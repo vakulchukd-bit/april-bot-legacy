@@ -3,6 +3,8 @@ import os
 import time
 import base64
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -21,6 +23,21 @@ paid_users = {}
 user_history = {}
 
 CARD_NUMBER = "5168745162781329"
+
+
+# ---------- МИНИ-СЕРВЕР ДЛЯ RENDER ----------
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    server.serve_forever()
 
 
 # ---------- СОХРАНЕНИЕ ----------
@@ -54,18 +71,9 @@ def count_words(text):
 
 def payment_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🏦 Оплатить",
-            url="https://www.privat24.ua/send/j3z5r"
-        )],
-        [InlineKeyboardButton(
-            text="📋 Скопировать карту",
-            callback_data="copy_card"
-        )],
-        [InlineKeyboardButton(
-            text="✅ Я оплатил",
-            callback_data="paid"
-        )]
+        [InlineKeyboardButton(text="🏦 Оплатить", url="https://www.privat24.ua/send/j3z5r")],
+        [InlineKeyboardButton(text="📋 Скопировать карту", callback_data="copy_card")],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="paid")]
     ])
 
 
@@ -84,9 +92,7 @@ async def generate_portrait(message, user_id):
 
     if user_id != ADMIN_ID and not is_paid(user_id):
         await message.answer(
-            "❌ Доступ только по подписке\n\n"
-            "💳 50 грн / 30 дней\n\n"
-            "📋 Карта:\n5168 7451 6278 1329",
+            "❌ Доступ только по подписке\n\n💳 50 грн / 30 дней\n\n📋 Карта:\n5168 7451 6278 1329",
             reply_markup=payment_keyboard()
         )
         return
@@ -115,7 +121,7 @@ async def generate_portrait(message, user_id):
 
         await message.answer_photo(photo)
 
-    except:
+    except Exception as e:
         await message.answer("⚠️ Ошибка генерации")
 
 
@@ -126,7 +132,7 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = None
 
-    # ---------- 🎤 ГОЛОС ----------
+    # 🎤 ГОЛОС
     if message.voice:
         try:
             await message.answer("🎤 Слушаю тебя...")
@@ -149,8 +155,8 @@ async def handle(message: types.Message):
 
             os.remove(file_name)
 
-        except Exception as e:
-            await message.answer(f"❌ Ошибка распознавания")
+        except Exception:
+            await message.answer("❌ Ошибка распознавания")
             return
 
     elif message.text:
@@ -160,7 +166,7 @@ async def handle(message: types.Message):
         await message.answer("Я понимаю только текст и голос 🙂")
         return
 
-    # ---------- ПАМЯТЬ ----------
+    # ПАМЯТЬ
     user_history.setdefault(user_id, []).append(text)
     user_history[user_id] = user_history[user_id][-15:]
 
@@ -176,7 +182,7 @@ async def handle(message: types.Message):
 
     lower = text.lower()
 
-    # ---------- ТРИГГЕР ----------
+    # ТРИГГЕР
     if (
         any(w in lower for w in ["сделай", "создай", "нарисуй", "сгенерируй"]) and
         any(t in lower for t in ["портрет", "фото", "картин"])
@@ -184,7 +190,7 @@ async def handle(message: types.Message):
         await generate_portrait(message, user_id)
         return
 
-    # ---------- ОТВЕТ ----------
+    # ОТВЕТ
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
@@ -244,5 +250,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # запускаем сервер в отдельном потоке
+    threading.Thread(target=run_server, daemon=True).start()
 
+    # запускаем бота
+    asyncio.run(main())
