@@ -86,45 +86,6 @@ def admin_keyboard(user_id):
     ])
 
 
-# ---------- ГЕНЕРАЦИЯ ПОРТРЕТА ----------
-
-async def generate_portrait(message, user_id):
-
-    if user_id != ADMIN_ID and not is_paid(user_id):
-        await message.answer(
-            "❌ Доступ только по подписке\n\n💳 50 грн / 30 дней\n\n📋 Карта:\n5168 7451 6278 1329",
-            reply_markup=payment_keyboard()
-        )
-        return
-
-    await message.answer("🧠 Анализирую тебя...")
-
-    try:
-        history_text = "\n".join(user_history.get(user_id, []))
-
-        analysis = client.responses.create(
-            model="gpt-4o-mini",
-            input=f"Опиши личность:\n{history_text}"
-        )
-
-        personality = analysis.output_text or "interesting personality"
-
-        await message.answer("🎨 Создаю портрет...")
-
-        img = client.images.generate(
-            model="gpt-image-1",
-            prompt=f"Psychological portrait: {personality}"
-        )
-
-        image_bytes = base64.b64decode(img.data[0].b64_json)
-        photo = BufferedInputFile(image_bytes, filename="portrait.png")
-
-        await message.answer_photo(photo)
-
-    except Exception:
-        await message.answer("⚠️ Ошибка генерации")
-
-
 # ---------- ГЕНЕРАЦИЯ ЛЮБЫХ КАРТИНОК ----------
 
 async def generate_image(message, user_id, prompt):
@@ -210,14 +171,12 @@ async def handle(message: types.Message):
 
     lower = text.lower()
 
-    # 🎨 КАРТИНКИ
-    if any(w in lower for w in ["сделай", "создай", "нарисуй", "сгенерируй"]):
-
-        if "портрет" in lower:
-            await generate_portrait(message, user_id)
-        else:
-            await generate_image(message, user_id, text)
-
+    # 🎨 ЛЮБАЯ ВИЗУАЛИЗАЦИЯ
+    if any(w in lower for w in [
+        "сделай", "создай", "нарисуй", "сгенерируй",
+        "картин", "изображение", "чертеж", "схема", "визуал"
+    ]):
+        await generate_image(message, user_id, text)
         return
 
     # 📱 TELEGRAM ПОМОЩНИК
@@ -225,7 +184,7 @@ async def handle(message: types.Message):
         try:
             response = client.responses.create(
                 model="gpt-4o-mini",
-                input=f"Ты эксперт по Telegram. Объясни просто и понятно:\n{text}"
+                input=f"Ты эксперт по Telegram. Объясни просто:\n{text}"
             )
             await message.answer(response.output_text)
         except:
@@ -237,7 +196,7 @@ async def handle(message: types.Message):
         try:
             response = client.responses.create(
                 model="gpt-4o-mini",
-                input=f"Реши и объясни просто:\n{text}"
+                input=f"Реши и объясни:\n{text}"
             )
             await message.answer(response.output_text)
         except:
@@ -281,13 +240,4 @@ async def paid(callback: types.CallbackQuery):
 async def approve(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[1])
 
-    paid_users[user_id] = time.time() + 30 * 24 * 60 * 60
-    save_data()
-
-    await bot.send_message(user_id, "✅ Оплата подтверждена! Доступ на 30 дней")
-    await callback.message.answer("Подтверждено")
-
-
-@dp.callback_query(lambda c: c.data.startswith("reject_"))
-async def reject(callback: types.CallbackQuery):
-    user_id = int
+    paid_users[user_id] = time
