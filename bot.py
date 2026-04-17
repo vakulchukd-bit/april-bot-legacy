@@ -30,44 +30,40 @@ SYSTEM_PROMPT = """
 
 Отвечай на языке пользователя.
 
-📌 ВАЖНО: ССЫЛКИ И САЙТЫ
-Если пользователь просит:
-- ссылки
-- сайты
-- где купить
-- подборку
-
-👉 ВСЕГДА оформляй так:
-
-1. Название
-🔗 ссылка
-📝 краткое описание
-
-НЕ делай кашу. Делай список.
+📌 ГЛАВНОЕ:
+Если запрос практический — давай ГОТОВОЕ РЕШЕНИЕ, а не рассуждения.
 
 ---
 
-📌 ВАЖНО: СХЕМЫ И ВИЗУАЛ
+📌 ССЫЛКИ:
+Если просят сайты / где купить:
+
+Формат:
+1. Название
+🔗 ссылка
+📝 кратко
+
+---
+
+📌 СХЕМЫ И ВИЗУАЛ:
 Если пользователь просит:
 - схему
 - подключение
-- как соединить
-- "нарисуй"
+- визуально
+- нарисуй
 
-👉 НЕ говори "я не могу"
-👉 ВСЕГДА давай ВИЗУАЛЬНУЮ ASCII-СХЕМУ
+👉 ВСЕГДА:
+1. Дай схему (ASCII)
+2. Дай объяснение
+3. Без фраз "я не могу"
 
-Пример формата:
+---
 
-[Устройство]
-     ↓
-[Следующее устройство]
-     ↓
-[Результат]
-
-ИЛИ:
-
-[+ Панель] ───► [Контроллер] ───► [Аккумулятор]
+📌 СТИЛЬ:
+- чётко
+- структурировано
+- без воды
+- как инженер
 
 ---
 
@@ -77,8 +73,6 @@ SYSTEM_PROMPT = """
 - опиши
 - распознай текст
 - объясни интерфейс
-
-Отвечай чётко и по делу.
 """
 # ==================== 🔴 BLOCK 2: SERVER ====================
 
@@ -126,7 +120,7 @@ async def speak_text(message, user_id, text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
-# ==================== 🔴 BLOCK 6: IMAGE ANALYSIS ====================
+## ==================== 🔴 BLOCK 6: IMAGE ANALYSIS + SMART GENERATION ====================
 
 async def analyze_image(file_path):
     try:
@@ -144,6 +138,49 @@ async def analyze_image(file_path):
         return response.output_text
     except Exception as e:
         return f"⚠️ Ошибка анализа: {e}"
+
+
+# 🔥 УМНАЯ генерация схемы
+async def generate_scheme_image(message, text):
+    try:
+        # 1. анализ задачи
+        analysis = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {"role": "system", "content": "Разбей задачу на элементы схемы."},
+                {"role": "user", "content": text}
+            ]
+        )
+
+        structured = analysis.output_text
+
+        # 2. генерация картинки
+        prompt = f"""
+        Create a clean technical diagram.
+
+        Based on:
+        {structured}
+
+        Style:
+        - white background
+        - labeled blocks
+        - arrows
+        - simple engineering scheme
+        """
+
+        result = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024"
+        )
+
+        image_bytes = base64.b64decode(result.data[0].b64_json)
+        photo = BufferedInputFile(image_bytes, filename="scheme.png")
+
+        await message.answer_photo(photo)
+
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка генерации схемы: {e}")
 # ==================== 🔴 BLOCK 7: IMAGE EDIT ====================
 
 async def edit_image(message, file_path, user_text):
@@ -170,14 +207,34 @@ async def edit_image(message, file_path, user_text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
-# ==================== 🔴 BLOCK 8: MAIN HANDLER ====================
+         # ==================== 🔴 BLOCK 8: MAIN HANDLER ====================
 @dp.message()
 async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
-
-        # --- ИНИЦИАЛИЗАЦИЯ ---
         user_history.setdefault(user_id, [])
+
+        text = message.text or ""
+
+        # ================== 🔥 СХЕМЫ = КАРТИНКА + ОБЪЯСНЕНИЕ ==================
+        if any(word in text.lower() for word in [
+            "схема", "подключение", "как подключить", "визуально"
+        ]):
+            # 1. картинка
+            await generate_scheme_image(message, text)
+
+            # 2. текст
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text}
+                ]
+            )
+
+            reply = response.output_text
+            await message.answer(reply, reply_markup=main_keyboard())
+            return
 
         # --- ГОЛОС ---
         if message.voice:
@@ -192,8 +249,6 @@ async def handle(message: types.Message):
                 )
             text = t.text
             await message.answer(f"📝 {text}")
-        else:
-            text = message.text or ""
 
         # --- КАРТИНКА ---
         if message.photo:
@@ -232,7 +287,6 @@ async def handle(message: types.Message):
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # 💰 долгая память
         if user_id in paid_users:
             if user_id in good_memory:
                 memory_text = "\n".join(good_memory[user_id][-15:])
@@ -243,7 +297,6 @@ async def handle(message: types.Message):
 
         messages.extend(user_history[user_id])
 
-        # --- ЗАПРОС К AI ---
         response = client.responses.create(
             model="gpt-4o-mini",
             input=messages
@@ -251,24 +304,6 @@ async def handle(message: types.Message):
 
         reply = response.output_text
 
-        # --- ФИКС: если модель вдруг "тупит" со схемами ---
-        if any(word in text.lower() for word in ["схема", "подключение", "как подключить"]):
-            if "не могу" in reply.lower():
-                reply = (
-                    "🔌 Вот схема подключения:\n\n"
-                    "[Солнечная панель]\n"
-                    "        ↓\n"
-                    "[Контроллер заряда]\n"
-                    "        ↓\n"
-                    "[Аккумулятор]\n"
-                    "        ↓\n"
-                    "[USB / выход]\n"
-                    "        ↓\n"
-                    "[Телефон]\n\n"
-                    "⚡ Панель → контроллер → аккумулятор → устройство"
-                )
-
-        # сохраняем
         user_history[user_id].append({
             "role": "assistant",
             "content": reply
