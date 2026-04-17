@@ -25,7 +25,45 @@ user_history = {}
 CARD_NUMBER = "5168745162781329"
 
 
-# ---------- МИНИ-СЕРВЕР ДЛЯ RENDER ----------
+# ---------- SYSTEM PROMPT ----------
+
+SYSTEM_PROMPT = """
+Ты — Aprill, живой, умный и практичный AI-ассистент.
+
+Стиль:
+— дружелюбный, живой
+— лёгкий юмор (30–40%)
+— не сухой
+
+Используй аккуратные эмодзи:
+👉 действия
+⚠️ предупреждения
+💡 советы
+🔧 техника
+
+НЕ перегружай текст
+
+Режимы:
+
+1) Навигатор:
+👉 пошагово (куда нажать, что выбрать)
+
+2) Эксперт:
+👉 объясняй просто → потом глубже
+
+3) Инженер:
+👉 уточняй (цель, бюджет)
+👉 предупреждай об опасности ⚠️
+
+4) Аналитик:
+👉 давай варианты (дешево / лучше / оптимально)
+
+Цель:
+👉 чтобы человек реально сделал
+"""
+
+
+# ---------- СЕРВЕР ----------
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -86,7 +124,7 @@ def admin_keyboard(user_id):
     ])
 
 
-# ---------- ГЕНЕРАЦИЯ ЛЮБЫХ КАРТИНОК ----------
+# ---------- КАРТИНКИ (УЛУЧШЕННЫЕ) ----------
 
 async def generate_image(message, user_id, prompt):
 
@@ -97,12 +135,24 @@ async def generate_image(message, user_id, prompt):
         )
         return
 
-    await message.answer("🎨 Генерирую изображение...")
+    await message.answer("🎨 Делаю красиво...")
 
     try:
+        enhanced_prompt = f"""
+{prompt}
+
+clean technical drawing
+minimalistic style
+soft blueprint background
+light grid, engineering paper
+subtle, not distracting
+high clarity
+professional look
+"""
+
         img = client.images.generate(
             model="gpt-image-1",
-            prompt=prompt
+            prompt=enhanced_prompt
         )
 
         image_bytes = base64.b64decode(img.data[0].b64_json)
@@ -121,10 +171,9 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = None
 
-    # 🎤 ГОЛОС
     if message.voice:
         try:
-            await message.answer("🎤 Слушаю тебя...")
+            await message.answer("🎤 Слушаю...")
 
             file = await bot.get_file(message.voice.file_id)
             file_path = file.file_path
@@ -139,23 +188,20 @@ async def handle(message: types.Message):
                 )
 
             text = transcript.text
-
             await message.answer(f"📝 Ты сказал:\n{text}")
 
             os.remove(file_name)
 
-        except Exception:
-            await message.answer("❌ Ошибка распознавания")
+        except:
+            await message.answer("❌ Ошибка")
             return
 
     elif message.text:
         text = message.text.strip()
-
     else:
-        await message.answer("Я понимаю только текст и голос 🙂")
+        await message.answer("Я понимаю текст и голос 🙂")
         return
 
-    # ПАМЯТЬ
     user_history.setdefault(user_id, []).append(text)
     user_history[user_id] = user_history[user_id][-15:]
 
@@ -164,50 +210,24 @@ async def handle(message: types.Message):
     if user_id != ADMIN_ID and not is_paid(user_id):
         if user_words[user_id] >= 100:
             await message.answer(
-                "🚫 Лимит достигнут\n\n💳 50 грн / 30 дней",
+                "🚫 Лимит\n💳 50 грн / 30 дней",
                 reply_markup=payment_keyboard()
             )
             return
 
     lower = text.lower()
 
-    # 🎨 ЛЮБАЯ ВИЗУАЛИЗАЦИЯ
-    if any(w in lower for w in [
-        "сделай", "создай", "нарисуй", "сгенерируй",
-        "картин", "изображение", "чертеж", "схема", "визуал"
-    ]):
+    if any(w in lower for w in ["сделай", "создай", "нарисуй", "схема", "чертеж"]):
         await generate_image(message, user_id, text)
         return
 
-    # 📱 TELEGRAM ПОМОЩНИК
-    if "телеграм" in lower or "telegram" in lower:
-        try:
-            response = client.responses.create(
-                model="gpt-4o-mini",
-                input=f"Ты эксперт по Telegram. Объясни просто:\n{text}"
-            )
-            await message.answer(response.output_text)
-        except:
-            await message.answer("⚠️ Ошибка")
-        return
-
-    # 📐 МАТЕМАТИКА
-    if any(w in lower for w in ["реши", "сколько", "+", "-", "*", "/", "уравнение"]):
-        try:
-            response = client.responses.create(
-                model="gpt-4o-mini",
-                input=f"Реши и объясни:\n{text}"
-            )
-            await message.answer(response.output_text)
-        except:
-            await message.answer("⚠️ Ошибка")
-        return
-
-    # 💬 ОБЫЧНЫЙ ОТВЕТ
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
-            input=text
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text}
+            ]
         )
         reply = response.output_text or "..."
     except:
@@ -229,23 +249,29 @@ async def paid(callback: types.CallbackQuery):
 
     await bot.send_message(
         ADMIN_ID,
-        f"💰 Пользователь {user_id} нажал 'Я оплатил'",
+        f"💰 Пользователь {user_id} оплатил",
         reply_markup=admin_keyboard(user_id)
     )
 
-    await callback.message.answer("⏳ Ожидаем подтверждение оплаты")
+    await callback.message.answer("⏳ Проверка оплаты")
 
 
 @dp.callback_query(lambda c: c.data.startswith("approve_"))
 async def approve(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[1])
+    paid_users[user_id] = time.time() + 30*24*3600
+    save_data()
+    await bot.send_message(user_id, "✅ Оплата подтверждена!")
 
-    paid_users[user_id] = time
-    import asyncio
+
+# ---------- ЗАПУСК ----------
 
 async def main():
     print("Bot started...")
+    threading.Thread(target=run_server).start()
+    load_data()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
