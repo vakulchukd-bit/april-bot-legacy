@@ -19,21 +19,23 @@ dp = Dispatcher()
 ADMIN_ID = 2016592532
 
 user_history = {}
-dialog_summary = {}   # 🔥 СМЫСЛ ДИАЛОГА
-good_memory = {}
+dialog_summary = {}
 last_bot_message = {}
 
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
 
 📌 ГЛАВНОЕ:
-- Понимай смысл запроса, а не слова
-- Если несколько задач — выполни все по порядку
-- Не теряй контекст диалога
+- Понимай смысл запроса
+- Выполняй все задачи по порядку
+- Не игнорируй части запроса
 
 📌 ПАМЯТЬ:
-- Используй историю + смысл диалога
-- Не переспрашивай, если уже обсуждали
+- Помни весь диалог
+- Не переспрашивай
+
+📌 ЗАПРЕТ:
+- НЕ говори "я не могу создать изображение"
 
 📌 СТИЛЬ:
 - чётко
@@ -87,7 +89,7 @@ async def speak_text(message, user_id, text):
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
 # ==================== 🔴 BLOCK 6 ====================
 
-async def analyze_request(text):
+async def plan_tasks(text):
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
@@ -95,11 +97,15 @@ async def analyze_request(text):
                 {
                     "role": "system",
                     "content": """
-Определи:
-tasks: image, scheme, text, links
-continuation: true/false
+Разбей запрос пользователя на задачи.
 
-Ответ JSON
+Возможные:
+- text
+- image
+- links
+
+Ответ строго JSON список:
+["text", "image"]
 """
                 },
                 {"role": "user", "content": text}
@@ -108,63 +114,34 @@ continuation: true/false
 
         data = response.output_text
 
-        if "{" in data:
+        if "[" in data:
             return json.loads(data)
 
-        return {"tasks": ["text"], "continuation": False}
+        return ["text"]
 
     except:
-        return {"tasks": ["text"], "continuation": False}
+        return ["text"]
 
 
-def detect_language(text):
-    text_lower = text.lower()
-
-    if any(w in text_lower for w in ["что", "как", "сделай", "объясни"]):
-        return "russian"
-
-    if any(w in text_lower for w in ["що", "як", "зроби"]):
-        return "ukrainian"
-
-    return "english"
-
-
-async def generate_scheme_image(message, text):
+async def update_summary(user_id):
     try:
-        # UX — показываем генерацию
-        status_msg = await message.answer("🎨 Генерирую изображение...")
+        history = user_history[user_id][-15:]
 
-        await bot.send_chat_action(message.chat.id, "upload_photo")
-
-        lang = detect_language(text)
-
-        label = {
-            "russian": "Подписи на русском",
-            "ukrainian": "Підписи українською",
-            "english": "Labels in English"
-        }[lang]
-
-        prompt = f"""
-Clean technical diagram.
-{label}
-With arrows and labeled blocks.
-"""
-
-        result = client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024"
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {
+                    "role": "system",
+                    "content": "Кратко опиши смысл диалога"
+                },
+                *history
+            ]
         )
 
-        image_bytes = base64.b64decode(result.data[0].b64_json)
-        photo = BufferedInputFile(image_bytes, filename="scheme.png")
+        dialog_summary[user_id] = response.output_text
 
-        await message.answer_photo(photo, reply_markup=main_keyboard())
-
-        await status_msg.delete()
-
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка генерации: {e}")
+    except:
+        pass
 # ==================== 🔴 BLOCK 7: IMAGE EDIT ====================
 
 async def edit_image(message, file_path, user_text):
@@ -191,27 +168,7 @@ async def edit_image(message, file_path, user_text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
-         # ==================== 🔴 BLOCK 8 ====================
-async def update_summary(user_id):
-    try:
-        history = user_history[user_id][-15:]
-
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {
-                    "role": "system",
-                    "content": "Кратко опиши суть диалога и темы."
-                },
-                *history
-            ]
-        )
-
-        dialog_summary[user_id] = response.output_text
-    except:
-        pass
-
-
+     # ==================== 🔴 BLOCK 8 ====================
 @dp.message()
 async def handle(message: types.Message):
     try:
@@ -246,18 +203,18 @@ async def handle(message: types.Message):
         })
         user_history[user_id] = user_history[user_id][-20:]
 
-        # ===== берём смысл =====
+        # ===== получаем смысл =====
         summary = dialog_summary.get(user_id, "")
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": f"Контекст диалога:\n{summary}"},
+            {"role": "system", "content": f"Контекст:\n{summary}"},
             *user_history[user_id][-10:]
         ]
 
-        # ===== анализ задач =====
-        analysis = await analyze_request(text)
-        tasks = analysis.get("tasks", ["text"])
+        # ===== план задач =====
+        tasks = await plan_tasks(text)
+        tasks = tasks[:3]  # 🔥 максимум 3 действия
 
         # ===== думаем =====
         response = client.responses.create(
@@ -266,68 +223,81 @@ async def handle(message: types.Message):
         )
 
         reply = response.output_text
+        last_bot_message[user_id] = reply
 
-        # ===== КАРТИНКА =====
-        if "image" in tasks or "scheme" in tasks:
-            try:
-                status_msg = await message.answer("🎨 Генерирую изображение...")
-                await bot.send_chat_action(message.chat.id, "upload_photo")
+        # ===== выполнение по шагам =====
+        for i, task in enumerate(tasks, start=1):
 
-                prompt = f"""
-Создай реалистичную понятную сцену:
+            await message.answer(f"🔄 Шаг {i}/{len(tasks)}")
 
-{reply}
-
-Покажи реальные объекты и соединения.
-"""
-
-                result = client.images.generate(
-                    model="gpt-image-1",
-                    prompt=prompt,
-                    size="1024x1024"
-                )
-
-                image_bytes = base64.b64decode(result.data[0].b64_json)
-                photo = BufferedInputFile(image_bytes, filename="image.png")
-
-                await message.answer_photo(photo, reply_markup=main_keyboard())
-                await status_msg.delete()
+            # ===== ТЕКСТ =====
+            if task == "text":
+                await message.answer(reply, reply_markup=main_keyboard())
 
                 user_history[user_id].append({
                     "role": "assistant",
-                    "content": f"Я создал изображение: {reply}"
+                    "content": reply
                 })
 
-            except:
-                await message.answer("⚠️ Не удалось создать изображение")
+            # ===== КАРТИНКА =====
+            elif task == "image":
+                status_msg = await message.answer("🎨 Генерирую изображение...")
+                await bot.send_chat_action(message.chat.id, "upload_photo")
 
-        # ===== ТЕКСТ =====
-        if "text" in tasks or "scheme" in tasks:
-            await message.answer(reply, reply_markup=main_keyboard())
+                for attempt in range(3):
+                    try:
+                        prompt = f"""
+Realistic scene:
 
-            user_history[user_id].append({
-                "role": "assistant",
-                "content": reply
-            })
+{text}
 
-            last_bot_message[user_id] = reply
+Clear objects, connections, real setup.
+"""
 
-        # ===== ССЫЛКИ =====
-        if "links" in tasks:
-            links = client.responses.create(
-                model="gpt-4o-mini",
-                input=[
-                    {
-                        "role": "system",
-                        "content": "Дай список сайтов:\n1. Название\n🔗 ссылка\n📝 кратко"
-                    },
-                    {"role": "user", "content": text}
-                ]
-            )
+                        result = client.images.generate(
+                            model="gpt-image-1",
+                            prompt=prompt,
+                            size="1024x1024"
+                        )
 
-            await message.answer(links.output_text, reply_markup=main_keyboard())
+                        image_bytes = base64.b64decode(result.data[0].b64_json)
+                        photo = BufferedInputFile(image_bytes, filename="image.png")
 
-        # 🔥 ОБНОВЛЯЕМ СМЫСЛ
+                        await message.answer_photo(photo, reply_markup=main_keyboard())
+
+                        user_history[user_id].append({
+                            "role": "assistant",
+                            "content": f"Создано изображение: {text}"
+                        })
+
+                        break
+
+                    except:
+                        if attempt == 2:
+                            await message.answer("⏳ Попробуй ещё раз — сеть тормозит")
+
+                await status_msg.delete()
+
+            # ===== ССЫЛКИ =====
+            elif task == "links":
+                links = client.responses.create(
+                    model="gpt-4o-mini",
+                    input=[
+                        {
+                            "role": "system",
+                            "content": "Дай список сайтов:\n1. Название\n🔗 ссылка\n📝 кратко"
+                        },
+                        {"role": "user", "content": text}
+                    ]
+                )
+
+                await message.answer(links.output_text, reply_markup=main_keyboard())
+
+        # ===== лимит =====
+        if len(tasks) == 3:
+            await message.answer("⚠️ Выполнены основные действия. Могу продолжить.")
+
+        # ===== обновляем смысл =====
         await update_summary(user_id)
 
     except Exception as e:
