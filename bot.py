@@ -271,6 +271,8 @@ async def like(c):
 # ==================== 🔴 BLOCK 10: START ====================
 
 def image_worker():
+    loop = asyncio.get_event_loop()
+
     while True:
         try:
             user_id, chat_id, text = image_queue.get()
@@ -292,7 +294,11 @@ Clear objects and connections.
             image_bytes = base64.b64decode(result.data[0].b64_json)
             photo = BufferedInputFile(image_bytes, filename="image.png")
 
-            asyncio.run(bot.send_photo(chat_id, photo))
+            # 🔥 ПРАВИЛЬНАЯ отправка в loop
+            asyncio.run_coroutine_threadsafe(
+                bot.send_photo(chat_id, photo),
+                loop
+            )
 
         except Exception as e:
             print("Image error:", e)
@@ -303,6 +309,10 @@ async def main():
 
 
 if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=image_worker, daemon=True).start()
-    asyncio.run(main())
+
+    loop.run_until_complete(main())
