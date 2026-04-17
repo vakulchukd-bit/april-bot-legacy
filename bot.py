@@ -1,5 +1,4 @@
 # ==================== 🔴 BLOCK 1: INIT ====================
-
 import asyncio
 import os
 import base64
@@ -28,9 +27,43 @@ last_image = {}
 
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
+
 Отвечай на языке пользователя.
-Если код — давай в ```python```
-Если изображение: опиши, распознай текст, объясни интерфейс.
+
+📌 ВАЖНО:
+Если пользователь просит:
+- ссылки
+- сайты
+- где купить
+- подборку сервисов
+
+👉 ВСЕГДА оформляй ответ СТРУКТУРИРОВАННО:
+
+Формат:
+1. Название
+🔗 ссылка
+📝 краткое описание
+
+2. Название
+🔗 ссылка
+📝 описание
+
+НЕ пиши всё в одну строку.
+НЕ делай "кашу".
+Делай красиво и читаемо.
+
+📌 Если можно — давай несколько вариантов.
+
+📌 Если код — давай в ```python```
+
+📌 Если изображение:
+- опиши
+- распознай текст
+- объясни интерфейс
+
+📌 Не говори "я не могу дать ссылки", если это обычные сайты.
+
+Отвечай чётко и по делу.
 """
 # ==================== 🔴 BLOCK 2: SERVER ====================
 
@@ -123,26 +156,31 @@ async def edit_image(message, file_path, user_text):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
 # ==================== 🔴 BLOCK 8: MAIN HANDLER ====================
-
 @dp.message()
 async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
 
+        # --- ИНИЦИАЛИЗАЦИЯ ---
+        user_history.setdefault(user_id, [])
+
+        # --- ГОЛОС ---
         if message.voice:
             file = await bot.get_file(message.voice.file_id)
             fname = f"{user_id}.ogg"
             await bot.download_file(file.file_path, destination=fname)
 
-            with open(fname,"rb") as a:
+            with open(fname, "rb") as a:
                 t = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe", file=a)
-
+                    model="gpt-4o-mini-transcribe",
+                    file=a
+                )
             text = t.text
             await message.answer(f"📝 {text}")
         else:
             text = message.text or ""
 
+        # --- КАРТИНКА ---
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
             file_path = f"image_{user_id}.jpg"
@@ -168,15 +206,46 @@ async def handle(message: types.Message):
                 await edit_image(message, last_image[user_id], text)
                 return
 
+        # ================== 🧠 ПАМЯТЬ ==================
+
+        # добавляем сообщение пользователя
+        user_history[user_id].append({
+            "role": "user",
+            "content": text
+        })
+
+        # ограничиваем историю (живая сессия)
+        user_history[user_id] = user_history[user_id][-20:]
+
+        # формируем сообщения
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # 💰 долгая память (только для платных)
+        if user_id in paid_users:
+            if user_id in good_memory:
+                memory_text = "\n".join(good_memory[user_id][-15:])
+                messages.append({
+                    "role": "system",
+                    "content": f"Важные факты о пользователе:\n{memory_text}"
+                })
+
+        # добавляем диалог
+        messages.extend(user_history[user_id])
+
+        # --- ЗАПРОС К AI ---
         response = client.responses.create(
             model="gpt-4o-mini",
-            input=[
-                {"role":"system","content":SYSTEM_PROMPT},
-                {"role":"user","content":text}
-            ]
+            input=messages
         )
 
         reply = response.output_text
+
+        # сохраняем ответ
+        user_history[user_id].append({
+            "role": "assistant",
+            "content": reply
+        })
+
         last_bot_message[user_id] = reply
 
         await message.answer(reply, reply_markup=main_keyboard())
