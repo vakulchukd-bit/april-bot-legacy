@@ -1,6 +1,7 @@
+# ==================== 🔴 BLOCK 1: INIT ====================
+
 import asyncio
 import os
-import time
 import base64
 import json
 import threading
@@ -22,22 +23,17 @@ user_words = {}
 paid_users = {}
 user_history = {}
 good_memory = {}
-user_voice = {}
 last_bot_message = {}
 last_image = {}
 
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
-
 Отвечай на языке пользователя.
-
 Если код — давай в ```python```
-
-Если изображение:
-опиши, распознай текст, объясни интерфейс.
-
-Отвечай понятно и живо.
+Если изображение: опиши, распознай текст, объясни интерфейс.
 """
+# ==================== 🔴 BLOCK 2: SERVER ====================
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -47,20 +43,22 @@ class Handler(BaseHTTPRequestHandler):
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+# ==================== 🔴 BLOCK 3: STORAGE ====================
+
+def save_memory():
+    with open("memory.json", "w") as f:
+        json.dump(good_memory, f)
+# ==================== 🔴 BLOCK 4: UI ====================
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👍", callback_data="like"),
-         InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice_menu")]
-    ])
-
-def voice_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="👨‍🦰", callback_data="voice_male"),
-            InlineKeyboardButton(text="👩‍🦱", callback_data="voice_female")
+            InlineKeyboardButton(text="👍", callback_data="like"),
+            InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice")
         ]
     ])
+# ==================== 🔴 BLOCK 5: VOICE ====================
+
 async def speak_text(message, user_id, text):
     try:
         if not text or text.strip() == "":
@@ -69,11 +67,9 @@ async def speak_text(message, user_id, text):
 
         await bot.send_chat_action(message.chat.id, "record_voice")
 
-        voice = user_voice.get(user_id, "female")
-
         speech = client.audio.speech.create(
             model="gpt-4o-mini-tts",
-            voice="verse" if voice == "male" else "nova",
+            voice="nova",  # только женский
             input=text
         )
 
@@ -82,6 +78,8 @@ async def speak_text(message, user_id, text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
+# ==================== 🔴 BLOCK 6: IMAGE ANALYSIS ====================
+
 async def analyze_image(file_path):
     try:
         with open(file_path, "rb") as img:
@@ -98,19 +96,17 @@ async def analyze_image(file_path):
         return response.output_text
     except Exception as e:
         return f"⚠️ Ошибка анализа: {e}"
-
+# ==================== 🔴 BLOCK 7: IMAGE EDIT ====================
 
 async def edit_image(message, file_path, user_text):
     try:
         with open(file_path, "rb") as img:
             prompt = f"""
             Отредактируй изображение максимально реалистично.
-
             Задача пользователя:
             {user_text}
-
             Сохрани лицо, стиль и освещение.
-            Сделай так, как будто это было изначально.
+            Сделай как будто это оригинал.
             """
 
             result = client.images.edit(
@@ -126,6 +122,8 @@ async def edit_image(message, file_path, user_text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
+# ==================== 🔴 BLOCK 8: MAIN HANDLER ====================
+
 @dp.message()
 async def handle(message: types.Message):
     try:
@@ -142,13 +140,11 @@ async def handle(message: types.Message):
 
             text = t.text
             await message.answer(f"📝 {text}")
-
         else:
             text = message.text or ""
 
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
-
             file_path = f"image_{user_id}.jpg"
             await bot.download_file(file.file_path, destination=file_path)
 
@@ -183,43 +179,41 @@ async def handle(message: types.Message):
         reply = response.output_text
         last_bot_message[user_id] = reply
 
-        await message.answer(reply, reply_markup=main_keyboard(), parse_mode="Markdown")
+        await message.answer(reply, reply_markup=main_keyboard())
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
+# ==================== 🔴 BLOCK 9: CALLBACKS ====================
 
-
-@dp.callback_query(lambda c: c.data=="voice_menu")
-async def voice_menu(c):
+@dp.callback_query(lambda c: c.data=="voice")
+async def voice(c):
     await c.answer()
-    await c.message.answer("Выбери голос", reply_markup=voice_keyboard())
-
-
-@dp.callback_query(lambda c: c.data=="voice_male")
-async def male(c):
-    await c.answer()
-    user_voice[c.from_user.id] = "male"
-    await speak_text(c.message, c.from_user.id, last_bot_message.get(c.from_user.id, ""))
-
-
-@dp.callback_query(lambda c: c.data=="voice_female")
-async def female(c):
-    await c.answer()
-    user_voice[c.from_user.id] = "female"
     await speak_text(c.message, c.from_user.id, last_bot_message.get(c.from_user.id, ""))
 
 
 @dp.callback_query(lambda c: c.data=="like")
 async def like(c):
-    await c.answer()
-    good_memory.setdefault(c.from_user.id, []).append(c.message.text)
-    save_memory()
-    await c.message.answer("💙 Спасибо! Ты помогаешь улучшать AI")
+    try:
+        await c.answer()
 
+        user_id = c.from_user.id
+        text = last_bot_message.get(user_id, "ответ")
+
+        good_memory.setdefault(user_id, []).append(text)
+
+        try:
+            save_memory()
+        except:
+            pass
+
+        await c.message.answer("💙 Спасибо за лайк! Это помогает развитию AI и IT 🚀")
+
+    except Exception as e:
+        await c.message.answer(f"⚠️ Ошибка лайка: {e}")
+# ==================== 🔴 BLOCK 10: START ====================
 
 async def main():
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
