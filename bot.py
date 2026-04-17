@@ -82,31 +82,38 @@ def voice_keyboard():
     ])
 
 async def speak_text(message, user_id, text):
-    await bot.send_chat_action(message.chat.id, "record_voice")
-    await message.answer("🔊 Генерирую голос...")
+    try:
+        await bot.send_chat_action(message.chat.id, "record_voice")
+        await message.answer("🔊 Генерирую голос...")
 
-    voice = user_voice.get(user_id, "female")
+        voice = user_voice.get(user_id, "female")
 
-    speech = client.audio.speech.create(
-        model="gpt-4o-mini-tts",
-        voice="alloy" if voice == "male" else "nova",
-        input=text
-    )
+        speech = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy" if voice == "male" else "nova",
+            input=text
+        )
 
-    audio = BufferedInputFile(speech.read(), "voice.mp3")
-    await message.answer_audio(audio)
-async def analyze_image(message, file_url):
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=[{
-            "role": "user",
-            "content": [
-                {"type":"input_text","text":"Опиши изображение, распознай текст и объясни интерфейс"},
-                {"type":"input_image","image_url":file_url}
-            ]
-        }]
-    )
-    return response.output_text
+        audio = BufferedInputFile(speech.read(), "voice.mp3")
+        await message.answer_audio(audio)
+
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка озвучки: {e}")
+async def analyze_image(file_url):
+    try:
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type":"input_text","text":"Опиши изображение, распознай текст и объясни интерфейс"},
+                    {"type":"input_image","image_url":file_url}
+                ]
+            }]
+        )
+        return response.output_text
+    except Exception as e:
+        return f"⚠️ Ошибка анализа: {e}"
 
 async def improve_image(message, prompt):
     img = client.images.generate(
@@ -115,46 +122,50 @@ async def improve_image(message, prompt):
     )
     photo = BufferedInputFile(base64.b64decode(img.data[0].b64_json),"img.png")
     await message.answer_photo(photo)
-
 @dp.message()
 async def handle(message: types.Message):
-    user_id = message.from_user.id
+    try:
+        user_id = message.from_user.id
 
-    if message.voice:
-        file = await bot.get_file(message.voice.file_id)
-        fname = f"{user_id}.ogg"
-        await bot.download_file(file.file_path, destination=fname)
+        if message.voice:
+            file = await bot.get_file(message.voice.file_id)
+            fname = f"{user_id}.ogg"
+            await bot.download_file(file.file_path, destination=fname)
 
-        with open(fname,"rb") as a:
-            t = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe", file=a)
+            with open(fname,"rb") as a:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe", file=a)
 
-        text = t.text
-        await message.answer(f"📝 {text}")
-else:
-        text = message.text or ""
+            text = t.text
+            await message.answer(f"📝 {text}")
 
-    if message.photo:
-        last_image[user_id] = message.photo[-1].file_id
-        file = await bot.get_file(message.photo[-1].file_id)
-        url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
+        else:
+            text = message.text or ""
 
-        result = await analyze_image(message, url)
-        await message.answer(result, reply_markup=main_keyboard())
-        return
+        if message.photo:
+            last_image[user_id] = message.photo[-1].file_id
+            file = await bot.get_file(message.photo[-1].file_id)
+            url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
 
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role":"system","content":SYSTEM_PROMPT},
-            {"role":"user","content":text}
-        ]
-    )
+            result = await analyze_image(url)
+            await message.answer(result, reply_markup=main_keyboard())
+            return
 
-    reply = response.output_text
-    last_bot_message[user_id] = reply
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {"role":"system","content":SYSTEM_PROMPT},
+                {"role":"user","content":text}
+            ]
+        )
 
-    await message.answer(reply, reply_markup=main_keyboard(), parse_mode="Markdown")
+        reply = response.output_text
+        last_bot_message[user_id] = reply
+
+        await message.answer(reply, reply_markup=main_keyboard(), parse_mode="Markdown")
+
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {e}")
 
 @dp.callback_query(lambda c: c.data=="voice_menu")
 async def voice_menu(c):
