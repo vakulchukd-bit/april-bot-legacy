@@ -4,6 +4,7 @@ import os
 import base64
 import json
 import threading
+import queue
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher, types
@@ -22,24 +23,16 @@ user_history = {}
 dialog_summary = {}
 last_bot_message = {}
 
+# 🔥 очередь изображений
+image_queue = queue.Queue()
+
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
 
-📌 ГЛАВНОЕ:
-- Понимай смысл запроса
-- Выполняй все задачи по порядку
-- Не игнорируй части запроса
-
-📌 ПАМЯТЬ:
-- Помни весь диалог
-- Не переспрашивай
-
-📌 ЗАПРЕТ:
-- НЕ говори "я не могу создать изображение"
-
-📌 СТИЛЬ:
-- чётко
-- без воды
+- Понимай смысл
+- Делай всё, что просят
+- Не говори "не могу"
+- Не обещай — делай
 """
 # ==================== 🔴 BLOCK 2: SERVER ====================
 
@@ -177,7 +170,7 @@ async def handle(message: types.Message):
 
         await bot.send_chat_action(message.chat.id, "typing")
 
-        # ===== текст / голос =====
+        # текст / голос
         if message.voice:
             file = await bot.get_file(message.voice.file_id)
             fname = f"{user_id}.ogg"
@@ -196,108 +189,54 @@ async def handle(message: types.Message):
             await message.answer("⚠️ Не понял сообщение")
             return
 
-        # ===== сохраняем =====
+        text_lower = text.lower()
+
         user_history[user_id].append({
             "role": "user",
             "content": text
         })
-        user_history[user_id] = user_history[user_id][-20:]
 
-        # ===== получаем смысл =====
-        summary = dialog_summary.get(user_id, "")
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": f"Контекст:\n{summary}"},
-            *user_history[user_id][-10:]
-        ]
-
-        # ===== план задач =====
+        # задачи
         tasks = await plan_tasks(text)
-        tasks = tasks[:3]  # 🔥 максимум 3 действия
 
-        # ===== думаем =====
+        # принудительная картинка
+        if any(w in text_lower for w in ["схем", "картин", "визуал", "нарисуй"]):
+            if "image" not in tasks:
+                tasks.append("image")
+
+        tasks = tasks[:3]
+
+        # текст
         response = client.responses.create(
             model="gpt-4o-mini",
-            input=messages
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                *user_history[user_id][-10:]
+            ]
         )
 
         reply = response.output_text
         last_bot_message[user_id] = reply
 
-        # ===== выполнение по шагам =====
-        for i, task in enumerate(tasks, start=1):
+        for task in tasks:
 
-            await message.answer(f"🔄 Шаг {i}/{len(tasks)}")
-
-            # ===== ТЕКСТ =====
             if task == "text":
                 await message.answer(reply, reply_markup=main_keyboard())
 
-                user_history[user_id].append({
-                    "role": "assistant",
-                    "content": reply
-                })
-
-            # ===== КАРТИНКА =====
             elif task == "image":
-                status_msg = await message.answer("🎨 Генерирую изображение...")
-                await bot.send_chat_action(message.chat.id, "upload_photo")
+                await message.answer("🎨 Делаю изображение...")
+                image_queue.put((user_id, message.chat.id, text))
 
-                for attempt in range(3):
-                    try:
-                        prompt = f"""
-Realistic scene:
-
-{text}
-
-Clear objects, connections, real setup.
-"""
-
-                        result = client.images.generate(
-                            model="gpt-image-1",
-                            prompt=prompt,
-                            size="1024x1024"
-                        )
-
-                        image_bytes = base64.b64decode(result.data[0].b64_json)
-                        photo = BufferedInputFile(image_bytes, filename="image.png")
-
-                        await message.answer_photo(photo, reply_markup=main_keyboard())
-
-                        user_history[user_id].append({
-                            "role": "assistant",
-                            "content": f"Создано изображение: {text}"
-                        })
-
-                        break
-
-                    except:
-                        if attempt == 2:
-                            await message.answer("⏳ Попробуй ещё раз — сеть тормозит")
-
-                await status_msg.delete()
-
-            # ===== ССЫЛКИ =====
             elif task == "links":
                 links = client.responses.create(
                     model="gpt-4o-mini",
                     input=[
-                        {
-                            "role": "system",
-                            "content": "Дай список сайтов:\n1. Название\n🔗 ссылка\n📝 кратко"
-                        },
+                        {"role": "system", "content": "Дай сайты"},
                         {"role": "user", "content": text}
                     ]
                 )
+                await message.answer(links.output_text)
 
-                await message.answer(links.output_text, reply_markup=main_keyboard())
-
-        # ===== лимит =====
-        if len(tasks) == 3:
-            await message.answer("⚠️ Выполнены основные действия. Могу продолжить.")
-
-        # ===== обновляем смысл =====
         await update_summary(user_id)
 
     except Exception as e:
@@ -331,9 +270,39 @@ async def like(c):
         await c.message.answer(f"⚠️ Ошибка лайка: {e}")
 # ==================== 🔴 BLOCK 10: START ====================
 
+def image_worker():
+    while True:
+        try:
+            user_id, chat_id, text = image_queue.get()
+
+            prompt = f"""
+Simple realistic scene:
+
+{text}
+
+Clear objects and connections.
+"""
+
+            result = client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt,
+                size="512x512"
+            )
+
+            image_bytes = base64.b64decode(result.data[0].b64_json)
+            photo = BufferedInputFile(image_bytes, filename="image.png")
+
+            asyncio.run(bot.send_photo(chat_id, photo))
+
+        except Exception as e:
+            print("Image error:", e)
+
+
 async def main():
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
+    threading.Thread(target=image_worker, daemon=True).start()
     asyncio.run(main())
