@@ -18,8 +18,6 @@ dp = Dispatcher()
 
 ADMIN_ID = 2016592532
 
-user_words = {}
-paid_users = {}
 user_history = {}
 good_memory = {}
 last_bot_message = {}
@@ -28,51 +26,22 @@ last_image = {}
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
 
-Отвечай на языке пользователя.
-
 📌 ГЛАВНОЕ:
-Если запрос практический — давай ГОТОВОЕ РЕШЕНИЕ, а не рассуждения.
+- Сначала подумай, потом отвечай
+- Делай только то, что попросили
+- Если задач несколько — делай все
 
----
+📌 ПАМЯТЬ:
+- Помни диалог
+- Не зацикливайся
 
-📌 ССЫЛКИ:
-Если просят сайты / где купить:
-
-Формат:
-1. Название
-🔗 ссылка
-📝 кратко
-
----
-
-📌 СХЕМЫ И ВИЗУАЛ:
-Если пользователь просит:
-- схему
-- подключение
-- визуально
-- нарисуй
-
-👉 ВСЕГДА:
-1. Дай схему (ASCII)
-2. Дай объяснение
-3. Без фраз "я не могу"
-
----
+📌 ЯЗЫК:
+- Отвечай на языке пользователя
+- Картинки — на том же языке
 
 📌 СТИЛЬ:
 - чётко
-- структурировано
-- без воды
-- как инженер
-
----
-
-📌 Если код — давай в ```python```
-
-📌 Если изображение:
-- опиши
-- распознай текст
-- объясни интерфейс
+- без лишнего
 """
 # ==================== 🔴 BLOCK 2: SERVER ====================
 
@@ -120,89 +89,64 @@ async def speak_text(message, user_id, text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
-# ==================== 🔴 BLOCK 6: IMAGE + SMART INTENT ====================
+# ==================== 🔴 BLOCK 6 ====================
 
-async def analyze_image(file_path):
-    try:
-        with open(file_path, "rb") as img:
-            response = client.responses.create(
-                model="gpt-4o-mini",
-                input=[{
-                    "role": "user",
-                    "content": [
-                        {"type":"input_text","text":"Опиши изображение, распознай текст и объясни интерфейс"},
-                        {"type":"input_image","image": img}
-                    ]
-                }]
-            )
-        return response.output_text
-    except Exception as e:
-        return f"⚠️ Ошибка анализа: {e}"
-
-
-def detect_intent(text):
-    text_lower = text.lower()
-
-    # 🔥 БЫСТРЫЙ УРОВЕНЬ (главный)
-    if any(w in text_lower for w in ["картин", "изображен", "нарисуй", "визуал", "покажи"]):
-        return "image"
-
-    if any(w in text_lower for w in ["схема", "подключ", "как собрать", "как работает"]):
-        return "scheme"
-
-    if any(w in text_lower for w in ["где купить", "ссылки", "сайт"]):
-        return "links"
-
-    # 🤖 GPT ТОЛЬКО ЕСЛИ НЕ ПОНЯТНО
+async def analyze_request(text):
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
-                {"role": "system", "content": "Ответь одним словом: image, scheme, links или text."},
+                {
+                    "role": "system",
+                    "content": """
+Определи:
+tasks: image, scheme, text, links
+continuation: true/false
+
+Ответ JSON
+"""
+                },
                 {"role": "user", "content": text}
             ]
         )
 
-        intent = response.output_text.lower().strip()
+        data = response.output_text
 
-        # 🔥 нормализация
-        if "image" in intent:
-            return "image"
-        if "scheme" in intent:
-            return "scheme"
-        if "links" in intent:
-            return "links"
+        if "{" in data:
+            return json.loads(data)
 
-        return "text"
+        return {"tasks": ["text"], "continuation": False}
 
     except:
-        return "text"
+        return {"tasks": ["text"], "continuation": False}
+
+
+def detect_language(text):
+    text_lower = text.lower()
+
+    if any(w in text_lower for w in ["что", "как", "сделай"]):
+        return "russian"
+    if any(w in text_lower for w in ["що", "як", "зроби"]):
+        return "ukrainian"
+
+    return "english"
 
 
 async def generate_scheme_image(message, text):
     try:
-        analysis = client.responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {"role": "system", "content": "Разбей задачу на элементы схемы."},
-                {"role": "user", "content": text}
-            ]
-        )
+        lang = detect_language(text)
 
-        structured = analysis.output_text
+        label = {
+            "russian": "Подписи на русском",
+            "ukrainian": "Підписи українською",
+            "english": "Labels in English"
+        }[lang]
 
         prompt = f"""
-        Create a clean technical diagram.
-
-        Based on:
-        {structured}
-
-        Style:
-        - white background
-        - labeled blocks
-        - arrows
-        - clear layout
-        """
+Clean technical diagram.
+{label}
+With arrows and blocks.
+"""
 
         result = client.images.generate(
             model="gpt-image-1",
@@ -213,10 +157,10 @@ async def generate_scheme_image(message, text):
         image_bytes = base64.b64decode(result.data[0].b64_json)
         photo = BufferedInputFile(image_bytes, filename="scheme.png")
 
-        await message.answer_photo(photo)
+        await message.answer_photo(photo, reply_markup=main_keyboard())
 
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка генерации схемы: {e}")
+        await message.answer(f"⚠️ Ошибка генерации: {e}")
 # ==================== 🔴 BLOCK 7: IMAGE EDIT ====================
 
 async def edit_image(message, file_path, user_text):
@@ -243,16 +187,17 @@ async def edit_image(message, file_path, user_text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
-         # ==================== 🔴 BLOCK 8: MAIN HANDLER ====================
+         # ==================== 🔴 BLOCK 8 ====================
 @dp.message()
 async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
         user_history.setdefault(user_id, [])
 
-        text = ""
+        # 🔥 показываем "печатает"
+        await bot.send_chat_action(message.chat.id, "typing")
 
-        # 🎤 голос
+        # ===== текст =====
         if message.voice:
             file = await bot.get_file(message.voice.file_id)
             fname = f"{user_id}.ogg"
@@ -266,84 +211,60 @@ async def handle(message: types.Message):
 
             text = t.text
             await message.answer(f"📝 {text}")
-
         else:
             text = message.text or ""
 
         if not text.strip():
-            await message.answer("⚠️ Я не понял сообщение")
+            await message.answer("⚠️ Не понял сообщение")
             return
 
-        # 🔥 intent
-        intent = detect_intent(text)
+        # 🔥 анализ (пока "печатает")
+        analysis = await analyze_request(text)
+        tasks = analysis.get("tasks", ["text"])
+        continuation = analysis.get("continuation", False)
 
-        # ================== РЕАКЦИЯ ==================
+        context = user_history[user_id][-10:] if continuation else []
 
-        if intent == "image":
+        # 🔥 ещё раз показываем typing перед ответом
+        await bot.send_chat_action(message.chat.id, "typing")
+
+        # ===== выполнение =====
+
+        if "image" in tasks or "scheme" in tasks:
             await generate_scheme_image(message, text)
-            return
 
-        if intent == "scheme":
-            await generate_scheme_image(message, text)
-
+        if "text" in tasks or "scheme" in tasks:
             response = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
+                    *context,
+                    {"role": "user", "content": text}
+                ]
+            )
+
+            reply = response.output_text
+            last_bot_message[user_id] = reply
+
+            await message.answer(reply, reply_markup=main_keyboard())
+
+        if "links" in tasks:
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "system",
+                        "content": "Дай список сайтов:\n1. Название\n🔗 ссылка\n📝 кратко"
+                    },
                     {"role": "user", "content": text}
                 ]
             )
 
             await message.answer(response.output_text, reply_markup=main_keyboard())
-            return
 
-        # 📷 входящая картинка
-        if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
-            file_path = f"image_{user_id}.jpg"
-            await bot.download_file(file.file_path, destination=file_path)
-
-            last_image[user_id] = file_path
-
-            await message.answer(
-                "📷 Что сделать с изображением?\n"
-                "— Описать\n— Улучшить\n— Изменить"
-            )
-            return
-
-        if user_id in last_image:
-            if "опис" in text.lower():
-                result = await analyze_image(last_image[user_id])
-                await message.answer(result)
-                return
-
-            if any(w in text.lower() for w in ["добав", "измени", "сделай"]):
-                await edit_image(message, last_image[user_id], text)
-                return
-
-        # 🧠 память
+        # ===== память =====
         user_history[user_id].append({"role": "user", "content": text})
-        user_history[user_id] = user_history[user_id][-20:]
-
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-        if user_id in paid_users and user_id in good_memory:
-            memory_text = "\n".join(good_memory[user_id][-15:])
-            messages.append({"role": "system", "content": memory_text})
-
-        messages.extend(user_history[user_id])
-
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            input=messages
-        )
-
-        reply = response.output_text
-
-        user_history[user_id].append({"role": "assistant", "content": reply})
-        last_bot_message[user_id] = reply
-
-        await message.answer(reply, reply_markup=main_keyboard())
+        user_history[user_id].append({"role": "assistant", "content": "ok"})
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
