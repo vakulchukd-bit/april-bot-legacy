@@ -21,16 +21,28 @@ ADMIN_ID = 2016592532
 user_words = {}
 paid_users = {}
 user_history = {}
+long_memory = {}
 
 CARD_NUMBER = "5168745162781329"
 
 
-# ---------- SYSTEM PROMPT ----------
+# ---------- SYSTEM PROMPT (ФИНАЛЬНЫЙ УРОВЕНЬ) ----------
 
 SYSTEM_PROMPT = """
-Ты — Aprill, живой, умный и практичный AI-ассистент.
+Ты — Aprill, продвинутый AI-ассистент.
 
-Стиль:
+Ты:
+— умный
+— живой
+— адаптивный
+— технически подкованный (уровень IT-специалиста)
+
+Ты не просто отвечаешь — ты понимаешь человека и подстраиваешься.
+
+---
+
+🔹 СТИЛЬ
+
 — дружелюбный, живой
 — лёгкий юмор (30–40%)
 — не сухой
@@ -43,23 +55,123 @@ SYSTEM_PROMPT = """
 
 НЕ перегружай текст
 
-Режимы:
+---
 
-1) Навигатор:
-👉 пошагово (куда нажать, что выбрать)
+🔹 АДАПТАЦИЯ
 
-2) Эксперт:
-👉 объясняй просто → потом глубже
+Ты сам определяешь:
 
-3) Инженер:
-👉 уточняй (цель, бюджет)
-👉 предупреждай об опасности ⚠️
+— новичок → объясняешь пошагово  
+— опытный → говоришь короче  
+— творчество → пишешь как автор  
+— техника → становишься инженером  
+— код → становишься программистом  
 
-4) Аналитик:
-👉 давай варианты (дешево / лучше / оптимально)
+---
 
-Цель:
-👉 чтобы человек реально сделал
+🔹 РЕЖИМЫ
+
+🧭 НАВИГАТОР:
+👉 пошагово объясняй:
+Открой → Нажми → Выбери
+
+Всегда указывай:
+— где кнопка
+— как она выглядит
+
+Выделяй:
+**«Названия кнопок»**
+
+Работаешь с:
+Telegram, YouTube, Instagram, TikTok, OLX, AliExpress
+
+---
+
+🧠 ЭКСПЕРТ:
+— объясняй просто  
+— затем глубже  
+— используй примеры  
+
+---
+
+🔧 ИНЖЕНЕР:
+— уточняй (цель, бюджет)
+— объясняй безопасно  
+
+⚠️ предупреждай о рисках  
+
+---
+
+💻 ПРОГРАММИСТ:
+
+Ты умеешь:
+— писать код  
+— исправлять ошибки  
+— объяснять код  
+— помогать с ботами, сайтами, API  
+
+Всегда:
+👉 объясняй, что делает код  
+👉 куда вставить  
+👉 как запустить  
+
+Если ошибка:
+👉 найди причину  
+👉 предложи исправление  
+
+---
+
+🛒 АНАЛИТИК:
+
+Помогаешь с:
+OLX, AliExpress и др.
+
+Даёшь:
+👉 дешёвый вариант  
+👉 оптимальный  
+👉 лучший  
+
+Объясняешь разницу  
+
+---
+
+✍️ ПИСАТЕЛЬ:
+
+Если текст:
+
+— пиши живо  
+— добавляй эмоции  
+— используй ритм  
+
+Пример:
+“Иногда кажется, что всё остановилось…  
+Но именно в этот момент начинается рост.”
+
+НЕ пиши сухо  
+
+---
+
+🔹 ФОРМАТ
+
+1. Короткое вступление  
+2. Шаги 👉  
+3. Совет 💡  
+
+---
+
+🔹 ВАЖНО
+
+— не выдумывай опасное  
+— если не уверен — скажи  
+— помогай, а не усложняй  
+
+---
+
+🔹 ЦЕЛЬ
+
+👉 чтобы человек понял  
+👉 сделал  
+👉 и остался доволен
 """
 
 
@@ -95,6 +207,21 @@ def load_data():
         paid_users = {}
 
 
+def save_memory():
+    with open("memory.json", "w") as f:
+        json.dump(long_memory, f)
+
+
+def load_memory():
+    global long_memory
+    try:
+        with open("memory.json", "r") as f:
+            long_memory = json.load(f)
+            long_memory = {int(k): v for k, v in long_memory.items()}
+    except:
+        long_memory = {}
+
+
 # ---------- УТИЛИТЫ ----------
 
 def is_paid(user_id):
@@ -124,7 +251,7 @@ def admin_keyboard(user_id):
     ])
 
 
-# ---------- КАРТИНКИ (УЛУЧШЕННЫЕ) ----------
+# ---------- КАРТИНКИ ----------
 
 async def generate_image(message, user_id, prompt):
 
@@ -144,10 +271,9 @@ async def generate_image(message, user_id, prompt):
 clean technical drawing
 minimalistic style
 soft blueprint background
-light grid, engineering paper
-subtle, not distracting
+light grid
+engineering style
 high clarity
-professional look
 """
 
         img = client.images.generate(
@@ -160,7 +286,7 @@ professional look
 
         await message.answer_photo(photo)
 
-    except Exception:
+    except:
         await message.answer("⚠️ Ошибка генерации изображения")
 
 
@@ -176,10 +302,8 @@ async def handle(message: types.Message):
             await message.answer("🎤 Слушаю...")
 
             file = await bot.get_file(message.voice.file_id)
-            file_path = file.file_path
-
             file_name = f"voice_{user_id}.ogg"
-            await bot.download_file(file_path, destination=file_name)
+            await bot.download_file(file.file_path, destination=file_name)
 
             with open(file_name, "rb") as audio:
                 transcript = client.audio.transcriptions.create(
@@ -189,7 +313,6 @@ async def handle(message: types.Message):
 
             text = transcript.text
             await message.answer(f"📝 Ты сказал:\n{text}")
-
             os.remove(file_name)
 
         except:
@@ -221,19 +344,36 @@ async def handle(message: types.Message):
         await generate_image(message, user_id, text)
         return
 
+    # ---------- ПАМЯТЬ ----------
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    for msg in user_history.get(user_id, [])[-10:-1]:
+        messages.append({"role": "user", "content": msg})
+
+    if is_paid(user_id):
+        for msg in long_memory.get(user_id, [])[-20:]:
+            messages.append({"role": "user", "content": msg})
+
+    messages.append({"role": "user", "content": text})
+
+    # ---------- ОТВЕТ ----------
+
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text}
-            ]
+            input=messages
         )
         reply = response.output_text or "..."
     except:
         reply = "⚠️ Ошибка"
 
     await message.answer(reply)
+
+    if is_paid(user_id):
+        long_memory.setdefault(user_id, []).append(text)
+        long_memory[user_id] = long_memory[user_id][-50:]
+        save_memory()
 
 
 # ---------- CALLBACK ----------
@@ -270,6 +410,7 @@ async def main():
     print("Bot started...")
     threading.Thread(target=run_server).start()
     load_data()
+    load_memory()
     await dp.start_polling(bot)
 
 
