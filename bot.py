@@ -1,6 +1,5 @@
 import asyncio
 import os
-import time
 import base64
 import json
 import threading
@@ -16,24 +15,18 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-ADMIN_ID = 2016592532
-
-user_words = {}
-paid_users = {}
 user_history = {}
 good_memory = {}
+user_voice = {}
+last_bot_message = {}
 
 SYSTEM_PROMPT = """
-Ты — Aprill, умный и безопасный AI-ассистент.
+Ты — Aprill, умный ассистент.
 
-— не используй мат
-— помогай понятно
-
-Если даёшь код — делай его удобным для копирования
-
-Используй:
-👉 шаги
-💡 советы
+— общайся живо
+— помогай по шагам
+— если картинка — анализируй
+— если код — объясняй как программист
 """
 
 class Handler(BaseHTTPRequestHandler):
@@ -59,46 +52,108 @@ def load_all():
     except:
         good_memory = {}
 
-def like_keyboard():
+def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👍", callback_data="like")]
+        [InlineKeyboardButton(text="👍", callback_data="like")],
+        [InlineKeyboardButton(text="🔊 Читать", callback_data="choose_voice")]
     ])
 
+def image_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👀 Что на картинке", callback_data="img_explain"),
+            InlineKeyboardButton(text="🎨 Улучшить", callback_data="img_improve")
+        ]
+    ])
+
+def voice_choice_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👨 Мужской", callback_data="voice_male"),
+            InlineKeyboardButton(text="👩 Женский", callback_data="voice_female")
+        ]
+    ])
+
+async def speak_text(message, user_id, text):
+    voice = user_voice.get(user_id, "female")
+
+    try:
+        speech = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy" if voice == "male" else "nova",
+            input=text
+        )
+
+        audio_bytes = speech.read()
+        audio_file = BufferedInputFile(audio_bytes, filename="voice.mp3")
+
+        await message.answer_audio(audio_file)
+
+    except:
+        await message.answer("⚠️ Ошибка озвучки")
+
 async def generate_image(message, prompt):
-    await message.answer("🎨 Генерирую...")
-
-    enhanced_prompt = f"""
-{prompt}
-
-ultra realistic
-cinematic lighting
-high detail
-8k quality
-perfect composition
-"""
+    await message.answer("🎨 Делаю красиво...")
 
     img = client.images.generate(
         model="gpt-image-1",
-        prompt=enhanced_prompt
+        prompt=f"{prompt}, ultra realistic, cinematic lighting, 8k"
     )
 
     image_bytes = base64.b64decode(img.data[0].b64_json)
     photo = BufferedInputFile(image_bytes, filename="image.png")
 
-    await message.answer_photo(photo, reply_markup=like_keyboard())
+    await message.answer_photo(photo, reply_markup=main_keyboard())
     @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
+
+    # 📸 ЕСЛИ КАРТИНКА
+    if message.photo:
+        last_bot_message[user_id] = message.photo[-1].file_id
+
+        if message.caption:
+            text = message.caption
+        else:
+            await message.answer(
+                "👀 Я вижу изображение. Что хочешь сделать?",
+                reply_markup=image_keyboard()
+            )
+            return
+
+        # анализ с текстом
+        try:
+            file = await bot.get_file(message.photo[-1].file_id)
+            file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
+
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": text},
+                            {"type": "input_image", "image_url": file_url}
+                        ]
+                    }
+                ]
+            )
+
+            reply = response.output_text
+            last_bot_message[user_id] = reply
+
+            await message.answer(reply, reply_markup=main_keyboard())
+            return
+
+        except:
+            await message.answer("⚠️ Ошибка обработки")
+            return
+
+    # 💬 ОБЫЧНЫЙ ТЕКСТ
     text = message.text or ""
 
     user_history.setdefault(user_id, []).append(text)
     user_history[user_id] = user_history[user_id][-5:]
-
-    lower = text.lower()
-
-    if any(w in lower for w in ["сделай", "создай", "нарисуй", "картинку", "схему"]):
-        await generate_image(message, text)
-        return
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -106,40 +161,54 @@ async def handle(message: types.Message):
         messages.append({"role": "user", "content": msg})
 
     for msg in good_memory.get(user_id, [])[-3:]:
-        messages.append({"role": "user", "content": f"(хороший ответ) {msg}"})
+        messages.append({"role": "user", "content": msg})
 
-    try:
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            input=messages
-        )
-        reply = response.output_text or "..."
-    except:
-        reply = "⚠️ Ошибка"
-
-    await message.answer(
-        reply,
-        reply_markup=like_keyboard(),
-        parse_mode="Markdown"
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=messages
     )
 
+    reply = response.output_text
+    last_bot_message[user_id] = reply
+
+    await message.answer(reply, reply_markup=main_keyboard())
+
+
+@dp.callback_query(lambda c: c.data == "choose_voice")
+async def choose_voice(callback: types.CallbackQuery):
+    await callback.message.answer("🎤 Выбери голос:", reply_markup=voice_choice_keyboard())
+
+
+@dp.callback_query(lambda c: c.data == "voice_male")
+async def male(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    user_voice[user_id] = "male"
+    await speak_text(callback.message, user_id, last_bot_message.get(user_id, ""))
+
+
+@dp.callback_query(lambda c: c.data == "voice_female")
+async def female(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    user_voice[user_id] = "female"
+    await speak_text(callback.message, user_id, last_bot_message.get(user_id, ""))
+
+
 @dp.callback_query(lambda c: c.data == "like")
-async def like_handler(callback: types.CallbackQuery):
+async def like(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     text = callback.message.text
 
     good_memory.setdefault(user_id, []).append(text)
-    good_memory[user_id] = good_memory[user_id][-20:]
-
     save_all()
 
-    await callback.message.answer("💙 Спасибо! Ты улучшаешь бота!")
+    await callback.message.answer("💙 Спасибо!")
+
 
 async def main():
-    print("Bot started...")
     threading.Thread(target=run_server).start()
     load_all()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
