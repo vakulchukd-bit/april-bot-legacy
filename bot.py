@@ -124,8 +124,9 @@ continuation: true/false
 def detect_language(text):
     text_lower = text.lower()
 
-    if any(w in text_lower for w in ["что", "как", "сделай"]):
+    if any(w in text_lower for w in ["что", "как", "сделай", "объясни"]):
         return "russian"
+
     if any(w in text_lower for w in ["що", "як", "зроби"]):
         return "ukrainian"
 
@@ -134,6 +135,11 @@ def detect_language(text):
 
 async def generate_scheme_image(message, text):
     try:
+        # UX — показываем генерацию
+        status_msg = await message.answer("🎨 Генерирую изображение...")
+
+        await bot.send_chat_action(message.chat.id, "upload_photo")
+
         lang = detect_language(text)
 
         label = {
@@ -145,7 +151,7 @@ async def generate_scheme_image(message, text):
         prompt = f"""
 Clean technical diagram.
 {label}
-With arrows and blocks.
+With arrows and labeled blocks.
 """
 
         result = client.images.generate(
@@ -158,6 +164,8 @@ With arrows and blocks.
         photo = BufferedInputFile(image_bytes, filename="scheme.png")
 
         await message.answer_photo(photo, reply_markup=main_keyboard())
+
+        await status_msg.delete()
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка генерации: {e}")
@@ -194,10 +202,10 @@ async def handle(message: types.Message):
         user_id = message.from_user.id
         user_history.setdefault(user_id, [])
 
-        # 🔥 показываем "печатает"
+        # 🔥 typing (живой бот)
         await bot.send_chat_action(message.chat.id, "typing")
 
-        # ===== текст =====
+        # ===== текст / голос =====
         if message.voice:
             file = await bot.get_file(message.voice.file_id)
             fname = f"{user_id}.ogg"
@@ -210,7 +218,6 @@ async def handle(message: types.Message):
                 )
 
             text = t.text
-            await message.answer(f"📝 {text}")
         else:
             text = message.text or ""
 
@@ -218,36 +225,49 @@ async def handle(message: types.Message):
             await message.answer("⚠️ Не понял сообщение")
             return
 
-        # 🔥 анализ (пока "печатает")
+        text_lower = text.lower()
+
+        # 🔥 сохраняем сразу (важно для памяти)
+        user_history[user_id].append({
+            "role": "user",
+            "content": text
+        })
+
+        user_history[user_id] = user_history[user_id][-20:]
+
+        # 🔥 ЖЁСТКИЙ ТРИГГЕР КАРТИНКИ
+        if any(w in text_lower for w in ["картин", "визуал", "нарисуй", "схем"]):
+            await generate_scheme_image(message, text)
+            return
+
+        # 🔥 анализ (для сложных задач)
         analysis = await analyze_request(text)
         tasks = analysis.get("tasks", ["text"])
-        continuation = analysis.get("continuation", False)
 
-        context = user_history[user_id][-10:] if continuation else []
-
-        # 🔥 ещё раз показываем typing перед ответом
         await bot.send_chat_action(message.chat.id, "typing")
 
-        # ===== выполнение =====
-
-        if "image" in tasks or "scheme" in tasks:
-            await generate_scheme_image(message, text)
-
+        # ===== ТЕКСТ =====
         if "text" in tasks or "scheme" in tasks:
             response = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    *context,
-                    {"role": "user", "content": text}
+                    *user_history[user_id]
                 ]
             )
 
             reply = response.output_text
+
+            user_history[user_id].append({
+                "role": "assistant",
+                "content": reply
+            })
+
             last_bot_message[user_id] = reply
 
             await message.answer(reply, reply_markup=main_keyboard())
 
+        # ===== ССЫЛКИ =====
         if "links" in tasks:
             response = client.responses.create(
                 model="gpt-4o-mini",
@@ -261,10 +281,6 @@ async def handle(message: types.Message):
             )
 
             await message.answer(response.output_text, reply_markup=main_keyboard())
-
-        # ===== память =====
-        user_history[user_id].append({"role": "user", "content": text})
-        user_history[user_id].append({"role": "assistant", "content": "ok"})
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
