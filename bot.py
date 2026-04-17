@@ -241,3 +241,11 @@ async def approve(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[1])
 
     paid_users[user_id] = time
+    import asyncio
+
+async def main():
+    print("Bot started...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
