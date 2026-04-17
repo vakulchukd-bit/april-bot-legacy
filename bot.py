@@ -86,7 +86,7 @@ def admin_keyboard(user_id):
     ])
 
 
-# ---------- ГЕНЕРАЦИЯ ----------
+# ---------- ГЕНЕРАЦИЯ ПОРТРЕТА ----------
 
 async def generate_portrait(message, user_id):
 
@@ -121,8 +121,36 @@ async def generate_portrait(message, user_id):
 
         await message.answer_photo(photo)
 
-    except Exception as e:
+    except Exception:
         await message.answer("⚠️ Ошибка генерации")
+
+
+# ---------- ГЕНЕРАЦИЯ ЛЮБЫХ КАРТИНОК ----------
+
+async def generate_image(message, user_id, prompt):
+
+    if user_id != ADMIN_ID and not is_paid(user_id):
+        await message.answer(
+            "❌ Доступ только по подписке\n\n💳 50 грн / 30 дней",
+            reply_markup=payment_keyboard()
+        )
+        return
+
+    await message.answer("🎨 Генерирую изображение...")
+
+    try:
+        img = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt
+        )
+
+        image_bytes = base64.b64decode(img.data[0].b64_json)
+        photo = BufferedInputFile(image_bytes, filename="image.png")
+
+        await message.answer_photo(photo)
+
+    except Exception:
+        await message.answer("⚠️ Ошибка генерации изображения")
 
 
 # ---------- ОСНОВНОЙ ХЕНДЛЕР ----------
@@ -182,15 +210,41 @@ async def handle(message: types.Message):
 
     lower = text.lower()
 
-    # ТРИГГЕР
-    if (
-        any(w in lower for w in ["сделай", "создай", "нарисуй", "сгенерируй"]) and
-        any(t in lower for t in ["портрет", "фото", "картин"])
-    ):
-        await generate_portrait(message, user_id)
+    # 🎨 КАРТИНКИ
+    if any(w in lower for w in ["сделай", "создай", "нарисуй", "сгенерируй"]):
+
+        if "портрет" in lower:
+            await generate_portrait(message, user_id)
+        else:
+            await generate_image(message, user_id, text)
+
         return
 
-    # ОТВЕТ
+    # 📱 TELEGRAM ПОМОЩНИК
+    if "телеграм" in lower or "telegram" in lower:
+        try:
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=f"Ты эксперт по Telegram. Объясни просто и понятно:\n{text}"
+            )
+            await message.answer(response.output_text)
+        except:
+            await message.answer("⚠️ Ошибка")
+        return
+
+    # 📐 МАТЕМАТИКА
+    if any(w in lower for w in ["реши", "сколько", "+", "-", "*", "/", "уравнение"]):
+        try:
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=f"Реши и объясни просто:\n{text}"
+            )
+            await message.answer(response.output_text)
+        except:
+            await message.answer("⚠️ Ошибка")
+        return
+
+    # 💬 ОБЫЧНЫЙ ОТВЕТ
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
@@ -236,22 +290,4 @@ async def approve(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("reject_"))
 async def reject(callback: types.CallbackQuery):
-    user_id = int(callback.data.split("_")[1])
-
-    await bot.send_message(user_id, "❌ Оплата не подтверждена")
-    await callback.message.answer("Отклонено")
-
-
-# ---------- ЗАПУСК ----------
-
-async def main():
-    load_data()
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    # запускаем сервер в отдельном потоке
-    threading.Thread(target=run_server, daemon=True).start()
-
-    # запускаем бота
-    asyncio.run(main())
+    user_id = int
