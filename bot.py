@@ -120,7 +120,7 @@ async def speak_text(message, user_id, text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
-# ==================== 🔴 BLOCK 6: IMAGE + INTENT ====================
+# ==================== 🔴 BLOCK 6: IMAGE + SMART INTENT ====================
 
 async def analyze_image(file_path):
     try:
@@ -140,29 +140,45 @@ async def analyze_image(file_path):
         return f"⚠️ Ошибка анализа: {e}"
 
 
-# 🔥 ОПРЕДЕЛЕНИЕ НАМЕРЕНИЯ
 def detect_intent(text):
+    text_lower = text.lower()
+
+    # 🔥 БЫСТРЫЙ УРОВЕНЬ (главный)
+    if any(w in text_lower for w in ["картин", "изображен", "нарисуй", "визуал", "покажи"]):
+        return "image"
+
+    if any(w in text_lower for w in ["схема", "подключ", "как собрать", "как работает"]):
+        return "scheme"
+
+    if any(w in text_lower for w in ["где купить", "ссылки", "сайт"]):
+        return "links"
+
+    # 🤖 GPT ТОЛЬКО ЕСЛИ НЕ ПОНЯТНО
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
-                {
-                    "role": "system",
-                    "content": "Определи намерение пользователя. Ответь одним словом: image, scheme, links, text."
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
+                {"role": "system", "content": "Ответь одним словом: image, scheme, links или text."},
+                {"role": "user", "content": text}
             ]
         )
+
         intent = response.output_text.lower().strip()
-        return intent
+
+        # 🔥 нормализация
+        if "image" in intent:
+            return "image"
+        if "scheme" in intent:
+            return "scheme"
+        if "links" in intent:
+            return "links"
+
+        return "text"
+
     except:
         return "text"
 
 
-# 🔥 генерация схемы (умная)
 async def generate_scheme_image(message, text):
     try:
         analysis = client.responses.create(
@@ -185,7 +201,7 @@ async def generate_scheme_image(message, text):
         - white background
         - labeled blocks
         - arrows
-        - simple engineering scheme
+        - clear layout
         """
 
         result = client.images.generate(
@@ -234,12 +250,34 @@ async def handle(message: types.Message):
         user_id = message.from_user.id
         user_history.setdefault(user_id, [])
 
-        text = message.text or ""
+        text = ""
 
-        # 🔥 ОПРЕДЕЛЯЕМ НАМЕРЕНИЕ
+        # 🎤 голос
+        if message.voice:
+            file = await bot.get_file(message.voice.file_id)
+            fname = f"{user_id}.ogg"
+            await bot.download_file(file.file_path, destination=fname)
+
+            with open(fname, "rb") as a:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=a
+                )
+
+            text = t.text
+            await message.answer(f"📝 {text}")
+
+        else:
+            text = message.text or ""
+
+        if not text.strip():
+            await message.answer("⚠️ Я не понял сообщение")
+            return
+
+        # 🔥 intent
         intent = detect_intent(text)
 
-        # ================== 🧠 РЕАКЦИЯ ==================
+        # ================== РЕАКЦИЯ ==================
 
         if intent == "image":
             await generate_scheme_image(message, text)
@@ -256,25 +294,10 @@ async def handle(message: types.Message):
                 ]
             )
 
-            reply = response.output_text
-            await message.answer(reply, reply_markup=main_keyboard())
+            await message.answer(response.output_text, reply_markup=main_keyboard())
             return
 
-        # --- ГОЛОС ---
-        if message.voice:
-            file = await bot.get_file(message.voice.file_id)
-            fname = f"{user_id}.ogg"
-            await bot.download_file(file.file_path, destination=fname)
-
-            with open(fname, "rb") as a:
-                t = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=a
-                )
-            text = t.text
-            await message.answer(f"📝 {text}")
-
-        # --- КАРТИНКА ---
+        # 📷 входящая картинка
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
             file_path = f"image_{user_id}.jpg"
@@ -283,10 +306,8 @@ async def handle(message: types.Message):
             last_image[user_id] = file_path
 
             await message.answer(
-                "📷 Что вы хотите сделать с изображением?\n\n"
-                "— 👀 Описать\n"
-                "— 🎨 Улучшить\n"
-                "— ✏️ Изменить"
+                "📷 Что сделать с изображением?\n"
+                "— Описать\n— Улучшить\n— Изменить"
             )
             return
 
@@ -300,24 +321,15 @@ async def handle(message: types.Message):
                 await edit_image(message, last_image[user_id], text)
                 return
 
-        # ================== 🧠 ПАМЯТЬ ==================
-
-        user_history[user_id].append({
-            "role": "user",
-            "content": text
-        })
-
+        # 🧠 память
+        user_history[user_id].append({"role": "user", "content": text})
         user_history[user_id] = user_history[user_id][-20:]
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        if user_id in paid_users:
-            if user_id in good_memory:
-                memory_text = "\n".join(good_memory[user_id][-15:])
-                messages.append({
-                    "role": "system",
-                    "content": f"Важные факты о пользователе:\n{memory_text}"
-                })
+        if user_id in paid_users and user_id in good_memory:
+            memory_text = "\n".join(good_memory[user_id][-15:])
+            messages.append({"role": "system", "content": memory_text})
 
         messages.extend(user_history[user_id])
 
@@ -328,11 +340,7 @@ async def handle(message: types.Message):
 
         reply = response.output_text
 
-        user_history[user_id].append({
-            "role": "assistant",
-            "content": reply
-        })
-
+        user_history[user_id].append({"role": "assistant", "content": reply})
         last_bot_message[user_id] = reply
 
         await message.answer(reply, reply_markup=main_keyboard())
