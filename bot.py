@@ -120,7 +120,7 @@ async def speak_text(message, user_id, text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
-## ==================== 🔴 BLOCK 6: IMAGE ANALYSIS + SMART GENERATION ====================
+# ==================== 🔴 BLOCK 6: IMAGE + INTENT ====================
 
 async def analyze_image(file_path):
     try:
@@ -140,10 +140,31 @@ async def analyze_image(file_path):
         return f"⚠️ Ошибка анализа: {e}"
 
 
-# 🔥 УМНАЯ генерация схемы
+# 🔥 ОПРЕДЕЛЕНИЕ НАМЕРЕНИЯ
+def detect_intent(text):
+    try:
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {
+                    "role": "system",
+                    "content": "Определи намерение пользователя. Ответь одним словом: image, scheme, links, text."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ]
+        )
+        intent = response.output_text.lower().strip()
+        return intent
+    except:
+        return "text"
+
+
+# 🔥 генерация схемы (умная)
 async def generate_scheme_image(message, text):
     try:
-        # 1. анализ задачи
         analysis = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -154,7 +175,6 @@ async def generate_scheme_image(message, text):
 
         structured = analysis.output_text
 
-        # 2. генерация картинки
         prompt = f"""
         Create a clean technical diagram.
 
@@ -216,14 +236,18 @@ async def handle(message: types.Message):
 
         text = message.text or ""
 
-        # ================== 🔥 СХЕМЫ = КАРТИНКА + ОБЪЯСНЕНИЕ ==================
-        if any(word in text.lower() for word in [
-            "схема", "подключение", "как подключить", "визуально"
-        ]):
-            # 1. картинка
+        # 🔥 ОПРЕДЕЛЯЕМ НАМЕРЕНИЕ
+        intent = detect_intent(text)
+
+        # ================== 🧠 РЕАКЦИЯ ==================
+
+        if intent == "image":
+            await generate_scheme_image(message, text)
+            return
+
+        if intent == "scheme":
             await generate_scheme_image(message, text)
 
-            # 2. текст
             response = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
