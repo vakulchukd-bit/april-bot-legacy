@@ -26,12 +26,10 @@ user_voice = {}
 last_bot_message = {}
 last_image = {}
 
-CARD_NUMBER = "5168745162781329"
-
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
 
-Отвечай на языке пользователя (русский, украинский, английский и др).
+Отвечай на языке пользователя.
 
 Если код — давай в ```python```
 
@@ -50,47 +48,32 @@ def run_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-def save_data():
-    with open("users.json", "w") as f:
-        json.dump(paid_users, f)
-
-def load_data():
-    global paid_users
-    try:
-        with open("users.json", "r") as f:
-            paid_users = json.load(f)
-            paid_users = {int(k): v for k, v in paid_users.items()}
-    except:
-        paid_users = {}
-
-def save_memory():
-    with open("memory.json", "w") as f:
-        json.dump(good_memory, f)
-def is_paid(user_id):
-    return user_id in paid_users and time.time() < paid_users[user_id]
-
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👍", callback_data="like")],
-        [InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice_menu")]
+        [InlineKeyboardButton(text="👍", callback_data="like"),
+         InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice_menu")]
     ])
 
 def voice_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔊 Мужской голос", callback_data="voice_male")],
-        [InlineKeyboardButton(text="🔊 Женский голос", callback_data="voice_female")]
+        [
+            InlineKeyboardButton(text="👨‍🦰", callback_data="voice_male"),
+            InlineKeyboardButton(text="👩‍🦱", callback_data="voice_female")
+        ]
     ])
-
 async def speak_text(message, user_id, text):
     try:
+        if not text or text.strip() == "":
+            await message.answer("⚠️ Нечего озвучивать")
+            return
+
         await bot.send_chat_action(message.chat.id, "record_voice")
-        await message.answer("🔊 Генерирую голос...")
 
         voice = user_voice.get(user_id, "female")
 
         speech = client.audio.speech.create(
             model="gpt-4o-mini-tts",
-            voice="alloy" if voice == "male" else "nova",
+            voice="verse" if voice == "male" else "nova",
             input=text
         )
 
@@ -99,29 +82,50 @@ async def speak_text(message, user_id, text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка озвучки: {e}")
-async def analyze_image(file_url):
+async def analyze_image(file_path):
     try:
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type":"input_text","text":"Опиши изображение, распознай текст и объясни интерфейс"},
-                    {"type":"input_image","image_url":file_url}
-                ]
-            }]
-        )
+        with open(file_path, "rb") as img:
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[{
+                    "role": "user",
+                    "content": [
+                        {"type":"input_text","text":"Опиши изображение, распознай текст и объясни интерфейс"},
+                        {"type":"input_image","image": img}
+                    ]
+                }]
+            )
         return response.output_text
     except Exception as e:
         return f"⚠️ Ошибка анализа: {e}"
 
-async def improve_image(message, prompt):
-    img = client.images.generate(
-        model="gpt-image-1",
-        prompt=f"{prompt}, youtube thumbnail, high contrast"
-    )
-    photo = BufferedInputFile(base64.b64decode(img.data[0].b64_json),"img.png")
-    await message.answer_photo(photo)
+
+async def edit_image(message, file_path, user_text):
+    try:
+        with open(file_path, "rb") as img:
+            prompt = f"""
+            Отредактируй изображение максимально реалистично.
+
+            Задача пользователя:
+            {user_text}
+
+            Сохрани лицо, стиль и освещение.
+            Сделай так, как будто это было изначально.
+            """
+
+            result = client.images.edit(
+                model="gpt-image-1",
+                image=img,
+                prompt=prompt
+            )
+
+        image_bytes = base64.b64decode(result.data[0].b64_json)
+        photo = BufferedInputFile(image_bytes, filename="edit.png")
+
+        await message.answer_photo(photo)
+
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка редактирования: {e}")
 @dp.message()
 async def handle(message: types.Message):
     try:
@@ -143,13 +147,30 @@ async def handle(message: types.Message):
             text = message.text or ""
 
         if message.photo:
-            last_image[user_id] = message.photo[-1].file_id
             file = await bot.get_file(message.photo[-1].file_id)
-            url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
 
-            result = await analyze_image(url)
-            await message.answer(result, reply_markup=main_keyboard())
+            file_path = f"image_{user_id}.jpg"
+            await bot.download_file(file.file_path, destination=file_path)
+
+            last_image[user_id] = file_path
+
+            await message.answer(
+                "📷 Что вы хотите сделать с изображением?\n\n"
+                "— 👀 Описать\n"
+                "— 🎨 Улучшить\n"
+                "— ✏️ Изменить"
+            )
             return
+
+        if user_id in last_image:
+            if "опис" in text.lower():
+                result = await analyze_image(last_image[user_id])
+                await message.answer(result)
+                return
+
+            if any(w in text.lower() for w in ["добав", "измени", "сделай"]):
+                await edit_image(message, last_image[user_id], text)
+                return
 
         response = client.responses.create(
             model="gpt-4o-mini",
@@ -167,31 +188,38 @@ async def handle(message: types.Message):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
 
+
 @dp.callback_query(lambda c: c.data=="voice_menu")
 async def voice_menu(c):
+    await c.answer()
     await c.message.answer("Выбери голос", reply_markup=voice_keyboard())
+
 
 @dp.callback_query(lambda c: c.data=="voice_male")
 async def male(c):
-    user_voice[c.from_user.id]="male"
-    await c.message.answer("🎙 Мужской голос выбран")
-    await speak_text(c.message,c.from_user.id,last_bot_message.get(c.from_user.id,""))
+    await c.answer()
+    user_voice[c.from_user.id] = "male"
+    await speak_text(c.message, c.from_user.id, last_bot_message.get(c.from_user.id, ""))
+
 
 @dp.callback_query(lambda c: c.data=="voice_female")
 async def female(c):
-    user_voice[c.from_user.id]="female"
-    await c.message.answer("🎙 Женский голос выбран")
-    await speak_text(c.message,c.from_user.id,last_bot_message.get(c.from_user.id,""))
+    await c.answer()
+    user_voice[c.from_user.id] = "female"
+    await speak_text(c.message, c.from_user.id, last_bot_message.get(c.from_user.id, ""))
+
 
 @dp.callback_query(lambda c: c.data=="like")
 async def like(c):
-    good_memory.setdefault(c.from_user.id,[]).append(c.message.text)
+    await c.answer()
+    good_memory.setdefault(c.from_user.id, []).append(c.message.text)
     save_memory()
     await c.message.answer("💙 Спасибо! Ты помогаешь улучшать AI")
 
+
 async def main():
-    load_data()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
