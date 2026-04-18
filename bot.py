@@ -176,8 +176,7 @@ async def edit_image(message, file_path, user_text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
- # ==================== 🔴 BLOCK 8 ====================
-@d# ==================== 🔴 BLOCK 8 ====================
+        # ==================== 🔴 BLOCK 8 ====================
 last_image = {}
 
 @dp.message()
@@ -203,15 +202,21 @@ async def handle(message: types.Message):
                 )
             text = t.text
 
-        # ===== 📷 ФОТО =====
-        elif message.photo:
+        # ===== 📷 ФОТО (ИСПРАВЛЕНО) =====
+        elif message.content_type == "photo":
             file = await bot.get_file(message.photo[-1].file_id)
             file_path = f"image_{user_id}.jpg"
             await bot.download_file(file.file_path, destination=file_path)
 
             last_image[user_id] = file_path
 
-            await message.answer("📷 Фото получено. Напиши, что с ним сделать.")
+            await message.answer(
+                "📷 Фото получено.\n\nНапиши, что сделать:\n"
+                "— добавить объект\n"
+                "— изменить стиль\n"
+                "— убрать фон\n"
+                "— или любое действие"
+            )
             return
 
         # ===== 💬 ТЕКСТ =====
@@ -224,7 +229,7 @@ async def handle(message: types.Message):
 
         text_lower = text.lower()
 
-        # ===== 📷 ЕСЛИ ЕСТЬ ПОСЛЕДНЕЕ ФОТО =====
+        # ===== 📷 ЕСЛИ ЕСТЬ ФОТО =====
         if user_id in last_image:
             await message.answer("🧠 Обрабатываю изображение...")
 
@@ -237,9 +242,9 @@ async def handle(message: types.Message):
 Сделай с изображением следующее:
 {text}
 
-Сохрани реализм.
+Максимально реалистично.
 Чёткие детали.
-Не ломай пропорции.
+Без искажений.
 """
                     )
 
@@ -247,14 +252,13 @@ async def handle(message: types.Message):
                 photo = BufferedInputFile(image_bytes, filename="edit.png")
 
                 await message.answer_photo(photo)
-
                 return
 
             except Exception as e:
                 await message.answer(f"⚠️ Ошибка обработки изображения: {e}")
                 return
 
-        # ===== 🧠 СОХРАНЯЕМ ДИАЛОГ =====
+        # ===== 🧠 ДИАЛОГ =====
         user_history[user_id].append({
             "role": "user",
             "content": text
@@ -271,13 +275,13 @@ async def handle(message: types.Message):
 
         tasks = tasks[:3]
 
-        # ===== 🎨 КАРТИНКА =====
+        # ===== 🎨 ГЕНЕРАЦИЯ =====
         if "image" in tasks:
             await message.answer("🎨 Делаю изображение...")
             image_queue.put((user_id, message.chat.id, text))
             return
 
-        # ===== 💬 ТЕКСТ =====
+        # ===== 💬 ОТВЕТ =====
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -291,23 +295,10 @@ async def handle(message: types.Message):
 
         await message.answer(reply, reply_markup=main_keyboard())
 
-        # ===== 🔗 ССЫЛКИ =====
-        if "links" in tasks:
-            links = client.responses.create(
-                model="gpt-4o-mini",
-                input=[
-                    {"role": "system", "content": "Дай сайты"},
-                    {"role": "user", "content": text}
-                ]
-            )
-
-            await message.answer(links.output_text)
-
         await update_summary(user_id)
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
-        
 # ==================== 🔴 BLOCK 9: CALLBACKS ====================
 
 @dp.callback_query(lambda c: c.data=="voice")
