@@ -10,6 +10,7 @@ from openai import OpenAI
 
 # 🔑 ДОБАВЛЕНО
 from subscription_system import *
+from blocks.input_system import process_input  # ← НОВЫЙ ИМПОРТ
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -143,6 +144,11 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
+    # 🔑 НОВЫЙ КЛЮЧ (ЕДИНЫЙ ВХОД)
+    data = await process_input(message)
+    text = data["text"]
+    intent = data["intent"]
+
     # 🔑 ДОБАВЛЕНО (регистрация)
     sub_register(user_id)
 
@@ -167,15 +173,13 @@ async def handle(message: types.Message):
         await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
         return
 
-    # VOICE
+    # VOICE (не ломаем, оставляем как есть)
     if message.voice:
         text = await run_with_typing(
             message.chat.id,
             voice_to_text(message, user_id)
         )
         await message.answer(f"🎤 {text}")
-    else:
-        text = message.text or ""
 
     # 🔥 РЕЖИМ ПОСЛЕ КНОПКИ "ИЗМЕНИТЬ"
     if user_id in edit_mode:
@@ -198,9 +202,7 @@ async def handle(message: types.Message):
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
 
-        # 🔑 ДОБАВЛЕНО
         sub_add_message(user_id)
-
         return
 
     if is_edit_request(text) and user_id in last_image:
@@ -217,9 +219,7 @@ async def handle(message: types.Message):
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
 
-        # 🔑 ДОБАВЛЕНО
         sub_add_message(user_id)
-
         return
 
     if user_id in awaiting_image_prompt:
@@ -238,12 +238,11 @@ async def handle(message: types.Message):
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
 
-        # 🔑 ДОБАВЛЕНО
         sub_add_message(user_id)
-
         return
 
-    if is_image_request(text):
+    # 🔑 УСИЛЕННЫЙ ТРИГГЕР ЧЕРЕЗ INTENT
+    if intent == "generate_image" or is_image_request(text):
         awaiting_image_prompt[user_id] = True
         await message.answer("Какое именно изображение тебе нужно?")
         return
@@ -272,7 +271,6 @@ async def handle(message: types.Message):
 
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
-    # 🔑 ДОБАВЛЕНО
     sub_add_message(user_id)
 
 # ===== CALLBACKS =====
