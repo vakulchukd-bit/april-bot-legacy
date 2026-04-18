@@ -17,16 +17,23 @@ dp = Dispatcher()
 
 # ===== MEMORY =====
 dialog_memory = {}
-last_bot_message = {}
 last_image = {}
 edit_mode = {}
 
-SYSTEM_PROMPT = (
-    "Ты умный ассистент. "
-    "Если не хватает данных — уточни. "
-    "Если задача понятна — решай сразу. "
-    "Если пользователь исправляет — исправь."
-)
+SYSTEM_PROMPT = """
+Ты умный ассистент.
+
+Отвечай как человек, коротко и по делу.
+
+Если задача понятна:
+— сразу давай решение
+
+Если не хватает данных:
+— задай короткий вопрос
+
+Не пиши лишнего.
+Не пиши инструкции типа "скопируйте код".
+"""
 
 # ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
@@ -96,7 +103,7 @@ async def analyze_image(file_path):
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Определи что это"},
+                    {"type": "input_text", "text": "Что это?"},
                     {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
                 ]
             }]
@@ -129,7 +136,7 @@ async def handle(message: types.Message):
         await bot.download_file(file.file_path, destination=path)
 
         last_image[user_id] = path
-        await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
+        await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
         return
 
     # VOICE
@@ -138,11 +145,11 @@ async def handle(message: types.Message):
             message.chat.id,
             voice_to_text(message, user_id)
         )
-        await message.answer(f"📝 {text}")
+        await message.answer(text)
     else:
         text = message.text or ""
 
-    # EDIT MODE
+    # EDIT
     if user_id in edit_mode and user_id in last_image:
         img = await run_with_typing(
             message.chat.id,
@@ -174,7 +181,8 @@ async def handle(message: types.Message):
                 return r.output_text
             except Exception as e:
                 print("ERROR:", e)
-                return "⚠️ Ошибка, попробуй ещё раз"
+                return "Ошибка, попробуй ещё раз"
+
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
@@ -188,8 +196,6 @@ async def handle(message: types.Message):
         "role": "assistant",
         "content": reply
     })
-
-    last_bot_message[user_id] = reply
 
     # CODE BLOCK
     if any(w in reply.lower() for w in ["<html", "button", "css", "def", "function"]):
@@ -225,7 +231,7 @@ async def img_edit(c: types.CallbackQuery):
     await c.answer()
 
     edit_mode[uid] = True
-    await c.message.answer("✏️ Что изменить?")
+    await c.message.answer("Что изменить?")
 
 # ===== START =====
 async def main():
