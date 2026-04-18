@@ -11,6 +11,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
+from PIL import Image, ImageEnhance
+import cv2
+import numpy as np
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -110,9 +114,6 @@ def main_keyboard():
         [
             InlineKeyboardButton(text="👍", callback_data="like"),
             InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice")
-        ],
-        [
-            InlineKeyboardButton(text="🆔 Мой ID", callback_data="get_id")
         ]
     ])
 
@@ -186,66 +187,83 @@ async def edit_image(message, file_path, user_text):
     photo = BufferedInputFile(image_bytes, filename="edit.png")
     await message.answer_photo(photo)
 
-# ==================== 🔴 COMMANDS ====================
-@dp.message(lambda m: m.text == "/id")
-async def get_id(message: types.Message):
-    await message.answer(f"🆔 {message.from_user.id}")
+# ==================== 🔴 HYBRID ====================
+def brighten_image(path):
+    img = Image.open(path)
+    enhancer = ImageEnhance.Brightness(img)
+    img = enhancer.enhance(1.5)
+    img.save(path)
 
+def add_snow(path):
+    img = cv2.imread(path)
+    snow = np.random.randint(200, 255, img.shape, dtype=np.uint8)
+    result = cv2.addWeighted(img, 0.8, snow, 0.2, 0)
+    cv2.imwrite(path, result)
+
+def detect_actions(text):
+    actions = []
+    if "освет" in text or "светлее" in text:
+        actions.append("brighten")
+    if "снег" in text:
+        actions.append("snow")
+    return actions
+
+# ==================== 🔴 COMMANDS ====================
 @dp.message(lambda m: m.text == "/paid")
 async def paid(message: types.Message):
     give_sub(message.from_user.id)
     await message.answer("✅ Подписка активирована")
 
-@dp.message(lambda m: m.text == "/logs")
-async def logs(message: types.Message):
-    if message.from_user.id not in ADMINS:
-        return
-
-    text = "📊 Логи:\n\n"
-    for log in sub_logs[-10:]:
-        text += f"{log['user_id']} | {log['days']} дней | {log['date']}\n"
-
-    await message.answer(text)
-
-# ==================== 🔴 MAIN HANDLER ====================
+# ==================== 🔴 MAIN ====================
 @dp.message()
 async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
 
-        # 🔒 ПОДПИСКА
         if not has_sub(user_id):
             await message.answer("🔒 Нет доступа. Напиши /paid")
             return
 
-        # ---------- PHOTO ----------
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
-            file_path = f"image_{user_id}.jpg"
+            file_path = f"{user_id}.jpg"
             await bot.download_file(file.file_path, destination=file_path)
 
             last_image[user_id] = file_path
-            await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
+            await message.answer("📷 Выбери:", reply_markup=image_keyboard())
             return
 
-        # ---------- TEXT / VOICE ----------
         if message.voice:
             text = await transcribe_voice(message, user_id)
         else:
             text = (message.text or "").lower()
 
-        # ---------- EDIT ----------
-        if user_id in edit_mode and user_id in last_image:
-            await run_with_action(
-                message.chat.id,
-                "upload_photo",
-                edit_image(message, last_image[user_id], text)
-            )
+        # 🔥 ГИБРИД
+        if edit_mode.get(user_id) and user_id in last_image:
+            file_path = last_image[user_id]
+            actions = detect_actions(text)
+
+            if actions:
+                if "brighten" in actions:
+                    brighten_image(file_path)
+                if "snow" in actions:
+                    add_snow(file_path)
+
+                with open(file_path, "rb") as img:
+                    photo = BufferedInputFile(img.read(), filename="result.jpg")
+
+                await message.answer_photo(photo)
+
+            else:
+                await run_with_action(
+                    message.chat.id,
+                    "upload_photo",
+                    edit_image(message, file_path, text)
+                )
+
             del edit_mode[user_id]
             del last_image[user_id]
             return
-
-        await bot.send_chat_action(message.chat.id, "typing")
 
         response = await asyncio.to_thread(
             lambda: client.responses.create(
@@ -257,47 +275,26 @@ async def handle(message: types.Message):
             )
         )
 
-        reply = response.output_text
-        last_bot_message[user_id] = reply
-
-        await message.answer(reply, reply_markup=main_keyboard())
+        await message.answer(response.output_text, reply_markup=main_keyboard())
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
 
 # ==================== 🔴 CALLBACKS ====================
-@dp.callback_query(lambda c: c.data == "get_id")
-async def get_id_btn(c):
-    await c.answer()
-    await c.message.answer(f"🆔 {c.from_user.id}")
-
 @dp.callback_query(lambda c: c.data == "img_describe")
 async def img_describe(c):
     user_id = c.from_user.id
     await c.answer()
-    await c.message.edit_reply_markup(None)
 
-    result = await run_with_action(
-        c.message.chat.id,
-        "typing",
-        analyze_image(last_image[user_id])
-    )
-
+    result = await analyze_image(last_image[user_id])
     await c.message.answer(result)
-    del last_image[user_id]
 
 @dp.callback_query(lambda c: c.data == "img_edit")
 async def img_edit(c):
     user_id = c.from_user.id
     await c.answer()
-    await c.message.edit_reply_markup(None)
-
     edit_mode[user_id] = True
     await c.message.answer("✏️ Что изменить?")
-
-@dp.callback_query(lambda c: c.data == "voice")
-async def voice(c):
-    await c.answer()
 
 # ==================== 🔴 START ====================
 async def main():
