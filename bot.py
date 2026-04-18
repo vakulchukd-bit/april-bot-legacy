@@ -1,7 +1,6 @@
 import asyncio
 import os
 import base64
-import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -25,14 +24,11 @@ SYSTEM_PROMPT = """
 
 Отвечай как человек, коротко и по делу.
 
-Если задача понятна:
-— сразу давай решение
+Если задача понятна — делай сразу.
+Если не хватает данных — уточни.
 
-Если не хватает данных:
-— задай короткий вопрос
-
-Не пиши лишнего.
-Не пиши инструкции типа "скопируйте код".
+Если можно сгенерировать картинку — генерируй.
+Не говори "не могу", если можешь.
 """
 
 # ===== SERVER =====
@@ -76,6 +72,51 @@ async def run_with_typing(chat_id, coro):
     finally:
         task.cancel()
 
+# ===== IMAGE GENERATE =====
+async def generate_image(prompt):
+    def run():
+        result = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024"
+        )
+        return base64.b64decode(result.data[0].b64_json)
+
+    return await asyncio.to_thread(run)
+
+# ===== IMAGE ANALYZE =====
+async def analyze_image(file_path):
+    def run():
+        with open(file_path, "rb") as img:
+            b64 = base64.b64encode(img.read()).decode()
+
+        r = client.responses.create(
+            model="gpt-4o",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Что на изображении?"},
+                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
+                ]
+            }]
+        )
+        return r.output_text
+
+    return await asyncio.to_thread(run)
+
+# ===== IMAGE EDIT =====
+async def edit_image(file_path, prompt):
+    def run():
+        with open(file_path, "rb") as img:
+            result = client.images.edit(
+                model="gpt-image-1",
+                image=img,
+                prompt=prompt
+            )
+        return base64.b64decode(result.data[0].b64_json)
+
+    return await asyncio.to_thread(run)
+
 # ===== VOICE =====
 async def voice_to_text(message, user_id):
     file = await bot.get_file(message.voice.file_id)
@@ -89,38 +130,6 @@ async def voice_to_text(message, user_id):
                 file=f
             )
         return t.text
-
-    return await asyncio.to_thread(run)
-
-# ===== IMAGE =====
-async def analyze_image(file_path):
-    def run():
-        with open(file_path, "rb") as img:
-            b64 = base64.b64encode(img.read()).decode()
-
-        r = client.responses.create(
-            model="gpt-4o",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "Что это?"},
-                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
-                ]
-            }]
-        )
-        return r.output_text
-
-    return await asyncio.to_thread(run)
-
-async def edit_image(file_path, prompt):
-    def run():
-        with open(file_path, "rb") as img:
-            result = client.images.edit(
-                model="gpt-image-1",
-                image=img,
-                prompt=prompt
-            )
-        return base64.b64decode(result.data[0].b64_json)
 
     return await asyncio.to_thread(run)
 
@@ -149,7 +158,21 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # EDIT
+    # IMAGE GENERATION
+    if any(w in text.lower() for w in ["картин", "фото", "изображен", "сгенерируй"]):
+        await message.answer("🎨 Генерирую...")
+
+        img = await run_with_typing(
+            message.chat.id,
+            generate_image(text)
+        )
+
+        await message.answer_photo(
+            BufferedInputFile(img, filename="image.png")
+        )
+        return
+
+    # EDIT MODE
     if user_id in edit_mode and user_id in last_image:
         img = await run_with_typing(
             message.chat.id,
@@ -197,7 +220,7 @@ async def handle(message: types.Message):
         "content": reply
     })
 
-    # CODE BLOCK
+    # CODE FORMAT
     if any(w in reply.lower() for w in ["<html", "button", "css", "def", "function"]):
         await message.answer(
             f"```html\n{reply}\n```",
