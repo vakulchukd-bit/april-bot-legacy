@@ -5,7 +5,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
@@ -15,7 +15,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-good_memory = {}  # ✅ добавили
+good_memory = {}
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
@@ -82,10 +82,11 @@ async def edit_image(message, file_path, user_text):
     await message.answer_photo(photo)
 
 # ---------- HANDLER ----------
-@dp.message()
+@dp.message(lambda m: m.text or m.photo)
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
+    # ---------- PHOTO ----------
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         file_path = f"image_{user_id}.jpg"
@@ -97,12 +98,17 @@ async def handle(message: types.Message):
 
     text = message.text or ""
 
+    if not text:
+        return
+
+    # ---------- EDIT MODE ----------
     if user_id in edit_mode and user_id in last_image:
         await edit_image(message, last_image[user_id], text)
         del edit_mode[user_id]
         del last_image[user_id]
         return
 
+    # ---------- GPT ----------
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[
@@ -113,13 +119,14 @@ async def handle(message: types.Message):
 
     reply = response.output_text
 
-    last_bot_message[user_id] = reply  # ✅ фикс
+    # 🔥 сохраняем ответ для лайка
+    last_bot_message[user_id] = reply
 
     await message.answer(reply, reply_markup=main_keyboard())
 
 # ---------- CALLBACKS ----------
-@dp.callback_query(lambda c: c.data == "like")
-async def like(c):
+@dp.callback_query(F.data == "like")
+async def like(c: types.CallbackQuery):
     try:
         await c.answer("👍")
 
@@ -138,18 +145,18 @@ async def like(c):
         await c.message.answer("💙 Лайк сохранён")
 
     except Exception as e:
-        await c.message.answer(f"Ошибка лайка: {e}")
+        await c.message.answer(f"Ошибка: {e}")
 
-@dp.callback_query(lambda c: c.data == "img_describe")
-async def img_describe(c):
+@dp.callback_query(F.data == "img_describe")
+async def img_describe(c: types.CallbackQuery):
     user_id = c.from_user.id
     await c.answer()
 
     result = await analyze_image(last_image[user_id])
     await c.message.answer(result)
 
-@dp.callback_query(lambda c: c.data == "img_edit")
-async def img_edit(c):
+@dp.callback_query(F.data == "img_edit")
+async def img_edit(c: types.CallbackQuery):
     user_id = c.from_user.id
     await c.answer()
 
