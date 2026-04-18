@@ -1,7 +1,10 @@
+# ==================== 🔴 IMPORTS ====================
 import asyncio
 import os
 import base64
 import threading
+import json
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher, types, F
@@ -11,8 +14,64 @@ from openai import OpenAI
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+ADMIN_ID = 2016592532  # твой ID
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# ==================== 💾 USERS ====================
+USERS_FILE = "users.json"
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_users():
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2)
+
+users = load_users()
+
+def get_user(user_id):
+    uid = str(user_id)
+    if uid not in users:
+        users[uid] = {
+            "is_premium": False,
+            "messages": 0,
+            "expires_at": None
+        }
+    return users[uid]
+
+def is_premium(user):
+    if not user["is_premium"]:
+        return False
+    if not user["expires_at"]:
+        return False
+    return datetime.now() < datetime.fromisoformat(user["expires_at"])
+
+FREE_LIMIT = 20
+
+# ==================== 💳 UI ====================
+def pay_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить", callback_data="pay")],
+        [InlineKeyboardButton(text="❌ Отказаться", callback_data="decline_pay")]
+    ])
+
+def paid_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="paid")]
+    ])
+
+def admin_keyboard(uid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{uid}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{uid}")
+        ]
+    ])
 
 # ===== MEMORY =====
 dialog_memory = {}
@@ -130,6 +189,18 @@ async def voice_to_text(message, user_id):
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
     user_id = message.from_user.id
+    user = get_user(user_id)
+
+    # 💰 ПРОВЕРКА ЛИМИТА
+    if not is_premium(user):
+        user["messages"] += 1
+        if user["messages"] > FREE_LIMIT:
+            await message.answer(
+                "⛔ Демо закончено\nХочешь полный доступ?",
+                reply_markup=pay_keyboard()
+            )
+            save_users()
+            return
 
     # PHOTO
     if message.photo:
@@ -152,12 +223,12 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # 🔥 РЕЖИМ ПОСЛЕ КНОПКИ "ИЗМЕНИТЬ"
+    # РЕЖИМ EDIT
     if user_id in edit_mode:
         edit_mode.pop(user_id)
 
         if user_id not in last_image:
-            await message.answer("Нет изображения для редактирования")
+            await message.answer("Нет изображения")
             return
 
         await message.answer("🎨 Редактирую...")
@@ -174,46 +245,6 @@ async def handle(message: types.Message):
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # 🔥 РЕДАКТИРОВАНИЕ (по тексту)
-    if is_edit_request(text) and user_id in last_image:
-        await message.answer("🎨 Редактирую...")
-
-        img = await run_with_typing(
-            message.chat.id,
-            edit_image(last_image[user_id], text)
-        )
-
-        sent = await message.answer_photo(
-            BufferedInputFile(img, filename="edit.png")
-        )
-
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
-
-    # 🔥 УТОЧНЕНИЕ
-    if user_id in awaiting_image_prompt:
-        awaiting_image_prompt.pop(user_id)
-
-        img = await run_with_typing(
-            message.chat.id,
-            generate_image(text)
-        )
-
-        sent = await message.answer_photo(
-            BufferedInputFile(img, filename="image.png")
-        )
-
-        last_image[user_id] = f"{user_id}_last.png"
-
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
-
-    # 🔥 ПЕРЕХВАТ
-    if is_image_request(text):
-        awaiting_image_prompt[user_id] = True
-        await message.answer("Какое именно изображение тебе нужно?")
-        return
-
     # GPT
     history = dialog_memory.get(user_id, [])[-6:]
 
@@ -228,7 +259,6 @@ async def handle(message: types.Message):
                 ]
             )
             return r.output_text
-
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
@@ -236,9 +266,53 @@ async def handle(message: types.Message):
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
-    sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+    save_users()
 
 # ===== CALLBACKS =====
+@dp.callback_query(F.data == "pay")
+async def pay(c: types.CallbackQuery):
+    await c.message.answer(
+        "💳 Оплата 150 грн\nКарта: XXXX XXXX XXXX XXXX",
+        reply_markup=paid_keyboard()
+    )
+    await c.answer()
+
+@dp.callback_query(F.data == "decline_pay")
+async def decline(c: types.CallbackQuery):
+    await c.message.answer("Ок 🙂")
+    await c.answer()
+
+@dp.callback_query(F.data == "paid")
+async def paid(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    await bot.send_message(
+        ADMIN_ID,
+        f"Запрос на подписку\nID: {user_id}",
+        reply_markup=admin_keyboard(user_id)
+    )
+    await c.message.answer("⏳ Ждём подтверждение")
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve(c: types.CallbackQuery):
+    uid = c.data.split("_")[1]
+    user = get_user(uid)
+
+    user["is_premium"] = True
+    user["expires_at"] = (datetime.now() + timedelta(days=30)).isoformat()
+    user["messages"] = 0
+
+    save_users()
+    await bot.send_message(uid, "✅ Подписка активна на 30 дней")
+    await c.answer("OK")
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(c: types.CallbackQuery):
+    uid = c.data.split("_")[1]
+    await bot.send_message(uid, "❌ Оплата не подтверждена")
+    await c.answer("OK")
+
 @dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
     feedback_memory[c.data] = "like"
@@ -252,7 +326,6 @@ async def dislike(c: types.CallbackQuery):
 @dp.callback_query(F.data == "img_edit")
 async def image_edit_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-
     edit_mode[user_id] = True
     await callback.message.answer("✏️ Как изменить изображение?")
     await callback.answer()
