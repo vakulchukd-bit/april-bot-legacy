@@ -234,19 +234,18 @@ async def handle(message: types.Message):
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
     sub_add_message(user_id)
 
-
-# ===== CALLBACKS (🔧 ИСПРАВЛЕНО) =====
+# ===== CALLBACKS (ТОЛЬКО ДОБАВЛЕНО СООБЩЕНИЕ) =====
 @dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
     feedback_memory[c.data] = "like"
-    await c.answer()  # ← FIX
-
+    await c.answer()
+    await c.message.answer("👍 Спасибо за лайк!")
 
 @dp.callback_query(F.data.startswith("dislike_"))
 async def dislike(c: types.CallbackQuery):
     feedback_memory[c.data] = "dislike"
-    await c.answer()  # ← FIX
-
+    await c.answer()
+    await c.message.answer("👎 Принял, буду лучше!")
 
 # ===== START =====
 async def main():
