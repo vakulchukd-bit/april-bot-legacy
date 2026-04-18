@@ -18,7 +18,6 @@ dp = Dispatcher()
 
 ADMIN_ID = 2016592532
 
-user_history = {}
 good_memory = {}
 last_bot_message = {}
 last_image = {}
@@ -55,7 +54,7 @@ def main_keyboard():
         ]
     ])
 
-# ==================== 🔴 BLOCK 5: UX ACTION ====================
+# ==================== 🔴 BLOCK 5: UX ====================
 async def send_action(chat_id, action):
     while True:
         try:
@@ -63,6 +62,13 @@ async def send_action(chat_id, action):
             await asyncio.sleep(4)
         except:
             break
+
+async def run_with_action(chat_id, action, coro):
+    task = asyncio.create_task(send_action(chat_id, action))
+    try:
+        return await coro
+    finally:
+        task.cancel()
 
 # ==================== 🔴 BLOCK 6: VOICE ====================
 async def speak_text(message, user_id, text):
@@ -98,7 +104,7 @@ async def analyze_image(file_path):
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Опиши изображение, распознай текст и объясни интерфейс"},
+                    {"type": "input_text", "text": "Опиши изображение подробно"},
                     {
                         "type": "input_image",
                         "image_url": f"data:image/jpeg;base64,{base64_image}"
@@ -117,11 +123,9 @@ async def edit_image(message, file_path, user_text):
     try:
         with open(file_path, "rb") as img:
             prompt = f"""
-Отредактируй изображение максимально реалистично.
-Задача пользователя:
+Отредактируй изображение:
 {user_text}
-Сохрани лицо, стиль и освещение.
-Сделай как будто это оригинал.
+Сделай максимально реалистично.
 """
 
             result = client.images.edit(
@@ -143,8 +147,7 @@ async def edit_image(message, file_path, user_text):
 async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
-
-        text = message.text or ""
+        text = (message.text or "").lower()
 
         # ---------- VOICE ----------
         if message.voice:
@@ -171,58 +174,54 @@ async def handle(message: types.Message):
             last_image[user_id] = file_path
 
             await message.answer(
-                "📷 Что вы хотите сделать с изображением?\n\n"
-                "— 👀 Описать\n"
-                "— 🎨 Улучшить\n"
-                "— ✏️ Изменить"
+                "📷 Выбери действие:\n\n"
+                "👀 Напиши: ОПИСАТЬ\n"
+                "🎨 Напиши: ИЗМЕНИ"
             )
             return
 
-        # ---------- IMAGE ACTION ----------
+        # ---------- IMAGE MODE ----------
         if user_id in last_image:
 
-            if "опис" in text.lower():
+            # описание
+            if any(x in text for x in ["опис", "опиши", "что на фото"]):
                 await message.answer("🔍 Анализирую изображение...")
 
-                task = asyncio.create_task(send_action(message.chat.id, "typing"))
-
-                try:
-                    result = await analyze_image(last_image[user_id])
-                finally:
-                    task.cancel()
+                result = await run_with_action(
+                    message.chat.id,
+                    "typing",
+                    analyze_image(last_image[user_id])
+                )
 
                 await message.answer(result)
                 return
 
-            if any(w in text.lower() for w in ["добав", "измени", "сделай"]):
+            # редактирование
+            if any(x in text for x in ["измени", "добав", "сделай"]):
                 await message.answer("🎨 Обрабатываю изображение...")
 
-                task = asyncio.create_task(send_action(message.chat.id, "upload_photo"))
-
-                try:
-                    await edit_image(message, last_image[user_id], text)
-                finally:
-                    task.cancel()
+                await run_with_action(
+                    message.chat.id,
+                    "upload_photo",
+                    edit_image(message, last_image[user_id], text)
+                )
 
                 return
 
         # ---------- TEXT ----------
-        task = asyncio.create_task(send_action(message.chat.id, "typing"))
+        await bot.send_chat_action(message.chat.id, "typing")
 
-        try:
-            response = client.responses.create(
+        response = await asyncio.to_thread(
+            lambda: client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": text}
                 ]
             )
+        )
 
-            reply = response.output_text
-
-        finally:
-            task.cancel()
-
+        reply = response.output_text
         last_bot_message[user_id] = reply
 
         await message.answer(reply, reply_markup=main_keyboard())
@@ -246,12 +245,9 @@ async def like(c):
 
         good_memory.setdefault(user_id, []).append(text)
 
-        try:
-            save_memory()
-        except:
-            pass
+        save_memory()
 
-        await c.message.answer("💙 Спасибо за лайк!")
+        await c.message.answer("💙 Сохранено")
 
     except Exception as e:
         await c.message.answer(f"⚠️ Ошибка лайка: {e}")
