@@ -287,38 +287,35 @@ async def like(c):
         await c.message.answer(f"⚠️ Ошибка лайка: {e}")
 # ==================== 🔴 BLOCK 10: START ====================
 
-def image_worker(loop):
+import requests
+
+def image_worker():
     while True:
         try:
             user_id, chat_id, text = image_queue.get()
 
-            prompt = f"""
-Simple realistic scene:
-
-{text}
-
-Clear objects and connections.
-"""
+            print("🟡 generating image...")
 
             result = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
+                prompt=f"Simple scene: {text}",
                 size="512x512"
             )
 
+            print("🟢 image ready")
+
             image_bytes = base64.b64decode(result.data[0].b64_json)
-            photo = BufferedInputFile(image_bytes, filename="image.png")
 
-            future = asyncio.run_coroutine_threadsafe(
-                bot.send_photo(chat_id, photo),
-                loop
-            )
+            url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+            files = {"photo": ("image.png", image_bytes)}
+            data = {"chat_id": chat_id}
 
-            # 🔥 ЖДЁМ РЕЗУЛЬТАТ
-            future.result(timeout=60)
+            r = requests.post(url, data=data, files=files)
+
+            print("📤 sent:", r.status_code)
 
         except Exception as e:
-            print("❌ Image error:", e)
+            print("❌ worker error:", e)
 
 
 async def main():
@@ -326,9 +323,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-
     threading.Thread(target=run_server, daemon=True).start()
-    threading.Thread(target=image_worker, args=(loop,), daemon=True).start()
+    threading.Thread(target=image_worker, daemon=True).start()
 
     asyncio.run(main())
