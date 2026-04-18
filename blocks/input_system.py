@@ -1,11 +1,6 @@
 # ==================== 🔵 BLOCK: INPUT SYSTEM ====================
 
 async def process_input(message):
-    """
-    Универсальный вход
-    Ничего не ломает, только добавляет слой понимания
-    """
-
     user_id = message.from_user.id
 
     # --- TEXT ---
@@ -13,12 +8,12 @@ async def process_input(message):
         text = message.text
         source = "text"
 
-    # --- VOICE (пока заглушка) ---
+    # --- VOICE ---
     elif message.voice:
         text = "[voice message]"
         source = "voice"
 
-    # --- IMAGE (пока заглушка) ---
+    # --- IMAGE ---
     elif message.photo:
         text = "[image message]"
         source = "image"
@@ -27,7 +22,6 @@ async def process_input(message):
         text = "[unsupported]"
         source = "unknown"
 
-    # --- INTENT ---
     intent = detect_intent(text)
 
     return {
@@ -41,13 +35,25 @@ async def process_input(message):
 # ==================== 🟣 INTENT DETECTOR ====================
 
 def detect_intent(text: str) -> str:
-    """
-    Определяем намерение пользователя
-    """
-
     t = text.lower()
 
-    trigger_words = [
+    # 🔥 diagram приоритет
+    diagram_words = [
+        "чертеж",
+        "чертёж",
+        "схема",
+        "диаграмма",
+        "план",
+        "планировка",
+        "квартира"
+    ]
+
+    for word in diagram_words:
+        if word in t:
+            return "diagram"
+
+    # 🖼 генерация изображений
+    image_words = [
         "сделай картинку",
         "сгенерируй",
         "нарисуй",
@@ -56,20 +62,8 @@ def detect_intent(text: str) -> str:
         "generate image"
     ]
 
-    negative_context = [
-        "я видел",
-        "на картинке",
-        "обсудим",
-        "расскажу",
-        "вопрос",
-        "почему"
-    ]
-
-    for word in trigger_words:
+    for word in image_words:
         if word in t:
-            for bad in negative_context:
-                if bad in t:
-                    return "chat"
             return "generate_image"
 
     return "chat"
