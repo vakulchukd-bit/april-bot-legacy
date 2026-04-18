@@ -1,5 +1,3 @@
-# (тот же код, что был до добавления math — полностью твоя предыдущая версия)
-
 import asyncio
 import os
 import base64
@@ -10,10 +8,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-# 🔑 ДОБАВЛЕНО
 from subscription_system import *
-from blocks.input_system import process_input, detect_intent
-from blocks.diagram_system import build_diagram_prompt, is_diagram_request
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -33,9 +28,9 @@ SYSTEM_PROMPT = """
 Ты — Aprill, интеллектуальный ассистент.
 Ты:
 - понимаешь контекст диалога
-- отвечает логично
-- не теряет связь между сообщениями
-- если не уверен — уточняет
+- отвечаешь логично
+- не теряешь связь между сообщениями
+- если не уверен — уточняешь
 """
 
 IMAGE_STYLE = """
@@ -51,6 +46,12 @@ def is_image_request(text):
 
 def is_edit_request(text):
     return any(w in text.lower() for w in ["убери", "удали", "измени", "замени", "добавь"])
+
+def is_diagram_request(text):
+    return any(w in text.lower() for w in ["чертеж", "чертёж", "схема", "диаграмма"])
+
+def build_diagram_prompt(text):
+    return f"technical drawing, blueprint, schematic, black lines, white background\n\n{text}"
 
 # ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
@@ -146,13 +147,6 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    data = await process_input(message)
-    text = data["text"]
-    intent = data["intent"]
-
-    if is_diagram_request(text):
-        intent = "diagram"
-
     sub_register(user_id)
     access, reason = sub_check_access(user_id)
 
@@ -163,6 +157,7 @@ async def handle(message: types.Message):
         )
         return
 
+    # PHOTO
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
@@ -172,19 +167,18 @@ async def handle(message: types.Message):
         await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
         return
 
+    # VOICE
     if message.voice:
         text = await run_with_typing(
             message.chat.id,
             voice_to_text(message, user_id)
         )
         await message.answer(f"🎤 {text}")
+    else:
+        text = message.text or ""
 
-        intent = detect_intent(text)
-
-        if is_diagram_request(text):
-            intent = "diagram"
-
-    if intent == "diagram":
+    # DIAGRAM
+    if is_diagram_request(text):
         prompt = build_diagram_prompt(text)
 
         img = await run_with_typing(
@@ -194,6 +188,21 @@ async def handle(message: types.Message):
 
         sent = await message.answer_photo(
             BufferedInputFile(img, filename="diagram.png")
+        )
+
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+        sub_add_message(user_id)
+        return
+
+    # IMAGE
+    if is_image_request(text):
+        img = await run_with_typing(
+            message.chat.id,
+            generate_image(text)
+        )
+
+        sent = await message.answer_photo(
+            BufferedInputFile(img, filename="image.png")
         )
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
@@ -223,7 +232,12 @@ async def handle(message: types.Message):
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
-
     sub_add_message(user_id)
 
-# (callbacks остаются без изменений)
+# ===== START =====
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    threading.Thread(target=run_server, daemon=True).start()
+    asyncio.run(main())
