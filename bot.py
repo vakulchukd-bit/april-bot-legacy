@@ -16,17 +16,22 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-ADMIN_ID = 2016592532
-
 good_memory = {}
 last_bot_message = {}
 last_image = {}
 
 SYSTEM_PROMPT = """
-Ты — умный ассистент.
-Отвечай на языке пользователя.
-Если код — давай в ```python```
-Если изображение: опиши, распознай текст, объясни интерфейс.
+Ты — живой и умный ассистент Ayprill.
+
+Отвечай естественно, как человек.
+Не пиши: "на изображении изображено", "можно увидеть".
+
+Если изображение:
+— скажи кратко что это
+— объясни зачем это
+— будь простым и понятным
+
+Говори как человеку, а не как отчёт.
 """
 
 # ==================== 🔴 BLOCK 2: SERVER ====================
@@ -104,7 +109,7 @@ async def analyze_image(file_path):
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Опиши изображение подробно"},
+                    {"type": "input_text", "text": "Что это на изображении и зачем это? Ответь просто."},
                     {
                         "type": "input_image",
                         "image_url": f"data:image/jpeg;base64,{base64_image}"
@@ -122,16 +127,10 @@ async def analyze_image(file_path):
 async def edit_image(message, file_path, user_text):
     try:
         with open(file_path, "rb") as img:
-            prompt = f"""
-Отредактируй изображение:
-{user_text}
-Сделай максимально реалистично.
-"""
-
             result = client.images.edit(
                 model="gpt-image-1",
                 image=img,
-                prompt=prompt
+                prompt=user_text
             )
 
         image_bytes = base64.b64decode(result.data[0].b64_json)
@@ -147,7 +146,6 @@ async def edit_image(message, file_path, user_text):
 async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
-        text = (message.text or "").lower()
 
         # ---------- VOICE ----------
         if message.voice:
@@ -170,22 +168,20 @@ async def handle(message: types.Message):
             file_path = f"image_{user_id}.jpg"
 
             await bot.download_file(file.file_path, destination=file_path)
-
             last_image[user_id] = file_path
 
-            await message.answer(
-                "📷 Выбери действие:\n\n"
-                "👀 Напиши: ОПИСАТЬ\n"
-                "🎨 Напиши: ИЗМЕНИ"
-            )
+            await message.answer("📷 Напиши: ОПИСАТЬ или ИЗМЕНИ")
             return
+
+        text = (message.text or "").lower()
 
         # ---------- IMAGE MODE ----------
         if user_id in last_image:
 
-            # описание
-            if any(x in text for x in ["опис", "опиши", "что на фото"]):
-                await message.answer("🔍 Анализирую изображение...")
+            if any(x in text for x in ["опис", "опиши"]):
+                await message.answer("🔍 Думаю...")
+
+                await asyncio.sleep(1)
 
                 result = await run_with_action(
                     message.chat.id,
@@ -194,11 +190,14 @@ async def handle(message: types.Message):
                 )
 
                 await message.answer(result)
+
+                del last_image[user_id]
                 return
 
-            # редактирование
             if any(x in text for x in ["измени", "добав", "сделай"]):
-                await message.answer("🎨 Обрабатываю изображение...")
+                await message.answer("🎨 Делаю...")
+
+                await asyncio.sleep(1)
 
                 await run_with_action(
                     message.chat.id,
@@ -206,6 +205,7 @@ async def handle(message: types.Message):
                     edit_image(message, last_image[user_id], text)
                 )
 
+                del last_image[user_id]
                 return
 
         # ---------- TEXT ----------
@@ -244,7 +244,6 @@ async def like(c):
         text = last_bot_message.get(user_id, "ответ")
 
         good_memory.setdefault(user_id, []).append(text)
-
         save_memory()
 
         await c.message.answer("💙 Сохранено")
