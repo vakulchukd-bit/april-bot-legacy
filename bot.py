@@ -9,20 +9,23 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
+# ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+client = OpenAI(api_key=OPENAI_KEY)
 
-good_memory = {}
+# ================= MEMORY =================
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
+good_memory = {}
 
-SYSTEM_PROMPT = "Ты — живой ассистент. Отвечай просто."
+SYSTEM_PROMPT = "Ты — живой ассистент. Отвечай по-человечески, просто и понятно."
 
-# ---------- SERVER ----------
+# ================= SERVER =================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -33,7 +36,7 @@ def run_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-# ---------- UI ----------
+# ================= UI =================
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👍", callback_data="like")]
@@ -47,140 +50,178 @@ def image_keyboard():
         ]
     ])
 
-# ---------- TYPING ----------
-async def send_typing(chat_id):
+# ================= TYPING =================
+async def typing_loop(chat_id):
     try:
         while True:
             await bot.send_chat_action(chat_id, "typing")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
     except:
         pass
 
-# ---------- IMAGE ----------
+async def run_with_typing(chat_id, coro):
+    task = asyncio.create_task(typing_loop(chat_id))
+    try:
+        return await coro
+    finally:
+        task.cancel()
+
+# ================= VOICE =================
+async def voice_to_text(message, user_id):
+    file = await bot.get_file(message.voice.file_id)
+    path = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=path)
+
+    def transcribe():
+        with open(path, "rb") as f:
+            t = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f
+            )
+        return t.text
+
+    return await asyncio.to_thread(transcribe)
+
+# ================= IMAGE =================
 async def analyze_image(file_path):
-    with open(file_path, "rb") as img:
-        image_bytes = img.read()
+    def run():
+        with open(file_path, "rb") as img:
+            b64 = base64.b64encode(img.read()).decode()
 
-    base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
-    response = client.responses.create(
-        model="gpt-4o",
-        input=[{
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": "Определи что это"},
-                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{base64_image}"}
-            ]
-        }]
-    )
-
-    return response.output_text
-
-
-async def edit_image(message, file_path, user_text):
-    with open(file_path, "rb") as img:
-        result = client.images.edit(
-            model="gpt-image-1",
-            image=img,
-            prompt=user_text
+        r = client.responses.create(
+            model="gpt-4o",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text",
+                     "text": "Скажи по-человечески что это и зачем это используется."},
+                    {"type": "input_image",
+                     "image_url": f"data:image/jpeg;base64,{b64}"}
+                ]
+            }]
         )
+        return r.output_text
 
-    image_bytes = base64.b64decode(result.data[0].b64_json)
-    photo = BufferedInputFile(image_bytes, filename="edit.png")
+    return await asyncio.to_thread(run)
 
-    await message.answer_photo(photo)
+async def edit_image(file_path, prompt):
+    def run():
+        with open(file_path, "rb") as img:
+            result = client.images.edit(
+                model="gpt-image-1",
+                image=img,
+                prompt=f"""
+Добавь максимально реалистично.
+Задача: {prompt}
+Сохрани стиль, лицо и освещение.
+Сделай как оригинальное фото.
+"""
+            )
+        return base64.b64decode(result.data[0].b64_json)
 
-# ---------- HANDLER ----------
-@dp.message(lambda m: m.text or m.photo)
+    return await asyncio.to_thread(run)
+
+# ================= HANDLER =================
+@dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
     # ---------- PHOTO ----------
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
-        file_path = f"image_{user_id}.jpg"
-        await bot.download_file(file.file_path, destination=file_path)
+        path = f"{user_id}.jpg"
+        await bot.download_file(file.file_path, destination=path)
 
-        last_image[user_id] = file_path
+        last_image[user_id] = path
         await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
         return
 
-    text = message.text or ""
-    if not text:
-        return
+    # ---------- VOICE ----------
+    if message.voice:
+        text = await run_with_typing(
+            message.chat.id,
+            voice_to_text(message, user_id)
+        )
+        await message.answer(f"📝 {text}")
+    else:
+        text = message.text or ""
 
     # ---------- EDIT MODE ----------
     if user_id in edit_mode and user_id in last_image:
-        await edit_image(message, last_image[user_id], text)
+        await message.answer("🎨 Делаю...")
+
+        img = await run_with_typing(
+            message.chat.id,
+            edit_image(last_image[user_id], text)
+        )
+
+        await message.answer_photo(
+            BufferedInputFile(img, filename="edit.png")
+        )
+
         del edit_mode[user_id]
         del last_image[user_id]
         return
 
-    # ---------- ГАРАНТИРОВАННЫЙ TYPING ----------
-    await bot.send_chat_action(message.chat.id, "typing")
-    await asyncio.sleep(1)
-
-    typing_task = asyncio.create_task(send_typing(message.chat.id))
-
-    try:
-        response = await asyncio.to_thread(
-            lambda: client.responses.create(
+    # ---------- GPT ----------
+    async def ask():
+        def run():
+            r = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": text}
                 ]
             )
-        )
-    finally:
-        typing_task.cancel()
+            return r.output_text
 
-    reply = response.output_text
+        return await asyncio.to_thread(run)
+
+    reply = await run_with_typing(message.chat.id, ask())
 
     last_bot_message[user_id] = reply
-
     await message.answer(reply, reply_markup=main_keyboard())
 
-# ---------- CALLBACKS ----------
+# ================= CALLBACKS =================
 @dp.callback_query(F.data == "like")
 async def like(c: types.CallbackQuery):
-    try:
-        await c.answer("👍")
+    await c.answer("👍")
 
-        user_id = c.from_user.id
-        text = last_bot_message.get(user_id)
+    uid = c.from_user.id
+    text = last_bot_message.get(uid)
 
-        if not text:
-            await c.message.answer("⚠️ Нет сообщения")
-            return
+    if not text:
+        await c.message.answer("⚠️ Нет сообщения")
+        return
 
-        good_memory.setdefault(user_id, []).append(text)
+    good_memory.setdefault(uid, []).append(text)
 
-        with open("memory.json", "w") as f:
-            json.dump(good_memory, f)
+    with open("memory.json", "w") as f:
+        json.dump(good_memory, f)
 
-        await c.message.answer("💙 Лайк сохранён")
-
-    except Exception as e:
-        await c.message.answer(f"Ошибка: {e}")
+    await c.message.answer("💙 Сохранено")
 
 @dp.callback_query(F.data == "img_describe")
 async def img_describe(c: types.CallbackQuery):
-    user_id = c.from_user.id
+    uid = c.from_user.id
     await c.answer()
 
-    result = await analyze_image(last_image[user_id])
+    result = await run_with_typing(
+        c.message.chat.id,
+        analyze_image(last_image[uid])
+    )
+
     await c.message.answer(result)
 
 @dp.callback_query(F.data == "img_edit")
 async def img_edit(c: types.CallbackQuery):
-    user_id = c.from_user.id
+    uid = c.from_user.id
     await c.answer()
 
-    edit_mode[user_id] = True
+    edit_mode[uid] = True
     await c.message.answer("✏️ Что изменить?")
 
-# ---------- START ----------
+# ================= START =================
 async def main():
     await dp.start_polling(bot)
 
