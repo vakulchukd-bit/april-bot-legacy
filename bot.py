@@ -234,6 +234,20 @@ async def handle(message: types.Message):
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
     sub_add_message(user_id)
 
+
+# ===== CALLBACKS (🔧 ИСПРАВЛЕНО) =====
+@dp.callback_query(F.data.startswith("like_"))
+async def like(c: types.CallbackQuery):
+    feedback_memory[c.data] = "like"
+    await c.answer()  # ← FIX
+
+
+@dp.callback_query(F.data.startswith("dislike_"))
+async def dislike(c: types.CallbackQuery):
+    feedback_memory[c.data] = "dislike"
+    await c.answer()  # ← FIX
+
+
 # ===== START =====
 async def main():
     await dp.start_polling(bot)
