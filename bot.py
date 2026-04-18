@@ -25,30 +25,43 @@ SYSTEM_PROMPT = """
 Ты — Aprill, интеллектуальный ассистент.
 
 Ты:
+- понимаешь пользователя
 - отвечаешь как человек
-- даёшь точные и умные ответы
-- адаптируешься под пользователя
+- уточняешь, если не уверен
+- не спешишь делать, если задача неясна
 - стремишься к качеству
 
-Если можно сделать лучше — делай лучше.
+Если запрос неполный — сначала уточни.
 """
 
 # ===== IMAGE STYLE =====
 IMAGE_STYLE = """
-psychological portrait, expressive emotions, cinematic lighting,
-ultra realistic, high detail, depth, 4k, professional photography,
-dramatic shadows, artistic composition
+psychological portrait, cinematic lighting,
+ultra realistic, high detail, 4k,
+dramatic shadows, depth, professional
 """
 
 def enhance_prompt(user_prompt):
     return f"""
 {IMAGE_STYLE}
 
-Based on this description:
 {user_prompt}
 
-Make it visually powerful, emotional and detailed.
+high quality, masterpiece
 """
+
+# ===== SMART CHECKS =====
+def is_image_request(text: str):
+    return any(w in text.lower() for w in ["картин", "фото", "изображен", "сгенерируй"])
+
+def is_clear_image_request(text: str):
+    if len(text.split()) < 3:
+        return False
+    return True
+
+def is_complaint(text: str):
+    bad = ["не то", "неправильно", "не понял", "почему", "ошибка", "не так"]
+    return any(w in text.lower() for w in bad)
 
 # ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
@@ -117,7 +130,7 @@ async def analyze_image(file_path):
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Опиши изображение подробно и точно"},
+                    {"type": "input_text", "text": "Опиши изображение"},
                     {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
                 ]
             }]
@@ -148,7 +161,7 @@ async def voice_to_text(message, user_id):
     def run():
         with open(path, "rb") as f:
             t = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
+                model="gpt-4o-transcribe",
                 file=f
             )
         return t.text
@@ -180,8 +193,30 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # IMAGE GENERATION
-    if any(w in text.lower() for w in ["картин", "фото", "изображен", "сгенерируй"]):
+    # ===== SMART IMAGE LOGIC =====
+    if is_image_request(text):
+
+        if is_complaint(text):
+            await message.answer(
+                "Понял тебя. Давай сделаем правильно 🙌\n\n"
+                "Опиши подробнее:\n"
+                "- что именно\n"
+                "- стиль (реализм / арт)\n"
+                "- атмосферу"
+            )
+            return
+
+        if not is_clear_image_request(text):
+            await message.answer(
+                "Хочу сделать точно 👇\n\n"
+                "Уточни:\n"
+                "- что на изображении\n"
+                "- настроение\n"
+                "- стиль\n\n"
+                "Например: остров в океане, закат, спокойствие"
+            )
+            return
+
         await message.answer("🎨 Создаю изображение...")
 
         img = await run_with_typing(
@@ -196,7 +231,7 @@ async def handle(message: types.Message):
         await message.answer("Оцени результат 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # EDIT MODE
+    # ===== EDIT MODE =====
     if user_id in edit_mode and user_id in last_image:
         img = await run_with_typing(
             message.chat.id,
@@ -213,53 +248,40 @@ async def handle(message: types.Message):
         del last_image[user_id]
         return
 
-    # GPT
+    # ===== GPT =====
     history = dialog_memory.get(user_id, [])[-6:]
 
     async def ask():
         def run():
-            try:
-                r = client.responses.create(
-                    model="gpt-4o-mini",
-                    input=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        *history,
-                        {"role": "user", "content": text}
-                    ]
-                )
-                return r.output_text
-            except Exception as e:
-                print("ERROR:", e)
-                return "Ошибка, попробуй ещё раз"
+            r = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    *history,
+                    {"role": "user", "content": text}
+                ]
+            )
+            return r.output_text
 
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
 
-    # MEMORY
-    dialog_memory.setdefault(user_id, []).append({
-        "role": "user",
-        "content": text
-    })
-    dialog_memory[user_id].append({
-        "role": "assistant",
-        "content": reply
-    })
+    dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
+    dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
 # ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
-    msg_id = c.data.split("_")[1]
-    feedback_memory[msg_id] = "like"
-    await c.answer("👍 Сохранено")
+    feedback_memory[c.data] = "like"
+    await c.answer("👍")
 
 @dp.callback_query(F.data.startswith("dislike_"))
 async def dislike(c: types.CallbackQuery):
-    msg_id = c.data.split("_")[1]
-    feedback_memory[msg_id] = "dislike"
-    await c.answer("👎 Принято")
+    feedback_memory[c.data] = "dislike"
+    await c.answer("👎")
 
 @dp.callback_query(F.data == "img_describe")
 async def img_describe(c: types.CallbackQuery):
