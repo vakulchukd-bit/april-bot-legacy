@@ -19,19 +19,17 @@ dp = Dispatcher()
 good_memory = {}
 last_bot_message = {}
 last_image = {}
+edit_mode = {}
 
 SYSTEM_PROMPT = """
-Ты — живой и умный ассистент Ayprill.
+Ты — живой ассистент Ayprill.
 
-Отвечай естественно, как человек.
-Не пиши: "на изображении изображено", "можно увидеть".
+Отвечай просто и по-человечески.
+Без фраз типа "на изображении изображено".
 
-Если изображение:
-— скажи кратко что это
+Если фото:
+— скажи что это
 — объясни зачем это
-— будь простым и понятным
-
-Говори как человеку, а не как отчёт.
 """
 
 # ==================== 🔴 BLOCK 2: SERVER ====================
@@ -56,6 +54,14 @@ def main_keyboard():
         [
             InlineKeyboardButton(text="👍", callback_data="like"),
             InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice")
+        ]
+    ])
+
+def image_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👀 Описать", callback_data="img_describe"),
+            InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
         ]
     ])
 
@@ -105,11 +111,11 @@ async def analyze_image(file_path):
         base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
         response = client.responses.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Что это на изображении и зачем это? Ответь просто."},
+                    {"type": "input_text", "text": "Определи точно, что изображено и объясни смысл"},
                     {
                         "type": "input_image",
                         "image_url": f"data:image/jpeg;base64,{base64_image}"
@@ -170,45 +176,27 @@ async def handle(message: types.Message):
             await bot.download_file(file.file_path, destination=file_path)
             last_image[user_id] = file_path
 
-            await message.answer("📷 Напиши: ОПИСАТЬ или ИЗМЕНИ")
+            await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
             return
 
-        text = (message.text or "").lower()
+        # ---------- EDIT MODE ----------
+        if user_id in edit_mode and user_id in last_image:
+            await message.answer("🎨 Обрабатываю...")
+            await asyncio.sleep(1)
 
-        # ---------- IMAGE MODE ----------
-        if user_id in last_image:
+            await run_with_action(
+                message.chat.id,
+                "upload_photo",
+                edit_image(message, last_image[user_id], message.text)
+            )
 
-            if any(x in text for x in ["опис", "опиши"]):
-                await message.answer("🔍 Думаю...")
-
-                await asyncio.sleep(1)
-
-                result = await run_with_action(
-                    message.chat.id,
-                    "typing",
-                    analyze_image(last_image[user_id])
-                )
-
-                await message.answer(result)
-
-                del last_image[user_id]
-                return
-
-            if any(x in text for x in ["измени", "добав", "сделай"]):
-                await message.answer("🎨 Делаю...")
-
-                await asyncio.sleep(1)
-
-                await run_with_action(
-                    message.chat.id,
-                    "upload_photo",
-                    edit_image(message, last_image[user_id], text)
-                )
-
-                del last_image[user_id]
-                return
+            del edit_mode[user_id]
+            del last_image[user_id]
+            return
 
         # ---------- TEXT ----------
+        text = message.text or ""
+
         await bot.send_chat_action(message.chat.id, "typing")
 
         response = await asyncio.to_thread(
@@ -230,6 +218,40 @@ async def handle(message: types.Message):
         await message.answer(f"⚠️ Ошибка: {e}")
 
 # ==================== 🔴 BLOCK 10: CALLBACKS ====================
+@dp.callback_query(lambda c: c.data == "img_describe")
+async def img_describe(c):
+    user_id = c.from_user.id
+    await c.answer()
+
+    if user_id not in last_image:
+        await c.message.answer("⚠️ Сначала отправь фото")
+        return
+
+    await c.message.answer("🔍 Анализирую...")
+    await asyncio.sleep(1)
+
+    result = await run_with_action(
+        c.message.chat.id,
+        "typing",
+        analyze_image(last_image[user_id])
+    )
+
+    await c.message.answer(result)
+
+    del last_image[user_id]
+
+@dp.callback_query(lambda c: c.data == "img_edit")
+async def img_edit(c):
+    user_id = c.from_user.id
+    await c.answer()
+
+    if user_id not in last_image:
+        await c.message.answer("⚠️ Сначала отправь фото")
+        return
+
+    edit_mode[user_id] = True
+    await c.message.answer("✏️ Напиши, что изменить:")
+
 @dp.callback_query(lambda c: c.data == "voice")
 async def voice(c):
     await c.answer()
