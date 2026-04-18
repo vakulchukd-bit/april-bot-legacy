@@ -177,6 +177,9 @@ async def edit_image(message, file_path, user_text):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
  # ==================== 🔴 BLOCK 8 ====================
+@d# ==================== 🔴 BLOCK 8 ====================
+last_image = {}
+
 @dp.message()
 async def handle(message: types.Message):
     try:
@@ -185,7 +188,9 @@ async def handle(message: types.Message):
 
         await bot.send_chat_action(message.chat.id, "typing")
 
-        # текст / голос
+        text = ""
+
+        # ===== 🎤 ГОЛОС =====
         if message.voice:
             file = await bot.get_file(message.voice.file_id)
             fname = f"{user_id}.ogg"
@@ -197,6 +202,19 @@ async def handle(message: types.Message):
                     file=a
                 )
             text = t.text
+
+        # ===== 📷 ФОТО =====
+        elif message.photo:
+            file = await bot.get_file(message.photo[-1].file_id)
+            file_path = f"image_{user_id}.jpg"
+            await bot.download_file(file.file_path, destination=file_path)
+
+            last_image[user_id] = file_path
+
+            await message.answer("📷 Фото получено. Напиши, что с ним сделать.")
+            return
+
+        # ===== 💬 ТЕКСТ =====
         else:
             text = message.text or ""
 
@@ -206,51 +224,84 @@ async def handle(message: types.Message):
 
         text_lower = text.lower()
 
+        # ===== 📷 ЕСЛИ ЕСТЬ ПОСЛЕДНЕЕ ФОТО =====
+        if user_id in last_image:
+            await message.answer("🧠 Обрабатываю изображение...")
+
+            try:
+                with open(last_image[user_id], "rb") as img:
+                    result = client.images.edit(
+                        model="gpt-image-1",
+                        image=img,
+                        prompt=f"""
+Сделай с изображением следующее:
+{text}
+
+Сохрани реализм.
+Чёткие детали.
+Не ломай пропорции.
+"""
+                    )
+
+                image_bytes = base64.b64decode(result.data[0].b64_json)
+                photo = BufferedInputFile(image_bytes, filename="edit.png")
+
+                await message.answer_photo(photo)
+
+                return
+
+            except Exception as e:
+                await message.answer(f"⚠️ Ошибка обработки изображения: {e}")
+                return
+
+        # ===== 🧠 СОХРАНЯЕМ ДИАЛОГ =====
         user_history[user_id].append({
             "role": "user",
             "content": text
         })
 
-        # задачи
+        user_history[user_id] = user_history[user_id][-20:]
+
+        # ===== 🔍 ЗАДАЧИ =====
         tasks = await plan_tasks(text)
 
-        # принудительная картинка
-        if any(w in text_lower for w in ["схем", "картин", "визуал", "нарисуй"]):
+        if any(w in text_lower for w in ["картин", "визуал", "нарисуй", "схем"]):
             if "image" not in tasks:
                 tasks.append("image")
 
         tasks = tasks[:3]
 
-        # генерация текста
+        # ===== 🎨 КАРТИНКА =====
+        if "image" in tasks:
+            await message.answer("🎨 Делаю изображение...")
+            image_queue.put((user_id, message.chat.id, text))
+            return
+
+        # ===== 💬 ТЕКСТ =====
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                *user_history[user_id][-10:]
+                *user_history[user_id]
             ]
         )
 
         reply = response.output_text
         last_bot_message[user_id] = reply
 
-        for task in tasks:
+        await message.answer(reply, reply_markup=main_keyboard())
 
-            if task == "text" and "image" not in tasks:
-                await message.answer(reply, reply_markup=main_keyboard())
+        # ===== 🔗 ССЫЛКИ =====
+        if "links" in tasks:
+            links = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {"role": "system", "content": "Дай сайты"},
+                    {"role": "user", "content": text}
+                ]
+            )
 
-            elif task == "image":
-                await message.answer("🎨 Делаю изображение...")
-                image_queue.put((user_id, message.chat.id, text))
-
-            elif task == "links":
-                links = client.responses.create(
-                    model="gpt-4o-mini",
-                    input=[
-                        {"role": "system", "content": "Дай сайты"},
-                        {"role": "user", "content": text}
-                    ]
-                )
-                await message.answer(links.output_text)
+            await message.answer(links.output_text)
 
         await update_summary(user_id)
 
