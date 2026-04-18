@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 # 🔴 ТВОЙ ID (уже вставил)
 ADMIN_ID = 2016592532
 
-FREE_LIMIT = 10
+FREE_LIMIT = 2
 
 # 🔥 УНИКАЛЬНЫЕ ИМЕНА (чтобы ничего не ломалось)
 sub_users_db = {}
