@@ -256,6 +256,7 @@ async def handle(message: types.Message):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
+        
 # ==================== 🔴 BLOCK 9: CALLBACKS ====================
 
 @dp.callback_query(lambda c: c.data=="voice")
