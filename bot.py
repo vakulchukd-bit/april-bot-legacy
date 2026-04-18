@@ -15,6 +15,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+good_memory = {}  # ✅ добавили
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
@@ -36,8 +37,7 @@ def run_server():
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="👍", callback_data="like"),
-            InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice")
+            InlineKeyboardButton(text="👍", callback_data="like")
         ]
     ])
 
@@ -111,9 +111,35 @@ async def handle(message: types.Message):
         ]
     )
 
-    await message.answer(response.output_text, reply_markup=main_keyboard())
+    reply = response.output_text
+
+    last_bot_message[user_id] = reply  # ✅ фикс
+
+    await message.answer(reply, reply_markup=main_keyboard())
 
 # ---------- CALLBACKS ----------
+@dp.callback_query(lambda c: c.data == "like")
+async def like(c):
+    try:
+        await c.answer("👍")
+
+        user_id = c.from_user.id
+        text = last_bot_message.get(user_id)
+
+        if not text:
+            await c.message.answer("⚠️ Нет сообщения")
+            return
+
+        good_memory.setdefault(user_id, []).append(text)
+
+        with open("memory.json", "w") as f:
+            json.dump(good_memory, f)
+
+        await c.message.answer("💙 Лайк сохранён")
+
+    except Exception as e:
+        await c.message.answer(f"Ошибка лайка: {e}")
+
 @dp.callback_query(lambda c: c.data == "img_describe")
 async def img_describe(c):
     user_id = c.from_user.id
