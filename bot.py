@@ -4,6 +4,7 @@ import os
 import base64
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher, types
@@ -16,21 +17,20 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+ADMIN_ID = 2016592532
+
 good_memory = {}
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
 
-SYSTEM_PROMPT = """
-Ты — живой ассистент Ayprill.
+paid_users = {}
+user_words = {}
+image_uses = {}
 
-Отвечай просто и по-человечески.
-Без фраз типа "на изображении изображено".
+CARD_NUMBER = "5168745162781329"
 
-Если фото:
-— скажи что это
-— объясни зачем это
-"""
+SYSTEM_PROMPT = "Ты — живой ассистент Ayprill."
 
 # ==================== 🔴 BLOCK 2: SERVER ====================
 class Handler(BaseHTTPRequestHandler):
@@ -44,17 +44,31 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 # ==================== 🔴 BLOCK 3: STORAGE ====================
-def save_memory():
-    with open("memory.json", "w") as f:
-        json.dump(good_memory, f)
+def save_users():
+    with open("users.json", "w") as f:
+        json.dump(paid_users, f)
+
+def load_users():
+    global paid_users
+    try:
+        with open("users.json", "r") as f:
+            paid_users = json.load(f)
+            paid_users = {int(k): v for k, v in paid_users.items()}
+    except:
+        paid_users = {}
+
+def is_paid(user_id):
+    return user_id in paid_users and time.time() < paid_users[user_id]
+
+def can_use_image(user_id):
+    if is_paid(user_id):
+        return True
+    return image_uses.get(user_id, 0) < 1
 
 # ==================== 🔴 BLOCK 4: UI ====================
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍", callback_data="like"),
-            InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice")
-        ]
+        [InlineKeyboardButton(text="👍", callback_data="like")]
     ])
 
 def image_keyboard():
@@ -62,6 +76,21 @@ def image_keyboard():
         [
             InlineKeyboardButton(text="👀 Описать", callback_data="img_describe"),
             InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
+        ]
+    ])
+
+def payment_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить", url="https://www.privat24.ua/send/j3z5r")],
+        [InlineKeyboardButton(text="📋 Скопировать карту", callback_data="copy_card")],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="paid")]
+    ])
+
+def admin_kb(uid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{uid}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{uid}")
         ]
     ])
 
@@ -73,13 +102,6 @@ async def send_action(chat_id, action):
             await asyncio.sleep(4)
         except:
             break
-
-async def run_with_action(chat_id, action, coro):
-    task = asyncio.create_task(send_action(chat_id, action))
-    try:
-        return await coro
-    finally:
-        task.cancel()
 
 # ==================== 🔴 BLOCK 6: VOICE ====================
 async def transcribe_voice(message, user_id):
@@ -107,123 +129,121 @@ async def analyze_image(file_path):
         input=[{
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "Определи что это и объясни смысл"},
-                {
-                    "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{base64_image}"
-                }
+                {"type": "input_text", "text": "Что это?"},
+                {"type": "input_image","image_url":f"data:image/jpeg;base64,{base64_image}"}
             ]
         }]
     )
-
     return response.output_text
 
 # ==================== 🔴 BLOCK 8: IMAGE EDIT ====================
-async def edit_image(message, file_path, user_text):
+async def edit_image(message, file_path, prompt):
     with open(file_path, "rb") as img:
         result = client.images.edit(
             model="gpt-image-1",
             image=img,
-            prompt=user_text
+            prompt=prompt
         )
-
-    image_bytes = base64.b64decode(result.data[0].b64_json)
-    photo = BufferedInputFile(image_bytes, filename="edit.png")
-
-    await message.answer_photo(photo)
+    img_bytes = base64.b64decode(result.data[0].b64_json)
+    await message.answer_photo(BufferedInputFile(img_bytes,"edit.png"))
 
 # ==================== 🔴 BLOCK 9: MAIN HANDLER ====================
 @dp.message()
 async def handle(message: types.Message):
-    try:
-        user_id = message.from_user.id
+    user_id = message.from_user.id
 
-        # ---------- PHOTO ----------
-        if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
-            file_path = f"image_{user_id}.jpg"
-            await bot.download_file(file.file_path, destination=file_path)
+    if message.photo:
+        file = await bot.get_file(message.photo[-1].file_id)
+        path = f"img_{user_id}.jpg"
+        await bot.download_file(file.file_path, destination=path)
+        last_image[user_id] = path
+        await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
+        return
 
-            last_image[user_id] = file_path
-            await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
+    if message.voice:
+        text = await transcribe_voice(message, user_id)
+    else:
+        text = (message.text or "").lower()
+
+    if not is_paid(user_id):
+        user_words[user_id] = user_words.get(user_id, 0) + len(text.split())
+        if user_words[user_id] > 70:
+            await message.answer("🚫 Лимит", reply_markup=payment_keyboard())
             return
 
-        # ---------- TEXT / VOICE ----------
-        if message.voice:
-            text = await transcribe_voice(message, user_id)
-        else:
-            text = (message.text or "").lower()
-
-        # ---------- EDIT MODE ----------
-        if user_id in edit_mode and user_id in last_image:
-            await message.answer("🎨 Делаю...")
-            await asyncio.sleep(1)
-
-            await run_with_action(
-                message.chat.id,
-                "upload_photo",
-                edit_image(message, last_image[user_id], text)
-            )
-
-            del edit_mode[user_id]
-            del last_image[user_id]
+    if user_id in edit_mode and user_id in last_image:
+        if not can_use_image(user_id):
+            await message.answer("🚫 Лимит изображений", reply_markup=payment_keyboard())
             return
 
-        # ---------- NORMAL TEXT ----------
-        await bot.send_chat_action(message.chat.id, "typing")
+        await message.answer("🎨 Делаю...")
+        await edit_image(message, last_image[user_id], text)
 
-        response = await asyncio.to_thread(
-            lambda: client.responses.create(
-                model="gpt-4o-mini",
-                input=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text}
-                ]
-            )
-        )
+        if not is_paid(user_id):
+            image_uses[user_id] = image_uses.get(user_id, 0) + 1
 
-        reply = response.output_text
-        last_bot_message[user_id] = reply
+        del edit_mode[user_id]
+        del last_image[user_id]
+        return
 
-        await message.answer(reply, reply_markup=main_keyboard())
-
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {e}")
-
-# ==================== 🔴 BLOCK 10: CALLBACKS ====================
-@dp.callback_query(lambda c: c.data == "img_describe")
-async def img_describe(c):
-    user_id = c.from_user.id
-    await c.answer()
-    await c.message.edit_reply_markup(None)
-
-    await c.message.answer("🔍 Анализирую...")
-    await asyncio.sleep(1)
-
-    result = await run_with_action(
-        c.message.chat.id,
-        "typing",
-        analyze_image(last_image[user_id])
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=text
     )
 
-    await c.message.answer(result)
-    del last_image[user_id]
+    reply = response.output_text
+    last_bot_message[user_id] = reply
+    await message.answer(reply, reply_markup=main_keyboard())
 
-@dp.callback_query(lambda c: c.data == "img_edit")
-async def img_edit(c):
-    user_id = c.from_user.id
-    await c.answer()
-    await c.message.edit_reply_markup(None)
+# ==================== 🔴 BLOCK 10: CALLBACKS ====================
+@dp.callback_query(lambda c: c.data=="img_describe")
+async def desc(c):
+    uid = c.from_user.id
+    await c.message.answer(await analyze_image(last_image[uid]))
 
-    edit_mode[user_id] = True
-    await c.message.answer("✏️ Скажи или напиши, что изменить:")
+@dp.callback_query(lambda c: c.data=="img_edit")
+async def edit(c):
+    uid = c.from_user.id
+    if not can_use_image(uid):
+        await c.message.answer("🚫 Только после оплаты", reply_markup=payment_keyboard())
+        return
+    edit_mode[uid] = True
+    await c.message.answer("✏️ Напиши что изменить")
 
-@dp.callback_query(lambda c: c.data == "voice")
-async def voice(c):
-    await c.answer()
+@dp.callback_query(lambda c: c.data=="paid")
+async def paid(c):
+    uid = c.from_user.id
+    await bot.send_message(ADMIN_ID, f"💰 {uid} оплатил", reply_markup=admin_kb(uid))
+    await c.message.answer("⏳ Ожидай подтверждения")
+
+@dp.callback_query(lambda c: c.data.startswith("approve_"))
+async def approve(c):
+    if c.from_user.id != ADMIN_ID:
+        return
+    uid = int(c.data.split("_")[1])
+    paid_users[uid] = time.time() + 30*86400
+    save_users()
+    await bot.send_message(uid, "✅ Оплата подтверждена")
+
+@dp.callback_query(lambda c: c.data.startswith("reject_"))
+async def reject(c):
+    if c.from_user.id != ADMIN_ID:
+        return
+    uid = int(c.data.split("_")[1])
+    await bot.send_message(uid, "❌ Оплата отклонена")
+
+@dp.message(lambda m: m.text=="/users")
+async def users(m):
+    if m.from_user.id != ADMIN_ID:
+        return
+    text="Платные:\n"
+    for uid in paid_users:
+        text+=f"{uid}\n"
+    await m.answer(text)
 
 # ==================== 🔴 BLOCK 11: START ====================
 async def main():
+    load_users()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
