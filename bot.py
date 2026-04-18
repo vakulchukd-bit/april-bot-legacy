@@ -176,7 +176,7 @@ async def edit_image(message, file_path, user_text):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка редактирования: {e}")
-     # ==================== 🔴 BLOCK 8 ====================
+ # ==================== 🔴 BLOCK 8 ====================
 @dp.message()
 async def handle(message: types.Message):
     try:
@@ -211,6 +211,8 @@ async def handle(message: types.Message):
             "content": text
         })
 
+        user_history[user_id] = user_history[user_id][-20:]
+
         # задачи
         tasks = await plan_tasks(text)
 
@@ -221,7 +223,13 @@ async def handle(message: types.Message):
 
         tasks = tasks[:3]
 
-        # генерация текста (но НЕ показываем, если будет картинка)
+        # 🚀 ЕСЛИ НУЖНА КАРТИНКА — НЕ ВЫЗЫВАЕМ GPT
+        if "image" in tasks:
+            await message.answer("🎨 Делаю изображение...")
+            image_queue.put((user_id, message.chat.id, text))
+            return
+
+        # ===== текст =====
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -233,25 +241,18 @@ async def handle(message: types.Message):
         reply = response.output_text
         last_bot_message[user_id] = reply
 
-        for task in tasks:
+        await message.answer(reply, reply_markup=main_keyboard())
 
-            # текст показываем ТОЛЬКО если нет картинки
-            if task == "text" and "image" not in tasks:
-                await message.answer(reply, reply_markup=main_keyboard())
-
-            elif task == "image":
-                await message.answer("🎨 Делаю изображение...")
-                image_queue.put((user_id, message.chat.id, text))
-
-            elif task == "links":
-                links = client.responses.create(
-                    model="gpt-4o-mini",
-                    input=[
-                        {"role": "system", "content": "Дай сайты"},
-                        {"role": "user", "content": text}
-                    ]
-                )
-                await message.answer(links.output_text)
+        # ===== ссылки =====
+        if "links" in tasks:
+            links = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {"role": "system", "content": "Дай сайты"},
+                    {"role": "user", "content": text}
+                ]
+            )
+            await message.answer(links.output_text)
 
         await update_summary(user_id)
 
@@ -284,7 +285,6 @@ async def like(c):
 
     except Exception as e:
         await c.message.answer(f"⚠️ Ошибка лайка: {e}")
-
 # ==================== 🔴 BLOCK 10: START ====================
 
 def image_worker(loop):
@@ -309,14 +309,16 @@ Clear objects and connections.
             image_bytes = base64.b64decode(result.data[0].b64_json)
             photo = BufferedInputFile(image_bytes, filename="image.png")
 
-            # ✅ отправка в правильный loop
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 bot.send_photo(chat_id, photo),
                 loop
             )
 
+            # 🔥 ЖДЁМ РЕЗУЛЬТАТ
+            future.result(timeout=60)
+
         except Exception as e:
-            print("Image error:", e)
+            print("❌ Image error:", e)
 
 
 async def main():
@@ -324,10 +326,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = asyncio.get_event_loop()
 
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=image_worker, args=(loop,), daemon=True).start()
 
-    loop.run_until_complete(main())
+    asyncio.run(main())
