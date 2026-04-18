@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import base64
@@ -8,6 +7,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
+
+# 🔑 ДОБАВЛЕНО
+from subscription_system import *
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -73,6 +75,15 @@ def image_keyboard():
         ]
     ])
 
+# 🔑 ДОБАВЛЕНО
+def buy_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да", callback_data="buy_yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+        ]
+    ])
+
 # ===== TYPING =====
 async def typing_loop(chat_id):
     try:
@@ -132,6 +143,19 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
+    # 🔑 ДОБАВЛЕНО (регистрация)
+    sub_register(user_id)
+
+    # 🔑 ДОБАВЛЕНО (проверка доступа)
+    access, reason = sub_check_access(user_id)
+
+    if not access:
+        await message.answer(
+            "💳 Подписка 30 дней — 150 грн\n\nОформить?",
+            reply_markup=buy_keyboard()
+        )
+        return
+
     # PHOTO
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
@@ -173,9 +197,12 @@ async def handle(message: types.Message):
         )
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+
+        # 🔑 ДОБАВЛЕНО
+        sub_add_message(user_id)
+
         return
 
-    # 🔥 РЕДАКТИРОВАНИЕ (по тексту)
     if is_edit_request(text) and user_id in last_image:
         await message.answer("🎨 Редактирую...")
 
@@ -189,9 +216,12 @@ async def handle(message: types.Message):
         )
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+
+        # 🔑 ДОБАВЛЕНО
+        sub_add_message(user_id)
+
         return
 
-    # 🔥 УТОЧНЕНИЕ
     if user_id in awaiting_image_prompt:
         awaiting_image_prompt.pop(user_id)
 
@@ -207,9 +237,12 @@ async def handle(message: types.Message):
         last_image[user_id] = f"{user_id}_last.png"
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+
+        # 🔑 ДОБАВЛЕНО
+        sub_add_message(user_id)
+
         return
 
-    # 🔥 ПЕРЕХВАТ
     if is_image_request(text):
         awaiting_image_prompt[user_id] = True
         await message.answer("Какое именно изображение тебе нужно?")
@@ -239,6 +272,9 @@ async def handle(message: types.Message):
 
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
+    # 🔑 ДОБАВЛЕНО
+    sub_add_message(user_id)
+
 # ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
@@ -257,6 +293,48 @@ async def image_edit_callback(callback: types.CallbackQuery):
     edit_mode[user_id] = True
     await callback.message.answer("✏️ Как изменить изображение?")
     await callback.answer()
+
+# 🔑 ДОБАВЛЕНО (покупка)
+@dp.callback_query(F.data == "buy_yes")
+async def buy_yes(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
+    sub_pending_payments.add(user_id)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}")
+        ]
+    ])
+
+    await bot.send_message(
+        2016592532,
+        f"💳 Запрос на подписку\nID: {user_id}",
+        reply_markup=keyboard
+    )
+
+    await callback.message.answer("⏳ Ожидайте подтверждения")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve(callback: types.CallbackQuery):
+    user_id = int(callback.data.split("_")[1])
+
+    sub_activate(user_id)
+    sub_pending_payments.discard(user_id)
+
+    await bot.send_message(user_id, "🎉 Подписка активирована на 30 дней")
+    await callback.answer("Подтверждено")
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(callback: types.CallbackQuery):
+    user_id = int(callback.data.split("_")[1])
+
+    sub_pending_payments.discard(user_id)
+
+    await bot.send_message(user_id, "❌ Оплата не подтверждена")
+    await callback.answer("Отклонено")
 
 # ===== START =====
 async def main():
