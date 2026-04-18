@@ -10,6 +10,9 @@ from openai import OpenAI
 
 from subscription_system import *
 
+# 🔑 ДОБАВЛЕНО (router)
+from blocks.router_system import decide_action
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -177,8 +180,13 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # DIAGRAM
-    if is_diagram_request(text):
+    # 🔑 ROUTER
+    history = dialog_memory.get(user_id, [])[-10:]
+    decision = decide_action(text, history)
+    action = decision["action"]
+
+    # 🔥 DIAGRAM
+    if action == "diagram":
         prompt = build_diagram_prompt(text)
 
         img = await run_with_typing(
@@ -194,8 +202,8 @@ async def handle(message: types.Message):
         sub_add_message(user_id)
         return
 
-    # IMAGE
-    if is_image_request(text):
+    # 🔥 IMAGE
+    if action == "image":
         img = await run_with_typing(
             message.chat.id,
             generate_image(text)
@@ -207,6 +215,11 @@ async def handle(message: types.Message):
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         sub_add_message(user_id)
+        return
+
+    # 🔥 CLARIFY
+    if action == "clarify":
+        await message.answer("Уточни, что именно ты хочешь?")
         return
 
     # GPT
@@ -234,7 +247,7 @@ async def handle(message: types.Message):
     sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
     sub_add_message(user_id)
 
-# ===== CALLBACKS (ТОЛЬКО ДОБАВЛЕНО СООБЩЕНИЕ) =====
+# ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
     feedback_memory[c.data] = "like"
