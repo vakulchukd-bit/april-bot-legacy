@@ -36,9 +36,7 @@ def run_server():
 # ---------- UI ----------
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍", callback_data="like")
-        ]
+        [InlineKeyboardButton(text="👍", callback_data="like")]
     ])
 
 def image_keyboard():
@@ -48,6 +46,15 @@ def image_keyboard():
             InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
         ]
     ])
+
+# ---------- TYPING ----------
+async def send_typing(chat_id):
+    try:
+        while True:
+            await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(3)
+    except:
+        pass
 
 # ---------- IMAGE ----------
 async def analyze_image(file_path):
@@ -69,6 +76,7 @@ async def analyze_image(file_path):
 
     return response.output_text
 
+
 async def edit_image(message, file_path, user_text):
     with open(file_path, "rb") as img:
         result = client.images.edit(
@@ -79,6 +87,7 @@ async def edit_image(message, file_path, user_text):
 
     image_bytes = base64.b64decode(result.data[0].b64_json)
     photo = BufferedInputFile(image_bytes, filename="edit.png")
+
     await message.answer_photo(photo)
 
 # ---------- HANDLER ----------
@@ -97,7 +106,6 @@ async def handle(message: types.Message):
         return
 
     text = message.text or ""
-
     if not text:
         return
 
@@ -108,18 +116,24 @@ async def handle(message: types.Message):
         del last_image[user_id]
         return
 
-    # ---------- GPT ----------
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text}
-        ]
-    )
+    # ---------- TYPING + GPT ----------
+    typing_task = asyncio.create_task(send_typing(message.chat.id))
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text}
+                ]
+            )
+        )
+    finally:
+        typing_task.cancel()
 
     reply = response.output_text
 
-    # 🔥 сохраняем ответ для лайка
     last_bot_message[user_id] = reply
 
     await message.answer(reply, reply_markup=main_keyboard())
