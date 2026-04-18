@@ -9,38 +9,32 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
+# ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+client = OpenAI(api_key=OPENAI_KEY)
 
-# ================= MEMORY =================
-dialog_memory = {}
-last_bot_message = {}
-last_image = {}
-edit_mode = {}
+# ================= STATE =================
+dialog_memory = {}        # {user_id: [ {role, content}, ... ]}
+last_bot_message = {}     # {user_id: "last reply text"}
+last_image = {}           # {user_id: "path"}
+edit_mode = {}            # {user_id: True}
 
 SYSTEM_PROMPT = """
 Ты умный ассистент.
 
-Определи цель пользователя.
-
-Если пользователь просит кнопку:
-— дай код кнопки
-— не делай весь сайт
-
-Если пользователь исправляет:
-— признай ошибку
-— исправь
-
-Если непонятно:
-— уточни
-
-Отвечай по делу.
+Правила:
+— Если задача ясна → сразу решай.
+— Если не хватает данных → задай короткий уточняющий вопрос.
+— Если пользователь говорит "не так" → признай и исправь.
+— Если вопрос про предыдущий ответ → ответь по нему, не повторяй всё.
+— Не давай лишнего, будь конкретным.
 """
 
-# ================= SERVER =================
+# ================= SERVER (для Railway/Render) =================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -81,36 +75,47 @@ async def run_with_typing(chat_id, coro):
     finally:
         task.cancel()
 
-# ================= LOGIC =================
-def detect_intent(text):
-    text = text.lower()
+# ================= MEMORY HELPERS =================
+def get_history(user_id, limit=6):
+    return dialog_memory.get(user_id, [])[-limit:]
 
-    if "кноп" in text:
-        return "button"
+def push_memory(user_id, role, content):
+    dialog_memory.setdefault(user_id, []).append({
+        "role": role,
+        "content": content
+    })
 
-    if "html" in text or "сайт" in text:
-        return "web"
+# ================= THINK (ШАГ 1) =================
+def think(user_id, text):
+    history = get_history(user_id, 6)
 
-    return "general"
+    prompt = f"""
+Ты анализируешь диалог и решаешь, что делать дальше.
 
-def is_correction(text):
-    triggers = ["не так", "не надо", "ошибка", "не это"]
-    return any(t in text.lower() for t in triggers)
+История:
+{history}
 
-def is_new_task(text):
-    triggers = ["другое", "по другому", "сделай", "теперь"]
-    return any(t in text.lower() for t in triggers)
+Новое сообщение:
+{text}
 
-def build_context(user_id, new_text):
-    history = dialog_memory.get(user_id, [])[-4:]
-    combined = ""
+Ответь строго JSON:
 
-    for msg in history:
-        if msg["role"] == "user":
-            combined += msg["content"] + " "
+{{
+"intent": "кратко что хочет пользователь",
+"action": "answer | clarify | correct | followup",
+"confidence": число от 0 до 100
+}}
+"""
 
-    combined += new_text
-    return combined.strip()
+    r = client.responses.create(
+        model="gpt-4o-mini",
+        input=prompt
+    )
+
+    try:
+        return json.loads(r.output_text)
+    except:
+        return {"intent": text, "action": "answer", "confidence": 50}
 
 # ================= VOICE =================
 async def voice_to_text(message, user_id):
@@ -140,7 +145,7 @@ async def analyze_image(file_path):
                 "role": "user",
                 "content": [
                     {"type": "input_text",
-                     "text": "Скажи по-человечески что это"},
+                     "text": "Скажи по-человечески что это и зачем это используется"},
                     {"type": "input_image",
                      "image_url": f"data:image/jpeg;base64,{b64}"}
                 ]
@@ -156,13 +161,13 @@ async def edit_image(file_path, prompt):
             result = client.images.edit(
                 model="gpt-image-1",
                 image=img,
-                prompt=prompt
+                prompt=f"Добавь максимально реалистично: {prompt}"
             )
         return base64.b64decode(result.data[0].b64_json)
 
     return await asyncio.to_thread(run)
 
-# ================= MAIN =================
+# ================= MAIN HANDLER =================
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
     user_id = message.from_user.id
@@ -170,7 +175,7 @@ async def handle(message: types.Message):
     # ---------- PHOTO ----------
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
-        path = f"{user_id}.jpg"
+        path = f"image_{user_id}.jpg"
         await bot.download_file(file.file_path, destination=path)
 
         last_image[user_id] = path
@@ -185,38 +190,66 @@ async def handle(message: types.Message):
         )
         await message.answer(f"📝 {text}")
     else:
-        text = message.text or ""
+        text = (message.text or "").strip()
 
-    # ---------- EDIT ----------
+    if not text:
+        return
+
+    # ---------- EDIT MODE ----------
     if user_id in edit_mode and user_id in last_image:
         img = await run_with_typing(
             message.chat.id,
             edit_image(last_image[user_id], text)
         )
-
-        await message.answer_photo(
-            BufferedInputFile(img, filename="edit.png")
-        )
+        await message.answer_photo(BufferedInputFile(img, filename="edit.png"))
 
         del edit_mode[user_id]
         del last_image[user_id]
         return
 
-    # ---------- LOGIC ----------
-    if is_new_task(text):
-        dialog_memory[user_id] = []
+    # ---------- THINK ----------
+    analysis = await asyncio.to_thread(think, user_id, text)
 
-    intent = detect_intent(text)
+    action = analysis.get("action", "answer")
+    intent = analysis.get("intent", text)
+    confidence = int(analysis.get("confidence", 50))
 
-    if is_correction(text):
-        smart_text = f"Исправь прошлый ответ. Новый запрос: {text}"
+    # ---------- DECIDE ----------
+    if action == "clarify" and confidence < 60:
+        await message.answer("Уточни, пожалуйста, чтобы я сделал точно как нужно")
+        return
+
+    if action == "correct":
+        smart_text = f"""
+Я ранее ошибся. Исправляю.
+
+Новая задача:
+{text}
+
+Дай правильное решение.
+"""
+    elif action == "followup":
+        prev = last_bot_message.get(user_id, "")
+        smart_text = f"""
+Вопрос по предыдущему ответу.
+
+Предыдущий ответ:
+{prev}
+
+Вопрос:
+{text}
+
+Ответь кратко и по делу.
+"""
     else:
-        smart_text = build_context(user_id, text)
+        smart_text = f"""
+Задача:
+{intent}
 
-    if intent == "button":
-        smart_text += "\nСделай именно кнопку HTML/CSS, без лишнего."
+Сделай максимально точно и без лишнего.
+"""
 
-    # ---------- GPT ----------
+    # ---------- ASK (ШАГ 2) ----------
     async def ask():
         def run():
             r = client.responses.create(
@@ -227,25 +260,18 @@ async def handle(message: types.Message):
                 ]
             )
             return r.output_text
-
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
 
+    # ---------- SAVE MEMORY ----------
+    push_memory(user_id, "user", text)
+    push_memory(user_id, "assistant", reply)
     last_bot_message[user_id] = reply
 
-    # память
-    dialog_memory.setdefault(user_id, []).append({
-        "role": "user",
-        "content": text
-    })
-    dialog_memory[user_id].append({
-        "role": "assistant",
-        "content": reply
-    })
-
-    # ---------- CODE FORMAT ----------
-    if any(w in reply.lower() for w in ["<html", "button", "css", "def", "function"]):
+    # ---------- PRETTY CODE OUTPUT ----------
+    lower = reply.lower()
+    if any(k in lower for k in ["<html", "<button", "css", "def ", "function "]):
         await message.answer(
             f"```html\n{reply}\n```",
             parse_mode="Markdown",
@@ -254,16 +280,42 @@ async def handle(message: types.Message):
     else:
         await message.answer(reply, reply_markup=main_keyboard())
 
-# ================= CALLBACK =================
+# ================= CALLBACKS =================
 @dp.callback_query(F.data == "like")
 async def like(c: types.CallbackQuery):
     await c.answer("👍")
     await c.message.answer("💙 Сохранено")
 
+@dp.callback_query(F.data == "img_describe")
+async def img_describe(c: types.CallbackQuery):
+    uid = c.from_user.id
+    await c.answer()
+
+    path = last_image.get(uid)
+    if not path:
+        await c.message.answer("⚠️ Нет изображения")
+        return
+
+    result = await run_with_typing(
+        c.message.chat.id,
+        analyze_image(path)
+    )
+    await c.message.answer(result)
+
+@dp.callback_query(F.data == "img_edit")
+async def img_edit(c: types.CallbackQuery):
+    uid = c.from_user.id
+    await c.answer()
+
+    if uid not in last_image:
+        await c.message.answer("⚠️ Сначала отправь фото")
+        return
+
+    edit_mode[uid] = True
+    await c.message.answer("✏️ Что изменить?")
+
 # ================= START =================
 async def main():
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
-    asyncio.run(main())
+if __name__ == "__main
