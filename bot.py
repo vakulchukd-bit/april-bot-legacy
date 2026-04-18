@@ -10,7 +10,8 @@ from openai import OpenAI
 
 # 🔑 ДОБАВЛЕНО
 from subscription_system import *
-from blocks.input_system import process_input  # ← НОВЫЙ ИМПОРТ
+from blocks.input_system import process_input
+from blocks.diagram_system import build_diagram_prompt, is_diagram_request  # ← НОВЫЙ ИМПОРТ
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -144,10 +145,14 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    # 🔑 НОВЫЙ КЛЮЧ (ЕДИНЫЙ ВХОД)
+    # 🔑 ЕДИНЫЙ ВХОД
     data = await process_input(message)
     text = data["text"]
     intent = data["intent"]
+
+    # 🔑 ДОБАВЛЕНО — diagram intent (перекрытие)
+    if is_diagram_request(text):
+        intent = "diagram"
 
     # 🔑 ДОБАВЛЕНО (регистрация)
     sub_register(user_id)
@@ -173,13 +178,31 @@ async def handle(message: types.Message):
         await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
         return
 
-    # VOICE (не ломаем, оставляем как есть)
+    # VOICE
     if message.voice:
         text = await run_with_typing(
             message.chat.id,
             voice_to_text(message, user_id)
         )
         await message.answer(f"🎤 {text}")
+
+    # 🔥 РЕЖИМ ЧЕРТЕЖА (НОВЫЙ БЛОК)
+    if intent == "diagram":
+        prompt = build_diagram_prompt(text)
+
+        img = await run_with_typing(
+            message.chat.id,
+            generate_image(prompt)
+        )
+
+        sent = await message.answer_photo(
+            BufferedInputFile(img, filename="diagram.png")
+        )
+
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+
+        sub_add_message(user_id)
+        return
 
     # 🔥 РЕЖИМ ПОСЛЕ КНОПКИ "ИЗМЕНИТЬ"
     if user_id in edit_mode:
@@ -241,7 +264,7 @@ async def handle(message: types.Message):
         sub_add_message(user_id)
         return
 
-    # 🔑 УСИЛЕННЫЙ ТРИГГЕР ЧЕРЕЗ INTENT
+    # 🔑 УСИЛЕННЫЙ ТРИГГЕР
     if intent == "generate_image" or is_image_request(text):
         awaiting_image_prompt[user_id] = True
         await message.answer("Какое именно изображение тебе нужно?")
