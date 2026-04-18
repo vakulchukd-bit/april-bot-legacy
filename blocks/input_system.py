@@ -22,11 +22,13 @@ async def process_input(message):
         text = "[unsupported]"
         source = "unknown"
 
+    intent = detect_intent(text)
+
     return {
         "user_id": user_id,
         "text": text,
         "source": source,
-        "intent": "chat"
+        "intent": intent
     }
 
 
@@ -35,5 +37,8 @@ def detect_intent(text: str) -> str:
 
     if any(w in t for w in ["картин", "фото", "сгенерируй"]):
         return "generate_image"
+
+    if any(w in t for w in ["чертеж", "схема", "диаграмма"]):
+        return "diagram"
 
     return "chat"
