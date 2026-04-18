@@ -9,21 +9,30 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-# ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-client = OpenAI(api_key=OPENAI_KEY)
 
 # ================= MEMORY =================
+dialog_memory = {}
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
 good_memory = {}
 
-SYSTEM_PROMPT = "Ты — живой ассистент. Отвечай по-человечески, просто и понятно."
+SYSTEM_PROMPT = """
+Ты умный ассистент.
+
+ВСЕГДА анализируй предыдущие сообщения.
+Если пользователь пишет обрывками — собирай смысл сам.
+
+Не переспрашивай лишний раз.
+Старайся догадаться и помочь.
+
+Отвечай по делу.
+"""
 
 # ================= SERVER =================
 class Handler(BaseHTTPRequestHandler):
@@ -66,13 +75,28 @@ async def run_with_typing(chat_id, coro):
     finally:
         task.cancel()
 
+# ================= CONTEXT =================
+def get_history(user_id):
+    return dialog_memory.get(user_id, [])[-6:]
+
+def build_context(user_id, new_text):
+    history = dialog_memory.get(user_id, [])[-4:]
+    combined = ""
+
+    for msg in history:
+        if msg["role"] == "user":
+            combined += msg["content"] + " "
+
+    combined += new_text
+    return combined.strip()
+
 # ================= VOICE =================
 async def voice_to_text(message, user_id):
     file = await bot.get_file(message.voice.file_id)
     path = f"{user_id}.ogg"
     await bot.download_file(file.file_path, destination=path)
 
-    def transcribe():
+    def run():
         with open(path, "rb") as f:
             t = client.audio.transcriptions.create(
                 model="gpt-4o-mini-transcribe",
@@ -80,7 +104,7 @@ async def voice_to_text(message, user_id):
             )
         return t.text
 
-    return await asyncio.to_thread(transcribe)
+    return await asyncio.to_thread(run)
 
 # ================= IMAGE =================
 async def analyze_image(file_path):
@@ -113,15 +137,14 @@ async def edit_image(file_path, prompt):
                 prompt=f"""
 Добавь максимально реалистично.
 Задача: {prompt}
-Сохрани стиль, лицо и освещение.
-Сделай как оригинальное фото.
+Сохрани стиль и освещение.
 """
             )
         return base64.b64decode(result.data[0].b64_json)
 
     return await asyncio.to_thread(run)
 
-# ================= HANDLER =================
+# ================= MAIN =================
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
     user_id = message.from_user.id
@@ -148,8 +171,6 @@ async def handle(message: types.Message):
 
     # ---------- EDIT MODE ----------
     if user_id in edit_mode and user_id in last_image:
-        await message.answer("🎨 Делаю...")
-
         img = await run_with_typing(
             message.chat.id,
             edit_image(last_image[user_id], text)
@@ -164,13 +185,15 @@ async def handle(message: types.Message):
         return
 
     # ---------- GPT ----------
+    smart_text = build_context(user_id, text)
+
     async def ask():
         def run():
             r = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text}
+                    {"role": "user", "content": smart_text}
                 ]
             )
             return r.output_text
@@ -180,6 +203,17 @@ async def handle(message: types.Message):
     reply = await run_with_typing(message.chat.id, ask())
 
     last_bot_message[user_id] = reply
+
+    # память
+    dialog_memory.setdefault(user_id, []).append({
+        "role": "user",
+        "content": text
+    })
+    dialog_memory[user_id].append({
+        "role": "assistant",
+        "content": reply
+    })
+
     await message.answer(reply, reply_markup=main_keyboard())
 
 # ================= CALLBACKS =================
