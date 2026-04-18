@@ -24,16 +24,20 @@ edit_mode = {}
 SYSTEM_PROMPT = """
 Ты умный ассистент.
 
-Если пользователь исправляет тебя:
+Определи цель пользователя.
+
+Если пользователь просит кнопку:
+— дай код кнопки
+— не делай весь сайт
+
+Если пользователь исправляет:
 — признай ошибку
-— извинись кратко
-— сразу исправь
+— исправь
 
-Если задача понятна:
-— делай сразу
-
-Если не понятна:
+Если непонятно:
 — уточни
+
+Отвечай по делу.
 """
 
 # ================= SERVER =================
@@ -78,8 +82,19 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 # ================= LOGIC =================
+def detect_intent(text):
+    text = text.lower()
+
+    if "кноп" in text:
+        return "button"
+
+    if "html" in text or "сайт" in text:
+        return "web"
+
+    return "general"
+
 def is_correction(text):
-    triggers = ["не так", "не надо", "не круглая", "ошибка", "не это"]
+    triggers = ["не так", "не надо", "ошибка", "не это"]
     return any(t in text.lower() for t in triggers)
 
 def is_new_task(text):
@@ -125,7 +140,7 @@ async def analyze_image(file_path):
                 "role": "user",
                 "content": [
                     {"type": "input_text",
-                     "text": "Скажи по-человечески что это и зачем это используется"},
+                     "text": "Скажи по-человечески что это"},
                     {"type": "input_image",
                      "image_url": f"data:image/jpeg;base64,{b64}"}
                 ]
@@ -141,7 +156,7 @@ async def edit_image(file_path, prompt):
             result = client.images.edit(
                 model="gpt-image-1",
                 image=img,
-                prompt=f"Добавь реалистично: {prompt}"
+                prompt=prompt
             )
         return base64.b64decode(result.data[0].b64_json)
 
@@ -191,15 +206,15 @@ async def handle(message: types.Message):
     if is_new_task(text):
         dialog_memory[user_id] = []
 
-    if is_correction(text):
-        smart_text = f"""
-Я ошибся ранее. Исправляю.
+    intent = detect_intent(text)
 
-Запрос пользователя:
-{text}
-"""
+    if is_correction(text):
+        smart_text = f"Исправь прошлый ответ. Новый запрос: {text}"
     else:
         smart_text = build_context(user_id, text)
+
+    if intent == "button":
+        smart_text += "\nСделай именно кнопку HTML/CSS, без лишнего."
 
     # ---------- GPT ----------
     async def ask():
