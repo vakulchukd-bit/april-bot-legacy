@@ -32,7 +32,6 @@ SYSTEM_PROMPT = """
 - если не уверен — уточняешь
 """
 
-# ❌ УБРАЛ ПОРТРЕТНЫЙ СТИЛЬ
 IMAGE_STYLE = """
 high quality, detailed, realistic, cinematic lighting,
 4k, sharp focus, natural colors
@@ -101,6 +100,7 @@ async def generate_image(prompt):
             size="1024x1024"
         )
         return base64.b64decode(result.data[0].b64_json)
+
     return await asyncio.to_thread(run)
 
 async def edit_image(file_path, prompt):
@@ -112,6 +112,27 @@ async def edit_image(file_path, prompt):
                 prompt=enhance_prompt(prompt)
             )
         return base64.b64decode(result.data[0].b64_json)
+
+    return await asyncio.to_thread(run)
+
+# ===== ДОБАВИЛИ =====
+async def analyze_image(file_path):
+    def run():
+        with open(file_path, "rb") as img:
+            b64 = base64.b64encode(img.read()).decode()
+
+        r = client.responses.create(
+            model="gpt-4o",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Опиши изображение"},
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}
+                ]
+            }]
+        )
+        return r.output_text
+
     return await asyncio.to_thread(run)
 
 # ===== VOICE =====
@@ -180,11 +201,16 @@ async def handle(message: types.Message):
             generate_image(text)
         )
 
+        # 🔥 СОХРАНЕНИЕ ФАЙЛА
+        path = f"{user_id}_image.png"
+        with open(path, "wb") as f:
+            f.write(img)
+
+        last_image[user_id] = path
+
         sent = await message.answer_photo(
             BufferedInputFile(img, filename="image.png")
         )
-
-        last_image[user_id] = f"{user_id}_last.png"
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
@@ -209,6 +235,7 @@ async def handle(message: types.Message):
                 ]
             )
             return r.output_text
+
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
@@ -216,7 +243,7 @@ async def handle(message: types.Message):
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
-    sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
 # ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
@@ -228,6 +255,31 @@ async def like(c: types.CallbackQuery):
 async def dislike(c: types.CallbackQuery):
     feedback_memory[c.data] = "dislike"
     await c.answer("👎")
+
+# 🔥 ДОБАВИЛИ КНОПКИ
+@dp.callback_query(F.data == "img_describe")
+async def img_describe(c: types.CallbackQuery):
+    uid = c.from_user.id
+    await c.answer()
+
+    if uid not in last_image:
+        await c.message.answer("Нет изображения")
+        return
+
+    result = await analyze_image(last_image[uid])
+    await c.message.answer(result)
+
+@dp.callback_query(F.data == "img_edit")
+async def img_edit(c: types.CallbackQuery):
+    uid = c.from_user.id
+    await c.answer()
+
+    if uid not in last_image:
+        await c.message.answer("Нет изображения")
+        return
+
+    edit_mode[uid] = True
+    await c.message.answer("Что изменить?")
 
 # ===== START =====
 async def main():
