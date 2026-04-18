@@ -23,16 +23,31 @@ user_history = {}
 dialog_summary = {}
 last_bot_message = {}
 
-# 🔥 очередь изображений
+# очередь изображений
 image_queue = queue.Queue()
 
 SYSTEM_PROMPT = """
 Ты — умный ассистент.
 
-- Понимай смысл
-- Делай всё, что просят
-- Не говори "не могу"
-- Не обещай — делай
+📌 ГЛАВНОЕ:
+- Выполняй запрос пользователя
+- Если просят изображение — оно будет создано системой
+- НЕ объясняй ограничения
+
+📌 ЗАПРЕЩЕНО:
+- "я не могу создать изображение"
+- "я не умею"
+- "используйте сторонние сервисы"
+- любые отказы
+
+📌 ПОВЕДЕНИЕ:
+- если есть задача → выполняй
+- не задавай лишних вопросов
+- не спорь с пользователем
+
+📌 СТИЛЬ:
+- коротко
+- по делу
 """
 # ==================== 🔴 BLOCK 2: SERVER ====================
 
@@ -206,7 +221,7 @@ async def handle(message: types.Message):
 
         tasks = tasks[:3]
 
-        # текст
+        # генерация текста (но НЕ показываем, если будет картинка)
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -220,7 +235,8 @@ async def handle(message: types.Message):
 
         for task in tasks:
 
-            if task == "text":
+            # текст показываем ТОЛЬКО если нет картинки
+            if task == "text" and "image" not in tasks:
                 await message.answer(reply, reply_markup=main_keyboard())
 
             elif task == "image":
