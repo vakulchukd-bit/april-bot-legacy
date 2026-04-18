@@ -24,7 +24,6 @@ awaiting_image_prompt = {}
 # ===== SYSTEM =====
 SYSTEM_PROMPT = """
 Ты — Aprill, интеллектуальный ассистент.
-
 Ты:
 - понимаешь контекст диалога
 - отвечаешь логично
@@ -33,8 +32,7 @@ SYSTEM_PROMPT = """
 """
 
 IMAGE_STYLE = """
-high quality, detailed, realistic, cinematic lighting,
-4k, sharp focus, natural colors
+high quality, detailed, realistic, cinematic lighting, 4k, sharp focus, natural colors
 """
 
 def enhance_prompt(user_prompt):
@@ -70,7 +68,6 @@ def main_keyboard(msg_id):
 def image_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="👀 Описать", callback_data="img_describe"),
             InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
         ]
     ])
@@ -100,7 +97,6 @@ async def generate_image(prompt):
             size="1024x1024"
         )
         return base64.b64decode(result.data[0].b64_json)
-
     return await asyncio.to_thread(run)
 
 async def edit_image(file_path, prompt):
@@ -112,28 +108,6 @@ async def edit_image(file_path, prompt):
                 prompt=enhance_prompt(prompt)
             )
         return base64.b64decode(result.data[0].b64_json)
-
-    return await asyncio.to_thread(run)
-
-# ===== FIXED =====
-async def analyze_image(file_path):
-    def run():
-        with open(file_path, "rb") as img:
-            b64 = base64.b64encode(img.read()).decode()
-
-        r = client.responses.create(
-            model="gpt-4o",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "Опиши изображение"},
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}
-                ]
-            }]
-        )
-
-        return r.output_text
-
     return await asyncio.to_thread(run)
 
 # ===== VOICE =====
@@ -153,7 +127,7 @@ async def voice_to_text(message, user_id):
     return await asyncio.to_thread(run)
 
 # ===== MAIN =====
-@dp.message(lambda m: m.text or m.photo or m.voice or m.document)
+@dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
@@ -164,17 +138,8 @@ async def handle(message: types.Message):
         await bot.download_file(file.file_path, destination=path)
 
         last_image[user_id] = path
+
         await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
-        return
-
-    # DOCUMENT (если отправлено как файл)
-    if message.document and message.document.mime_type and message.document.mime_type.startswith("image"):
-        file = await bot.get_file(message.document.file_id)
-        path = f"{user_id}_doc.jpg"
-        await bot.download_file(file.file_path, destination=path)
-
-        last_image[user_id] = path
-        await message.answer("📷 Фото получено. Что сделать?", reply_markup=image_keyboard())
         return
 
     # VOICE
@@ -187,7 +152,29 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # РЕДАКТИРОВАНИЕ
+    # 🔥 РЕЖИМ ПОСЛЕ КНОПКИ "ИЗМЕНИТЬ"
+    if user_id in edit_mode:
+        edit_mode.pop(user_id)
+
+        if user_id not in last_image:
+            await message.answer("Нет изображения для редактирования")
+            return
+
+        await message.answer("🎨 Редактирую...")
+
+        img = await run_with_typing(
+            message.chat.id,
+            edit_image(last_image[user_id], text)
+        )
+
+        sent = await message.answer_photo(
+            BufferedInputFile(img, filename="edit.png")
+        )
+
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+        return
+
+    # 🔥 РЕДАКТИРОВАНИЕ (по тексту)
     if is_edit_request(text) and user_id in last_image:
         await message.answer("🎨 Редактирую...")
 
@@ -203,7 +190,7 @@ async def handle(message: types.Message):
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # УТОЧНЕНИЕ
+    # 🔥 УТОЧНЕНИЕ
     if user_id in awaiting_image_prompt:
         awaiting_image_prompt.pop(user_id)
 
@@ -212,20 +199,16 @@ async def handle(message: types.Message):
             generate_image(text)
         )
 
-        path = f"{user_id}_image.png"
-        with open(path, "wb") as f:
-            f.write(img)
-
-        last_image[user_id] = path
-
         sent = await message.answer_photo(
             BufferedInputFile(img, filename="image.png")
         )
 
+        last_image[user_id] = f"{user_id}_last.png"
+
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # ПЕРЕХВАТ
+    # 🔥 ПЕРЕХВАТ
     if is_image_request(text):
         awaiting_image_prompt[user_id] = True
         await message.answer("Какое именно изображение тебе нужно?")
@@ -253,7 +236,7 @@ async def handle(message: types.Message):
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
-    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+    sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
 # ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
@@ -266,29 +249,13 @@ async def dislike(c: types.CallbackQuery):
     feedback_memory[c.data] = "dislike"
     await c.answer("👎")
 
-@dp.callback_query(F.data == "img_describe")
-async def img_describe(c: types.CallbackQuery):
-    uid = c.from_user.id
-    await c.answer()
-
-    if uid not in last_image:
-        await c.message.answer("Нет изображения")
-        return
-
-    result = await analyze_image(last_image[uid])
-    await c.message.answer(result)
-
 @dp.callback_query(F.data == "img_edit")
-async def img_edit(c: types.CallbackQuery):
-    uid = c.from_user.id
-    await c.answer()
+async def image_edit_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
 
-    if uid not in last_image:
-        await c.message.answer("Нет изображения")
-        return
-
-    edit_mode[uid] = True
-    await c.message.answer("Что изменить?")
+    edit_mode[user_id] = True
+    await callback.message.answer("✏️ Как изменить изображение?")
+    await callback.answer()
 
 # ===== START =====
 async def main():
