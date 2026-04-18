@@ -25,11 +25,11 @@ good_memory = {}
 SYSTEM_PROMPT = """
 Ты умный ассистент.
 
-ВСЕГДА анализируй предыдущие сообщения.
-Если пользователь пишет обрывками — собирай смысл сам.
+Если пользователь пишет не полностью:
+— уточни
 
-Не переспрашивай лишний раз.
-Старайся догадаться и помочь.
+Если задача понятна:
+— сразу решай
 
 Отвечай по делу.
 """
@@ -76,9 +76,6 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 # ================= CONTEXT =================
-def get_history(user_id):
-    return dialog_memory.get(user_id, [])[-6:]
-
 def build_context(user_id, new_text):
     history = dialog_memory.get(user_id, [])[-4:]
     combined = ""
@@ -118,7 +115,7 @@ async def analyze_image(file_path):
                 "role": "user",
                 "content": [
                     {"type": "input_text",
-                     "text": "Скажи по-человечески что это и зачем это используется."},
+                     "text": "Скажи по-человечески что это и зачем это используется"},
                     {"type": "input_image",
                      "image_url": f"data:image/jpeg;base64,{b64}"}
                 ]
@@ -134,11 +131,7 @@ async def edit_image(file_path, prompt):
             result = client.images.edit(
                 model="gpt-image-1",
                 image=img,
-                prompt=f"""
-Добавь максимально реалистично.
-Задача: {prompt}
-Сохрани стиль и освещение.
-"""
+                prompt=f"Добавь реалистично: {prompt}"
             )
         return base64.b64decode(result.data[0].b64_json)
 
@@ -169,7 +162,7 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # ---------- EDIT MODE ----------
+    # ---------- EDIT ----------
     if user_id in edit_mode and user_id in last_image:
         img = await run_with_typing(
             message.chat.id,
@@ -214,7 +207,15 @@ async def handle(message: types.Message):
         "content": reply
     })
 
-    await message.answer(reply, reply_markup=main_keyboard())
+    # ---------- КРАСИВЫЙ КОД ----------
+    if any(word in reply.lower() for word in ["<html", "button", "css", "def", "function"]):
+        await message.answer(
+            f"```html\n{reply}\n```",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+    else:
+        await message.answer(reply, reply_markup=main_keyboard())
 
 # ================= CALLBACKS =================
 @dp.callback_query(F.data == "like")
