@@ -10,8 +10,8 @@ from openai import OpenAI
 
 # 🔑 ДОБАВЛЕНО
 from subscription_system import *
-from blocks.input_system import process_input
-from blocks.diagram_system import build_diagram_prompt, is_diagram_request  # ← НОВЫЙ ИМПОРТ
+from blocks.input_system import process_input, detect_intent  # ← ДОБАВИЛ detect_intent
+from blocks.diagram_system import build_diagram_prompt, is_diagram_request
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -186,7 +186,14 @@ async def handle(message: types.Message):
         )
         await message.answer(f"🎤 {text}")
 
-    # 🔥 РЕЖИМ ЧЕРТЕЖА (НОВЫЙ БЛОК)
+        # 🔑 ДОБАВЛЕНО — пересчёт intent после голоса
+        intent = detect_intent(text)
+
+        # 🔑 ДОБАВЛЕНО — приоритет чертежа
+        if is_diagram_request(text):
+            intent = "diagram"
+
+    # 🔥 РЕЖИМ ЧЕРТЕЖА
     if intent == "diagram":
         prompt = build_diagram_prompt(text)
 
