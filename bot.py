@@ -18,17 +18,36 @@ dp = Dispatcher()
 dialog_memory = {}
 last_image = {}
 edit_mode = {}
+feedback_memory = {}
 
+# ===== SYSTEM =====
 SYSTEM_PROMPT = """
-Ты умный ассистент.
+Ты — Aprill, интеллектуальный ассистент.
 
-Отвечай как человек, коротко и по делу.
+Ты:
+- отвечаешь как человек
+- даёшь точные и умные ответы
+- адаптируешься под пользователя
+- стремишься к качеству
 
-Если задача понятна — делай сразу.
-Если не хватает данных — уточни.
+Если можно сделать лучше — делай лучше.
+"""
 
-Если можно сгенерировать картинку — генерируй.
-Не говори "не могу", если можешь.
+# ===== IMAGE STYLE =====
+IMAGE_STYLE = """
+psychological portrait, expressive emotions, cinematic lighting,
+ultra realistic, high detail, depth, 4k, professional photography,
+dramatic shadows, artistic composition
+"""
+
+def enhance_prompt(user_prompt):
+    return f"""
+{IMAGE_STYLE}
+
+Based on this description:
+{user_prompt}
+
+Make it visually powerful, emotional and detailed.
 """
 
 # ===== SERVER =====
@@ -43,9 +62,12 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 # ===== UI =====
-def main_keyboard():
+def main_keyboard(msg_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👍", callback_data="like")]
+        [
+            InlineKeyboardButton(text="👍", callback_data=f"like_{msg_id}"),
+            InlineKeyboardButton(text="👎", callback_data=f"dislike_{msg_id}")
+        ]
     ])
 
 def image_keyboard():
@@ -77,7 +99,7 @@ async def generate_image(prompt):
     def run():
         result = client.images.generate(
             model="gpt-image-1",
-            prompt=prompt,
+            prompt=enhance_prompt(prompt),
             size="1024x1024"
         )
         return base64.b64decode(result.data[0].b64_json)
@@ -95,7 +117,7 @@ async def analyze_image(file_path):
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Что на изображении?"},
+                    {"type": "input_text", "text": "Опиши изображение подробно и точно"},
                     {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
                 ]
             }]
@@ -111,7 +133,7 @@ async def edit_image(file_path, prompt):
             result = client.images.edit(
                 model="gpt-image-1",
                 image=img,
-                prompt=prompt
+                prompt=enhance_prompt(prompt)
             )
         return base64.b64decode(result.data[0].b64_json)
 
@@ -154,22 +176,24 @@ async def handle(message: types.Message):
             message.chat.id,
             voice_to_text(message, user_id)
         )
-        await message.answer(text)
+        await message.answer(f"🎤 Ты сказал: {text}")
     else:
         text = message.text or ""
 
     # IMAGE GENERATION
     if any(w in text.lower() for w in ["картин", "фото", "изображен", "сгенерируй"]):
-        await message.answer("🎨 Генерирую...")
+        await message.answer("🎨 Создаю изображение...")
 
         img = await run_with_typing(
             message.chat.id,
             generate_image(text)
         )
 
-        await message.answer_photo(
+        sent = await message.answer_photo(
             BufferedInputFile(img, filename="image.png")
         )
+
+        await message.answer("Оцени результат 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
     # EDIT MODE
@@ -179,9 +203,11 @@ async def handle(message: types.Message):
             edit_image(last_image[user_id], text)
         )
 
-        await message.answer_photo(
+        sent = await message.answer_photo(
             BufferedInputFile(img, filename="edit.png")
         )
+
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
 
         del edit_mode[user_id]
         del last_image[user_id]
@@ -220,21 +246,20 @@ async def handle(message: types.Message):
         "content": reply
     })
 
-    # CODE FORMAT
-    if any(w in reply.lower() for w in ["<html", "button", "css", "def", "function"]):
-        await message.answer(
-            f"```html\n{reply}\n```",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard()
-        )
-    else:
-        await message.answer(reply, reply_markup=main_keyboard())
+    sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
 # ===== CALLBACKS =====
-@dp.callback_query(F.data == "like")
+@dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
-    await c.answer("👍")
-    await c.message.answer("💙 Сохранено")
+    msg_id = c.data.split("_")[1]
+    feedback_memory[msg_id] = "like"
+    await c.answer("👍 Сохранено")
+
+@dp.callback_query(F.data.startswith("dislike_"))
+async def dislike(c: types.CallbackQuery):
+    msg_id = c.data.split("_")[1]
+    feedback_memory[msg_id] = "dislike"
+    await c.answer("👎 Принято")
 
 @dp.callback_query(F.data == "img_describe")
 async def img_describe(c: types.CallbackQuery):
