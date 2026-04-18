@@ -116,7 +116,10 @@ async def handle(message: types.Message):
         del last_image[user_id]
         return
 
-    # ---------- TYPING + GPT ----------
+    # ---------- ГАРАНТИРОВАННЫЙ TYPING ----------
+    await bot.send_chat_action(message.chat.id, "typing")
+    await asyncio.sleep(1)
+
     typing_task = asyncio.create_task(send_typing(message.chat.id))
 
     try:
