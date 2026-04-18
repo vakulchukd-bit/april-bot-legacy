@@ -82,70 +82,55 @@ async def run_with_action(chat_id, action, coro):
         task.cancel()
 
 # ==================== 🔴 BLOCK 6: VOICE ====================
-async def speak_text(message, user_id, text):
-    try:
-        if not text:
-            await message.answer("⚠️ Нечего озвучивать")
-            return
+async def transcribe_voice(message, user_id):
+    file = await bot.get_file(message.voice.file_id)
+    fname = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=fname)
 
-        await bot.send_chat_action(message.chat.id, "record_voice")
-
-        speech = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="nova",
-            input=text
+    with open(fname, "rb") as a:
+        t = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=a
         )
 
-        audio = BufferedInputFile(speech.read(), "voice.mp3")
-        await message.answer_audio(audio)
-
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка озвучки: {e}")
+    return t.text.lower()
 
 # ==================== 🔴 BLOCK 7: IMAGE ANALYSIS ====================
 async def analyze_image(file_path):
-    try:
-        with open(file_path, "rb") as img:
-            image_bytes = img.read()
+    with open(file_path, "rb") as img:
+        image_bytes = img.read()
 
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        response = client.responses.create(
-            model="gpt-4o",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "Определи точно, что изображено и объясни смысл"},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{base64_image}"
-                    }
-                ]
-            }]
-        )
+    response = client.responses.create(
+        model="gpt-4o",
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Определи что это и объясни смысл"},
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{base64_image}"
+                }
+            ]
+        }]
+    )
 
-        return response.output_text
-
-    except Exception as e:
-        return f"⚠️ Ошибка анализа: {e}"
+    return response.output_text
 
 # ==================== 🔴 BLOCK 8: IMAGE EDIT ====================
 async def edit_image(message, file_path, user_text):
-    try:
-        with open(file_path, "rb") as img:
-            result = client.images.edit(
-                model="gpt-image-1",
-                image=img,
-                prompt=user_text
-            )
+    with open(file_path, "rb") as img:
+        result = client.images.edit(
+            model="gpt-image-1",
+            image=img,
+            prompt=user_text
+        )
 
-        image_bytes = base64.b64decode(result.data[0].b64_json)
-        photo = BufferedInputFile(image_bytes, filename="edit.png")
+    image_bytes = base64.b64decode(result.data[0].b64_json)
+    photo = BufferedInputFile(image_bytes, filename="edit.png")
 
-        await message.answer_photo(photo)
-
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка редактирования: {e}")
+    await message.answer_photo(photo)
 
 # ==================== 🔴 BLOCK 9: MAIN HANDLER ====================
 @dp.message()
@@ -153,50 +138,38 @@ async def handle(message: types.Message):
     try:
         user_id = message.from_user.id
 
-        # ---------- VOICE ----------
-        if message.voice:
-            file = await bot.get_file(message.voice.file_id)
-            fname = f"{user_id}.ogg"
-            await bot.download_file(file.file_path, destination=fname)
-
-            with open(fname, "rb") as a:
-                t = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=a
-                )
-
-            await message.answer(f"📝 {t.text}")
-            return
-
         # ---------- PHOTO ----------
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
             file_path = f"image_{user_id}.jpg"
-
             await bot.download_file(file.file_path, destination=file_path)
-            last_image[user_id] = file_path
 
+            last_image[user_id] = file_path
             await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
             return
 
+        # ---------- TEXT / VOICE ----------
+        if message.voice:
+            text = await transcribe_voice(message, user_id)
+        else:
+            text = (message.text or "").lower()
+
         # ---------- EDIT MODE ----------
         if user_id in edit_mode and user_id in last_image:
-            await message.answer("🎨 Обрабатываю...")
+            await message.answer("🎨 Делаю...")
             await asyncio.sleep(1)
 
             await run_with_action(
                 message.chat.id,
                 "upload_photo",
-                edit_image(message, last_image[user_id], message.text)
+                edit_image(message, last_image[user_id], text)
             )
 
             del edit_mode[user_id]
             del last_image[user_id]
             return
 
-        # ---------- TEXT ----------
-        text = message.text or ""
-
+        # ---------- NORMAL TEXT ----------
         await bot.send_chat_action(message.chat.id, "typing")
 
         response = await asyncio.to_thread(
@@ -222,10 +195,7 @@ async def handle(message: types.Message):
 async def img_describe(c):
     user_id = c.from_user.id
     await c.answer()
-
-    if user_id not in last_image:
-        await c.message.answer("⚠️ Сначала отправь фото")
-        return
+    await c.message.edit_reply_markup(None)
 
     await c.message.answer("🔍 Анализирую...")
     await asyncio.sleep(1)
@@ -237,41 +207,20 @@ async def img_describe(c):
     )
 
     await c.message.answer(result)
-
     del last_image[user_id]
 
 @dp.callback_query(lambda c: c.data == "img_edit")
 async def img_edit(c):
     user_id = c.from_user.id
     await c.answer()
-
-    if user_id not in last_image:
-        await c.message.answer("⚠️ Сначала отправь фото")
-        return
+    await c.message.edit_reply_markup(None)
 
     edit_mode[user_id] = True
-    await c.message.answer("✏️ Напиши, что изменить:")
+    await c.message.answer("✏️ Скажи или напиши, что изменить:")
 
 @dp.callback_query(lambda c: c.data == "voice")
 async def voice(c):
     await c.answer()
-    await speak_text(c.message, c.from_user.id, last_bot_message.get(c.from_user.id, ""))
-
-@dp.callback_query(lambda c: c.data == "like")
-async def like(c):
-    try:
-        await c.answer()
-
-        user_id = c.from_user.id
-        text = last_bot_message.get(user_id, "ответ")
-
-        good_memory.setdefault(user_id, []).append(text)
-        save_memory()
-
-        await c.message.answer("💙 Сохранено")
-
-    except Exception as e:
-        await c.message.answer(f"⚠️ Ошибка лайка: {e}")
 
 # ==================== 🔴 BLOCK 11: START ====================
 async def main():
