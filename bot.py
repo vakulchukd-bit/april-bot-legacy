@@ -211,8 +211,6 @@ async def handle(message: types.Message):
             "content": text
         })
 
-        user_history[user_id] = user_history[user_id][-20:]
-
         # задачи
         tasks = await plan_tasks(text)
 
@@ -223,13 +221,7 @@ async def handle(message: types.Message):
 
         tasks = tasks[:3]
 
-        # 🚀 ЕСЛИ НУЖНА КАРТИНКА — НЕ ВЫЗЫВАЕМ GPT
-        if "image" in tasks:
-            await message.answer("🎨 Делаю изображение...")
-            image_queue.put((user_id, message.chat.id, text))
-            return
-
-        # ===== текст =====
+        # генерация текста
         response = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -241,18 +233,24 @@ async def handle(message: types.Message):
         reply = response.output_text
         last_bot_message[user_id] = reply
 
-        await message.answer(reply, reply_markup=main_keyboard())
+        for task in tasks:
 
-        # ===== ссылки =====
-        if "links" in tasks:
-            links = client.responses.create(
-                model="gpt-4o-mini",
-                input=[
-                    {"role": "system", "content": "Дай сайты"},
-                    {"role": "user", "content": text}
-                ]
-            )
-            await message.answer(links.output_text)
+            if task == "text" and "image" not in tasks:
+                await message.answer(reply, reply_markup=main_keyboard())
+
+            elif task == "image":
+                await message.answer("🎨 Делаю изображение...")
+                image_queue.put((user_id, message.chat.id, text))
+
+            elif task == "links":
+                links = client.responses.create(
+                    model="gpt-4o-mini",
+                    input=[
+                        {"role": "system", "content": "Дай сайты"},
+                        {"role": "user", "content": text}
+                    ]
+                )
+                await message.answer(links.output_text)
 
         await update_summary(user_id)
 
