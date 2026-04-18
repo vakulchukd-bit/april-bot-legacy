@@ -9,17 +9,19 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
+# ---------- CONFIG ----------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+good_memory = {}
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
 
-SYSTEM_PROMPT = "Ты — живой ассистент. Отвечай просто."
+SYSTEM_PROMPT = "Ты — живой ассистент. Отвечай просто и понятно."
 
 # ---------- SERVER ----------
 class Handler(BaseHTTPRequestHandler):
@@ -36,8 +38,7 @@ def run_server():
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="👍", callback_data="like"),
-            InlineKeyboardButton(text="🔊 Озвучить", callback_data="voice")
+            InlineKeyboardButton(text="👍", callback_data="like")
         ]
     ])
 
@@ -84,56 +85,35 @@ async def edit_image(message, file_path, user_text):
 # ---------- HANDLER ----------
 @dp.message()
 async def handle(message: types.Message):
-    user_id = message.from_user.id
+    try:
+        user_id = message.from_user.id
 
-    if message.photo:
-        file = await bot.get_file(message.photo[-1].file_id)
-        file_path = f"image_{user_id}.jpg"
-        await bot.download_file(file.file_path, destination=file_path)
+        # ---------- PHOTO ----------
+        if message.photo:
+            file = await bot.get_file(message.photo[-1].file_id)
+            file_path = f"image_{user_id}.jpg"
+            await bot.download_file(file.file_path, destination=file_path)
 
-        last_image[user_id] = file_path
-        await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
-        return
+            last_image[user_id] = file_path
+            await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
+            return
 
-    text = message.text or ""
+        text = message.text or ""
 
-    if user_id in edit_mode and user_id in last_image:
-        await edit_image(message, last_image[user_id], text)
-        del edit_mode[user_id]
-        del last_image[user_id]
-        return
+        # ---------- EDIT MODE ----------
+        if user_id in edit_mode and user_id in last_image:
+            await edit_image(message, last_image[user_id], text)
+            del edit_mode[user_id]
+            del last_image[user_id]
+            return
 
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text}
-        ]
-    )
+        # ---------- GPT ----------
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text}
+            ]
+        )
 
-    await message.answer(response.output_text, reply_markup=main_keyboard())
-
-# ---------- CALLBACKS ----------
-@dp.callback_query(lambda c: c.data == "img_describe")
-async def img_describe(c):
-    user_id = c.from_user.id
-    await c.answer()
-
-    result = await analyze_image(last_image[user_id])
-    await c.message.answer(result)
-
-@dp.callback_query(lambda c: c.data == "img_edit")
-async def img_edit(c):
-    user_id = c.from_user.id
-    await c.answer()
-
-    edit_mode[user_id] = True
-    await c.message.answer("✏️ Что изменить?")
-
-# ---------- START ----------
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
-    asyncio.run(main())
+        reply
