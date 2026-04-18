@@ -25,6 +25,8 @@ edit_mode = {}
 user_words = {}
 image_uses = {}
 
+CARD_NUMBER = "5168745162781329"
+
 # ==================== 🔴 BLOCK 2: DATABASE ====================
 conn = sqlite3.connect("users.db")
 cursor = conn.cursor()
@@ -45,9 +47,7 @@ def add_user(user_id):
 def is_paid(user_id):
     cursor.execute("SELECT expire_time FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
-    if row:
-        return time.time() < row[0]
-    return False
+    return row and time.time() < row[0]
 
 def get_all_users():
     cursor.execute("SELECT user_id FROM users")
@@ -81,6 +81,7 @@ def image_keyboard():
 def payment_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Оплатить", url="https://www.privat24.ua/send/j3z5r")],
+        [InlineKeyboardButton(text="📋 Скопировать карту", callback_data="copy_card")],
         [InlineKeyboardButton(text="✅ Я оплатил", callback_data="paid")]
     ])
 
@@ -92,7 +93,23 @@ def admin_kb(uid):
         ]
     ])
 
-# ==================== 🔴 BLOCK 5: VOICE ====================
+# ==================== 🔴 BLOCK 5: UX ====================
+async def send_action(chat_id, action):
+    while True:
+        try:
+            await bot.send_chat_action(chat_id, action)
+            await asyncio.sleep(4)
+        except:
+            break
+
+async def run_with_action(chat_id, action, coro):
+    task = asyncio.create_task(send_action(chat_id, action))
+    try:
+        return await coro
+    finally:
+        task.cancel()
+
+# ==================== 🔴 BLOCK 6: VOICE ====================
 async def transcribe_voice(message, user_id):
     file = await bot.get_file(message.voice.file_id)
     fname = f"{user_id}.ogg"
@@ -105,17 +122,18 @@ async def transcribe_voice(message, user_id):
         )
     return t.text.lower()
 
-# ==================== 🔴 BLOCK 6: IMAGE ====================
+# ==================== 🔴 BLOCK 7: IMAGE ====================
 async def analyze_image(file_path):
     with open(file_path, "rb") as img:
         b64 = base64.b64encode(img.read()).decode()
+
     response = client.responses.create(
         model="gpt-4o",
         input=[{
-            "role":"user",
-            "content":[
-                {"type":"input_text","text":"Что это?"},
-                {"type":"input_image","image_url":f"data:image/jpeg;base64,{b64}"}
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Что это?"},
+                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
             ]
         }]
     )
@@ -129,9 +147,9 @@ async def edit_image(message, file_path, prompt):
             prompt=prompt
         )
     img_bytes = base64.b64decode(result.data[0].b64_json)
-    await message.answer_photo(BufferedInputFile(img_bytes,"edit.png"))
+    await message.answer_photo(BufferedInputFile(img_bytes, "edit.png"))
 
-# ==================== 🔴 BLOCK 7: MAIN HANDLER ====================
+# ==================== 🔴 BLOCK 8: MAIN HANDLER ====================
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
@@ -141,6 +159,7 @@ async def handle(message: types.Message):
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
         await bot.download_file(file.file_path, destination=path)
+
         last_image[user_id] = path
         await message.answer("📷 Выбери действие:", reply_markup=image_keyboard())
         return
@@ -166,7 +185,12 @@ async def handle(message: types.Message):
             return
 
         await message.answer("🎨 Делаю...")
-        await edit_image(message, last_image[user_id], text)
+
+        await run_with_action(
+            message.chat.id,
+            "upload_photo",
+            edit_image(message, last_image[user_id], text)
+        )
 
         if not is_paid(user_id):
             image_uses[user_id] = image_uses.get(user_id, 0) + 1
@@ -176,30 +200,60 @@ async def handle(message: types.Message):
         return
 
     # GPT
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=text
+    response = await run_with_action(
+        message.chat.id,
+        "typing",
+        asyncio.to_thread(lambda: client.responses.create(
+            model="gpt-4o-mini",
+            input=text
+        ))
     )
-    await message.answer(response.output_text, reply_markup=main_keyboard())
 
-# ==================== 🔴 BLOCK 8: CALLBACKS ====================
-@dp.callback_query(lambda c: c.data=="img_describe")
+    reply = response.output_text
+    last_bot_message[user_id] = reply
+
+    await message.answer(reply, reply_markup=main_keyboard())
+
+# ==================== 🔴 BLOCK 9: CALLBACKS ====================
+@dp.callback_query(lambda c: c.data == "img_describe")
 async def desc(c):
     uid = c.from_user.id
-    await c.message.answer(await analyze_image(last_image[uid]))
 
-@dp.callback_query(lambda c: c.data=="img_edit")
+    result = await run_with_action(
+        c.message.chat.id,
+        "typing",
+        analyze_image(last_image[uid])
+    )
+
+    await c.message.answer(result)
+
+@dp.callback_query(lambda c: c.data == "img_edit")
 async def edit(c):
     uid = c.from_user.id
+
+    if not is_paid(uid) and image_uses.get(uid, 0) >= 1:
+        await c.message.answer("🚫 Только после оплаты", reply_markup=payment_keyboard())
+        return
+
     edit_mode[uid] = True
     await c.message.answer("✏️ Напиши что изменить")
 
+@dp.callback_query(lambda c: c.data == "like")
+async def like(c):
+    await c.answer()
+    await c.message.answer("💙 Принял")
+
+@dp.callback_query(lambda c: c.data == "copy_card")
+async def copy_card(c):
+    await c.answer()
+    await c.message.answer(f"💳 Карта:\n{CARD_NUMBER}")
+
 # 💳 ОПЛАТА
-@dp.callback_query(lambda c: c.data=="paid")
+@dp.callback_query(lambda c: c.data == "paid")
 async def paid(c):
     uid = c.from_user.id
-    await bot.send_message(ADMIN_ID, f"💰 {uid} оплатил", reply_markup=admin_kb(uid))
-    await c.message.answer("⏳ Жди подтверждения")
+    await bot.send_message(ADMIN_ID, f"💰 {uid} хочет доступ", reply_markup=admin_kb(uid))
+    await c.message.answer("⏳ Ожидай подтверждения")
 
 @dp.callback_query(lambda c: c.data.startswith("approve_"))
 async def approve(c):
@@ -216,7 +270,6 @@ async def reject(c):
     uid = int(c.data.split("_")[1])
     await bot.send_message(uid, "❌ Оплата не подтверждена")
 
-# 📊 СПИСОК
 @dp.message(lambda m: m.text == "/users")
 async def users(m):
     if m.from_user.id != ADMIN_ID:
@@ -225,7 +278,7 @@ async def users(m):
     text = "\n".join([str(u[0]) for u in users]) or "Нет"
     await m.answer(text)
 
-# ==================== 🔴 BLOCK 9: START ====================
+# ==================== 🔴 BLOCK 10: START ====================
 async def main():
     await dp.start_polling(bot)
 
