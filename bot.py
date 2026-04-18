@@ -20,18 +20,20 @@ dialog_memory = {}
 last_bot_message = {}
 last_image = {}
 edit_mode = {}
-good_memory = {}
 
 SYSTEM_PROMPT = """
 Ты умный ассистент.
 
-Если пользователь пишет не полностью:
-— уточни
+Если пользователь исправляет тебя:
+— признай ошибку
+— извинись кратко
+— сразу исправь
 
 Если задача понятна:
-— сразу решай
+— делай сразу
 
-Отвечай по делу.
+Если не понятна:
+— уточни
 """
 
 # ================= SERVER =================
@@ -75,7 +77,15 @@ async def run_with_typing(chat_id, coro):
     finally:
         task.cancel()
 
-# ================= CONTEXT =================
+# ================= LOGIC =================
+def is_correction(text):
+    triggers = ["не так", "не надо", "не круглая", "ошибка", "не это"]
+    return any(t in text.lower() for t in triggers)
+
+def is_new_task(text):
+    triggers = ["другое", "по другому", "сделай", "теперь"]
+    return any(t in text.lower() for t in triggers)
+
 def build_context(user_id, new_text):
     history = dialog_memory.get(user_id, [])[-4:]
     combined = ""
@@ -177,9 +187,21 @@ async def handle(message: types.Message):
         del last_image[user_id]
         return
 
-    # ---------- GPT ----------
-    smart_text = build_context(user_id, text)
+    # ---------- LOGIC ----------
+    if is_new_task(text):
+        dialog_memory[user_id] = []
 
+    if is_correction(text):
+        smart_text = f"""
+Я ошибся ранее. Исправляю.
+
+Запрос пользователя:
+{text}
+"""
+    else:
+        smart_text = build_context(user_id, text)
+
+    # ---------- GPT ----------
     async def ask():
         def run():
             r = client.responses.create(
@@ -207,8 +229,8 @@ async def handle(message: types.Message):
         "content": reply
     })
 
-    # ---------- КРАСИВЫЙ КОД ----------
-    if any(word in reply.lower() for word in ["<html", "button", "css", "def", "function"]):
+    # ---------- CODE FORMAT ----------
+    if any(w in reply.lower() for w in ["<html", "button", "css", "def", "function"]):
         await message.answer(
             f"```html\n{reply}\n```",
             parse_mode="Markdown",
@@ -217,44 +239,11 @@ async def handle(message: types.Message):
     else:
         await message.answer(reply, reply_markup=main_keyboard())
 
-# ================= CALLBACKS =================
+# ================= CALLBACK =================
 @dp.callback_query(F.data == "like")
 async def like(c: types.CallbackQuery):
     await c.answer("👍")
-
-    uid = c.from_user.id
-    text = last_bot_message.get(uid)
-
-    if not text:
-        await c.message.answer("⚠️ Нет сообщения")
-        return
-
-    good_memory.setdefault(uid, []).append(text)
-
-    with open("memory.json", "w") as f:
-        json.dump(good_memory, f)
-
     await c.message.answer("💙 Сохранено")
-
-@dp.callback_query(F.data == "img_describe")
-async def img_describe(c: types.CallbackQuery):
-    uid = c.from_user.id
-    await c.answer()
-
-    result = await run_with_typing(
-        c.message.chat.id,
-        analyze_image(last_image[uid])
-    )
-
-    await c.message.answer(result)
-
-@dp.callback_query(F.data == "img_edit")
-async def img_edit(c: types.CallbackQuery):
-    uid = c.from_user.id
-    await c.answer()
-
-    edit_mode[uid] = True
-    await c.message.answer("✏️ Что изменить?")
 
 # ================= START =================
 async def main():
