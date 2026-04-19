@@ -254,17 +254,20 @@ async def handle(message: types.Message):
 
     mode = detect_response_mode(text)
 
-    if not check_subscription(user_id):
-        if not can_send_message(user_id):
-            await message.answer("⛔ Лимит сообщений исчерпан")
-            return
+    # 🔥 FIX: админ полностью без лимитов
+    if user_id != ADMIN_ID:
+        if not check_subscription(user_id):
+            if not can_send_message(user_id):
+                await message.answer("⛔ Лимит сообщений исчерпан")
+                return
 
     # ===== IMAGE =====
     if action == "image":
-        if not check_subscription(user_id):
-            if not can_generate_image(user_id):
-                await message.answer("⛔ Лимит картинок исчерпан")
-                return
+        if user_id != ADMIN_ID:
+            if not check_subscription(user_id):
+                if not can_generate_image(user_id):
+                    await message.answer("⛔ Лимит картинок исчерпан")
+                    return
 
         img = await run_with_typing(message.chat.id, generate_image(text))
 
