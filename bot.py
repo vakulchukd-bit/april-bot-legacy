@@ -12,6 +12,8 @@ from subscription_system import *
 
 # 🔑 ДОБАВЛЕНО (router)
 from blocks.router_system import decide_action
+# 🔥 ДОБАВЛЕНО (response mode)
+from blocks.response_mode import detect_response_mode
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -185,6 +187,9 @@ async def handle(message: types.Message):
     decision = decide_action(text, history)
     action = decision["action"]
 
+    # 🔥 ДОБАВЛЕНО — режим ответа
+    mode = detect_response_mode(text)
+
     # 🔥 DIAGRAM
     if action == "diagram":
         prompt = build_diagram_prompt(text)
@@ -240,6 +245,10 @@ async def handle(message: types.Message):
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
+
+    # 🔥 ДОБАВЛЕНО — формат копирования
+    if mode == "copy":
+        reply = f"```text\n{reply}\n```"
 
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
