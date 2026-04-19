@@ -25,8 +25,7 @@ ADMIN_ID = 2016592532
 # ===== MEMORY =====
 dialog_memory = {}
 last_image = {}
-edit_mode = {}
-feedback_memory = {}
+last_prompt = {}
 awaiting_image_prompt = {}
 image_context = {}
 
@@ -34,19 +33,21 @@ image_context = {}
 SYSTEM_PROMPT = """
 Ты — Aprill, интеллектуальный ассистент.
 
-Правила:
-- понимаешь контекст диалога
-- отвечаешь логично
-- не теряешь связь между сообщениями
+Ты:
+- понимаешь диалог
+- помнишь контекст
+- работаешь с изображениями
 
 ВАЖНО:
-- ты умеешь генерировать изображения
-- ты умеешь анализировать изображения
+- ты МОЖЕШЬ генерировать изображения
+- ты МОЖЕШЬ анализировать изображения
 - никогда не говори "я не могу"
 
+Если пользователь говорит про картинку:
+- учитывай последнюю картинку из контекста
+
 Если пользователь просит текст для копирования:
-- не добавляй пояснения
-- возвращай только чистый текст
+- возвращай только текст
 """
 
 def enhance_prompt(user_prompt):
@@ -114,22 +115,6 @@ async def generate_image(prompt):
         return base64.b64decode(result.data[0].b64_json)
     return await asyncio.to_thread(run)
 
-# ===== VOICE =====
-async def voice_to_text(message, user_id):
-    file = await bot.get_file(message.voice.file_id)
-    path = f"{user_id}.ogg"
-    await bot.download_file(file.file_path, destination=path)
-
-    def run():
-        with open(path, "rb") as f:
-            t = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=f
-            )
-        return t.text
-
-    return await asyncio.to_thread(run)
-
 # ===== MAIN =====
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
@@ -140,10 +125,7 @@ async def handle(message: types.Message):
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
-    if user_id == ADMIN_ID:
-        access = True
-    else:
-        access = check_subscription(user_id)
+    access = True if user_id == ADMIN_ID else check_subscription(user_id)
 
     if not access:
         await message.answer(
@@ -158,12 +140,7 @@ async def handle(message: types.Message):
         path = f"{user_id}.jpg"
         await bot.download_file(file.file_path, destination=path)
 
-        last_image[user_id] = path
-
-        try:
-            hint = await analyze_image(path)
-        except:
-            hint = "Не удалось определить содержимое"
+        hint = await analyze_image(path)
 
         image_context[user_id] = {
             "type": "uploaded",
@@ -172,32 +149,42 @@ async def handle(message: types.Message):
             "full": None
         }
 
+        last_prompt[user_id] = hint
+
         await message.answer(f"📷 Я вижу: {hint}\n\nЧто сделать?", reply_markup=image_keyboard())
         return
 
-    # ===== VOICE =====
-    if message.voice:
-        text = await run_with_typing(message.chat.id, voice_to_text(message, user_id))
-        await message.answer(f"🎤 {text}")
-    else:
-        text = message.text or ""
+    text = message.text or ""
 
-    # ===== ПЕРЕХВАТ КАРТИНКИ =====
-    if "что на картинке" in text.lower():
+    # ===== РЕДАКТИРОВАНИЕ =====
+    if awaiting_image_prompt.get(user_id):
+        awaiting_image_prompt[user_id] = False
+
         ctx = image_context.get(user_id)
+        if not ctx:
+            await message.answer("❌ Нет изображения")
+            return
 
+        base = last_prompt.get(user_id, ctx["hint"])
+        new_prompt = base + ", " + text
+
+        img = await run_with_typing(message.chat.id, generate_image(new_prompt))
+
+        last_prompt[user_id] = new_prompt
+
+        await message.answer_photo(
+            BufferedInputFile(img, filename="edited.png"),
+            reply_markup=image_keyboard()
+        )
+        return
+
+    # ===== ПЕРЕХВАТ ОПИСАНИЯ =====
+    if any(w in text.lower() for w in [
+        "что на картинке", "что здесь", "опиши", "что изображено"
+    ]):
+        ctx = image_context.get(user_id)
         if ctx:
-            if ctx["type"] == "generated":
-                await message.answer(f"На изображении: {ctx['hint']}")
-                return
-
-            if not ctx["full"]:
-                try:
-                    ctx["full"] = await analyze_image(ctx["path"])
-                except:
-                    ctx["full"] = "Не удалось проанализировать изображение"
-
-            await message.answer(ctx["full"])
+            await message.answer(ctx["hint"])
             return
 
     # ===== ROUTER =====
@@ -220,16 +207,18 @@ async def handle(message: types.Message):
 
         img = await run_with_typing(message.chat.id, generate_image(text))
 
-        sent = await message.answer_photo(
-            BufferedInputFile(img, filename="image.png")
-        )
-
         image_context[user_id] = {
             "type": "generated",
             "path": None,
             "hint": text,
             "full": text
         }
+
+        last_prompt[user_id] = text
+
+        sent = await message.answer_photo(
+            BufferedInputFile(img, filename="image.png")
+        )
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
@@ -243,7 +232,7 @@ async def handle(message: types.Message):
             if ctx:
                 extra.append({
                     "role": "system",
-                    "content": f"Последнее изображение: {ctx['hint']}"
+                    "content": f"Контекст изображения: {ctx['hint']}"
                 })
 
             r = client.responses.create(
@@ -261,7 +250,6 @@ async def handle(message: types.Message):
 
     reply = await run_with_typing(message.chat.id, ask())
 
-    # ===== COPY =====
     if mode == "copy":
         clean = reply.replace("```", "").strip()
         reply = f"```text\n{clean}\n```"
@@ -271,52 +259,13 @@ async def handle(message: types.Message):
 
     await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
-# ===== CALLBACKS =====
-@dp.callback_query(F.data.startswith("like_"))
-async def like(c: types.CallbackQuery):
-    await c.answer()
-    await c.message.answer("👍 Спасибо!")
-
-@dp.callback_query(F.data.startswith("dislike_"))
-async def dislike(c: types.CallbackQuery):
-    await c.answer()
-    await c.message.answer("👎 Принял!")
-
-@dp.callback_query(F.data == "buy_yes")
-async def buy_yes(c: types.CallbackQuery):
+# ===== CALLBACK =====
+@dp.callback_query(F.data == "img_edit")
+async def edit_image(c: types.CallbackQuery):
     user_id = c.from_user.id
-
-    await bot.send_message(
-        ADMIN_ID,
-        f"💰 Новый запрос\n\nID: {user_id}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅", callback_data=f"approve_{user_id}"),
-                InlineKeyboardButton(text="❌", callback_data=f"reject_{user_id}")
-            ]
-        ])
-    )
-
+    awaiting_image_prompt[user_id] = True
     await c.answer()
-    await c.message.answer("⏳ Ожидайте подтверждения")
-
-@dp.callback_query(F.data.startswith("approve_"))
-async def approve(c: types.CallbackQuery):
-    user_id = int(c.data.split("_")[1])
-    set_subscription(user_id)
-    await bot.send_message(user_id, "✅ Подписка активирована!")
-    await c.answer()
-
-@dp.callback_query(F.data.startswith("reject_"))
-async def reject(c: types.CallbackQuery):
-    user_id = int(c.data.split("_")[1])
-    await bot.send_message(user_id, "❌ Отказано")
-    await c.answer()
-
-@dp.callback_query(F.data == "buy_no")
-async def buy_no(c: types.CallbackQuery):
-    await c.answer()
-    await c.message.answer("❌ Хорошо, если передумаешь — возвращайся")
+    await c.message.answer("✏️ Напиши, что изменить")
 
 # ===== START =====
 async def main():
