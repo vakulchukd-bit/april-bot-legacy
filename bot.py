@@ -142,7 +142,7 @@ async def handle(message: types.Message):
         )
         return
 
-    # ===== PHOTO (НОВАЯ ЛОГИКА) =====
+    # ===== PHOTO =====
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
@@ -175,7 +175,7 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # ===== РЕДАКТИРОВАНИЕ / АНАЛИЗ =====
+    # ===== РЕДАКТИРОВАНИЕ =====
     if awaiting_image_prompt.get(user_id):
         awaiting_image_prompt[user_id] = False
 
@@ -184,7 +184,6 @@ async def handle(message: types.Message):
             await message.answer("❌ Нет изображения")
             return
 
-        # если нет анализа — делаем
         if not ctx["hint"]:
             try:
                 ctx["hint"] = await analyze_image(ctx["path"])
@@ -192,7 +191,6 @@ async def handle(message: types.Message):
                 ctx["hint"] = "изображение"
 
         base = last_prompt.get(user_id, ctx["hint"])
-
         new_prompt = base + ", IMPORTANT: " + text
 
         img = await run_with_typing(
@@ -220,28 +218,29 @@ async def handle(message: types.Message):
                     ctx["hint"] = "Не удалось определить"
             await message.answer(ctx["hint"])
             return
-            
-# ===== ПРЯМОЙ ТРИГГЕР ГЕНЕРАЦИИ =====
-if any(w in text.lower() for w in [
-    "сгенерируй", "создай", "нарисуй", "картинку", "изображение"
-]):
-    img = await run_with_upload(message.chat.id, generate_image(text))
 
-    image_context[user_id] = {
-        "type": "generated",
-        "path": None,
-        "hint": text,
-        "full": text
-    }
+    # ===== ПРЯМОЙ ТРИГГЕР ГЕНЕРАЦИИ (ИСПРАВЛЕНО МЕСТО) =====
+    if any(w in text.lower() for w in [
+        "сгенерируй", "создай", "нарисуй", "картинку", "изображение"
+    ]):
+        img = await run_with_typing(message.chat.id, generate_image(text))
 
-    last_prompt[user_id] = text
+        image_context[user_id] = {
+            "type": "generated",
+            "path": None,
+            "hint": text,
+            "full": text
+        }
 
-    sent = await message.answer_photo(
-        BufferedInputFile(img, filename="image.png")
-    )
+        last_prompt[user_id] = text
 
-    await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-    return
+        sent = await message.answer_photo(
+            BufferedInputFile(img, filename="image.png")
+        )
+
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+        return
+
     # ===== ROUTER =====
     decision = decide_action(text, dialog_memory.get(user_id, []))
     action = decision["action"]
