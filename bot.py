@@ -249,16 +249,27 @@ async def handle(message: types.Message):
 
     reply = await run_with_typing(message.chat.id, ask())
 
-    # 🔥 УЛУЧШЕННЫЙ COPY FIX
+    # 🔥 ФИНАЛЬНЫЙ COPY FIX (ТОЧЕЧНОЕ ИЗМЕНЕНИЕ)
     if mode == "copy":
         clean = reply
 
-        # убираем мусор
-        for bad in ["```", "Вот", "Конечно", "Просто", "Ты можешь"]:
-            clean = clean.replace(bad, "")
+        clean = clean.replace("```text", "")
+        clean = clean.replace("```", "")
 
-        # убираем объяснения (берем только содержимое)
+        bad_phrases = [
+            "Вот", "Конечно", "Просто", "Ты можешь",
+            "Чтобы скопировать", "Вот текст", "Конечно!"
+        ]
+        for phrase in bad_phrases:
+            clean = clean.replace(phrase, "")
+
+        clean = clean.strip()
+
         lines = [l.strip() for l in clean.split("\n") if l.strip()]
+
+        if len(lines) > 4:
+            lines = lines[-4:]
+
         clean = "\n".join(lines)
 
         reply = f"```text\n{clean}\n```"
