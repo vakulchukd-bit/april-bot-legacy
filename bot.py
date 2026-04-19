@@ -10,6 +10,9 @@ from openai import OpenAI
 
 from subscription_system import *
 
+# 🔥 НОВОЕ (JSON)
+from storage import check_subscription, set_subscription
+
 # 🔑 ДОБАВЛЕНО (router)
 from blocks.router_system import decide_action
 # 🔥 ДОБАВЛЕНО (response mode)
@@ -29,7 +32,6 @@ last_image = {}
 edit_mode = {}
 feedback_memory = {}
 awaiting_image_prompt = {}
-# 🔥 ДОБАВЛЕНО
 image_context = {}
 
 # ===== SYSTEM =====
@@ -50,7 +52,7 @@ SYSTEM_PROMPT = """
 """
 
 def enhance_prompt(user_prompt):
-    return f"{IMAGE_STYLE}\n\n{user_prompt}"
+    return f"{user_prompt}"
 
 # ===== HELPERS =====
 def is_image_request(text):
@@ -160,7 +162,9 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
 
     sub_register(user_id)
-    access, reason = sub_check_access(user_id)
+
+    # 🔥 НОВАЯ ПРОВЕРКА (JSON)
+    access = check_subscription(user_id)
 
     if not access:
         await message.answer(
@@ -177,7 +181,6 @@ async def handle(message: types.Message):
 
         last_image[user_id] = path
 
-        # 🔥 ДОБАВЛЕНО — анализ картинки
         hint = await analyze_image(path)
 
         image_context[user_id] = {
@@ -199,15 +202,13 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
-    # 🔑 ROUTER
+    # ROUTER
     history = dialog_memory.get(user_id, [])[-10:]
     decision = decide_action(text, history)
     action = decision["action"]
 
-    # 🔥 ДОБАВЛЕНО — режим ответа
     mode = detect_response_mode(text)
 
-    # 🔥 ДОБАВЛЕНО — вопрос про картинку
     if "что на картинке" in text.lower():
         ctx = image_context.get(user_id)
 
@@ -218,7 +219,6 @@ async def handle(message: types.Message):
             await message.answer(ctx["full"])
             return
 
-    # 🔥 DIAGRAM
     if action == "diagram":
         prompt = build_diagram_prompt(text)
 
@@ -235,7 +235,6 @@ async def handle(message: types.Message):
         sub_add_message(user_id)
         return
 
-    # 🔥 IMAGE
     if action == "image":
         img = await run_with_typing(
             message.chat.id,
@@ -250,12 +249,10 @@ async def handle(message: types.Message):
         sub_add_message(user_id)
         return
 
-    # 🔥 CLARIFY
     if action == "clarify":
         await message.answer("Уточни, что именно ты хочешь?")
         return
 
-    # GPT
     history = dialog_memory.get(user_id, [])[-6:]
 
     async def ask():
@@ -274,7 +271,6 @@ async def handle(message: types.Message):
 
     reply = await run_with_typing(message.chat.id, ask())
 
-    # 🔥 ДОБАВЛЕНО — формат копирования
     if mode == "copy":
         reply = f"```text\n{reply}\n```"
 
@@ -296,6 +292,19 @@ async def dislike(c: types.CallbackQuery):
     feedback_memory[c.data] = "dislike"
     await c.answer()
     await c.message.answer("👎 Принял, буду лучше!")
+
+# 🔥 НОВОЕ — покупка
+@dp.callback_query(F.data == "buy_yes")
+async def buy_yes(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    set_subscription(user_id)
+    await c.answer()
+    await c.message.answer("✅ Подписка активирована на 30 дней!")
+
+@dp.callback_query(F.data == "buy_no")
+async def buy_no(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.answer("❌ Хорошо, если передумаешь — возвращайся")
 
 # ===== START =====
 async def main():
