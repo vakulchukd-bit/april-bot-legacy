@@ -20,6 +20,9 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# 🔥 АДМИН
+ADMIN_ID = 2016592532
+
 # ===== MEMORY =====
 dialog_memory = {}
 last_image = {}
@@ -131,7 +134,11 @@ async def handle(message: types.Message):
 
     sub_register(user_id)
 
-    access = check_subscription(user_id)
+    # 🔥 ВОТ ГЛАВНОЕ ИЗМЕНЕНИЕ
+    if user_id == ADMIN_ID:
+        access = True
+    else:
+        access = check_subscription(user_id)
 
     if not access:
         await message.answer(
