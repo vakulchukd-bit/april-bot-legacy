@@ -134,7 +134,6 @@ async def handle(message: types.Message):
 
     sub_register(user_id)
 
-    # 🔥 ВОТ ГЛАВНОЕ ИЗМЕНЕНИЕ
     if user_id == ADMIN_ID:
         access = True
     else:
@@ -163,7 +162,7 @@ async def handle(message: types.Message):
             "full": None
         }
 
-        await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
+        await message.answer(f"📷 Я вижу: {hint}\n\nЧто сделать?", reply_markup=image_keyboard())
         return
 
     # VOICE
@@ -185,36 +184,23 @@ async def handle(message: types.Message):
 
     if "что на картинке" in text.lower():
         ctx = image_context.get(user_id)
-
         if ctx:
             if not ctx["full"]:
                 ctx["full"] = await analyze_image(ctx["path"])
-
             await message.answer(ctx["full"])
             return
 
     if action == "diagram":
         prompt = "technical drawing, blueprint\n\n" + text
-
-        img = await run_with_typing(
-            message.chat.id,
-            generate_image(prompt)
-        )
-
-        await message.answer_photo(
-            BufferedInputFile(img, filename="diagram.png")
-        )
+        img = await run_with_typing(message.chat.id, generate_image(prompt))
+        sent = await message.answer_photo(BufferedInputFile(img, filename="diagram.png"))
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
     if action == "image":
-        img = await run_with_typing(
-            message.chat.id,
-            generate_image(text)
-        )
-
-        await message.answer_photo(
-            BufferedInputFile(img, filename="image.png")
-        )
+        img = await run_with_typing(message.chat.id, generate_image(text))
+        sent = await message.answer_photo(BufferedInputFile(img, filename="image.png"))
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
     if action == "clarify":
@@ -234,26 +220,61 @@ async def handle(message: types.Message):
                 ]
             )
             return r.output_text
-
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
 
     if mode == "copy":
-        reply = f"```text\n{reply}\n```"
+        reply = f"```\n{reply.strip()}\n```"
 
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
-    await message.answer(reply)
+    sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
 # ===== CALLBACKS =====
+@dp.callback_query(F.data.startswith("like_"))
+async def like(c: types.CallbackQuery):
+    feedback_memory[c.data] = "like"
+    await c.answer()
+    await c.message.answer("👍 Спасибо!")
+
+@dp.callback_query(F.data.startswith("dislike_"))
+async def dislike(c: types.CallbackQuery):
+    feedback_memory[c.data] = "dislike"
+    await c.answer()
+    await c.message.answer("👎 Принял!")
+
 @dp.callback_query(F.data == "buy_yes")
 async def buy_yes(c: types.CallbackQuery):
     user_id = c.from_user.id
-    set_subscription(user_id)
+
+    await bot.send_message(
+        ADMIN_ID,
+        f"💰 Новый запрос на подписку\n\nID: {user_id}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}")
+            ]
+        ])
+    )
+
     await c.answer()
-    await c.message.answer("✅ Подписка активирована!")
+    await c.message.answer("⏳ Заявка отправлена на проверку")
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve(c: types.CallbackQuery):
+    user_id = int(c.data.split("_")[1])
+    set_subscription(user_id)
+    await bot.send_message(user_id, "✅ Подписка подтверждена!")
+    await c.answer("Готово")
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(c: types.CallbackQuery):
+    user_id = int(c.data.split("_")[1])
+    await bot.send_message(user_id, "❌ Подписка отклонена")
+    await c.answer("Отклонено")
 
 @dp.callback_query(F.data == "buy_no")
 async def buy_no(c: types.CallbackQuery):
