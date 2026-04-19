@@ -220,7 +220,28 @@ async def handle(message: types.Message):
                     ctx["hint"] = "Не удалось определить"
             await message.answer(ctx["hint"])
             return
+            
+# ===== ПРЯМОЙ ТРИГГЕР ГЕНЕРАЦИИ =====
+if any(w in text.lower() for w in [
+    "сгенерируй", "создай", "нарисуй", "картинку", "изображение"
+]):
+    img = await run_with_upload(message.chat.id, generate_image(text))
 
+    image_context[user_id] = {
+        "type": "generated",
+        "path": None,
+        "hint": text,
+        "full": text
+    }
+
+    last_prompt[user_id] = text
+
+    sent = await message.answer_photo(
+        BufferedInputFile(img, filename="image.png")
+    )
+
+    await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+    return
     # ===== ROUTER =====
     decision = decide_action(text, dialog_memory.get(user_id, []))
     action = decision["action"]
