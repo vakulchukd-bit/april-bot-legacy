@@ -9,11 +9,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboar
 from openai import OpenAI
 
 from subscription_system import *
-
-
 from storage import check_subscription, set_subscription
-
-
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
@@ -37,19 +33,7 @@ image_context = {}
 
 SYSTEM_PROMPT = """
 Ты — Aprill, интеллектуальный ассистент.
-
-Правила:
-
-- понимаешь контекст диалога
-- отвечаешь логично
-- не теряешь связь между сообщениями
-- если не уверен — уточняешь
-
-ВАЖНО:
-Если пользователь просит создать готовый текст:
-
-- пиши сразу результат
-  """
+"""
 
 def enhance_prompt(user_prompt):
 return user_prompt
@@ -145,7 +129,6 @@ user_id = message.from_user.id
 
 sub_register(user_id)
 
-# 🔥 ВСЕ ИДУТ ЧЕРЕЗ ПОДПИСКУ (рабочая версия)
 access = check_subscription(user_id)
 
 if not access:
@@ -174,7 +157,6 @@ if message.photo:
     await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
     return
 
-# TEXT
 text = message.text or ""
 
 history = dialog_memory.get(user_id, [])[-10:]
