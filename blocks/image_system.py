@@ -1,7 +1,8 @@
 import base64
+import os
 from openai import OpenAI
 
-client = OpenAI()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def analyze_image(path: str) -> str:
     try:
@@ -16,10 +17,13 @@ async def analyze_image(path: str) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": "Опиши, что изображено на картинке"},
+                        {
+                            "type": "input_text",
+                            "text": "Опиши подробно, что изображено на картинке"
+                        },
                         {
                             "type": "input_image",
-                            "image_base64": image_b64
+                            "image_url": f"data:image/jpeg;base64,{image_b64}"
                         }
                     ]
                 }
