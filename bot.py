@@ -9,7 +9,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboar
 from openai import OpenAI
 
 from subscription_system import *
-from storage import check_subscription, set_subscription
+from storage import check_subscription, set_subscription, should_warn, can_send_message, can_generate_image
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
@@ -44,6 +44,16 @@ SYSTEM_PROMPT = """
 ВАЖНО:
 Если пользователь просит создать готовый текст:
 - пиши сразу результат
+
+Если пользователь просит текст для копирования:
+- не добавляй пояснения
+- не добавляй ``` сам
+- возвращай только чистый текст
+
+Если пользователь спрашивает про изображение:
+- ты умеешь анализировать изображения
+- не говори, что не умеешь
+- отвечай уверенно
 """
 
 def enhance_prompt(user_prompt):
@@ -134,6 +144,10 @@ async def handle(message: types.Message):
 
     sub_register(user_id)
 
+    # 🔔 предупреждение за 24 часа
+    if should_warn(user_id):
+        await message.answer("⚠️ Подписка закончится через 24 часа")
+
     if user_id == ADMIN_ID:
         access = True
     else:
@@ -154,7 +168,10 @@ async def handle(message: types.Message):
 
         last_image[user_id] = path
 
-        hint = await analyze_image(path)
+        try:
+            hint = await analyze_image(path)
+        except:
+            hint = "Не удалось определить содержимое"
 
         image_context[user_id] = {
             "path": path,
@@ -175,6 +192,19 @@ async def handle(message: types.Message):
     else:
         text = message.text or ""
 
+    # 🔥 ПЕРЕХВАТ КАРТИНКИ ДО GPT
+    if text and "что на картинке" in text.lower():
+        ctx = image_context.get(user_id)
+        if ctx:
+            if not ctx["full"]:
+                try:
+                    ctx["full"] = await analyze_image(ctx["path"])
+                except:
+                    ctx["full"] = "Не удалось проанализировать изображение"
+
+            await message.answer(ctx["full"])
+            return
+
     # ROUTER
     history = dialog_memory.get(user_id, [])[-10:]
     decision = decide_action(text, history)
@@ -182,12 +212,10 @@ async def handle(message: types.Message):
 
     mode = detect_response_mode(text)
 
-    if "что на картинке" in text.lower():
-        ctx = image_context.get(user_id)
-        if ctx:
-            if not ctx["full"]:
-                ctx["full"] = await analyze_image(ctx["path"])
-            await message.answer(ctx["full"])
+    # 🔥 лимит сообщений (только для НЕ подписанных)
+    if not check_subscription(user_id):
+        if not can_send_message(user_id):
+            await message.answer("⛔ Лимит сообщений на сегодня исчерпан")
             return
 
     if action == "diagram":
@@ -198,6 +226,12 @@ async def handle(message: types.Message):
         return
 
     if action == "image":
+        # 🔥 лимит картинок
+        if not check_subscription(user_id):
+            if not can_generate_image(user_id):
+                await message.answer("⛔ Лимит генерации изображений исчерпан")
+                return
+
         img = await run_with_typing(message.chat.id, generate_image(text))
         sent = await message.answer_photo(BufferedInputFile(img, filename="image.png"))
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
@@ -224,13 +258,15 @@ async def handle(message: types.Message):
 
     reply = await run_with_typing(message.chat.id, ask())
 
+    # 🔥 ЖЁСТКИЙ COPY FIX
     if mode == "copy":
-        reply = f"```\n{reply.strip()}\n```"
+        clean = reply.replace("```", "").replace("Вот", "").replace("Конечно", "").strip()
+        reply = f"```text\n{clean}\n```"
 
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
-    sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
 # ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
