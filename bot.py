@@ -144,7 +144,6 @@ async def handle(message: types.Message):
 
     sub_register(user_id)
 
-    # 🔔 предупреждение за 24 часа
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
@@ -184,15 +183,12 @@ async def handle(message: types.Message):
 
     # VOICE
     if message.voice:
-        text = await run_with_typing(
-            message.chat.id,
-            voice_to_text(message, user_id)
-        )
+        text = await run_with_typing(message.chat.id, voice_to_text(message, user_id))
         await message.answer(f"🎤 {text}")
     else:
         text = message.text or ""
 
-    # 🔥 ПЕРЕХВАТ КАРТИНКИ ДО GPT
+    # 🔥 ПЕРЕХВАТ КАРТИНКИ
     if text and "что на картинке" in text.lower():
         ctx = image_context.get(user_id)
         if ctx:
@@ -201,7 +197,6 @@ async def handle(message: types.Message):
                     ctx["full"] = await analyze_image(ctx["path"])
                 except:
                     ctx["full"] = "Не удалось проанализировать изображение"
-
             await message.answer(ctx["full"])
             return
 
@@ -212,7 +207,6 @@ async def handle(message: types.Message):
 
     mode = detect_response_mode(text)
 
-    # 🔥 лимит сообщений (только для НЕ подписанных)
     if not check_subscription(user_id):
         if not can_send_message(user_id):
             await message.answer("⛔ Лимит сообщений на сегодня исчерпан")
@@ -226,7 +220,6 @@ async def handle(message: types.Message):
         return
 
     if action == "image":
-        # 🔥 лимит картинок
         if not check_subscription(user_id):
             if not can_generate_image(user_id):
                 await message.answer("⛔ Лимит генерации изображений исчерпан")
@@ -241,15 +234,13 @@ async def handle(message: types.Message):
         await message.answer("Уточни, что именно ты хочешь?")
         return
 
-    history = dialog_memory.get(user_id, [])[-6:]
-
     async def ask():
         def run():
             r = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    *history,
+                    *dialog_memory.get(user_id, [])[-6:],
                     {"role": "user", "content": text}
                 ]
             )
@@ -258,9 +249,18 @@ async def handle(message: types.Message):
 
     reply = await run_with_typing(message.chat.id, ask())
 
-    # 🔥 ЖЁСТКИЙ COPY FIX
+    # 🔥 УЛУЧШЕННЫЙ COPY FIX
     if mode == "copy":
-        clean = reply.replace("```", "").replace("Вот", "").replace("Конечно", "").strip()
+        clean = reply
+
+        # убираем мусор
+        for bad in ["```", "Вот", "Конечно", "Просто", "Ты можешь"]:
+            clean = clean.replace(bad, "")
+
+        # убираем объяснения (берем только содержимое)
+        lines = [l.strip() for l in clean.split("\n") if l.strip()]
+        clean = "\n".join(lines)
+
         reply = f"```text\n{clean}\n```"
 
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
