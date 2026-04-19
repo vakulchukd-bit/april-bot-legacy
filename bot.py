@@ -14,6 +14,8 @@ from subscription_system import *
 from blocks.router_system import decide_action
 # 🔥 ДОБАВЛЕНО (response mode)
 from blocks.response_mode import detect_response_mode
+# 🔥 ДОБАВЛЕНО (image system)
+from blocks.image_system import analyze_image
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -27,6 +29,8 @@ last_image = {}
 edit_mode = {}
 feedback_memory = {}
 awaiting_image_prompt = {}
+# 🔥 ДОБАВЛЕНО
+image_context = {}
 
 # ===== SYSTEM =====
 SYSTEM_PROMPT = """
@@ -172,6 +176,16 @@ async def handle(message: types.Message):
         await bot.download_file(file.file_path, destination=path)
 
         last_image[user_id] = path
+
+        # 🔥 ДОБАВЛЕНО — анализ картинки
+        hint = await analyze_image(path)
+
+        image_context[user_id] = {
+            "path": path,
+            "hint": hint,
+            "full": None
+        }
+
         await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
         return
 
@@ -192,6 +206,17 @@ async def handle(message: types.Message):
 
     # 🔥 ДОБАВЛЕНО — режим ответа
     mode = detect_response_mode(text)
+
+    # 🔥 ДОБАВЛЕНО — вопрос про картинку
+    if "что на картинке" in text.lower():
+        ctx = image_context.get(user_id)
+
+        if ctx:
+            if not ctx["full"]:
+                ctx["full"] = await analyze_image(ctx["path"])
+
+            await message.answer(ctx["full"])
+            return
 
     # 🔥 DIAGRAM
     if action == "diagram":
