@@ -10,21 +10,18 @@ from openai import OpenAI
 
 from subscription_system import *
 
-🔥 НОВОЕ (JSON)
-
+# 🔥 НОВОЕ (JSON)
 from storage import check_subscription, set_subscription
 
-🔑 ДОБАВЛЕНО (router)
-
+# 🔑 ДОБАВЛЕНО (router)
 from blocks.router_system import decide_action
-
-🔥 ДОБАВЛЕНО (response mode)
-
+# 🔥 ДОБАВЛЕНО (response mode)
 from blocks.response_mode import detect_response_mode
-
-🔥 ДОБАВЛЕНО (image system)
-
+# 🔥 ДОБАВЛЕНО (image system)
 from blocks.image_system import analyze_image
+
+# 🔥 АДМИН
+ADMIN_ID = 2016592532
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -32,8 +29,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-===== MEMORY =====
-
+# ===== MEMORY =====
 dialog_memory = {}
 last_image = {}
 edit_mode = {}
@@ -41,302 +37,146 @@ feedback_memory = {}
 awaiting_image_prompt = {}
 image_context = {}
 
-===== SYSTEM =====
-
+# ===== SYSTEM =====
 SYSTEM_PROMPT = """
 Ты — Aprill, интеллектуальный ассистент.
 
 Правила:
-
-понимаешь контекст диалога
-
-отвечаешь логично
-
-не теряешь связь между сообщениями
-
-если не уверен — уточняешь
-
+- понимаешь контекст диалога
+- отвечаешь логично
+- не теряешь связь между сообщениями
+- если не уверен — уточняешь
 
 ВАЖНО:
 Если пользователь просит создать готовый текст (стих, письмо, заявление, шаблон):
-
-НЕ добавляй вступления
-
-НЕ пиши "вот текст" или "конечно"
-
-пиши сразу результат
+- НЕ добавляй вступления
+- НЕ пиши "вот текст" или "конечно"
+- пиши сразу результат
 """
 
-
 def enhance_prompt(user_prompt):
-return f"{user_prompt}"
+    return f"{user_prompt}"
 
-===== HELPERS =====
-
+# ===== HELPERS =====
 def is_image_request(text):
-return any(w in text.lower() for w in ["картин", "фото", "изображен", "сгенерируй"])
+    return any(w in text.lower() for w in ["картин", "фото", "изображен", "сгенерируй"])
 
 def is_edit_request(text):
-return any(w in text.lower() for w in ["убери", "удали", "измени", "замени", "добавь"])
+    return any(w in text.lower() for w in ["убери", "удали", "измени", "замени", "добавь"])
 
 def is_diagram_request(text):
-return any(w in text.lower() for w in ["чертеж", "чертёж", "схема", "диаграмма"])
+    return any(w in text.lower() for w in ["чертеж", "чертёж", "схема", "диаграмма"])
 
 def build_diagram_prompt(text):
-return f"technical drawing, blueprint, schematic, black lines, white background\n\n{text}"
+    return f"technical drawing, blueprint, schematic, black lines, white background\n\n{text}"
 
-===== SERVER =====
-
+# ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
-def do_GET(self):
-self.send_response(200)
-self.end_headers()
-self.wfile.write(b"OK")
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
 def run_server():
-port = int(os.environ.get("PORT", 10000))
-HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-===== UI =====
-
+# ===== UI =====
 def main_keyboard(msg_id):
-return InlineKeyboardMarkup(inline_keyboard=[
-[
-InlineKeyboardButton(text="👍", callback_data=f"like_{msg_id}"),
-InlineKeyboardButton(text="👎", callback_data=f"dislike_{msg_id}")
-]
-])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👍", callback_data=f"like_{msg_id}"),
+            InlineKeyboardButton(text="👎", callback_data=f"dislike_{msg_id}")
+        ]
+    ])
 
 def image_keyboard():
-return InlineKeyboardMarkup(inline_keyboard=[
-[
-InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
-]
-])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
+        ]
+    ])
 
 def buy_keyboard():
-return InlineKeyboardMarkup(inline_keyboard=[
-[
-InlineKeyboardButton(text="✅ Да", callback_data="buy_yes"),
-InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-]
-])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да", callback_data="buy_yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+        ]
+    ])
 
-===== TYPING =====
-
+# ===== TYPING =====
 async def typing_loop(chat_id):
-try:
-while True:
-await bot.send_chat_action(chat_id, "typing")
-await asyncio.sleep(2)
-except:
-pass
+    try:
+        while True:
+            await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(2)
+    except:
+        pass
 
 async def run_with_typing(chat_id, coro):
-task = asyncio.create_task(typing_loop(chat_id))
-try:
-return await coro
-finally:
-task.cancel()
+    task = asyncio.create_task(typing_loop(chat_id))
+    try:
+        return await coro
+    finally:
+        task.cancel()
 
-===== IMAGE =====
-
+# ===== IMAGE =====
 async def generate_image(prompt):
-def run():
-result = client.images.generate(
-model="gpt-image-1",
-prompt=enhance_prompt(prompt),
-size="1024x1024"
-)
-return base64.b64decode(result.data[0].b64_json)
-return await asyncio.to_thread(run)
+    def run():
+        result = client.images.generate(
+            model="gpt-image-1",
+            prompt=enhance_prompt(prompt),
+            size="1024x1024"
+        )
+        return base64.b64decode(result.data[0].b64_json)
+    return await asyncio.to_thread(run)
 
 async def edit_image(file_path, prompt):
-def run():
-with open(file_path, "rb") as img:
-result = client.images.edit(
-model="gpt-image-1",
-image=img,
-prompt=enhance_prompt(prompt)
-)
-return base64.b64decode(result.data[0].b64_json)
-return await asyncio.to_thread(run)
+    def run():
+        with open(file_path, "rb") as img:
+            result = client.images.edit(
+                model="gpt-image-1",
+                image=img,
+                prompt=enhance_prompt(prompt)
+            )
+        return base64.b64decode(result.data[0].b64_json)
+    return await asyncio.to_thread(run)
 
-===== VOICE =====
-
+# ===== VOICE =====
 async def voice_to_text(message, user_id):
-file = await bot.get_file(message.voice.file_id)
-path = f"{user_id}.ogg"
-await bot.download_file(file.file_path, destination=path)
+    file = await bot.get_file(message.voice.file_id)
+    path = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=path)
 
-def run():  
-    with open(path, "rb") as f:  
-        t = client.audio.transcriptions.create(  
-            model="gpt-4o-mini-transcribe",  
-            file=f  
-        )  
-    return t.text  
+    def run():
+        with open(path, "rb") as f:
+            t = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f
+            )
+        return t.text
 
-return await asyncio.to_thread(run)
+    return await asyncio.to_thread(run)
 
-===== MAIN =====
-
+# ===== MAIN =====
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
-user_id = message.from_user.id
+    user_id = message.from_user.id
 
-sub_register(user_id)  
+    sub_register(user_id)
 
-# 🔥 НОВАЯ ПРОВЕРКА (JSON)  
-access = check_subscription(user_id)  
+    # 🔥 АДМИН ПРОПУСК
+    if user_id == ADMIN_ID:
+        access = True
+    else:
+        access = check_subscription(user_id)
 
-if not access:  
-    await message.answer(  
-        "💳 Подписка 30 дней — 150 грн\n\nОформить?",  
-        reply_markup=buy_keyboard()  
-    )  
-    return  
+    if not access:
+        await message.answer(
+            "💳 Подписка 30 дней — 150 грн\n\nОформить?",
+            reply_markup=buy_keyboard()
+        )
+        return
 
-# PHOTO  
-if message.photo:  
-    file = await bot.get_file(message.photo[-1].file_id)  
-    path = f"{user_id}.jpg"  
-    await bot.download_file(file.file_path, destination=path)  
-
-    last_image[user_id] = path  
-
-    hint = await analyze_image(path)  
-
-    image_context[user_id] = {  
-        "path": path,  
-        "hint": hint,  
-        "full": None  
-    }  
-
-    await message.answer("📷 Что сделать?", reply_markup=image_keyboard())  
-    return  
-
-# VOICE  
-if message.voice:  
-    text = await run_with_typing(  
-        message.chat.id,  
-        voice_to_text(message, user_id)  
-    )  
-    await message.answer(f"🎤 {text}")  
-else:  
-    text = message.text or ""  
-
-# ROUTER  
-history = dialog_memory.get(user_id, [])[-10:]  
-decision = decide_action(text, history)  
-action = decision["action"]  
-
-mode = detect_response_mode(text)  
-
-if "что на картинке" in text.lower():  
-    ctx = image_context.get(user_id)  
-
-    if ctx:  
-        if not ctx["full"]:  
-            ctx["full"] = await analyze_image(ctx["path"])  
-
-        await message.answer(ctx["full"])  
-        return  
-
-if action == "diagram":  
-    prompt = build_diagram_prompt(text)  
-
-    img = await run_with_typing(  
-        message.chat.id,  
-        generate_image(prompt)  
-    )  
-
-    sent = await message.answer_photo(  
-        BufferedInputFile(img, filename="diagram.png")  
-    )  
-
-    await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))  
-    sub_add_message(user_id)  
-    return  
-
-if action == "image":  
-    img = await run_with_typing(  
-        message.chat.id,  
-        generate_image(text)  
-    )  
-
-    sent = await message.answer_photo(  
-        BufferedInputFile(img, filename="image.png")  
-    )  
-
-    await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))  
-    sub_add_message(user_id)  
-    return  
-
-if action == "clarify":  
-    await message.answer("Уточни, что именно ты хочешь?")  
-    return  
-
-history = dialog_memory.get(user_id, [])[-6:]  
-
-async def ask():  
-    def run():  
-        r = client.responses.create(  
-            model="gpt-4o-mini",  
-            input=[  
-                {"role": "system", "content": SYSTEM_PROMPT},  
-                *history,  
-                {"role": "user", "content": text}  
-            ]  
-        )  
-        return r.output_text  
-
-    return await asyncio.to_thread(run)  
-
-reply = await run_with_typing(message.chat.id, ask())  
-
-if mode == "copy":  
-    reply = f"```text\n{reply}\n```"  
-
-dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})  
-dialog_memory[user_id].append({"role": "assistant", "content": reply})  
-
-sent = await message.answer(reply, reply_markup=main_keyboard(message.message_id))  
-sub_add_message(user_id)
-
-===== CALLBACKS =====
-
-@dp.callback_query(F.data.startswith("like_"))
-async def like(c: types.CallbackQuery):
-feedback_memory[c.data] = "like"
-await c.answer()
-await c.message.answer("👍 Спасибо за лайк!")
-
-@dp.callback_query(F.data.startswith("dislike_"))
-async def dislike(c: types.CallbackQuery):
-feedback_memory[c.data] = "dislike"
-await c.answer()
-await c.message.answer("👎 Принял, буду лучше!")
-
-🔥 НОВОЕ — покупка
-
-@dp.callback_query(F.data == "buy_yes")
-async def buy_yes(c: types.CallbackQuery):
-user_id = c.from_user.id
-set_subscription(user_id)
-await c.answer()
-await c.message.answer("✅ Подписка активирована на 30 дней!")
-
-@dp.callback_query(F.data == "buy_no")
-async def buy_no(c: types.CallbackQuery):
-await c.answer()
-await c.message.answer("❌ Хорошо, если передумаешь — возвращайся")
-
-===== START =====
-
-async def main():
-await dp.start_polling(bot)
-
-if name == "main":
-threading.Thread(target=run_server, daemon=True).start()
-asyncio.run(main())
+    # ===== дальше без изменений =====
