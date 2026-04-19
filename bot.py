@@ -221,25 +221,32 @@ async def handle(message: types.Message):
 
     # ===== ПРЯМОЙ ТРИГГЕР ГЕНЕРАЦИИ (ИСПРАВЛЕНО МЕСТО) =====
     if any(w in text.lower() for w in [
-        "сгенерируй", "создай", "нарисуй", "картинку", "изображение"
-    ]):
-        img = await run_with_typing(message.chat.id, generate_image(text))
+    "сгенерируй", "создай", "нарисуй",
+    "картинку", "изображение",
+    "можешь сгенерировать",
+    "сделай картинку",
+    "хочу картинку",
+    "дай картинку",
+    "generate image", "create image",
+    "draw", "make a picture"
+]):
+    img = await run_with_typing(message.chat.id, generate_image(text))
 
-        image_context[user_id] = {
-            "type": "generated",
-            "path": None,
-            "hint": text,
-            "full": text
-        }
+    image_context[user_id] = {
+        "type": "generated",
+        "path": None,
+        "hint": text,
+        "full": text
+    }
 
-        last_prompt[user_id] = text
+    last_prompt[user_id] = text
 
-        sent = await message.answer_photo(
-            BufferedInputFile(img, filename="image.png")
-        )
+    sent = await message.answer_photo(
+        BufferedInputFile(img, filename="image.png")
+    )
 
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
+    await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+    return
 
     # ===== ROUTER =====
     decision = decide_action(text, dialog_memory.get(user_id, []))
@@ -320,3 +327,13 @@ async def main():
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     asyncio.run(main())
+    # ===== CALLBACKS =====
+@dp.callback_query(F.data.startswith("like_"))
+async def like(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.answer("👍 Спасибо!")
+
+@dp.callback_query(F.data.startswith("dislike_"))
+async def dislike(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.answer("👎 Принял!")
