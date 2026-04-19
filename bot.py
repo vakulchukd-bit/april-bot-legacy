@@ -20,7 +20,6 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# 🔥 АДМИН
 ADMIN_ID = 2016592532
 
 # ===== MEMORY =====
@@ -39,21 +38,15 @@ SYSTEM_PROMPT = """
 - понимаешь контекст диалога
 - отвечаешь логично
 - не теряешь связь между сообщениями
-- если не уверен — уточняешь
 
 ВАЖНО:
-Если пользователь просит создать готовый текст:
-- пиши сразу результат
+- ты умеешь генерировать изображения
+- ты умеешь анализировать изображения
+- никогда не говори "я не могу"
 
 Если пользователь просит текст для копирования:
 - не добавляй пояснения
-- не добавляй ``` сам
 - возвращай только чистый текст
-
-Если пользователь спрашивает про изображение:
-- ты умеешь анализировать изображения
-- не говори, что не умеешь
-- отвечай уверенно
 """
 
 def enhance_prompt(user_prompt):
@@ -159,7 +152,7 @@ async def handle(message: types.Message):
         )
         return
 
-    # PHOTO
+    # ===== PHOTO =====
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
@@ -173,6 +166,7 @@ async def handle(message: types.Message):
             hint = "Не удалось определить содержимое"
 
         image_context[user_id] = {
+            "type": "uploaded",
             "path": path,
             "hint": hint,
             "full": None
@@ -181,97 +175,95 @@ async def handle(message: types.Message):
         await message.answer(f"📷 Я вижу: {hint}\n\nЧто сделать?", reply_markup=image_keyboard())
         return
 
-    # VOICE
+    # ===== VOICE =====
     if message.voice:
         text = await run_with_typing(message.chat.id, voice_to_text(message, user_id))
         await message.answer(f"🎤 {text}")
     else:
         text = message.text or ""
 
-    # 🔥 ПЕРЕХВАТ КАРТИНКИ
-    if text and "что на картинке" in text.lower():
+    # ===== ПЕРЕХВАТ КАРТИНКИ =====
+    if "что на картинке" in text.lower():
         ctx = image_context.get(user_id)
+
         if ctx:
+            if ctx["type"] == "generated":
+                await message.answer(f"На изображении: {ctx['hint']}")
+                return
+
             if not ctx["full"]:
                 try:
                     ctx["full"] = await analyze_image(ctx["path"])
                 except:
                     ctx["full"] = "Не удалось проанализировать изображение"
+
             await message.answer(ctx["full"])
             return
 
-    # ROUTER
-    history = dialog_memory.get(user_id, [])[-10:]
-    decision = decide_action(text, history)
+    # ===== ROUTER =====
+    decision = decide_action(text, dialog_memory.get(user_id, []))
     action = decision["action"]
 
     mode = detect_response_mode(text)
 
     if not check_subscription(user_id):
         if not can_send_message(user_id):
-            await message.answer("⛔ Лимит сообщений на сегодня исчерпан")
+            await message.answer("⛔ Лимит сообщений исчерпан")
             return
 
-    if action == "diagram":
-        prompt = "technical drawing, blueprint\n\n" + text
-        img = await run_with_typing(message.chat.id, generate_image(prompt))
-        sent = await message.answer_photo(BufferedInputFile(img, filename="diagram.png"))
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
-
+    # ===== IMAGE =====
     if action == "image":
         if not check_subscription(user_id):
             if not can_generate_image(user_id):
-                await message.answer("⛔ Лимит генерации изображений исчерпан")
+                await message.answer("⛔ Лимит картинок исчерпан")
                 return
 
         img = await run_with_typing(message.chat.id, generate_image(text))
-        sent = await message.answer_photo(BufferedInputFile(img, filename="image.png"))
+
+        sent = await message.answer_photo(
+            BufferedInputFile(img, filename="image.png")
+        )
+
+        image_context[user_id] = {
+            "type": "generated",
+            "path": None,
+            "hint": text,
+            "full": text
+        }
+
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    if action == "clarify":
-        await message.answer("Уточни, что именно ты хочешь?")
-        return
-
+    # ===== GPT =====
     async def ask():
         def run():
+            ctx = image_context.get(user_id)
+
+            extra = []
+            if ctx:
+                extra.append({
+                    "role": "system",
+                    "content": f"Последнее изображение: {ctx['hint']}"
+                })
+
             r = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
                     {"role": "system", "content": SYSTEM_PROMPT},
+                    *extra,
                     *dialog_memory.get(user_id, [])[-6:],
                     {"role": "user", "content": text}
                 ]
             )
             return r.output_text
+
         return await asyncio.to_thread(run)
 
     reply = await run_with_typing(message.chat.id, ask())
 
-    # 🔥 ФИНАЛЬНЫЙ COPY FIX (ТОЧЕЧНОЕ ИЗМЕНЕНИЕ)
+    # ===== COPY =====
     if mode == "copy":
-        clean = reply
-
-        clean = clean.replace("```text", "")
-        clean = clean.replace("```", "")
-
-        bad_phrases = [
-            "Вот", "Конечно", "Просто", "Ты можешь",
-            "Чтобы скопировать", "Вот текст", "Конечно!"
-        ]
-        for phrase in bad_phrases:
-            clean = clean.replace(phrase, "")
-
-        clean = clean.strip()
-
-        lines = [l.strip() for l in clean.split("\n") if l.strip()]
-
-        if len(lines) > 4:
-            lines = lines[-4:]
-
-        clean = "\n".join(lines)
-
+        clean = reply.replace("```", "").strip()
         reply = f"```text\n{clean}\n```"
 
     dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -282,13 +274,11 @@ async def handle(message: types.Message):
 # ===== CALLBACKS =====
 @dp.callback_query(F.data.startswith("like_"))
 async def like(c: types.CallbackQuery):
-    feedback_memory[c.data] = "like"
     await c.answer()
     await c.message.answer("👍 Спасибо!")
 
 @dp.callback_query(F.data.startswith("dislike_"))
 async def dislike(c: types.CallbackQuery):
-    feedback_memory[c.data] = "dislike"
     await c.answer()
     await c.message.answer("👎 Принял!")
 
@@ -298,30 +288,30 @@ async def buy_yes(c: types.CallbackQuery):
 
     await bot.send_message(
         ADMIN_ID,
-        f"💰 Новый запрос на подписку\n\nID: {user_id}",
+        f"💰 Новый запрос\n\nID: {user_id}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user_id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}")
+                InlineKeyboardButton(text="✅", callback_data=f"approve_{user_id}"),
+                InlineKeyboardButton(text="❌", callback_data=f"reject_{user_id}")
             ]
         ])
     )
 
     await c.answer()
-    await c.message.answer("⏳ Заявка отправлена на проверку")
+    await c.message.answer("⏳ Ожидайте подтверждения")
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(c: types.CallbackQuery):
     user_id = int(c.data.split("_")[1])
     set_subscription(user_id)
-    await bot.send_message(user_id, "✅ Подписка подтверждена!")
-    await c.answer("Готово")
+    await bot.send_message(user_id, "✅ Подписка активирована!")
+    await c.answer()
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject(c: types.CallbackQuery):
     user_id = int(c.data.split("_")[1])
-    await bot.send_message(user_id, "❌ Подписка отклонена")
-    await c.answer("Отклонено")
+    await bot.send_message(user_id, "❌ Отказано")
+    await c.answer()
 
 @dp.callback_query(F.data == "buy_no")
 async def buy_no(c: types.CallbackQuery):
