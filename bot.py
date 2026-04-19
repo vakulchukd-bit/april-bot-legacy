@@ -20,10 +20,6 @@ from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
 
-🔥 АДМИН
-
-ADMIN_ID = 2016592532
-
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -50,6 +46,11 @@ SYSTEM_PROMPT = """
 - отвечаешь логично
 - не теряешь связь между сообщениями
 - если не уверен — уточняешь
+
+ВАЖНО:
+Если пользователь просит создать готовый текст:
+
+- пиши сразу результат
   """
 
 def enhance_prompt(user_prompt):
@@ -146,11 +147,8 @@ user_id = message.from_user.id
 
 sub_register(user_id)
 
-# 🔥 АДМИН
-if user_id == ADMIN_ID:
-    access = True
-else:
-    access = check_subscription(user_id)
+# 🔥 ВСЕ ИДУТ ЧЕРЕЗ ПОДПИСКУ (рабочая версия)
+access = check_subscription(user_id)
 
 if not access:
     await message.answer(
@@ -178,29 +176,12 @@ if message.photo:
     await message.answer("📷 Что сделать?", reply_markup=image_keyboard())
     return
 
-# VOICE
-if message.voice:
-    text = await run_with_typing(
-        message.chat.id,
-        voice_to_text(message, user_id)
-    )
-    await message.answer(f"🎤 {text}")
-else:
-    text = message.text or ""
+# TEXT
+text = message.text or ""
 
 history = dialog_memory.get(user_id, [])[-10:]
 decision = decide_action(text, history)
 action = decision["action"]
-
-mode = detect_response_mode(text)
-
-if "что на картинке" in text.lower():
-    ctx = image_context.get(user_id)
-    if ctx:
-        if not ctx["full"]:
-            ctx["full"] = await analyze_image(ctx["path"])
-        await message.answer(ctx["full"])
-        return
 
 if action == "image":
     img = await run_with_typing(
@@ -217,14 +198,9 @@ async def ask():
     def run():
         r = client.responses.create(
             model="gpt-4o-mini",
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                *history,
-                {"role": "user", "content": text}
-            ]
+            input=text
         )
         return r.output_text
-
     return await asyncio.to_thread(run)
 
 reply = await run_with_typing(message.chat.id, ask())
