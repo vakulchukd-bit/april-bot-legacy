@@ -24,7 +24,6 @@ ADMIN_ID = 2016592532
 
 # ===== MEMORY =====
 dialog_memory = {}
-last_image = {}
 last_prompt = {}
 awaiting_image_prompt = {}
 image_context = {}
@@ -73,13 +72,6 @@ def main_keyboard(msg_id):
         ]
     ])
 
-def image_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎨 Изменить", callback_data="img_edit")
-        ]
-    ])
-
 def buy_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -115,6 +107,22 @@ async def generate_image(prompt):
         return base64.b64decode(result.data[0].b64_json)
     return await asyncio.to_thread(run)
 
+# ===== VOICE =====
+async def voice_to_text(message, user_id):
+    file = await bot.get_file(message.voice.file_id)
+    path = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=path)
+
+    def run():
+        with open(path, "rb") as f:
+            t = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f
+            )
+        return t.text
+
+    return await asyncio.to_thread(run)
+
 # ===== MAIN =====
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
@@ -134,29 +142,40 @@ async def handle(message: types.Message):
         )
         return
 
-    # ===== PHOTO =====
+    # ===== PHOTO (НОВАЯ ЛОГИКА) =====
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
         await bot.download_file(file.file_path, destination=path)
 
-        hint = await analyze_image(path)
-
         image_context[user_id] = {
             "type": "uploaded",
             "path": path,
-            "hint": hint,
+            "hint": None,
             "full": None
         }
 
-        last_prompt[user_id] = hint
+        awaiting_image_prompt[user_id] = True
 
-        await message.answer(f"📷 Я вижу: {hint}\n\nЧто сделать?", reply_markup=image_keyboard())
+        await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
         return
 
-    text = message.text or ""
+    # ===== VOICE =====
+    if message.voice:
+        text = await run_with_typing(
+            message.chat.id,
+            voice_to_text(message, user_id)
+        )
 
-    # ===== РЕДАКТИРОВАНИЕ =====
+        if not text or text.strip() == "":
+            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+            return
+
+        await message.answer(f"🎤 {text}")
+    else:
+        text = message.text or ""
+
+    # ===== РЕДАКТИРОВАНИЕ / АНАЛИЗ =====
     if awaiting_image_prompt.get(user_id):
         awaiting_image_prompt[user_id] = False
 
@@ -165,16 +184,26 @@ async def handle(message: types.Message):
             await message.answer("❌ Нет изображения")
             return
 
-        base = last_prompt.get(user_id, ctx["hint"])
-        new_prompt = base + ", " + text
+        # если нет анализа — делаем
+        if not ctx["hint"]:
+            try:
+                ctx["hint"] = await analyze_image(ctx["path"])
+            except:
+                ctx["hint"] = "изображение"
 
-        img = await run_with_typing(message.chat.id, generate_image(new_prompt))
+        base = last_prompt.get(user_id, ctx["hint"])
+
+        new_prompt = base + ", IMPORTANT: " + text
+
+        img = await run_with_typing(
+            message.chat.id,
+            generate_image(new_prompt)
+        )
 
         last_prompt[user_id] = new_prompt
 
         await message.answer_photo(
-            BufferedInputFile(img, filename="edited.png"),
-            reply_markup=image_keyboard()
+            BufferedInputFile(img, filename="edited.png")
         )
         return
 
@@ -184,6 +213,11 @@ async def handle(message: types.Message):
     ]):
         ctx = image_context.get(user_id)
         if ctx:
+            if not ctx["hint"]:
+                try:
+                    ctx["hint"] = await analyze_image(ctx["path"])
+                except:
+                    ctx["hint"] = "Не удалось определить"
             await message.answer(ctx["hint"])
             return
 
@@ -229,7 +263,7 @@ async def handle(message: types.Message):
             ctx = image_context.get(user_id)
 
             extra = []
-            if ctx:
+            if ctx and ctx["hint"]:
                 extra.append({
                     "role": "system",
                     "content": f"Контекст изображения: {ctx['hint']}"
@@ -258,14 +292,6 @@ async def handle(message: types.Message):
     dialog_memory[user_id].append({"role": "assistant", "content": reply})
 
     await message.answer(reply, reply_markup=main_keyboard(message.message_id))
-
-# ===== CALLBACK =====
-@dp.callback_query(F.data == "img_edit")
-async def edit_image(c: types.CallbackQuery):
-    user_id = c.from_user.id
-    awaiting_image_prompt[user_id] = True
-    await c.answer()
-    await c.message.answer("✏️ Напиши, что изменить")
 
 # ===== START =====
 async def main():
