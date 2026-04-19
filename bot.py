@@ -10,11 +10,9 @@ from openai import OpenAI
 
 from subscription_system import *
 
-🔥 JSON
 
 from storage import check_subscription, set_subscription
 
-🔑 блоки
 
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
