@@ -6,15 +6,12 @@ from openai import OpenAI
 
 client = OpenAI()
 
-def enhance_prompt(user_prompt):
-    return user_prompt
-
 
 async def generate_image(prompt):
     def run():
         result = client.images.generate(
             model="gpt-image-1",
-            prompt=enhance_prompt(prompt),
+            prompt=prompt,
             size="1024x1024"
         )
         return base64.b64decode(result.data[0].b64_json)
@@ -23,10 +20,23 @@ async def generate_image(prompt):
 
 
 async def process(user_id, text, state):
-    img = await generate_image(text)
+    try:
+        img = await asyncio.wait_for(generate_image(text), timeout=30)
 
-    return {
-        "type": "image",
-        "data": img,
-        "caption": "Оцени 👇"
-    }
+        return {
+            "type": "image",
+            "data": img,
+            "caption": "Оцени 👇"
+        }
+
+    except asyncio.TimeoutError:
+        return {
+            "type": "error",
+            "text": "⏳ Слишком долго генерируется. Попробуй ещё раз"
+        }
+
+    except Exception as e:
+        return {
+            "type": "error",
+            "text": "❌ Ошибка генерации картинки"
+        }
