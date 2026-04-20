@@ -1,46 +1,60 @@
-import json
-import os
+from storage import check_subscription
+from blocks.analytics_storage import add_user, add_event, get_stats, load_data
+from blocks.cost_system import calculate_cost
 
-FILE = "data/analytics.json"
-
-
-def load_data():
-    if not os.path.exists(FILE):
-        return {"users": [], "events": []}
-
-    with open(FILE, "r") as f:
-        return json.load(f)
+# 🔐 твой ID
+ADMIN_ID = 2016592532
 
 
-def save_data(data):
-    os.makedirs("data", exist_ok=True)
-    with open(FILE, "w") as f:
-        json.dump(data, f)
+# ===== РЕГИСТРАЦИЯ =====
+def register_user(user_id):
+    add_user(user_id)
 
 
-def add_user(user_id):
+# ===== СОБЫТИЯ =====
+def log_event(user_id, event_type):
+    add_event(user_id, event_type)
+
+
+# ===== ПОДПИСКИ =====
+def get_active_subscriptions():
     data = load_data()
-    if user_id not in data["users"]:
-        data["users"].append(user_id)
-        save_data(data)
+    users = data.get("users", [])
+
+    active = 0
+
+    for user_id in users:
+        try:
+            if check_subscription(user_id):
+                active += 1
+        except:
+            pass
+
+    return active
 
 
-def add_event(user_id, event_type):
-    data = load_data()
+# ===== ПАНЕЛЬ =====
+def get_admin_panel():
+    users_count, messages, images = get_stats()
+    active_subs = get_active_subscriptions()
 
-    data["events"].append({
-        "user_id": user_id,
-        "type": event_type
-    })
+    cost_data = calculate_cost()
 
-    save_data(data)
+    text = f"""
+📊 АДМИН ПАНЕЛЬ
 
+👥 Пользователи: {users_count}
+💳 Активные подписки: {active_subs}
 
-def get_stats():
-    data = load_data()
+💬 Сообщения: {messages}
+🖼 Картинки: {images}
 
-    users = len(data["users"])
-    messages = sum(1 for e in data["events"] if e["type"] == "text")
-    images = sum(1 for e in data["events"] if e["type"] == "image")
+💰 Расход:
+- Текст: {cost_data['text']}
+- Картинки: {cost_data['images']}
+- Итого: ${cost_data['cost']}
 
-    return users, messages, images
+🧠 Статус: работает
+"""
+
+    return text
