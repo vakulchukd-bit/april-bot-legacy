@@ -54,7 +54,7 @@ async def safe_image(chat_id, user_id, prompt):
 
 
 # ===== MAIN =====
-@dp.message(lambda m: m.text or m.photo or m.voice)
+@dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
@@ -135,3 +135,12 @@ async def handle(message: types.Message):
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}")
+
+
+# ===== START =====
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
