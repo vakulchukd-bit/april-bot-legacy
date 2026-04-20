@@ -62,24 +62,31 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
-    # ===== 🔥 ПРИОРИТЕТ: IMAGE EDIT =====
+    # ===== 🔥 СОБИРАЕМ КОНТЕКСТ (ДОМОФОН) =====
     ctx = get_image_context(user_id)
+    anchor = get_anchor(user_id)
 
+    context = {
+        "state": state,
+        "image": ctx,
+        "anchor": anchor,
+        "mode": mode
+    }
+
+    # ===== 🔥 ПРИОРИТЕТ: IMAGE EDIT =====
     if ctx and ctx.get("path"):
         if mode == "image_edit" or get_awaiting(user_id):
 
             set_mode(user_id, "image_edit")
             set_awaiting(user_id, False)
 
-            if not ctx["hint"]:
+            if not ctx.get("hint"):
                 try:
                     ctx["hint"] = await analyze_image(ctx["path"])
                 except:
                     ctx["hint"] = "изображение"
 
-            anchor = get_anchor(user_id)
             base = anchor["current"] if anchor else ctx["hint"]
-
             new_prompt = base + ", IMPORTANT: " + text
 
             result = await run_with_typing(
@@ -104,7 +111,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": result["data"]
             }
 
-    # ===== ROUTER =====
+    # ===== 🔥 ROUTER (ДОМОФОН РЕШЕНИЕ) =====
     decision = decide_action(text, state["dialog"])
     action = decision["action"]
 
@@ -138,15 +145,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": "⚠️ Ошибка генерации изображения"
         }
 
-    # ===== TEXT =====
+    # ===== 🔥 TEXT (С УЧЁТОМ МИРА) =====
     clear_mode(user_id)
 
-    anchor = get_anchor(user_id)
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    context = build_context_text()
-    text = f"{context}\n\n{text}"
+    world = build_context_text()
+    text = f"{world}\n\n{text}"
 
     result = await run_with_typing(
         chat_id,
