@@ -40,6 +40,10 @@ from blocks.mode_manager import set_mode, clear_mode
 # 🔥 SESSION
 from blocks.session_manager import is_session_expired
 
+# 🔥 IMAGE UTILS
+from blocks.image_utils import compress_image
+
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -186,9 +190,20 @@ async def handle(message: types.Message):
         if result["type"] == "image":
             log_event(user_id, "image")
 
-            sent = await message.answer_photo(
-                BufferedInputFile(result["data"], filename="image.png")
-            )
+            # 🔥 СЖАТИЕ
+            compressed = compress_image(result["data"])
+
+            # 🔥 RETRY
+            for attempt in range(3):
+                try:
+                    sent = await message.answer_photo(
+                        BufferedInputFile(compressed, filename="image.jpg")
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    await asyncio.sleep(1)
 
             await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
 
@@ -240,7 +255,6 @@ async def buy_yes(c: types.CallbackQuery):
     await c.answer()
 
 
-# ===== ПОДТВЕРЖДЕНИЕ =====
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(c: types.CallbackQuery):
     user_id = int(c.data.split("_")[1])
