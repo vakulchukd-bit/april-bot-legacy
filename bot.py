@@ -8,7 +8,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-from subscription_system import *
 from storage import check_subscription, set_subscription, should_warn, can_send_message, can_generate_image
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
@@ -127,8 +126,6 @@ async def voice_to_text(message, user_id):
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
     user_id = message.from_user.id
-
-    sub_register(user_id)
 
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
@@ -254,7 +251,6 @@ async def handle(message: types.Message):
 
     mode = detect_response_mode(text)
 
-    # 🔥 FIX: админ полностью без лимитов
     if user_id != ADMIN_ID:
         if not check_subscription(user_id):
             if not can_send_message(user_id):
