@@ -15,10 +15,23 @@ from blocks.anchor_system import get_anchor, update_anchor
 from blocks.image_system import analyze_image
 
 
+# ===== SAFE IMAGE PARSE =====
+def extract_image(result):
+    if not isinstance(result, dict):
+        return None
+
+    return (
+        result.get("data")
+        or result.get("image")
+        or result.get("url")
+        or result.get("b64_json")
+    )
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
 
-    # ===== 🧠 ПРОВЕРКА: РЕДАКТИРОВАНИЕ =====
+    # ===== 🧠 IMAGE EDIT =====
     if get_awaiting(user_id):
         set_awaiting(user_id, False)
 
@@ -45,31 +58,47 @@ async def execute(user_id, text, chat_id, run_with_typing):
             image_process(user_id, new_prompt, {})
         )
 
+        image_data = extract_image(result)
+
+        if not image_data:
+            return {
+                "type": "text",
+                "data": "⚠️ Ошибка обработки изображения"
+            }
+
         set_last_prompt(user_id, new_prompt)
         update_anchor(user_id, new_prompt)
 
         return {
             "type": "image",
-            "data": result["data"],
+            "data": image_data,
             "edit": True
         }
 
-    # ===== 🧠 ОБЫЧНАЯ ЛОГИКА =====
+    # ===== 🧠 ROUTER =====
     decision = decide_action(text, state["dialog"])
     action = decision["action"]
 
     mode = detect_response_mode(text)
 
-    # ===== IMAGE (НОВАЯ) =====
+    # ===== IMAGE GENERATION =====
     if action == "image":
         result = await run_with_typing(
             chat_id,
             image_process(user_id, text, state)
         )
 
+        image_data = extract_image(result)
+
+        if not image_data:
+            return {
+                "type": "text",
+                "data": "⚠️ Ошибка генерации изображения"
+            }
+
         return {
             "type": "image",
-            "data": result["data"],
+            "data": image_data,
             "edit": False
         }
 
