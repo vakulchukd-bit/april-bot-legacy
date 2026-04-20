@@ -15,11 +15,10 @@ from storage import (
     set_subscription
 )
 
-from blocks.router_system import decide_action
-from blocks.response_mode import detect_response_mode
+# 🔥 CORE
+from core.executor import execute
+
 from blocks.image_system import analyze_image
-from blocks.image_module import process as image_process
-from blocks.text_module import process as text_process
 from blocks.ui import main_keyboard, buy_keyboard
 from blocks.state_manager import (
     get_state,
@@ -128,6 +127,7 @@ async def handle(message: types.Message):
         return
 
     try:
+        # ===== PHOTO =====
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
             path = f"{user_id}.jpg"
@@ -146,6 +146,7 @@ async def handle(message: types.Message):
             await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
             return
 
+        # ===== VOICE =====
         if message.voice:
             text = await run_with_typing(
                 message.chat.id,
@@ -162,6 +163,7 @@ async def handle(message: types.Message):
 
         log_event(user_id, "text")
 
+        # ===== EDIT IMAGE =====
         if get_awaiting(user_id):
             set_awaiting(user_id, False)
 
@@ -201,43 +203,22 @@ async def handle(message: types.Message):
             )
             return
 
-        state = get_state(user_id)
-        decision = decide_action(text, state["dialog"])
-        action = decision["action"]
-        mode = detect_response_mode(text)
-
+        # ===== CORE EXECUTION =====
         if user_id != ADMIN_ID:
             if not check_subscription(user_id):
                 if not can_send_message(user_id):
                     await message.answer("⛔ Лимит сообщений исчерпан")
                     return
 
-        if action == "image":
-            if user_id != ADMIN_ID:
-                if not check_subscription(user_id):
-                    if not can_generate_image(user_id):
-                        await message.answer("⛔ Лимит картинок исчерпан")
-                        return
+        result = await execute(
+            user_id,
+            text,
+            message.chat.id,
+            run_with_typing
+        )
 
-            try:
-                result = await run_with_typing(
-                    message.chat.id,
-                    image_process(user_id, text, state)
-                )
-            except Exception as e:
-                await handle_error(bot, message, e, "image_generation")
-                return
-
-            set_image_context(user_id, {
-                "type": "generated",
-                "path": None,
-                "hint": text,
-                "full": text
-            })
-
-            set_last_prompt(user_id, text)
-            create_anchor(user_id, "image", text)
-
+        # ===== RESPONSE =====
+        if result["type"] == "image":
             log_event(user_id, "image")
 
             sent = await message.answer_photo(
@@ -245,31 +226,15 @@ async def handle(message: types.Message):
             )
 
             await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-            return
 
-        anchor = get_anchor(user_id)
-        if anchor:
-            text = f"Контекст: {anchor['current']}\n\n{text}"
+        else:
+            add_dialog(user_id, "user", text)
+            add_dialog(user_id, "assistant", result["data"])
 
-        try:
-            result = await run_with_typing(
-                message.chat.id,
-                text_process(user_id, text, state)
+            await message.answer(
+                result["data"],
+                reply_markup=main_keyboard(message.message_id)
             )
-        except Exception as e:
-            await handle_error(bot, message, e, "text_generation")
-            return
-
-        reply = result["content"]
-
-        if mode == "copy":
-            clean = reply.replace("```", "").strip()
-            reply = f"```text\n{clean}\n```"
-
-        add_dialog(user_id, "user", text)
-        add_dialog(user_id, "assistant", reply)
-
-        await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
