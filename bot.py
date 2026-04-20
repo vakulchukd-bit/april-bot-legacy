@@ -25,6 +25,14 @@ from blocks.state_manager import (
     add_dialog
 )
 
+# 🔥 ANCHOR
+from blocks.anchor_system import (
+    get_anchor,
+    create_anchor,
+    update_anchor,
+    clear_anchor
+)
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -114,6 +122,9 @@ async def handle(message: types.Message):
 
         set_awaiting(user_id, True)
 
+        # 🔥 создаём якорь (пока без hint, позже обновим)
+        create_anchor(user_id, "image", "изображение")
+
         await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
         return
 
@@ -147,7 +158,13 @@ async def handle(message: types.Message):
             except:
                 ctx["hint"] = "изображение"
 
-        base = get_last_prompt(user_id) or ctx["hint"]
+        # 🔥 якорь
+        anchor = get_anchor(user_id)
+        if anchor:
+            base = anchor["current"]
+        else:
+            base = get_last_prompt(user_id) or ctx["hint"]
+
         new_prompt = base + ", IMPORTANT: " + text
 
         result = await run_with_typing(
@@ -156,6 +173,9 @@ async def handle(message: types.Message):
         )
 
         set_last_prompt(user_id, new_prompt)
+
+        # 🔥 обновляем якорь
+        update_anchor(user_id, new_prompt)
 
         await message.answer_photo(
             BufferedInputFile(result["data"], filename="edited.png")
@@ -198,6 +218,9 @@ async def handle(message: types.Message):
 
         set_last_prompt(user_id, text)
 
+        # 🔥 якорь
+        create_anchor(user_id, "image", text)
+
         sent = await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png")
         )
@@ -206,6 +229,10 @@ async def handle(message: types.Message):
         return
 
     # ===== GPT =====
+    anchor = get_anchor(user_id)
+    if anchor:
+        text = f"Контекст: {anchor['current']}\n\n{text}"
+
     result = await run_with_typing(
         message.chat.id,
         text_process(user_id, text, state)
