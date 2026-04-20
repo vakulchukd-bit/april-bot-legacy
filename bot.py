@@ -18,26 +18,14 @@ from storage import (
 # 🔥 CORE
 from core.executor import execute
 
-from blocks.image_system import analyze_image
 from blocks.ui import main_keyboard, buy_keyboard
 from blocks.state_manager import (
-    get_state,
     set_image_context,
-    get_image_context,
     set_awaiting,
-    get_awaiting,
-    set_last_prompt,
-    get_last_prompt,
     add_dialog
 )
 
-from blocks.anchor_system import (
-    get_anchor,
-    create_anchor,
-    update_anchor,
-    clear_anchor
-)
-
+from blocks.anchor_system import create_anchor
 from blocks.error_handler import handle_error
 
 from blocks.admin_system import (
@@ -163,53 +151,14 @@ async def handle(message: types.Message):
 
         log_event(user_id, "text")
 
-        # ===== EDIT IMAGE =====
-        if get_awaiting(user_id):
-            set_awaiting(user_id, False)
-
-            ctx = get_image_context(user_id)
-            if not ctx:
-                await message.answer("❌ Нет изображения")
-                return
-
-            if not ctx["hint"]:
-                try:
-                    ctx["hint"] = await analyze_image(ctx["path"])
-                except Exception as e:
-                    await handle_error(bot, message, e, "image_analysis")
-                    ctx["hint"] = "изображение"
-
-            anchor = get_anchor(user_id)
-            base = anchor["current"] if anchor else get_last_prompt(user_id) or ctx["hint"]
-
-            new_prompt = base + ", IMPORTANT: " + text
-
-            try:
-                result = await run_with_typing(
-                    message.chat.id,
-                    image_process(user_id, new_prompt, {})
-                )
-            except Exception as e:
-                await handle_error(bot, message, e, "image_edit")
-                return
-
-            set_last_prompt(user_id, new_prompt)
-            update_anchor(user_id, new_prompt)
-
-            log_event(user_id, "image")
-
-            await message.answer_photo(
-                BufferedInputFile(result["data"], filename="edited.png")
-            )
-            return
-
-        # ===== CORE EXECUTION =====
+        # ===== LIMIT =====
         if user_id != ADMIN_ID:
             if not check_subscription(user_id):
                 if not can_send_message(user_id):
                     await message.answer("⛔ Лимит сообщений исчерпан")
                     return
 
+        # ===== CORE =====
         result = await execute(
             user_id,
             text,
