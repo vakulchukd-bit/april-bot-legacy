@@ -6,13 +6,10 @@ from blocks.analytics_storage import load_data
 TEXT_COST = 0.0005
 IMAGE_COST = 0.02
 
-# 🔥 счётчики (в памяти)
-image_counter = 0
-
 
 def add_image():
-    global image_counter
-    image_counter += 1
+    # больше не используем память
+    pass
 
 
 def calculate_cost():
@@ -20,7 +17,7 @@ def calculate_cost():
         data = load_data()
 
         total_text = data.get("messages", 0)
-        total_images = data.get("images", 0) + image_counter
+        total_images = data.get("images", 0)
 
         text_cost = total_text * TEXT_COST
         image_cost = total_images * IMAGE_COST
