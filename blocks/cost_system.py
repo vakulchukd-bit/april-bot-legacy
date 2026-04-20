@@ -2,27 +2,34 @@
 
 from blocks.analytics_storage import load_data
 
-# 💰 примерные цены (можно менять)
+# 💰 цены (примерные, можно менять)
 TEXT_COST = 0.0005
 IMAGE_COST = 0.02
 
 
 def calculate_cost():
-    data = load_data()
+    try:
+        data = load_data()
 
-    total_text = 0
-    total_images = 0
+        total_text = data.get("messages", 0)
+        total_images = data.get("images", 0)
 
-    for e in data["events"]:
-        if e["type"] == "text":
-            total_text += 1
-        elif e["type"] == "image":
-            total_images += 1
+        text_cost = total_text * TEXT_COST
+        image_cost = total_images * IMAGE_COST
 
-    total_cost = (total_text * TEXT_COST) + (total_images * IMAGE_COST)
+        total_cost = text_cost + image_cost
 
-    return {
-        "text": total_text,
-        "images": total_images,
-        "cost": round(total_cost, 4)
-    }
+        return {
+            "text": round(text_cost, 4),
+            "images": round(image_cost, 4),
+            "cost": round(total_cost, 4)
+        }
+
+    except Exception as e:
+        print("🔥 COST ERROR:", e)
+
+        return {
+            "text": 0,
+            "images": 0,
+            "cost": 0
+        }
