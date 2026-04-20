@@ -14,7 +14,15 @@ async def generate_image(prompt):
             prompt=prompt,
             size="1024x1024"
         )
-        return base64.b64decode(result.data[0].b64_json)
+
+        # 🔥 проверка ответа
+        if not result or not result.data:
+            return None
+
+        try:
+            return base64.b64decode(result.data[0].b64_json)
+        except Exception:
+            return None
 
     return await asyncio.to_thread(run)
 
@@ -23,20 +31,29 @@ async def process(user_id, text, state):
     try:
         img = await asyncio.wait_for(generate_image(text), timeout=30)
 
+        # 🔥 если пустой результат
+        if not img:
+            return {
+                "type": "error",
+                "data": None,
+                "error": "empty_result"
+            }
+
         return {
             "type": "image",
-            "data": img,
-            "caption": "Оцени 👇"
+            "data": img
         }
 
     except asyncio.TimeoutError:
         return {
             "type": "error",
-            "text": "⏳ Слишком долго генерируется. Попробуй ещё раз"
+            "data": None,
+            "error": "timeout"
         }
 
     except Exception as e:
         return {
             "type": "error",
-            "text": "❌ Ошибка генерации картинки"
+            "data": None,
+            "error": str(e)
         }
