@@ -12,6 +12,7 @@ from storage import check_subscription, set_subscription, should_warn, can_send_
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
+from blocks.image_module import process as image_process
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -94,17 +95,6 @@ async def run_with_typing(chat_id, coro):
         return await coro
     finally:
         task.cancel()
-
-# ===== IMAGE =====
-async def generate_image(prompt):
-    def run():
-        result = client.images.generate(
-            model="gpt-image-1",
-            prompt=enhance_prompt(prompt),
-            size="1024x1024"
-        )
-        return base64.b64decode(result.data[0].b64_json)
-    return await asyncio.to_thread(run)
 
 # ===== VOICE =====
 async def voice_to_text(message, user_id):
@@ -190,15 +180,15 @@ async def handle(message: types.Message):
         base = last_prompt.get(user_id, ctx["hint"])
         new_prompt = base + ", IMPORTANT: " + text
 
-        img = await run_with_typing(
+        result = await run_with_typing(
             message.chat.id,
-            generate_image(new_prompt)
+            image_process(user_id, new_prompt, {})
         )
 
         last_prompt[user_id] = new_prompt
 
         await message.answer_photo(
-            BufferedInputFile(img, filename="edited.png")
+            BufferedInputFile(result["data"], filename="edited.png")
         )
         return
 
@@ -227,7 +217,10 @@ async def handle(message: types.Message):
         "generate image", "create image",
         "draw", "make a picture"
     ]):
-        img = await run_with_typing(message.chat.id, generate_image(text))
+        result = await run_with_typing(
+            message.chat.id,
+            image_process(user_id, text, {})
+        )
 
         image_context[user_id] = {
             "type": "generated",
@@ -239,7 +232,7 @@ async def handle(message: types.Message):
         last_prompt[user_id] = text
 
         sent = await message.answer_photo(
-            BufferedInputFile(img, filename="image.png")
+            BufferedInputFile(result["data"], filename="image.png")
         )
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
@@ -265,7 +258,10 @@ async def handle(message: types.Message):
                     await message.answer("⛔ Лимит картинок исчерпан")
                     return
 
-        img = await run_with_typing(message.chat.id, generate_image(text))
+        result = await run_with_typing(
+            message.chat.id,
+            image_process(user_id, text, {})
+        )
 
         image_context[user_id] = {
             "type": "generated",
@@ -277,7 +273,7 @@ async def handle(message: types.Message):
         last_prompt[user_id] = text
 
         sent = await message.answer_photo(
-            BufferedInputFile(img, filename="image.png")
+            BufferedInputFile(result["data"], filename="image.png")
         )
 
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
