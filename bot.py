@@ -4,7 +4,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import BufferedInputFile
 from openai import OpenAI
 
 from storage import check_subscription, set_subscription, should_warn, can_send_message, can_generate_image
@@ -13,6 +13,7 @@ from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
 from blocks.image_module import process as image_process
 from blocks.text_module import process as text_process
+from blocks.ui import main_keyboard, buy_keyboard
 from blocks.state_manager import (
     get_state,
     set_image_context,
@@ -42,23 +43,6 @@ class Handler(BaseHTTPRequestHandler):
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
-
-# ===== UI =====
-def main_keyboard(msg_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍", callback_data=f"like_{msg_id}"),
-            InlineKeyboardButton(text="👎", callback_data=f"dislike_{msg_id}")
-        ]
-    ])
-
-def buy_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Да", callback_data="buy_yes"),
-            InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-        ]
-    ])
 
 # ===== TYPING =====
 async def typing_loop(chat_id):
