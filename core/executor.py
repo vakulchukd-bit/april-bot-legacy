@@ -13,9 +13,9 @@ from blocks.state_manager import (
 )
 from blocks.anchor_system import get_anchor, update_anchor
 from blocks.image_system import analyze_image
+from blocks.mode_manager import get_mode, set_mode, clear_mode
 
 
-# ===== SAFE IMAGE PARSE =====
 def extract_image(result):
     if not isinstance(result, dict):
         return None
@@ -30,9 +30,11 @@ def extract_image(result):
 
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
+    mode = get_mode(user_id)
 
-    # ===== 🧠 IMAGE EDIT =====
-    if get_awaiting(user_id):
+    # ===== IMAGE EDIT =====
+    if mode == "image_edit" or get_awaiting(user_id):
+        set_mode(user_id, "image_edit")
         set_awaiting(user_id, False)
 
         ctx = get_image_context(user_id)
@@ -71,18 +73,19 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         return {
             "type": "image",
-            "data": image_data,
-            "edit": True
+            "data": image_data
         }
 
-    # ===== 🧠 ROUTER =====
+    # ===== ROUTER =====
     decision = decide_action(text, state["dialog"])
     action = decision["action"]
 
-    mode = detect_response_mode(text)
+    mode_response = detect_response_mode(text)
 
-    # ===== IMAGE GENERATION =====
+    # ===== IMAGE GENERATE =====
     if action == "image":
+        set_mode(user_id, "image_generate")
+
         result = await run_with_typing(
             chat_id,
             image_process(user_id, text, state)
@@ -98,11 +101,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         return {
             "type": "image",
-            "data": image_data,
-            "edit": False
+            "data": image_data
         }
 
     # ===== TEXT =====
+    clear_mode(user_id)
+
     anchor = get_anchor(user_id)
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
@@ -114,7 +118,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     reply = result["content"]
 
-    if mode == "copy":
+    if mode_response == "copy":
         clean = reply.replace("```", "").strip()
         reply = f"```text\n{clean}\n```"
 
