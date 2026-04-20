@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
 from openai import OpenAI
 
-from storage import check_subscription, set_subscription, should_warn, can_send_message, can_generate_image
+from storage import check_subscription, should_warn, can_send_message, can_generate_image
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
@@ -18,11 +18,10 @@ from blocks.state_manager import (
     get_state,
     set_image_context,
     get_image_context,
-    set_awaiting,
-    get_awaiting,
-    set_last_prompt,
-    get_last_prompt,
-    add_dialog
+    add_dialog,
+    set_task,
+    get_task,
+    clear_task
 )
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -60,22 +59,6 @@ async def run_with_typing(chat_id, coro):
     finally:
         task.cancel()
 
-# ===== VOICE =====
-async def voice_to_text(message, user_id):
-    file = await bot.get_file(message.voice.file_id)
-    path = f"{user_id}.ogg"
-    await bot.download_file(file.file_path, destination=path)
-
-    def run():
-        with open(path, "rb") as f:
-            t = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=f
-            )
-        return t.text
-
-    return await asyncio.to_thread(run)
-
 # ===== MAIN =====
 @dp.message(lambda m: m.text or m.photo or m.voice)
 async def handle(message: types.Message):
@@ -93,107 +76,66 @@ async def handle(message: types.Message):
         )
         return
 
-    # ===== PHOTO =====
+    # ===== PHOTO (НОВАЯ ЗАДАЧА) =====
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
         await bot.download_file(file.file_path, destination=path)
 
+        try:
+            hint = await analyze_image(path)
+        except:
+            hint = "изображение"
+
         set_image_context(user_id, {
             "type": "uploaded",
             "path": path,
-            "hint": None,
-            "full": None
+            "hint": hint
         })
 
-        set_awaiting(user_id, True)
+        set_task(user_id, {
+            "type": "image_edit",
+            "source": "uploaded",
+            "hint": hint
+        })
 
-        await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
+        await message.answer("📷 Изображение получено\n\n✏️ Что изменить?")
         return
 
-    # ===== VOICE =====
-    if message.voice:
-        text = await run_with_typing(
-            message.chat.id,
-            voice_to_text(message, user_id)
-        )
+    text = message.text or ""
 
-        if not text or text.strip() == "":
-            await message.answer("🎤 Не расслышал, попробуй ещё раз")
-            return
+    # ===== ПРОДОЛЖЕНИЕ ЗАДАЧИ =====
+    task = get_task(user_id)
 
-        await message.answer(f"🎤 {text}")
-    else:
-        text = message.text or ""
-
-    # ===== РЕДАКТИРОВАНИЕ =====
-    if get_awaiting(user_id):
-        set_awaiting(user_id, False)
-
-        ctx = get_image_context(user_id)
-        if not ctx:
-            await message.answer("❌ Нет изображения")
-            return
-
-        if not ctx["hint"]:
-            try:
-                ctx["hint"] = await analyze_image(ctx["path"])
-            except:
-                ctx["hint"] = "изображение"
-
-        base = get_last_prompt(user_id) or ctx["hint"]
-        new_prompt = base + ", IMPORTANT: " + text
+    if task and task["type"] == "image_edit":
+        base = task.get("hint", "")
+        new_prompt = base + ", " + text
 
         result = await run_with_typing(
             message.chat.id,
             image_process(user_id, new_prompt, {})
         )
 
-        set_last_prompt(user_id, new_prompt)
-
         await message.answer_photo(
-            BufferedInputFile(result["data"], filename="edited.png")
+            BufferedInputFile(result["data"], filename="edit.png")
         )
+
         return
 
-    # ===== ПЕРЕХВАТ ОПИСАНИЯ =====
-    if any(w in text.lower() for w in [
-        "что на картинке", "что здесь", "опиши", "что изображено"
-    ]):
-        ctx = get_image_context(user_id)
-        if ctx:
-            if not ctx["hint"]:
-                try:
-                    ctx["hint"] = await analyze_image(ctx["path"])
-                except:
-                    ctx["hint"] = "Не удалось определить"
-            await message.answer(ctx["hint"])
-            return
-
-    # ===== ПРЯМОЙ ТРИГГЕР ГЕНЕРАЦИИ =====
+    # ===== ТРИГГЕР КАРТИНКИ =====
     if any(w in text.lower() for w in [
         "сгенерируй", "создай", "нарисуй",
-        "картинку", "изображение",
-        "можешь сгенерировать",
-        "сделай картинку",
-        "хочу картинку",
-        "дай картинку",
-        "generate image", "create image",
-        "draw", "make a picture"
+        "картинку", "изображение"
     ]):
         result = await run_with_typing(
             message.chat.id,
             image_process(user_id, text, {})
         )
 
-        set_image_context(user_id, {
-            "type": "generated",
-            "path": None,
-            "hint": text,
-            "full": text
+        set_task(user_id, {
+            "type": "image_generate",
+            "prompt": text
         })
-
-        set_last_prompt(user_id, text)
 
         sent = await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png")
@@ -204,39 +146,22 @@ async def handle(message: types.Message):
 
     # ===== ROUTER =====
     state = get_state(user_id)
-
     decision = decide_action(text, state["dialog"])
     action = decision["action"]
 
     mode = detect_response_mode(text)
 
-    if user_id != ADMIN_ID:
-        if not check_subscription(user_id):
-            if not can_send_message(user_id):
-                await message.answer("⛔ Лимит сообщений исчерпан")
-                return
-
     # ===== IMAGE =====
     if action == "image":
-        if user_id != ADMIN_ID:
-            if not check_subscription(user_id):
-                if not can_generate_image(user_id):
-                    await message.answer("⛔ Лимит картинок исчерпан")
-                    return
-
         result = await run_with_typing(
             message.chat.id,
             image_process(user_id, text, state)
         )
 
-        set_image_context(user_id, {
-            "type": "generated",
-            "path": None,
-            "hint": text,
-            "full": text
+        set_task(user_id, {
+            "type": "image_generate",
+            "prompt": text
         })
-
-        set_last_prompt(user_id, text)
 
         sent = await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png")
@@ -259,6 +184,8 @@ async def handle(message: types.Message):
 
     add_dialog(user_id, "user", text)
     add_dialog(user_id, "assistant", reply)
+
+    clear_task(user_id)  # смена темы
 
     await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
