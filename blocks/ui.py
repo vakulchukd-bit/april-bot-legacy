@@ -2,6 +2,7 @@
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+
 def main_keyboard(msg_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -9,6 +10,7 @@ def main_keyboard(msg_id):
             InlineKeyboardButton(text="👎", callback_data=f"dislike_{msg_id}")
         ]
     ])
+
 
 def buy_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
