@@ -108,6 +108,14 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
+    # 🔥 ADMIN ПРИОРИТЕТ (СРАЗУ)
+    if message.text == "/admin":
+        if user_id == ADMIN_ID:
+            await message.answer(get_admin_panel())
+        else:
+            await message.answer("⛔ Ошибка доступа")
+        return
+
     # 🔥 SESSION CHECK
     if is_session_expired(user_id):
         clear_anchor(user_id)
@@ -119,17 +127,17 @@ async def handle(message: types.Message):
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
-    access = True if user_id == ADMIN_ID else check_subscription(user_id)
+    # 🔥 ДОСТУП (админ всегда проходит)
+    if user_id == ADMIN_ID:
+        access = True
+    else:
+        access = check_subscription(user_id)
 
     if not access:
         await message.answer(
             "💳 Подписка 30 дней — 150 грн\n\nОформить?",
             reply_markup=buy_keyboard()
         )
-        return
-
-    if message.text == "/admin" and user_id == ADMIN_ID:
-        await message.answer(get_admin_panel())
         return
 
     try:
@@ -190,10 +198,8 @@ async def handle(message: types.Message):
         if result["type"] == "image":
             log_event(user_id, "image")
 
-            # 🔥 СЖАТИЕ
             compressed = compress_image(result["data"])
 
-            # 🔥 RETRY
             for attempt in range(3):
                 try:
                     sent = await message.answer_photo(
