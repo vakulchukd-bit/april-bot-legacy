@@ -16,18 +16,6 @@ from blocks.image_system import analyze_image
 from blocks.mode_manager import get_mode, set_mode, clear_mode
 
 
-def extract_image(result):
-    if not isinstance(result, dict):
-        return None
-
-    return (
-        result.get("data")
-        or result.get("image")
-        or result.get("url")
-        or result.get("b64_json")
-    )
-
-
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -60,9 +48,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
             image_process(user_id, new_prompt, {})
         )
 
-        image_data = extract_image(result)
-
-        if not image_data:
+        # 🔥 ПРОСТАЯ ЛОГИКА
+        if result.get("type") == "error":
             return {
                 "type": "text",
                 "data": "⚠️ Ошибка обработки изображения"
@@ -73,7 +60,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         return {
             "type": "image",
-            "data": image_data
+            "data": result["data"]
         }
 
     # ===== ROUTER =====
@@ -91,9 +78,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
             image_process(user_id, text, state)
         )
 
-        image_data = extract_image(result)
-
-        if not image_data:
+        # 🔥 ПРОСТАЯ ЛОГИКА
+        if result.get("type") == "error":
             return {
                 "type": "text",
                 "data": "⚠️ Ошибка генерации изображения"
@@ -101,7 +87,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         return {
             "type": "image",
-            "data": image_data
+            "data": result["data"]
         }
 
     # ===== TEXT =====
