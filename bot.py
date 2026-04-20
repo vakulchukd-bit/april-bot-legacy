@@ -12,7 +12,7 @@ from storage import (
     should_warn,
     can_send_message,
     can_generate_image,
-    set_subscription  # ✅ ИСПРАВЛЕНО
+    set_subscription
 )
 
 from blocks.router_system import decide_action
@@ -32,7 +32,6 @@ from blocks.state_manager import (
     add_dialog
 )
 
-# 🔥 ANCHOR
 from blocks.anchor_system import (
     get_anchor,
     create_anchor,
@@ -40,16 +39,13 @@ from blocks.anchor_system import (
     clear_anchor
 )
 
-# 🔥 ERROR HANDLER
 from blocks.error_handler import handle_error
 
-# 🔥 ADMIN SYSTEM
 from blocks.admin_system import (
     register_user,
     log_event,
     get_admin_panel
 )
-
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -292,17 +288,46 @@ async def dislike(c: types.CallbackQuery):
     await c.message.answer("👎 Принял!")
 
 
-# 🔥 КНОПКИ ПОКУПКИ (ИСПРАВЛЕНО)
+# ===== ЗАЯВКА =====
 @dp.callback_query(F.data == "buy_yes")
 async def buy_yes(c: types.CallbackQuery):
     user_id = c.from_user.id
 
-    try:
-        set_subscription(user_id, days=30)  # ✅ теперь правильно
-        await c.message.answer("✅ Подписка активирована на 30 дней!")
-    except Exception as e:
-        await handle_error(bot, c.message, e, "buy_subscription")
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user_id}"),
+            types.InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}")
+        ]
+    ])
 
+    await bot.send_message(
+        ADMIN_ID,
+        f"💳 Запрос на подписку\n\n👤 User ID: {user_id}",
+        reply_markup=keyboard
+    )
+
+    await c.message.answer("⏳ Заявка отправлена администратору")
+    await c.answer()
+
+
+# ===== ПОДТВЕРЖДЕНИЕ =====
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve(c: types.CallbackQuery):
+    user_id = int(c.data.split("_")[1])
+
+    set_subscription(user_id, 30)
+
+    await bot.send_message(user_id, "✅ Подписка активирована!")
+    await c.message.answer(f"✔️ Выдано: {user_id}")
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(c: types.CallbackQuery):
+    user_id = int(c.data.split("_")[1])
+
+    await bot.send_message(user_id, "❌ Заявка отклонена")
+    await c.message.answer(f"❌ Отклонено: {user_id}")
     await c.answer()
 
 
