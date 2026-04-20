@@ -7,7 +7,14 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
 from openai import OpenAI
 
-from storage import check_subscription, should_warn, can_send_message, can_generate_image
+from storage import (
+    check_subscription,
+    should_warn,
+    can_send_message,
+    can_generate_image,
+    set_subscription  # ✅ ИСПРАВЛЕНО
+)
+
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
@@ -42,9 +49,6 @@ from blocks.admin_system import (
     log_event,
     get_admin_panel
 )
-
-# 🔥 ДОБАВЛЕНО: подписка
-from storage import activate_subscription
 
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -288,13 +292,13 @@ async def dislike(c: types.CallbackQuery):
     await c.message.answer("👎 Принял!")
 
 
-# 🔥 ДОБАВЛЕНО: КНОПКИ ПОКУПКИ
+# 🔥 КНОПКИ ПОКУПКИ (ИСПРАВЛЕНО)
 @dp.callback_query(F.data == "buy_yes")
 async def buy_yes(c: types.CallbackQuery):
     user_id = c.from_user.id
 
     try:
-        activate_subscription(user_id, days=30)
+        set_subscription(user_id, days=30)  # ✅ теперь правильно
         await c.message.answer("✅ Подписка активирована на 30 дней!")
     except Exception as e:
         await handle_error(bot, c.message, e, "buy_subscription")
