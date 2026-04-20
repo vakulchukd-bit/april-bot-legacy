@@ -33,6 +33,9 @@ from blocks.anchor_system import (
     clear_anchor
 )
 
+# 🔥 ERROR HANDLER
+from blocks.error_handler import handle_error
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -107,147 +110,157 @@ async def handle(message: types.Message):
         )
         return
 
-    # ===== PHOTO =====
-    if message.photo:
-        file = await bot.get_file(message.photo[-1].file_id)
-        path = f"{user_id}.jpg"
-        await bot.download_file(file.file_path, destination=path)
+    try:
+        # ===== PHOTO =====
+        if message.photo:
+            file = await bot.get_file(message.photo[-1].file_id)
+            path = f"{user_id}.jpg"
+            await bot.download_file(file.file_path, destination=path)
 
-        set_image_context(user_id, {
-            "type": "uploaded",
-            "path": path,
-            "hint": None,
-            "full": None
-        })
+            set_image_context(user_id, {
+                "type": "uploaded",
+                "path": path,
+                "hint": None,
+                "full": None
+            })
 
-        set_awaiting(user_id, True)
+            set_awaiting(user_id, True)
+            create_anchor(user_id, "image", "изображение")
 
-        # 🔥 создаём якорь (пока без hint, позже обновим)
-        create_anchor(user_id, "image", "изображение")
-
-        await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
-        return
-
-    # ===== VOICE =====
-    if message.voice:
-        text = await run_with_typing(
-            message.chat.id,
-            voice_to_text(message, user_id)
-        )
-
-        if not text or text.strip() == "":
-            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+            await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
             return
 
-        await message.answer(f"🎤 {text}")
-    else:
-        text = message.text or ""
+        # ===== VOICE =====
+        if message.voice:
+            text = await run_with_typing(
+                message.chat.id,
+                voice_to_text(message, user_id)
+            )
 
-    # ===== РЕДАКТИРОВАНИЕ =====
-    if get_awaiting(user_id):
-        set_awaiting(user_id, False)
-
-        ctx = get_image_context(user_id)
-        if not ctx:
-            await message.answer("❌ Нет изображения")
-            return
-
-        if not ctx["hint"]:
-            try:
-                ctx["hint"] = await analyze_image(ctx["path"])
-            except:
-                ctx["hint"] = "изображение"
-
-        # 🔥 якорь
-        anchor = get_anchor(user_id)
-        if anchor:
-            base = anchor["current"]
-        else:
-            base = get_last_prompt(user_id) or ctx["hint"]
-
-        new_prompt = base + ", IMPORTANT: " + text
-
-        result = await run_with_typing(
-            message.chat.id,
-            image_process(user_id, new_prompt, {})
-        )
-
-        set_last_prompt(user_id, new_prompt)
-
-        # 🔥 обновляем якорь
-        update_anchor(user_id, new_prompt)
-
-        await message.answer_photo(
-            BufferedInputFile(result["data"], filename="edited.png")
-        )
-        return
-
-    # ===== ROUTER =====
-    state = get_state(user_id)
-
-    decision = decide_action(text, state["dialog"])
-    action = decision["action"]
-
-    mode = detect_response_mode(text)
-
-    if user_id != ADMIN_ID:
-        if not check_subscription(user_id):
-            if not can_send_message(user_id):
-                await message.answer("⛔ Лимит сообщений исчерпан")
+            if not text or text.strip() == "":
+                await message.answer("🎤 Не расслышал, попробуй ещё раз")
                 return
 
-    # ===== IMAGE =====
-    if action == "image":
+            await message.answer(f"🎤 {text}")
+        else:
+            text = message.text or ""
+
+        # ===== EDIT =====
+        if get_awaiting(user_id):
+            set_awaiting(user_id, False)
+
+            ctx = get_image_context(user_id)
+            if not ctx:
+                await message.answer("❌ Нет изображения")
+                return
+
+            if not ctx["hint"]:
+                try:
+                    ctx["hint"] = await analyze_image(ctx["path"])
+                except Exception as e:
+                    await handle_error(bot, message, e, "image_analysis")
+                    ctx["hint"] = "изображение"
+
+            anchor = get_anchor(user_id)
+            if anchor:
+                base = anchor["current"]
+            else:
+                base = get_last_prompt(user_id) or ctx["hint"]
+
+            new_prompt = base + ", IMPORTANT: " + text
+
+            try:
+                result = await run_with_typing(
+                    message.chat.id,
+                    image_process(user_id, new_prompt, {})
+                )
+            except Exception as e:
+                await handle_error(bot, message, e, "image_edit")
+                return
+
+            set_last_prompt(user_id, new_prompt)
+            update_anchor(user_id, new_prompt)
+
+            await message.answer_photo(
+                BufferedInputFile(result["data"], filename="edited.png")
+            )
+            return
+
+        # ===== ROUTER =====
+        state = get_state(user_id)
+
+        decision = decide_action(text, state["dialog"])
+        action = decision["action"]
+
+        mode = detect_response_mode(text)
+
         if user_id != ADMIN_ID:
             if not check_subscription(user_id):
-                if not can_generate_image(user_id):
-                    await message.answer("⛔ Лимит картинок исчерпан")
+                if not can_send_message(user_id):
+                    await message.answer("⛔ Лимит сообщений исчерпан")
                     return
 
-        result = await run_with_typing(
-            message.chat.id,
-            image_process(user_id, text, state)
-        )
+        # ===== IMAGE =====
+        if action == "image":
+            if user_id != ADMIN_ID:
+                if not check_subscription(user_id):
+                    if not can_generate_image(user_id):
+                        await message.answer("⛔ Лимит картинок исчерпан")
+                        return
 
-        set_image_context(user_id, {
-            "type": "generated",
-            "path": None,
-            "hint": text,
-            "full": text
-        })
+            try:
+                result = await run_with_typing(
+                    message.chat.id,
+                    image_process(user_id, text, state)
+                )
+            except Exception as e:
+                await handle_error(bot, message, e, "image_generation")
+                return
 
-        set_last_prompt(user_id, text)
+            set_image_context(user_id, {
+                "type": "generated",
+                "path": None,
+                "hint": text,
+                "full": text
+            })
 
-        # 🔥 якорь
-        create_anchor(user_id, "image", text)
+            set_last_prompt(user_id, text)
+            create_anchor(user_id, "image", text)
 
-        sent = await message.answer_photo(
-            BufferedInputFile(result["data"], filename="image.png")
-        )
+            sent = await message.answer_photo(
+                BufferedInputFile(result["data"], filename="image.png")
+            )
 
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
+            await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+            return
 
-    # ===== GPT =====
-    anchor = get_anchor(user_id)
-    if anchor:
-        text = f"Контекст: {anchor['current']}\n\n{text}"
+        # ===== GPT =====
+        anchor = get_anchor(user_id)
+        if anchor:
+            text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    result = await run_with_typing(
-        message.chat.id,
-        text_process(user_id, text, state)
-    )
+        try:
+            result = await run_with_typing(
+                message.chat.id,
+                text_process(user_id, text, state)
+            )
+        except Exception as e:
+            await handle_error(bot, message, e, "text_generation")
+            return
 
-    reply = result["content"]
+        reply = result["content"]
 
-    if mode == "copy":
-        clean = reply.replace("```", "").strip()
-        reply = f"```text\n{clean}\n```"
+        if mode == "copy":
+            clean = reply.replace("```", "").strip()
+            reply = f"```text\n{clean}\n```"
 
-    add_dialog(user_id, "user", text)
-    add_dialog(user_id, "assistant", reply)
+        add_dialog(user_id, "user", text)
+        add_dialog(user_id, "assistant", reply)
 
-    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+        await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+
+    except Exception as e:
+        await handle_error(bot, message, e, "global_handler")
 
 
 # ===== CALLBACKS =====
