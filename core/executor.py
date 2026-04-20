@@ -68,26 +68,22 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     mode_response = detect_response_mode(text)
 
-    # ===== IMAGE GENERATE (С НОРМАЛЬНЫМ UX) =====
+    # ===== IMAGE GENERATE =====
     if action == "image":
         clear_mode(user_id)
 
-        # 🔹 ПЕРВАЯ ПОПЫТКА
         result = await run_with_typing(
             chat_id,
             image_generate(user_id, text, state)
         )
 
-        # 🔸 если сразу успех
         if result.get("type") == "image":
             return {
                 "type": "image",
                 "data": result["data"]
             }
 
-        # 🔸 если нужно повторить
         if result.get("type") == "retry_notice":
-            # 👉 ВАЖНО: показываем пользователю сообщение
             return {
                 "type": "retry",
                 "data": result["data"],
@@ -95,7 +91,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "text": text
             }
 
-        # 🔸 ошибка
         return {
             "type": "text",
             "data": "⚠️ Ошибка генерации изображения"
@@ -108,6 +103,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         ctx = get_image_context(user_id)
         if not ctx or not ctx["path"]:
+            clear_mode(user_id)
             return {
                 "type": "text",
                 "data": "❌ Нет изображения"
@@ -130,6 +126,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         )
 
         if result.get("type") == "error":
+            clear_mode(user_id)
             return {
                 "type": "text",
                 "data": "⚠️ Ошибка редактирования изображения"
@@ -137,6 +134,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         set_last_prompt(user_id, new_prompt)
         update_anchor(user_id, new_prompt)
+
+        clear_mode(user_id)  # 🔥 ВОТ ГЛАВНЫЙ ФИКС
 
         return {
             "type": "image",
