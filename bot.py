@@ -43,6 +43,10 @@ from blocks.admin_system import (
     get_admin_panel
 )
 
+# 🔥 ДОБАВЛЕНО: подписка
+from storage import activate_subscription
+
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -105,7 +109,6 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    # 🔥 регистрируем пользователя
     register_user(user_id)
 
     if should_warn(user_id):
@@ -120,13 +123,11 @@ async def handle(message: types.Message):
         )
         return
 
-    # 🔥 команда админки
     if message.text == "/admin" and user_id == ADMIN_ID:
         await message.answer(get_admin_panel())
         return
 
     try:
-        # ===== PHOTO =====
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
             path = f"{user_id}.jpg"
@@ -145,7 +146,6 @@ async def handle(message: types.Message):
             await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
             return
 
-        # ===== VOICE =====
         if message.voice:
             text = await run_with_typing(
                 message.chat.id,
@@ -160,10 +160,8 @@ async def handle(message: types.Message):
         else:
             text = message.text or ""
 
-        # 🔥 лог текстового события
         log_event(user_id, "text")
 
-        # ===== EDIT =====
         if get_awaiting(user_id):
             set_awaiting(user_id, False)
 
@@ -180,10 +178,7 @@ async def handle(message: types.Message):
                     ctx["hint"] = "изображение"
 
             anchor = get_anchor(user_id)
-            if anchor:
-                base = anchor["current"]
-            else:
-                base = get_last_prompt(user_id) or ctx["hint"]
+            base = anchor["current"] if anchor else get_last_prompt(user_id) or ctx["hint"]
 
             new_prompt = base + ", IMPORTANT: " + text
 
@@ -199,7 +194,6 @@ async def handle(message: types.Message):
             set_last_prompt(user_id, new_prompt)
             update_anchor(user_id, new_prompt)
 
-            # 🔥 лог картинки
             log_event(user_id, "image")
 
             await message.answer_photo(
@@ -207,12 +201,9 @@ async def handle(message: types.Message):
             )
             return
 
-        # ===== ROUTER =====
         state = get_state(user_id)
-
         decision = decide_action(text, state["dialog"])
         action = decision["action"]
-
         mode = detect_response_mode(text)
 
         if user_id != ADMIN_ID:
@@ -221,7 +212,6 @@ async def handle(message: types.Message):
                     await message.answer("⛔ Лимит сообщений исчерпан")
                     return
 
-        # ===== IMAGE =====
         if action == "image":
             if user_id != ADMIN_ID:
                 if not check_subscription(user_id):
@@ -248,7 +238,6 @@ async def handle(message: types.Message):
             set_last_prompt(user_id, text)
             create_anchor(user_id, "image", text)
 
-            # 🔥 лог картинки
             log_event(user_id, "image")
 
             sent = await message.answer_photo(
@@ -258,7 +247,6 @@ async def handle(message: types.Message):
             await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
             return
 
-        # ===== GPT =====
         anchor = get_anchor(user_id)
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
@@ -298,6 +286,26 @@ async def like(c: types.CallbackQuery):
 async def dislike(c: types.CallbackQuery):
     await c.answer()
     await c.message.answer("👎 Принял!")
+
+
+# 🔥 ДОБАВЛЕНО: КНОПКИ ПОКУПКИ
+@dp.callback_query(F.data == "buy_yes")
+async def buy_yes(c: types.CallbackQuery):
+    user_id = c.from_user.id
+
+    try:
+        activate_subscription(user_id, days=30)
+        await c.message.answer("✅ Подписка активирована на 30 дней!")
+    except Exception as e:
+        await handle_error(bot, c.message, e, "buy_subscription")
+
+    await c.answer()
+
+
+@dp.callback_query(F.data == "buy_no")
+async def buy_no(c: types.CallbackQuery):
+    await c.message.answer("Ок, если передумаешь — напиши 🙂")
+    await c.answer()
 
 
 # ===== START =====
