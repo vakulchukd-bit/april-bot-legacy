@@ -1,7 +1,10 @@
 from datetime import datetime
+import pytz
+
 
 def get_time_context():
-    now = datetime.now()
+    kyiv_tz = pytz.timezone("Europe/Kyiv")
+    now = datetime.now(kyiv_tz)
 
     return {
         "datetime": now.strftime("%Y-%m-%d %H:%M"),
@@ -14,7 +17,7 @@ def get_time_context():
 def get_location_context():
     return {
         "country": "Украина",
-        "timezone": "GMT+3",
+        "timezone": "Europe/Kyiv",
         "city": "не определён (по умолчанию Украина)"
     }
 
@@ -32,6 +35,7 @@ def build_context_text():
 - Страна: {loc['country']}
 
 ВАЖНО:
-Ты находишься в текущем времени и должен отвечать, исходя из актуальной реальности.
+Ты находишься в реальном текущем времени.
+Отвечай, исходя из актуальной даты и времени.
 Не используй устаревшие данные.
 """
