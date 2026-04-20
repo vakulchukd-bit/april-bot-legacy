@@ -25,7 +25,7 @@ from blocks.state_manager import (
     add_dialog
 )
 
-from blocks.anchor_system import create_anchor
+from blocks.anchor_system import create_anchor, clear_anchor
 from blocks.error_handler import handle_error
 
 from blocks.admin_system import (
@@ -35,7 +35,10 @@ from blocks.admin_system import (
 )
 
 # 🔥 MODE
-from blocks.mode_manager import set_mode
+from blocks.mode_manager import set_mode, clear_mode
+
+# 🔥 SESSION
+from blocks.session_manager import is_session_expired
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -101,6 +104,14 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
+    # 🔥 SESSION CHECK
+    if is_session_expired(user_id):
+        clear_anchor(user_id)
+        clear_mode(user_id)
+        set_image_context(user_id, None)
+
+        await message.answer("🧠 Сессия обновлена. Начнём заново 🙂")
+
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
@@ -132,7 +143,7 @@ async def handle(message: types.Message):
             })
 
             set_awaiting(user_id, True)
-            set_mode(user_id, "image_edit")  # 🔥 ВАЖНО
+            set_mode(user_id, "image_edit")
 
             create_anchor(user_id, "image", "изображение")
 
