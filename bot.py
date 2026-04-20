@@ -34,6 +34,9 @@ from blocks.admin_system import (
     get_admin_panel
 )
 
+# 🔥 MODE
+from blocks.mode_manager import set_mode
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -129,6 +132,8 @@ async def handle(message: types.Message):
             })
 
             set_awaiting(user_id, True)
+            set_mode(user_id, "image_edit")  # 🔥 ВАЖНО
+
             create_anchor(user_id, "image", "изображение")
 
             await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
