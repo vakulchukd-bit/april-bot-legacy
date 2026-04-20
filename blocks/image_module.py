@@ -20,12 +20,10 @@ async def generate_image(prompt):
 
             print("📦 RAW RESULT:", result)
 
-            # проверка ответа
             if not result or not result.data:
                 print("❌ EMPTY RESULT FROM OPENAI")
                 return None
 
-            # проверяем наличие base64
             if not hasattr(result.data[0], "b64_json"):
                 print("❌ NO b64_json IN RESPONSE:", result.data[0])
                 return None
@@ -47,27 +45,25 @@ async def generate_image(prompt):
 
 async def process(user_id, text, state):
     try:
-        img = await asyncio.wait_for(generate_image(text), timeout=30)
+        # ===== ПЕРВАЯ ПОПЫТКА =====
+        try:
+            img = await asyncio.wait_for(generate_image(text), timeout=60)
+        except asyncio.TimeoutError:
+            print("⏱️ TIMEOUT FIRST ATTEMPT")
+            img = None
 
-        if not img:
+        if img:
             return {
-                "type": "error",
-                "data": None,
-                "error": "generation_failed"
+                "type": "image",
+                "data": img
             }
 
-        return {
-            "type": "image",
-            "data": img
-        }
-
-    except asyncio.TimeoutError:
-        print("⏱️ IMAGE GENERATION TIMEOUT")
+        # ===== СИГНАЛ О ПОВТОРЕ =====
+        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
 
         return {
-            "type": "error",
-            "data": None,
-            "error": "timeout"
+            "type": "retry_notice",
+            "data": "⏳ Картинка генерируется дольше обычного… пробую ещё раз"
         }
 
     except Exception as e:
@@ -77,4 +73,34 @@ async def process(user_id, text, state):
             "type": "error",
             "data": None,
             "error": str(e)
+        }
+
+
+# 🔥 ВТОРАЯ ПОПЫТКА (отдельно вызывается)
+async def retry_process(user_id, text, state):
+    try:
+        try:
+            img = await asyncio.wait_for(generate_image(text), timeout=60)
+        except asyncio.TimeoutError:
+            print("⏱️ TIMEOUT SECOND ATTEMPT")
+            img = None
+
+        if img:
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        # ===== ФИНАЛЬНАЯ ОШИБКА =====
+        return {
+            "type": "final_error",
+            "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
+        }
+
+    except Exception as e:
+        print("🔥 RETRY PROCESS ERROR:", e)
+
+        return {
+            "type": "final_error",
+            "data": "⚠️ Сервис временно недоступен"
         }
