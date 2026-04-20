@@ -18,6 +18,9 @@ from blocks.anchor_system import get_anchor, update_anchor
 from blocks.image_system import analyze_image
 from blocks.mode_manager import get_mode, set_mode, clear_mode
 
+# 🔥 НОВОЕ — КОНТЕКСТ
+from blocks.context_system import build_context_text
+
 
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
@@ -61,15 +64,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
-    # ===== ROUTER (ПЕРЕНЕСЁН ВВЕРХ) =====
+    # ===== ROUTER =====
     decision = decide_action(text, state["dialog"])
     action = decision["action"]
 
     mode_response = detect_response_mode(text)
 
-    # ===== IMAGE GENERATE (ПРИОРИТЕТ) =====
+    # ===== IMAGE GENERATE =====
     if action == "image":
-        clear_mode(user_id)  # 🔥 сбрасываем режим
+        clear_mode(user_id)
 
         result = await run_with_typing(
             chat_id,
@@ -135,6 +138,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
     anchor = get_anchor(user_id)
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
+
+    # 🔥 ДОБАВЛЯЕМ РЕАЛЬНЫЙ КОНТЕКСТ
+    context = build_context_text()
+    text = f"{context}\n\n{text}"
 
     result = await run_with_typing(
         chat_id,
