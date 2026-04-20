@@ -62,6 +62,48 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
+    # ===== 🔥 ПРИОРИТЕТ: IMAGE EDIT =====
+    ctx = get_image_context(user_id)
+
+    if ctx and ctx.get("path"):
+        if mode == "image_edit" or get_awaiting(user_id):
+
+            set_mode(user_id, "image_edit")
+            set_awaiting(user_id, False)
+
+            if not ctx["hint"]:
+                try:
+                    ctx["hint"] = await analyze_image(ctx["path"])
+                except:
+                    ctx["hint"] = "изображение"
+
+            anchor = get_anchor(user_id)
+            base = anchor["current"] if anchor else ctx["hint"]
+
+            new_prompt = base + ", IMPORTANT: " + text
+
+            result = await run_with_typing(
+                chat_id,
+                image_edit(user_id, ctx["path"], new_prompt)
+            )
+
+            if result.get("type") == "error":
+                clear_mode(user_id)
+                return {
+                    "type": "text",
+                    "data": "⚠️ Ошибка редактирования изображения"
+                }
+
+            set_last_prompt(user_id, new_prompt)
+            update_anchor(user_id, new_prompt)
+
+            clear_mode(user_id)
+
+            return {
+                "type": "image",
+                "data": result["data"]
+            }
+
     # ===== ROUTER =====
     decision = decide_action(text, state["dialog"])
     action = decision["action"]
@@ -94,52 +136,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         return {
             "type": "text",
             "data": "⚠️ Ошибка генерации изображения"
-        }
-
-    # ===== IMAGE EDIT =====
-    if mode == "image_edit" or get_awaiting(user_id):
-        set_mode(user_id, "image_edit")
-        set_awaiting(user_id, False)
-
-        ctx = get_image_context(user_id)
-        if not ctx or not ctx["path"]:
-            clear_mode(user_id)
-            return {
-                "type": "text",
-                "data": "❌ Нет изображения"
-            }
-
-        if not ctx["hint"]:
-            try:
-                ctx["hint"] = await analyze_image(ctx["path"])
-            except:
-                ctx["hint"] = "изображение"
-
-        anchor = get_anchor(user_id)
-        base = anchor["current"] if anchor else ctx["hint"]
-
-        new_prompt = base + ", IMPORTANT: " + text
-
-        result = await run_with_typing(
-            chat_id,
-            image_edit(user_id, ctx["path"], new_prompt)
-        )
-
-        if result.get("type") == "error":
-            clear_mode(user_id)
-            return {
-                "type": "text",
-                "data": "⚠️ Ошибка редактирования изображения"
-            }
-
-        set_last_prompt(user_id, new_prompt)
-        update_anchor(user_id, new_prompt)
-
-        clear_mode(user_id)  # 🔥 ВОТ ГЛАВНЫЙ ФИКС
-
-        return {
-            "type": "image",
-            "data": result["data"]
         }
 
     # ===== TEXT =====
