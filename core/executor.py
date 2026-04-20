@@ -1,6 +1,6 @@
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
-from blocks.image_module import process as image_generate
+from blocks.image_module import process as image_generate, retry_process
 from blocks.image_edit_module import process as image_edit
 from blocks.text_module import process as text_process
 
@@ -18,7 +18,6 @@ from blocks.anchor_system import get_anchor, update_anchor
 from blocks.image_system import analyze_image
 from blocks.mode_manager import get_mode, set_mode, clear_mode
 
-# 🔥 НОВОЕ — КОНТЕКСТ
 from blocks.context_system import build_context_text
 
 
@@ -26,7 +25,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 INTENT
     intent = detect_intent(text)
 
     # ===== MEMORY =====
@@ -70,24 +68,37 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     mode_response = detect_response_mode(text)
 
-    # ===== IMAGE GENERATE =====
+    # ===== IMAGE GENERATE (С НОРМАЛЬНЫМ UX) =====
     if action == "image":
         clear_mode(user_id)
 
+        # 🔹 ПЕРВАЯ ПОПЫТКА
         result = await run_with_typing(
             chat_id,
             image_generate(user_id, text, state)
         )
 
-        if result.get("type") == "error":
+        # 🔸 если сразу успех
+        if result.get("type") == "image":
             return {
-                "type": "text",
-                "data": "⚠️ Ошибка генерации изображения"
+                "type": "image",
+                "data": result["data"]
             }
 
+        # 🔸 если нужно повторить
+        if result.get("type") == "retry_notice":
+            # 👉 ВАЖНО: показываем пользователю сообщение
+            return {
+                "type": "retry",
+                "data": result["data"],
+                "retry": True,
+                "text": text
+            }
+
+        # 🔸 ошибка
         return {
-            "type": "image",
-            "data": result["data"]
+            "type": "text",
+            "data": "⚠️ Ошибка генерации изображения"
         }
 
     # ===== IMAGE EDIT =====
@@ -139,7 +150,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    # 🔥 ДОБАВЛЯЕМ РЕАЛЬНЫЙ КОНТЕКСТ
     context = build_context_text()
     text = f"{context}\n\n{text}"
 
