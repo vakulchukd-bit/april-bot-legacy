@@ -1,12 +1,10 @@
-# core/executor.py
-
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 from blocks.text_module import process as text_process
 
-from blocks.intent_system import detect_intent  # 🔥 ДОБАВЛЕНО
+from blocks.intent_system import detect_intent
 
 from blocks.state_manager import (
     get_state,
@@ -63,6 +61,32 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
+    # ===== ROUTER (ПЕРЕНЕСЁН ВВЕРХ) =====
+    decision = decide_action(text, state["dialog"])
+    action = decision["action"]
+
+    mode_response = detect_response_mode(text)
+
+    # ===== IMAGE GENERATE (ПРИОРИТЕТ) =====
+    if action == "image":
+        clear_mode(user_id)  # 🔥 сбрасываем режим
+
+        result = await run_with_typing(
+            chat_id,
+            image_generate(user_id, text, state)
+        )
+
+        if result.get("type") == "error":
+            return {
+                "type": "text",
+                "data": "⚠️ Ошибка генерации изображения"
+            }
+
+        return {
+            "type": "image",
+            "data": result["data"]
+        }
+
     # ===== IMAGE EDIT =====
     if mode == "image_edit" or get_awaiting(user_id):
         set_mode(user_id, "image_edit")
@@ -99,32 +123,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         set_last_prompt(user_id, new_prompt)
         update_anchor(user_id, new_prompt)
-
-        return {
-            "type": "image",
-            "data": result["data"]
-        }
-
-    # ===== ROUTER =====
-    decision = decide_action(text, state["dialog"])
-    action = decision["action"]
-
-    mode_response = detect_response_mode(text)
-
-    # ===== IMAGE GENERATE =====
-    if action == "image" and intent == "generate":  # 🔥 ФИЛЬТР
-        set_mode(user_id, "image_generate")
-
-        result = await run_with_typing(
-            chat_id,
-            image_generate(user_id, text, state)
-        )
-
-        if result.get("type") == "error":
-            return {
-                "type": "text",
-                "data": "⚠️ Ошибка генерации изображения"
-            }
 
         return {
             "type": "image",
