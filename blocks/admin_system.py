@@ -1,10 +1,8 @@
 from storage import check_subscription
 
-# 🔐 твой ID
 ADMIN_ID = 2016592532
 
 
-# ===== ЛЕНИВЫЕ ИМПОРТЫ =====
 def get_storage():
     from blocks.analytics_storage import add_user, add_event, get_stats, load_data
     return add_user, add_event, get_stats, load_data
@@ -40,58 +38,54 @@ def get_active_subscriptions():
         data = load_data()
 
         users = data.get("users", [])
-        if not isinstance(users, list):
-            print("❌ USERS NOT LIST:", users)
-            return 0
-
         active = 0
 
         for user_id in users:
             try:
                 if check_subscription(user_id):
                     active += 1
-            except Exception as e:
-                print(f"⚠️ SUB CHECK ERROR ({user_id}):", e)
+            except:
+                pass
 
         return active
 
     except Exception as e:
-        print("🔥 GET ACTIVE SUBS ERROR:", e)
+        print("🔥 SUB ERROR:", e)
         return 0
 
 
 # ===== ПАНЕЛЬ =====
 def get_admin_panel():
+    print("🚀 ADMIN PANEL START")
+
+    # --- безопасная статистика ---
     try:
-        print("🚀 ADMIN PANEL START")
-
         _, _, get_stats, _ = get_storage()
-        calculate_cost = get_cost()
-
-        # --- статистика ---
         stats = get_stats()
-        print("📊 RAW STATS:", stats)
+        users_count, messages, images = stats if stats and len(stats) == 3 else (0, 0, 0)
+    except Exception as e:
+        print("🔥 STATS ERROR:", e)
+        users_count, messages, images = 0, 0, 0
 
-        if not stats or len(stats) != 3:
-            raise Exception(f"Invalid stats format: {stats}")
-
-        users_count, messages, images = stats
-
-        # --- подписки ---
+    # --- подписки ---
+    try:
         active_subs = get_active_subscriptions()
+    except:
+        active_subs = 0
 
-        # --- стоимость ---
-        cost_data = calculate_cost()
-        print("💰 COST DATA:", cost_data)
+    # --- стоимость ---
+    try:
+        calculate_cost = get_cost()
+        cost_data = calculate_cost() or {}
+    except Exception as e:
+        print("🔥 COST ERROR:", e)
+        cost_data = {}
 
-        if not isinstance(cost_data, dict):
-            raise Exception(f"Invalid cost_data: {cost_data}")
+    text_cost = cost_data.get("text", 0)
+    image_cost = cost_data.get("images", 0)
+    total_cost = cost_data.get("cost", 0)
 
-        text_cost = cost_data.get("text", 0)
-        image_cost = cost_data.get("images", 0)
-        total_cost = cost_data.get("cost", 0)
-
-        text = f"""
+    return f"""
 📊 АДМИН ПАНЕЛЬ
 
 👥 Пользователи: {users_count}
@@ -107,8 +101,3 @@ def get_admin_panel():
 
 🧠 Статус: работает
 """
-        return text
-
-    except Exception as e:
-        print("🔥 ADMIN PANEL ERROR:", e)
-        return "⚠️ Админ-панель временно недоступна"
