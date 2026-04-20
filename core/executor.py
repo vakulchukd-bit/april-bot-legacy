@@ -6,6 +6,8 @@ from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 from blocks.text_module import process as text_process
 
+from blocks.intent_system import detect_intent  # 🔥 ДОБАВЛЕНО
+
 from blocks.state_manager import (
     get_state,
     get_image_context,
@@ -22,6 +24,44 @@ from blocks.mode_manager import get_mode, set_mode, clear_mode
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
+
+    # 🔥 INTENT
+    intent = detect_intent(text)
+
+    # ===== MEMORY =====
+    if intent == "memory":
+        anchor = get_anchor(user_id)
+
+        if not anchor:
+            return {
+                "type": "text",
+                "data": "🤔 Я пока ничего не запомнил"
+            }
+
+        return {
+            "type": "text",
+            "data": f"🧠 Последний контекст:\n{anchor['current']}"
+        }
+
+    # ===== ANALYZE =====
+    if intent == "analyze":
+        ctx = get_image_context(user_id)
+
+        if not ctx or not ctx["path"]:
+            return {
+                "type": "text",
+                "data": "❌ Нет изображения для анализа"
+            }
+
+        try:
+            hint = await analyze_image(ctx["path"])
+        except:
+            hint = "не удалось определить"
+
+        return {
+            "type": "text",
+            "data": f"📷 На изображении: {hint}"
+        }
 
     # ===== IMAGE EDIT =====
     if mode == "image_edit" or get_awaiting(user_id):
@@ -72,7 +112,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     mode_response = detect_response_mode(text)
 
     # ===== IMAGE GENERATE =====
-    if action == "image":
+    if action == "image" and intent == "generate":  # 🔥 ФИЛЬТР
         set_mode(user_id, "image_generate")
 
         result = await run_with_typing(
