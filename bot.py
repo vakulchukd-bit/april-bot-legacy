@@ -36,6 +36,13 @@ from blocks.anchor_system import (
 # 🔥 ERROR HANDLER
 from blocks.error_handler import handle_error
 
+# 🔥 ADMIN SYSTEM
+from blocks.admin_system import (
+    register_user,
+    log_event,
+    get_admin_panel
+)
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -98,6 +105,9 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
+    # 🔥 регистрируем пользователя
+    register_user(user_id)
+
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
@@ -108,6 +118,11 @@ async def handle(message: types.Message):
             "💳 Подписка 30 дней — 150 грн\n\nОформить?",
             reply_markup=buy_keyboard()
         )
+        return
+
+    # 🔥 команда админки
+    if message.text == "/admin" and user_id == ADMIN_ID:
+        await message.answer(get_admin_panel())
         return
 
     try:
@@ -145,6 +160,9 @@ async def handle(message: types.Message):
         else:
             text = message.text or ""
 
+        # 🔥 лог текстового события
+        log_event(user_id, "text")
+
         # ===== EDIT =====
         if get_awaiting(user_id):
             set_awaiting(user_id, False)
@@ -180,6 +198,9 @@ async def handle(message: types.Message):
 
             set_last_prompt(user_id, new_prompt)
             update_anchor(user_id, new_prompt)
+
+            # 🔥 лог картинки
+            log_event(user_id, "image")
 
             await message.answer_photo(
                 BufferedInputFile(result["data"], filename="edited.png")
@@ -226,6 +247,9 @@ async def handle(message: types.Message):
 
             set_last_prompt(user_id, text)
             create_anchor(user_id, "image", text)
+
+            # 🔥 лог картинки
+            log_event(user_id, "image")
 
             sent = await message.answer_photo(
                 BufferedInputFile(result["data"], filename="image.png")
