@@ -34,6 +34,9 @@ from blocks.admin_system import (
     get_admin_panel
 )
 
+# 🔥 COST
+from blocks.cost_system import add_image  # ← добавили
+
 # 🔥 MODE
 from blocks.mode_manager import set_mode, clear_mode
 
@@ -108,7 +111,7 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # 🔥 ADMIN ПРИОРИТЕТ (СРАЗУ)
+    # 🔥 ADMIN
     if message.text == "/admin":
         if user_id == ADMIN_ID:
             await message.answer(get_admin_panel())
@@ -116,22 +119,18 @@ async def handle(message: types.Message):
             await message.answer("⛔ Ошибка доступа")
         return
 
-    # 🔥 SESSION CHECK
+    # 🔥 SESSION
     if is_session_expired(user_id):
         clear_anchor(user_id)
         clear_mode(user_id)
         set_image_context(user_id, None)
-
         await message.answer("🧠 Сессия обновлена. Начнём заново 🙂")
 
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
-    # 🔥 ДОСТУП (админ всегда проходит)
-    if user_id == ADMIN_ID:
-        access = True
-    else:
-        access = check_subscription(user_id)
+    # 🔥 ДОСТУП
+    access = True if user_id == ADMIN_ID else check_subscription(user_id)
 
     if not access:
         await message.answer(
@@ -197,6 +196,7 @@ async def handle(message: types.Message):
         # ===== RESPONSE =====
         if result["type"] == "image":
             log_event(user_id, "image")
+            add_image()  # 💰 считаем картинку
 
             compressed = compress_image(result["data"])
 
