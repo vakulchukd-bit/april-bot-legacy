@@ -15,16 +15,40 @@ class ImageGenerateRoom(Room):
             "generate image", "draw"
         ]
 
-        return any(word in t for word in triggers)
+        if not any(word in t for word in triggers):
+            return False
+
+        # 🔥 проверка: есть ли конкретика
+        weak_phrases = [
+            "какую", "какой", "что-нибудь",
+            "какую-то", "что-то", "просто",
+            "любую", "какая-нибудь"
+        ]
+
+        # если слишком коротко или нет смысла
+        if any(w in t for w in weak_phrases) or len(t.split()) < 4:
+            return "ask"
+
+        return True
 
     async def handle(self, user_id, text, context, run):
-        result = await run(
-            context["chat_id"],
-            image_generate(user_id, text, context["state"])
-        )
+        decision = self.can_handle(text, context)
 
-        if result and result.get("type") == "image":
-            return result
+        # 🔥 если нет конкретики → спрашиваем
+        if decision == "ask":
+            return {
+                "type": "text",
+                "data": "🎨 Какую именно картинку ты хочешь создать?\nОпиши подробнее 🙂"
+            }
+
+        if decision is True:
+            result = await run(
+                context["chat_id"],
+                image_generate(user_id, text, context["state"])
+            )
+
+            if result and result.get("type") == "image":
+                return result
 
         return None
 
