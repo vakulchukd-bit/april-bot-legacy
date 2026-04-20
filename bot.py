@@ -1,6 +1,5 @@
 import asyncio
 import os
-import base64
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -13,6 +12,7 @@ from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
 from blocks.image_module import process as image_process
+from blocks.text_module import process as text_process
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -27,30 +27,6 @@ dialog_memory = {}
 last_prompt = {}
 awaiting_image_prompt = {}
 image_context = {}
-
-# ===== SYSTEM =====
-SYSTEM_PROMPT = """
-Ты — Aprill, интеллектуальный ассистент.
-
-Ты:
-- понимаешь диалог
-- помнишь контекст
-- работаешь с изображениями
-
-ВАЖНО:
-- ты МОЖЕШЬ генерировать изображения
-- ты МОЖЕШЬ анализировать изображения
-- никогда не говори "я не могу"
-
-Если пользователь говорит про картинку:
-- учитывай последнюю картинку из контекста
-
-Если пользователь просит текст для копирования:
-- возвращай только текст
-"""
-
-def enhance_prompt(user_prompt):
-    return user_prompt
 
 # ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
@@ -279,32 +255,18 @@ async def handle(message: types.Message):
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # ===== GPT =====
-    async def ask():
-        def run():
-            ctx = image_context.get(user_id)
+    # ===== GPT (через модуль) =====
+    state = {
+        "dialog": dialog_memory.get(user_id, []),
+        "image_context": image_context.get(user_id)
+    }
 
-            extra = []
-            if ctx and ctx["hint"]:
-                extra.append({
-                    "role": "system",
-                    "content": f"Контекст изображения: {ctx['hint']}"
-                })
+    result = await run_with_typing(
+        message.chat.id,
+        text_process(user_id, text, state)
+    )
 
-            r = client.responses.create(
-                model="gpt-4o-mini",
-                input=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    *extra,
-                    *dialog_memory.get(user_id, [])[-6:],
-                    {"role": "user", "content": text}
-                ]
-            )
-            return r.output_text
-
-        return await asyncio.to_thread(run)
-
-    reply = await run_with_typing(message.chat.id, ask())
+    reply = result["content"]
 
     if mode == "copy":
         clean = reply.replace("```", "").strip()
