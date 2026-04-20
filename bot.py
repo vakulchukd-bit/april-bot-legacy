@@ -63,21 +63,42 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
-# ===== VOICE FIX =====
+# ===== VOICE =====
 async def voice_to_text(message, user_id):
-    file = await bot.get_file(message.voice.file_id)
-    path = f"{user_id}.ogg"
-    await bot.download_file(file.file_path, destination=path)
+    try:
+        file = await bot.get_file(message.voice.file_id)
+        path = f"{user_id}.ogg"
+        await bot.download_file(file.file_path, destination=path)
 
-    def run():
-        with open(path, "rb") as f:
-            t = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=f
-            )
-        return t.text
+        def run():
+            with open(path, "rb") as f:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+            return t.text
 
-    return await asyncio.to_thread(run)
+        return await asyncio.to_thread(run)
+
+    except:
+        return ""
+
+
+# ===== SAFE IMAGE CALL =====
+async def safe_image(chat_id, user_id, prompt):
+    try:
+        result = await run_with_typing(
+            chat_id,
+            image_process(user_id, prompt, {})
+        )
+
+        if result["type"] == "error":
+            return result
+
+        return result
+
+    except Exception:
+        return {"type": "error", "text": "❌ Ошибка при генерации изображения"}
 
 
 # ===== MAIN =====
@@ -85,122 +106,125 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    if should_warn(user_id):
-        await message.answer("⚠️ Подписка закончится через 24 часа")
+    try:
+        if should_warn(user_id):
+            await message.answer("⚠️ Подписка закончится через 24 часа")
 
-    access = True if user_id == ADMIN_ID else check_subscription(user_id)
+        access = True if user_id == ADMIN_ID else check_subscription(user_id)
 
-    if not access:
-        await message.answer(
-            "💳 Подписка 30 дней — 150 грн\n\nОформить?",
-            reply_markup=buy_keyboard()
-        )
-        return
-
-    # ===== VOICE =====
-    if message.voice:
-        text = await run_with_typing(
-            message.chat.id,
-            voice_to_text(message, user_id)
-        )
-
-        if not text or text.strip() == "":
-            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+        if not access:
+            await message.answer(
+                "💳 Подписка 30 дней — 150 грн\n\nОформить?",
+                reply_markup=buy_keyboard()
+            )
             return
 
-        await message.answer(f"🎤 {text}")
-    else:
-        text = message.text or ""
+        # ===== VOICE =====
+        if message.voice:
+            text = await voice_to_text(message, user_id)
 
-    # ===== PHOTO =====
-    if message.photo:
-        file = await bot.get_file(message.photo[-1].file_id)
-        path = f"{user_id}.jpg"
-        await bot.download_file(file.file_path, destination=path)
+            if not text.strip():
+                await message.answer("🎤 Не расслышал, попробуй ещё раз")
+                return
 
-        try:
-            hint = await analyze_image(path)
-        except:
-            hint = "изображение"
+            await message.answer(f"🎤 {text}")
+        else:
+            text = message.text or ""
 
-        set_image_context(user_id, {
-            "type": "uploaded",
-            "path": path,
-            "hint": hint
-        })
+        # ===== PHOTO =====
+        if message.photo:
+            file = await bot.get_file(message.photo[-1].file_id)
+            path = f"{user_id}.jpg"
+            await bot.download_file(file.file_path, destination=path)
 
-        set_task(user_id, {
-            "type": "image_edit",
-            "hint": hint,
-            "steps": 0
-        })
+            try:
+                hint = await analyze_image(path)
+            except:
+                hint = "изображение"
 
-        await message.answer("📷 Изображение получено\n\n✏️ Что изменить?")
-        return
+            set_image_context(user_id, {
+                "type": "uploaded",
+                "path": path,
+                "hint": hint
+            })
 
-    # ===== TASK =====
-    task = get_task(user_id)
+            set_task(user_id, {
+                "type": "image_edit",
+                "hint": hint,
+                "steps": 0
+            })
 
-    if task and task["type"] == "image_edit":
-        if len(text.split()) < 6:
-            base = task.get("hint", "")
-            new_prompt = base + ", " + text
+            await message.answer("📷 Изображение получено\n\n✏️ Что изменить?")
+            return
 
-            result = await run_with_typing(
-                message.chat.id,
-                image_process(user_id, new_prompt, {})
-            )
+        # ===== TASK =====
+        task = get_task(user_id)
 
-            task["steps"] += 1
+        if task and task["type"] == "image_edit":
+            if len(text.split()) < 6:
+                base = task.get("hint", "")
+                new_prompt = base + ", " + text
 
-            if task["steps"] >= 2:
+                result = await safe_image(message.chat.id, user_id, new_prompt)
+
+                if result["type"] == "error":
+                    await message.answer(result["text"])
+                    return
+
+                task["steps"] += 1
+
+                if task["steps"] >= 2:
+                    clear_task(user_id)
+
+                await message.answer_photo(
+                    BufferedInputFile(result["data"], filename="edit.png")
+                )
+                return
+            else:
                 clear_task(user_id)
 
-            await message.answer_photo(
-                BufferedInputFile(result["data"], filename="edit.png")
-            )
-            return
-        else:
-            clear_task(user_id)
+        # ===== IMAGE =====
+        if any(w in text.lower() for w in [
+            "сгенерируй", "создай", "нарисуй",
+            "картинку", "изображение"
+        ]):
+            result = await safe_image(message.chat.id, user_id, text)
 
-    # ===== IMAGE =====
-    if any(w in text.lower() for w in [
-        "сгенерируй", "создай", "нарисуй",
-        "картинку", "изображение"
-    ]):
+            if result["type"] == "error":
+                await message.answer(result["text"])
+                return
+
+            set_task(user_id, {
+                "type": "image_generate",
+                "prompt": text
+            })
+
+            sent = await message.answer_photo(
+                BufferedInputFile(result["data"], filename="image.png")
+            )
+
+            await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+            return
+
+        # ===== GPT =====
+        state = get_state(user_id)
+
         result = await run_with_typing(
             message.chat.id,
-            image_process(user_id, text, {})
+            text_process(user_id, text, state)
         )
 
-        set_task(user_id, {
-            "type": "image_generate",
-            "prompt": text
-        })
+        reply = result["content"]
 
-        sent = await message.answer_photo(
-            BufferedInputFile(result["data"], filename="image.png")
-        )
+        add_dialog(user_id, "user", text)
+        add_dialog(user_id, "assistant", reply)
 
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
+        clear_task(user_id)
 
-    # ===== GPT =====
-    state = get_state(user_id)
+        await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
-    result = await run_with_typing(
-        message.chat.id,
-        text_process(user_id, text, state)
-    )
-
-    reply = result["content"]
-
-    add_dialog(user_id, "user", text)
-    add_dialog(user_id, "assistant", reply)
-
-    clear_task(user_id)
-
-    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
+    except Exception as e:
+        await message.answer("⚠️ Что-то пошло не так, попробуй ещё раз")
 
 
 # ===== CALLBACKS =====
