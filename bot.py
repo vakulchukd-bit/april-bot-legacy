@@ -35,7 +35,7 @@ from blocks.admin_system import (
 )
 
 # 🔥 COST
-from blocks.cost_system import add_image  # ← добавили
+from blocks.cost_system import add_image
 
 # 🔥 MODE
 from blocks.mode_manager import set_mode, clear_mode
@@ -45,6 +45,9 @@ from blocks.session_manager import is_session_expired
 
 # 🔥 IMAGE UTILS
 from blocks.image_utils import compress_image
+
+# 🔥 NEW (retry)
+from blocks.image_module import retry_process
 
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -193,10 +196,34 @@ async def handle(message: types.Message):
             run_with_typing
         )
 
-        # ===== RESPONSE =====
+        # ===== RETRY IMAGE =====
+        if result["type"] == "retry":
+            await message.answer(result["data"])
+
+            retry_result = await retry_process(
+                user_id,
+                result["text"],
+                None
+            )
+
+            if retry_result.get("type") == "image":
+                log_event(user_id, "image")
+                add_image()
+
+                compressed = compress_image(retry_result["data"])
+
+                await message.answer_photo(
+                    BufferedInputFile(compressed, filename="image.jpg")
+                )
+            else:
+                await message.answer(retry_result.get("data"))
+
+            return
+
+        # ===== IMAGE =====
         if result["type"] == "image":
             log_event(user_id, "image")
-            add_image()  # 💰 считаем картинку
+            add_image()
 
             compressed = compress_image(result["data"])
 
