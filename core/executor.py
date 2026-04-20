@@ -2,8 +2,10 @@
 
 from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
-from blocks.image_module import process as image_process
+from blocks.image_module import process as image_generate
+from blocks.image_edit_module import process as image_edit
 from blocks.text_module import process as text_process
+
 from blocks.state_manager import (
     get_state,
     get_image_context,
@@ -11,6 +13,7 @@ from blocks.state_manager import (
     set_awaiting,
     set_last_prompt
 )
+
 from blocks.anchor_system import get_anchor, update_anchor
 from blocks.image_system import analyze_image
 from blocks.mode_manager import get_mode, set_mode, clear_mode
@@ -26,7 +29,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         set_awaiting(user_id, False)
 
         ctx = get_image_context(user_id)
-        if not ctx:
+        if not ctx or not ctx["path"]:
             return {
                 "type": "text",
                 "data": "❌ Нет изображения"
@@ -45,14 +48,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         result = await run_with_typing(
             chat_id,
-            image_process(user_id, new_prompt, {})
+            image_edit(user_id, ctx["path"], new_prompt)
         )
 
-        # 🔥 ПРОСТАЯ ЛОГИКА
         if result.get("type") == "error":
             return {
                 "type": "text",
-                "data": "⚠️ Ошибка обработки изображения"
+                "data": "⚠️ Ошибка редактирования изображения"
             }
 
         set_last_prompt(user_id, new_prompt)
@@ -75,10 +77,9 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         result = await run_with_typing(
             chat_id,
-            image_process(user_id, text, state)
+            image_generate(user_id, text, state)
         )
 
-        # 🔥 ПРОСТАЯ ЛОГИКА
         if result.get("type") == "error":
             return {
                 "type": "text",
