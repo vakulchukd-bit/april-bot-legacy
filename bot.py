@@ -7,9 +7,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
 from openai import OpenAI
 
-from storage import check_subscription, should_warn, can_send_message, can_generate_image
+from storage import check_subscription, should_warn
 from blocks.router_system import decide_action
-from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
 from blocks.image_module import process as image_process
 from blocks.text_module import process as text_process
@@ -32,6 +31,7 @@ dp = Dispatcher()
 
 ADMIN_ID = 2016592532
 
+
 # ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -39,9 +39,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
+
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
 
 # ===== TYPING =====
 async def typing_loop(chat_id):
@@ -52,12 +54,31 @@ async def typing_loop(chat_id):
     except:
         pass
 
+
 async def run_with_typing(chat_id, coro):
     task = asyncio.create_task(typing_loop(chat_id))
     try:
         return await coro
     finally:
         task.cancel()
+
+
+# ===== VOICE FIX =====
+async def voice_to_text(message, user_id):
+    file = await bot.get_file(message.voice.file_id)
+    path = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=path)
+
+    def run():
+        with open(path, "rb") as f:
+            t = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f
+            )
+        return t.text
+
+    return await asyncio.to_thread(run)
+
 
 # ===== MAIN =====
 @dp.message(lambda m: m.text or m.photo or m.voice)
@@ -76,7 +97,22 @@ async def handle(message: types.Message):
         )
         return
 
-    # ===== PHOTO (НОВАЯ ЗАДАЧА) =====
+    # ===== VOICE =====
+    if message.voice:
+        text = await run_with_typing(
+            message.chat.id,
+            voice_to_text(message, user_id)
+        )
+
+        if not text or text.strip() == "":
+            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+            return
+
+        await message.answer(f"🎤 {text}")
+    else:
+        text = message.text or ""
+
+    # ===== PHOTO =====
     if message.photo:
         file = await bot.get_file(message.photo[-1].file_id)
         path = f"{user_id}.jpg"
@@ -95,34 +131,39 @@ async def handle(message: types.Message):
 
         set_task(user_id, {
             "type": "image_edit",
-            "source": "uploaded",
-            "hint": hint
+            "hint": hint,
+            "steps": 0
         })
 
         await message.answer("📷 Изображение получено\n\n✏️ Что изменить?")
         return
 
-    text = message.text or ""
-
-    # ===== ПРОДОЛЖЕНИЕ ЗАДАЧИ =====
+    # ===== TASK =====
     task = get_task(user_id)
 
     if task and task["type"] == "image_edit":
-        base = task.get("hint", "")
-        new_prompt = base + ", " + text
+        if len(text.split()) < 6:
+            base = task.get("hint", "")
+            new_prompt = base + ", " + text
 
-        result = await run_with_typing(
-            message.chat.id,
-            image_process(user_id, new_prompt, {})
-        )
+            result = await run_with_typing(
+                message.chat.id,
+                image_process(user_id, new_prompt, {})
+            )
 
-        await message.answer_photo(
-            BufferedInputFile(result["data"], filename="edit.png")
-        )
+            task["steps"] += 1
 
-        return
+            if task["steps"] >= 2:
+                clear_task(user_id)
 
-    # ===== ТРИГГЕР КАРТИНКИ =====
+            await message.answer_photo(
+                BufferedInputFile(result["data"], filename="edit.png")
+            )
+            return
+        else:
+            clear_task(user_id)
+
+    # ===== IMAGE =====
     if any(w in text.lower() for w in [
         "сгенерируй", "создай", "нарисуй",
         "картинку", "изображение"
@@ -144,33 +185,9 @@ async def handle(message: types.Message):
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # ===== ROUTER =====
-    state = get_state(user_id)
-    decision = decide_action(text, state["dialog"])
-    action = decision["action"]
-
-    mode = detect_response_mode(text)
-
-    # ===== IMAGE =====
-    if action == "image":
-        result = await run_with_typing(
-            message.chat.id,
-            image_process(user_id, text, state)
-        )
-
-        set_task(user_id, {
-            "type": "image_generate",
-            "prompt": text
-        })
-
-        sent = await message.answer_photo(
-            BufferedInputFile(result["data"], filename="image.png")
-        )
-
-        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
-        return
-
     # ===== GPT =====
+    state = get_state(user_id)
+
     result = await run_with_typing(
         message.chat.id,
         text_process(user_id, text, state)
@@ -178,14 +195,10 @@ async def handle(message: types.Message):
 
     reply = result["content"]
 
-    if mode == "copy":
-        clean = reply.replace("```", "").strip()
-        reply = f"```text\n{clean}\n```"
-
     add_dialog(user_id, "user", text)
     add_dialog(user_id, "assistant", reply)
 
-    clear_task(user_id)  # смена темы
+    clear_task(user_id)
 
     await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
@@ -195,6 +208,7 @@ async def handle(message: types.Message):
 async def like(c: types.CallbackQuery):
     await c.answer()
     await c.message.answer("👍 Спасибо!")
+
 
 @dp.callback_query(F.data.startswith("dislike_"))
 async def dislike(c: types.CallbackQuery):
