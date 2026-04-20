@@ -1,8 +1,3 @@
-# ключевые фиксы:
-# 1. показываем реальные ошибки
-# 2. защита от пустых команд
-# 3. не уходим в image если нет смысла
-
 import asyncio
 import os
 import threading
@@ -12,7 +7,9 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
 from openai import OpenAI
 
-from storage import check_subscription, should_warn
+from storage import check_subscription, should_warn, can_send_message, can_generate_image
+from blocks.router_system import decide_action
+from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
 from blocks.image_module import process as image_process
 from blocks.text_module import process as text_process
@@ -21,10 +18,11 @@ from blocks.state_manager import (
     get_state,
     set_image_context,
     get_image_context,
-    add_dialog,
-    set_task,
-    get_task,
-    clear_task
+    set_awaiting,
+    get_awaiting,
+    set_last_prompt,
+    get_last_prompt,
+    add_dialog
 )
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -36,21 +34,52 @@ dp = Dispatcher()
 ADMIN_ID = 2016592532
 
 
-# ===== SAFE IMAGE =====
-async def safe_image(chat_id, user_id, prompt):
+# ===== SERVER =====
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
+# ===== TYPING =====
+async def typing_loop(chat_id):
     try:
-        if not prompt or len(prompt.strip()) < 3:
-            return {"type": "error", "text": "⚠️ Слишком пустой запрос"}
+        while True:
+            await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(2)
+    except:
+        pass
 
-        result = await image_process(user_id, prompt, {})
 
-        if result["type"] == "error":
-            return result
+async def run_with_typing(chat_id, coro):
+    task = asyncio.create_task(typing_loop(chat_id))
+    try:
+        return await coro
+    finally:
+        task.cancel()
 
-        return result
 
-    except Exception as e:
-        return {"type": "error", "text": f"❌ Ошибка: {str(e)}"}
+# ===== VOICE =====
+async def voice_to_text(message, user_id):
+    file = await bot.get_file(message.voice.file_id)
+    path = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=path)
+
+    def run():
+        with open(path, "rb") as f:
+            t = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f
+            )
+        return t.text
+
+    return await asyncio.to_thread(run)
 
 
 # ===== MAIN =====
@@ -58,89 +87,161 @@ async def safe_image(chat_id, user_id, prompt):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    try:
+    if should_warn(user_id):
+        await message.answer("⚠️ Подписка закончится через 24 часа")
+
+    access = True if user_id == ADMIN_ID else check_subscription(user_id)
+
+    if not access:
+        await message.answer(
+            "💳 Подписка 30 дней — 150 грн\n\nОформить?",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    # ===== PHOTO =====
+    if message.photo:
+        file = await bot.get_file(message.photo[-1].file_id)
+        path = f"{user_id}.jpg"
+        await bot.download_file(file.file_path, destination=path)
+
+        set_image_context(user_id, {
+            "type": "uploaded",
+            "path": path,
+            "hint": None,
+            "full": None
+        })
+
+        set_awaiting(user_id, True)
+
+        await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
+        return
+
+    # ===== VOICE =====
+    if message.voice:
+        text = await run_with_typing(
+            message.chat.id,
+            voice_to_text(message, user_id)
+        )
+
+        if not text or text.strip() == "":
+            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+            return
+
+        await message.answer(f"🎤 {text}")
+    else:
         text = message.text or ""
 
-        # ===== PHOTO =====
-        if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
-            path = f"{user_id}.jpg"
-            await bot.download_file(file.file_path, destination=path)
+    # ===== РЕДАКТИРОВАНИЕ =====
+    if get_awaiting(user_id):
+        set_awaiting(user_id, False)
 
+        ctx = get_image_context(user_id)
+        if not ctx:
+            await message.answer("❌ Нет изображения")
+            return
+
+        if not ctx["hint"]:
             try:
-                hint = await analyze_image(path)
+                ctx["hint"] = await analyze_image(ctx["path"])
             except:
-                hint = "изображение"
+                ctx["hint"] = "изображение"
 
-            set_image_context(user_id, {
-                "path": path,
-                "hint": hint
-            })
+        base = get_last_prompt(user_id) or ctx["hint"]
+        new_prompt = base + ", IMPORTANT: " + text
 
-            set_task(user_id, {
-                "type": "image_edit",
-                "hint": hint
-            })
+        result = await run_with_typing(
+            message.chat.id,
+            image_process(user_id, new_prompt, {})
+        )
 
-            await message.answer("📷 Что изменить?")
-            return
+        set_last_prompt(user_id, new_prompt)
 
-        # ===== TASK =====
-        task = get_task(user_id)
+        await message.answer_photo(
+            BufferedInputFile(result["data"], filename="edited.png")
+        )
+        return
 
-        if task and task["type"] == "image_edit":
-            if len(text.strip()) < 3 or text.lower() in ["ничего", "нет"]:
-                await message.answer("Ок, ничего не меняем 👍")
-                clear_task(user_id)
+    # ===== ROUTER =====
+    state = get_state(user_id)
+
+    decision = decide_action(text, state["dialog"])
+    action = decision["action"]
+
+    mode = detect_response_mode(text)
+
+    if user_id != ADMIN_ID:
+        if not check_subscription(user_id):
+            if not can_send_message(user_id):
+                await message.answer("⛔ Лимит сообщений исчерпан")
                 return
 
-            base = task.get("hint", "")
-            prompt = base + ", " + text
+    # ===== IMAGE =====
+    if action == "image":
+        if user_id != ADMIN_ID:
+            if not check_subscription(user_id):
+                if not can_generate_image(user_id):
+                    await message.answer("⛔ Лимит картинок исчерпан")
+                    return
 
-            result = await safe_image(message.chat.id, user_id, prompt)
+        result = await run_with_typing(
+            message.chat.id,
+            image_process(user_id, text, state)
+        )
 
-            if result["type"] == "error":
-                await message.answer(result["text"])
-                return
+        set_image_context(user_id, {
+            "type": "generated",
+            "path": None,
+            "hint": text,
+            "full": text
+        })
 
-            await message.answer_photo(
-                BufferedInputFile(result["data"], filename="edit.png")
-            )
-            return
+        set_last_prompt(user_id, text)
 
-        # ===== IMAGE =====
-        if "картин" in text.lower() or "нарисуй" in text.lower():
-            result = await safe_image(message.chat.id, user_id, text)
+        sent = await message.answer_photo(
+            BufferedInputFile(result["data"], filename="image.png")
+        )
 
-            if result["type"] == "error":
-                await message.answer(result["text"])
-                return
+        await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+        return
 
-            await message.answer_photo(
-                BufferedInputFile(result["data"], filename="image.png")
-            )
-            return
+    # ===== GPT =====
+    result = await run_with_typing(
+        message.chat.id,
+        text_process(user_id, text, state)
+    )
 
-        # ===== GPT =====
-        state = get_state(user_id)
+    reply = result["content"]
 
-        result = await text_process(user_id, text, state)
+    if mode == "copy":
+        clean = reply.replace("```", "").strip()
+        reply = f"```text\n{clean}\n```"
 
-        reply = result["content"]
+    add_dialog(user_id, "user", text)
+    add_dialog(user_id, "assistant", reply)
 
-        add_dialog(user_id, "user", text)
-        add_dialog(user_id, "assistant", reply)
+    await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
-        await message.answer(reply)
 
-    except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {str(e)}")
+# ===== CALLBACKS =====
+@dp.callback_query(F.data.startswith("like_"))
+async def like(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.answer("👍 Спасибо!")
+
+
+@dp.callback_query(F.data.startswith("dislike_"))
+async def dislike(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.answer("👎 Принял!")
 
 
 # ===== START =====
 async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
+    threading.Thread(target=run_server, daemon=True).start()
     asyncio.run(main())
