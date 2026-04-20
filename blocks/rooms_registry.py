@@ -25,7 +25,6 @@ class ImageGenerateRoom(Room):
             "любую", "какая-нибудь"
         ]
 
-        # если слишком коротко или нет смысла
         if any(w in t for w in weak_phrases) or len(t.split()) < 4:
             return "ask"
 
@@ -34,7 +33,6 @@ class ImageGenerateRoom(Room):
     async def handle(self, user_id, text, context, run):
         decision = self.can_handle(text, context)
 
-        # 🔥 если нет конкретики → спрашиваем
         if decision == "ask":
             return {
                 "type": "text",
@@ -61,7 +59,42 @@ class ImageEditRoom(Room):
     name = "image_edit"
 
     def can_handle(self, text, context):
-        return context.get("image") is not None
+        ctx = context.get("image")
+
+        # ❌ нет картинки — не редактируем
+        if not ctx or not ctx.get("path"):
+            return False
+
+        t = text.lower()
+
+        # 🔴 вопросы → не редактируем
+        question_words = [
+            "что", "как", "почему", "зачем",
+            "нравится", "думаешь", "опиши", "это", "?"
+        ]
+
+        if any(q in t for q in question_words):
+            return False
+
+        # 🟡 глаголы редактирования
+        edit_verbs = [
+            "измени", "сделай", "добавь", "убери",
+            "замени", "осветли", "затемни",
+            "исправь", "поменяй", "улучши",
+            "размой", "сделай ярче", "сделай темнее"
+        ]
+
+        # 🟢 указание на объект
+        image_words = [
+            "картинку", "изображение", "фото",
+            "её", "его", "это"
+        ]
+
+        # 🔥 ключ: действие + объект
+        if any(v in t for v in edit_verbs) and any(i in t for i in image_words):
+            return True
+
+        return False
 
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
