@@ -13,6 +13,16 @@ from blocks.response_mode import detect_response_mode
 from blocks.image_system import analyze_image
 from blocks.image_module import process as image_process
 from blocks.text_module import process as text_process
+from blocks.state_manager import (
+    get_state,
+    set_image_context,
+    get_image_context,
+    set_awaiting,
+    get_awaiting,
+    set_last_prompt,
+    get_last_prompt,
+    add_dialog
+)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -21,12 +31,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 ADMIN_ID = 2016592532
-
-# ===== MEMORY =====
-dialog_memory = {}
-last_prompt = {}
-awaiting_image_prompt = {}
-image_context = {}
 
 # ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
@@ -111,14 +115,14 @@ async def handle(message: types.Message):
         path = f"{user_id}.jpg"
         await bot.download_file(file.file_path, destination=path)
 
-        image_context[user_id] = {
+        set_image_context(user_id, {
             "type": "uploaded",
             "path": path,
             "hint": None,
             "full": None
-        }
+        })
 
-        awaiting_image_prompt[user_id] = True
+        set_awaiting(user_id, True)
 
         await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
         return
@@ -139,10 +143,10 @@ async def handle(message: types.Message):
         text = message.text or ""
 
     # ===== РЕДАКТИРОВАНИЕ =====
-    if awaiting_image_prompt.get(user_id):
-        awaiting_image_prompt[user_id] = False
+    if get_awaiting(user_id):
+        set_awaiting(user_id, False)
 
-        ctx = image_context.get(user_id)
+        ctx = get_image_context(user_id)
         if not ctx:
             await message.answer("❌ Нет изображения")
             return
@@ -153,7 +157,7 @@ async def handle(message: types.Message):
             except:
                 ctx["hint"] = "изображение"
 
-        base = last_prompt.get(user_id, ctx["hint"])
+        base = get_last_prompt(user_id) or ctx["hint"]
         new_prompt = base + ", IMPORTANT: " + text
 
         result = await run_with_typing(
@@ -161,7 +165,7 @@ async def handle(message: types.Message):
             image_process(user_id, new_prompt, {})
         )
 
-        last_prompt[user_id] = new_prompt
+        set_last_prompt(user_id, new_prompt)
 
         await message.answer_photo(
             BufferedInputFile(result["data"], filename="edited.png")
@@ -172,7 +176,7 @@ async def handle(message: types.Message):
     if any(w in text.lower() for w in [
         "что на картинке", "что здесь", "опиши", "что изображено"
     ]):
-        ctx = image_context.get(user_id)
+        ctx = get_image_context(user_id)
         if ctx:
             if not ctx["hint"]:
                 try:
@@ -198,14 +202,14 @@ async def handle(message: types.Message):
             image_process(user_id, text, {})
         )
 
-        image_context[user_id] = {
+        set_image_context(user_id, {
             "type": "generated",
             "path": None,
             "hint": text,
             "full": text
-        }
+        })
 
-        last_prompt[user_id] = text
+        set_last_prompt(user_id, text)
 
         sent = await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png")
@@ -215,7 +219,9 @@ async def handle(message: types.Message):
         return
 
     # ===== ROUTER =====
-    decision = decide_action(text, dialog_memory.get(user_id, []))
+    state = get_state(user_id)
+
+    decision = decide_action(text, state["dialog"])
     action = decision["action"]
 
     mode = detect_response_mode(text)
@@ -236,17 +242,17 @@ async def handle(message: types.Message):
 
         result = await run_with_typing(
             message.chat.id,
-            image_process(user_id, text, {})
+            image_process(user_id, text, state)
         )
 
-        image_context[user_id] = {
+        set_image_context(user_id, {
             "type": "generated",
             "path": None,
             "hint": text,
             "full": text
-        }
+        })
 
-        last_prompt[user_id] = text
+        set_last_prompt(user_id, text)
 
         sent = await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png")
@@ -255,12 +261,7 @@ async def handle(message: types.Message):
         await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
         return
 
-    # ===== GPT (через модуль) =====
-    state = {
-        "dialog": dialog_memory.get(user_id, []),
-        "image_context": image_context.get(user_id)
-    }
-
+    # ===== GPT =====
     result = await run_with_typing(
         message.chat.id,
         text_process(user_id, text, state)
@@ -272,8 +273,8 @@ async def handle(message: types.Message):
         clean = reply.replace("```", "").strip()
         reply = f"```text\n{clean}\n```"
 
-    dialog_memory.setdefault(user_id, []).append({"role": "user", "content": text})
-    dialog_memory[user_id].append({"role": "assistant", "content": reply})
+    add_dialog(user_id, "user", text)
+    add_dialog(user_id, "assistant", reply)
 
     await message.answer(reply, reply_markup=main_keyboard(message.message_id))
 
