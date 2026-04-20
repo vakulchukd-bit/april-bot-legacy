@@ -1,80 +1,51 @@
-from storage import check_subscription
-from blocks.cost_system import calculate_cost
+import json
+import os
 
-# 🔐 твой ID
-ADMIN_ID = 2016592532
-
-
-# ===== РЕГИСТРАЦИЯ =====
-def register_user(user_id):
-    try:
-        from blocks.analytics_storage import add_user
-        add_user(user_id)
-    except Exception as e:
-        print("🔥 REGISTER USER ERROR:", e)
+DATA_FILE = "data/analytics.json"
 
 
-# ===== СОБЫТИЯ =====
-def log_event(user_id, event_type):
-    try:
-        from blocks.analytics_storage import add_event
-        add_event(user_id, event_type)
-    except Exception as e:
-        print("🔥 LOG EVENT ERROR:", e)
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {
+            "users": [],
+            "messages": 0,
+            "images": 0
+        }
+
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-# ===== ПОДПИСКИ =====
-def get_active_subscriptions():
-    try:
-        from blocks.analytics_storage import load_data
-
-        data = load_data()
-        users = data.get("users", [])
-
-        active = 0
-
-        for user_id in users:
-            try:
-                if check_subscription(user_id):
-                    active += 1
-            except:
-                pass
-
-        return active
-
-    except Exception as e:
-        print("🔥 SUBSCRIPTIONS ERROR:", e)
-        return 0
+def save_data(data):
+    os.makedirs("data", exist_ok=True)
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
-# ===== ПАНЕЛЬ =====
-def get_admin_panel():
-    try:
-        from blocks.analytics_storage import get_stats
+def add_user(user_id):
+    data = load_data()
 
-        users_count, messages, images = get_stats()
-        active_subs = get_active_subscriptions()
+    if user_id not in data["users"]:
+        data["users"].append(user_id)
+        save_data(data)
 
-        cost_data = calculate_cost()
 
-        text = f"""
-📊 АДМИН ПАНЕЛЬ
+def add_event(user_id, event_type):
+    data = load_data()
 
-👥 Пользователи: {users_count}
-💳 Активные подписки: {active_subs}
+    if event_type == "text":
+        data["messages"] += 1
+    elif event_type == "image":
+        data["images"] += 1
 
-💬 Сообщения: {messages}
-🖼 Картинки: {images}
+    save_data(data)
 
-💰 Расход:
-- Текст: {cost_data.get('text', 0)}
-- Картинки: {cost_data.get('images', 0)}
-- Итого: ${cost_data.get('cost', 0)}
 
-🧠 Статус: работает
-"""
-        return text
+def get_stats():
+    data = load_data()
 
-    except Exception as e:
-        print("🔥 ADMIN PANEL ERROR:", e)
-        return "⚠️ Админ-панель временно недоступна"
+    users = len(data.get("users", []))
+    messages = data.get("messages", 0)
+    images = data.get("images", 0)
+
+    return users, messages, images
