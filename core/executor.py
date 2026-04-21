@@ -102,6 +102,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== TEXT =====
     clear_mode(user_id)
 
+    # 🔥 НОВОЕ — АВТОАНАЛИЗ КАРТИНКИ
+    if ctx and ctx.get("path"):
+        try:
+            hint = await analyze_image(ctx["path"])
+            text = f"На изображении: {hint}\n\n{text}"
+        except:
+            pass
+
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
