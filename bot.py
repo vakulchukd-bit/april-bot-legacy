@@ -132,9 +132,9 @@ async def voice_to_text(message, user_id):
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
-    text = message.text or ""
+    text = message.text or message.caption or ""
 
-    # ===== 🔥 /analiz (ТОЛЬКО ДЛЯ АДМИНА)
+    # ===== 🔥 /analiz
     if text.lower() == "/analiz" and user_id == ADMIN_ID:
         if get_mode(user_id) == "engineering":
             await message.answer("🛠 Ты уже в режиме анализа. Отправь код.")
@@ -144,7 +144,13 @@ async def handle(message: types.Message):
         await message.answer("🛠 Режим анализа включен. Отправь код.")
         return
 
-    # ===== 🔥 ENGINEERING MODE (ПОЛНЫЙ ПЕРЕХВАТ)
+    # ===== 🔥 /exit
+    if text.lower() == "/exit" and user_id == ADMIN_ID:
+        clear_mode(user_id)
+        await message.answer("❌ Режим анализа выключен")
+        return
+
+    # ===== 🔥 ENGINEERING MODE (ПЕРЕХВАТ)
     if get_mode(user_id) == "engineering" and user_id == ADMIN_ID:
         result = await execute(
             user_id,
@@ -154,7 +160,7 @@ async def handle(message: types.Message):
         )
 
         if result["type"] == "admin_report":
-            await bot.send_message(ADMIN_ID, result["data"])
+            await message.answer(result["data"])
             return
 
         await message.answer("⚠️ Ошибка режима анализа")
