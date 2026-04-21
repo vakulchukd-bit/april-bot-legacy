@@ -31,6 +31,25 @@ async def process(user_id, text, state):
         ctx = state.get("image_context")
 
         extra = []
+
+        # ===== 🔥 ДОБАВЛЕНО: ВРЕМЯ В SYSTEM =====
+        hour = state.get("hour")
+        if hour is not None:
+            if hour < 6:
+                part = "ночь"
+            elif hour < 12:
+                part = "утро"
+            elif hour < 18:
+                part = "день"
+            else:
+                part = "вечер"
+
+            extra.append({
+                "role": "system",
+                "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv). Это реальное текущее время."
+            })
+        # ===== КОНЕЦ БЛОКА ВРЕМЕНИ =====
+
         if ctx and ctx.get("hint"):
             extra.append({
                 "role": "system",
