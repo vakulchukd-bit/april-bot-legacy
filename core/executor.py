@@ -40,8 +40,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # ===== 🔥 ENGINEERING MODE =====
-    if mode == "engineering":
+    # ===== 🔥 ENGINEERING MODE (ИСПРАВЛЕНО) =====
+    if mode == "engineering" and not text.startswith("/"):
 
         if text.lower() == "/analiz":
             return {
@@ -67,7 +67,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВОПРОСЫ (ИСПРАВЛЕНО) =====
+    # ===== 🔥 ВОПРОСЫ (УМНЫЕ) =====
     if intent == "question" and any(x in t for x in ["умеешь", "можешь", "что ты умеешь"]):
         return {
             "type": "text",
