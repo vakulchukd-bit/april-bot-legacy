@@ -26,7 +26,20 @@ async def process(user_id, text, state):
 
         extra = []
 
-        # 🔥 ПРОСТОЕ ВРЕМЯ БЕЗ МНОГОСТРОЧНЫХ СТРОК
+        # 🔥 ЛЕНИВЫЙ ИМПОРТ (ЕДИНСТВЕННО ПРАВИЛЬНО)
+        try:
+            import importlib
+            context_module = importlib.import_module("blocks.context_system")
+            world = context_module.build_context_text()
+
+            extra.append({
+                "role": "system",
+                "content": world
+            })
+        except Exception as e:
+            print("🔥 CONTEXT ERROR:", e)
+
+        # 🔥 ВРЕМЯ
         hour = state.get("hour")
         if hour is not None:
             extra.append({
