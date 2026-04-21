@@ -2,6 +2,7 @@
 
 import asyncio
 from openai import OpenAI
+from blocks.context_system import build_context_text  # 🔥 ПЕРЕНЕСЛИ НАВЕРХ
 
 client = OpenAI()
 
@@ -33,31 +34,36 @@ async def process(user_id, text, state):
         extra = []
 
         # ===== 🔥 ВРЕМЯ И КОНТЕКСТ КАК SYSTEM =====
-        from blocks.context_system import build_context_text
-        world = build_context_text()
-
-        extra.append({
-            "role": "system",
-            "content": world
-        })
-        # ===== КОНЕЦ =====
-
-        # ===== (оставляем твой блок времени тоже, не удаляем) =====
-        hour = state.get("hour")
-        if hour is not None:
-            if hour < 6:
-                part = "ночь"
-            elif hour < 12:
-                part = "утро"
-            elif hour < 18:
-                part = "день"
-            else:
-                part = "вечер"
+        try:
+            world = build_context_text()
 
             extra.append({
                 "role": "system",
-                "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv). Это реальное текущее время."
+                "content": world
             })
+        except Exception as e:
+            print("🔥 CONTEXT ERROR:", e)
+        # ===== КОНЕЦ =====
+
+        # ===== (оставляем твой блок времени тоже, не удаляем) =====
+        try:
+            hour = state.get("hour")
+            if hour is not None:
+                if hour < 6:
+                    part = "ночь"
+                elif hour < 12:
+                    part = "утро"
+                elif hour < 18:
+                    part = "день"
+                else:
+                    part = "вечер"
+
+                extra.append({
+                    "role": "system",
+                    "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv). Это реальное текущее время."
+                })
+        except Exception as e:
+            print("🔥 TIME ERROR:", e)
         # ===== КОНЕЦ =====
 
         if ctx and ctx.get("hint"):
