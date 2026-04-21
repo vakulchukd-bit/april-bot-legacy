@@ -24,26 +24,19 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # ===== 🔥 НОВОЕ: ЖЁСТКИЙ ОТВЕТ ПРО ВРЕМЯ =====
+    # ===== 🔥 ФИКС: НОРМАЛЬНОЕ ВРЕМЯ =====
     lower_text = text.lower()
     if "время" in lower_text or "час" in lower_text:
-        hour = state.get("hour")
+        time_str = state.get("time_str")
+        weekday = state.get("weekday")
+        date_str = state.get("date_str")
 
-        if hour is not None:
-            if hour < 6:
-                part = "ночь"
-            elif hour < 12:
-                part = "утро"
-            elif hour < 18:
-                part = "день"
-            else:
-                part = "вечер"
-
+        if time_str:
             return {
                 "type": "text",
-                "data": f"Сейчас {hour}:00 ({part}, Europe/Kyiv)"
+                "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
             }
-    # ===== КОНЕЦ БЛОКА =====
+    # ===== КОНЕЦ =====
 
     # ===== MEMORY =====
     if intent == "memory":
@@ -64,7 +57,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if intent == "analyze":
         ctx = get_image_context(user_id)
 
-        # 🔥 страховка
         if not ctx:
             ctx = state.get("image_context")
 
@@ -87,7 +79,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== КОНТЕКСТ =====
     ctx = get_image_context(user_id)
 
-    # 🔥 СТРАХОВКА (главный фикс)
     if not ctx:
         ctx = state.get("image_context")
 
@@ -103,7 +94,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     mode_response = detect_response_mode(text)
 
-    # ===== 🔥 ГЛАВНОЕ: ТОЛЬКО КОМНАТЫ =====
+    # ===== КОМНАТЫ =====
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -123,7 +114,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== TEXT =====
     clear_mode(user_id)
 
-    # 🔥 НОВОЕ — АВТОАНАЛИЗ КАРТИНКИ
+    # 🔥 КАРТИНКА
     if ctx and ctx.get("path"):
         try:
             hint = await analyze_image(ctx["path"])
@@ -134,27 +125,18 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    # ===== 🔥 ДОБАВЛЕНО: ВРЕМЯ (как контекст, не критично) =====
+    # ===== 🔥 НОВЫЙ КОНТЕКСТ ВРЕМЕНИ =====
     try:
-        hour = state.get("hour")
+        time_str = state.get("time_str")
 
-        if hour is not None:
-            if hour < 6:
-                part = "ночь"
-            elif hour < 12:
-                part = "утро"
-            elif hour < 18:
-                part = "день"
-            else:
-                part = "вечер"
-
-            time_context = f"Сейчас у пользователя {hour}:00 ({part}, Europe/Kyiv)"
+        if time_str:
+            time_context = f"Текущее время пользователя: {time_str} (Europe/Kyiv)"
             text = f"{time_context}\n\n{text}"
 
     except Exception as e:
         print("🔥 TIME ERROR:", e)
-    # ===== КОНЕЦ БЛОКА ВРЕМЕНИ =====
 
+    # ===== КОНТЕКСТ МИРА =====
     world = build_context_text()
     text = f"{world}\n\n{text}"
 
