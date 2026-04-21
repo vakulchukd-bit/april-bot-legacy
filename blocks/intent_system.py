@@ -1,30 +1,28 @@
-# blocks/intent_system.py
-
 def detect_intent(text: str):
-    t = text.lower()
+    t = text.lower().strip()
 
-    # ===== MEMORY =====
-    if any(x in t for x in [
-        "какая была", "что было", "напомни", "помнишь"
+    # ===== ВОПРОС =====
+    if "?" in t or any(q in t for q in [
+        "как", "что", "почему", "зачем",
+        "умеешь", "можешь"
     ]):
-        return "memory"
+        return "question"
 
-    # ===== ANALYZE =====
-    if any(x in t for x in [
-        "что на", "что изображено", "что это"
-    ]):
-        return "analyze"
-
-    # ===== EDIT =====
-    if any(x in t for x in [
-        "измени", "сделай", "добавь", "убери", "осветли", "затемни"
+    # ===== РЕДАКТИРОВАНИЕ =====
+    if any(v in t for v in [
+        "добавь", "измени", "убери",
+        "замени", "поменяй", "улучши",
+        "подправь", "ярче", "темнее"
     ]):
         return "edit"
 
-    # ===== GENERATE =====
-    if any(x in t for x in [
-        "создай", "сгенерируй", "нарисуй"
+    # ===== ГЕНЕРАЦИЯ =====
+    if any(g in t for g in [
+        "создай", "сгенерируй", "нарисуй",
+        "сделай", "покажи", "хочу",
+        "картин", "изображен"
     ]):
         return "generate"
 
-    return "text"
+    # ===== ОБЫЧНЫЙ ТЕКСТ =====
+    return "chat"
