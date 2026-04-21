@@ -10,7 +10,7 @@ from blocks.state_manager import (
 
 from blocks.anchor_system import get_anchor
 from blocks.image_system import analyze_image
-from blocks.mode_manager import get_mode, clear_mode
+from blocks.mode_manager import get_mode
 
 from blocks.context_system import build_context_text
 
@@ -40,7 +40,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # ===== 🔥 ENGINEERING MODE (НОВАЯ ЛОГИКА) =====
+    # ===== 🔥 ENGINEERING MODE =====
     if mode == "engineering":
 
         # если повторно написали /analiz
@@ -50,30 +50,27 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": "📥 Жду код..."
             }
 
-        # 👉 СРАЗУ анализируем
+        # 👉 анализируем БЕЗ сброса режима
         report = analyze_code(text)
-
-        # 🔥 ВЫХОД ИЗ РЕЖИМА
-        clear_mode(user_id)
 
         return {
             "type": "admin_report",
             "data": report
         }
 
-    # 🔥 НОВОЕ
+    # ===== 🔥 НОВОЕ =====
     task_type = detect_task_type(text)
 
-    # ===== 🔥 БЫСТРЫЕ ВЕТКИ =====
     t = text.lower().strip()
 
+    # ===== БЫСТРЫЕ ОТВЕТЫ =====
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВРЕМЯ =====
+    # ===== ВРЕМЯ =====
     if "время" in t or "час" in t:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
@@ -102,10 +99,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     # ===== ANALYZE IMAGE =====
     if intent == "analyze":
-        ctx = get_image_context(user_id)
-
-        if not ctx:
-            ctx = state.get("image_context")
+        ctx = get_image_context(user_id) or state.get("image_context")
 
         if not ctx or not ctx.get("path"):
             return {
@@ -124,11 +118,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         }
 
     # ===== КОНТЕКСТ =====
-    ctx = get_image_context(user_id)
-
-    if not ctx:
-        ctx = state.get("image_context")
-
+    ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
     context = {
@@ -160,7 +150,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
     # ===== TEXT =====
-    clear_mode(user_id)
 
     # 🔥 КАРТИНКА
     if ctx and ctx.get("path"):
@@ -173,7 +162,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    # ===== ВРЕМЯ В КОНТЕКСТ =====
+    # ===== ВРЕМЯ =====
     try:
         time_str = state.get("time_str")
         if time_str:
