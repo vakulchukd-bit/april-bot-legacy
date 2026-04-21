@@ -1,6 +1,6 @@
 # blocks/cost_system.py
 
-from blocks.analytics_storage import load_data
+from blocks.analytics_storage import load_data, save_data
 
 # 💰 цены
 TEXT_COST = 0.0005
@@ -8,8 +8,21 @@ IMAGE_COST = 0.02
 
 
 def add_image():
-    # больше не используем память
-    pass
+    data = load_data()
+
+    # 🔥 увеличиваем счётчик
+    data["images"] = data.get("images", 0) + 1
+
+    save_data(data)
+
+
+def add_text():
+    data = load_data()
+
+    # 🔥 увеличиваем сообщения
+    data["messages"] = data.get("messages", 0) + 1
+
+    save_data(data)
 
 
 def calculate_cost():
