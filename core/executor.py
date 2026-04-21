@@ -24,6 +24,27 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
+    # ===== 🔥 НОВОЕ: ЖЁСТКИЙ ОТВЕТ ПРО ВРЕМЯ =====
+    lower_text = text.lower()
+    if "время" in lower_text or "час" in lower_text:
+        hour = state.get("hour")
+
+        if hour is not None:
+            if hour < 6:
+                part = "ночь"
+            elif hour < 12:
+                part = "утро"
+            elif hour < 18:
+                part = "день"
+            else:
+                part = "вечер"
+
+            return {
+                "type": "text",
+                "data": f"Сейчас {hour}:00 ({part}, Europe/Kyiv)"
+            }
+    # ===== КОНЕЦ БЛОКА =====
+
     # ===== MEMORY =====
     if intent == "memory":
         anchor = get_anchor(user_id)
@@ -113,7 +134,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    # ===== 🔥 ДОБАВЛЕНО: ВРЕМЯ =====
+    # ===== 🔥 ДОБАВЛЕНО: ВРЕМЯ (как контекст, не критично) =====
     try:
         hour = state.get("hour")
 
