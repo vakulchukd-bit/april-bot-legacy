@@ -10,51 +10,19 @@ class ImageGenerateRoom(Room):
         t = text.lower()
         return any(w in t for w in [
             "сгенерируй", "создай", "нарисуй", "сделай",
+            "картин", "изображен",
             "generate", "draw"
         ])
 
-    def decide(self, text):
-        t = text.lower()
-        words = t.split()
-
-        # ❌ вопросы
-        if any(q in t for q in ["что", "как", "почему", "зачем", "можешь", "?"]):
-            return "ask"
-
-        # ❌ нет конкретики
-        if len(words) <= 2:
-            return "ask"
-
-        # ❌ "сделай картинку"
-        if "картинку" in words:
-            idx = words.index("картинку")
-            if idx == len(words) - 1:
-                return "ask"
-
-        if "изображение" in words:
-            idx = words.index("изображение")
-            if idx == len(words) - 1:
-                return "ask"
-
-        return "generate"
-
     async def handle(self, user_id, text, context, run):
-        decision = self.decide(text)
+        # 👉 ВСЕГДА генерируем, без тупых проверок
+        result = await run(
+            context["chat_id"],
+            image_generate(user_id, text, context["state"])
+        )
 
-        if decision == "ask":
-            return {
-                "type": "text",
-                "data": "🎨 Что именно нужно создать?\nНапример: лес, город, человек 🙂"
-            }
-
-        if decision == "generate":
-            result = await run(
-                context["chat_id"],
-                image_generate(user_id, text, context["state"])
-            )
-
-            if result and result.get("type") == "image":
-                return result
+        if result and result.get("type") == "image":
+            return result
 
         return None
 
@@ -70,28 +38,7 @@ class ImageEditRoom(Room):
         ctx = context.get("image")
         return ctx is not None and ctx.get("path") is not None
 
-    def decide(self, text):
-        t = text.lower()
-
-        # ❌ вопросы
-        if any(q in t for q in ["что", "как", "почему", "?", "думаешь"]):
-            return "ignore"
-
-        # ✅ команды
-        if any(v in t for v in [
-            "измени", "добавь", "убери", "осветли",
-            "затемни", "замени", "поменяй", "улучши"
-        ]):
-            return "edit"
-
-        return "ignore"
-
     async def handle(self, user_id, text, context, run):
-        decision = self.decide(text)
-
-        if decision != "edit":
-            return None
-
         ctx = context["image"]
 
         if not ctx or not ctx.get("path"):
@@ -140,6 +87,6 @@ class TextRoom(Room):
 # === РЕЕСТР ===
 ROOMS = [
     ImageEditRoom(),
-    ImageGenerateRoom(),
+    ImageGenerateRoom(),  # ← приоритет генерации
     TextRoom()
 ]
