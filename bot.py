@@ -43,7 +43,7 @@ from blocks.admin_system import (
 from blocks.cost_system import add_image, add_text
 
 # 🔥 MODE
-from blocks.mode_manager import set_mode, clear_mode
+from blocks.mode_manager import get_mode, set_mode, clear_mode
 
 # 🔥 SESSION
 from blocks.session_manager import is_session_expired
@@ -135,7 +135,13 @@ async def handle(message: types.Message):
 
     # ===== 🔥 /analiz (ТОЛЬКО ДЛЯ АДМИНА)
     text = message.text or ""
+
     if text.lower() == "/analiz" and user_id == ADMIN_ID:
+        # если уже в режиме — не даём провалиться дальше
+        if get_mode(user_id) == "engineering":
+            await message.answer("🛠 Ты уже в режиме анализа. Отправь код.")
+            return
+
         set_mode(user_id, "engineering")
         await message.answer("🛠 Режим анализа включен. Отправь код.")
         return
