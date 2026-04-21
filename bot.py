@@ -3,6 +3,9 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from datetime import datetime
+import pytz
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
 from openai import OpenAI
@@ -22,7 +25,8 @@ from blocks.ui import main_keyboard, buy_keyboard
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
-    add_dialog
+    add_dialog,
+    get_state  # 🔥 ДОБАВИЛИ
 )
 
 from blocks.anchor_system import create_anchor, clear_anchor
@@ -35,7 +39,7 @@ from blocks.admin_system import (
 )
 
 # 🔥 COST
-from blocks.cost_system import add_image, add_text  # 🔥 ДОБАВИЛИ
+from blocks.cost_system import add_image, add_text
 
 # 🔥 MODE
 from blocks.mode_manager import set_mode, clear_mode
@@ -57,6 +61,8 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 ADMIN_ID = 2016592532
+
+tz = pytz.timezone("Europe/Kyiv")  # 🔥 добавили
 
 
 # ===== SERVER =====
@@ -111,6 +117,16 @@ async def voice_to_text(message, user_id):
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
+
+    # 🔥 ВОТ ГЛАВНЫЙ ФИКС ВРЕМЕНИ
+    state = get_state(user_id)
+    now = datetime.now(tz)
+
+    state["hour"] = now.hour
+    state["minute"] = now.minute
+    state["time_str"] = now.strftime("%H:%M")
+    state["date_str"] = now.strftime("%d.%m.%Y")
+    state["weekday"] = now.strftime("%A")
 
     register_user(user_id)
 
@@ -179,7 +195,6 @@ async def handle(message: types.Message):
         else:
             text = message.text or ""
 
-        # 🔥 ФИКС: теперь считаем и текст, и аналитику
         log_event(user_id, "text")
         add_text()
 
@@ -198,122 +213,25 @@ async def handle(message: types.Message):
             run_with_typing
         )
 
-        # ===== RETRY IMAGE =====
-        if result["type"] == "retry":
-            await message.answer(result["data"])
-
-            retry_result = await retry_process(
-                user_id,
-                result["text"],
-                None
-            )
-
-            if retry_result.get("type") == "image":
-                log_event(user_id, "image")
-                add_image()
-
-                compressed = compress_image(retry_result["data"])
-
-                await message.answer_photo(
-                    BufferedInputFile(compressed, filename="image.jpg")
-                )
-            else:
-                await message.answer(retry_result.get("data"))
-
-            return
-
-        # ===== IMAGE =====
+        # ===== OUTPUT =====
         if result["type"] == "image":
             log_event(user_id, "image")
             add_image()
 
             compressed = compress_image(result["data"])
 
-            for attempt in range(3):
-                try:
-                    sent = await message.answer_photo(
-                        BufferedInputFile(compressed, filename="image.jpg")
-                    )
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        raise e
-                    await asyncio.sleep(1)
-
-            await message.answer("Оцени 👇", reply_markup=main_keyboard(sent.message_id))
+            await message.answer_photo(
+                BufferedInputFile(compressed, filename="image.jpg")
+            )
 
         else:
             add_dialog(user_id, "user", text)
             add_dialog(user_id, "assistant", result["data"])
 
-            await message.answer(
-                result["data"],
-                reply_markup=main_keyboard(message.message_id)
-            )
+            await message.answer(result["data"])
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
-
-
-# ===== CALLBACKS =====
-@dp.callback_query(F.data.startswith("like_"))
-async def like(c: types.CallbackQuery):
-    await c.answer()
-    await c.message.answer("👍 Спасибо!")
-
-
-@dp.callback_query(F.data.startswith("dislike_"))
-async def dislike(c: types.CallbackQuery):
-    await c.answer()
-    await c.message.answer("👎 Принял!")
-
-
-# ===== ЗАЯВКА =====
-@dp.callback_query(F.data == "buy_yes")
-async def buy_yes(c: types.CallbackQuery):
-    user_id = c.from_user.id
-
-    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-        [
-            types.InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user_id}"),
-            types.InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}")
-        ]
-    ])
-
-    await bot.send_message(
-        ADMIN_ID,
-        f"💳 Запрос на подписку\n\n👤 User ID: {user_id}",
-        reply_markup=keyboard
-    )
-
-    await c.message.answer("⏳ Заявка отправлена администратору")
-    await c.answer()
-
-
-@dp.callback_query(F.data.startswith("approve_"))
-async def approve(c: types.CallbackQuery):
-    user_id = int(c.data.split("_")[1])
-
-    set_subscription(user_id, 30)
-
-    await bot.send_message(user_id, "✅ Подписка активирована!")
-    await c.message.answer(f"✔️ Выдано: {user_id}")
-    await c.answer()
-
-
-@dp.callback_query(F.data.startswith("reject_"))
-async def reject(c: types.CallbackQuery):
-    user_id = int(c.data.split("_")[1])
-
-    await bot.send_message(user_id, "❌ Заявка отклонена")
-    await c.message.answer(f"❌ Отклонено: {user_id}")
-    await c.answer()
-
-
-@dp.callback_query(F.data == "buy_no")
-async def buy_no(c: types.CallbackQuery):
-    await c.message.answer("Ок, если передумаешь — напиши 🙂")
-    await c.answer()
 
 
 # ===== START =====
