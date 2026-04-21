@@ -67,8 +67,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВОПРОСЫ (НОВОЕ) =====
-    if intent == "question":
+    # ===== 🔥 ВОПРОСЫ (ИСПРАВЛЕНО) =====
+    if intent == "question" and any(x in t for x in ["умеешь", "можешь", "что ты умеешь"]):
         return {
             "type": "text",
             "data": "Да 🙂 Я умею:\n\n• создавать изображения 🎨\n• редактировать фото 📷\n• отвечать на вопросы 💬\n• анализировать код 🛠\n\nСкажи, что хочешь сделать."
