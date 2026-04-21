@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from datetime import datetime
 import pytz
+import random
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
@@ -65,7 +66,7 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# ===== 🔥 FINAL CONTROL =====
+# ===== FINAL CONTROL =====
 def final_control(text: str) -> str:
     if not text or not text.strip():
         return "⚠️ Ответ не сгенерирован. Попробуй ещё раз."
@@ -132,6 +133,13 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
+    # ===== 🔥 /analiz (ТОЛЬКО ДЛЯ АДМИНА)
+    text = message.text or ""
+    if text.lower() == "/analiz" and user_id == ADMIN_ID:
+        set_mode(user_id, "engineering")
+        await message.answer("🛠 Режим анализа включен. Отправь код.")
+        return
+
     # 🔥 TIME
     state = get_state(user_id)
     now = datetime.now(tz)
@@ -145,7 +153,7 @@ async def handle(message: types.Message):
     register_user(user_id)
 
     # ===== ADMIN =====
-    if message.text == "/admin":
+    if text == "/admin":
         if user_id == ADMIN_ID:
             await message.answer(get_admin_panel())
         else:
@@ -206,8 +214,6 @@ async def handle(message: types.Message):
                 return
 
             await message.answer(f"🎤 {text}")
-        else:
-            text = message.text or ""
 
         log_event(user_id, "text")
         add_text()
@@ -227,6 +233,16 @@ async def handle(message: types.Message):
             run_with_typing
         )
 
+        # ===== 🔥 ENGINEERING REPORT (СКРЫТЫЙ)
+        if result["type"] == "admin_report":
+            await bot.send_chat_action(message.chat.id, "typing")
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            await bot.send_message(ADMIN_ID, result["data"])
+            await message.answer("⏳ Обрабатываю...")
+
+            return
+
         # ===== OUTPUT =====
         if result["type"] == "image":
             log_event(user_id, "image")
@@ -243,7 +259,6 @@ async def handle(message: types.Message):
             add_dialog(user_id, "assistant", result["data"])
 
             reply = final_control(result["data"])
-
             await message.answer(reply)
 
     except Exception as e:
