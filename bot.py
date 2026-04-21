@@ -132,12 +132,10 @@ async def voice_to_text(message, user_id):
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
-
-    # ===== 🔥 /analiz (ТОЛЬКО ДЛЯ АДМИНА)
     text = message.text or ""
 
+    # ===== 🔥 /analiz (ТОЛЬКО ДЛЯ АДМИНА)
     if text.lower() == "/analiz" and user_id == ADMIN_ID:
-        # если уже в режиме — не даём провалиться дальше
         if get_mode(user_id) == "engineering":
             await message.answer("🛠 Ты уже в режиме анализа. Отправь код.")
             return
@@ -146,7 +144,23 @@ async def handle(message: types.Message):
         await message.answer("🛠 Режим анализа включен. Отправь код.")
         return
 
-    # 🔥 TIME
+    # ===== 🔥 ENGINEERING MODE (ПОЛНЫЙ ПЕРЕХВАТ)
+    if get_mode(user_id) == "engineering" and user_id == ADMIN_ID:
+        result = await execute(
+            user_id,
+            text,
+            message.chat.id,
+            run_with_typing
+        )
+
+        if result["type"] == "admin_report":
+            await bot.send_message(ADMIN_ID, result["data"])
+            return
+
+        await message.answer("⚠️ Ошибка режима анализа")
+        return
+
+    # ===== TIME =====
     state = get_state(user_id)
     now = datetime.now(tz)
 
@@ -238,16 +252,6 @@ async def handle(message: types.Message):
             message.chat.id,
             run_with_typing
         )
-
-        # ===== 🔥 ENGINEERING REPORT (СКРЫТЫЙ)
-        if result["type"] == "admin_report":
-            await bot.send_chat_action(message.chat.id, "typing")
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-
-            await bot.send_message(ADMIN_ID, result["data"])
-            await message.answer("⏳ Обрабатываю...")
-
-            return
 
         # ===== OUTPUT =====
         if result["type"] == "image":
