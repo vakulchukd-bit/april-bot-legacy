@@ -43,14 +43,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== 🔥 ENGINEERING MODE =====
     if mode == "engineering":
 
-        # если повторно написали /analiz
         if text.lower() == "/analiz":
             return {
                 "type": "text",
                 "data": "📥 Жду код..."
             }
 
-        # 👉 анализируем БЕЗ сброса режима
         report = analyze_code(text)
 
         return {
@@ -58,7 +56,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": report
         }
 
-    # ===== 🔥 НОВОЕ =====
     task_type = detect_task_type(text)
 
     t = text.lower().strip()
@@ -69,6 +66,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
+
+    # ===== 🔥 ВОПРОСЫ (НОВОЕ) =====
+    if intent == "question":
+        return {
+            "type": "text",
+            "data": "Да 🙂 Я умею:\n\n• создавать изображения 🎨\n• редактировать фото 📷\n• отвечать на вопросы 💬\n• анализировать код 🛠\n\nСкажи, что хочешь сделать."
+        }
 
     # ===== ВРЕМЯ =====
     if "время" in t or "час" in t:
@@ -133,6 +137,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
     mode_response = detect_response_mode(text)
 
     # ===== ROOMS =====
+    handled = False
+
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -146,12 +152,19 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 if result:
                     return result
 
+                handled = True
+
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
+    if handled:
+        return {
+            "type": "text",
+            "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
+        }
+
     # ===== TEXT =====
 
-    # 🔥 КАРТИНКА
     if ctx and ctx.get("path"):
         try:
             hint = await analyze_image(ctx["path"])
@@ -162,7 +175,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    # ===== ВРЕМЯ =====
     try:
         time_str = state.get("time_str")
         if time_str:
@@ -170,7 +182,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     except Exception as e:
         print("🔥 TIME ERROR:", e)
 
-    # ===== МИР =====
     world = build_context_text()
     text = f"{world}\n\n{text}"
 
