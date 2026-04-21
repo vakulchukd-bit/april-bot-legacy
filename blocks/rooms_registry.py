@@ -8,38 +8,46 @@ class ImageGenerateRoom(Room):
 
     def can_handle(self, text, context):
         t = text.lower()
+        return any(w in t for w in [
+            "сгенерируй", "создай", "нарисуй", "сделай",
+            "generate", "draw"
+        ])
 
-        triggers = [
-            "сгенерируй", "создай", "нарисуй",
-            "сделай картинку", "сделай изображение",
-            "generate image", "draw"
-        ]
+    def decide(self, text):
+        t = text.lower()
+        words = t.split()
 
-        if not any(word in t for word in triggers):
-            return False
-
-        # 🔥 проверка: есть ли конкретика
-        weak_phrases = [
-            "какую", "какой", "что-нибудь",
-            "какую-то", "что-то", "просто",
-            "любую", "какая-нибудь"
-        ]
-
-        if any(w in t for w in weak_phrases) or len(t.split()) < 4:
+        # ❌ вопросы
+        if any(q in t for q in ["что", "как", "почему", "зачем", "можешь", "?"]):
             return "ask"
 
-        return True
+        # ❌ нет конкретики
+        if len(words) <= 2:
+            return "ask"
+
+        # ❌ "сделай картинку"
+        if "картинку" in words:
+            idx = words.index("картинку")
+            if idx == len(words) - 1:
+                return "ask"
+
+        if "изображение" in words:
+            idx = words.index("изображение")
+            if idx == len(words) - 1:
+                return "ask"
+
+        return "generate"
 
     async def handle(self, user_id, text, context, run):
-        decision = self.can_handle(text, context)
+        decision = self.decide(text)
 
         if decision == "ask":
             return {
                 "type": "text",
-                "data": "🎨 Какую именно картинку ты хочешь создать?\nОпиши подробнее 🙂"
+                "data": "🎨 Что именно нужно создать?\nНапример: лес, город, человек 🙂"
             }
 
-        if decision is True:
+        if decision == "generate":
             result = await run(
                 context["chat_id"],
                 image_generate(user_id, text, context["state"])
@@ -60,43 +68,30 @@ class ImageEditRoom(Room):
 
     def can_handle(self, text, context):
         ctx = context.get("image")
+        return ctx is not None and ctx.get("path") is not None
 
-        # ❌ нет картинки — не редактируем
-        if not ctx or not ctx.get("path"):
-            return False
-
+    def decide(self, text):
         t = text.lower()
 
-        # 🔴 вопросы → не редактируем
-        question_words = [
-            "что", "как", "почему", "зачем",
-            "нравится", "думаешь", "опиши", "это", "?"
-        ]
+        # ❌ вопросы
+        if any(q in t for q in ["что", "как", "почему", "?", "думаешь"]):
+            return "ignore"
 
-        if any(q in t for q in question_words):
-            return False
+        # ✅ команды
+        if any(v in t for v in [
+            "измени", "добавь", "убери", "осветли",
+            "затемни", "замени", "поменяй", "улучши"
+        ]):
+            return "edit"
 
-        # 🟡 глаголы редактирования
-        edit_verbs = [
-            "измени", "сделай", "добавь", "убери",
-            "замени", "осветли", "затемни",
-            "исправь", "поменяй", "улучши",
-            "размой", "сделай ярче", "сделай темнее"
-        ]
-
-        # 🟢 указание на объект
-        image_words = [
-            "картинку", "изображение", "фото",
-            "её", "его", "это"
-        ]
-
-        # 🔥 ключ: действие + объект
-        if any(v in t for v in edit_verbs) and any(i in t for i in image_words):
-            return True
-
-        return False
+        return "ignore"
 
     async def handle(self, user_id, text, context, run):
+        decision = self.decide(text)
+
+        if decision != "edit":
+            return None
+
         ctx = context["image"]
 
         if not ctx or not ctx.get("path"):
@@ -108,8 +103,7 @@ class ImageEditRoom(Room):
             except:
                 ctx["hint"] = "изображение"
 
-        base = ctx["hint"]
-        new_prompt = base + ", IMPORTANT: " + text
+        new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
         result = await run(
             context["chat_id"],
