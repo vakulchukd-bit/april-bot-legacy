@@ -35,7 +35,7 @@ from blocks.admin_system import (
 )
 
 # 🔥 COST
-from blocks.cost_system import add_image
+from blocks.cost_system import add_image, add_text  # 🔥 ДОБАВИЛИ
 
 # 🔥 MODE
 from blocks.mode_manager import set_mode, clear_mode
@@ -179,7 +179,9 @@ async def handle(message: types.Message):
         else:
             text = message.text or ""
 
+        # 🔥 ФИКС: теперь считаем и текст, и аналитику
         log_event(user_id, "text")
+        add_text()
 
         # ===== LIMIT =====
         if user_id != ADMIN_ID:
