@@ -1,24 +1,21 @@
-from blocks.router_system import decide_action
 from blocks.response_mode import detect_response_mode
-from blocks.image_module import process as image_generate, retry_process
-from blocks.image_edit_module import process as image_edit
 from blocks.text_module import process as text_process
 
 from blocks.intent_system import detect_intent
 
 from blocks.state_manager import (
     get_state,
-    get_image_context,
-    get_awaiting,
-    set_awaiting,
-    set_last_prompt
+    get_image_context
 )
 
-from blocks.anchor_system import get_anchor, update_anchor
+from blocks.anchor_system import get_anchor
 from blocks.image_system import analyze_image
-from blocks.mode_manager import get_mode, set_mode, clear_mode
+from blocks.mode_manager import get_mode, clear_mode
 
 from blocks.context_system import build_context_text
+
+# 🔥 НОВОЕ — КОМНАТЫ
+from blocks.rooms_registry import ROOMS
 
 
 async def execute(user_id, text, chat_id, run_with_typing):
@@ -62,90 +59,38 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
-    # ===== 🔥 СОБИРАЕМ КОНТЕКСТ (ДОМОФОН) =====
+    # ===== КОНТЕКСТ =====
     ctx = get_image_context(user_id)
     anchor = get_anchor(user_id)
 
     context = {
+        "chat_id": chat_id,
         "state": state,
         "image": ctx,
         "anchor": anchor,
         "mode": mode
     }
 
-    # ===== 🔥 ПРИОРИТЕТ: IMAGE EDIT =====
-    if ctx and ctx.get("path"):
-        if mode == "image_edit" or get_awaiting(user_id):
-
-            set_mode(user_id, "image_edit")
-            set_awaiting(user_id, False)
-
-            if not ctx.get("hint"):
-                try:
-                    ctx["hint"] = await analyze_image(ctx["path"])
-                except:
-                    ctx["hint"] = "изображение"
-
-            base = anchor["current"] if anchor else ctx["hint"]
-            new_prompt = base + ", IMPORTANT: " + text
-
-            result = await run_with_typing(
-                chat_id,
-                image_edit(user_id, ctx["path"], new_prompt)
-            )
-
-            if result.get("type") == "error":
-                clear_mode(user_id)
-                return {
-                    "type": "text",
-                    "data": "⚠️ Ошибка редактирования изображения"
-                }
-
-            set_last_prompt(user_id, new_prompt)
-            update_anchor(user_id, new_prompt)
-
-            clear_mode(user_id)
-
-            return {
-                "type": "image",
-                "data": result["data"]
-            }
-
-    # ===== 🔥 ROUTER (ДОМОФОН РЕШЕНИЕ) =====
-    decision = decide_action(text, state["dialog"])
-    action = decision["action"]
-
     mode_response = detect_response_mode(text)
 
-    # ===== IMAGE GENERATE =====
-    if action == "image":
-        clear_mode(user_id)
+    # ===== 🔥 ГЛАВНОЕ: ТОЛЬКО КОМНАТЫ =====
+    for room in ROOMS:
+        try:
+            if room.can_handle(text, context):
+                result = await room.handle(
+                    user_id,
+                    text,
+                    context,
+                    run_with_typing
+                )
 
-        result = await run_with_typing(
-            chat_id,
-            image_generate(user_id, text, state)
-        )
+                if result:
+                    return result
 
-        if result.get("type") == "image":
-            return {
-                "type": "image",
-                "data": result["data"]
-            }
+        except Exception as e:
+            print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-        if result.get("type") == "retry_notice":
-            return {
-                "type": "retry",
-                "data": result["data"],
-                "retry": True,
-                "text": text
-            }
-
-        return {
-            "type": "text",
-            "data": "⚠️ Ошибка генерации изображения"
-        }
-
-    # ===== 🔥 TEXT (С УЧЁТОМ МИРА) =====
+    # ===== TEXT =====
     clear_mode(user_id)
 
     if anchor:
