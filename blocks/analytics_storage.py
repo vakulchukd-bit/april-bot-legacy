@@ -4,13 +4,21 @@ import os
 DATA_FILE = "data/analytics.json"
 
 
-def load_data():
+def ensure_file():
+    # 🔥 гарантированно создаёт файл
     if not os.path.exists(DATA_FILE):
-        return {
-            "users": [],
-            "messages": 0,
-            "images": 0
-        }
+        os.makedirs("data", exist_ok=True)
+
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "users": [],
+                "messages": 0,
+                "images": 0
+            }, f, indent=2)
+
+
+def load_data():
+    ensure_file()  # 🔥 ВАЖНО
 
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -18,6 +26,7 @@ def load_data():
 
 def save_data(data):
     os.makedirs("data", exist_ok=True)
+
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
