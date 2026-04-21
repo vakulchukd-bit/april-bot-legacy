@@ -15,7 +15,6 @@ class ImageGenerateRoom(Room):
         ])
 
     async def handle(self, user_id, text, context, run):
-        # 👉 ВСЕГДА генерируем, без тупых проверок
         result = await run(
             context["chat_id"],
             image_generate(user_id, text, context["state"])
@@ -36,7 +35,16 @@ class ImageEditRoom(Room):
 
     def can_handle(self, text, context):
         ctx = context.get("image")
-        return ctx is not None and ctx.get("path") is not None
+        if not ctx or not ctx.get("path"):
+            return False
+
+        t = text.lower()
+
+        return any(v in t for v in [
+            "измени", "добавь", "убери",
+            "сделай", "замени", "поменяй",
+            "осветли", "затемни", "улучши"
+        ])
 
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
@@ -87,6 +95,6 @@ class TextRoom(Room):
 # === РЕЕСТР ===
 ROOMS = [
     ImageEditRoom(),
-    ImageGenerateRoom(),  # ← приоритет генерации
+    ImageGenerateRoom(),
     TextRoom()
 ]
