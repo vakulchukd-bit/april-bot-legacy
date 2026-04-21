@@ -2,6 +2,9 @@
 
 state = {}
 
+# 🔥 ДОБАВИЛИ ОТДЕЛЬНОЕ ХРАНИЛИЩЕ (стабильность)
+image_storage = {}
+
 
 def get_state(user_id):
     if user_id not in state:
@@ -16,10 +19,19 @@ def get_state(user_id):
 
 # ===== IMAGE CONTEXT =====
 def set_image_context(user_id, ctx):
+    # 🔥 сохраняем в двух местах
+    image_storage[user_id] = ctx
     get_state(user_id)["image_context"] = ctx
 
 
 def get_image_context(user_id):
+    # 🔥 сначала берём из стабильного хранилища
+    ctx = image_storage.get(user_id)
+
+    if ctx:
+        return ctx
+
+    # 🔥 fallback (если вдруг потерялось)
     return get_state(user_id).get("image_context")
 
 
