@@ -18,11 +18,36 @@ from blocks.context_system import build_context_text
 from blocks.rooms_registry import ROOMS
 
 
+# ===== 🔥 НОВОЕ: ТИПЫ ЗАДАЧ =====
+def detect_task_type(text: str) -> str:
+    t = text.lower().strip()
+
+    if any(x in t for x in ["+", "-", "*", "/", "="]):
+        return "math"
+
+    if t.startswith("/"):
+        return "command"
+
+    return "chat"
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
     intent = detect_intent(text)
+
+    # 🔥 НОВОЕ
+    task_type = detect_task_type(text)
+
+    # ===== 🔥 БЫСТРЫЕ ВЕТКИ =====
+    t = text.lower().strip()
+
+    if t == "привет":
+        return {"type": "text", "data": "Привет 🙂"}
+
+    if t == "2+2":
+        return {"type": "text", "data": "4"}
 
     # ===== 🔥 ФИКС: НОРМАЛЬНОЕ ВРЕМЯ =====
     lower_text = text.lower()
@@ -36,7 +61,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "type": "text",
                 "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
             }
-    # ===== КОНЕЦ =====
 
     # ===== MEMORY =====
     if intent == "memory":
@@ -89,7 +113,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "state": state,
         "image": ctx,
         "anchor": anchor,
-        "mode": mode
+        "mode": mode,
+        "task_type": task_type  # 🔥 ДОБАВИЛИ
     }
 
     mode_response = detect_response_mode(text)
