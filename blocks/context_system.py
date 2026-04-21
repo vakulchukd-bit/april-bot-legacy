@@ -1,94 +1,30 @@
-# blocks/text_module.py
+# blocks/context_system.py
 
-import asyncio
-from openai import OpenAI
-from blocks.context_system import build_context_text  # 🔥 ПЕРЕНЕСЛИ НАВЕРХ
+def build_context_text(state=None):
+    """
+    Главный контекст April.
+    НЕ импортирует другие модули → нет циклов.
+    """
 
-client = OpenAI()
-
-SYSTEM_PROMPT = """
-Ты — Aprill, интеллектуальный ассистент.
+    base = """
+Ты — April, интеллектуальная система анализа личности.
 
 Ты:
-- понимаешь диалог
-- помнишь контекст
-- работаешь с изображениями
+- анализируешь поведение пользователя
+- запоминаешь стиль общения
+- формируешь психологический портрет
+- адаптируешь ответы под человека
 
-ВАЖНО:
-- ты МОЖЕШЬ генерировать изображения
-- ты МОЖЕШЬ анализировать изображения
-- никогда не говори "я не могу"
-
-Если пользователь говорит про картинку:
-- учитывай последнюю картинку из контекста
-
-Если пользователь просит текст для копирования:
-- возвращай только текст
+Принципы:
+- не говори, что ты ИИ
+- не ломай атмосферу диалога
+- отвечай естественно и точно
 """
 
+    # 🔥 динамика (если передали state)
+    if state:
+        mood = state.get("mood")
+        if mood:
+            base += f"\nТекущее состояние пользователя: {mood}"
 
-async def process(user_id, text, state):
-    def run():
-        ctx = state.get("image_context")
-
-        extra = []
-
-        # ===== 🔥 ВРЕМЯ И КОНТЕКСТ КАК SYSTEM =====
-        try:
-            world = build_context_text()
-
-            extra.append({
-                "role": "system",
-                "content": world
-            })
-        except Exception as e:
-            print("🔥 CONTEXT ERROR:", e)
-        # ===== КОНЕЦ =====
-
-        # ===== (оставляем твой блок времени тоже, не удаляем) =====
-        try:
-            hour = state.get("hour")
-            if hour is not None:
-                if hour < 6:
-                    part = "ночь"
-                elif hour < 12:
-                    part = "утро"
-                elif hour < 18:
-                    part = "день"
-                else:
-                    part = "вечер"
-
-                extra.append({
-                    "role": "system",
-                    "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv). Это реальное текущее время."
-                })
-        except Exception as e:
-            print("🔥 TIME ERROR:", e)
-        # ===== КОНЕЦ =====
-
-        if ctx and ctx.get("hint"):
-            extra.append({
-                "role": "system",
-                "content": f"Контекст изображения: {ctx['hint']}"
-            })
-
-        history = state.get("dialog", [])
-
-        r = client.responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                *extra,
-                *history[-6:],
-                {"role": "user", "content": text}
-            ]
-        )
-
-        return r.output_text
-
-    reply = await asyncio.to_thread(run)
-
-    return {
-        "type": "text",
-        "content": reply
-    }
+    return base
