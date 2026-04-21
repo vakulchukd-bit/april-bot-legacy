@@ -26,7 +26,7 @@ from blocks.state_manager import (
     set_image_context,
     set_awaiting,
     add_dialog,
-    get_state  # 🔥 ДОБАВИЛИ
+    get_state
 )
 
 from blocks.anchor_system import create_anchor, clear_anchor
@@ -62,7 +62,21 @@ dp = Dispatcher()
 
 ADMIN_ID = 2016592532
 
-tz = pytz.timezone("Europe/Kyiv")  # 🔥 добавили
+tz = pytz.timezone("Europe/Kyiv")
+
+
+# ===== 🔥 FINAL CONTROL =====
+def final_control(text: str) -> str:
+    if not text or not text.strip():
+        return "⚠️ Ответ не сгенерирован. Попробуй ещё раз."
+
+    if text.count("```") >= 2:
+        text = text.replace("```", "").strip()
+
+    if len(text) > 3500:
+        text = text[:3500] + "\n\n…обрезано"
+
+    return text.strip()
 
 
 # ===== SERVER =====
@@ -118,7 +132,7 @@ async def voice_to_text(message, user_id):
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    # 🔥 ВОТ ГЛАВНЫЙ ФИКС ВРЕМЕНИ
+    # 🔥 TIME
     state = get_state(user_id)
     now = datetime.now(tz)
 
@@ -130,7 +144,7 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # 🔥 ADMIN
+    # ===== ADMIN =====
     if message.text == "/admin":
         if user_id == ADMIN_ID:
             await message.answer(get_admin_panel())
@@ -138,7 +152,7 @@ async def handle(message: types.Message):
             await message.answer("⛔ Ошибка доступа")
         return
 
-    # 🔥 SESSION
+    # ===== SESSION =====
     if is_session_expired(user_id):
         clear_anchor(user_id)
         clear_mode(user_id)
@@ -148,7 +162,7 @@ async def handle(message: types.Message):
     if should_warn(user_id):
         await message.answer("⚠️ Подписка закончится через 24 часа")
 
-    # 🔥 ДОСТУП
+    # ===== ACCESS =====
     access = True if user_id == ADMIN_ID else check_subscription(user_id)
 
     if not access:
@@ -228,7 +242,9 @@ async def handle(message: types.Message):
             add_dialog(user_id, "user", text)
             add_dialog(user_id, "assistant", result["data"])
 
-            await message.answer(result["data"])
+            reply = final_control(result["data"])
+
+            await message.answer(reply)
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
