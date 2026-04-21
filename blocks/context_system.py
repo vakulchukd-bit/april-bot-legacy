@@ -1,41 +1,88 @@
-from datetime import datetime
-import pytz
+# blocks/text_module.py
 
+import asyncio
+from openai import OpenAI
 
-def get_time_context():
-    kyiv_tz = pytz.timezone("Europe/Kyiv")
-    now = datetime.now(kyiv_tz)
+client = OpenAI()
 
-    return {
-        "datetime": now.strftime("%Y-%m-%d %H:%M"),
-        "date": now.strftime("%Y-%m-%d"),
-        "time": now.strftime("%H:%M"),
-        "year": now.year
-    }
+SYSTEM_PROMPT = """
+Ты — Aprill, интеллектуальный ассистент.
 
-
-def get_location_context():
-    return {
-        "country": "Украина",
-        "timezone": "Europe/Kyiv",
-        "city": "не определён (по умолчанию Украина)"
-    }
-
-
-def build_context_text():
-    time_data = get_time_context()
-    loc = get_location_context()
-
-    return f"""
-ТЕКУЩИЙ КОНТЕКСТ:
-- Дата: {time_data['date']}
-- Время: {time_data['time']}
-- Год: {time_data['year']}
-- Часовой пояс: {loc['timezone']}
-- Страна: {loc['country']}
+Ты:
+- понимаешь диалог
+- помнишь контекст
+- работаешь с изображениями
 
 ВАЖНО:
-Ты находишься в реальном текущем времени.
-Отвечай, исходя из актуальной даты и времени.
-Не используй устаревшие данные.
+- ты МОЖЕШЬ генерировать изображения
+- ты МОЖЕШЬ анализировать изображения
+- никогда не говори "я не могу"
+
+Если пользователь говорит про картинку:
+- учитывай последнюю картинку из контекста
+
+Если пользователь просит текст для копирования:
+- возвращай только текст
 """
+
+
+async def process(user_id, text, state):
+    def run():
+        ctx = state.get("image_context")
+
+        extra = []
+
+        # ===== 🔥 ВРЕМЯ И КОНТЕКСТ КАК SYSTEM =====
+        from blocks.context_system import build_context_text
+        world = build_context_text()
+
+        extra.append({
+            "role": "system",
+            "content": world
+        })
+        # ===== КОНЕЦ =====
+
+        # ===== (оставляем твой блок времени тоже, не удаляем) =====
+        hour = state.get("hour")
+        if hour is not None:
+            if hour < 6:
+                part = "ночь"
+            elif hour < 12:
+                part = "утро"
+            elif hour < 18:
+                part = "день"
+            else:
+                part = "вечер"
+
+            extra.append({
+                "role": "system",
+                "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv). Это реальное текущее время."
+            })
+        # ===== КОНЕЦ =====
+
+        if ctx and ctx.get("hint"):
+            extra.append({
+                "role": "system",
+                "content": f"Контекст изображения: {ctx['hint']}"
+            })
+
+        history = state.get("dialog", [])
+
+        r = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                *extra,
+                *history[-6:],
+                {"role": "user", "content": text}
+            ]
+        )
+
+        return r.output_text
+
+    reply = await asyncio.to_thread(run)
+
+    return {
+        "type": "text",
+        "content": reply
+    }
