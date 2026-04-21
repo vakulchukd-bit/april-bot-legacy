@@ -40,30 +40,25 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # ===== 🔥 ENGINEERING MODE =====
+    # ===== 🔥 ENGINEERING MODE (НОВАЯ ЛОГИКА) =====
     if mode == "engineering":
 
+        # если повторно написали /analiz
         if text.lower() == "/analiz":
-            code = state.get("engineering_buffer")
-
-            if not code:
-                return {
-                    "type": "text",
-                    "data": "❌ Нет кода для анализа"
-                }
-
-            report = analyze_code(code)
-
             return {
-                "type": "admin_report",
-                "data": report
+                "type": "text",
+                "data": "📥 Жду код..."
             }
 
-        state["engineering_buffer"] = text
+        # 👉 СРАЗУ анализируем
+        report = analyze_code(text)
+
+        # 🔥 ВЫХОД ИЗ РЕЖИМА
+        clear_mode(user_id)
 
         return {
-            "type": "text",
-            "data": "📥 Принято"
+            "type": "admin_report",
+            "data": report
         }
 
     # 🔥 НОВОЕ
