@@ -17,8 +17,11 @@ from blocks.context_system import build_context_text
 # 🔥 НОВОЕ — КОМНАТЫ
 from blocks.rooms_registry import ROOMS
 
+# 🔥 ENGINEERING
+from blocks.engineering_system import analyze_code
 
-# ===== 🔥 НОВОЕ: ТИПЫ ЗАДАЧ =====
+
+# ===== 🔥 ТИПЫ ЗАДАЧ =====
 def detect_task_type(text: str) -> str:
     t = text.lower().strip()
 
@@ -37,6 +40,32 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
+    # ===== 🔥 ENGINEERING MODE =====
+    if mode == "engineering":
+
+        if text.lower() == "/analiz":
+            code = state.get("engineering_buffer")
+
+            if not code:
+                return {
+                    "type": "text",
+                    "data": "❌ Нет кода для анализа"
+                }
+
+            report = analyze_code(code)
+
+            return {
+                "type": "admin_report",
+                "data": report
+            }
+
+        state["engineering_buffer"] = text
+
+        return {
+            "type": "text",
+            "data": "📥 Принято"
+        }
+
     # 🔥 НОВОЕ
     task_type = detect_task_type(text)
 
@@ -49,9 +78,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ФИКС: НОРМАЛЬНОЕ ВРЕМЯ =====
-    lower_text = text.lower()
-    if "время" in lower_text or "час" in lower_text:
+    # ===== 🔥 ВРЕМЯ =====
+    if "время" in t or "час" in t:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
         date_str = state.get("date_str")
@@ -77,7 +105,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"🧠 Последний контекст:\n{anchor['current']}"
         }
 
-    # ===== ANALYZE =====
+    # ===== ANALYZE IMAGE =====
     if intent == "analyze":
         ctx = get_image_context(user_id)
 
@@ -114,12 +142,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": task_type  # 🔥 ДОБАВИЛИ
+        "task_type": task_type
     }
 
     mode_response = detect_response_mode(text)
 
-    # ===== КОМНАТЫ =====
+    # ===== ROOMS =====
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -150,18 +178,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
-    # ===== 🔥 НОВЫЙ КОНТЕКСТ ВРЕМЕНИ =====
+    # ===== ВРЕМЯ В КОНТЕКСТ =====
     try:
         time_str = state.get("time_str")
-
         if time_str:
-            time_context = f"Текущее время пользователя: {time_str} (Europe/Kyiv)"
-            text = f"{time_context}\n\n{text}"
-
+            text = f"Текущее время пользователя: {time_str} (Europe/Kyiv)\n\n{text}"
     except Exception as e:
         print("🔥 TIME ERROR:", e)
 
-    # ===== КОНТЕКСТ МИРА =====
+    # ===== МИР =====
     world = build_context_text()
     text = f"{world}\n\n{text}"
 
