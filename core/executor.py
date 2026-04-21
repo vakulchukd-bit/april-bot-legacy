@@ -113,6 +113,27 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
+    # ===== 🔥 ДОБАВЛЕНО: ВРЕМЯ =====
+    try:
+        hour = state.get("hour")
+
+        if hour is not None:
+            if hour < 6:
+                part = "ночь"
+            elif hour < 12:
+                part = "утро"
+            elif hour < 18:
+                part = "день"
+            else:
+                part = "вечер"
+
+            time_context = f"Сейчас у пользователя {hour}:00 ({part}, Europe/Kyiv)"
+            text = f"{time_context}\n\n{text}"
+
+    except Exception as e:
+        print("🔥 TIME ERROR:", e)
+    # ===== КОНЕЦ БЛОКА ВРЕМЕНИ =====
+
     world = build_context_text()
     text = f"{world}\n\n{text}"
 
