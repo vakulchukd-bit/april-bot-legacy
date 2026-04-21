@@ -43,7 +43,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if intent == "analyze":
         ctx = get_image_context(user_id)
 
-        if not ctx or not ctx["path"]:
+        # 🔥 страховка
+        if not ctx:
+            ctx = state.get("image_context")
+
+        if not ctx or not ctx.get("path"):
             return {
                 "type": "text",
                 "data": "❌ Нет изображения для анализа"
@@ -61,6 +65,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     # ===== КОНТЕКСТ =====
     ctx = get_image_context(user_id)
+
+    # 🔥 СТРАХОВКА (главный фикс)
+    if not ctx:
+        ctx = state.get("image_context")
+
     anchor = get_anchor(user_id)
 
     context = {
