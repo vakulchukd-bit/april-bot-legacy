@@ -24,7 +24,9 @@ def is_followup(text: str) -> bool:
     t = text.lower().strip()
 
     markers = [
-        "сделай", "ещё", "еще",
+        "сделай", "измени", "добавь", "убери",
+        "замени", "поменяй",
+        "ещё", "еще",
         "короче", "подробнее",
         "объясни проще",
         "не это имел в виду",
@@ -45,6 +47,11 @@ def is_confirmation(text: str) -> bool:
     ]
 
     return any(t == p or t.startswith(p + " ") for p in positives)
+
+
+def is_rejection(text: str) -> bool:
+    t = text.lower().strip()
+    return t in ["нет", "не", "не так", "не то"]
 
 
 def update_last_action(state, text):
@@ -90,7 +97,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if is_followup(text):
         intent = "question"
 
-    # ===== 🔥 ФИКС v2: "ДА" → ПОВТОР ДЕЙСТВИЯ =====
+    t = text.lower().strip()
+
+    # ===== 🔥 НОВОЕ: ОБНОВЛЕНИЕ PROMPT ПРИ УТОЧНЕНИЯХ =====
+    if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
+        # обновляем последний prompt (ключевой фикс)
+        state["last_image_prompt"] = text
+
+    # ===== 🔥 ФИКС: "ДА" → ПОВТОР ДЕЙСТВИЯ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
@@ -142,8 +156,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         report = analyze_code(text)
         return {"type": "admin_report", "data": report}
 
-    t = text.lower().strip()
-
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
@@ -180,7 +192,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
-        # 🔥 сохраняем последний prompt
+        # 🔥 сохраняем prompt при первом запросе
         if state["last_action"]["type"] == "image":
             state["last_image_prompt"] = text
 
