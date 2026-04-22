@@ -1,9 +1,6 @@
 from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
-# ❌ больше не используем старый intent
-# from blocks.intent_system import detect_intent
-
 from core.interpreter import interpret
 
 from blocks.state_manager import (
@@ -125,6 +122,19 @@ async def execute(user_id, text, chat_id, run_with_typing):
         return {
             "type": "text",
             "data": f"📷 На изображении: {hint}"
+        }
+
+    # ===== 🔥 FOLLOW CONTEXT (НОВОЕ) =====
+    if intent == "follow_context":
+        if anchor:
+            return {
+                "type": "text",
+                "data": f"Ты имеешь в виду это:\n\n{anchor['current']}\n\nМожешь уточнить, что именно интересно? 🙂"
+            }
+
+        return {
+            "type": "text",
+            "data": "Можешь уточнить, о чём именно речь? 🤔"
         }
 
     # ===== 🚫 BLOCK GENERATE IF IMAGE EXISTS =====
