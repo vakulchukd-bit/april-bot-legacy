@@ -23,8 +23,8 @@ from openai import OpenAI
 client = OpenAI()
 
 
-# ===== GPT helper =====
-def gpt_decide_action(text: str) -> str:
+# ===== 🔥 УМНАЯ ОЦЕНКА (НОВОЕ) =====
+def smart_evaluate(user_text: str, last_assistant_text: str) -> str:
     try:
         r = client.responses.create(
             model="gpt-4o-mini",
@@ -32,62 +32,57 @@ def gpt_decide_action(text: str) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "Определи тип запроса.\n"
+                        "Оцени реакцию пользователя на ответ ассистента.\n"
                         "Ответь одним словом:\n"
-                        "text / image / edit / analyze\n"
-                        "Если это уточнение текста — ВСЕГДА text."
+                        "accepted / refined / conflict\n\n"
+                        "accepted — пользователь продолжает тему или согласен\n"
+                        "refined — уточняет, хочет лучше/короче/подробнее\n"
+                        "conflict — ассистент ошибся, пользователь исправляет или недоволен\n\n"
+                        "Без объяснений."
                     )
                 },
-                {"role": "user", "content": text}
+                {
+                    "role": "user",
+                    "content": f"Ответ ассистента:\n{last_assistant_text}\n\nСообщение пользователя:\n{user_text}"
+                }
             ]
         )
 
-        decision = r.output_text.lower().strip()
+        result = r.output_text.lower().strip()
 
-        if "image" in decision:
-            return "image"
-        if "edit" in decision:
-            return "edit"
-        if "analyze" in decision:
-            return "analyze"
+        if "conflict" in result:
+            return "conflict"
+        if "refined" in result:
+            return "refined"
 
-        return "text"
+        return "accepted"
 
     except:
-        return "text"
+        return "accepted"
 
 
-# 🔥 ЖЁСТКАЯ ЗАЩИТА (главное)
-def is_text_refinement(text: str) -> bool:
-    t = text.lower().strip()
-
-    markers = [
-        "еще короче", "ещё короче",
-        "сократи", "укороти",
-        "поконкретнее", "подробнее", "уточни",
-        "сделай короче", "сделай её короче", "сделай это короче"
-    ]
-
-    return any(m in t for m in markers)
-
-
+# 🔥 ОБНОВЛЕНИЕ СТАТУСА (переписано)
 def update_last_action(state, text):
     last = state.get("last_action")
 
     if not last or last.get("status") != "pending":
         return
 
-    t = text.lower()
+    history = state.get("dialog", [])
 
-    if any(x in t for x in ["добавь", "еще", "ещё", "измени", "переделай"]):
-        last["status"] = "refined"
+    last_assistant = None
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            last_assistant = msg.get("content")
+            break
+
+    if not last_assistant:
+        last["status"] = "accepted"
         return
 
-    if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка"]):
-        last["status"] = "conflict"
-        return
+    status = smart_evaluate(text, last_assistant)
 
-    last["status"] = "accepted"
+    last["status"] = status
 
 
 def commit_last_action(user_id, state):
@@ -111,6 +106,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
+    # ===== DEBUG =====
     if text == "/exp":
         data = load_experience()
         user_data = data.get(str(user_id), {})
@@ -120,14 +116,24 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"🧠 Опыт:\n{user_data}"
         }
 
-    # ===== 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ =====
-    if is_text_refinement(text):
-        gpt_action = "text"
-    else:
-        gpt_action = gpt_decide_action(text)
+    # ===== ENGINEERING =====
+    if mode == "engineering" and not text.startswith("/"):
+        if text.lower() == "/analiz":
+            return {"type": "text", "data": "📥 Жду код..."}
 
-    # ===== TEXT =====
-    if intent == "question" or gpt_action == "text":
+        report = analyze_code(text)
+        return {"type": "admin_report", "data": report}
+
+    t = text.lower().strip()
+
+    if t == "привет":
+        return {"type": "text", "data": "Привет 🙂"}
+
+    if t == "2+2":
+        return {"type": "text", "data": "4"}
+
+    # ===== ВОПРОСЫ =====
+    if intent == "question":
 
         ctx = get_image_context(user_id) or state.get("image_context")
         anchor = get_anchor(user_id)
@@ -161,7 +167,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": result["content"]
         }
 
-    # ===== ROOMS =====
+    # ===== CONTEXT =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
