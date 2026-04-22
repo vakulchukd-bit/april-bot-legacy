@@ -60,6 +60,29 @@ async def process(user_id, text, state):
                 "content": f"Контекст изображения: {ctx['hint']}"
             })
 
+        # ===== 🔥 ЯКОРЬ ДИАЛОГА (НОВОЕ) =====
+        try:
+            if history:
+                last_assistant = None
+
+                for msg in reversed(history):
+                    if msg.get("role") == "assistant":
+                        last_assistant = msg.get("content")
+                        break
+
+                if last_assistant:
+                    extra.append({
+                        "role": "system",
+                        "content": (
+                            "Последний ответ ассистента ниже. "
+                            "Короткие фразы пользователя (например: 'еще короче', 'поконкретнее') "
+                            "относятся к нему.\n\n"
+                            f"{last_assistant}"
+                        )
+                    })
+        except Exception as e:
+            print("🔥 ANCHOR ERROR:", e)
+
         # ===== 🔥 ОПЫТ ПОЛЬЗОВАТЕЛЯ =====
         try:
             from blocks.experience_manager import load_experience
@@ -72,15 +95,12 @@ async def process(user_id, text, state):
             accepted = sum(1 for a in actions if a.get("status") == "accepted")
             conflict = sum(1 for a in actions if a.get("status") == "conflict")
 
-            # 🔥 формируем стиль
             style_hint = ""
 
             if refined >= 2:
                 style_hint = "Отвечай кратко, по делу, максимально конкретно. Пользователь часто просит уточнения."
-
             elif conflict >= 1:
                 style_hint = "Будь аккуратен в ответах и иногда уточняй, правильно ли понял пользователя."
-
             else:
                 style_hint = "Отвечай свободно, дружелюбно и естественно."
 
@@ -100,7 +120,10 @@ async def process(user_id, text, state):
                 *history[-6:],
 
                 # 🔥 ЖИВОЙ ДИАЛОГ
-                {"role": "system", "content": "Это живой диалог. Отвечай естественно, не как справка и не списком."},
+                {
+                    "role": "system",
+                    "content": "Это живой диалог. Всегда учитывай предыдущий ответ и продолжай мысль пользователя."
+                },
 
                 {"role": "user", "content": text}
             ]
