@@ -21,7 +21,7 @@ async def process(user_id, text, state):
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
-        # ===== 🔥 КОНТЕКСТ (без циклов) =====
+        # ===== 🔥 КОНТЕКСТ =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
@@ -60,27 +60,37 @@ async def process(user_id, text, state):
                 "content": f"Контекст изображения: {ctx['hint']}"
             })
 
-        # ===== 🔥 НОВОЕ: ОПЫТ ПОЛЬЗОВАТЕЛЯ =====
+        # ===== 🔥 ОПЫТ ПОЛЬЗОВАТЕЛЯ =====
         try:
             from blocks.experience_manager import load_experience
 
             data = load_experience()
             user_data = data.get(str(user_id), {})
-            actions = user_data.get("actions", [])[-5:]
+            actions = user_data.get("actions", [])
 
-            if actions:
-                exp_text = "Поведение пользователя в последних взаимодействиях:\n"
+            refined = sum(1 for a in actions if a.get("status") == "refined")
+            accepted = sum(1 for a in actions if a.get("status") == "accepted")
+            conflict = sum(1 for a in actions if a.get("status") == "conflict")
 
-                for a in actions:
-                    exp_text += f"- {a.get('type')} → {a.get('status')}\n"
+            # 🔥 формируем стиль
+            style_hint = ""
 
-                extra.append({
-                    "role": "system",
-                    "content": exp_text
-                })
+            if refined >= 2:
+                style_hint = "Отвечай кратко, по делу, максимально конкретно. Пользователь часто просит уточнения."
+
+            elif conflict >= 1:
+                style_hint = "Будь аккуратен в ответах и иногда уточняй, правильно ли понял пользователя."
+
+            else:
+                style_hint = "Отвечай свободно, дружелюбно и естественно."
+
+            extra.append({
+                "role": "system",
+                "content": f"Стиль ответа: {style_hint}"
+            })
 
         except Exception as e:
-            print("🔥 EXPERIENCE ERROR:", e)
+            print("🔥 EXPERIENCE STYLE ERROR:", e)
 
         r = client.responses.create(
             model="gpt-4o-mini",
@@ -89,7 +99,7 @@ async def process(user_id, text, state):
                 *extra,
                 *history[-6:],
 
-                # 🔥 СТИЛЬ ДИАЛОГА
+                # 🔥 ЖИВОЙ ДИАЛОГ
                 {"role": "system", "content": "Это живой диалог. Отвечай естественно, не как справка и не списком."},
 
                 {"role": "user", "content": text}
