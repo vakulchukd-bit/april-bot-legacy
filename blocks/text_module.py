@@ -84,7 +84,7 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 ANCHOR ERROR:", e)
 
-        # ===== 🔥 ОПЫТ (СТАБИЛЬНЫЙ, МЯГКИЙ) =====
+        # ===== 🔥 ОПЫТ (МЯГКОЕ ВЛИЯНИЕ) =====
         try:
             from blocks.experience_manager import load_experience
 
@@ -94,8 +94,6 @@ async def process(user_id, text, state):
 
             refined = sum(1 for a in actions if a.get("status") == "refined")
             conflict = sum(1 for a in actions if a.get("status") == "conflict")
-
-            style_hint = ""
 
             if refined >= 2:
                 style_hint = (
@@ -128,12 +126,24 @@ async def process(user_id, text, state):
             )
         })
 
+        # ===== 🔥 НОВОЕ: ЛОГИКА ДЛЯ ИЗОБРАЖЕНИЙ =====
+        extra.append({
+            "role": "system",
+            "content": (
+                "Если пользователь уточняет или изменяет изображение (например: 'сделай теплее', 'сделай милее'), "
+                "ты должен:\n"
+                "1. Кратко описать, как изменится изображение\n"
+                "2. ОБЯЗАТЕЛЬНО предложить: 'Хочешь, я сгенерирую обновлённую версию?'\n"
+                "3. НЕ генерировать без явной команды\n"
+            )
+        })
+
         r = client.responses.create(
             model="gpt-4o-mini",
             input=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *extra,
-                *history[-8:],  # немного увеличили окно
+                *history[-8:],
 
                 {
                     "role": "system",
