@@ -270,12 +270,6 @@ async def handle(message: types.Message):
                 BufferedInputFile(compressed, filename="image.jpg")
             )
 
-            # 🔥 ДОБАВЛЕНО: ПАМЯТЬ (ПОСЛЕ ВСЕГО)
-            prompt = state.get("last_prompt") or text
-
-            add_dialog(user_id, "user", text)
-            add_dialog(user_id, "assistant", f"Создано изображение: {prompt}")
-
         else:
             add_dialog(user_id, "user", text)
             add_dialog(user_id, "assistant", result["data"])
