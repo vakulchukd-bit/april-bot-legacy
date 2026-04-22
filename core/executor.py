@@ -36,6 +36,19 @@ def is_followup(text: str) -> bool:
     return any(m in t for m in markers)
 
 
+# ===== 🔥 НОВОЕ: ПОДТВЕРЖДЕНИЕ "ДА" =====
+def is_confirmation(text: str) -> bool:
+    t = text.lower().strip()
+
+    positives = [
+        "да", "ага", "ок", "окей", "хорошо",
+        "давай", "согласен", "подходит",
+        "делай", "генерируй", "создавай"
+    ]
+
+    return any(t == p or t.startswith(p + " ") for p in positives)
+
+
 def update_last_action(state, text):
     last = state.get("last_action")
 
@@ -79,6 +92,39 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # 🔥 фикс: уточнения всегда текст
     if is_followup(text):
         intent = "question"
+
+    # ===== 🔥 НОВОЕ: ЕСЛИ "ДА" → ДЕЛАЕМ ДЕЙСТВИЕ =====
+    last = state.get("last_action")
+
+    if is_confirmation(text) and last:
+        if last.get("type") == "image":
+            # 👉 пробуем снова через комнаты (генерация/редактирование)
+            ctx = get_image_context(user_id) or state.get("image_context")
+
+            context = {
+                "chat_id": chat_id,
+                "state": state,
+                "image": ctx,
+                "anchor": get_anchor(user_id),
+                "mode": mode,
+                "task_type": "chat"
+            }
+
+            for room in ROOMS:
+                try:
+                    if room.can_handle("generate", context):
+                        result = await room.handle(
+                            user_id,
+                            "generate",
+                            context,
+                            run_with_typing
+                        )
+
+                        if result:
+                            return result
+
+                except Exception as e:
+                    print(f"🔥 ROOM ERROR [confirm]:", e)
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -130,8 +176,9 @@ async def execute(user_id, text, chat_id, run_with_typing):
             text_process(user_id, text, state)
         )
 
+        # 👉 если речь про изображение — помечаем как ожидающее действия
         state["last_action"] = {
-            "type": "text",
+            "type": "image" if ("изображ" in text or "робот" in text) else "text",
             "intent": "answer",
             "status": "pending"
         }
@@ -165,6 +212,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 )
 
                 if result:
+                    # 👉 если генерация — помечаем
+                    if result.get("type") == "image":
+                        state["last_action"] = {
+                            "type": "image",
+                            "intent": "generate",
+                            "status": "pending"
+                        }
                     return result
 
         except Exception as e:
