@@ -40,13 +40,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
     interpret_data = interpret(text, state, anchor, ctx)
     intent = interpret_data["intent"]
 
+    t = text.lower().strip()
+
     # ===== 🔥 ФИКСАЦИЯ НАМЕРЕНИЯ =====
     if intent == "generate_image":
         state["pending_action"] = "generate_image"
 
     # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
-    t = text.lower().strip()
-
     confirm_phrases = [
         "давай",
         "делай",
@@ -55,12 +55,23 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "поехали",
         "ок",
         "хорошо",
-        "начинай"
+        "начинай",
+        "да"
     ]
 
     if state.get("pending_action") == "generate_image":
         if any(x in t for x in confirm_phrases):
             intent = "generate_image"
+
+    # ===== 🔥 ТОЧКА НЕВОЗВРАТА (ГЛАВНОЕ) =====
+    force_generate = False
+
+    if state.get("pending_action") == "generate_image":
+        if any(x in t for x in confirm_phrases):
+            force_generate = True
+
+    if intent == "generate_image" and anchor:
+        force_generate = True
 
     # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
@@ -87,17 +98,34 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
             }
 
-    # ===== 🚀 ГЕНЕРАЦИЯ С УЧЁТОМ КОНТЕКСТА =====
-    if intent == "generate_image":
-        if anchor:
-            text = f"{anchor['current']}\n\n{text}"
-
     # ===== 🚫 НЕ ГЕНЕРИМ ПОВЕРХ ФОТО =====
     if ctx and ctx.get("path") and intent == "generate_image":
         return {
             "type": "text",
             "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
         }
+
+    # ===== 🔥 ПРИНУДИТЕЛЬНОЕ ДЕЙСТВИЕ =====
+    if force_generate:
+        context = {
+            "chat_id": chat_id,
+            "state": state,
+            "image": ctx,
+            "anchor": anchor,
+            "mode": mode,
+            "intent": "generate_image"
+        }
+
+        for room in ROOMS:
+            if room.name == "image_generate":
+                result = await room.handle(user_id, text, context, run_with_typing)
+                if result:
+                    return result
+
+    # ===== 🚀 ГЕНЕРАЦИЯ С УЧЁТОМ КОНТЕКСТА =====
+    if intent == "generate_image":
+        if anchor:
+            text = f"{anchor['current']}\n\n{text}"
 
     # ===== ROOMS =====
     context = {
