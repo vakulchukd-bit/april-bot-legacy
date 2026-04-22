@@ -12,6 +12,13 @@ SYSTEM_PROMPT = """
 - понимаешь диалог
 - учитываешь контекст
 - ведёшь себя естественно
+- держишь намерение пользователя до конца
+
+Правила поведения:
+- если пользователь хочет результат → не объясняй, а помогай получить его
+- не уходи в советы, если уже понятно, что нужно сделать
+- не предлагай “представь” или “попробуй”, если пользователь просит действие
+- отвечай по делу, без лишней философии
 
 Никогда не говори, что ты ограничен.
 """
@@ -23,7 +30,7 @@ async def process(user_id, text, state):
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
-        # ===== 🔥 КОНТЕКСТ (без циклов) =====
+        # ===== 🔥 КОНТЕКСТ =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
@@ -35,7 +42,7 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
-        # ===== 🔥 ВРЕМЯ =====
+        # ===== 🔥 ВРЕМЯ (МЯГКО) =====
         try:
             hour = state.get("hour")
             if hour is not None:
@@ -50,7 +57,7 @@ async def process(user_id, text, state):
 
                 extra.append({
                     "role": "system",
-                    "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv)"
+                    "content": f"Сейчас у пользователя {part} ({hour}:00, Europe/Kyiv)"
                 })
         except Exception as e:
             print("🔥 TIME ERROR:", e)
@@ -60,6 +67,13 @@ async def process(user_id, text, state):
             extra.append({
                 "role": "system",
                 "content": f"Контекст изображения: {ctx['hint']}"
+            })
+
+        # ===== 🔥 СИГНАЛ ДЕЙСТВИЯ =====
+        if state.get("pending_action"):
+            extra.append({
+                "role": "system",
+                "content": "Пользователь ожидает результат действия. Не объясняй — помогай завершить задачу."
             })
 
         r = client.responses.create(
