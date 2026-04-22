@@ -1,7 +1,10 @@
 from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
-from blocks.intent_system import detect_intent
+# ❌ больше не используем старый intent
+# from blocks.intent_system import detect_intent
+
+from core.interpreter import interpret
 
 from blocks.state_manager import (
     get_state,
@@ -38,9 +41,16 @@ async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    intent = detect_intent(text)
+    # ===== 🔥 CONTEXT =====
+    ctx = get_image_context(user_id) or state.get("image_context")
+    anchor = get_anchor(user_id)
 
-    # ===== 🔥 ENGINEERING MODE (ИСПРАВЛЕНО) =====
+    # ===== 🔥 INTERPRETER =====
+    interpret_data = interpret(text, state, anchor, ctx)
+    intent = interpret_data["intent"]
+    confidence = interpret_data["confidence"]
+
+    # ===== 🔥 ENGINEERING MODE =====
     if mode == "engineering" and not text.startswith("/"):
 
         if text.lower() == "/analiz":
@@ -60,19 +70,19 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
+    # ===== 🔥 LOW CONFIDENCE =====
+    if confidence < 0.7:
+        return {
+            "type": "text",
+            "data": "Я не до конца понял, что ты хочешь сделать 🤔\n\nХочешь, чтобы я:\n• ответил на вопрос\n• сгенерировал изображение\n• изменил фото\n\nУточни, пожалуйста 🙂"
+        }
+
     # ===== БЫСТРЫЕ ОТВЕТЫ =====
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
-
-    # ===== 🔥 ВОПРОСЫ (УМНЫЕ) =====
-    if intent == "question" and any(x in t for x in ["умеешь", "можешь", "что ты умеешь"]):
-        return {
-            "type": "text",
-            "data": "Да 🙂 Я умею:\n\n• создавать изображения 🎨\n• редактировать фото 📷\n• отвечать на вопросы 💬\n• анализировать код 🛠\n\nСкажи, что хочешь сделать."
-        }
 
     # ===== ВРЕМЯ =====
     if "время" in t or "час" in t:
@@ -88,8 +98,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     # ===== MEMORY =====
     if intent == "memory":
-        anchor = get_anchor(user_id)
-
         if not anchor:
             return {
                 "type": "text",
@@ -101,10 +109,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"🧠 Последний контекст:\n{anchor['current']}"
         }
 
-    # ===== ANALYZE IMAGE =====
-    if intent == "analyze":
-        ctx = get_image_context(user_id) or state.get("image_context")
-
+    # ===== DESCRIBE IMAGE =====
+    if intent == "describe_image":
         if not ctx or not ctx.get("path"):
             return {
                 "type": "text",
@@ -121,22 +127,24 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
-    # ===== КОНТЕКСТ =====
-    ctx = get_image_context(user_id) or state.get("image_context")
-    anchor = get_anchor(user_id)
+    # ===== 🚫 BLOCK GENERATE IF IMAGE EXISTS =====
+    if ctx and ctx.get("path") and intent == "generate_image":
+        return {
+            "type": "text",
+            "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
+        }
 
+    # ===== ROOMS =====
     context = {
         "chat_id": chat_id,
         "state": state,
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": task_type
+        "task_type": task_type,
+        "intent": intent
     }
 
-    mode_response = detect_response_mode(text)
-
-    # ===== ROOMS =====
     handled = False
 
     for room in ROOMS:
@@ -184,6 +192,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     world = build_context_text()
     text = f"{world}\n\n{text}"
+
+    mode_response = detect_response_mode(text)
 
     result = await run_with_typing(
         chat_id,
