@@ -1,5 +1,3 @@
-# blocks/image_module.py
-
 import base64
 import asyncio
 from openai import OpenAI
@@ -45,14 +43,25 @@ async def generate_image(prompt):
 
 async def process(user_id, text, state):
     try:
+        prompt = text
+
         # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
-            img = await asyncio.wait_for(generate_image(text), timeout=60)
+            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
         except asyncio.TimeoutError:
             print("⏱️ TIMEOUT FIRST ATTEMPT")
             img = None
 
         if img:
+            # 🔥 НОВОЕ: СОХРАНЯЕМ КОНТЕКСТ КАРТИНКИ
+            state["image_context"] = {
+                "type": "generated",
+                "source": "text",
+                "prompt": prompt,
+                "hint": prompt,
+                "path": None
+            }
+
             return {
                 "type": "image",
                 "data": img
@@ -79,13 +88,24 @@ async def process(user_id, text, state):
 # 🔥 ВТОРАЯ ПОПЫТКА (отдельно вызывается)
 async def retry_process(user_id, text, state):
     try:
+        prompt = text
+
         try:
-            img = await asyncio.wait_for(generate_image(text), timeout=60)
+            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
         except asyncio.TimeoutError:
             print("⏱️ TIMEOUT SECOND ATTEMPT")
             img = None
 
         if img:
+            # 🔥 НОВОЕ: СОХРАНЯЕМ И ЗДЕСЬ ТОЖЕ
+            state["image_context"] = {
+                "type": "generated",
+                "source": "text",
+                "prompt": prompt,
+                "hint": prompt,
+                "path": None
+            }
+
             return {
                 "type": "image",
                 "data": img
