@@ -20,6 +20,24 @@ from blocks.engineering_system import analyze_code
 from blocks.experience_manager import update_experience, load_experience
 
 
+# ===== 🔥 УМНЫЙ АПДЕЙТ PROMPT =====
+def update_image_prompt(old_prompt: str, new_text: str) -> str:
+    t = new_text.lower()
+
+    colors = [
+        "красн", "син", "зелён", "желт", "черн", "бел",
+        "blue", "red", "green", "yellow", "black", "white"
+    ]
+
+    # если есть цвет → заменяем смысл, но не теряем объект
+    for c in colors:
+        if c in t:
+            return f"{new_text} ({old_prompt})"
+
+    # иначе просто дополняем
+    return f"{old_prompt}, {new_text}"
+
+
 def is_followup(text: str) -> bool:
     t = text.lower().strip()
 
@@ -99,12 +117,16 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 НОВОЕ: ОБНОВЛЕНИЕ PROMPT ПРИ УТОЧНЕНИЯХ =====
+    # ===== 🔥 КОНТЕКСТ v2 (ГЛАВНЫЙ ФИКС) =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
-        # обновляем последний prompt (ключевой фикс)
-        state["last_image_prompt"] = text
+        old = state.get("last_image_prompt")
 
-    # ===== 🔥 ФИКС: "ДА" → ПОВТОР ДЕЙСТВИЯ =====
+        if old:
+            state["last_image_prompt"] = update_image_prompt(old, text)
+        else:
+            state["last_image_prompt"] = text
+
+    # ===== 🔥 "ДА" → ПОВТОР ДЕЙСТВИЯ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
@@ -136,7 +158,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             return result
 
                 except Exception as e:
-                    print(f"🔥 ROOM ERROR [confirm v2]:", e)
+                    print(f"🔥 ROOM ERROR [confirm v3]:", e)
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -187,12 +209,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
         )
 
         state["last_action"] = {
-            "type": "image" if ("изображ" in text or "робот" in text) else "text",
+            "type": "image" if ("изображ" in text or "картин" in text) else "text",
             "intent": "answer",
             "status": "pending"
         }
 
-        # 🔥 сохраняем prompt при первом запросе
         if state["last_action"]["type"] == "image":
             state["last_image_prompt"] = text
 
