@@ -3,24 +3,43 @@ from blocks.room_protocol import Room
 # === IMAGE GENERATE ===
 from blocks.image_module import process as image_generate
 
+
 class ImageGenerateRoom(Room):
     name = "image_generate"
 
     def can_handle(self, text, context):
-        t = text.lower()
-        return any(w in t for w in [
-            "сгенерируй", "создай", "нарисуй", "сделай",
-            "картин", "изображен",
-            "generate", "draw"
-        ])
+        t = text.lower().strip()
+
+        # 🔥 ЯВНАЯ ГЕНЕРАЦИЯ (основной вход)
+        if any(w in t for w in [
+            "сгенерируй", "создай изображение", "создай картинку",
+            "нарисуй", "generate image", "draw image"
+        ]):
+            return True
+
+        # 🔥 ПОДТВЕРЖДЕНИЕ (фикс "да")
+        state = context.get("state", {})
+        if state.get("last_image_prompt"):
+            if t in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
+                return True
+
+        return False
 
     async def handle(self, user_id, text, context, run):
+        state = context.get("state", {})
+
+        # 🔥 если это "да" → берём прошлый prompt
+        if text.lower().strip() in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
+            text = state.get("last_image_prompt", text)
+
         result = await run(
             context["chat_id"],
-            image_generate(user_id, text, context["state"])
+            image_generate(user_id, text, state)
         )
 
         if result and result.get("type") == "image":
+            # сохраняем как последний успешный prompt
+            state["last_image_prompt"] = text
             return result
 
         return None
@@ -29,6 +48,7 @@ class ImageGenerateRoom(Room):
 # === IMAGE EDIT ===
 from blocks.image_edit_module import process as image_edit
 from blocks.image_system import analyze_image
+
 
 class ImageEditRoom(Room):
     name = "image_edit"
@@ -73,6 +93,7 @@ class ImageEditRoom(Room):
 
 # === TEXT ===
 from blocks.text_module import process as text_process
+
 
 class TextRoom(Room):
     name = "text"
