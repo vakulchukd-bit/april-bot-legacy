@@ -18,16 +18,49 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 
+# ===== 🔥 ПРОВЕРКА: ЭТО ВОПРОС =====
+def is_question(text: str) -> bool:
+    t = text.lower()
+
+    if "?" in t:
+        return True
+
+    question_words = [
+        "что", "кто", "как", "почему",
+        "зачем", "можешь", "умеешь", "если", "а ты"
+    ]
+
+    return any(x in t for x in question_words)
+
+
+# ===== 🔥 ПРОВЕРКА: ЭТО ПОДТВЕРЖДЕНИЕ =====
+def is_confirm(text: str) -> bool:
+    t = text.lower().strip()
+
+    if len(t.split()) <= 3:
+        if any(x in t for x in [
+            "да", "давай", "делай", "ок",
+            "хорошо", "поехали", "начинай"
+        ]):
+            return True
+
+    if any(x in t for x in [
+        "я хочу", "я бы хотел", "сделай",
+        "давай сделаем", "сгенерируй", "создай"
+    ]):
+        return True
+
+    return False
+
+
+# ===== 🔥 ГОТОВНОСТЬ К ДЕЙСТВИЮ =====
 def is_ready_to_generate(state, text, anchor):
-    # если есть сохранённый промпт — уже хорошо
     if state.get("last_prompt"):
         return True
 
-    # если есть anchor — тоже норм
-    if anchor:
+    if anchor and len(anchor.get("current", "").split()) > 3:
         return True
 
-    # если текст длинный (есть описание)
     if len(text.split()) > 4:
         return True
 
@@ -46,8 +79,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
+    question = is_question(text)
+    confirm = is_confirm(text)
+
+    # ===== 🔥 БЛОКИРОВКА СЛУЧАЙНОЙ ГЕНЕРАЦИИ =====
+    if intent == "generate_image" and question and not confirm:
+        intent = "question"
+
     # ===== 🔥 ФИКСАЦИЯ НАМЕРЕНИЯ =====
-    if intent in ["generate_image", "edit_image"]:
+    if intent in ["generate_image", "edit_image"] and not question:
         state["pending_action"] = intent
 
         if anchor:
@@ -56,20 +96,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
             state["last_prompt"] = text
 
     # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
-    confirm_phrases = [
-        "давай", "делай", "сделай",
-        "генерируй", "поехали",
-        "ок", "хорошо", "начинай", "да"
-    ]
-
-    is_confirm = any(x in t for x in confirm_phrases)
-
-    if state.get("pending_action") and is_confirm:
+    if state.get("pending_action") and confirm:
         intent = state["pending_action"]
 
-    # ===== 🔥 СБРОС ЕСЛИ СМЕНИЛАСЬ ТЕМА =====
+    # ===== 🔥 СБРОС ЕСЛИ УШЛИ В ДРУГУЮ ТЕМУ =====
     if intent not in ["generate_image", "edit_image"]:
-        if state.get("pending_action") and not is_confirm:
+        if state.get("pending_action") and not confirm:
             state["pending_action"] = None
 
     # ===== ENGINEERING =====
@@ -85,7 +117,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВРЕМЯ =====
+    # ===== ВРЕМЯ (ТОЛЬКО ПО ЗАПРОСУ) =====
     if "время" in t or "час" in t:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
@@ -108,10 +140,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if intent == "generate_image":
         ready = is_ready_to_generate(state, text, anchor)
 
-        if not ready and not is_confirm:
+        if not ready and not confirm:
             return {
                 "type": "text",
-                "data": "Какую именно картинку ты хочешь? Опиши подробнее 🙂"
+                "data": "Опиши, какую именно картинку ты хочешь 🙂"
             }
 
     # ===== 🔥 ГЛАВНЫЙ БЛОК =====
