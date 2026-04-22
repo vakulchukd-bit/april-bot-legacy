@@ -7,23 +7,25 @@ def decide_action(text: str, history: list):
     if any(w in t for w in ["не надо", "не делай", "не нужно"]):
         return {"action": "chat"}
 
-    # --- image (ПЕРВЫМ!) ---
+    # ===== 🔥 IMAGE (ТОЛЬКО ЯВНЫЕ ДЕЙСТВИЯ) =====
     if any(w in t for w in [
-        "создай", "сгенерируй", "нарисуй",
-        "изображение", "картинку", "картинка",
-        "сделай картинку", "покажи картинку"
+        "создай",
+        "сгенерируй",
+        "нарисуй",
+        "draw",
+        "generate"
     ]):
         return {"action": "image"}
 
-    # --- diagram ---
+    # ===== DIAGRAM =====
     if any(w in t for w in ["чертеж", "чертёж", "схема", "диаграмма"]):
         return {"action": "diagram"}
 
-    # --- если вопрос ---
+    # ===== ВОПРОС =====
     if "?" in t or any(w in t for w in ["что", "почему", "как", "зачем"]):
         return {"action": "chat"}
 
-    # --- слабый запрос ---
+    # ===== СЛАБЫЙ ЗАПРОС =====
     if len(t.split()) <= 2:
         return {"action": "clarify"}
 
