@@ -37,26 +37,40 @@ def is_question(text: str) -> bool:
 def is_confirm(text: str) -> bool:
     t = text.lower().strip()
 
-    if len(t.split()) <= 3:
-        if any(x in t for x in [
-            "да", "давай", "делай", "ок",
-            "хорошо", "поехали", "начинай"
-        ]):
-            return True
+    short_confirms = [
+        "да", "давай", "делай", "ок",
+        "хорошо", "поехали", "начинай"
+    ]
 
-    if any(x in t for x in [
-        "я хочу", "я бы хотел", "сделай",
-        "давай сделаем", "сгенерируй", "создай"
-    ]):
+    if len(t.split()) <= 3 and any(x in t for x in short_confirms):
         return True
 
-    return False
+    strong_confirms = [
+        "я хочу", "я бы хотел",
+        "сделай", "сгенерируй", "создай"
+    ]
+
+    return any(x in t for x in strong_confirms)
+
+
+# ===== НОВАЯ ТЕМА =====
+def is_new_topic(text: str) -> bool:
+    t = text.lower()
+
+    return any(x in t for x in [
+        "что ты умеешь",
+        "как дела",
+        "кто ты",
+        "сколько времени",
+        "время",
+        "расскажи",
+        "поговорим"
+    ])
 
 
 # ===== ГОТОВНОСТЬ =====
 def is_ready_to_generate(state, text, anchor):
-    if state.get("last_prompt"):
-        return True
+    # ❗ УБРАН last_prompt как источник истины
 
     if anchor and len(anchor.get("current", "").split()) > 3:
         return True
@@ -82,6 +96,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
     question = is_question(text)
     confirm = is_confirm(text)
 
+    # =========================================================
+    # 🔥 СБРОС ПРИ СМЕНЕ ТЕМЫ (КЛЮЧЕВОЙ ФИКС)
+    # =========================================================
+    if is_new_topic(text):
+        state["pending_action"] = None
+        state["last_prompt"] = None
+
     # ===== БЛОК ВОПРОСОВ =====
     if intent == "generate_image" and question and not confirm:
         intent = "question"
@@ -90,16 +111,18 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if intent in ["generate_image", "edit_image"] and not question:
         state["pending_action"] = intent
 
-        if anchor:
-            state["last_prompt"] = anchor["current"]
-        else:
-            state["last_prompt"] = text
+        # ❗ сохраняем только если это НЕ подтверждение
+        if not confirm:
+            if anchor:
+                state["last_prompt"] = anchor["current"]
+            else:
+                state["last_prompt"] = text
 
     # ===== ПОДТВЕРЖДЕНИЕ =====
     if state.get("pending_action") and confirm:
         intent = state["pending_action"]
 
-    # ===== СБРОС =====
+    # ===== СБРОС ЕСЛИ УШЛИ В ДРУГУЮ ТЕМУ =====
     if intent not in ["generate_image", "edit_image"]:
         if state.get("pending_action") and not confirm:
             state["pending_action"] = None
@@ -117,8 +140,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВРЕМЯ (ТОЛЬКО ЯВНО) =====
-    if ("время" in t or "час" in t) and len(t.split()) <= 5:
+    # ===== ВРЕМЯ (СТРОГО) =====
+    if t in ["время", "сколько времени", "который час"]:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
         date_str = state.get("date_str")
@@ -137,7 +160,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         }
 
     # =========================================================
-    # 🔥 ГЛАВНЫЙ ФИКС — ГАРАНТИЯ ГЕНЕРАЦИИ
+    # 🔥 ГЕНЕРАЦИЯ (ЧИСТАЯ ЛОГИКА)
     # =========================================================
     if intent == "generate_image":
 
@@ -163,7 +186,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
                 result = await room.handle(user_id, text, context, run_with_typing)
 
-                # ❗ КРИТИЧНО: НЕТ ФОЛБЭКА В TEXT
                 if not result:
                     return {
                         "type": "text",
