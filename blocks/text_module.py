@@ -1,5 +1,3 @@
-# blocks/text_module.py
-
 import asyncio
 from openai import OpenAI
 
@@ -62,6 +60,28 @@ async def process(user_id, text, state):
                 "content": f"Контекст изображения: {ctx['hint']}"
             })
 
+        # ===== 🔥 НОВОЕ: ОПЫТ ПОЛЬЗОВАТЕЛЯ =====
+        try:
+            from blocks.experience_manager import load_experience
+
+            data = load_experience()
+            user_data = data.get(str(user_id), {})
+            actions = user_data.get("actions", [])[-5:]
+
+            if actions:
+                exp_text = "Поведение пользователя в последних взаимодействиях:\n"
+
+                for a in actions:
+                    exp_text += f"- {a.get('type')} → {a.get('status')}\n"
+
+                extra.append({
+                    "role": "system",
+                    "content": exp_text
+                })
+
+        except Exception as e:
+            print("🔥 EXPERIENCE ERROR:", e)
+
         r = client.responses.create(
             model="gpt-4o-mini",
             input=[
@@ -69,7 +89,7 @@ async def process(user_id, text, state):
                 *extra,
                 *history[-6:],
 
-                # 🔥 НОВЫЙ СЛОЙ (РЕЖИМ ДИАЛОГА)
+                # 🔥 СТИЛЬ ДИАЛОГА
                 {"role": "system", "content": "Это живой диалог. Отвечай естественно, не как справка и не списком."},
 
                 {"role": "user", "content": text}
