@@ -45,7 +45,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== 🔥 INTERPRETER (мягкий, не блокирует) =====
     interpret_data = interpret(text, state, anchor, ctx)
     intent = interpret_data["intent"]
-    # confidence пока НЕ используем жёстко
 
     # ===== 🔥 ENGINEERING MODE =====
     if mode == "engineering" and not text.startswith("/"):
@@ -74,7 +73,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВРЕМЯ =====
+    # ===== ВРЕМЯ (ТОЛЬКО ПО ЗАПРОСУ) =====
     if "время" in t or "час" in t:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
@@ -143,7 +142,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
         }
 
-    # ===== 🔥 МЯГКОЕ УСИЛЕНИЕ (ВОТ ЗДЕСЬ МАГИЯ) =====
+    # ===== 🔥 МЯГКОЕ УСИЛЕНИЕ =====
 
     # 📷 если есть изображение — добавляем описание
     if intent == "describe_image" and ctx and ctx.get("path"):
@@ -157,7 +156,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if intent == "follow_context" and anchor:
         text = f"Контекст диалога: {anchor['current']}\n\n{text}"
 
-    # 📷 общий fallback (как было у тебя — оставляем!)
+    # 📷 fallback
     if ctx and ctx.get("path"):
         try:
             hint = await analyze_image(ctx["path"])
@@ -165,23 +164,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
         except:
             pass
 
-    # 🧠 anchor как раньше
+    # 🧠 anchor
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
-
-    # 🕒 время
-    try:
-        time_str = state.get("time_str")
-        if time_str:
-            text = f"Текущее время пользователя: {time_str} (Europe/Kyiv)\n\n{text}"
-    except Exception as e:
-        print("🔥 TIME ERROR:", e)
 
     # 🌍 мир
     world = build_context_text()
     text = f"{world}\n\n{text}"
 
-    # ===== ГЛАВНЫЙ МОЗГ (НЕ ТРОГАЕМ) =====
+    # ===== ГЛАВНЫЙ МОЗГ =====
     mode_response = detect_response_mode(text)
 
     result = await run_with_typing(
