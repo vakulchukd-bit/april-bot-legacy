@@ -5,21 +5,24 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from datetime import datetime
 import pytz
+import random
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import BufferedInputFile
 from openai import OpenAI
 
 from storage import (
     check_subscription,
     should_warn,
-    can_send_message
+    can_send_message,
+    can_generate_image,
+    set_subscription
 )
 
-# CORE
+# 🔥 CORE
 from core.executor import execute
 
-from blocks.ui import buy_keyboard
+from blocks.ui import main_keyboard, buy_keyboard
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
@@ -36,10 +39,21 @@ from blocks.admin_system import (
     get_admin_panel
 )
 
+# 🔥 COST
 from blocks.cost_system import add_image, add_text
+
+# 🔥 MODE
 from blocks.mode_manager import get_mode, set_mode, clear_mode
+
+# 🔥 SESSION
 from blocks.session_manager import is_session_expired
+
+# 🔥 IMAGE UTILS
 from blocks.image_utils import compress_image
+
+# 🔥 NEW (retry)
+from blocks.image_module import retry_process
+
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -48,6 +62,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 ADMIN_ID = 2016592532
+
 tz = pytz.timezone("Europe/Kyiv")
 
 
@@ -55,6 +70,9 @@ tz = pytz.timezone("Europe/Kyiv")
 def final_control(text: str) -> str:
     if not text or not text.strip():
         return "⚠️ Ответ не сгенерирован. Попробуй ещё раз."
+
+    if text.count("```") >= 2:
+        text = text.replace("```", "").strip()
 
     if len(text) > 3500:
         text = text[:3500] + "\n\n…обрезано"
@@ -93,50 +111,99 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
+# ===== VOICE =====
+async def voice_to_text(message, user_id):
+    file = await bot.get_file(message.voice.file_id)
+    path = f"{user_id}.ogg"
+    await bot.download_file(file.file_path, destination=path)
+
+    def run():
+        with open(path, "rb") as f:
+            t = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f
+            )
+        return t.text
+
+    return await asyncio.to_thread(run)
+
+
 # ===== MAIN =====
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # ===== ENGINEERING =====
+    # ===== 🔥 /analiz
     if text.lower() == "/analiz" and user_id == ADMIN_ID:
+        if get_mode(user_id) == "engineering":
+            await message.answer("🛠 Ты уже в режиме анализа. Отправь код.")
+            return
+
         set_mode(user_id, "engineering")
-        await message.answer("🛠 Режим анализа включен")
+        await message.answer("🛠 Режим анализа включен. Отправь код.")
         return
 
+    # ===== 🔥 /exit
     if text.lower() == "/exit" and user_id == ADMIN_ID:
         clear_mode(user_id)
         await message.answer("❌ Режим анализа выключен")
         return
 
+    # ===== 🔥 ENGINEERING MODE (ПЕРЕХВАТ)
     if get_mode(user_id) == "engineering" and user_id == ADMIN_ID:
-        result = await execute(user_id, text, message.chat.id, run_with_typing)
-        await message.answer(result.get("data", "Ошибка"))
+        result = await execute(
+            user_id,
+            text,
+            message.chat.id,
+            run_with_typing
+        )
+
+        if result["type"] == "admin_report":
+            await message.answer(result["data"])
+            return
+
+        await message.answer("⚠️ Ошибка режима анализа")
         return
 
-    # ===== STATE =====
+    # ===== TIME =====
     state = get_state(user_id)
     now = datetime.now(tz)
 
+    state["hour"] = now.hour
+    state["minute"] = now.minute
     state["time_str"] = now.strftime("%H:%M")
     state["date_str"] = now.strftime("%d.%m.%Y")
     state["weekday"] = now.strftime("%A")
 
     register_user(user_id)
 
+    # ===== ADMIN =====
+    if text == "/admin":
+        if user_id == ADMIN_ID:
+            await message.answer(get_admin_panel())
+        else:
+            await message.answer("⛔ Ошибка доступа")
+        return
+
     # ===== SESSION =====
     if is_session_expired(user_id):
         clear_anchor(user_id)
+        clear_mode(user_id)
         set_image_context(user_id, None)
-        await message.answer("🧠 Сессия обновлена")
+        await message.answer("🧠 Сессия обновлена. Начнём заново 🙂")
 
     if should_warn(user_id):
-        await message.answer("⚠️ Подписка скоро закончится")
+        await message.answer("⚠️ Подписка закончится через 24 часа")
 
     # ===== ACCESS =====
-    if user_id != ADMIN_ID and not check_subscription(user_id):
-        await message.answer("💳 Оформить подписку?", reply_markup=buy_keyboard())
+    access = True if user_id == ADMIN_ID else check_subscription(user_id)
+
+    if not access:
+        await message.answer(
+            "💳 Подписка 30 дней — 150 грн\n\nОформить?",
+            reply_markup=buy_keyboard()
+        )
         return
 
     try:
@@ -147,19 +214,44 @@ async def handle(message: types.Message):
             await bot.download_file(file.file_path, destination=path)
 
             set_image_context(user_id, {
+                "type": "uploaded",
                 "path": path,
-                "hint": None
+                "hint": None,
+                "full": None
             })
 
+            set_awaiting(user_id, True)
             set_mode(user_id, "image_edit")
+
             create_anchor(user_id, "image", "изображение")
 
-            await message.answer("📷 Что изменить?")
+            await message.answer("📷 Изображение получено\n\n✏️ Что хочешь с ним сделать?")
             return
+
+        # ===== VOICE =====
+        if message.voice:
+            text = await run_with_typing(
+                message.chat.id,
+                voice_to_text(message, user_id)
+            )
+
+            if not text or text.strip() == "":
+                await message.answer("🎤 Не расслышал, попробуй ещё раз")
+                return
+
+            await message.answer(f"🎤 {text}")
 
         log_event(user_id, "text")
         add_text()
 
+        # ===== LIMIT =====
+        if user_id != ADMIN_ID:
+            if not check_subscription(user_id):
+                if not can_send_message(user_id):
+                    await message.answer("⛔ Лимит сообщений исчерпан")
+                    return
+
+        # ===== CORE =====
         result = await execute(
             user_id,
             text,
@@ -167,15 +259,8 @@ async def handle(message: types.Message):
             run_with_typing
         )
 
-        # ===== 🔥 ЖЁСТКИЙ КОНТРОЛЬ =====
-        if not result or "type" not in result:
-            await message.answer("⚠️ Ошибка выполнения")
-            return
-
-        rtype = result["type"]
-
-        # ===== IMAGE =====
-        if rtype == "image":
+        # ===== OUTPUT =====
+        if result["type"] == "image":
             log_event(user_id, "image")
             add_image()
 
@@ -184,31 +269,22 @@ async def handle(message: types.Message):
             await message.answer_photo(
                 BufferedInputFile(compressed, filename="image.jpg")
             )
-            return
 
-        # ===== TEXT =====
-        elif rtype == "text":
-            content = result.get("data")
-
-            if not content:
-                await message.answer("⚠️ Пустой ответ")
-                return
+            # 🔥 ДОБАВЛЕНО: ПАМЯТЬ (ПОСЛЕ ВСЕГО)
+            prompt = state.get("last_prompt") or text
 
             add_dialog(user_id, "user", text)
-            add_dialog(user_id, "assistant", content)
+            add_dialog(user_id, "assistant", f"Создано изображение: {prompt}")
 
-            reply = final_control(content)
-            await message.answer(reply)
-            return
-
-        # ===== UNKNOWN =====
         else:
-            print("❌ UNKNOWN:", result)
-            await message.answer("⚠️ Ошибка выполнения")
-            return
+            add_dialog(user_id, "user", text)
+            add_dialog(user_id, "assistant", result["data"])
+
+            reply = final_control(result["data"])
+            await message.answer(reply)
 
     except Exception as e:
-        await handle_error(bot, message, e, "global")
+        await handle_error(bot, message, e, "global_handler")
 
 
 # ===== START =====
