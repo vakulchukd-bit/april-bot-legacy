@@ -20,6 +20,9 @@ from blocks.rooms_registry import ROOMS
 # 🔥 ENGINEERING
 from blocks.engineering_system import analyze_code
 
+# 🔥 НОВОЕ — EXPERIENCE
+from blocks.experience_manager import update_experience
+
 
 # ===== 🔥 ТИПЫ ЗАДАЧ =====
 def detect_task_type(text: str) -> str:
@@ -55,17 +58,14 @@ def update_last_action(state, text):
 
     t = text.lower()
 
-    # 👉 признаки доработки / уточнения
     if any(x in t for x in ["добавь", "еще", "ещё", "сделай еще", "измени", "переделай"]):
         last["status"] = "refined"
         return
 
-    # 👉 признаки конфликта / недовольства
     if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка"]):
         last["status"] = "conflict"
         return
 
-    # 👉 иначе считаем принято
     last["status"] = "accepted"
 
 
@@ -73,42 +73,31 @@ async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 НОВОЕ: фиксируем реакцию пользователя
+    # 🔥 фиксируем реакцию
     update_last_action(state, text)
 
     intent = detect_intent(text)
 
-    # ===== 🔥 ENGINEERING MODE =====
+    # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
-
         if text.lower() == "/analiz":
-            return {
-                "type": "text",
-                "data": "📥 Жду код..."
-            }
+            return {"type": "text", "data": "📥 Жду код..."}
 
         report = analyze_code(text)
-
-        return {
-            "type": "admin_report",
-            "data": report
-        }
+        return {"type": "admin_report", "data": report}
 
     task_type = detect_task_type(text)
-
     t = text.lower().strip()
 
-    # ===== БЫСТРЫЕ ОТВЕТЫ =====
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВОПРОСЫ (ПРИОРИТЕТ) =====
+    # ===== ВОПРОСЫ =====
     if intent == "question":
 
-        # 👉 ЕСЛИ ЭТО ВОПРОС ПРО ВРЕМЯ — ОТВЕЧАЕМ
         if is_time_request(text):
             time_str = state.get("time_str")
             weekday = state.get("weekday")
@@ -121,12 +110,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
                     "status": "pending"
                 }
 
+                update_experience(user_id, state)
+
                 return {
                     "type": "text",
                     "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
                 }
 
-        # 👉 ОСТАЛЬНЫЕ ВОПРОСЫ — В ДИАЛОГ
         ctx = get_image_context(user_id) or state.get("image_context")
         anchor = get_anchor(user_id)
 
@@ -154,6 +144,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
+        update_experience(user_id, state)
+
         return {
             "type": "text",
             "data": result["content"]
@@ -169,18 +161,17 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
+        update_experience(user_id, state)
+
         if not anchor:
-            return {
-                "type": "text",
-                "data": "🤔 Я пока ничего не запомнил"
-            }
+            return {"type": "text", "data": "🤔 Я пока ничего не запомнил"}
 
         return {
             "type": "text",
             "data": f"🧠 Последний контекст:\n{anchor['current']}"
         }
 
-    # ===== ANALYZE IMAGE =====
+    # ===== ANALYZE =====
     if intent == "analyze":
         ctx = get_image_context(user_id) or state.get("image_context")
 
@@ -190,11 +181,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
+        update_experience(user_id, state)
+
         if not ctx or not ctx.get("path"):
-            return {
-                "type": "text",
-                "data": "❌ Нет изображения для анализа"
-            }
+            return {"type": "text", "data": "❌ Нет изображения для анализа"}
 
         try:
             hint = await analyze_image(ctx["path"])
@@ -206,7 +196,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"📷 На изображении: {hint}"
         }
 
-    # ===== КОНТЕКСТ =====
+    # ===== CONTEXT =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
@@ -235,7 +225,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 )
 
                 if result:
-                    # 🔥 если это изображение
                     if result.get("type") == "image":
                         state["last_action"] = {
                             "type": "image",
@@ -248,6 +237,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             "intent": "room_response",
                             "status": "pending"
                         }
+
+                    update_experience(user_id, state)
 
                     return result
 
@@ -263,13 +254,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
+        update_experience(user_id, state)
+
         return {
             "type": "text",
             "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
         }
 
     # ===== TEXT =====
-
     if ctx and ctx.get("path"):
         try:
             hint = await analyze_image(ctx["path"])
@@ -299,6 +291,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "intent": "fallback_text",
         "status": "pending"
     }
+
+    update_experience(user_id, state)
 
     return {
         "type": "text",
