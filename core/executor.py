@@ -46,9 +46,35 @@ def is_time_request(text: str) -> bool:
     )
 
 
+# ===== 🔥 НОВОЕ: ОБНОВЛЕНИЕ СТАТУСА =====
+def update_last_action(state, text):
+    last = state.get("last_action")
+
+    if not last or last.get("status") != "pending":
+        return
+
+    t = text.lower()
+
+    # 👉 признаки доработки / уточнения
+    if any(x in t for x in ["добавь", "еще", "ещё", "сделай еще", "измени", "переделай"]):
+        last["status"] = "refined"
+        return
+
+    # 👉 признаки конфликта / недовольства
+    if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка"]):
+        last["status"] = "conflict"
+        return
+
+    # 👉 иначе считаем принято
+    last["status"] = "accepted"
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
+
+    # 🔥 НОВОЕ: фиксируем реакцию пользователя
+    update_last_action(state, text)
 
     intent = detect_intent(text)
 
@@ -89,6 +115,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
             date_str = state.get("date_str")
 
             if time_str:
+                state["last_action"] = {
+                    "type": "text",
+                    "intent": "time_answer",
+                    "status": "pending"
+                }
+
                 return {
                     "type": "text",
                     "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
@@ -116,6 +148,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
             text_process(user_id, text, state)
         )
 
+        state["last_action"] = {
+            "type": "text",
+            "intent": "answer",
+            "status": "pending"
+        }
+
         return {
             "type": "text",
             "data": result["content"]
@@ -124,6 +162,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== MEMORY =====
     if intent == "memory":
         anchor = get_anchor(user_id)
+
+        state["last_action"] = {
+            "type": "text",
+            "intent": "memory",
+            "status": "pending"
+        }
 
         if not anchor:
             return {
@@ -139,6 +183,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== ANALYZE IMAGE =====
     if intent == "analyze":
         ctx = get_image_context(user_id) or state.get("image_context")
+
+        state["last_action"] = {
+            "type": "image",
+            "intent": "analyze",
+            "status": "pending"
+        }
 
         if not ctx or not ctx.get("path"):
             return {
@@ -185,6 +235,20 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 )
 
                 if result:
+                    # 🔥 если это изображение
+                    if result.get("type") == "image":
+                        state["last_action"] = {
+                            "type": "image",
+                            "intent": "generate_or_edit",
+                            "status": "pending"
+                        }
+                    else:
+                        state["last_action"] = {
+                            "type": "text",
+                            "intent": "room_response",
+                            "status": "pending"
+                        }
+
                     return result
 
                 handled = True
@@ -193,6 +257,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
     if handled:
+        state["last_action"] = {
+            "type": "text",
+            "intent": "error",
+            "status": "pending"
+        }
+
         return {
             "type": "text",
             "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
@@ -223,6 +293,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if mode_response == "copy":
         clean = reply.replace("```", "").strip()
         reply = f"```text\n{clean}\n```"
+
+    state["last_action"] = {
+        "type": "text",
+        "intent": "fallback_text",
+        "status": "pending"
+    }
 
     return {
         "type": "text",
