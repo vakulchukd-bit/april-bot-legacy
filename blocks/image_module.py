@@ -5,21 +5,7 @@ from openai import OpenAI
 client = OpenAI()
 
 
-# ===== 🔥 ПРОВЕРКА: ЭТО ТОЧНО ЗАПРОС НА ГЕНЕРАЦИЮ? =====
-def is_valid_image_prompt(text: str) -> bool:
-    t = text.lower()
-
-    triggers = [
-        "нарисуй",
-        "сгенерируй",
-        "создай",
-        "draw",
-        "generate"
-    ]
-
-    return any(x in t for x in triggers)
-
-
+# ===== 🔥 ГЕНЕРАЦИЯ =====
 async def generate_image(prompt):
     def run():
         print("🚀 START IMAGE GENERATION:", prompt)
@@ -31,14 +17,8 @@ async def generate_image(prompt):
                 size="1024x1024"
             )
 
-            print("📦 RAW RESULT:", result)
-
             if not result or not result.data:
                 print("❌ EMPTY RESULT FROM OPENAI")
-                return None
-
-            if not hasattr(result.data[0], "b64_json"):
-                print("❌ NO b64_json IN RESPONSE:", result.data[0])
                 return None
 
             image_base64 = result.data[0].b64_json
@@ -56,77 +36,20 @@ async def generate_image(prompt):
     return await asyncio.to_thread(run)
 
 
+# ===== 🔥 ОСНОВНОЙ ПРОЦЕСС =====
 async def process(user_id, text, state):
     try:
-        # 🚫 ЗАЩИТА ОТ СЛУЧАЙНОЙ ГЕНЕРАЦИИ
-        if not is_valid_image_prompt(text):
-            return {
-                "type": "text",
-                "data": "Я не вижу явного запроса на генерацию изображения 🤔\n\nНапиши, например: «нарисуй кота» или «создай картинку города»"
-            }
+        # ===== 🔥 ВАЖНО: ВОССТАНОВЛЕНИЕ ПРОМПТА =====
+        prompt = text
 
-        # ===== ПЕРВАЯ ПОПЫТКА =====
-        try:
-            img = await asyncio.wait_for(generate_image(text), timeout=60)
-        except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT FIRST ATTEMPT")
-            img = None
+        # если это подтверждение — берём прошлый запрос
+        if state.get("pending_action") == "generate_image":
+            last = state.get("last_prompt")
+            if last:
+                print("♻️ USING LAST PROMPT")
+                prompt = last
 
-        if img:
-            return {
-                "type": "image",
-                "data": img
-            }
+        # сохраняем текущий как последний
+        state["last_prompt"] = prompt
 
-        # ===== СИГНАЛ О ПОВТОРЕ =====
-        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
-
-        return {
-            "type": "retry_notice",
-            "data": "⏳ Картинка генерируется дольше обычного… пробую ещё раз"
-        }
-
-    except Exception as e:
-        print("🔥 PROCESS ERROR:", e)
-
-        return {
-            "type": "error",
-            "data": None,
-            "error": str(e)
-        }
-
-
-# 🔥 ВТОРАЯ ПОПЫТКА
-async def retry_process(user_id, text, state):
-    try:
-        # 🚫 ПОВТОРНАЯ ЗАЩИТА
-        if not is_valid_image_prompt(text):
-            return {
-                "type": "final_error",
-                "data": "⚠️ Запрос не похож на генерацию изображения"
-            }
-
-        try:
-            img = await asyncio.wait_for(generate_image(text), timeout=60)
-        except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT SECOND ATTEMPT")
-            img = None
-
-        if img:
-            return {
-                "type": "image",
-                "data": img
-            }
-
-        return {
-            "type": "final_error",
-            "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
-        }
-
-    except Exception as e:
-        print("🔥 RETRY PROCESS ERROR:", e)
-
-        return {
-            "type": "final_error",
-            "data": "⚠️ Сервис временно недоступен"
-        }
+        # ===== П
