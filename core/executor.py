@@ -20,7 +20,7 @@ from blocks.rooms_registry import ROOMS
 # 🔥 ENGINEERING
 from blocks.engineering_system import analyze_code
 
-# 🔥 НОВОЕ — EXPERIENCE
+# 🔥 EXPERIENCE
 from blocks.experience_manager import update_experience, load_experience
 
 
@@ -55,7 +55,7 @@ def update_last_action(state, text):
 
     t = text.lower()
 
-    if any(x in t for x in ["добавь", "еще", "ещё", "сделай еще", "измени", "переделай"]):
+    if any(x in t for x in ["добавь", "еще", "ещё", "измени", "переделай"]):
         last["status"] = "refined"
         return
 
@@ -66,16 +66,32 @@ def update_last_action(state, text):
     last["status"] = "accepted"
 
 
+# 🔥 НОВОЕ: фиксация прошлого действия
+def commit_last_action(user_id, state):
+    last = state.get("last_action")
+
+    if not last:
+        return
+
+    if last.get("status") == "pending":
+        return
+
+    update_experience(user_id, state)
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 фиксируем реакцию
+    # 🔥 1. пользователь ответил → обновляем статус
     update_last_action(state, text)
+
+    # 🔥 2. фиксируем прошлое действие (если оно завершено)
+    commit_last_action(user_id, state)
 
     intent = detect_intent(text)
 
-    # ===== 🔥 НОВОЕ: DEBUG ОПЫТА =====
+    # ===== DEBUG =====
     if text == "/exp":
         data = load_experience()
         user_data = data.get(str(user_id), {})
@@ -117,8 +133,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
                     "status": "pending"
                 }
 
-                update_experience(user_id, state)
-
                 return {
                     "type": "text",
                     "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
@@ -151,8 +165,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
-        update_experience(user_id, state)
-
         return {
             "type": "text",
             "data": result["content"]
@@ -167,8 +179,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "intent": "memory",
             "status": "pending"
         }
-
-        update_experience(user_id, state)
 
         if not anchor:
             return {"type": "text", "data": "🤔 Я пока ничего не запомнил"}
@@ -187,8 +197,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "intent": "analyze",
             "status": "pending"
         }
-
-        update_experience(user_id, state)
 
         if not ctx or not ctx.get("path"):
             return {"type": "text", "data": "❌ Нет изображения для анализа"}
@@ -245,8 +253,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             "status": "pending"
                         }
 
-                    update_experience(user_id, state)
-
                     return result
 
                 handled = True
@@ -260,8 +266,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "intent": "error",
             "status": "pending"
         }
-
-        update_experience(user_id, state)
 
         return {
             "type": "text",
@@ -298,8 +302,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "intent": "fallback_text",
         "status": "pending"
     }
-
-    update_experience(user_id, state)
 
     return {
         "type": "text",
