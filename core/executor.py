@@ -34,6 +34,18 @@ def detect_task_type(text: str) -> str:
     return "chat"
 
 
+# ===== 🔥 ПРОВЕРКА ЗАПРОСА ВРЕМЕНИ =====
+def is_time_request(text: str) -> bool:
+    t = text.lower()
+
+    return (
+        "который час" in t or
+        "сколько времени" in t or
+        "какое сейчас время" in t or
+        "покажи время" in t
+    )
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -67,9 +79,22 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВОПРОСЫ (ИСПРАВЛЕНО) =====
+    # ===== 🔥 ВОПРОСЫ (ПРИОРИТЕТ) =====
     if intent == "question":
-        # 👉 КЛЮЧЕВОЙ ФИКС: вопрос = НЕТ ДЕЙСТВИЙ
+
+        # 👉 ЕСЛИ ЭТО ВОПРОС ПРО ВРЕМЯ — ОТВЕЧАЕМ
+        if is_time_request(text):
+            time_str = state.get("time_str")
+            weekday = state.get("weekday")
+            date_str = state.get("date_str")
+
+            if time_str:
+                return {
+                    "type": "text",
+                    "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
+                }
+
+        # 👉 ОСТАЛЬНЫЕ ВОПРОСЫ — В ДИАЛОГ
         ctx = get_image_context(user_id) or state.get("image_context")
         anchor = get_anchor(user_id)
 
@@ -83,13 +108,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
 
-        try:
-            time_str = state.get("time_str")
-            if time_str:
-                text = f"Текущее время пользователя: {time_str} (Europe/Kyiv)\n\n{text}"
-        except Exception as e:
-            print("🔥 TIME ERROR:", e)
-
         world = build_context_text()
         text = f"{world}\n\n{text}"
 
@@ -102,18 +120,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "type": "text",
             "data": result["content"]
         }
-
-    # ===== ВРЕМЯ =====
-    if "время" in t or "час" in t:
-        time_str = state.get("time_str")
-        weekday = state.get("weekday")
-        date_str = state.get("date_str")
-
-        if time_str:
-            return {
-                "type": "text",
-                "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
-            }
 
     # ===== MEMORY =====
     if intent == "memory":
@@ -203,13 +209,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
-
-    try:
-        time_str = state.get("time_str")
-        if time_str:
-            text = f"Текущее время пользователя: {time_str} (Europe/Kyiv)\n\n{text}"
-    except Exception as e:
-        print("🔥 TIME ERROR:", e)
 
     world = build_context_text()
     text = f"{world}\n\n{text}"
