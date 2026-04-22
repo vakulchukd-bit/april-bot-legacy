@@ -7,9 +7,13 @@ class ImageGenerateRoom(Room):
     name = "image_generate"
 
     def can_handle(self, text, context):
+        # 🔥 теперь опираемся НЕ только на текст, а на intent
+        if context.get("intent") == "generate_image":
+            return True
+
         t = text.lower()
         return any(w in t for w in [
-            "сгенерируй", "создай", "нарисуй", "сделай",
+            "сгенерируй", "создай", "нарисуй",
             "картин", "изображен",
             "generate", "draw"
         ])
@@ -21,6 +25,8 @@ class ImageGenerateRoom(Room):
         )
 
         if result and result.get("type") == "image":
+            # 🔥 очищаем pending_action после выполнения
+            context["state"]["pending_action"] = None
             return result
 
         return None
@@ -38,11 +44,15 @@ class ImageEditRoom(Room):
         if not ctx or not ctx.get("path"):
             return False
 
+        # 🔥 приоритет через intent
+        if context.get("intent") == "edit_image":
+            return True
+
         t = text.lower()
 
         return any(v in t for v in [
             "измени", "добавь", "убери",
-            "сделай", "замени", "поменяй",
+            "замени", "поменяй",
             "осветли", "затемни", "улучши"
         ])
 
@@ -66,6 +76,8 @@ class ImageEditRoom(Room):
         )
 
         if result and result.get("type") == "image":
+            # 🔥 очищаем pending_action
+            context["state"]["pending_action"] = None
             return result
 
         return None
