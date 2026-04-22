@@ -1,3 +1,5 @@
+# blocks/image_module.py
+
 import base64
 import asyncio
 from openai import OpenAI
@@ -5,20 +7,6 @@ from openai import OpenAI
 client = OpenAI()
 
 
-# ===== НОРМАЛИЗАЦИЯ =====
-def normalize_prompt(prompt: str) -> str:
-    if not prompt:
-        return ""
-
-    p = prompt.strip()
-
-    if len(p.split()) < 2:
-        return ""
-
-    return p
-
-
-# ===== ГЕНЕРАЦИЯ =====
 async def generate_image(prompt):
     def run():
         print("🚀 START IMAGE GENERATION:", prompt)
@@ -30,8 +18,14 @@ async def generate_image(prompt):
                 size="1024x1024"
             )
 
+            print("📦 RAW RESULT:", result)
+
             if not result or not result.data:
                 print("❌ EMPTY RESULT FROM OPENAI")
+                return None
+
+            if not hasattr(result.data[0], "b64_json"):
+                print("❌ NO b64_json IN RESPONSE:", result.data[0])
                 return None
 
             image_base64 = result.data[0].b64_json
@@ -49,85 +43,64 @@ async def generate_image(prompt):
     return await asyncio.to_thread(run)
 
 
-# ===== ОСНОВНОЙ ПРОЦЕСС =====
 async def process(user_id, text, state):
     try:
-        raw_text = text
-        last = state.get("last_prompt")
-
-        # 🔥 ВЫБОР ПРАВИЛЬНОГО PROMPT
-        current = normalize_prompt(raw_text)
-
-        if current:
-            prompt = current
-        elif last:
-            prompt = last
-        else:
-            return {
-                "type": "text",
-                "data": "Опиши, какую картинку ты хочешь 🙂"
-            }
-
-        # сохраняем актуальный prompt
-        state["last_prompt"] = prompt
-
+        # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
-            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
+            img = await asyncio.wait_for(generate_image(text), timeout=60)
         except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT")
+            print("⏱️ TIMEOUT FIRST ATTEMPT")
             img = None
 
         if img:
-            state["pending_action"] = None
             return {
                 "type": "image",
                 "data": img
             }
 
+        # ===== СИГНАЛ О ПОВТОРЕ =====
+        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
+
         return {
-            "type": "text",
-            "data": "⚠️ Не удалось создать изображение. Попробуй ещё раз."
+            "type": "retry_notice",
+            "data": "⏳ Картинка генерируется дольше обычного… пробую ещё раз"
         }
 
     except Exception as e:
         print("🔥 PROCESS ERROR:", e)
 
         return {
-            "type": "text",
-            "data": "⚠️ Ошибка при генерации изображения"
+            "type": "error",
+            "data": None,
+            "error": str(e)
         }
 
 
-# ===== RETRY =====
+# 🔥 ВТОРАЯ ПОПЫТКА (отдельно вызывается)
 async def retry_process(user_id, text, state):
     try:
-        prompt = normalize_prompt(state.get("last_prompt") or text)
-
-        if not prompt:
-            return {
-                "type": "text",
-                "data": "⚠️ Нет описания для генерации"
-            }
-
         try:
-            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
+            img = await asyncio.wait_for(generate_image(text), timeout=60)
         except asyncio.TimeoutError:
+            print("⏱️ TIMEOUT SECOND ATTEMPT")
             img = None
 
         if img:
-            state["pending_action"] = None
             return {
                 "type": "image",
                 "data": img
             }
 
+        # ===== ФИНАЛЬНАЯ ОШИБКА =====
         return {
-            "type": "text",
-            "data": "⚠️ Не удалось создать изображение"
+            "type": "final_error",
+            "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
         }
 
-    except Exception:
+    except Exception as e:
+        print("🔥 RETRY PROCESS ERROR:", e)
+
         return {
-            "type": "text",
+            "type": "final_error",
             "data": "⚠️ Сервис временно недоступен"
         }
