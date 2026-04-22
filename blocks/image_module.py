@@ -1,10 +1,23 @@
-# blocks/image_module.py
-
 import base64
 import asyncio
 from openai import OpenAI
 
 client = OpenAI()
+
+
+# ===== 🔥 ПРОВЕРКА: ЭТО ТОЧНО ЗАПРОС НА ГЕНЕРАЦИЮ? =====
+def is_valid_image_prompt(text: str) -> bool:
+    t = text.lower()
+
+    triggers = [
+        "нарисуй",
+        "сгенерируй",
+        "создай",
+        "draw",
+        "generate"
+    ]
+
+    return any(x in t for x in triggers)
 
 
 async def generate_image(prompt):
@@ -45,6 +58,13 @@ async def generate_image(prompt):
 
 async def process(user_id, text, state):
     try:
+        # 🚫 ЗАЩИТА ОТ СЛУЧАЙНОЙ ГЕНЕРАЦИИ
+        if not is_valid_image_prompt(text):
+            return {
+                "type": "text",
+                "data": "Я не вижу явного запроса на генерацию изображения 🤔\n\nНапиши, например: «нарисуй кота» или «создай картинку города»"
+            }
+
         # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
             img = await asyncio.wait_for(generate_image(text), timeout=60)
@@ -76,9 +96,16 @@ async def process(user_id, text, state):
         }
 
 
-# 🔥 ВТОРАЯ ПОПЫТКА (отдельно вызывается)
+# 🔥 ВТОРАЯ ПОПЫТКА
 async def retry_process(user_id, text, state):
     try:
+        # 🚫 ПОВТОРНАЯ ЗАЩИТА
+        if not is_valid_image_prompt(text):
+            return {
+                "type": "final_error",
+                "data": "⚠️ Запрос не похож на генерацию изображения"
+            }
+
         try:
             img = await asyncio.wait_for(generate_image(text), timeout=60)
         except asyncio.TimeoutError:
@@ -91,7 +118,6 @@ async def retry_process(user_id, text, state):
                 "data": img
             }
 
-        # ===== ФИНАЛЬНАЯ ОШИБКА =====
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
