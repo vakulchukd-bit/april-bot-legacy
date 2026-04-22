@@ -5,6 +5,21 @@ from openai import OpenAI
 client = OpenAI()
 
 
+# ===== 🔥 ДОБАВЛЕНО: СОХРАНЕНИЕ В ПАМЯТЬ =====
+def save_to_memory(state, item):
+    memory = state.get("image_memory", [])
+
+    # добавляем новую
+    memory.append(item)
+
+    # ограничиваем до 3 последних
+    if len(memory) > 3:
+        memory = memory[-3:]
+
+    state["image_memory"] = memory
+    state["image_context"] = item  # текущая активная
+
+
 async def generate_image(prompt):
     def run():
         print("🚀 START IMAGE GENERATION:", prompt)
@@ -53,14 +68,16 @@ async def process(user_id, text, state):
             img = None
 
         if img:
-            # 🔥 НОВОЕ: СОХРАНЯЕМ КОНТЕКСТ КАРТИНКИ
-            state["image_context"] = {
+            item = {
                 "type": "generated",
                 "source": "text",
                 "prompt": prompt,
                 "hint": prompt,
                 "path": None
             }
+
+            # 🔥 СОХРАНЕНИЕ В ПАМЯТЬ
+            save_to_memory(state, item)
 
             return {
                 "type": "image",
@@ -97,14 +114,16 @@ async def retry_process(user_id, text, state):
             img = None
 
         if img:
-            # 🔥 НОВОЕ: СОХРАНЯЕМ И ЗДЕСЬ ТОЖЕ
-            state["image_context"] = {
+            item = {
                 "type": "generated",
                 "source": "text",
                 "prompt": prompt,
                 "hint": prompt,
                 "path": None
             }
+
+            # 🔥 СОХРАНЕНИЕ В ПАМЯТЬ
+            save_to_memory(state, item)
 
             return {
                 "type": "image",
