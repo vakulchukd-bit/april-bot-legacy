@@ -7,11 +7,9 @@ class ImageGenerateRoom(Room):
     name = "image_generate"
 
     def can_handle(self, text, context):
-        # 🔥 ТОЛЬКО ЧЕРЕЗ INTENT (никаких слов!)
         if context.get("intent") != "generate_image":
             return False
 
-        # 🔥 И ТОЛЬКО ЕСЛИ ЕСТЬ НАМЕРЕНИЕ
         if not context["state"].get("pending_action"):
             return False
 
@@ -43,7 +41,6 @@ class ImageEditRoom(Room):
         if not ctx or not ctx.get("path"):
             return False
 
-        # 🔥 ТОЛЬКО ЧЕРЕЗ INTENT
         if context.get("intent") != "edit_image":
             return False
 
@@ -85,8 +82,9 @@ class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        # 🔥 НЕ ПЕРЕХВАТЫВАЕМ ДЕЙСТВИЯ
-        if context.get("intent") in ["generate_image", "edit_image"]:
+        # 🔥 КЛЮЧЕВОЙ ФИКС
+        # если есть активное действие — текст НЕ вмешивается
+        if context["state"].get("pending_action"):
             return False
 
         return True
