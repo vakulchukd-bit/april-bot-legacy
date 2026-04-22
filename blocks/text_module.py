@@ -68,6 +68,10 @@ async def process(user_id, text, state):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *extra,
                 *history[-6:],
+
+                # 🔥 НОВЫЙ СЛОЙ (РЕЖИМ ДИАЛОГА)
+                {"role": "system", "content": "Это живой диалог. Отвечай естественно, не как справка и не списком."},
+
                 {"role": "user", "content": text}
             ]
         )
