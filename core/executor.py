@@ -19,7 +19,6 @@ from blocks.engineering_system import analyze_code
 
 from blocks.experience_manager import update_experience, load_experience
 
-# 🔥 GPT routing (мягкий)
 from openai import OpenAI
 client = OpenAI()
 
@@ -36,7 +35,7 @@ def gpt_decide_action(text: str) -> str:
                         "Определи тип запроса.\n"
                         "Ответь одним словом:\n"
                         "text / image / edit / analyze\n"
-                        "Без объяснений."
+                        "Если это уточнение текста — ВСЕГДА text."
                     )
                 },
                 {"role": "user", "content": text}
@@ -58,29 +57,7 @@ def gpt_decide_action(text: str) -> str:
         return "text"
 
 
-def detect_task_type(text: str) -> str:
-    t = text.lower().strip()
-
-    if any(x in t for x in ["+", "-", "*", "/", "="]):
-        return "math"
-
-    if t.startswith("/"):
-        return "command"
-
-    return "chat"
-
-
-def is_time_request(text: str) -> bool:
-    t = text.lower()
-
-    return (
-        "который час" in t or
-        "сколько времени" in t or
-        "какое сейчас время" in t or
-        "покажи время" in t
-    )
-
-
+# 🔥 ЖЁСТКАЯ ЗАЩИТА (главное)
 def is_text_refinement(text: str) -> bool:
     t = text.lower().strip()
 
@@ -134,7 +111,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # ===== DEBUG =====
     if text == "/exp":
         data = load_experience()
         user_data = data.get(str(user_id), {})
@@ -144,45 +120,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"🧠 Опыт:\n{user_data}"
         }
 
-    # ===== GPT decision =====
-    gpt_action = gpt_decide_action(text)
+    # ===== 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ =====
+    if is_text_refinement(text):
+        gpt_action = "text"
+    else:
+        gpt_action = gpt_decide_action(text)
 
-    # ===== ENGINEERING =====
-    if mode == "engineering" and not text.startswith("/"):
-        if text.lower() == "/analiz":
-            return {"type": "text", "data": "📥 Жду код..."}
-
-        report = analyze_code(text)
-        return {"type": "admin_report", "data": report}
-
-    task_type = detect_task_type(text)
-    t = text.lower().strip()
-
-    if t == "привет":
-        return {"type": "text", "data": "Привет 🙂"}
-
-    if t == "2+2":
-        return {"type": "text", "data": "4"}
-
-    # ===== ТЕКСТ (если GPT сказал text ИЛИ старый intent) =====
+    # ===== TEXT =====
     if intent == "question" or gpt_action == "text":
-
-        if is_time_request(text):
-            time_str = state.get("time_str")
-            weekday = state.get("weekday")
-            date_str = state.get("date_str")
-
-            if time_str:
-                state["last_action"] = {
-                    "type": "text",
-                    "intent": "time_answer",
-                    "status": "pending"
-                }
-
-                return {
-                    "type": "text",
-                    "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
-                }
 
         ctx = get_image_context(user_id) or state.get("image_context")
         anchor = get_anchor(user_id)
@@ -216,7 +161,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": result["content"]
         }
 
-    # ===== ROOMS (если GPT считает что это действие) =====
+    # ===== ROOMS =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
@@ -226,7 +171,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": task_type
+        "task_type": "chat"
     }
 
     for room in ROOMS:
