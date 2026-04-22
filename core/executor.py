@@ -18,18 +18,6 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 
-def detect_task_type(text: str) -> str:
-    t = text.lower().strip()
-
-    if any(x in t for x in ["+", "-", "*", "/", "="]):
-        return "math"
-
-    if t.startswith("/"):
-        return "command"
-
-    return "chat"
-
-
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -43,35 +31,29 @@ async def execute(user_id, text, chat_id, run_with_typing):
     t = text.lower().strip()
 
     # ===== 🔥 ФИКСАЦИЯ НАМЕРЕНИЯ =====
-    if intent == "generate_image":
-        state["pending_action"] = "generate_image"
+    if intent in ["generate_image", "edit_image"]:
+        state["pending_action"] = intent
+
+        # сохраняем промпт (очень важно)
+        if anchor:
+            state["last_prompt"] = anchor["current"]
+        else:
+            state["last_prompt"] = text
 
     # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
     confirm_phrases = [
-        "давай",
-        "делай",
-        "сделай",
-        "генерируй",
-        "поехали",
-        "ок",
-        "хорошо",
-        "начинай",
-        "да"
+        "давай", "делай", "сделай",
+        "генерируй", "поехали",
+        "ок", "хорошо", "начинай", "да"
     ]
 
-    if state.get("pending_action") == "generate_image":
-        if any(x in t for x in confirm_phrases):
-            intent = "generate_image"
+    if state.get("pending_action") and any(x in t for x in confirm_phrases):
+        intent = state["pending_action"]
 
-    # ===== 🔥 ТОЧКА НЕВОЗВРАТА (ГЛАВНОЕ) =====
-    force_generate = False
-
-    if state.get("pending_action") == "generate_image":
-        if any(x in t for x in confirm_phrases):
-            force_generate = True
-
-    if intent == "generate_image" and anchor:
-        force_generate = True
+    # ===== 🔥 СБРОС ЕСЛИ СМЕНИЛАСЬ ТЕМА =====
+    if intent not in ["generate_image", "edit_image"]:
+        if state.get("pending_action") and not any(x in t for x in confirm_phrases):
+            state["pending_action"] = None
 
     # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
@@ -105,29 +87,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
         }
 
-    # ===== 🔥 ПРИНУДИТЕЛЬНОЕ ДЕЙСТВИЕ =====
-    if force_generate:
-        context = {
-            "chat_id": chat_id,
-            "state": state,
-            "image": ctx,
-            "anchor": anchor,
-            "mode": mode,
-            "intent": "generate_image"
-        }
-
-        for room in ROOMS:
-            if room.name == "image_generate":
-                result = await room.handle(user_id, text, context, run_with_typing)
-                if result:
-                    return result
-
-    # ===== 🚀 ГЕНЕРАЦИЯ С УЧЁТОМ КОНТЕКСТА =====
-    if intent == "generate_image":
-        if anchor:
-            text = f"{anchor['current']}\n\n{text}"
-
-    # ===== ROOMS =====
+    # ===== 🔥 ГЛАВНЫЙ БЛОК (ПРИОРИТЕТ ДЕЙСТВИЯ) =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -137,6 +97,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "intent": intent
     }
 
+    # сначала пробуем действия
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
