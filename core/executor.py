@@ -42,10 +42,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # ===== 🔥 INTERPRETER =====
+    # ===== 🔥 INTERPRETER (мягкий, не блокирует) =====
     interpret_data = interpret(text, state, anchor, ctx)
     intent = interpret_data["intent"]
-    confidence = interpret_data["confidence"]
+    # confidence пока НЕ используем жёстко
 
     # ===== 🔥 ENGINEERING MODE =====
     if mode == "engineering" and not text.startswith("/"):
@@ -66,13 +66,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     task_type = detect_task_type(text)
 
     t = text.lower().strip()
-
-    # ===== 🔥 LOW CONFIDENCE =====
-    if confidence < 0.7:
-        return {
-            "type": "text",
-            "data": "Я не до конца понял, что ты хочешь сделать 🤔\n\nХочешь, чтобы я:\n• ответил на вопрос\n• сгенерировал изображение\n• изменил фото\n\nУточни, пожалуйста 🙂"
-        }
 
     # ===== БЫСТРЫЕ ОТВЕТЫ =====
     if t == "привет":
@@ -106,38 +99,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"🧠 Последний контекст:\n{anchor['current']}"
         }
 
-    # ===== DESCRIBE IMAGE =====
-    if intent == "describe_image":
-        if not ctx or not ctx.get("path"):
-            return {
-                "type": "text",
-                "data": "❌ Нет изображения для анализа"
-            }
-
-        try:
-            hint = await analyze_image(ctx["path"])
-        except:
-            hint = "не удалось определить"
-
-        return {
-            "type": "text",
-            "data": f"📷 На изображении: {hint}"
-        }
-
-    # ===== 🔥 FOLLOW CONTEXT (НОВОЕ) =====
-    if intent == "follow_context":
-        if anchor:
-            return {
-                "type": "text",
-                "data": f"Ты имеешь в виду это:\n\n{anchor['current']}\n\nМожешь уточнить, что именно интересно? 🙂"
-            }
-
-        return {
-            "type": "text",
-            "data": "Можешь уточнить, о чём именно речь? 🤔"
-        }
-
-    # ===== 🚫 BLOCK GENERATE IF IMAGE EXISTS =====
+    # ===== 🚫 НЕ ГЕНЕРИМ НОВОЕ ЕСЛИ ЕСТЬ ФОТО =====
     if ctx and ctx.get("path") and intent == "generate_image":
         return {
             "type": "text",
@@ -181,8 +143,21 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
         }
 
-    # ===== TEXT =====
+    # ===== 🔥 МЯГКОЕ УСИЛЕНИЕ (ВОТ ЗДЕСЬ МАГИЯ) =====
 
+    # 📷 если есть изображение — добавляем описание
+    if intent == "describe_image" and ctx and ctx.get("path"):
+        try:
+            hint = await analyze_image(ctx["path"])
+            text = f"На изображении: {hint}\n\n{text}"
+        except:
+            pass
+
+    # 🔗 если это продолжение диалога
+    if intent == "follow_context" and anchor:
+        text = f"Контекст диалога: {anchor['current']}\n\n{text}"
+
+    # 📷 общий fallback (как было у тебя — оставляем!)
     if ctx and ctx.get("path"):
         try:
             hint = await analyze_image(ctx["path"])
@@ -190,9 +165,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
         except:
             pass
 
+    # 🧠 anchor как раньше
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
+    # 🕒 время
     try:
         time_str = state.get("time_str")
         if time_str:
@@ -200,9 +177,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
     except Exception as e:
         print("🔥 TIME ERROR:", e)
 
+    # 🌍 мир
     world = build_context_text()
     text = f"{world}\n\n{text}"
 
+    # ===== ГЛАВНЫЙ МОЗГ (НЕ ТРОГАЕМ) =====
     mode_response = detect_response_mode(text)
 
     result = await run_with_typing(
