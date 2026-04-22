@@ -20,7 +20,6 @@ from blocks.engineering_system import analyze_code
 from blocks.experience_manager import update_experience, load_experience
 
 
-# ===== 🔥 ЗАЩИТА ОТ ЛОЖНЫХ ДЕЙСТВИЙ =====
 def is_followup(text: str) -> bool:
     t = text.lower().strip()
 
@@ -36,7 +35,6 @@ def is_followup(text: str) -> bool:
     return any(m in t for m in markers)
 
 
-# ===== 🔥 НОВОЕ: ПОДТВЕРЖДЕНИЕ "ДА" =====
 def is_confirmation(text: str) -> bool:
     t = text.lower().strip()
 
@@ -61,7 +59,7 @@ def update_last_action(state, text):
         last["status"] = "refined"
         return
 
-    if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка"]):
+    if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка", "нет"]):
         last["status"] = "conflict"
         return
 
@@ -89,16 +87,16 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # 🔥 фикс: уточнения всегда текст
     if is_followup(text):
         intent = "question"
 
-    # ===== 🔥 НОВОЕ: ЕСЛИ "ДА" → ДЕЛАЕМ ДЕЙСТВИЕ =====
+    # ===== 🔥 ФИКС v2: "ДА" → ПОВТОР ДЕЙСТВИЯ =====
     last = state.get("last_action")
 
-    if is_confirmation(text) and last:
-        if last.get("type") == "image":
-            # 👉 пробуем снова через комнаты (генерация/редактирование)
+    if is_confirmation(text) and last and last.get("type") == "image":
+        last_prompt = state.get("last_image_prompt")
+
+        if last_prompt:
             ctx = get_image_context(user_id) or state.get("image_context")
 
             context = {
@@ -112,10 +110,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
             for room in ROOMS:
                 try:
-                    if room.can_handle("generate", context):
+                    if room.can_handle(last_prompt, context):
                         result = await room.handle(
                             user_id,
-                            "generate",
+                            last_prompt,
                             context,
                             run_with_typing
                         )
@@ -124,7 +122,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             return result
 
                 except Exception as e:
-                    print(f"🔥 ROOM ERROR [confirm]:", e)
+                    print(f"🔥 ROOM ERROR [confirm v2]:", e)
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -176,12 +174,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
             text_process(user_id, text, state)
         )
 
-        # 👉 если речь про изображение — помечаем как ожидающее действия
         state["last_action"] = {
             "type": "image" if ("изображ" in text or "робот" in text) else "text",
             "intent": "answer",
             "status": "pending"
         }
+
+        # 🔥 сохраняем последний prompt
+        if state["last_action"]["type"] == "image":
+            state["last_image_prompt"] = text
 
         return {
             "type": "text",
@@ -212,13 +213,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 )
 
                 if result:
-                    # 👉 если генерация — помечаем
                     if result.get("type") == "image":
                         state["last_action"] = {
                             "type": "image",
                             "intent": "generate",
                             "status": "pending"
                         }
+                        state["last_image_prompt"] = text
+
                     return result
 
         except Exception as e:
