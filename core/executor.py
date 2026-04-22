@@ -14,14 +14,48 @@ from blocks.mode_manager import get_mode
 
 from blocks.context_system import build_context_text
 
-# 🔥 НОВОЕ — КОМНАТЫ
 from blocks.rooms_registry import ROOMS
-
-# 🔥 ENGINEERING
 from blocks.engineering_system import analyze_code
 
-# 🔥 EXPERIENCE
 from blocks.experience_manager import update_experience, load_experience
+
+# 🔥 GPT routing (мягкий)
+from openai import OpenAI
+client = OpenAI()
+
+
+# ===== GPT helper =====
+def gpt_decide_action(text: str) -> str:
+    try:
+        r = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Определи тип запроса.\n"
+                        "Ответь одним словом:\n"
+                        "text / image / edit / analyze\n"
+                        "Без объяснений."
+                    )
+                },
+                {"role": "user", "content": text}
+            ]
+        )
+
+        decision = r.output_text.lower().strip()
+
+        if "image" in decision:
+            return "image"
+        if "edit" in decision:
+            return "edit"
+        if "analyze" in decision:
+            return "analyze"
+
+        return "text"
+
+    except:
+        return "text"
 
 
 def detect_task_type(text: str) -> str:
@@ -47,7 +81,6 @@ def is_time_request(text: str) -> bool:
     )
 
 
-# 🔥 НОВОЕ: определяем уточнение текста (ВАЖНО)
 def is_text_refinement(text: str) -> bool:
     t = text.lower().strip()
 
@@ -80,7 +113,6 @@ def update_last_action(state, text):
     last["status"] = "accepted"
 
 
-# 🔥 НОВОЕ: фиксация прошлого действия
 def commit_last_action(user_id, state):
     last = state.get("last_action")
 
@@ -97,10 +129,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 1. пользователь ответил → обновляем статус
     update_last_action(state, text)
-
-    # 🔥 2. фиксируем прошлое действие
     commit_last_action(user_id, state)
 
     intent = detect_intent(text)
@@ -114,6 +143,9 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "type": "text",
             "data": f"🧠 Опыт:\n{user_data}"
         }
+
+    # ===== GPT decision =====
+    gpt_action = gpt_decide_action(text)
 
     # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
@@ -132,8 +164,8 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВОПРОСЫ =====
-    if intent == "question":
+    # ===== ТЕКСТ (если GPT сказал text ИЛИ старый intent) =====
+    if intent == "question" or gpt_action == "text":
 
         if is_time_request(text):
             time_str = state.get("time_str")
@@ -184,48 +216,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": result["content"]
         }
 
-    # ===== MEMORY =====
-    if intent == "memory":
-        anchor = get_anchor(user_id)
-
-        state["last_action"] = {
-            "type": "text",
-            "intent": "memory",
-            "status": "pending"
-        }
-
-        if not anchor:
-            return {"type": "text", "data": "🤔 Я пока ничего не запомнил"}
-
-        return {
-            "type": "text",
-            "data": f"🧠 Последний контекст:\n{anchor['current']}"
-        }
-
-    # ===== ANALYZE =====
-    if intent == "analyze":
-        ctx = get_image_context(user_id) or state.get("image_context")
-
-        state["last_action"] = {
-            "type": "image",
-            "intent": "analyze",
-            "status": "pending"
-        }
-
-        if not ctx or not ctx.get("path"):
-            return {"type": "text", "data": "❌ Нет изображения для анализа"}
-
-        try:
-            hint = await analyze_image(ctx["path"])
-        except:
-            hint = "не удалось определить"
-
-        return {
-            "type": "text",
-            "data": f"📷 На изображении: {hint}"
-        }
-
-    # ===== CONTEXT =====
+    # ===== ROOMS (если GPT считает что это действие) =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
@@ -238,93 +229,29 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "task_type": task_type
     }
 
-    mode_response = detect_response_mode(text)
-
-    # ===== 🔥 ФИКС ROUTING =====
-    skip_rooms = False
-
-    if intent == "question" or is_text_refinement(text):
-        skip_rooms = True
-
-    # ===== ROOMS =====
-    handled = False
-
-    if not skip_rooms:
-        for room in ROOMS:
-            try:
-                if room.can_handle(text, context):
-                    result = await room.handle(
-                        user_id,
-                        text,
-                        context,
-                        run_with_typing
-                    )
-
-                    if result:
-                        if result.get("type") == "image":
-                            state["last_action"] = {
-                                "type": "image",
-                                "intent": "generate_or_edit",
-                                "status": "pending"
-                            }
-                        else:
-                            state["last_action"] = {
-                                "type": "text",
-                                "intent": "room_response",
-                                "status": "pending"
-                            }
-
-                        return result
-
-                    handled = True
-
-            except Exception as e:
-                print(f"🔥 ROOM ERROR [{room.name}]:", e)
-
-    if handled:
-        state["last_action"] = {
-            "type": "text",
-            "intent": "error",
-            "status": "pending"
-        }
-
-        return {
-            "type": "text",
-            "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
-        }
-
-    # ===== TEXT =====
-    if ctx and ctx.get("path"):
+    for room in ROOMS:
         try:
-            hint = await analyze_image(ctx["path"])
-            text = f"На изображении: {hint}\n\n{text}"
-        except:
-            pass
+            if room.can_handle(text, context):
+                result = await room.handle(
+                    user_id,
+                    text,
+                    context,
+                    run_with_typing
+                )
 
-    if anchor:
-        text = f"Контекст: {anchor['current']}\n\n{text}"
+                if result:
+                    return result
 
-    world = build_context_text()
-    text = f"{world}\n\n{text}"
+        except Exception as e:
+            print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
+    # ===== FALLBACK =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state)
     )
 
-    reply = result["content"]
-
-    if mode_response == "copy":
-        clean = reply.replace("```", "").strip()
-        reply = f"```text\n{clean}\n```"
-
-    state["last_action"] = {
-        "type": "text",
-        "intent": "fallback_text",
-        "status": "pending"
-    }
-
     return {
         "type": "text",
-        "data": reply
+        "data": result["content"]
     }
