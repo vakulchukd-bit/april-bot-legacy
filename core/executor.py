@@ -18,7 +18,6 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 
-# ===== 🔥 ПРОВЕРКА: ЭТО ВОПРОС =====
 def is_question(text: str) -> bool:
     t = text.lower()
 
@@ -33,7 +32,6 @@ def is_question(text: str) -> bool:
     return any(x in t for x in question_words)
 
 
-# ===== 🔥 ПРОВЕРКА: ЭТО ПОДТВЕРЖДЕНИЕ =====
 def is_confirm(text: str) -> bool:
     t = text.lower().strip()
 
@@ -53,7 +51,6 @@ def is_confirm(text: str) -> bool:
     return False
 
 
-# ===== 🔥 ГОТОВНОСТЬ К ДЕЙСТВИЮ =====
 def is_ready_to_generate(state, text, anchor):
     if state.get("last_prompt"):
         return True
@@ -82,11 +79,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
     question = is_question(text)
     confirm = is_confirm(text)
 
-    # ===== 🔥 БЛОКИРОВКА СЛУЧАЙНОЙ ГЕНЕРАЦИИ =====
+    # ===== 🔥 БЛОКИРОВКА ВОПРОСА =====
     if intent == "generate_image" and question and not confirm:
         intent = "question"
 
-    # ===== 🔥 ФИКСАЦИЯ НАМЕРЕНИЯ =====
+    # ===== 🔥 ФИКСАЦИЯ =====
     if intent in ["generate_image", "edit_image"] and not question:
         state["pending_action"] = intent
 
@@ -99,7 +96,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if state.get("pending_action") and confirm:
         intent = state["pending_action"]
 
-    # ===== 🔥 СБРОС ЕСЛИ УШЛИ В ДРУГУЮ ТЕМУ =====
+    # ===== СБРОС =====
     if intent not in ["generate_image", "edit_image"]:
         if state.get("pending_action") and not confirm:
             state["pending_action"] = None
@@ -110,14 +107,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
             return {"type": "text", "data": "📥 Жду код..."}
         return {"type": "admin_report", "data": analyze_code(text)}
 
-    # ===== БЫСТРЫЕ ОТВЕТЫ =====
+    # ===== SIMPLE =====
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВРЕМЯ (ТОЛЬКО ПО ЗАПРОСУ) =====
+    # ===== ВРЕМЯ =====
     if "время" in t or "час" in t:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
@@ -129,15 +126,16 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
             }
 
-    # ===== 🚫 НЕ ГЕНЕРИМ ПОВЕРХ ФОТО =====
+    # ===== 🚫 IMAGE OVER IMAGE =====
     if ctx and ctx.get("path") and intent == "generate_image":
         return {
             "type": "text",
             "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
         }
 
-    # ===== 🔥 🧠 УМНОЕ РЕШЕНИЕ =====
+    # ===== 🔥 КРИТИЧНЫЙ БЛОК =====
     if intent == "generate_image":
+
         ready = is_ready_to_generate(state, text, anchor)
 
         if not ready and not confirm:
@@ -146,7 +144,30 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": "Опиши, какую именно картинку ты хочешь 🙂"
             }
 
-    # ===== 🔥 ГЛАВНЫЙ БЛОК =====
+        context = {
+            "chat_id": chat_id,
+            "state": state,
+            "image": ctx,
+            "anchor": anchor,
+            "mode": mode,
+            "intent": "generate_image"
+        }
+
+        # 🔥 ПРИНУДИТЕЛЬНО ВЫЗЫВАЕМ НУЖНУЮ КОМНАТУ
+        for room in ROOMS:
+            if room.name == "image_generate":
+                result = await room.handle(user_id, text, context, run_with_typing)
+
+                if result:
+                    return result
+
+        # ❗ ЕСЛИ НЕ СРАБОТАЛО — НЕ УХОДИМ В TEXT
+        return {
+            "type": "text",
+            "data": "⚠️ Не удалось создать изображение. Попробуй ещё раз."
+        }
+
+    # ===== ОБЫЧНЫЕ КОМНАТЫ =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -165,14 +186,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== УСИЛЕНИЕ =====
-    if intent == "describe_image" and ctx:
-        try:
-            hint = await analyze_image(ctx["path"])
-            text = f"На изображении: {hint}\n\n{text}"
-        except:
-            pass
-
+    # ===== TEXT =====
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
 
