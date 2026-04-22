@@ -21,10 +21,9 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 # 🔥 НОВОЕ — EXPERIENCE
-from blocks.experience_manager import update_experience
+from blocks.experience_manager import update_experience, load_experience
 
 
-# ===== 🔥 ТИПЫ ЗАДАЧ =====
 def detect_task_type(text: str) -> str:
     t = text.lower().strip()
 
@@ -37,7 +36,6 @@ def detect_task_type(text: str) -> str:
     return "chat"
 
 
-# ===== 🔥 ПРОВЕРКА ЗАПРОСА ВРЕМЕНИ =====
 def is_time_request(text: str) -> bool:
     t = text.lower()
 
@@ -49,7 +47,6 @@ def is_time_request(text: str) -> bool:
     )
 
 
-# ===== 🔥 НОВОЕ: ОБНОВЛЕНИЕ СТАТУСА =====
 def update_last_action(state, text):
     last = state.get("last_action")
 
@@ -77,6 +74,16 @@ async def execute(user_id, text, chat_id, run_with_typing):
     update_last_action(state, text)
 
     intent = detect_intent(text)
+
+    # ===== 🔥 НОВОЕ: DEBUG ОПЫТА =====
+    if text == "/exp":
+        data = load_experience()
+        user_data = data.get(str(user_id), {})
+
+        return {
+            "type": "text",
+            "data": f"🧠 Опыт:\n{user_data}"
+        }
 
     # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
