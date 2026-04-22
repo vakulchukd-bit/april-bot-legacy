@@ -18,6 +18,22 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 
+def is_ready_to_generate(state, text, anchor):
+    # если есть сохранённый промпт — уже хорошо
+    if state.get("last_prompt"):
+        return True
+
+    # если есть anchor — тоже норм
+    if anchor:
+        return True
+
+    # если текст длинный (есть описание)
+    if len(text.split()) > 4:
+        return True
+
+    return False
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -34,7 +50,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if intent in ["generate_image", "edit_image"]:
         state["pending_action"] = intent
 
-        # сохраняем промпт (очень важно)
         if anchor:
             state["last_prompt"] = anchor["current"]
         else:
@@ -47,12 +62,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "ок", "хорошо", "начинай", "да"
     ]
 
-    if state.get("pending_action") and any(x in t for x in confirm_phrases):
+    is_confirm = any(x in t for x in confirm_phrases)
+
+    if state.get("pending_action") and is_confirm:
         intent = state["pending_action"]
 
     # ===== 🔥 СБРОС ЕСЛИ СМЕНИЛАСЬ ТЕМА =====
     if intent not in ["generate_image", "edit_image"]:
-        if state.get("pending_action") and not any(x in t for x in confirm_phrases):
+        if state.get("pending_action") and not is_confirm:
             state["pending_action"] = None
 
     # ===== ENGINEERING =====
@@ -87,7 +104,17 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
         }
 
-    # ===== 🔥 ГЛАВНЫЙ БЛОК (ПРИОРИТЕТ ДЕЙСТВИЯ) =====
+    # ===== 🔥 🧠 УМНОЕ РЕШЕНИЕ =====
+    if intent == "generate_image":
+        ready = is_ready_to_generate(state, text, anchor)
+
+        if not ready and not is_confirm:
+            return {
+                "type": "text",
+                "data": "Какую именно картинку ты хочешь? Опиши подробнее 🙂"
+            }
+
+    # ===== 🔥 ГЛАВНЫЙ БЛОК =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -97,7 +124,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         "intent": intent
     }
 
-    # сначала пробуем действия
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
