@@ -4,7 +4,7 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
     intent = "chat"
     confidence = 0.5
 
-    # ===== 🔥 1. СНАЧАЛА ОПРЕДЕЛЯЕМ ВОПРОС (КРИТИЧЕСКОЕ) =====
+    # ===== 🔥 1. ВОПРОС (НО НЕ ЛОМАЕМ СМЕШАННЫЕ ФРАЗЫ) =====
     question_markers = [
         "можешь", "сможешь", "ты бы", "если", "а ты",
         "умеешь", "можно", "получится"
@@ -12,30 +12,42 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
 
     is_question = "?" in text or any(x in t for x in question_markers)
 
-    if is_question:
+    # ⚠️ НО: если есть явное действие — это НЕ просто вопрос
+    action_markers = [
+        "сделай", "создай", "сгенерируй", "нарисуй"
+    ]
+
+    has_action = any(x in t for x in action_markers)
+
+    if is_question and not has_action:
         return {
             "intent": "question",
             "confidence": 0.95
         }
 
-    # ===== 🔥 2. ПОДТВЕРЖДЕНИЕ ДЕЙСТВИЯ =====
+    # ===== 🔥 2. ПОДТВЕРЖДЕНИЕ (УЛУЧШЕНО) =====
     confirm_phrases = [
-        "давай",
-        "делай",
-        "сделай",
-        "генерируй",
-        "поехали",
-        "ок",
-        "хорошо",
-        "начинай",
-        "да"
+        "да", "давай", "делай", "сделай",
+        "генерируй", "поехали", "ок",
+        "хорошо", "начинай"
     ]
 
-    if any(x in t for x in confirm_phrases):
+    # короткий ответ = почти всегда подтверждение
+    if len(t.split()) <= 3 and any(x in t for x in confirm_phrases):
         if state.get("pending_action"):
             return {
                 "intent": state.get("pending_action"),
                 "confidence": 0.95
+            }
+
+    # более длинные формы (типа "я бы хотел")
+    if any(x in t for x in [
+        "я хочу", "я бы хотел", "давай сделаем"
+    ]):
+        if state.get("pending_action"):
+            return {
+                "intent": state.get("pending_action"),
+                "confidence": 0.9
             }
 
     # ===== 🔥 3. ЯВНАЯ ГЕНЕРАЦИЯ =====
@@ -49,7 +61,7 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
         intent = "generate_image"
         confidence = 0.95
 
-    # ===== 🔥 4. МЯГКАЯ ГЕНЕРАЦИЯ (НО ТОЛЬКО НЕ ВОПРОС) =====
+    # ===== 🔥 4. МЯГКАЯ ГЕНЕРАЦИЯ =====
     elif any(x in t for x in [
         "сделай картинку",
         "сделай изображение",
@@ -57,9 +69,7 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
         "сделай так",
         "хочу такую",
         "хочу такую же",
-        "давай сделаем",
         "давай такую",
-        "сделай как было",
         "такую же как выше"
     ]):
         intent = "generate_image"
