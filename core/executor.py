@@ -34,13 +34,47 @@ def detect_task_type(text: str) -> str:
     return "chat"
 
 
+# ===== 🔥 ПРОВЕРКА ЯВНОГО ДЕЙСТВИЯ =====
+def is_clear_action(text: str) -> bool:
+    t = text.lower()
+
+    return any(x in t for x in [
+        "сделай",
+        "создай",
+        "сгенерируй",
+        "нарисуй",
+        "измени",
+        "удали",
+        "добавь",
+        "поменяй"
+    ])
+
+
+# ===== 🔥 НЕЯСНЫЙ ЗАПРОС =====
+def is_unclear_request(text: str) -> bool:
+    t = text.lower()
+
+    triggers = [
+        "давай",
+        "что-нибудь",
+        "что то",
+        "про картинки",
+        "интересно",
+        "может",
+        "поговорим",
+        "что скажешь"
+    ]
+
+    return any(x in t for x in triggers)
+
+
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
     intent = detect_intent(text)
 
-    # ===== 🔥 ENGINEERING MODE (ИСПРАВЛЕНО) =====
+    # ===== 🔥 ENGINEERING MODE =====
     if mode == "engineering" and not text.startswith("/"):
 
         if text.lower() == "/analiz":
@@ -67,11 +101,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВОПРОСЫ (УМНЫЕ) =====
+    # ===== 🔥 ВОПРОСЫ =====
     if intent == "question" and any(x in t for x in ["умеешь", "можешь", "что ты умеешь"]):
         return {
             "type": "text",
-            "data": "Да 🙂 Я умею:\n\n• создавать изображения 🎨\n• редактировать фото 📷\n• отвечать на вопросы 💬\n• анализировать код 🛠\n\nСкажи, что хочешь сделать."
+            "data": "Да 🙂 Могу. Хочешь попробуем?"
         }
 
     # ===== ВРЕМЯ =====
@@ -119,6 +153,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
         return {
             "type": "text",
             "data": f"📷 На изображении: {hint}"
+        }
+
+    # =========================================================
+    # 🔥 🔥 🔥 НОВЫЙ БЛОК — УТОЧНЕНИЕ 🔥 🔥 🔥
+    # =========================================================
+    if not is_clear_action(text) and is_unclear_request(text):
+        return {
+            "type": "text",
+            "data": "Хочешь, я что-то сгенерирую или просто обсудим идеи? 🙂"
         }
 
     # ===== КОНТЕКСТ =====
