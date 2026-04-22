@@ -47,6 +47,20 @@ def is_time_request(text: str) -> bool:
     )
 
 
+# 🔥 НОВОЕ: определяем уточнение текста (ВАЖНО)
+def is_text_refinement(text: str) -> bool:
+    t = text.lower().strip()
+
+    markers = [
+        "еще короче", "ещё короче",
+        "сократи", "укороти",
+        "поконкретнее", "подробнее", "уточни",
+        "сделай короче", "сделай её короче", "сделай это короче"
+    ]
+
+    return any(m in t for m in markers)
+
+
 def update_last_action(state, text):
     last = state.get("last_action")
 
@@ -86,7 +100,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # 🔥 1. пользователь ответил → обновляем статус
     update_last_action(state, text)
 
-    # 🔥 2. фиксируем прошлое действие (если оно завершено)
+    # 🔥 2. фиксируем прошлое действие
     commit_last_action(user_id, state)
 
     intent = detect_intent(text)
@@ -226,39 +240,46 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     mode_response = detect_response_mode(text)
 
+    # ===== 🔥 ФИКС ROUTING =====
+    skip_rooms = False
+
+    if intent == "question" or is_text_refinement(text):
+        skip_rooms = True
+
     # ===== ROOMS =====
     handled = False
 
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(
-                    user_id,
-                    text,
-                    context,
-                    run_with_typing
-                )
+    if not skip_rooms:
+        for room in ROOMS:
+            try:
+                if room.can_handle(text, context):
+                    result = await room.handle(
+                        user_id,
+                        text,
+                        context,
+                        run_with_typing
+                    )
 
-                if result:
-                    if result.get("type") == "image":
-                        state["last_action"] = {
-                            "type": "image",
-                            "intent": "generate_or_edit",
-                            "status": "pending"
-                        }
-                    else:
-                        state["last_action"] = {
-                            "type": "text",
-                            "intent": "room_response",
-                            "status": "pending"
-                        }
+                    if result:
+                        if result.get("type") == "image":
+                            state["last_action"] = {
+                                "type": "image",
+                                "intent": "generate_or_edit",
+                                "status": "pending"
+                            }
+                        else:
+                            state["last_action"] = {
+                                "type": "text",
+                                "intent": "room_response",
+                                "status": "pending"
+                            }
 
-                    return result
+                        return result
 
-                handled = True
+                    handled = True
 
-        except Exception as e:
-            print(f"🔥 ROOM ERROR [{room.name}]:", e)
+            except Exception as e:
+                print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
     if handled:
         state["last_action"] = {
