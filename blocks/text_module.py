@@ -42,25 +42,7 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
-        # ===== 🔥 ВРЕМЯ (МЯГКО) =====
-        try:
-            hour = state.get("hour")
-            if hour is not None:
-                if hour < 6:
-                    part = "ночь"
-                elif hour < 12:
-                    part = "утро"
-                elif hour < 18:
-                    part = "день"
-                else:
-                    part = "вечер"
-
-                extra.append({
-                    "role": "system",
-                    "content": f"Сейчас у пользователя {part} ({hour}:00, Europe/Kyiv)"
-                })
-        except Exception as e:
-            print("🔥 TIME ERROR:", e)
+        # ❌ ВРЕМЯ УБРАНО ПОЛНОСТЬЮ (чтобы не лезло в ответы)
 
         # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
         if ctx and ctx.get("hint"):
