@@ -40,12 +40,33 @@ async def execute(user_id, text, chat_id, run_with_typing):
     interpret_data = interpret(text, state, anchor, ctx)
     intent = interpret_data["intent"]
 
+    # ===== 🔥 ФИКСАЦИЯ НАМЕРЕНИЯ =====
+    if intent == "generate_image":
+        state["pending_action"] = "generate_image"
+
+    # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
+    t = text.lower().strip()
+
+    confirm_phrases = [
+        "давай",
+        "делай",
+        "сделай",
+        "генерируй",
+        "поехали",
+        "ок",
+        "хорошо",
+        "начинай"
+    ]
+
+    if state.get("pending_action") == "generate_image":
+        if any(x in t for x in confirm_phrases):
+            intent = "generate_image"
+
+    # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
         if text.lower() == "/analiz":
             return {"type": "text", "data": "📥 Жду код..."}
         return {"type": "admin_report", "data": analyze_code(text)}
-
-    t = text.lower().strip()
 
     # ===== БЫСТРЫЕ ОТВЕТЫ =====
     if t == "привет":
