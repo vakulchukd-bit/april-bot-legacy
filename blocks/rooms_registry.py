@@ -7,15 +7,15 @@ class ImageGenerateRoom(Room):
     name = "image_generate"
 
     def can_handle(self, text, context):
-        if context.get("intent") == "generate_image":
-            return True
+        # 🔥 ТОЛЬКО ЧЕРЕЗ INTENT (никаких слов!)
+        if context.get("intent") != "generate_image":
+            return False
 
-        t = text.lower()
-        return any(w in t for w in [
-            "сгенерируй", "создай", "нарисуй",
-            "картин", "изображен",
-            "generate", "draw"
-        ])
+        # 🔥 И ТОЛЬКО ЕСЛИ ЕСТЬ НАМЕРЕНИЕ
+        if not context["state"].get("pending_action"):
+            return False
+
+        return True
 
     async def handle(self, user_id, text, context, run):
         result = await run(
@@ -39,19 +39,18 @@ class ImageEditRoom(Room):
 
     def can_handle(self, text, context):
         ctx = context.get("image")
+
         if not ctx or not ctx.get("path"):
             return False
 
-        if context.get("intent") == "edit_image":
-            return True
+        # 🔥 ТОЛЬКО ЧЕРЕЗ INTENT
+        if context.get("intent") != "edit_image":
+            return False
 
-        t = text.lower()
+        if not context["state"].get("pending_action"):
+            return False
 
-        return any(v in t for v in [
-            "измени", "добавь", "убери",
-            "замени", "поменяй",
-            "осветли", "затемни", "улучши"
-        ])
+        return True
 
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
@@ -86,7 +85,7 @@ class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        # 🔥 КРИТИЧНО: НЕ ПЕРЕХВАТЫВАЕМ действия
+        # 🔥 НЕ ПЕРЕХВАТЫВАЕМ ДЕЙСТВИЯ
         if context.get("intent") in ["generate_image", "edit_image"]:
             return False
 
