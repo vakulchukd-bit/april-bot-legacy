@@ -15,7 +15,7 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
         intent = "generate_image"
         confidence = 0.95
 
-    # ===== 🔥 МЯГКАЯ ГЕНЕРАЦИЯ (НОВОЕ — КЛЮЧ) =====
+    # ===== 🔥 МЯГКАЯ ГЕНЕРАЦИЯ (УЛУЧШЕНО) =====
     elif any(x in t for x in [
         "сделай картинку",
         "сделай изображение",
@@ -24,11 +24,35 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
         "можешь сделать",
         "сможешь сделать",
         "хочу такую",
-        "хочу такую же"
+        "хочу такую же",
+        "давай сделаем",
+        "давай такую",
+        "сделай как было",
+        "такую же как выше"
     ]):
-        if anchor:
-            intent = "generate_image"
-            confidence = 0.9
+        # теперь не требуем anchor жестко
+        intent = "generate_image"
+        confidence = 0.9
+
+    # ===== 🔥 ПОДТВЕРЖДЕНИЕ ДЕЙСТВИЯ (НОВОЕ) =====
+    confirm_phrases = [
+        "давай",
+        "делай",
+        "сделай",
+        "генерируй",
+        "поехали",
+        "ок",
+        "хорошо",
+        "начинай"
+    ]
+
+    if any(x in t for x in confirm_phrases):
+        # если уже есть намерение в состоянии
+        if state.get("pending_action"):
+            return {
+                "intent": state.get("pending_action"),
+                "confidence": 0.95
+            }
 
     # ===== 🔥 EDIT IMAGE =====
     if image_ctx and image_ctx.get("path"):
@@ -39,10 +63,12 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
             "убери",
             "улучши",
             "ярче",
-            "темнее"
+            "темнее",
+            "добавь лодку",
+            "сделай ярче"
         ]):
             intent = "edit_image"
-            confidence = 0.85
+            confidence = 0.9
 
     # ===== 🔥 FOLLOW-UP =====
     follow_phrases = [
