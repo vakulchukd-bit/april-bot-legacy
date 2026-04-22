@@ -18,6 +18,7 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 
+# ===== ВОПРОС =====
 def is_question(text: str) -> bool:
     t = text.lower()
 
@@ -32,6 +33,7 @@ def is_question(text: str) -> bool:
     return any(x in t for x in question_words)
 
 
+# ===== ПОДТВЕРЖДЕНИЕ =====
 def is_confirm(text: str) -> bool:
     t = text.lower().strip()
 
@@ -51,6 +53,7 @@ def is_confirm(text: str) -> bool:
     return False
 
 
+# ===== ГОТОВНОСТЬ =====
 def is_ready_to_generate(state, text, anchor):
     if state.get("last_prompt"):
         return True
@@ -79,11 +82,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
     question = is_question(text)
     confirm = is_confirm(text)
 
-    # ===== 🔥 БЛОКИРОВКА ВОПРОСА =====
+    # ===== БЛОК ВОПРОСОВ =====
     if intent == "generate_image" and question and not confirm:
         intent = "question"
 
-    # ===== 🔥 ФИКСАЦИЯ =====
+    # ===== ФИКСАЦИЯ НАМЕРЕНИЯ =====
     if intent in ["generate_image", "edit_image"] and not question:
         state["pending_action"] = intent
 
@@ -92,7 +95,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         else:
             state["last_prompt"] = text
 
-    # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
+    # ===== ПОДТВЕРЖДЕНИЕ =====
     if state.get("pending_action") and confirm:
         intent = state["pending_action"]
 
@@ -107,15 +110,15 @@ async def execute(user_id, text, chat_id, run_with_typing):
             return {"type": "text", "data": "📥 Жду код..."}
         return {"type": "admin_report", "data": analyze_code(text)}
 
-    # ===== SIMPLE =====
+    # ===== ПРОСТОЕ =====
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВРЕМЯ =====
-    if "время" in t or "час" in t:
+    # ===== ВРЕМЯ (ТОЛЬКО ЯВНО) =====
+    if ("время" in t or "час" in t) and len(t.split()) <= 5:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
         date_str = state.get("date_str")
@@ -126,14 +129,16 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
             }
 
-    # ===== 🚫 IMAGE OVER IMAGE =====
+    # ===== ЗАЩИТА =====
     if ctx and ctx.get("path") and intent == "generate_image":
         return {
             "type": "text",
             "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
         }
 
-    # ===== 🔥 КРИТИЧНЫЙ БЛОК =====
+    # =========================================================
+    # 🔥 ГЛАВНЫЙ ФИКС — ГАРАНТИЯ ГЕНЕРАЦИИ
+    # =========================================================
     if intent == "generate_image":
 
         ready = is_ready_to_generate(state, text, anchor)
@@ -153,19 +158,19 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "intent": "generate_image"
         }
 
-        # 🔥 ПРИНУДИТЕЛЬНО ВЫЗЫВАЕМ НУЖНУЮ КОМНАТУ
         for room in ROOMS:
             if room.name == "image_generate":
+
                 result = await room.handle(user_id, text, context, run_with_typing)
 
-                if result:
-                    return result
+                # ❗ КРИТИЧНО: НЕТ ФОЛБЭКА В TEXT
+                if not result:
+                    return {
+                        "type": "text",
+                        "data": "⚠️ Генерация не сработала. Попробуй ещё раз."
+                    }
 
-        # ❗ ЕСЛИ НЕ СРАБОТАЛО — НЕ УХОДИМ В TEXT
-        return {
-            "type": "text",
-            "data": "⚠️ Не удалось создать изображение. Попробуй ещё раз."
-        }
+                return result
 
     # ===== ОБЫЧНЫЕ КОМНАТЫ =====
     context = {
