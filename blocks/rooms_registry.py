@@ -7,23 +7,23 @@ class ImageGenerateRoom(Room):
     name = "image_generate"
 
     def can_handle(self, text, context):
-        if context.get("intent") != "generate_image":
-            return False
-
-        if not context["state"].get("pending_action"):
-            return False
-
-        return True
+        t = text.lower()
+        return any(w in t for w in [
+            "сгенерируй", "создай", "нарисуй", "сделай",
+            "картин", "изображен",
+            "generate", "draw"
+        ])
 
     async def handle(self, user_id, text, context, run):
-        # 🔥 ВАЖНО: УБРАЛИ run_with_typing
-        result = await image_generate(user_id, text, context["state"])
+        result = await run(
+            context["chat_id"],
+            image_generate(user_id, text, context["state"])
+        )
 
         if result and result.get("type") == "image":
-            context["state"]["pending_action"] = None
             return result
 
-        return result  # 🔥 возвращаем даже если ошибка
+        return None
 
 
 # === IMAGE EDIT ===
@@ -35,17 +35,16 @@ class ImageEditRoom(Room):
 
     def can_handle(self, text, context):
         ctx = context.get("image")
-
         if not ctx or not ctx.get("path"):
             return False
 
-        if context.get("intent") != "edit_image":
-            return False
+        t = text.lower()
 
-        if not context["state"].get("pending_action"):
-            return False
-
-        return True
+        return any(v in t for v in [
+            "измени", "добавь", "убери",
+            "сделай", "замени", "поменяй",
+            "осветли", "затемни", "улучши"
+        ])
 
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
@@ -61,14 +60,15 @@ class ImageEditRoom(Room):
 
         new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
-        # 🔥 УБРАЛИ run_with_typing
-        result = await image_edit(user_id, ctx["path"], new_prompt)
+        result = await run(
+            context["chat_id"],
+            image_edit(user_id, ctx["path"], new_prompt)
+        )
 
         if result and result.get("type") == "image":
-            context["state"]["pending_action"] = None
             return result
 
-        return result
+        return None
 
 
 # === TEXT ===
@@ -78,8 +78,6 @@ class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        if context["state"].get("pending_action"):
-            return False
         return True
 
     async def handle(self, user_id, text, context, run):
