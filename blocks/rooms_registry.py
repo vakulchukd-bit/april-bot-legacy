@@ -16,16 +16,14 @@ class ImageGenerateRoom(Room):
         return True
 
     async def handle(self, user_id, text, context, run):
-        result = await run(
-            context["chat_id"],
-            image_generate(user_id, text, context["state"])
-        )
+        # 🔥 ВАЖНО: УБРАЛИ run_with_typing
+        result = await image_generate(user_id, text, context["state"])
 
         if result and result.get("type") == "image":
             context["state"]["pending_action"] = None
             return result
 
-        return None
+        return result  # 🔥 возвращаем даже если ошибка
 
 
 # === IMAGE EDIT ===
@@ -63,16 +61,14 @@ class ImageEditRoom(Room):
 
         new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
-        result = await run(
-            context["chat_id"],
-            image_edit(user_id, ctx["path"], new_prompt)
-        )
+        # 🔥 УБРАЛИ run_with_typing
+        result = await image_edit(user_id, ctx["path"], new_prompt)
 
         if result and result.get("type") == "image":
             context["state"]["pending_action"] = None
             return result
 
-        return None
+        return result
 
 
 # === TEXT ===
@@ -82,11 +78,8 @@ class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        # 🔥 КЛЮЧЕВОЙ ФИКС
-        # если есть активное действие — текст НЕ вмешивается
         if context["state"].get("pending_action"):
             return False
-
         return True
 
     async def handle(self, user_id, text, context, run):
