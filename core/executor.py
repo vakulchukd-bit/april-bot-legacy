@@ -23,7 +23,7 @@ from openai import OpenAI
 client = OpenAI()
 
 
-# ===== 🔥 УМНАЯ ОЦЕНКА (НОВОЕ) =====
+# ===== 🔥 УМНАЯ ОЦЕНКА =====
 def smart_evaluate(user_text: str, last_assistant_text: str) -> str:
     try:
         r = client.responses.create(
@@ -61,7 +61,23 @@ def smart_evaluate(user_text: str, last_assistant_text: str) -> str:
         return "accepted"
 
 
-# 🔥 ОБНОВЛЕНИЕ СТАТУСА (переписано)
+# ===== 🔥 ЗАЩИТА ОТ ЛОЖНЫХ ДЕЙСТВИЙ =====
+def is_followup(text: str) -> bool:
+    t = text.lower().strip()
+
+    markers = [
+        "сделай", "ещё", "еще",
+        "короче", "подробнее",
+        "объясни проще",
+        "не это имел в виду",
+        "я про другое",
+        "уточни"
+    ]
+
+    return any(m in t for m in markers)
+
+
+# ===== ОБНОВЛЕНИЕ СТАТУСА =====
 def update_last_action(state, text):
     last = state.get("last_action")
 
@@ -105,6 +121,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
     commit_last_action(user_id, state)
 
     intent = detect_intent(text)
+
+    # ===== 🔥 ФИКС: уточнения всегда текст =====
+    if is_followup(text):
+        intent = "question"
 
     # ===== DEBUG =====
     if text == "/exp":
