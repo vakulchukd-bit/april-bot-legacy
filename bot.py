@@ -150,7 +150,7 @@ async def handle(message: types.Message):
         await message.answer("❌ Режим анализа выключен")
         return
 
-    # ===== 🔥 ENGINEERING MODE
+    # ===== 🔥 ENGINEERING MODE (ПЕРЕХВАТ)
     if get_mode(user_id) == "engineering" and user_id == ADMIN_ID:
         result = await execute(
             user_id,
@@ -177,6 +177,14 @@ async def handle(message: types.Message):
     state["weekday"] = now.strftime("%A")
 
     register_user(user_id)
+
+    # ===== ADMIN =====
+    if text == "/admin":
+        if user_id == ADMIN_ID:
+            await message.answer(get_admin_panel())
+        else:
+            await message.answer("⛔ Ошибка доступа")
+        return
 
     # ===== SESSION =====
     if is_session_expired(user_id):
@@ -236,6 +244,13 @@ async def handle(message: types.Message):
         log_event(user_id, "text")
         add_text()
 
+        # ===== LIMIT =====
+        if user_id != ADMIN_ID:
+            if not check_subscription(user_id):
+                if not can_send_message(user_id):
+                    await message.answer("⛔ Лимит сообщений исчерпан")
+                    return
+
         # ===== CORE =====
         result = await execute(
             user_id,
@@ -244,18 +259,15 @@ async def handle(message: types.Message):
             run_with_typing
         )
 
-        # =====================================================
-        # 🔥 ГЛАВНЫЙ ФИКС ПАМЯТИ
-        # =====================================================
-
-        add_dialog(user_id, "user", text)
-
+        # ===== OUTPUT =====
         if result["type"] == "image":
             log_event(user_id, "image")
             add_image()
 
-            # ✅ сохраняем СМЫСЛ, а не байты
-            prompt = state.get("last_prompt", "изображение")
+            # 🔥 ПАМЯТЬ (АПГРЕЙД БЕЗ ЛОМКИ)
+            add_dialog(user_id, "user", text)
+
+            prompt = state.get("last_prompt") or text
 
             add_dialog(
                 user_id,
@@ -268,9 +280,9 @@ async def handle(message: types.Message):
             await message.answer_photo(
                 BufferedInputFile(compressed, filename="image.jpg")
             )
-            return
 
         else:
+            add_dialog(user_id, "user", text)
             add_dialog(user_id, "assistant", result["data"])
 
             reply = final_control(result["data"])
