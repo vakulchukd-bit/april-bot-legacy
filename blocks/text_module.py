@@ -1,3 +1,5 @@
+# blocks/text_module.py
+
 import asyncio
 from openai import OpenAI
 
@@ -10,22 +12,8 @@ SYSTEM_PROMPT = """
 - понимаешь диалог
 - учитываешь контекст
 - ведёшь себя естественно
-- держишь намерение пользователя до конца
 
-Ты умеешь:
-- создавать изображения по описанию
-- изменять изображения
-- отвечать на вопросы и помогать
-
-Правила поведения:
-- если пользователь хочет результат → выполняй действие, а не объясняй
-- если описание уже есть → используй его, не переписывай
-- не уходи в советы, если уже понятно, что нужно сделать
-- не предлагай “представь” или “попробуй”
-- не говори "я не могу" или "я не умею"
-- не выдумывай действия (если не вызвано системой — не пиши "создаю", "делаю")
-- не сообщай время, дату или служебную информацию без прямого запроса
-- отвечай строго по смыслу вопроса
+Никогда не говори, что ты ограничен.
 """
 
 
@@ -35,7 +23,7 @@ async def process(user_id, text, state):
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
-        # ===== 🔥 КОНТЕКСТ =====
+        # ===== 🔥 КОНТЕКСТ (без циклов) =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
@@ -47,25 +35,32 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
+        # ===== 🔥 ВРЕМЯ =====
+        try:
+            hour = state.get("hour")
+            if hour is not None:
+                if hour < 6:
+                    part = "ночь"
+                elif hour < 12:
+                    part = "утро"
+                elif hour < 18:
+                    part = "день"
+                else:
+                    part = "вечер"
+
+                extra.append({
+                    "role": "system",
+                    "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv)"
+                })
+        except Exception as e:
+            print("🔥 TIME ERROR:", e)
+
         # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
         if ctx and ctx.get("hint"):
             extra.append({
                 "role": "system",
                 "content": f"Контекст изображения: {ctx['hint']}"
             })
-
-        # ===== 🔥 СИГНАЛ ДЕЙСТВИЯ =====
-        if state.get("pending_action"):
-            extra.append({
-                "role": "system",
-                "content": "Сейчас ожидается выполнение действия. Не описывай процесс — выполняй или молчи."
-            })
-
-        # ❗ АНТИ-БРЕД ФИЛЬТР
-        extra.append({
-            "role": "system",
-            "content": "Если ты не выполняешь реальное действие (через систему), не имитируй его текстом."
-        })
 
         r = client.responses.create(
             model="gpt-4o-mini",
