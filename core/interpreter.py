@@ -4,18 +4,47 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
     intent = "chat"
     confidence = 0.5
 
-    # ===== 🔥 IMAGE GENERATION =====
-    if any(x in t for x in ["нарисуй", "сгенерируй", "создай", "draw", "generate"]):
+    # ===== 🔥 ЯВНАЯ ГЕНЕРАЦИЯ =====
+    if any(x in t for x in [
+        "нарисуй",
+        "сгенерируй",
+        "создай",
+        "draw",
+        "generate"
+    ]):
         intent = "generate_image"
-        confidence = 0.9
+        confidence = 0.95
+
+    # ===== 🔥 МЯГКАЯ ГЕНЕРАЦИЯ (НОВОЕ — КЛЮЧ) =====
+    elif any(x in t for x in [
+        "сделай картинку",
+        "сделай изображение",
+        "сделай такую",
+        "сделай так",
+        "можешь сделать",
+        "сможешь сделать",
+        "хочу такую",
+        "хочу такую же"
+    ]):
+        if anchor:
+            intent = "generate_image"
+            confidence = 0.9
 
     # ===== 🔥 EDIT IMAGE =====
     if image_ctx and image_ctx.get("path"):
-        if any(x in t for x in ["измени", "сделай", "добавь", "убери", "улучши"]):
+        if any(x in t for x in [
+            "измени",
+            "сделай",
+            "добавь",
+            "убери",
+            "улучши",
+            "ярче",
+            "темнее"
+        ]):
             intent = "edit_image"
             confidence = 0.85
 
-    # ===== 🔥 FOLLOW-UP (САМОЕ ВАЖНОЕ) =====
+    # ===== 🔥 FOLLOW-UP =====
     follow_phrases = [
         "что на ней",
         "что это",
@@ -27,21 +56,19 @@ def interpret(text: str, state: dict, anchor: dict, image_ctx: dict):
     ]
 
     if any(x in t for x in follow_phrases):
-        # если есть изображение — это точно описание
         if image_ctx and image_ctx.get("path"):
             return {
                 "intent": "describe_image",
                 "confidence": 0.95
             }
 
-        # если есть anchor (контекст диалога)
         if anchor:
             return {
                 "intent": "follow_context",
-                "confidence": 0.8
+                "confidence": 0.85
             }
 
-    # ===== 🔥 QUESTION =====
+    # ===== 🔥 ВОПРОС =====
     if any(x in t for x in ["что", "кто", "какая", "почему", "как"]):
         intent = "question"
         confidence = 0.8
