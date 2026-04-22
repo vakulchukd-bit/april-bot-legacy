@@ -19,47 +19,6 @@ from blocks.engineering_system import analyze_code
 
 from blocks.experience_manager import update_experience, load_experience
 
-from openai import OpenAI
-client = OpenAI()
-
-
-# ===== 🔥 УМНАЯ ОЦЕНКА =====
-def smart_evaluate(user_text: str, last_assistant_text: str) -> str:
-    try:
-        r = client.responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Оцени реакцию пользователя на ответ ассистента.\n"
-                        "Ответь одним словом:\n"
-                        "accepted / refined / conflict\n\n"
-                        "accepted — пользователь продолжает тему или согласен\n"
-                        "refined — уточняет, хочет лучше/короче/подробнее\n"
-                        "conflict — ассистент ошибся, пользователь исправляет или недоволен\n\n"
-                        "Без объяснений."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"Ответ ассистента:\n{last_assistant_text}\n\nСообщение пользователя:\n{user_text}"
-                }
-            ]
-        )
-
-        result = r.output_text.lower().strip()
-
-        if "conflict" in result:
-            return "conflict"
-        if "refined" in result:
-            return "refined"
-
-        return "accepted"
-
-    except:
-        return "accepted"
-
 
 # ===== 🔥 ЗАЩИТА ОТ ЛОЖНЫХ ДЕЙСТВИЙ =====
 def is_followup(text: str) -> bool:
@@ -77,28 +36,23 @@ def is_followup(text: str) -> bool:
     return any(m in t for m in markers)
 
 
-# ===== ОБНОВЛЕНИЕ СТАТУСА =====
 def update_last_action(state, text):
     last = state.get("last_action")
 
     if not last or last.get("status") != "pending":
         return
 
-    history = state.get("dialog", [])
+    t = text.lower()
 
-    last_assistant = None
-    for msg in reversed(history):
-        if msg.get("role") == "assistant":
-            last_assistant = msg.get("content")
-            break
-
-    if not last_assistant:
-        last["status"] = "accepted"
+    if any(x in t for x in ["добавь", "еще", "ещё", "измени", "переделай"]):
+        last["status"] = "refined"
         return
 
-    status = smart_evaluate(text, last_assistant)
+    if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка"]):
+        last["status"] = "conflict"
+        return
 
-    last["status"] = status
+    last["status"] = "accepted"
 
 
 def commit_last_action(user_id, state):
@@ -122,7 +76,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     intent = detect_intent(text)
 
-    # ===== 🔥 ФИКС: уточнения всегда текст =====
+    # 🔥 фикс: уточнения всегда текст
     if is_followup(text):
         intent = "question"
 
