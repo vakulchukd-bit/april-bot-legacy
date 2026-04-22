@@ -1,7 +1,7 @@
 from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
-from core.interpreter import interpret
+from blocks.intent_system import detect_intent
 
 from blocks.state_manager import (
     get_state,
@@ -14,134 +14,68 @@ from blocks.mode_manager import get_mode
 
 from blocks.context_system import build_context_text
 
+# 🔥 НОВОЕ — КОМНАТЫ
 from blocks.rooms_registry import ROOMS
+
+# 🔥 ENGINEERING
 from blocks.engineering_system import analyze_code
 
 
-# ===== ВОПРОС =====
-def is_question(text: str) -> bool:
-    t = text.lower()
-
-    if "?" in t:
-        return True
-
-    question_words = [
-        "что", "кто", "как", "почему",
-        "зачем", "можешь", "умеешь", "если", "а ты"
-    ]
-
-    return any(x in t for x in question_words)
-
-
-# ===== ПОДТВЕРЖДЕНИЕ =====
-def is_confirm(text: str) -> bool:
+# ===== 🔥 ТИПЫ ЗАДАЧ =====
+def detect_task_type(text: str) -> str:
     t = text.lower().strip()
 
-    short_confirms = [
-        "да", "давай", "делай", "ок",
-        "хорошо", "поехали", "начинай"
-    ]
+    if any(x in t for x in ["+", "-", "*", "/", "="]):
+        return "math"
 
-    if len(t.split()) <= 3 and any(x in t for x in short_confirms):
-        return True
+    if t.startswith("/"):
+        return "command"
 
-    strong_confirms = [
-        "я хочу", "я бы хотел",
-        "сделай", "сгенерируй", "создай"
-    ]
-
-    return any(x in t for x in strong_confirms)
-
-
-# ===== НОВАЯ ТЕМА =====
-def is_new_topic(text: str) -> bool:
-    t = text.lower()
-
-    return any(x in t for x in [
-        "что ты умеешь",
-        "как дела",
-        "кто ты",
-        "сколько времени",
-        "время",
-        "расскажи",
-        "поговорим"
-    ])
-
-
-# ===== ГОТОВНОСТЬ =====
-def is_ready_to_generate(state, text, anchor):
-    # ❗ УБРАН last_prompt как источник истины
-
-    if anchor and len(anchor.get("current", "").split()) > 3:
-        return True
-
-    if len(text.split()) > 4:
-        return True
-
-    return False
+    return "chat"
 
 
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    ctx = get_image_context(user_id) or state.get("image_context")
-    anchor = get_anchor(user_id)
+    intent = detect_intent(text)
 
-    interpret_data = interpret(text, state, anchor, ctx)
-    intent = interpret_data["intent"]
+    # ===== 🔥 ENGINEERING MODE (ИСПРАВЛЕНО) =====
+    if mode == "engineering" and not text.startswith("/"):
+
+        if text.lower() == "/analiz":
+            return {
+                "type": "text",
+                "data": "📥 Жду код..."
+            }
+
+        report = analyze_code(text)
+
+        return {
+            "type": "admin_report",
+            "data": report
+        }
+
+    task_type = detect_task_type(text)
 
     t = text.lower().strip()
 
-    question = is_question(text)
-    confirm = is_confirm(text)
-
-    # =========================================================
-    # 🔥 СБРОС ПРИ СМЕНЕ ТЕМЫ (КЛЮЧЕВОЙ ФИКС)
-    # =========================================================
-    if is_new_topic(text):
-        state["pending_action"] = None
-        state["last_prompt"] = None
-
-    # ===== БЛОК ВОПРОСОВ =====
-    if intent == "generate_image" and question and not confirm:
-        intent = "question"
-
-    # ===== ФИКСАЦИЯ НАМЕРЕНИЯ =====
-    if intent in ["generate_image", "edit_image"] and not question:
-        state["pending_action"] = intent
-
-        # ❗ сохраняем только если это НЕ подтверждение
-        if not confirm:
-            if anchor:
-                state["last_prompt"] = anchor["current"]
-            else:
-                state["last_prompt"] = text
-
-    # ===== ПОДТВЕРЖДЕНИЕ =====
-    if state.get("pending_action") and confirm:
-        intent = state["pending_action"]
-
-    # ===== СБРОС ЕСЛИ УШЛИ В ДРУГУЮ ТЕМУ =====
-    if intent not in ["generate_image", "edit_image"]:
-        if state.get("pending_action") and not confirm:
-            state["pending_action"] = None
-
-    # ===== ENGINEERING =====
-    if mode == "engineering" and not text.startswith("/"):
-        if text.lower() == "/analiz":
-            return {"type": "text", "data": "📥 Жду код..."}
-        return {"type": "admin_report", "data": analyze_code(text)}
-
-    # ===== ПРОСТОЕ =====
+    # ===== БЫСТРЫЕ ОТВЕТЫ =====
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВРЕМЯ (СТРОГО) =====
-    if t in ["время", "сколько времени", "который час"]:
+    # ===== 🔥 ВОПРОСЫ (УМНЫЕ) =====
+    if intent == "question" and any(x in t for x in ["умеешь", "можешь", "что ты умеешь"]):
+        return {
+            "type": "text",
+            "data": "Да 🙂 Я умею:\n\n• создавать изображения 🎨\n• редактировать фото 📷\n• отвечать на вопросы 💬\n• анализировать код 🛠\n\nСкажи, что хочешь сделать."
+        }
+
+    # ===== ВРЕМЯ =====
+    if "время" in t or "час" in t:
         time_str = state.get("time_str")
         weekday = state.get("weekday")
         date_str = state.get("date_str")
@@ -152,70 +86,101 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 "data": f"Сейчас {time_str} • {weekday}, {date_str} (Europe/Kyiv)"
             }
 
-    # ===== ЗАЩИТА =====
-    if ctx and ctx.get("path") and intent == "generate_image":
-        return {
-            "type": "text",
-            "data": "У тебя уже есть изображение 📷\n\nХочешь изменить его или создать новое?"
-        }
+    # ===== MEMORY =====
+    if intent == "memory":
+        anchor = get_anchor(user_id)
 
-    # =========================================================
-    # 🔥 ГЕНЕРАЦИЯ (ЧИСТАЯ ЛОГИКА)
-    # =========================================================
-    if intent == "generate_image":
-
-        ready = is_ready_to_generate(state, text, anchor)
-
-        if not ready and not confirm:
+        if not anchor:
             return {
                 "type": "text",
-                "data": "Опиши, какую именно картинку ты хочешь 🙂"
+                "data": "🤔 Я пока ничего не запомнил"
             }
 
-        context = {
-            "chat_id": chat_id,
-            "state": state,
-            "image": ctx,
-            "anchor": anchor,
-            "mode": mode,
-            "intent": "generate_image"
+        return {
+            "type": "text",
+            "data": f"🧠 Последний контекст:\n{anchor['current']}"
         }
 
-        for room in ROOMS:
-            if room.name == "image_generate":
+    # ===== ANALYZE IMAGE =====
+    if intent == "analyze":
+        ctx = get_image_context(user_id) or state.get("image_context")
 
-                result = await room.handle(user_id, text, context, run_with_typing)
+        if not ctx or not ctx.get("path"):
+            return {
+                "type": "text",
+                "data": "❌ Нет изображения для анализа"
+            }
 
-                if not result:
-                    return {
-                        "type": "text",
-                        "data": "⚠️ Генерация не сработала. Попробуй ещё раз."
-                    }
+        try:
+            hint = await analyze_image(ctx["path"])
+        except:
+            hint = "не удалось определить"
 
-                return result
+        return {
+            "type": "text",
+            "data": f"📷 На изображении: {hint}"
+        }
 
-    # ===== ОБЫЧНЫЕ КОМНАТЫ =====
+    # ===== КОНТЕКСТ =====
+    ctx = get_image_context(user_id) or state.get("image_context")
+    anchor = get_anchor(user_id)
+
     context = {
         "chat_id": chat_id,
         "state": state,
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "intent": intent
+        "task_type": task_type
     }
+
+    mode_response = detect_response_mode(text)
+
+    # ===== ROOMS =====
+    handled = False
 
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
+                result = await room.handle(
+                    user_id,
+                    text,
+                    context,
+                    run_with_typing
+                )
+
                 if result:
                     return result
+
+                handled = True
+
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
+    if handled:
+        return {
+            "type": "text",
+            "data": "⚠️ Не удалось выполнить запрос. Попробуй уточнить."
+        }
+
     # ===== TEXT =====
+
+    if ctx and ctx.get("path"):
+        try:
+            hint = await analyze_image(ctx["path"])
+            text = f"На изображении: {hint}\n\n{text}"
+        except:
+            pass
+
     if anchor:
         text = f"Контекст: {anchor['current']}\n\n{text}"
+
+    try:
+        time_str = state.get("time_str")
+        if time_str:
+            text = f"Текущее время пользователя: {time_str} (Europe/Kyiv)\n\n{text}"
+    except Exception as e:
+        print("🔥 TIME ERROR:", e)
 
     world = build_context_text()
     text = f"{world}\n\n{text}"
@@ -225,7 +190,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
         text_process(user_id, text, state)
     )
 
+    reply = result["content"]
+
+    if mode_response == "copy":
+        clean = reply.replace("```", "").strip()
+        reply = f"```text\n{clean}\n```"
+
     return {
         "type": "text",
-        "data": result["content"]
+        "data": reply
     }
