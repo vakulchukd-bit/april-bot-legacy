@@ -34,40 +34,6 @@ def detect_task_type(text: str) -> str:
     return "chat"
 
 
-# ===== 🔥 ПРОВЕРКА ЯВНОГО ДЕЙСТВИЯ =====
-def is_clear_action(text: str) -> bool:
-    t = text.lower()
-
-    return any(x in t for x in [
-        "сделай",
-        "создай",
-        "сгенерируй",
-        "нарисуй",
-        "измени",
-        "удали",
-        "добавь",
-        "поменяй"
-    ])
-
-
-# ===== 🔥 НЕЯСНЫЙ ЗАПРОС =====
-def is_unclear_request(text: str) -> bool:
-    t = text.lower()
-
-    triggers = [
-        "давай",
-        "что-нибудь",
-        "что то",
-        "про картинки",
-        "интересно",
-        "может",
-        "поговорим",
-        "что скажешь"
-    ]
-
-    return any(x in t for x in triggers)
-
-
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -101,11 +67,40 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== 🔥 ВОПРОСЫ =====
-    if intent == "question" and any(x in t for x in ["умеешь", "можешь", "что ты умеешь"]):
+    # ===== 🔥 ВОПРОСЫ (ИСПРАВЛЕНО) =====
+    if intent == "question":
+        # 👉 КЛЮЧЕВОЙ ФИКС: вопрос = НЕТ ДЕЙСТВИЙ
+        ctx = get_image_context(user_id) or state.get("image_context")
+        anchor = get_anchor(user_id)
+
+        if ctx and ctx.get("path"):
+            try:
+                hint = await analyze_image(ctx["path"])
+                text = f"На изображении: {hint}\n\n{text}"
+            except:
+                pass
+
+        if anchor:
+            text = f"Контекст: {anchor['current']}\n\n{text}"
+
+        try:
+            time_str = state.get("time_str")
+            if time_str:
+                text = f"Текущее время пользователя: {time_str} (Europe/Kyiv)\n\n{text}"
+        except Exception as e:
+            print("🔥 TIME ERROR:", e)
+
+        world = build_context_text()
+        text = f"{world}\n\n{text}"
+
+        result = await run_with_typing(
+            chat_id,
+            text_process(user_id, text, state)
+        )
+
         return {
             "type": "text",
-            "data": "Да 🙂 Могу. Хочешь попробуем?"
+            "data": result["content"]
         }
 
     # ===== ВРЕМЯ =====
@@ -153,15 +148,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         return {
             "type": "text",
             "data": f"📷 На изображении: {hint}"
-        }
-
-    # =========================================================
-    # 🔥 🔥 🔥 НОВЫЙ БЛОК — УТОЧНЕНИЕ 🔥 🔥 🔥
-    # =========================================================
-    if not is_clear_action(text) and is_unclear_request(text):
-        return {
-            "type": "text",
-            "data": "Хочешь, я что-то сгенерирую или просто обсудим идеи? 🙂"
         }
 
     # ===== КОНТЕКСТ =====
