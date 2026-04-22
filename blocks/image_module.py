@@ -52,4 +52,62 @@ async def process(user_id, text, state):
         # сохраняем текущий как последний
         state["last_prompt"] = prompt
 
-        # ===== П
+        # ===== ПЕРВАЯ ПОПЫТКА =====
+        try:
+            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
+        except asyncio.TimeoutError:
+            print("⏱️ TIMEOUT FIRST ATTEMPT")
+            img = None
+
+        if img:
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
+
+        return {
+            "type": "retry_notice",
+            "data": "⏳ Генерация заняла больше времени… пробую ещё раз"
+        }
+
+    except Exception as e:
+        print("🔥 PROCESS ERROR:", e)
+
+        return {
+            "type": "error",
+            "data": None,
+            "error": str(e)
+        }
+
+
+# ===== 🔁 RETRY =====
+async def retry_process(user_id, text, state):
+    try:
+        prompt = state.get("last_prompt") or text
+
+        try:
+            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
+        except asyncio.TimeoutError:
+            print("⏱️ TIMEOUT SECOND ATTEMPT")
+            img = None
+
+        if img:
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        return {
+            "type": "final_error",
+            "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
+        }
+
+    except Exception as e:
+        print("🔥 RETRY PROCESS ERROR:", e)
+
+        return {
+            "type": "final_error",
+            "data": "⚠️ Сервис временно недоступен"
+        }
