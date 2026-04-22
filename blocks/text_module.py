@@ -60,49 +60,56 @@ async def process(user_id, text, state):
                 "content": f"Контекст изображения: {ctx['hint']}"
             })
 
-        # ===== 🔥 ЯКОРЬ ДИАЛОГА (НОВОЕ) =====
+        # ===== 🔥 УСИЛЕННЫЙ ЯКОРЬ ДИАЛОГА =====
         try:
-            if history:
-                last_assistant = None
+            last_assistant = None
 
+            if history:
                 for msg in reversed(history):
                     if msg.get("role") == "assistant":
                         last_assistant = msg.get("content")
                         break
 
-                if last_assistant:
-                    extra.append({
-                        "role": "system",
-                        "content": (
-                            "Последний ответ ассистента ниже. "
-                            "Короткие фразы пользователя (например: 'еще короче', 'поконкретнее') "
-                            "относятся к нему.\n\n"
-                            f"{last_assistant}"
-                        )
-                    })
+            if last_assistant:
+                extra.append({
+                    "role": "system",
+                    "content": (
+                        "Это продолжение диалога.\n"
+                        "Если пользователь пишет короткие фразы (например: 'короче', 'ещё', 'проще'), "
+                        "ты ОБЯЗАН применить их к последнему ответу.\n\n"
+                        "Последний ответ ассистента:\n"
+                        f"{last_assistant}"
+                    )
+                })
         except Exception as e:
             print("🔥 ANCHOR ERROR:", e)
 
-        # ===== 🔥 ОПЫТ ПОЛЬЗОВАТЕЛЯ =====
+        # ===== 🔥 ОПЫТ (СТАБИЛЬНЫЙ, МЯГКИЙ) =====
         try:
             from blocks.experience_manager import load_experience
 
             data = load_experience()
             user_data = data.get(str(user_id), {})
-            actions = user_data.get("actions", [])
+            actions = user_data.get("actions", [])[-10:]
 
             refined = sum(1 for a in actions if a.get("status") == "refined")
-            accepted = sum(1 for a in actions if a.get("status") == "accepted")
             conflict = sum(1 for a in actions if a.get("status") == "conflict")
 
             style_hint = ""
 
             if refined >= 2:
-                style_hint = "Отвечай кратко, по делу, максимально конкретно. Пользователь часто просит уточнения."
+                style_hint = (
+                    "Отвечай кратко, по делу и без лишней воды. "
+                    "Сохраняй смысл, но делай формулировки проще и короче."
+                )
             elif conflict >= 1:
-                style_hint = "Будь аккуратен в ответах и иногда уточняй, правильно ли понял пользователя."
+                style_hint = (
+                    "Будь точнее. Если есть сомнение — уточни вопрос перед ответом."
+                )
             else:
-                style_hint = "Отвечай свободно, дружелюбно и естественно."
+                style_hint = (
+                    "Отвечай естественно, дружелюбно и понятно."
+                )
 
             extra.append({
                 "role": "system",
@@ -112,17 +119,28 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 EXPERIENCE STYLE ERROR:", e)
 
+        # ===== 🔥 АНТИ-СБРОС ТЕМЫ =====
+        extra.append({
+            "role": "system",
+            "content": (
+                "Никогда не начинай ответ заново (например: 'привет, как дела'), "
+                "если диалог уже идёт. Всегда продолжай текущую тему."
+            )
+        })
+
         r = client.responses.create(
             model="gpt-4o-mini",
             input=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *extra,
-                *history[-6:],
+                *history[-8:],  # немного увеличили окно
 
-                # 🔥 ЖИВОЙ ДИАЛОГ
                 {
                     "role": "system",
-                    "content": "Это живой диалог. Всегда учитывай предыдущий ответ и продолжай мысль пользователя."
+                    "content": (
+                        "Это живой диалог. "
+                        "Учитывай контекст, не теряй тему и продолжай мысль пользователя."
+                    )
                 },
 
                 {"role": "user", "content": text}
