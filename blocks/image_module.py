@@ -5,6 +5,7 @@ from openai import OpenAI
 client = OpenAI()
 
 
+# ===== НОРМАЛИЗАЦИЯ =====
 def normalize_prompt(prompt: str) -> str:
     if not prompt:
         return ""
@@ -17,6 +18,7 @@ def normalize_prompt(prompt: str) -> str:
     return p
 
 
+# ===== ГЕНЕРАЦИЯ =====
 async def generate_image(prompt):
     def run():
         print("🚀 START IMAGE GENERATION:", prompt)
@@ -47,23 +49,26 @@ async def generate_image(prompt):
     return await asyncio.to_thread(run)
 
 
+# ===== ОСНОВНОЙ ПРОЦЕСС =====
 async def process(user_id, text, state):
     try:
-        prompt = text
+        raw_text = text
+        last = state.get("last_prompt")
 
-        if state.get("pending_action") == "generate_image":
-            last = state.get("last_prompt")
-            if last:
-                prompt = last
+        # 🔥 ВЫБОР ПРАВИЛЬНОГО PROMPT
+        current = normalize_prompt(raw_text)
 
-        prompt = normalize_prompt(prompt)
-
-        if not prompt:
+        if current:
+            prompt = current
+        elif last:
+            prompt = last
+        else:
             return {
                 "type": "text",
                 "data": "Опиши, какую картинку ты хочешь 🙂"
             }
 
+        # сохраняем актуальный prompt
         state["last_prompt"] = prompt
 
         try:
@@ -79,7 +84,6 @@ async def process(user_id, text, state):
                 "data": img
             }
 
-        # ❗ ВАЖНО: БОЛЬШЕ НИКАКИХ retry_notice
         return {
             "type": "text",
             "data": "⚠️ Не удалось создать изображение. Попробуй ещё раз."
@@ -94,6 +98,7 @@ async def process(user_id, text, state):
         }
 
 
+# ===== RETRY =====
 async def retry_process(user_id, text, state):
     try:
         prompt = normalize_prompt(state.get("last_prompt") or text)
