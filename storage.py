@@ -48,14 +48,24 @@ def ensure_user(data, user_id):
     return uid, False
 
 
-# ===== PLAN =====
+# ===== 🔥 PLAN MANAGEMENT =====
 def set_subscription(user_id, plan="premium"):
     data = load_data()
     uid, _ = ensure_user(data, user_id)
 
-    days = 15 if plan == "lite" else 30
+    if plan == "lite":
+        days = 15
+    elif plan == "premium":
+        days = 30
+    else:
+        # защита от мусора
+        plan = "free"
+        days = 0
 
-    expire_date = now().timestamp() + days * 86400
+    if days > 0:
+        expire_date = now().timestamp() + days * 86400
+    else:
+        expire_date = 0
 
     data["users"][uid]["plan"] = plan
     data["users"][uid]["subscription_until"] = expire_date
@@ -73,7 +83,11 @@ def get_user_plan(user_id):
     if created:
         save_data(data)
 
+    # 🔥 ВАЖНО: если истекло → сбрасываем в free
     if user["subscription_until"] < now().timestamp():
+        if user["plan"] != "free":
+            user["plan"] = "free"
+            save_data(data)
         return "free"
 
     return user.get("plan", "free")
@@ -198,7 +212,10 @@ def get_admin_stats():
     users = data["users"]
 
     total_users = len(users)
-    subs = sum(1 for u in users.values() if u["subscription_until"] > now().timestamp())
+    subs = sum(
+        1 for u in users.values()
+        if u["subscription_until"] > now().timestamp()
+    )
 
     return {
         "users": total_users,
