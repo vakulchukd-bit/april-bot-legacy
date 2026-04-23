@@ -56,12 +56,21 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# ===== TYPING =====
+# ===== TYPING (УЛУЧШЕННЫЙ) =====
 async def typing_loop(chat_id):
     try:
+        elapsed = 0
+
         while True:
-            await bot.send_chat_action(chat_id, "typing")
+            if elapsed < 4:
+                await bot.send_chat_action(chat_id, "typing")
+            else:
+                # имитация "думает"
+                await bot.send_chat_action(chat_id, "upload_photo")
+
             await asyncio.sleep(2)
+            elapsed += 2
+
     except:
         pass
 
@@ -69,7 +78,10 @@ async def typing_loop(chat_id):
 async def run_with_typing(chat_id, coro):
     task = asyncio.create_task(typing_loop(chat_id))
     try:
-        return await coro
+        result = await coro
+        # 🔥 микро-пауза перед ответом (очень важно для UX)
+        await asyncio.sleep(0.1)
+        return result
     finally:
         task.cancel()
 
@@ -186,12 +198,12 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     await callback.answer()
 
-    # ===== 👍 ЛАЙК =====
+    # 👍 ЛАЙК
     if data.startswith("like_"):
         await callback.answer("👍 Принято", show_alert=False)
         return
 
-    # ===== 👎 ДИЗЛАЙК =====
+    # 👎 ДИЗЛАЙК
     if data.startswith("dislike_"):
         await callback.answer("👎 Учту", show_alert=False)
         return
@@ -241,7 +253,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("❌ Отменено")
         return
 
-    # NOOP
     if data == "noop":
         return
 
