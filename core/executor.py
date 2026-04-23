@@ -20,48 +20,49 @@ from blocks.engineering_system import analyze_code
 from blocks.experience_manager import update_experience, load_experience
 
 
-# ===== 🔥 ФИКС: ЗАМЕНА ЦВЕТА + СОХРАНЕНИЕ СЦЕНЫ =====
-def update_image_prompt(old_prompt: str, new_text: str) -> str:
-    t = new_text.lower()
+# ===== 🔥 НОВОЕ: СТРУКТУРА СЦЕНЫ =====
+def extract_scene_object(text: str):
+    t = text.lower()
 
-    color_map = {
-        "красн": "красный",
-        "син": "синий",
-        "зелён": "зелёный",
-        "желт": "жёлтый",
-        "черн": "чёрный",
-        "бел": "белый",
-        "red": "red",
-        "blue": "blue",
-        "green": "green",
-        "yellow": "yellow",
-        "black": "black",
-        "white": "white"
-    }
+    scene = ""
+    obj = ""
+    color = ""
 
-    new_color = None
-    for key, val in color_map.items():
-        if key in t:
-            new_color = val
+    colors = ["красный", "синий", "зелёный", "жёлтый", "чёрный", "белый"]
+
+    for c in colors:
+        if c in t:
+            color = c
             break
 
-    if new_color:
-        clean_prompt = old_prompt
+    if "треугольник" in t:
+        obj = "треугольник"
+    elif "круг" in t:
+        obj = "круг"
+    elif "ромб" in t:
+        obj = "ромб"
+    elif "квадрат" in t:
+        obj = "квадрат"
 
-        # удаляем старые цвета
-        for key in color_map.keys():
-            clean_prompt = clean_prompt.replace(key, "")
+    # сцена (всё после "на")
+    if "на" in t:
+        idx = t.find("на")
+        scene = text[idx:]
 
-        # убираем лишние пробелы
-        clean_prompt = " ".join(clean_prompt.split())
-
-        # 👉 ВАЖНО: сохраняем всё остальное (фон и т.д.)
-        return f"{new_color} {clean_prompt}".strip()
-
-    # если не цвет → просто добавляем
-    return f"{old_prompt}, {new_text}"
+    return scene.strip(), obj, color
 
 
+def build_prompt(state):
+    data = state.get("image_struct", {})
+
+    scene = data.get("scene", "")
+    obj = data.get("object", "")
+    color = data.get("color", "")
+
+    return f"{color} {obj} {scene}".strip()
+
+
+# ===== БАЗОВЫЕ ФУНКЦИИ =====
 def is_followup(text: str) -> bool:
     t = text.lower().strip()
 
@@ -127,6 +128,7 @@ def commit_last_action(user_id, state):
     update_experience(user_id, state)
 
 
+# ===== ОСНОВНАЯ ЛОГИКА =====
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -141,22 +143,28 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 ОБНОВЛЕНИЕ КОНТЕКСТА =====
+    # ===== 🔥 ОБНОВЛЕНИЕ СТРУКТУРЫ ПРИ УТОЧНЕНИЯХ =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
-        old = state.get("last_image_prompt")
+        data = state.get("image_struct", {})
 
-        if old:
-            state["last_image_prompt"] = update_image_prompt(old, text)
-        else:
-            state["last_image_prompt"] = text
+        if "синий" in t:
+            data["color"] = "синий"
+        elif "зелёный" in t:
+            data["color"] = "зелёный"
+        elif "красный" in t:
+            data["color"] = "красный"
+        elif "жёлтый" in t:
+            data["color"] = "жёлтый"
+
+        state["image_struct"] = data
 
     # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
-        last_prompt = state.get("last_image_prompt")
+        final_prompt = build_prompt(state)
 
-        if last_prompt:
+        if final_prompt:
             ctx = get_image_context(user_id) or state.get("image_context")
 
             context = {
@@ -170,10 +178,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
             for room in ROOMS:
                 try:
-                    if room.can_handle(last_prompt, context):
+                    if room.can_handle(final_prompt, context):
                         result = await room.handle(
                             user_id,
-                            last_prompt,
+                            final_prompt,
                             context,
                             run_with_typing
                         )
@@ -182,7 +190,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             return result
 
                 except Exception as e:
-                    print(f"🔥 ROOM ERROR [scene fix]:", e)
+                    print(f"🔥 ROOM ERROR [scene system]:", e)
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -232,14 +240,20 @@ async def execute(user_id, text, chat_id, run_with_typing):
             text_process(user_id, text, state)
         )
 
+        # ===== 🔥 СОХРАНЯЕМ СЦЕНУ =====
+        scene, obj, color = extract_scene_object(text)
+
+        state["image_struct"] = {
+            "scene": scene,
+            "object": obj,
+            "color": color
+        }
+
         state["last_action"] = {
             "type": "image" if ("изображ" in text or "картин" in text) else "text",
             "intent": "answer",
             "status": "pending"
         }
-
-        if state["last_action"]["type"] == "image":
-            state["last_image_prompt"] = text
 
         return {
             "type": "text",
@@ -276,7 +290,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             "intent": "generate",
                             "status": "pending"
                         }
-                        state["last_image_prompt"] = text
 
                     return result
 
