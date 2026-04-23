@@ -16,20 +16,23 @@ def get_user_role(user_id):
 
 # ===== FREE =====
 def build_free_menu(user_id):
-    # ⚠️ тут ты можешь позже подключить реальные лимиты
-    messages_left = "?"
-    images_left = "?"
+    # 🔥 РЕАЛЬНЫЕ ЛИМИТЫ
+    msg_available = can_send_message(user_id)
+    img_available = can_generate_image(user_id)
+
+    msg_text = "доступно" if msg_available else "❌ лимит"
+    img_text = "доступно" if img_available else "❌ лимит"
 
     text = (
         "🆓 Статус: FREE\n\n"
-        f"💬 Сообщения: {messages_left}\n"
-        f"🎨 Генерация: {images_left}\n\n"
-        "⏳ Лимиты обновятся автоматически\n\n"
+        f"💬 Сообщения: {msg_text}\n"
+        f"🎨 Генерация: {img_text}\n\n"
+        "⏳ Лимиты обновляются автоматически\n\n"
         "🚀 Перейди на PRO для полного доступа"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Перейти на PRO", callback_data="go_pro")]
+        [InlineKeyboardButton(text="🚀 Перейти на PRO", callback_data="buy_yes")]
     ])
 
     return text, keyboard
@@ -46,7 +49,7 @@ def build_pro_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="renew_pro")],
+        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_yes")],
         [InlineKeyboardButton(text="📋 Тарифы", callback_data="tariffs")]
     ])
 
