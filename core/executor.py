@@ -48,6 +48,8 @@ def extract_scene_object(text: str):
         obj = "квадрат"
     elif "звезда" in t:
         obj = "звезда"
+    elif "шестиугольник" in t or "гексагон" in t:
+        obj = "шестиугольник"
 
     if "на" in t:
         idx = t.find("на")
@@ -150,6 +152,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== 🔥 ОБНОВЛЕНИЕ СЦЕНЫ =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
         data = state.get("image_struct", {})
+
+        # 🔥 если "его" — не теряем объект
+        if "его" in t and not data.get("object"):
+            prev = state.get("image_struct", {})
+            data["object"] = prev.get("object", "")
 
         if "синий" in t:
             data["color"] = "синий"
