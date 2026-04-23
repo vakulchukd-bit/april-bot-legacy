@@ -58,7 +58,6 @@ def set_subscription(user_id, plan="premium"):
     elif plan == "premium":
         days = 30
     else:
-        # защита от мусора
         plan = "free"
         days = 0
 
@@ -83,7 +82,6 @@ def get_user_plan(user_id):
     if created:
         save_data(data)
 
-    # 🔥 ВАЖНО: если истекло → сбрасываем в free
     if user["subscription_until"] < now().timestamp():
         if user["plan"] != "free":
             user["plan"] = "free"
@@ -203,6 +201,23 @@ def get_remaining_messages(user_id, limit=15):
     reset_if_needed(user)
 
     return max(0, limit - user["messages_today"])
+
+
+# ===== 🔥 ДОБАВЛЕНО (ФИКС ПАДЕНИЯ) =====
+def get_all_users():
+    data = load_data()
+    return list(data["users"].keys())
+
+
+def get_all_subscriptions():
+    data = load_data()
+    result = []
+
+    for uid, user in data["users"].items():
+        if user.get("subscription_until", 0) > now().timestamp():
+            result.append(uid)
+
+    return result
 
 
 # ===== ADMIN =====
