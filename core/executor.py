@@ -16,7 +16,7 @@ from blocks.context_system import build_context_text
 from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
-from blocks.experience_manager import load_experience
+from blocks.experience_manager import load_experience, update_experience
 
 from blocks.image_module import process as image_generate
 
@@ -102,6 +102,22 @@ async def execute(user_id, text, chat_id, run_with_typing):
     mode = get_mode(user_id)
 
     t = text.lower().strip()
+
+    # ===== 🔥 СОХРАНЕНИЕ ОПЫТА =====
+    if "last_action" not in state:
+        state["last_action"] = {"status": "pending"}
+
+    if any(x in t for x in ["не так", "ошибка", "плохо", "неправильно"]):
+        state["last_action"]["status"] = "conflict"
+        update_experience(user_id, state)
+
+    elif any(x in t for x in ["сделай", "измени", "переделай", "ещё"]):
+        state["last_action"]["status"] = "refined"
+        update_experience(user_id, state)
+
+    elif any(x in t for x in ["да", "ок", "хорошо", "норм"]):
+        state["last_action"]["status"] = "accepted"
+        update_experience(user_id, state)
 
     # ===== 0. СБРОС ПРИ СМЕНЕ ТЕМЫ =====
     if state.get("pending_render"):
@@ -209,7 +225,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "color": color
         }
 
-        # 🔥 ФИКС: СОХРАНЯЕМ ДЛЯ ПОДТВЕРЖДЕНИЯ
         if wants_image(text):
             state["pending_render"] = state["image_struct"].copy()
 
