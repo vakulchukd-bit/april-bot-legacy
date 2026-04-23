@@ -18,7 +18,8 @@ from storage import (
     get_remaining_messages,
     get_remaining_days,
     get_limits,
-    get_admin_stats
+    get_admin_stats,
+    get_user_plan  # 🔥 добавили
 )
 
 from core.executor import execute
@@ -155,9 +156,9 @@ async def handle(message: types.Message):
     register_user(user_id)
 
     is_admin = user_id == ADMIN_ID
-    is_pro = check_subscription(user_id)
+    plan = get_user_plan(user_id)  # 🔥 вместо is_pro
 
-    if not is_admin and not is_pro:
+    if not is_admin and plan == "free":
         remaining = get_remaining_messages(user_id)
         if remaining == 0:
             await message.answer("⛔ Лимит исчерпан", reply_markup=buy_keyboard())
@@ -173,8 +174,13 @@ async def handle(message: types.Message):
         if result["type"] == "text":
             reply = result["data"]
 
-            if is_admin or is_pro:
-                status = f"\n\n👑 PRO: {get_remaining_days(user_id)} дн."
+            # 🔥 ПРАВИЛЬНЫЙ СТАТУС
+            if is_admin:
+                status = "\n\n⚙️ ADMIN"
+            elif plan == "premium":
+                status = f"\n\n👑 PREMIUM: {get_remaining_days(user_id)} дн."
+            elif plan == "lite":
+                status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
             else:
                 limits = get_limits(user_id)
                 status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
@@ -194,13 +200,18 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 👍 👎 (🔥 исправлено: теперь всплывает сверху)
+    # 👍 👎
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо за лайк", show_alert=True)
         return
 
     if data.startswith("dislike_"):
         await callback.answer("👎 Учту, исправлюсь", show_alert=True)
+        return
+
+    # 🔥 noop (фикс спама)
+    if data == "noop":
+        await callback.answer("Текущий тариф", show_alert=False)
         return
 
     await callback.answer()
@@ -222,14 +233,12 @@ async def handle_callbacks(callback: types.CallbackQuery):
         if not result:
             return
 
-        # ===== TEXT =====
         if result["type"] == "text":
             await callback.message.answer(
                 result["data"],
                 reply_markup=result.get("keyboard")
             )
 
-        # ===== ADMIN REQUEST =====
         elif result["type"] == "admin_request":
             plan = result["plan"]
 
@@ -254,7 +263,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
             await callback.message.answer("⏳ Отправлено администратору")
 
-        # ===== notify_user =====
         elif result["type"] == "notify_user":
             await bot.send_message(result["target_user"], result["data"])
 
