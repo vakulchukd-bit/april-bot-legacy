@@ -166,6 +166,18 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
+# ===== 🔥 ОСТАЛОСЬ СООБЩЕНИЙ =====
+def get_remaining_messages(user_id, limit=15):
+    data = load_data()
+    uid = ensure_user(data, user_id)
+    user = data["users"][uid]
+
+    reset_if_needed(user)
+
+    remaining = limit - user["messages_today"]
+    return max(0, remaining)
+
+
 # ===== АДМИН СТАТИСТИКА =====
 def get_admin_stats():
     data = load_data()
