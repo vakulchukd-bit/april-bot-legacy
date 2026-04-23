@@ -16,6 +16,7 @@ def load_data():
 
 
 def save_data(data):
+    os.makedirs(os.path.dirname(FILE_PATH), exist_ok=True)
     with open(FILE_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
@@ -42,14 +43,15 @@ def ensure_user(data, user_id):
             "images_today": 0,
             "last_reset": today()
         }
+        return uid, True  # 🔥 новый пользователь
 
-    return uid
+    return uid, False
 
 
 # ===== SUBSCRIPTION =====
 def set_subscription(user_id, days=30):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, _ = ensure_user(data, user_id)
 
     expire_date = now().timestamp() + days * 86400
 
@@ -62,9 +64,13 @@ def set_subscription(user_id, days=30):
 
 def check_subscription(user_id):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
 
     user = data["users"][uid]
+
+    # 🔥 если пользователь новый — сохраняем
+    if created:
+        save_data(data)
 
     if not user["is_subscribed"]:
         return False
@@ -78,7 +84,10 @@ def check_subscription(user_id):
 # ===== REMAINING TIME =====
 def get_remaining_seconds(user_id):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
+
+    if created:
+        save_data(data)
 
     user = data["users"][uid]
 
@@ -88,7 +97,7 @@ def get_remaining_seconds(user_id):
     return user["subscription_until"] - now().timestamp()
 
 
-# ===== 🔥 ДНИ (ФИКС) =====
+# ===== ДНИ =====
 def get_remaining_days(user_id):
     seconds = get_remaining_seconds(user_id)
 
@@ -98,18 +107,21 @@ def get_remaining_days(user_id):
     return math.ceil(seconds / 86400)
 
 
-# ===== 🔥 ПРОВЕРКА СКОРОГО ОКОНЧАНИЯ =====
+# ===== ПРОВЕРКА СКОРОГО ОКОНЧАНИЯ =====
 def is_expiring_soon(user_id, days_threshold=2):
     days = get_remaining_days(user_id)
     return 0 < days <= days_threshold
 
 
-# ===== WARNING (24 HOURS) =====
+# ===== WARNING =====
 def should_warn(user_id):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
 
     user = data["users"][uid]
+
+    if created:
+        save_data(data)
 
     if not user["is_subscribed"]:
         return False
@@ -137,8 +149,11 @@ def reset_if_needed(user):
 # ===== LIMITS =====
 def can_send_message(user_id, limit=15):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
     user = data["users"][uid]
+
+    if created:
+        save_data(data)
 
     if reset_if_needed(user):
         save_data(data)
@@ -153,8 +168,11 @@ def can_send_message(user_id, limit=15):
 
 def can_generate_image(user_id, limit=1):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
     user = data["users"][uid]
+
+    if created:
+        save_data(data)
 
     if reset_if_needed(user):
         save_data(data)
@@ -170,8 +188,11 @@ def can_generate_image(user_id, limit=1):
 # ===== СЧЁТЧИКИ =====
 def get_limits(user_id, msg_limit=15, img_limit=1):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
     user = data["users"][uid]
+
+    if created:
+        save_data(data)
 
     reset_if_needed(user)
 
@@ -183,11 +204,14 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
-# ===== 🔥 ОСТАЛОСЬ СООБЩЕНИЙ =====
+# ===== ОСТАЛОСЬ СООБЩЕНИЙ =====
 def get_remaining_messages(user_id, limit=15):
     data = load_data()
-    uid = ensure_user(data, user_id)
+    uid, created = ensure_user(data, user_id)
     user = data["users"][uid]
+
+    if created:
+        save_data(data)
 
     reset_if_needed(user)
 
@@ -195,13 +219,12 @@ def get_remaining_messages(user_id, limit=15):
     return max(0, remaining)
 
 
-# ===== 🔥 СПИСОК ПОЛЬЗОВАТЕЛЕЙ =====
+# ===== СПИСКИ =====
 def get_all_users():
     data = load_data()
     return list(data["users"].keys())
 
 
-# ===== 🔥 СПИСОК ПОДПИСОК =====
 def get_all_subscriptions():
     data = load_data()
 
@@ -238,7 +261,7 @@ def get_admin_stats():
     }
 
 
-# ===== 🔥 ТАЙМЕР ДО СБРОСА =====
+# ===== ТАЙМЕР =====
 def get_reset_seconds(user_id):
     now_time = now()
     tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
