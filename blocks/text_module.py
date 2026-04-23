@@ -18,6 +18,40 @@ SYSTEM_PROMPT = """
 """
 
 
+# 🔥 ЛИМИТЫ
+MAX_HISTORY_MESSAGES = 6
+MAX_MESSAGE_CHARS = 2000
+MAX_TOTAL_CHARS = 12000
+
+
+def trim_text(text):
+    if not text:
+        return ""
+    text = str(text)
+    if len(text) > MAX_MESSAGE_CHARS:
+        return text[:MAX_MESSAGE_CHARS] + "…"
+    return text
+
+
+def trim_messages(messages):
+    total = 0
+    result = []
+
+    for msg in reversed(messages):
+        content = trim_text(msg.get("content", ""))
+        total += len(content)
+
+        if total > MAX_TOTAL_CHARS:
+            break
+
+        result.append({
+            "role": msg["role"],
+            "content": content
+        })
+
+    return list(reversed(result))
+
+
 async def process(user_id, text, state):
     def run():
         history = state.get("dialog", [])
@@ -27,7 +61,7 @@ async def process(user_id, text, state):
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
 
-        # ===== 🔥 ОБУЧЕНИЕ (АДАПТАЦИЯ) =====
+        # ===== EXPERIENCE =====
         try:
             from blocks.experience_manager import load_experience
 
@@ -39,7 +73,6 @@ async def process(user_id, text, state):
             refined = sum(1 for a in actions if a.get("status") == "refined")
             accepted = sum(1 for a in actions if a.get("status") == "accepted")
 
-            # мягкое влияние, без ломания поведения
             if conflict >= 3:
                 messages.append({
                     "role": "system",
@@ -61,7 +94,7 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 EXPERIENCE APPLY ERROR:", e)
 
-        # ===== КОНТЕКСТ МИРА =====
+        # ===== WORLD CONTEXT =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
@@ -69,25 +102,34 @@ async def process(user_id, text, state):
             if world:
                 messages.append({
                     "role": "system",
-                    "content": world
+                    "content": trim_text(world)
                 })
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
-        # ===== КОНТЕКСТ ИЗОБРАЖЕНИЯ =====
+        # ===== IMAGE CONTEXT =====
         if ctx and ctx.get("hint"):
             messages.append({
                 "role": "system",
-                "content": f"Ранее обсуждалось изображение: {ctx['hint']}"
+                "content": trim_text(f"Ранее обсуждалось изображение: {ctx['hint']}")
             })
 
-        # ===== ИСТОРИЯ =====
-        messages.extend(history[-6:])
+        # ===== HISTORY (🔥 ФИКС) =====
+        safe_history = []
+        for msg in history[-MAX_HISTORY_MESSAGES:]:
+            safe_history.append({
+                "role": msg["role"],
+                "content": trim_text(msg.get("content", ""))
+            })
 
-        # ===== ЗАПРОС =====
+        safe_history = trim_messages(safe_history)
+
+        messages.extend(safe_history)
+
+        # ===== USER =====
         messages.append({
             "role": "user",
-            "content": text
+            "content": trim_text(text)
         })
 
         r = client.responses.create(
