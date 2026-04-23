@@ -9,7 +9,6 @@ from blocks.state_manager import (
 )
 
 from blocks.anchor_system import get_anchor
-from blocks.image_system import analyze_image
 from blocks.mode_manager import get_mode
 
 from blocks.context_system import build_context_text
@@ -17,7 +16,7 @@ from blocks.context_system import build_context_text
 from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
-from blocks.experience_manager import update_experience, load_experience
+from blocks.experience_manager import load_experience
 
 from blocks.image_module import process as image_generate
 
@@ -65,17 +64,28 @@ def build_prompt(struct):
     return f"{struct.get('color','')} {struct.get('object','')} {struct.get('scene','')}".strip()
 
 
+# ===== ЛОГИКА =====
 def is_followup(text: str):
     t = text.lower()
     return any(x in t for x in ["сделай", "измени", "добавь", "поменяй"])
 
 
 def is_confirmation(text: str):
-    return text.lower().strip() in ["да", "ок", "ага", "давай"]
+    t = text.lower().strip()
+
+    positives = [
+        "да", "ага", "ок", "окей", "давай",
+        "хорошо", "ладно", "согласен",
+        "делай", "поехали", "го",
+        "запускай", "генерируй"
+    ]
+
+    return any(p in t for p in positives)
 
 
 def is_rejection(text: str):
-    return text.lower().strip() in ["нет", "не"]
+    t = text.lower().strip()
+    return any(x in t for x in ["нет", "не", "не надо", "отмена"])
 
 
 # ===== EXECUTE =====
@@ -83,11 +93,42 @@ async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    intent = detect_intent(text)
     t = text.lower().strip()
 
-    # ===== ОБНОВЛЕНИЕ STATE =====
-    if is_followup(text) and not is_confirmation(text):
+    # ===== 1. ПОДТВЕРЖДЕНИЕ =====
+    last = state.get("last_action")
+
+    if is_confirmation(text) and last and last.get("type") == "image":
+
+        final_struct = state.get("pending_render")
+
+        if final_struct:
+            final_prompt = build_prompt(final_struct)
+
+            state["image_context"] = None
+
+            result = await run_with_typing(
+                chat_id,
+                image_generate(user_id, final_prompt, {"image_struct": final_struct})
+            )
+
+            if result:
+                state["pending_render"] = None
+                state["last_action"] = None
+                return result
+
+    # ===== 2. ОТМЕНА =====
+    if is_rejection(text) and state.get("pending_render"):
+        state["pending_render"] = None
+        state["last_action"] = None
+
+        return {
+            "type": "text",
+            "data": "Ок, отменил 👍"
+        }
+
+    # ===== 3. ИЗМЕНЕНИЯ =====
+    if is_followup(text):
 
         old = state.get("image_struct", {})
 
@@ -100,29 +141,25 @@ async def execute(user_id, text, chat_id, run_with_typing):
         }
 
         state["image_struct"] = updated
+        state["pending_render"] = updated.copy()
 
-    # ===== ПОДТВЕРЖДЕНИЕ =====
-    last = state.get("last_action")
+        state["last_action"] = {
+            "type": "image",
+            "intent": "modify",
+            "status": "pending"
+        }
 
-    if is_confirmation(text) and last and last.get("type") == "image":
+        return {
+            "type": "text",
+            "data": f"Ок, делаю: {build_prompt(updated)}.\nПодтвердить?"
+        }
 
-        final_struct = state.get("pending_render")
-
-        if final_struct:
-            final_prompt = build_prompt(final_struct)
-
-            # 🔥 КРИТИЧЕСКИЙ ФИКС
-            state["image_context"] = None
-
-            result = await run_with_typing(
-                chat_id,
-                image_generate(user_id, final_prompt, {"image_struct": final_struct})
-            )
-
-            if result:
-                state["pending_render"] = None
-                state["last_action"] = None
-                return result
+    # ===== 4. НЕПОНЯТНЫЙ ОТВЕТ =====
+    if state.get("pending_render"):
+        return {
+            "type": "text",
+            "data": "Подтвердить генерацию? Напиши «да» или «нет» 🙂"
+        }
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -144,12 +181,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВОПРОСЫ =====
+    # ===== ВОПРОС =====
+    intent = detect_intent(text)
+
     if intent == "question":
 
         anchor = get_anchor(user_id)
 
-        # ❌ УБРАЛИ ВЛИЯНИЕ image_context
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
 
@@ -172,7 +210,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         state["last_action"] = {
             "type": "image",
-            "intent": "answer",
+            "intent": "create",
             "status": "pending"
         }
 
