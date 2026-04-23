@@ -56,6 +56,23 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
+# ===== 🔥 TIME CHECK =====
+def is_time_question(text: str):
+    text = text.lower()
+
+    triggers = [
+        "сколько времени",
+        "который час",
+        "какая дата",
+        "какой сегодня день",
+        "текущее время",
+        "сегодняшняя дата",
+        "сколько время"
+    ]
+
+    return any(t in text for t in triggers)
+
+
 # ===== TYPING =====
 async def typing_loop(chat_id):
     try:
@@ -113,6 +130,17 @@ def run_server():
 async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
+
+    state = get_state(user_id)
+
+    # 🔥 ВРЕМЯ В КОНТЕКСТ
+    now = datetime.now(tz)
+    state["time_str"] = now.strftime("%H:%M")
+    state["date_str"] = now.strftime("%d.%m.%Y")
+    state["day"] = now.strftime("%A")
+
+    # 🔥 ФЛАГ ВРЕМЕНИ
+    state["allow_time"] = is_time_question(text)
 
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
@@ -187,17 +215,14 @@ async def handle(message: types.Message):
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
 
-    # 👍 ЛАЙК
     if data.startswith("like_"):
         await callback.answer("👍 Сохранено", show_alert=False)
         return
 
-    # 👎 ДИЗЛАЙК
     if data.startswith("dislike_"):
         await callback.answer("👎 Учту и улучшу", show_alert=False)
         return
 
-    # MENU
     if data == "menu":
         await callback.answer()
         text, keyboard = get_menu(callback.from_user.id)
@@ -206,8 +231,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     if data == "info":
         await callback.answer()
-        text = "🤖 Ayprill работает и развивается"
-        await callback.message.answer(text)
+        await callback.message.answer("🤖 Ayprill работает и развивается")
         return
 
     if data == "tariffs":
