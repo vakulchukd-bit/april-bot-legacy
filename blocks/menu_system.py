@@ -121,6 +121,28 @@ def build_tariffs_menu(user_id):
     return text, keyboard
 
 
+# ===== 🔥 INFO (ВОЗВРАЩАЕМ НОРМАЛЬНОЕ ОПИСАНИЕ) =====
+def build_info_menu(user_id):
+    text = (
+        "🤖 *Возможности Ayprill*\n\n"
+        "💬 Общение — ответы и диалог\n"
+        "🧠 Интеллект — идеи и объяснения\n"
+        "🖼 Генерация — изображения\n"
+        "💻 Помощь — код и задачи\n\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "📦 *Тарифы*\n\n"
+        "🆓 FREE — базовые лимиты\n"
+        "⚡ LITE — больше возможностей\n"
+        "👑 PREMIUM — без ограничений\n"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+    ])
+
+    return text, keyboard
+
+
 # ===== ОБЩИЙ ВХОД =====
 def get_menu(user_id):
     role = get_user_role(user_id)
