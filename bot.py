@@ -170,7 +170,6 @@ async def handle(message: types.Message):
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
-        # ===== ОБРАБОТКА TYPE =====
         if result["type"] == "text":
             reply = result["data"]
 
@@ -218,19 +217,19 @@ async def handle_callbacks(callback: types.CallbackQuery):
         return
 
     try:
-        # 🔥 ВАЖНО: передаём callback в executor
         result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
 
         if not result:
             return
 
-        # ===== ОБРАБОТКА ОТВЕТА =====
+        # ===== TEXT =====
         if result["type"] == "text":
             await callback.message.answer(
                 result["data"],
                 reply_markup=result.get("keyboard")
             )
 
+        # ===== ADMIN REQUEST =====
         elif result["type"] == "admin_request":
             plan = result["plan"]
 
@@ -255,7 +254,8 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
             await callback.message.answer("⏳ Отправлено администратору")
 
-        elif result["type"] == "text" and "target_user" in result:
+        # ===== 🔥 ФИКС (главный) =====
+        elif result["type"] == "notify_user":
             await bot.send_message(result["target_user"], result["data"])
 
     except Exception as e:
