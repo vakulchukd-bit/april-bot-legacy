@@ -101,35 +101,28 @@ async def execute(user_id, text, chat_id, run_with_typing):
             intent_tmp = detect_intent(text)
             if intent_tmp == "question":
                 state["pending_render"] = None
-                state["last_action"] = None
 
-    # ===== 1. ПОДТВЕРЖДЕНИЕ =====
-    last = state.get("last_action")
-
-    if is_confirmation(text) and last and last.get("type") == "image":
+    # ===== 1. ПОДТВЕРЖДЕНИЕ (БЕЗ last_action!) =====
+    if is_confirmation(text) and state.get("pending_render"):
 
         final_struct = state.get("pending_render")
 
-        if final_struct:
-            final_prompt = build_prompt(final_struct)
+        final_prompt = build_prompt(final_struct)
 
-            state["image_context"] = None
+        state["image_context"] = None
 
-            result = await run_with_typing(
-                chat_id,
-                image_generate(user_id, final_prompt, {"image_struct": final_struct})
-            )
+        result = await run_with_typing(
+            chat_id,
+            image_generate(user_id, final_prompt, {"image_struct": final_struct})
+        )
 
-            if result:
-                state["pending_render"] = None
-                state["last_action"] = None
-                return result
+        if result:
+            state["pending_render"] = None
+            return result
 
     # ===== 2. ОТМЕНА =====
     if is_rejection(text) and state.get("pending_render"):
         state["pending_render"] = None
-        state["last_action"] = None
-
         return {
             "type": "text",
             "data": "Ок, отменил 👍"
@@ -150,12 +143,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         state["image_struct"] = updated
         state["pending_render"] = updated.copy()
-
-        state["last_action"] = {
-            "type": "image",
-            "intent": "modify",
-            "status": "pending"
-        }
 
         return {
             "type": "text",
@@ -230,12 +217,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         state["pending_render"] = state["image_struct"].copy()
 
-        state["last_action"] = {
-            "type": "image",
-            "intent": "create",
-            "status": "pending"
-        }
-
         return {"type": "text", "data": result["content"]}
 
     # ===== ROOMS =====
@@ -257,10 +238,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
                 result = await room.handle(user_id, text, context, run_with_typing)
 
                 if result and result.get("type") == "image":
-                    state["last_action"] = {
-                        "type": "image",
-                        "intent": "generate",
-                        "status": "pending"
+                    state["pending_render"] = {
+                        "scene": "",
+                        "object": "",
+                        "color": ""
                     }
 
                 if result:
