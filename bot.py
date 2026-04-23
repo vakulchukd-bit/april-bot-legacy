@@ -19,14 +19,12 @@ from storage import (
     get_remaining_days,
     get_limits,
     is_expiring_soon,
-    get_admin_stats,
-    get_all_users,
-    get_all_subscriptions
+    get_admin_stats
 )
 
 from core.executor import execute
 
-from blocks.ui import main_keyboard, buy_keyboard
+from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
@@ -45,7 +43,7 @@ from blocks.admin_system import (
 
 from blocks.mode_manager import get_mode, set_mode, clear_mode
 from blocks.session_manager import is_session_expired
-from blocks.menu_system import get_menu
+from blocks.menu_system import get_menu, build_tariffs_menu
 
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -109,7 +107,7 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # ===== 🔥 VOICE =====
+    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -126,93 +124,41 @@ async def handle(message: types.Message):
 
         text = await asyncio.to_thread(run)
 
-        if not text or text.strip() == "":
-            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+        if not text.strip():
+            await message.answer("🎤 Не расслышал")
             return
 
         await message.answer(f"🎤 {text}")
 
-    # ===== 🔥 РАССЫЛКА =====
-    if get_mode(user_id) == "broadcast" and user_id == ADMIN_ID:
-        users = get_all_users()
-
-        sent = 0
-        for uid in users:
-            try:
-                await bot.send_message(uid, text)
-                sent += 1
-            except:
-                pass
-
-        clear_mode(user_id)
-        await message.answer(f"📢 Отправлено: {sent}")
-        return
-
-    # ADMIN
+    # ===== ADMIN PANEL =====
     if text == "/admin":
         if user_id == ADMIN_ID:
-            await message.answer(get_admin_panel())
+            await message.answer(get_admin_panel(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Анализ", callback_data="admin_stats")],
+                [InlineKeyboardButton(text="💳 Оплаты", callback_data="admin_payments")],
+                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")]
+            ]))
         else:
-            await message.answer("⛔ Ошибка доступа")
+            await message.answer("⛔ Нет доступа")
         return
 
-    state = get_state(user_id)
-    now = datetime.now(tz)
-
-    state["time_str"] = now.strftime("%H:%M")
-    state["date_str"] = now.strftime("%d.%m.%Y")
-
     register_user(user_id)
-
-    # SESSION
-    if is_session_expired(user_id):
-        clear_anchor(user_id)
-        clear_mode(user_id)
-        set_image_context(user_id, None)
-        await message.answer("🧠 Сессия обновлена")
 
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # PRO
-    if is_pro:
-        if should_warn(user_id):
-            await message.answer("⚠️ Подписка скоро закончится")
-
-        if is_expiring_soon(user_id):
-            await message.answer(
-                "⚠️ Подписка скоро закончится\n\n💳 Продлить?",
-                reply_markup=buy_keyboard()
-            )
-
-    # FREE
+    # ===== FREE LIMIT =====
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
 
-        if remaining == 1:
-            await message.answer(
-                "⚠️ Осталось 1 сообщение\n\n💳 Без лимитов?",
-                reply_markup=buy_keyboard()
-            )
-        elif remaining == 2:
-            await message.answer("⚠️ Осталось 2 сообщения")
-
         if remaining == 0:
-            await message.answer(
-                "⛔ Лимит сообщений исчерпан\n\n💳 Оформить подписку?",
-                reply_markup=buy_keyboard()
-            )
+            await message.answer("⛔ Лимит исчерпан", reply_markup=buy_keyboard())
             return
 
         can_send_message(user_id)
 
     try:
-        result = await execute(
-            user_id,
-            text,
-            message.chat.id,
-            run_with_typing
-        )
+        result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result["data"])
@@ -220,8 +166,7 @@ async def handle(message: types.Message):
         reply = final_control(result["data"])
 
         if is_admin or is_pro:
-            days = get_remaining_days(user_id)
-            status = f"\n\n👑 PRO: {days} дн."
+            status = f"\n\n👑 PRO: {get_remaining_days(user_id)} дн."
         else:
             limits = get_limits(user_id)
             status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
@@ -241,47 +186,21 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     await callback.answer()
 
+    # MENU
     if data == "menu":
         text, keyboard = get_menu(callback.from_user.id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    if data == "admin_stats":
-        stats = get_admin_stats()
-
-        text = (
-            "📊 Аналитика\n\n"
-            f"👥 Пользователей: {stats['users']}\n"
-            f"💳 Подписок: {stats['subs']}\n"
-            f"💰 Доход: {stats['income_total']} грн"
-        )
-
-        await callback.message.answer(text)
+    # ТАРИФЫ
+    if data == "tariffs":
+        text, keyboard = build_tariffs_menu(callback.from_user.id)
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    if data == "admin_users":
-        users = get_all_users()
-
-        text = "👥 Пользователи:\n\n"
-        for u in users[:20]:
-            text += f"{u}\n"
-
-        await callback.message.answer(text)
-        return
-
-    if data == "admin_subs":
-        subs = get_all_subscriptions()
-
-        text = "💳 Подписки:\n\n"
-        for u in subs:
-            text += f"{u}\n"
-
-        await callback.message.answer(text)
-        return
-
-    if data == "admin_broadcast":
-        set_mode(callback.from_user.id, "broadcast")
-        await callback.message.answer("📢 Введи сообщение для рассылки")
+    # ПОКУПКА
+    if data in ["buy_lite", "buy_premium"]:
+        await callback.message.answer("💳 Отправить запрос на покупку?", reply_markup=buy_keyboard())
         return
 
     if data == "buy_yes":
@@ -294,26 +213,36 @@ async def handle_callbacks(callback: types.CallbackQuery):
             ]
         ])
 
-        await bot.send_message(
-            ADMIN_ID,
-            f"💳 Запрос на подписку\n\nПользователь: {user_id}",
-            reply_markup=keyboard
-        )
+        await bot.send_message(ADMIN_ID, f"💳 Запрос от {user_id}", reply_markup=keyboard)
+        await callback.message.answer("⏳ Ожидай подтверждения")
+        return
 
-        await callback.message.answer("⏳ Запрос отправлен администратору")
+    # АДМИН
+    if data == "admin_stats":
+        stats = get_admin_stats()
+        await callback.message.answer(
+            f"📊\n👥 {stats['users']}\n💳 {stats['subs']}\n💰 {stats['income_total']} грн"
+        )
+        return
+
+    if data == "admin_payments":
+        await callback.message.answer("💳 Платежи:", reply_markup=payments_keyboard())
+        return
+
+    if data == "admin_broadcast":
+        set_mode(callback.from_user.id, "broadcast")
+        await callback.message.answer("📢 Введи текст")
         return
 
     if data.startswith("admin_confirm_"):
         user_id = int(data.split("_")[2])
         set_subscription(user_id)
-        await bot.send_message(user_id, "✅ Подписка активирована 🎉")
-        await callback.message.answer("✔ Подтверждено")
+        await bot.send_message(user_id, "✅ Подписка активирована")
         return
 
     if data.startswith("admin_reject_"):
         user_id = int(data.split("_")[2])
-        await bot.send_message(user_id, "❌ Подписка отклонена")
-        await callback.message.answer("❌ Отклонено")
+        await bot.send_message(user_id, "❌ Отклонено")
         return
 
 
