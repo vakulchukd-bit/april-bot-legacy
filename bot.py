@@ -64,10 +64,7 @@ def is_time_question(text: str):
         "сколько времени",
         "который час",
         "какая дата",
-        "какой сегодня день",
-        "текущее время",
-        "сегодняшняя дата",
-        "сколько время"
+        "какой сегодня день"
     ]
 
     return any(t in text for t in triggers)
@@ -159,7 +156,6 @@ async def handle(message: types.Message):
     now = datetime.now(tz)
     state["time_str"] = now.strftime("%H:%M")
     state["date_str"] = now.strftime("%d.%m.%Y")
-    state["day"] = now.strftime("%A")
 
     state["allow_time"] = is_time_question(text)
 
@@ -171,24 +167,11 @@ async def handle(message: types.Message):
         )
         return
 
-    # ===== ADMIN =====
-    if text == "/admin":
-        if user_id == ADMIN_ID:
-            await message.answer(get_admin_panel(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Анализ", callback_data="admin_stats")],
-                [InlineKeyboardButton(text="💳 Оплаты", callback_data="admin_payments")],
-                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")]
-            ]))
-        else:
-            await message.answer("⛔ Нет доступа")
-        return
-
     register_user(user_id)
 
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # ===== LIMIT =====
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
         if remaining == 0:
@@ -224,9 +207,10 @@ async def handle(message: types.Message):
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
-    is_pro = check_subscription(user_id)
 
-    # 👍 👎
+    await callback.answer()
+
+    # ===== LIKE =====
     if data.startswith("like_"):
         await callback.answer("👍 Сохранено", show_alert=False)
         return
@@ -235,87 +219,41 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer("👎 Учту", show_alert=False)
         return
 
-    # MENU
+    # ===== MENU =====
     if data == "menu":
-        await callback.answer()
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # INFO
+    # ===== INFO =====
     if data == "info":
-        await callback.answer()
         text, keyboard = build_info_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
     # ===== BUY =====
     if data == "buy_lite":
-        await callback.answer()
-        await callback.message.answer(
-            "💳 Отправить запрос на Lite?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-                ]
-            ])
-        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+            ]
+        ])
+        await callback.message.answer("💳 Подтвердить переход на Lite?", reply_markup=keyboard)
         return
 
     if data == "buy_premium":
-        await callback.answer()
-        await callback.message.answer(
-            "💳 Отправить запрос на Premium?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-                ]
-            ])
-        )
-        return
-
-    # ===== PREMIUM → LITE =====
-    if data == "confirm_downgrade":
-        await callback.answer()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
+                InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
             ]
         ])
-        await callback.message.answer("⚠️ Перейти на Lite?", reply_markup=keyboard)
+        await callback.message.answer("💳 Подтвердить переход на Premium?", reply_markup=keyboard)
         return
 
-    if data == "confirm_downgrade_yes":
-        await callback.answer()
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_lite_{user_id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_lite_{user_id}")
-            ]
-        ])
-
-        await bot.send_message(
-            ADMIN_ID,
-            f"⚡ Premium → Lite\nПользователь: {user_id}",
-            reply_markup=keyboard
-        )
-
-        await callback.message.answer("⏳ Отправлено админу")
-        return
-
-    if data == "confirm_downgrade_no":
-        await callback.answer()
-        await callback.message.answer("❌ Отменено")
-        return
-
-    # ===== BUY CONFIRM =====
+    # ===== SEND TO ADMIN =====
     if data == "buy_yes_lite":
-        await callback.answer()
-
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_lite_{user_id}"),
@@ -323,18 +261,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
             ]
         ])
 
-        await bot.send_message(
-            ADMIN_ID,
-            f"💳 LITE\nПользователь: {user_id}",
-            reply_markup=keyboard
-        )
-
-        await callback.message.answer("⏳ Ожидай")
+        await bot.send_message(ADMIN_ID, f"💳 ЗАПРОС: LITE\nID: {user_id}", reply_markup=keyboard)
+        await callback.message.answer("⏳ Отправлено администратору")
         return
 
     if data == "buy_yes_premium":
-        await callback.answer()
-
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_premium_{user_id}"),
@@ -342,37 +273,30 @@ async def handle_callbacks(callback: types.CallbackQuery):
             ]
         ])
 
-        await bot.send_message(
-            ADMIN_ID,
-            f"💳 PREMIUM\nПользователь: {user_id}",
-            reply_markup=keyboard
-        )
-
-        await callback.message.answer("⏳ Ожидай")
+        await bot.send_message(ADMIN_ID, f"💳 ЗАПРОС: PREMIUM\nID: {user_id}", reply_markup=keyboard)
+        await callback.message.answer("⏳ Отправлено администратору")
         return
 
-    # ===== ADMIN =====
+    # ===== ADMIN CONFIRM =====
     if data.startswith("admin_confirm_"):
-        await callback.answer()  # 🔥 ФИКС
-
-        _, _, plan, uid = data.split("_")
-        uid = int(uid)
+        parts = data.split("_")
+        plan = parts[2]
+        uid = int(parts[3])
 
         if plan == "premium":
-            set_subscription(uid, days=30)
+            set_subscription(uid, 30)
         elif plan == "lite":
-            set_subscription(uid, days=15)
+            set_subscription(uid, 15)
 
-        await bot.send_message(uid, "✅ Подписка активирована")
+        await bot.send_message(uid, f"✅ Активирован {plan.upper()}")
         return
 
+    # ===== ADMIN REJECT =====
     if data.startswith("admin_reject_"):
-        await callback.answer()  # 🔥 ФИКС
+        parts = data.split("_")
+        uid = int(parts[3])
 
-        _, _, plan, uid = data.split("_")
-        uid = int(uid)
-
-        await bot.send_message(uid, "❌ Отклонено")
+        await bot.send_message(uid, "❌ Запрос отклонён")
         return
 
 
