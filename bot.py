@@ -109,6 +109,29 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
+    # ===== 🔥 VOICE =====
+    if message.voice:
+        file = await bot.get_file(message.voice.file_id)
+        path = f"{user_id}.ogg"
+
+        await bot.download_file(file.file_path, destination=path)
+
+        def run():
+            with open(path, "rb") as f:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+            return t.text
+
+        text = await asyncio.to_thread(run)
+
+        if not text or text.strip() == "":
+            await message.answer("🎤 Не расслышал, попробуй ещё раз")
+            return
+
+        await message.answer(f"🎤 {text}")
+
     # ===== 🔥 РАССЫЛКА =====
     if get_mode(user_id) == "broadcast" and user_id == ADMIN_ID:
         users = get_all_users()
@@ -218,13 +241,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     await callback.answer()
 
-    # ===== MENU =====
     if data == "menu":
         text, keyboard = get_menu(callback.from_user.id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # ===== 📊 АНАЛИТИКА =====
     if data == "admin_stats":
         stats = get_admin_stats()
 
@@ -238,7 +259,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text)
         return
 
-    # ===== 👥 ПОЛЬЗОВАТЕЛИ =====
     if data == "admin_users":
         users = get_all_users()
 
@@ -249,7 +269,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text)
         return
 
-    # ===== 💳 ПОДПИСКИ =====
     if data == "admin_subs":
         subs = get_all_subscriptions()
 
@@ -260,13 +279,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text)
         return
 
-    # ===== 📢 РАССЫЛКА =====
     if data == "admin_broadcast":
         set_mode(callback.from_user.id, "broadcast")
         await callback.message.answer("📢 Введи сообщение для рассылки")
         return
 
-    # ===== BUY =====
     if data == "buy_yes":
         user_id = callback.from_user.id
 
@@ -286,7 +303,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("⏳ Запрос отправлен администратору")
         return
 
-    # ===== CONFIRM =====
     if data.startswith("admin_confirm_"):
         user_id = int(data.split("_")[2])
         set_subscription(user_id)
@@ -294,7 +310,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("✔ Подтверждено")
         return
 
-    # ===== REJECT =====
     if data.startswith("admin_reject_"):
         user_id = int(data.split("_")[2])
         await bot.send_message(user_id, "❌ Подписка отклонена")
