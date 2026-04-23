@@ -186,13 +186,23 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     await callback.answer()
 
+    # ===== 👍 ЛАЙК =====
+    if data.startswith("like_"):
+        await callback.answer("👍 Принято", show_alert=False)
+        return
+
+    # ===== 👎 ДИЗЛАЙК =====
+    if data.startswith("dislike_"):
+        await callback.answer("👎 Учту", show_alert=False)
+        return
+
     # MENU
     if data == "menu":
         text, keyboard = get_menu(callback.from_user.id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # INFO (описание)
+    # INFO
     if data == "info":
         text = (
             "🤖 *Возможности Ayprill*\n\n"
