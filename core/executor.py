@@ -19,7 +19,6 @@ from blocks.engineering_system import analyze_code
 
 from blocks.experience_manager import update_experience, load_experience
 
-# 🔥 прямой вызов генерации
 from blocks.image_module import process as image_generate
 
 
@@ -50,6 +49,10 @@ def extract_scene_object(text: str):
         obj = "звезда"
     elif "шестиугольник" in t or "гексагон" in t:
         obj = "шестиугольник"
+    elif "прямоугольник" in t:
+        obj = "прямоугольник"
+    elif "овал" in t:
+        obj = "овал"
 
     if "на" in t:
         idx = t.find("на")
@@ -60,18 +63,12 @@ def extract_scene_object(text: str):
 
 def build_prompt(state):
     data = state.get("image_struct", {})
-
-    scene = data.get("scene", "")
-    obj = data.get("object", "")
-    color = data.get("color", "")
-
-    return f"{color} {obj} {scene}".strip()
+    return f"{data.get('color','')} {data.get('object','')} {data.get('scene','')}".strip()
 
 
 # ===== БАЗОВЫЕ =====
 def is_followup(text: str) -> bool:
     t = text.lower().strip()
-
     markers = [
         "сделай", "измени", "добавь", "убери",
         "замени", "поменяй",
@@ -82,19 +79,16 @@ def is_followup(text: str) -> bool:
         "я про другое",
         "уточни"
     ]
-
     return any(m in t for m in markers)
 
 
 def is_confirmation(text: str) -> bool:
     t = text.lower().strip()
-
     positives = [
         "да", "ага", "ок", "окей", "хорошо",
         "давай", "согласен", "подходит",
         "делай", "генерируй", "создавай"
     ]
-
     return any(t == p or t.startswith(p + " ") for p in positives)
 
 
@@ -124,13 +118,8 @@ def update_last_action(state, text):
 
 def commit_last_action(user_id, state):
     last = state.get("last_action")
-
-    if not last:
+    if not last or last.get("status") == "pending":
         return
-
-    if last.get("status") == "pending":
-        return
-
     update_experience(user_id, state)
 
 
@@ -149,38 +138,30 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 ОБНОВЛЕНИЕ СЦЕНЫ =====
+    # ===== 🔥 ГЛАВНЫЙ ФИКС: ПЕРЕСБОРКА STATE =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
-        data = state.get("image_struct", {})
 
-        # 🔥 если "его" — не теряем объект
-        if "его" in t and not data.get("object"):
-            prev = state.get("image_struct", {})
-            data["object"] = prev.get("object", "")
+        old = state.get("image_struct", {})
 
-        if "синий" in t:
-            data["color"] = "синий"
-        elif "зелёный" in t:
-            data["color"] = "зелёный"
-        elif "красный" in t:
-            data["color"] = "красный"
-        elif "жёлтый" in t:
-            data["color"] = "жёлтый"
+        new_scene, new_obj, new_color = extract_scene_object(text)
 
-        state["image_struct"] = data
+        updated = {
+            "scene": new_scene or old.get("scene", ""),
+            "object": new_obj or old.get("object", ""),
+            "color": new_color or old.get("color", "")
+        }
 
-    # ===== 🔥 FINAL SNAPSHOT: ИЗОЛЯЦИЯ РЕНДЕРА =====
+        state["image_struct"] = updated
+
+    # ===== 🔥 SNAPSHOT =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
-        # 1) фиксируем финальное состояние
-        final_struct = state.get("image_struct", {}).copy()
 
-        # 2) строим prompt только из финального состояния
-        final_prompt = f"{final_struct.get('color','')} {final_struct.get('object','')} {final_struct.get('scene','')}".strip()
+        final_struct = state.get("image_struct", {}).copy()
+        final_prompt = build_prompt({"image_struct": final_struct})
 
         if final_prompt:
-            # 3) изолируем state для генерации (без истории/контекста)
             clean_state = {
                 "image_struct": final_struct
             }
@@ -191,30 +172,24 @@ async def execute(user_id, text, chat_id, run_with_typing):
             )
 
             if result:
-                # 4) старт нового цикла (не даём старому влиять дальше)
                 state["last_action"] = None
                 state["image_context"] = None
                 state["last_render_struct"] = final_struct
-
                 return result
 
     # ===== DEBUG =====
     if text == "/exp":
         data = load_experience()
-        user_data = data.get(str(user_id), {})
-
         return {
             "type": "text",
-            "data": f"🧠 Опыт:\n{user_data}"
+            "data": f"🧠 Опыт:\n{data.get(str(user_id), {})}"
         }
 
     # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
         if text.lower() == "/analiz":
             return {"type": "text", "data": "📥 Жду код..."}
-
-        report = analyze_code(text)
-        return {"type": "admin_report", "data": report}
+        return {"type": "admin_report", "data": analyze_code(text)}
 
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
@@ -238,15 +213,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
 
-        world = build_context_text()
-        text = f"{world}\n\n{text}"
+        text = f"{build_context_text()}\n\n{text}"
 
         result = await run_with_typing(
             chat_id,
             text_process(user_id, text, state)
         )
 
-        # ===== 🔥 СОХРАНЯЕМ СЦЕНУ =====
         scene, obj, color = extract_scene_object(text)
 
         state["image_struct"] = {
@@ -261,10 +234,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "status": "pending"
         }
 
-        return {
-            "type": "text",
-            "data": result["content"]
-        }
+        return {"type": "text", "data": result["content"]}
 
     # ===== ROOMS =====
     ctx = get_image_context(user_id) or state.get("image_context")
@@ -282,33 +252,24 @@ async def execute(user_id, text, chat_id, run_with_typing):
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
-                result = await room.handle(
-                    user_id,
-                    text,
-                    context,
-                    run_with_typing
-                )
+                result = await room.handle(user_id, text, context, run_with_typing)
+
+                if result and result.get("type") == "image":
+                    state["last_action"] = {
+                        "type": "image",
+                        "intent": "generate",
+                        "status": "pending"
+                    }
 
                 if result:
-                    if result.get("type") == "image":
-                        state["last_action"] = {
-                            "type": "image",
-                            "intent": "generate",
-                            "status": "pending"
-                        }
-
                     return result
 
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== FALLBACK =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state)
     )
 
-    return {
-        "type": "text",
-        "data": result["content"]
-    }
+    return {"type": "text", "data": result["content"]}
