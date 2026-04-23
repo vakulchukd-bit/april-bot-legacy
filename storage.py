@@ -148,3 +148,44 @@ def can_generate_image(user_id, limit=1):
     user["images_today"] += 1
     save_data(data)
     return True
+
+
+# ===== 🔥 НОВОЕ: ПОЛУЧИТЬ СЧЁТЧИКИ =====
+def get_limits(user_id, msg_limit=15, img_limit=1):
+    data = load_data()
+    uid = ensure_user(data, user_id)
+    user = data["users"][uid]
+
+    reset_if_needed(user)
+
+    return {
+        "messages_used": user["messages_today"],
+        "messages_limit": msg_limit,
+        "images_used": user["images_today"],
+        "images_limit": img_limit
+    }
+
+
+# ===== 🔥 НОВОЕ: АДМИН СТАТИСТИКА =====
+def get_admin_stats():
+    data = load_data()
+
+    users = data["users"]
+
+    total_users = len(users)
+    subs = 0
+
+    for u in users.values():
+        if u.get("is_subscribed") and u.get("subscription_until", 0) > now().timestamp():
+            subs += 1
+
+    # 💰 пока заглушка (потом подключим реальные платежи)
+    income_total = subs * 150
+    income_today = 0
+
+    return {
+        "users": total_users,
+        "subs": subs,
+        "income_total": income_total,
+        "income_today": income_today
+    }
