@@ -22,163 +22,115 @@ from blocks.image_module import process as image_generate
 
 from datetime import datetime
 
-
-# ===== СТРУКТУРА =====
-def extract_scene_object(text: str):
-    t = text.lower()
-
-    scene = ""
-    obj = ""
-    color = ""
-
-    colors = ["красный", "синий", "зелёный", "жёлтый", "чёрный", "белый"]
-
-    for c in colors:
-        if c in t:
-            color = c
-            break
-
-    if "треугольник" in t:
-        obj = "треугольник"
-    elif "круг" in t:
-        obj = "круг"
-    elif "ромб" in t:
-        obj = "ромб"
-    elif "квадрат" in t:
-        obj = "квадрат"
-    elif "звезда" in t:
-        obj = "звезда"
-    elif "шестиугольник" in t or "гексагон" in t:
-        obj = "шестиугольник"
-    elif "прямоугольник" in t:
-        obj = "прямоугольник"
-    elif "овал" in t:
-        obj = "овал"
-
-    if "на" in t:
-        idx = t.find("на")
-        scene = text[idx:]
-
-    return scene.strip(), obj, color
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from storage import set_subscription
 
 
-def build_prompt(struct):
-    return f"{struct.get('color','')} {struct.get('object','')} {struct.get('scene','')}".strip()
+# ===== SUBSCRIPTION HANDLER =====
+def handle_subscription(callback_data, user_id):
+    # BUY FLOW
+    if callback_data == "buy_lite":
+        return {
+            "type": "text",
+            "data": "💳 Подтвердить переход на Lite?",
+            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+                ]
+            ])
+        }
 
+    if callback_data == "buy_premium":
+        return {
+            "type": "text",
+            "data": "💳 Подтвердить переход на Premium?",
+            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+                ]
+            ])
+        }
 
-# ===== НОВОЕ: НАМЕРЕНИЕ КАРТИНКИ =====
-def wants_image(text: str):
-    t = text.lower()
-    return any(x in t for x in [
-        "покажи", "хочу увидеть", "сгенерируй", "картинку", "изображение"
-    ])
+    # CONFIRM BUY
+    if callback_data == "buy_yes_lite":
+        return {
+            "type": "admin_request",
+            "plan": "lite",
+            "user_id": user_id
+        }
 
+    if callback_data == "buy_yes_premium":
+        return {
+            "type": "admin_request",
+            "plan": "premium",
+            "user_id": user_id
+        }
 
-# ===== ЛОГИКА =====
-def is_followup(text: str):
-    t = text.lower()
-    return any(x in t for x in ["сделай", "измени", "добавь", "поменяй"])
+    # DOWNGRADE
+    if callback_data == "confirm_downgrade":
+        return {
+            "type": "text",
+            "data": "⚠️ Ты уверен, что хочешь перейти на Lite?",
+            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
+                ]
+            ])
+        }
 
+    if callback_data == "confirm_downgrade_yes":
+        return {
+            "type": "admin_request",
+            "plan": "lite",
+            "user_id": user_id
+        }
 
-def is_confirmation(text: str):
-    t = text.lower().strip()
-    positives = [
-        "да", "ага", "ок", "окей", "давай",
-        "хорошо", "ладно", "согласен",
-        "делай", "поехали", "го",
-        "запускай", "генерируй"
-    ]
-    return any(p in t for p in positives)
+    if callback_data == "confirm_downgrade_no":
+        return {
+            "type": "text",
+            "data": "❌ Отменено"
+        }
 
+    # ADMIN CONFIRM
+    if callback_data.startswith("admin_confirm_"):
+        parts = callback_data.split("_")
+        plan = parts[2]
+        uid = int(parts[3])
 
-def is_rejection(text: str):
-    t = text.lower().strip()
-    return any(x in t for x in ["нет", "не", "не надо", "отмена"])
+        set_subscription(uid, plan)
+
+        return {
+            "type": "text",
+            "data": f"✅ Активирован {plan.upper()}",
+            "target_user": uid
+        }
+
+    if callback_data.startswith("admin_reject_"):
+        uid = int(callback_data.split("_")[3])
+        return {
+            "type": "text",
+            "data": "❌ Запрос отклонён",
+            "target_user": uid
+        }
+
+    return None
 
 
 # ===== EXECUTE =====
-async def execute(user_id, text, chat_id, run_with_typing):
+async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    # ===== CALLBACK ROUTING =====
+    if callback_data:
+        sub = handle_subscription(callback_data, user_id)
+        if sub:
+            return sub
+
     t = text.lower().strip()
-
-    # ===== 🔥 СОХРАНЕНИЕ ОПЫТА (ФИКС) =====
-    if "last_action" not in state:
-        state["last_action"] = {}
-
-    if any(x in t for x in ["не так", "ошибка", "ошибся", "плохо", "неправильно"]):
-        state["last_action"]["status"] = "conflict"
-        update_experience(user_id, state)
-
-    elif any(x in t for x in ["сделай", "измени", "переделай", "ещё"]):
-        state["last_action"]["status"] = "refined"
-        update_experience(user_id, state)
-
-    elif any(x in t for x in ["да", "ок", "хорошо", "норм"]):
-        state["last_action"]["status"] = "accepted"
-        update_experience(user_id, state)
-
-    # ===== 0. СБРОС ПРИ СМЕНЕ ТЕМЫ =====
-    if state.get("pending_render"):
-        if not is_followup(text) and not is_confirmation(text):
-            intent_tmp = detect_intent(text)
-            if intent_tmp == "question":
-                state["pending_render"] = None
-
-    # ===== 1. ПОДТВЕРЖДЕНИЕ =====
-    if is_confirmation(text) and state.get("pending_render"):
-
-        final_struct = state.get("pending_render")
-        final_prompt = build_prompt(final_struct)
-
-        state["image_context"] = None
-
-        result = await run_with_typing(
-            chat_id,
-            image_generate(user_id, final_prompt, {"image_struct": final_struct})
-        )
-
-        if result:
-            state["pending_render"] = None
-            return result
-
-    # ===== 2. ОТМЕНА =====
-    if is_rejection(text) and state.get("pending_render"):
-        state["pending_render"] = None
-        return {
-            "type": "text",
-            "data": "Ок, отменил 👍"
-        }
-
-    # ===== 3. ИЗМЕНЕНИЯ =====
-    if is_followup(text):
-
-        old = state.get("image_struct", {})
-
-        new_scene, new_obj, new_color = extract_scene_object(text)
-
-        updated = {
-            "scene": new_scene or old.get("scene", ""),
-            "object": new_obj or old.get("object", ""),
-            "color": new_color or old.get("color", "")
-        }
-
-        state["image_struct"] = updated
-        state["pending_render"] = updated.copy()
-
-        return {
-            "type": "text",
-            "data": f"Ок, делаю: {build_prompt(updated)}.\nПодтвердить?"
-        }
-
-    # ===== DEBUG =====
-    if text == "/exp":
-        data = load_experience()
-        return {
-            "type": "text",
-            "data": f"🧠 Опыт:\n{data.get(str(user_id), {})}"
-        }
 
     # ===== ВРЕМЯ =====
     if "время" in t:
@@ -216,22 +168,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             chat_id,
             text_process(user_id, text, state)
         )
-
-        scene, obj, color = extract_scene_object(text)
-
-        state["image_struct"] = {
-            "scene": scene,
-            "object": obj,
-            "color": color
-        }
-
-        if wants_image(text):
-            state["pending_render"] = state["image_struct"].copy()
-
-            return {
-                "type": "text",
-                "data": result["content"] + "\n\nХочешь, сгенерирую это изображение?"
-            }
 
         return {"type": "text", "data": result["content"]}
 
