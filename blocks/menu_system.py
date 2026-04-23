@@ -16,19 +16,19 @@ def get_user_role(user_id):
 
 # ===== FREE =====
 def build_free_menu(user_id):
-    # 🔥 РЕАЛЬНЫЕ ЛИМИТЫ
     msg_available = can_send_message(user_id)
     img_available = can_generate_image(user_id)
 
-    msg_text = "доступно" if msg_available else "❌ лимит"
-    img_text = "доступно" if img_available else "❌ лимит"
+    msg_text = "✅ доступно" if msg_available else "❌ лимит"
+    img_text = "✅ доступно" if img_available else "❌ лимит"
 
     text = (
-        "🆓 Статус: FREE\n\n"
+        "🆓 *FREE*\n\n"
+        "📊 *Текущие лимиты:*\n"
         f"💬 Сообщения: {msg_text}\n"
         f"🎨 Генерация: {img_text}\n\n"
-        "⏳ Лимиты обновляются автоматически\n\n"
-        "🚀 Перейди на PRO для полного доступа"
+        "⏳ _Лимиты обновляются автоматически_\n\n"
+        "🚀 *Перейди на PRO для полного доступа*"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -41,7 +41,8 @@ def build_free_menu(user_id):
 # ===== PRO =====
 def build_pro_menu(user_id):
     text = (
-        "👑 Статус: PRO\n\n"
+        "👑 *PRO*\n\n"
+        "📊 *Статус:*\n"
         "∞ Без ограничений\n"
         "⚡ Быстрые ответы\n"
         "🧠 Приоритетная обработка\n\n"
@@ -59,8 +60,8 @@ def build_pro_menu(user_id):
 # ===== ADMIN =====
 def build_admin_menu(user_id):
     text = (
-        "⚙️ Админ-панель\n\n"
-        "Добро пожаловать в управление системой"
+        "⚙️ *АДМИН-ПАНЕЛЬ*\n\n"
+        "📊 Управление системой"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
