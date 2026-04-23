@@ -27,18 +27,27 @@ async def handle_error(bot, user_message, error, context=""):
     - Админ получает полный лог
     """
 
-    # ===== USER MESSAGE =====
-    try:
-        await user_message.answer(
-            "⚠️ Сервис временно недоступен. Мы уже работаем над этим."
-        )
-    except:
-        pass
-
-    # ===== ERROR DATA =====
     user_id = getattr(user_message.from_user, "id", "unknown")
     text = getattr(user_message, "text", None)
 
+    # ===== 🔥 USER MESSAGE (УЛУЧШЕНО) =====
+    try:
+        # 👉 если это похоже на генерацию изображения
+        if text and any(x in text.lower() for x in ["картин", "изображ", "сгенерир", "нарисуй"]):
+            user_text = "🎨 Не удалось создать изображение. Попробуй изменить запрос."
+        else:
+            user_text = "⚠️ Не получилось выполнить запрос. Попробуй ещё раз."
+
+        await user_message.answer(user_text)
+
+    except:
+        # 🔥 fallback (если answer не сработал)
+        try:
+            await bot.send_message(user_id, "⚠️ Ошибка выполнения. Попробуй ещё раз.")
+        except:
+            pass
+
+    # ===== ERROR DATA =====
     error_text = f"""
 🕒 {time.strftime('%H:%M:%S')}
 👤 {user_id}
@@ -66,6 +75,7 @@ async def handle_error(bot, user_message, error, context=""):
 {traceback.format_exc()}
 """
 
+    # 🔥 защита от переполнения Telegram
     full_error = full_error[:4000]
 
     # ===== ADMIN ALERT =====
