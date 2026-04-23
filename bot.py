@@ -18,7 +18,10 @@ from storage import (
     get_remaining_messages,
     get_remaining_days,
     get_limits,
-    is_expiring_soon
+    is_expiring_soon,
+    get_admin_stats,
+    get_all_users,
+    get_all_subscriptions
 )
 
 from core.executor import execute
@@ -106,6 +109,22 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
+    # ===== 🔥 РАССЫЛКА =====
+    if get_mode(user_id) == "broadcast" and user_id == ADMIN_ID:
+        users = get_all_users()
+
+        sent = 0
+        for uid in users:
+            try:
+                await bot.send_message(uid, text)
+                sent += 1
+            except:
+                pass
+
+        clear_mode(user_id)
+        await message.answer(f"📢 Отправлено: {sent}")
+        return
+
     # ADMIN
     if text == "/admin":
         if user_id == ADMIN_ID:
@@ -132,7 +151,7 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # PRO уведомления
+    # PRO
     if is_pro:
         if should_warn(user_id):
             await message.answer("⚠️ Подписка скоро закончится")
@@ -143,7 +162,7 @@ async def handle(message: types.Message):
                 reply_markup=buy_keyboard()
             )
 
-    # FREE лимиты
+    # FREE
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
 
@@ -165,7 +184,6 @@ async def handle(message: types.Message):
         can_send_message(user_id)
 
     try:
-        # 🔥 ФИКС ТУТ
         result = await execute(
             user_id,
             text,
@@ -200,11 +218,55 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     await callback.answer()
 
+    # ===== MENU =====
     if data == "menu":
         text, keyboard = get_menu(callback.from_user.id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
+    # ===== 📊 АНАЛИТИКА =====
+    if data == "admin_stats":
+        stats = get_admin_stats()
+
+        text = (
+            "📊 Аналитика\n\n"
+            f"👥 Пользователей: {stats['users']}\n"
+            f"💳 Подписок: {stats['subs']}\n"
+            f"💰 Доход: {stats['income_total']} грн"
+        )
+
+        await callback.message.answer(text)
+        return
+
+    # ===== 👥 ПОЛЬЗОВАТЕЛИ =====
+    if data == "admin_users":
+        users = get_all_users()
+
+        text = "👥 Пользователи:\n\n"
+        for u in users[:20]:
+            text += f"{u}\n"
+
+        await callback.message.answer(text)
+        return
+
+    # ===== 💳 ПОДПИСКИ =====
+    if data == "admin_subs":
+        subs = get_all_subscriptions()
+
+        text = "💳 Подписки:\n\n"
+        for u in subs:
+            text += f"{u}\n"
+
+        await callback.message.answer(text)
+        return
+
+    # ===== 📢 РАССЫЛКА =====
+    if data == "admin_broadcast":
+        set_mode(callback.from_user.id, "broadcast")
+        await callback.message.answer("📢 Введи сообщение для рассылки")
+        return
+
+    # ===== BUY =====
     if data == "buy_yes":
         user_id = callback.from_user.id
 
@@ -224,6 +286,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("⏳ Запрос отправлен администратору")
         return
 
+    # ===== CONFIRM =====
     if data.startswith("admin_confirm_"):
         user_id = int(data.split("_")[2])
         set_subscription(user_id)
@@ -231,6 +294,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("✔ Подтверждено")
         return
 
+    # ===== REJECT =====
     if data.startswith("admin_reject_"):
         user_id = int(data.split("_")[2])
         await bot.send_message(user_id, "❌ Подписка отклонена")
