@@ -168,20 +168,22 @@ async def handle(message: types.Message):
         result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         add_dialog(user_id, "user", text)
-        add_dialog(user_id, "assistant", result["data"])
+        add_dialog(user_id, "assistant", result.get("data", ""))
 
-        reply = result["data"]
+        # ===== ОБРАБОТКА TYPE =====
+        if result["type"] == "text":
+            reply = result["data"]
 
-        if is_admin or is_pro:
-            status = f"\n\n👑 PRO: {get_remaining_days(user_id)} дн."
-        else:
-            limits = get_limits(user_id)
-            status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
+            if is_admin or is_pro:
+                status = f"\n\n👑 PRO: {get_remaining_days(user_id)} дн."
+            else:
+                limits = get_limits(user_id)
+                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
 
-        await message.answer(
-            reply + status,
-            reply_markup=main_keyboard(message.message_id)
-        )
+            await message.answer(
+                reply + status,
+                reply_markup=main_keyboard(message.message_id)
+            )
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
@@ -193,8 +195,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    await callback.answer()
-
     # 👍 👎
     if data.startswith("like_"):
         await callback.answer("👍 Сохранено", show_alert=False)
@@ -203,6 +203,8 @@ async def handle_callbacks(callback: types.CallbackQuery):
     if data.startswith("dislike_"):
         await callback.answer("👎 Учту", show_alert=False)
         return
+
+    await callback.answer()
 
     # ===== MENU =====
     if data == "menu":
@@ -215,13 +217,49 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # ❗ ВСЮ ЛОГИКУ ПОДПИСОК МЫ УДАЛИЛИ ОТСЮДА
-    # 👉 дальше она переедет в executor
+    try:
+        # 🔥 ВАЖНО: передаём callback в executor
+        result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
 
-    # временно (чтобы не падало)
-    if data.startswith("buy_") or data.startswith("admin_") or data.startswith("confirm_"):
-        await callback.message.answer("⚙️ Система обновляется...")
-        return
+        if not result:
+            return
+
+        # ===== ОБРАБОТКА ОТВЕТА =====
+        if result["type"] == "text":
+            await callback.message.answer(
+                result["data"],
+                reply_markup=result.get("keyboard")
+            )
+
+        elif result["type"] == "admin_request":
+            plan = result["plan"]
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить",
+                        callback_data=f"admin_confirm_{plan}_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"admin_reject_{plan}_{user_id}"
+                    )
+                ]
+            ])
+
+            await bot.send_message(
+                ADMIN_ID,
+                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
+                reply_markup=keyboard
+            )
+
+            await callback.message.answer("⏳ Отправлено администратору")
+
+        elif result["type"] == "text" and "target_user" in result:
+            await bot.send_message(result["target_user"], result["data"])
+
+    except Exception as e:
+        await handle_error(bot, callback.message, e, "callback_handler")
 
 
 # ===== START =====
