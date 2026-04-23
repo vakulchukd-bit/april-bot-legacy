@@ -131,7 +131,7 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # ===== 🔥 VOICE ВОЗВРАЩЁН =====
+    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -163,7 +163,7 @@ async def handle(message: types.Message):
 
     state["allow_time"] = is_time_question(text)
 
-    # ===== ВРЕМЯ =====
+    # ===== TIME =====
     if state.get("allow_time"):
         await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
@@ -353,6 +353,8 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     # ===== ADMIN =====
     if data.startswith("admin_confirm_"):
+        await callback.answer()  # 🔥 ФИКС
+
         _, _, plan, uid = data.split("_")
         uid = int(uid)
 
@@ -365,6 +367,8 @@ async def handle_callbacks(callback: types.CallbackQuery):
         return
 
     if data.startswith("admin_reject_"):
+        await callback.answer()  # 🔥 ФИКС
+
         _, _, plan, uid = data.split("_")
         uid = int(uid)
 
