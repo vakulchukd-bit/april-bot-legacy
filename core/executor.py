@@ -209,8 +209,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "color": color
         }
 
-        # 🔥 ГЛАВНЫЙ ФИКС
+        # 🔥 ФИКС: СОХРАНЯЕМ ДЛЯ ПОДТВЕРЖДЕНИЯ
         if wants_image(text):
+            state["pending_render"] = state["image_struct"].copy()
+
             return {
                 "type": "text",
                 "data": result["content"] + "\n\nХочешь, сгенерирую это изображение?"
