@@ -20,7 +20,7 @@ from blocks.engineering_system import analyze_code
 from blocks.experience_manager import update_experience, load_experience
 
 
-# ===== 🔥 ЗАМЕНА ЦВЕТА (ГЛАВНЫЙ ФИКС) =====
+# ===== 🔥 ФИКС: ЗАМЕНА ЦВЕТА + СОХРАНЕНИЕ СЦЕНЫ =====
 def update_image_prompt(old_prompt: str, new_text: str) -> str:
     t = new_text.lower()
 
@@ -39,24 +39,26 @@ def update_image_prompt(old_prompt: str, new_text: str) -> str:
         "white": "white"
     }
 
-    # ищем новый цвет
     new_color = None
     for key, val in color_map.items():
         if key in t:
             new_color = val
             break
 
-    # если найден цвет → удаляем старые цвета и ставим новый
     if new_color:
         clean_prompt = old_prompt
 
+        # удаляем старые цвета
         for key in color_map.keys():
             clean_prompt = clean_prompt.replace(key, "")
 
-        # собираем нормальный prompt
+        # убираем лишние пробелы
+        clean_prompt = " ".join(clean_prompt.split())
+
+        # 👉 ВАЖНО: сохраняем всё остальное (фон и т.д.)
         return f"{new_color} {clean_prompt}".strip()
 
-    # если не цвет → дополняем
+    # если не цвет → просто добавляем
     return f"{old_prompt}, {new_text}"
 
 
@@ -139,7 +141,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 КОНТЕКСТ (ИСПРАВЛЕННЫЙ) =====
+    # ===== 🔥 ОБНОВЛЕНИЕ КОНТЕКСТА =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
         old = state.get("last_image_prompt")
 
@@ -148,7 +150,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         else:
             state["last_image_prompt"] = text
 
-    # ===== 🔥 "ДА" → ГЕНЕРАЦИЯ =====
+    # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
@@ -180,7 +182,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             return result
 
                 except Exception as e:
-                    print(f"🔥 ROOM ERROR [confirm final]:", e)
+                    print(f"🔥 ROOM ERROR [scene fix]:", e)
 
     # ===== DEBUG =====
     if text == "/exp":
