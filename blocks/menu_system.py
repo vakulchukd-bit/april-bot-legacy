@@ -6,7 +6,7 @@ from storage import (
     get_reset_seconds,
     format_time,
     get_remaining_days,
-    get_user_plan  # 🔥 добавили
+    get_user_plan
 )
 
 ADMIN_ID = 2016592532
