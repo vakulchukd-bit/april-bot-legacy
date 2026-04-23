@@ -98,6 +98,12 @@ def get_remaining_days(user_id):
     return max(0, days)
 
 
+# ===== 🔥 ПРОВЕРКА СКОРОГО ОКОНЧАНИЯ =====
+def is_expiring_soon(user_id, days_threshold=2):
+    days = get_remaining_days(user_id)
+    return 0 < days <= days_threshold
+
+
 # ===== WARNING (24 HOURS) =====
 def should_warn(user_id):
     data = load_data()
