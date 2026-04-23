@@ -7,15 +7,15 @@ from datetime import datetime
 import pytz
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
 from storage import (
     check_subscription,
     should_warn,
     can_send_message,
-    can_generate_image,
-    set_subscription
+    set_subscription,
+    get_remaining_messages
 )
 
 from core.executor import execute
@@ -37,11 +37,8 @@ from blocks.admin_system import (
     get_admin_panel
 )
 
-from blocks.cost_system import add_image, add_text
 from blocks.mode_manager import get_mode, set_mode, clear_mode
 from blocks.session_manager import is_session_expired
-from blocks.image_utils import compress_image
-from blocks.image_module import retry_process
 from blocks.menu_system import get_menu
 
 
@@ -88,7 +85,7 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # ===== ADMIN COMMANDS =====
+    # ===== ADMIN =====
     if text == "/admin":
         if user_id == ADMIN_ID:
             await message.answer(get_admin_panel())
@@ -119,14 +116,22 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # ===== LIMIT =====
+    # ===== LIMIT CONTROL (НОВАЯ ЛОГИКА) =====
     if not is_admin and not is_pro:
-        if not can_send_message(user_id):
+        remaining = get_remaining_messages(user_id)
+
+        if remaining <= 2 and remaining > 0:
+            await message.answer(f"⚠️ Осталось {remaining} сообщений")
+
+        if remaining == 0:
             await message.answer(
                 "⛔ Лимит сообщений исчерпан\n\n💳 Оформить подписку?",
                 reply_markup=buy_keyboard()
             )
             return
+
+        # увеличиваем счётчик
+        can_send_message(user_id)
 
     try:
         # ===== EXECUTE =====
