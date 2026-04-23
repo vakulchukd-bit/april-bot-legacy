@@ -28,7 +28,8 @@ from storage import set_subscription
 
 # ===== SUBSCRIPTION HANDLER =====
 def handle_subscription(callback_data, user_id):
-    # BUY FLOW
+
+    # ===== BUY =====
     if callback_data == "buy_lite":
         return {
             "type": "text",
@@ -53,22 +54,20 @@ def handle_subscription(callback_data, user_id):
             ])
         }
 
-    # CONFIRM BUY
+    # ===== CONFIRM BUY =====
     if callback_data == "buy_yes_lite":
         return {
             "type": "admin_request",
-            "plan": "lite",
-            "user_id": user_id
+            "plan": "lite"
         }
 
     if callback_data == "buy_yes_premium":
         return {
             "type": "admin_request",
-            "plan": "premium",
-            "user_id": user_id
+            "plan": "premium"
         }
 
-    # DOWNGRADE
+    # ===== DOWNGRADE =====
     if callback_data == "confirm_downgrade":
         return {
             "type": "text",
@@ -84,8 +83,7 @@ def handle_subscription(callback_data, user_id):
     if callback_data == "confirm_downgrade_yes":
         return {
             "type": "admin_request",
-            "plan": "lite",
-            "user_id": user_id
+            "plan": "lite"
         }
 
     if callback_data == "confirm_downgrade_no":
@@ -94,7 +92,7 @@ def handle_subscription(callback_data, user_id):
             "data": "❌ Отменено"
         }
 
-    # ADMIN CONFIRM
+    # ===== ADMIN CONFIRM =====
     if callback_data.startswith("admin_confirm_"):
         parts = callback_data.split("_")
         plan = parts[2]
@@ -103,17 +101,19 @@ def handle_subscription(callback_data, user_id):
         set_subscription(uid, plan)
 
         return {
-            "type": "text",
-            "data": f"✅ Активирован {plan.upper()}",
-            "target_user": uid
+            "type": "notify_user",
+            "target_user": uid,
+            "data": f"✅ Активирован {plan.upper()}"
         }
 
+    # ===== ADMIN REJECT =====
     if callback_data.startswith("admin_reject_"):
         uid = int(callback_data.split("_")[3])
+
         return {
-            "type": "text",
-            "data": "❌ Запрос отклонён",
-            "target_user": uid
+            "type": "notify_user",
+            "target_user": uid,
+            "data": "❌ Запрос отклонён"
         }
 
     return None
@@ -124,7 +124,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # ===== CALLBACK ROUTING =====
+    # ===== CALLBACK =====
     if callback_data:
         sub = handle_subscription(callback_data, user_id)
         if sub:
@@ -132,7 +132,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ===== ВРЕМЯ =====
+    # ===== TIME =====
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
         return {
