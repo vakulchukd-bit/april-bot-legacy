@@ -54,18 +54,24 @@ def get_active_subscriptions():
         return 0
 
 
+# ===== ОШИБКИ (заглушка пока) =====
+def get_errors_count():
+    # пока просто 0 (потом подключим лог ошибок)
+    return 0
+
+
 # ===== ПАНЕЛЬ =====
 def get_admin_panel():
     print("🚀 ADMIN PANEL START")
 
-    # --- безопасная статистика ---
+    # --- пользователи ---
     try:
         _, _, get_stats, _ = get_storage()
         stats = get_stats()
         users_count, messages, images = stats if stats and len(stats) == 3 else (0, 0, 0)
     except Exception as e:
         print("🔥 STATS ERROR:", e)
-        users_count, messages, images = 0, 0, 0
+        users_count = 0
 
     # --- подписки ---
     try:
@@ -73,7 +79,7 @@ def get_admin_panel():
     except:
         active_subs = 0
 
-    # --- стоимость ---
+    # --- доход (через cost пока) ---
     try:
         calculate_cost = get_cost()
         cost_data = calculate_cost() or {}
@@ -81,23 +87,19 @@ def get_admin_panel():
         print("🔥 COST ERROR:", e)
         cost_data = {}
 
-    text_cost = cost_data.get("text", 0)
-    image_cost = cost_data.get("images", 0)
     total_cost = cost_data.get("cost", 0)
 
+    # --- ошибки ---
+    errors = get_errors_count()
+
     return f"""
-📊 АДМИН ПАНЕЛЬ
+⚙️ АДМИН
 
 👥 Пользователи: {users_count}
-💳 Активные подписки: {active_subs}
+💳 Подписки: {active_subs}
 
-💬 Сообщения: {messages}
-🖼 Картинки: {images}
+💰 Доход: ${total_cost}
+📅 Сегодня: 0
 
-💰 Расход:
-- Текст: {text_cost}
-- Картинки: {image_cost}
-- Итого: ${total_cost}
-
-🧠 Статус: работает
+⚠️ Ошибки: {errors}
 """
