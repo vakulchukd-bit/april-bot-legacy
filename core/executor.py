@@ -20,21 +20,43 @@ from blocks.engineering_system import analyze_code
 from blocks.experience_manager import update_experience, load_experience
 
 
-# ===== 🔥 УМНЫЙ АПДЕЙТ PROMPT =====
+# ===== 🔥 ЗАМЕНА ЦВЕТА (ГЛАВНЫЙ ФИКС) =====
 def update_image_prompt(old_prompt: str, new_text: str) -> str:
     t = new_text.lower()
 
-    colors = [
-        "красн", "син", "зелён", "желт", "черн", "бел",
-        "blue", "red", "green", "yellow", "black", "white"
-    ]
+    color_map = {
+        "красн": "красный",
+        "син": "синий",
+        "зелён": "зелёный",
+        "желт": "жёлтый",
+        "черн": "чёрный",
+        "бел": "белый",
+        "red": "red",
+        "blue": "blue",
+        "green": "green",
+        "yellow": "yellow",
+        "black": "black",
+        "white": "white"
+    }
 
-    # если есть цвет → заменяем смысл, но не теряем объект
-    for c in colors:
-        if c in t:
-            return f"{new_text} ({old_prompt})"
+    # ищем новый цвет
+    new_color = None
+    for key, val in color_map.items():
+        if key in t:
+            new_color = val
+            break
 
-    # иначе просто дополняем
+    # если найден цвет → удаляем старые цвета и ставим новый
+    if new_color:
+        clean_prompt = old_prompt
+
+        for key in color_map.keys():
+            clean_prompt = clean_prompt.replace(key, "")
+
+        # собираем нормальный prompt
+        return f"{new_color} {clean_prompt}".strip()
+
+    # если не цвет → дополняем
     return f"{old_prompt}, {new_text}"
 
 
@@ -117,7 +139,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 КОНТЕКСТ v2 (ГЛАВНЫЙ ФИКС) =====
+    # ===== 🔥 КОНТЕКСТ (ИСПРАВЛЕННЫЙ) =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
         old = state.get("last_image_prompt")
 
@@ -126,7 +148,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
         else:
             state["last_image_prompt"] = text
 
-    # ===== 🔥 "ДА" → ПОВТОР ДЕЙСТВИЯ =====
+    # ===== 🔥 "ДА" → ГЕНЕРАЦИЯ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
@@ -158,7 +180,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
                             return result
 
                 except Exception as e:
-                    print(f"🔥 ROOM ERROR [confirm v3]:", e)
+                    print(f"🔥 ROOM ERROR [confirm final]:", e)
 
     # ===== DEBUG =====
     if text == "/exp":
