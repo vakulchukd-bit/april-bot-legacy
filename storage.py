@@ -1,44 +1,4 @@
-import jsonfrom aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-
-# ===== ОСНОВНАЯ КЛАВИАТУРА (под ответом) =====
-def main_keyboard(msg_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍", callback_data=f"like_{msg_id}"),
-            InlineKeyboardButton(text="👎", callback_data=f"dislike_{msg_id}"),
-            InlineKeyboardButton(text="⋯", callback_data="menu")
-        ]
-    ])
-
-
-# ===== ❌ УСТАРЕВШАЯ (НЕ ИСПОЛЬЗУЕМ) =====
-# ОСТАВЛЯЮ, НО НЕ ТРОГАЕМ (чтобы ничего не сломать)
-def buy_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Да", callback_data="noop"),
-            InlineKeyboardButton(text="❌ Нет", callback_data="noop")
-        ]
-    ])
-
-
-# ===== 🔥 ВЫБОР ТАРИФА =====
-def тариф_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Lite", callback_data="buy_lite")],
-        [InlineKeyboardButton(text="👑 Premium", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-    ])
-
-
-# ===== 🔥 ОПЛАТЫ (АДМИН) =====
-def payments_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
-        [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-    ])
+import json
 import os
 import math
 from datetime import datetime, timezone, timedelta
@@ -50,7 +10,7 @@ FILE_PATH = "data/subscriptions.json"
 def load_data():
     if not os.path.exists(FILE_PATH):
         return {"users": {}}
-    
+
     with open(FILE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -76,7 +36,7 @@ def ensure_user(data, user_id):
 
     if uid not in data["users"]:
         data["users"][uid] = {
-            "plan": "free",  # 🔥 free / lite / premium
+            "plan": "free",
             "subscription_until": 0,
             "warned": False,
             "messages_today": 0,
@@ -88,15 +48,12 @@ def ensure_user(data, user_id):
     return uid, False
 
 
-# ===== 🔥 PLAN MANAGEMENT =====
+# ===== PLAN =====
 def set_subscription(user_id, plan="premium"):
     data = load_data()
     uid, _ = ensure_user(data, user_id)
 
-    if plan == "lite":
-        days = 15
-    else:
-        days = 30
+    days = 15 if plan == "lite" else 30
 
     expire_date = now().timestamp() + days * 86400
 
@@ -116,7 +73,6 @@ def get_user_plan(user_id):
     if created:
         save_data(data)
 
-    # если истекло → free
     if user["subscription_until"] < now().timestamp():
         return "free"
 
@@ -124,11 +80,10 @@ def get_user_plan(user_id):
 
 
 def check_subscription(user_id):
-    plan = get_user_plan(user_id)
-    return plan in ["lite", "premium"]
+    return get_user_plan(user_id) in ["lite", "premium"]
 
 
-# ===== REMAINING TIME =====
+# ===== REMAINING =====
 def get_remaining_seconds(user_id):
     data = load_data()
     uid, created = ensure_user(data, user_id)
@@ -144,7 +99,6 @@ def get_remaining_seconds(user_id):
     return user["subscription_until"] - now().timestamp()
 
 
-# ===== ДНИ =====
 def get_remaining_days(user_id):
     seconds = get_remaining_seconds(user_id)
 
@@ -152,12 +106,6 @@ def get_remaining_days(user_id):
         return 0
 
     return math.ceil(seconds / 86400)
-
-
-# ===== ПРОВЕРКА СКОРОГО ОКОНЧАНИЯ =====
-def is_expiring_soon(user_id, days_threshold=2):
-    days = get_remaining_days(user_id)
-    return 0 < days <= days_threshold
 
 
 # ===== WARNING =====
@@ -183,7 +131,7 @@ def should_warn(user_id):
     return False
 
 
-# ===== RESET DAILY LIMITS =====
+# ===== LIMITS =====
 def reset_if_needed(user):
     if user["last_reset"] != today():
         user["messages_today"] = 0
@@ -193,7 +141,6 @@ def reset_if_needed(user):
     return False
 
 
-# ===== LIMITS =====
 def can_send_message(user_id, limit=15):
     data = load_data()
     uid, created = ensure_user(data, user_id)
@@ -213,26 +160,6 @@ def can_send_message(user_id, limit=15):
     return True
 
 
-def can_generate_image(user_id, limit=1):
-    data = load_data()
-    uid, created = ensure_user(data, user_id)
-    user = data["users"][uid]
-
-    if created:
-        save_data(data)
-
-    if reset_if_needed(user):
-        save_data(data)
-
-    if user["images_today"] >= limit:
-        return False
-
-    user["images_today"] += 1
-    save_data(data)
-    return True
-
-
-# ===== СЧЁТЧИКИ =====
 def get_limits(user_id, msg_limit=15, img_limit=1):
     data = load_data()
     uid, created = ensure_user(data, user_id)
@@ -251,7 +178,6 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
-# ===== ОСТАЛОСЬ СООБЩЕНИЙ =====
 def get_remaining_messages(user_id, limit=15):
     data = load_data()
     uid, created = ensure_user(data, user_id)
@@ -262,53 +188,27 @@ def get_remaining_messages(user_id, limit=15):
 
     reset_if_needed(user)
 
-    remaining = limit - user["messages_today"]
-    return max(0, remaining)
+    return max(0, limit - user["messages_today"])
 
 
-# ===== СПИСКИ =====
-def get_all_users():
-    data = load_data()
-    return list(data["users"].keys())
-
-
-def get_all_subscriptions():
-    data = load_data()
-
-    result = []
-
-    for uid, user in data["users"].items():
-        if user.get("subscription_until", 0) > now().timestamp():
-            result.append(uid)
-
-    return result
-
-
-# ===== АДМИН СТАТИСТИКА =====
+# ===== ADMIN =====
 def get_admin_stats():
     data = load_data()
 
     users = data["users"]
 
     total_users = len(users)
-    subs = 0
-
-    for u in users.values():
-        if u.get("subscription_until", 0) > now().timestamp():
-            subs += 1
-
-    income_total = subs * 150
-    income_today = 0
+    subs = sum(1 for u in users.values() if u["subscription_until"] > now().timestamp())
 
     return {
         "users": total_users,
         "subs": subs,
-        "income_total": income_total,
-        "income_today": income_today
+        "income_total": subs * 150,
+        "income_today": 0
     }
 
 
-# ===== ТАЙМЕР =====
+# ===== TIMER =====
 def get_reset_seconds(user_id):
     now_time = now()
     tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
