@@ -178,6 +178,19 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
+    # ===== 🔥 ВСТАВКА ВРЕМЕНИ (НОВОЕ, НИЧЕГО НЕ ЛОМАЕТ) =====
+    if state.get("allow_time"):
+        now = datetime.now(tz)
+
+        time_text = (
+            f"🕒 Время: {now.strftime('%H:%M')}\n"
+            f"📅 Дата: {now.strftime('%d.%m.%Y')}"
+        )
+
+        await message.answer(time_text)
+        return
+    # ===== КОНЕЦ ВСТАВКИ =====
+
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
         if remaining == 0:
@@ -229,7 +242,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # ✅ FIX INFO
     if data == "info":
         await callback.answer()
         text, keyboard = build_info_menu(user_id)
@@ -242,7 +254,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # ✅ FIX BUY LOGIC
     if data == "buy_lite":
         await callback.answer()
 
@@ -262,7 +273,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
 
         if is_pro:
-            return  # ничего не делаем (уже Premium)
+            return
         else:
             await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
         return
