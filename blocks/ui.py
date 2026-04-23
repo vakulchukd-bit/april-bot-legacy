@@ -12,12 +12,13 @@ def main_keyboard(msg_id):
     ])
 
 
-# ===== ПОДТВЕРЖДЕНИЕ ПОКУПКИ =====
+# ===== ❌ УСТАРЕВШАЯ (НЕ ИСПОЛЬЗУЕМ) =====
+# ОСТАВЛЯЮ, НО НЕ ТРОГАЕМ (чтобы ничего не сломать)
 def buy_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Да", callback_data="buy_yes"),
-            InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+            InlineKeyboardButton(text="✅ Да", callback_data="noop"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="noop")
         ]
     ])
 
