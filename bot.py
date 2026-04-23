@@ -273,7 +273,12 @@ async def handle(message: types.Message):
             add_dialog(user_id, "assistant", result["data"])
 
             reply = final_control(result["data"])
-            await message.answer(reply)
+
+            # 🔥 ВОТ ГЛАВНЫЙ ФИКС
+            await message.answer(
+                reply,
+                reply_markup=main_keyboard(message.message_id)
+            )
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
