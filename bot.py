@@ -19,7 +19,7 @@ from storage import (
     get_remaining_days,
     get_limits,
     get_admin_stats,
-    get_user_plan  # 🔥 добавили
+    get_user_plan
 )
 
 from core.executor import execute
@@ -156,7 +156,7 @@ async def handle(message: types.Message):
     register_user(user_id)
 
     is_admin = user_id == ADMIN_ID
-    plan = get_user_plan(user_id)  # 🔥 вместо is_pro
+    plan = get_user_plan(user_id)
 
     if not is_admin and plan == "free":
         remaining = get_remaining_messages(user_id)
@@ -174,7 +174,6 @@ async def handle(message: types.Message):
         if result["type"] == "text":
             reply = result["data"]
 
-            # 🔥 ПРАВИЛЬНЫЙ СТАТУС
             if is_admin:
                 status = "\n\n⚙️ ADMIN"
             elif plan == "premium":
@@ -209,10 +208,36 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer("👎 Учту, исправлюсь", show_alert=True)
         return
 
-    # 🔥 noop (фикс спама)
+    # noop
     if data == "noop":
         await callback.answer("Текущий тариф", show_alert=False)
         return
+
+    # ===== 🔥 АДМИНКА (ПЕРЕХВАТ ДО CORE) =====
+    if user_id == ADMIN_ID:
+
+        if data == "admin_stats":
+            errors = get_errors()
+            if not errors:
+                await callback.answer("✅ Ошибок нет", show_alert=True)
+            else:
+                text = "❌ Ошибки:\n\n"
+                for err in errors[-5:]:
+                    text += f"{err}\n\n"
+                await callback.message.answer(text)
+            return
+
+        if data == "admin_payments":
+            await callback.message.answer(
+                "💳 Оплаты:",
+                reply_markup=payments_keyboard()
+            )
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.message.answer("📢 Введи текст для рассылки")
+            return
 
     await callback.answer()
 
