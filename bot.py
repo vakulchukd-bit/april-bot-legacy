@@ -131,6 +131,29 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
+    # ===== 🔥 VOICE ВОЗВРАЩЁН =====
+    if message.voice:
+        file = await bot.get_file(message.voice.file_id)
+        path = f"{user_id}.ogg"
+
+        await bot.download_file(file.file_path, destination=path)
+
+        def run():
+            with open(path, "rb") as f:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+            return t.text
+
+        text = await asyncio.to_thread(run)
+
+        if not text.strip():
+            await message.answer("🎤 Не расслышал")
+            return
+
+        await message.answer(f"🎤 {text}")
+
     state = get_state(user_id)
 
     now = datetime.now(tz)
@@ -140,6 +163,7 @@ async def handle(message: types.Message):
 
     state["allow_time"] = is_time_question(text)
 
+    # ===== ВРЕМЯ =====
     if state.get("allow_time"):
         await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
@@ -147,11 +171,24 @@ async def handle(message: types.Message):
         )
         return
 
+    # ===== ADMIN =====
+    if text == "/admin":
+        if user_id == ADMIN_ID:
+            await message.answer(get_admin_panel(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Анализ", callback_data="admin_stats")],
+                [InlineKeyboardButton(text="💳 Оплаты", callback_data="admin_payments")],
+                [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")]
+            ]))
+        else:
+            await message.answer("⛔ Нет доступа")
+        return
+
     register_user(user_id)
 
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
+    # ===== LIMIT =====
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
         if remaining == 0:
@@ -212,7 +249,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # ===== FREE / LITE → ЗАПРОСЫ =====
+    # ===== BUY =====
     if data == "buy_lite":
         await callback.answer()
         await callback.message.answer(
@@ -239,7 +276,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         )
         return
 
-    # ===== PREMIUM → LITE (САМОПОДТВЕРЖДЕНИЕ) =====
+    # ===== PREMIUM → LITE =====
     if data == "confirm_downgrade":
         await callback.answer()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -248,10 +285,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
                 InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
             ]
         ])
-        await callback.message.answer(
-            "⚠️ Ты уверен, что хочешь перейти на Lite?",
-            reply_markup=keyboard
-        )
+        await callback.message.answer("⚠️ Перейти на Lite?", reply_markup=keyboard)
         return
 
     if data == "confirm_downgrade_yes":
@@ -266,11 +300,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
         await bot.send_message(
             ADMIN_ID,
-            f"⚡ Переход Premium → Lite\nПользователь: {user_id}",
+            f"⚡ Premium → Lite\nПользователь: {user_id}",
             reply_markup=keyboard
         )
 
-        await callback.message.answer("⏳ Запрос отправлен администратору")
+        await callback.message.answer("⏳ Отправлено админу")
         return
 
     if data == "confirm_downgrade_no":
@@ -291,11 +325,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
         await bot.send_message(
             ADMIN_ID,
-            f"💳 Запрос на LITE\nПользователь: {user_id}",
+            f"💳 LITE\nПользователь: {user_id}",
             reply_markup=keyboard
         )
 
-        await callback.message.answer("⏳ Ожидай подтверждения")
+        await callback.message.answer("⏳ Ожидай")
         return
 
     if data == "buy_yes_premium":
@@ -310,11 +344,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
         await bot.send_message(
             ADMIN_ID,
-            f"💳 Запрос на PREMIUM\nПользователь: {user_id}",
+            f"💳 PREMIUM\nПользователь: {user_id}",
             reply_markup=keyboard
         )
 
-        await callback.message.answer("⏳ Ожидай подтверждения")
+        await callback.message.answer("⏳ Ожидай")
         return
 
     # ===== ADMIN =====
