@@ -252,6 +252,32 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("💳 Подтвердить переход на Premium?", reply_markup=keyboard)
         return
 
+    # ===== PREMIUM → LITE (confirm self) =====
+    if data == "confirm_downgrade":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
+            ]
+        ])
+        await callback.message.answer("⚠️ Перейти на Lite?", reply_markup=keyboard)
+        return
+
+    if data == "confirm_downgrade_yes":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_lite_{user_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_lite_{user_id}")
+            ]
+        ])
+        await bot.send_message(ADMIN_ID, f"🔻 DOWNGRADE → LITE\nID: {user_id}", reply_markup=keyboard)
+        await callback.message.answer("⏳ Запрос отправлен")
+        return
+
+    if data == "confirm_downgrade_no":
+        await callback.message.answer("❌ Отменено")
+        return
+
     # ===== SEND TO ADMIN =====
     if data == "buy_yes_lite":
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -284,9 +310,9 @@ async def handle_callbacks(callback: types.CallbackQuery):
         uid = int(parts[3])
 
         if plan == "premium":
-            set_subscription(uid, 30)
+            set_subscription(uid, 30, "premium")
         elif plan == "lite":
-            set_subscription(uid, 15)
+            set_subscription(uid, 15, "lite")
 
         await bot.send_message(uid, f"✅ Активирован {plan.upper()}")
         return
