@@ -20,7 +20,7 @@ from storage import (
     get_limits,
     get_admin_stats,
     get_user_plan,
-    get_all_users  # 🔥 добавили
+    get_all_users
 )
 
 from core.executor import execute
@@ -144,7 +144,6 @@ async def handle(message: types.Message):
 
     state["allow_time"] = is_time_question(text)
 
-    # ===== TIME =====
     if state.get("allow_time"):
         await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
@@ -154,7 +153,7 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # ===== 🔥 BROADCAST =====
+    # ===== BROADCAST =====
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -229,7 +228,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer("Текущий тариф", show_alert=False)
         return
 
-    # ===== 🔥 АДМИНКА =====
+    # ===== АДМИНКА =====
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
@@ -244,12 +243,17 @@ async def handle_callbacks(callback: types.CallbackQuery):
                 await callback.answer(text[:200], show_alert=True)
             return
 
+        # 🔥 ВОТ ЗДЕСЬ ФИКС
         if data == "admin_payments":
-            await callback.answer(
-                "💳 Оплаты:\n\n"
-                "OpenAI:\nhttps://platform.openai.com/account/billing\n\n"
-                "Railway:\nhttps://railway.app",
-                show_alert=True
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+
+            await callback.message.answer(
+                "💳 Оплаты:",
+                reply_markup=keyboard
             )
             return
 
