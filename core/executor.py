@@ -103,11 +103,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 СОХРАНЕНИЕ ОПЫТА =====
+    # ===== 🔥 СОХРАНЕНИЕ ОПЫТА (ФИКС) =====
     if "last_action" not in state:
-        state["last_action"] = {"status": "pending"}
+        state["last_action"] = {}
 
-    if any(x in t for x in ["не так", "ошибка", "плохо", "неправильно"]):
+    if any(x in t for x in ["не так", "ошибка", "ошибся", "плохо", "неправильно"]):
         state["last_action"]["status"] = "conflict"
         update_experience(user_id, state)
 
