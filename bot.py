@@ -94,7 +94,7 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
-# ===== 🔥 SERVER (ВОЗВРАЩЁН) =====
+# ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -195,6 +195,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     await callback.answer()
 
+    # 👍 👎
     if data.startswith("like_"):
         await callback.answer("👍 Сохранено", show_alert=False)
         return
@@ -203,6 +204,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer("👎 Учту", show_alert=False)
         return
 
+    # ===== MENU =====
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -213,41 +215,12 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    if data == "buy_lite":
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-            ]
-        ])
-        await callback.message.answer("💳 Подтвердить переход на Lite?", reply_markup=keyboard)
-        return
+    # ❗ ВСЮ ЛОГИКУ ПОДПИСОК МЫ УДАЛИЛИ ОТСЮДА
+    # 👉 дальше она переедет в executor
 
-    if data == "buy_premium":
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-            ]
-        ])
-        await callback.message.answer("💳 Подтвердить переход на Premium?", reply_markup=keyboard)
-        return
-
-    # ===== ADMIN CONFIRM =====
-    if data.startswith("admin_confirm_"):
-        parts = data.split("_")
-        plan = parts[2]
-        uid = int(parts[3])
-
-        set_subscription(uid, plan)
-
-        await bot.send_message(uid, f"✅ Активирован {plan.upper()}")
-        return
-
-    # ===== ADMIN REJECT =====
-    if data.startswith("admin_reject_"):
-        uid = int(data.split("_")[3])
-        await bot.send_message(uid, "❌ Запрос отклонён")
+    # временно (чтобы не падало)
+    if data.startswith("buy_") or data.startswith("admin_") or data.startswith("confirm_"):
+        await callback.message.answer("⚙️ Система обновляется...")
         return
 
 
