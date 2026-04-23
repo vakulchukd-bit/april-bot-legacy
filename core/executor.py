@@ -65,23 +65,17 @@ def build_prompt(struct):
     return f"{struct.get('color','')} {struct.get('object','')} {struct.get('scene','')}".strip()
 
 
-# ===== БАЗОВЫЕ =====
-def is_followup(text: str) -> bool:
-    t = text.lower().strip()
-    return any(x in t for x in [
-        "сделай", "измени", "добавь", "убери",
-        "замени", "поменяй"
-    ])
+def is_followup(text: str):
+    t = text.lower()
+    return any(x in t for x in ["сделай", "измени", "добавь", "поменяй"])
 
 
-def is_confirmation(text: str) -> bool:
-    t = text.lower().strip()
-    return t in ["да", "ага", "ок", "окей", "давай"]
+def is_confirmation(text: str):
+    return text.lower().strip() in ["да", "ок", "ага", "давай"]
 
 
-def is_rejection(text: str) -> bool:
-    t = text.lower().strip()
-    return t in ["нет", "не"]
+def is_rejection(text: str):
+    return text.lower().strip() in ["нет", "не"]
 
 
 # ===== EXECUTE =====
@@ -112,11 +106,13 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     if is_confirmation(text) and last and last.get("type") == "image":
 
-        # 🔥 БЕРЁМ ЗАФИКСИРОВАННОЕ
         final_struct = state.get("pending_render")
 
         if final_struct:
             final_prompt = build_prompt(final_struct)
+
+            # 🔥 КРИТИЧЕСКИЙ ФИКС
+            state["image_context"] = None
 
             result = await run_with_typing(
                 chat_id,
@@ -151,16 +147,9 @@ async def execute(user_id, text, chat_id, run_with_typing):
     # ===== ВОПРОСЫ =====
     if intent == "question":
 
-        ctx = get_image_context(user_id) or state.get("image_context")
         anchor = get_anchor(user_id)
 
-        if ctx and ctx.get("path"):
-            try:
-                hint = await analyze_image(ctx["path"])
-                text = f"На изображении: {hint}\n\n{text}"
-            except:
-                pass
-
+        # ❌ УБРАЛИ ВЛИЯНИЕ image_context
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
 
@@ -171,7 +160,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             text_process(user_id, text, state)
         )
 
-        # ===== СОХРАНЯЕМ СЦЕНУ =====
         scene, obj, color = extract_scene_object(text)
 
         state["image_struct"] = {
@@ -180,7 +168,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "color": color
         }
 
-        # 🔥 ВАЖНО: фиксируем перед вопросом
         state["pending_render"] = state["image_struct"].copy()
 
         state["last_action"] = {
