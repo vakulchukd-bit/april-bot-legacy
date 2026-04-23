@@ -1,5 +1,6 @@
 import json
 import os
+import math
 from datetime import datetime, timezone, timedelta
 
 FILE_PATH = "data/subscriptions.json"
@@ -87,15 +88,14 @@ def get_remaining_seconds(user_id):
     return user["subscription_until"] - now().timestamp()
 
 
-# ===== 🔥 ОСТАЛОСЬ ДНЕЙ ПОДПИСКИ =====
+# ===== 🔥 ДНИ (ФИКС) =====
 def get_remaining_days(user_id):
     seconds = get_remaining_seconds(user_id)
 
     if not seconds or seconds <= 0:
         return 0
 
-    days = int(seconds // 86400)
-    return max(0, days)
+    return math.ceil(seconds / 86400)
 
 
 # ===== 🔥 ПРОВЕРКА СКОРОГО ОКОНЧАНИЯ =====
@@ -193,6 +193,25 @@ def get_remaining_messages(user_id, limit=15):
 
     remaining = limit - user["messages_today"]
     return max(0, remaining)
+
+
+# ===== 🔥 СПИСОК ПОЛЬЗОВАТЕЛЕЙ =====
+def get_all_users():
+    data = load_data()
+    return list(data["users"].keys())
+
+
+# ===== 🔥 СПИСОК ПОДПИСОК =====
+def get_all_subscriptions():
+    data = load_data()
+
+    result = []
+
+    for uid, user in data["users"].items():
+        if user.get("is_subscribed") and user.get("subscription_until", 0) > now().timestamp():
+            result.append(uid)
+
+    return result
 
 
 # ===== АДМИН СТАТИСТИКА =====
