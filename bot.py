@@ -56,7 +56,7 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# ===== 🔥 TIME CHECK =====
+# ===== TIME CHECK =====
 def is_time_question(text: str):
     text = text.lower()
 
@@ -178,18 +178,14 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # ===== 🔥 ВСТАВКА ВРЕМЕНИ (НОВОЕ, НИЧЕГО НЕ ЛОМАЕТ) =====
+    # ===== TIME =====
     if state.get("allow_time"):
         now = datetime.now(tz)
-
-        time_text = (
+        await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
             f"📅 Дата: {now.strftime('%d.%m.%Y')}"
         )
-
-        await message.answer(time_text)
         return
-    # ===== КОНЕЦ ВСТАВКИ =====
 
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
@@ -248,44 +244,50 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    if data == "tariffs":
-        await callback.answer()
-        text, keyboard = build_tariffs_menu(user_id)
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-        return
-
-    if data == "buy_lite":
+    # ===== PREMIUM → LITE =====
+    if data == "confirm_downgrade":
         await callback.answer()
 
-        if is_pro:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no")
-                ]
-            ])
-            await callback.message.answer("⚠️ Перейти на Lite тариф?", reply_markup=keyboard)
-        else:
-            await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
+            ]
+        ])
+
+        await callback.message.answer(
+            "⚠️ Ты уверен, что хочешь перейти на более простой тариф Lite?",
+            reply_markup=keyboard
+        )
         return
 
-    if data == "buy_premium":
+    if data == "confirm_downgrade_yes":
         await callback.answer()
 
-        if is_pro:
-            return
-        else:
-            await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_{user_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_{user_id}")
+            ]
+        ])
+
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚡ Переход Premium → Lite\nПользователь: {user_id}",
+            reply_markup=keyboard
+        )
+
+        await callback.message.answer("⏳ Запрос отправлен администратору")
         return
 
-    if data == "confirm_yes":
-        await callback.answer()
-        await callback.message.answer("⚡ Тариф изменён на Lite")
-        return
-
-    if data == "confirm_no":
+    if data == "confirm_downgrade_no":
         await callback.answer()
         await callback.message.answer("❌ Отменено")
+        return
+
+    if data in ["buy_lite", "buy_premium"]:
+        await callback.answer()
+        await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
         return
 
     if data == "buy_yes":
@@ -298,7 +300,12 @@ async def handle_callbacks(callback: types.CallbackQuery):
             ]
         ])
 
-        await bot.send_message(ADMIN_ID, f"💳 Запрос от {user_id}", reply_markup=keyboard)
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 Запрос на подписку\nПользователь: {user_id}",
+            reply_markup=keyboard
+        )
+
         await callback.message.answer("⏳ Ожидай подтверждения")
         return
 
