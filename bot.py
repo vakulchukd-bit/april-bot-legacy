@@ -94,6 +94,19 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
+# ===== 🔥 SERVER (ВОЗВРАЩЁН) =====
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
 # ===== MAIN =====
 @dp.message()
 async def handle(message: types.Message):
