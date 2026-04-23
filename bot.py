@@ -150,14 +150,9 @@ async def handle(message: types.Message):
         await message.answer("❌ Режим анализа выключен")
         return
 
-    # ===== 🔥 ENGINEERING MODE (ПЕРЕХВАТ)
+    # ===== ENGINEERING MODE
     if get_mode(user_id) == "engineering" and user_id == ADMIN_ID:
-        result = await execute(
-            user_id,
-            text,
-            message.chat.id,
-            run_with_typing
-        )
+        result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         if result["type"] == "admin_report":
             await message.answer(result["data"])
@@ -252,12 +247,7 @@ async def handle(message: types.Message):
                     return
 
         # ===== CORE =====
-        result = await execute(
-            user_id,
-            text,
-            message.chat.id,
-            run_with_typing
-        )
+        result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         # ===== OUTPUT =====
         if result["type"] == "image":
@@ -279,6 +269,30 @@ async def handle(message: types.Message):
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
+
+
+# ===== CALLBACK КНОПКИ =====
+@dp.callback_query()
+async def handle_callbacks(callback: types.CallbackQuery):
+    data = callback.data
+
+    await callback.answer()
+
+    if data == "buy_yes":
+        await callback.message.answer("💳 Оформляем подписку...\n\nНапиши /pay (заглушка)")
+        return
+
+    if data == "buy_no":
+        await callback.message.answer("Ок 👍 Если передумаешь — напиши 🙂")
+        return
+
+    if data.startswith("like_"):
+        await callback.message.answer("👍 Спасибо за оценку!")
+        return
+
+    if data.startswith("dislike_"):
+        await callback.message.answer("👎 Принял, буду лучше")
+        return
 
 
 # ===== START =====
