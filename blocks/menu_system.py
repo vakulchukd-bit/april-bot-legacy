@@ -37,20 +37,20 @@ def build_free_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Lite", callback_data="buy_lite")],
-        [InlineKeyboardButton(text="👑 Premium", callback_data="buy_premium")],
+        [InlineKeyboardButton(text="🚀 Перейти на Lite", callback_data="buy_lite")],
+        [InlineKeyboardButton(text="👑 Перейти на Premium", callback_data="buy_premium")],
         [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
     ])
 
     return text, keyboard
 
 
-# ===== PRO =====
+# ===== PRO (PREMIUM) =====
 def build_pro_menu(user_id):
     days = get_remaining_days(user_id)
 
     text = (
-        "👑 *PRO*\n\n"
+        "👑 *PREMIUM*\n\n"
         "∞ Без ограничений\n"
         "⚡ Быстрые ответы\n"
         "🧠 Приоритет\n\n"
@@ -121,7 +121,7 @@ def build_tariffs_menu(user_id):
     return text, keyboard
 
 
-# ===== 🔥 INFO (ВОЗВРАЩАЕМ НОРМАЛЬНОЕ ОПИСАНИЕ) =====
+# ===== INFO =====
 def build_info_menu(user_id):
     text = (
         "🤖 *Возможности Ayprill*\n\n"
