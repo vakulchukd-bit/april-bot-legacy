@@ -33,7 +33,7 @@ from blocks.state_manager import (
 )
 
 from blocks.anchor_system import create_anchor, clear_anchor
-from blocks.error_handler import handle_error
+from blocks.error_handler import handle_error, get_errors  # 🔥 добавили
 
 from blocks.admin_system import (
     register_user,
@@ -217,23 +217,34 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("⏳ Ожидай подтверждения")
         return
 
-    # АДМИН
+    # 🔥 АНАЛИЗ = ОШИБКИ
     if data == "admin_stats":
-        stats = get_admin_stats()
-        await callback.message.answer(
-            f"📊\n👥 {stats['users']}\n💳 {stats['subs']}\n💰 {stats['income_total']} грн"
-        )
+        errors = get_errors()
+
+        if not errors:
+            await callback.message.answer("✅ Ошибок нет")
+            return
+
+        text = "❌ ОШИБКИ:\n\n"
+
+        for i, err in enumerate(errors[-5:], 1):
+            text += f"{i}. {err}\n\n"
+
+        await callback.message.answer(text)
         return
 
+    # ОПЛАТЫ
     if data == "admin_payments":
         await callback.message.answer("💳 Платежи:", reply_markup=payments_keyboard())
         return
 
+    # РАССЫЛКА
     if data == "admin_broadcast":
         set_mode(callback.from_user.id, "broadcast")
         await callback.message.answer("📢 Введи текст")
         return
 
+    # ПОДТВЕРЖДЕНИЕ
     if data.startswith("admin_confirm_"):
         user_id = int(data.split("_")[2])
         set_subscription(user_id)
