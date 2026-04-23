@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 import pytz
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
@@ -15,7 +15,9 @@ from storage import (
     should_warn,
     can_send_message,
     set_subscription,
-    get_remaining_messages
+    get_remaining_messages,
+    get_remaining_days,
+    get_limits
 )
 
 from core.executor import execute
@@ -116,7 +118,7 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # ===== LIMIT CONTROL (НОВАЯ ЛОГИКА) =====
+    # ===== LIMIT CONTROL =====
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
 
@@ -130,7 +132,6 @@ async def handle(message: types.Message):
             )
             return
 
-        # увеличиваем счётчик
         can_send_message(user_id)
 
     try:
@@ -143,8 +144,16 @@ async def handle(message: types.Message):
 
         reply = final_control(result["data"])
 
+        # ===== СТАТУС В ОТВЕТЕ =====
+        if is_admin or is_pro:
+            days = get_remaining_days(user_id)
+            status = f"\n\n👑 PRO: осталось {days} дн."
+        else:
+            limits = get_limits(user_id)
+            status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
+
         await message.answer(
-            reply,
+            reply + status,
             reply_markup=main_keyboard(message.message_id)
         )
 
