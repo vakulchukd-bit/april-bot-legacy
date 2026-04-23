@@ -19,7 +19,8 @@ from storage import (
     get_remaining_days,
     get_limits,
     get_admin_stats,
-    get_user_plan
+    get_user_plan,
+    get_all_users  # 🔥 добавили
 )
 
 from core.executor import execute
@@ -59,14 +60,12 @@ tz = pytz.timezone("Europe/Kyiv")
 # ===== TIME CHECK =====
 def is_time_question(text: str):
     text = text.lower()
-
     triggers = [
         "сколько времени",
         "который час",
         "какая дата",
         "какой сегодня день"
     ]
-
     return any(t in text for t in triggers)
 
 
@@ -155,6 +154,25 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
+    # ===== 🔥 BROADCAST =====
+    mode = get_mode(user_id)
+    if user_id == ADMIN_ID and mode == "broadcast":
+        users = get_all_users()
+        success = 0
+
+        for uid in users:
+            if int(uid) == ADMIN_ID:
+                continue
+            try:
+                await bot.send_message(uid, f"📢 {text}")
+                success += 1
+            except:
+                pass
+
+        clear_mode(user_id)
+        await message.answer(f"✅ Рассылка отправлена: {success}")
+        return
+
     is_admin = user_id == ADMIN_ID
     plan = get_user_plan(user_id)
 
@@ -199,7 +217,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 👍 👎
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо за лайк", show_alert=True)
         return
@@ -208,35 +225,37 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer("👎 Учту, исправлюсь", show_alert=True)
         return
 
-    # noop
     if data == "noop":
         await callback.answer("Текущий тариф", show_alert=False)
         return
 
-    # ===== 🔥 АДМИНКА (ПЕРЕХВАТ ДО CORE) =====
+    # ===== 🔥 АДМИНКА =====
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
             errors = get_errors()
+
             if not errors:
-                await callback.answer("✅ Ошибок нет", show_alert=True)
+                await callback.answer("📊 Анализ\n\n✅ Ошибок нет", show_alert=True)
             else:
-                text = "❌ Ошибки:\n\n"
+                text = "📊 Анализ\n\n❌ Ошибки:\n\n"
                 for err in errors[-5:]:
-                    text += f"{err}\n\n"
-                await callback.message.answer(text)
+                    text += f"{err}\n"
+                await callback.answer(text[:200], show_alert=True)
             return
 
         if data == "admin_payments":
-            await callback.message.answer(
-                "💳 Оплаты:",
-                reply_markup=payments_keyboard()
+            await callback.answer(
+                "💳 Оплаты:\n\n"
+                "OpenAI:\nhttps://platform.openai.com/account/billing\n\n"
+                "Railway:\nhttps://railway.app",
+                show_alert=True
             )
             return
 
         if data == "admin_broadcast":
             set_mode(user_id, "broadcast")
-            await callback.message.answer("📢 Введи текст для рассылки")
+            await callback.answer("📢 Введи текст для рассылки", show_alert=True)
             return
 
     await callback.answer()
