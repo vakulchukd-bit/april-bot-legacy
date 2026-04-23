@@ -274,7 +274,6 @@ async def handle(message: types.Message):
 
             reply = final_control(result["data"])
 
-            # 🔥 ВОТ ГЛАВНЫЙ ФИКС
             await message.answer(
                 reply,
                 reply_markup=main_keyboard(message.message_id)
@@ -291,10 +290,23 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     await callback.answer()
 
-    # 🔥 МЕНЮ
+    # 🔥 МЕНЮ (ФИКС)
     if data == "menu":
         text, keyboard = get_menu(callback.from_user.id)
-        await callback.message.answer(text, reply_markup=keyboard)
+
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        except:
+            await callback.message.answer(
+                text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+
         return
 
     # 🔥 ЗАПРОС ПОДПИСКИ → АДМИНУ
