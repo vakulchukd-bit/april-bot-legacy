@@ -20,6 +20,8 @@ from blocks.experience_manager import load_experience
 
 from blocks.image_module import process as image_generate
 
+from datetime import datetime
+
 
 # ===== СТРУКТУРА =====
 def extract_scene_object(text: str):
@@ -72,14 +74,12 @@ def is_followup(text: str):
 
 def is_confirmation(text: str):
     t = text.lower().strip()
-
     positives = [
         "да", "ага", "ок", "окей", "давай",
         "хорошо", "ладно", "согласен",
         "делай", "поехали", "го",
         "запускай", "генерируй"
     ]
-
     return any(p in t for p in positives)
 
 
@@ -94,6 +94,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
     mode = get_mode(user_id)
 
     t = text.lower().strip()
+
+    # ===== 0. СБРОС ПРИ СМЕНЕ ТЕМЫ =====
+    if state.get("pending_render"):
+        if not is_followup(text) and not is_confirmation(text):
+            intent_tmp = detect_intent(text)
+            if intent_tmp == "question":
+                state["pending_render"] = None
+                state["last_action"] = None
 
     # ===== 1. ПОДТВЕРЖДЕНИЕ =====
     last = state.get("last_action")
@@ -154,12 +162,18 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": f"Ок, делаю: {build_prompt(updated)}.\nПодтвердить?"
         }
 
-    # ===== 4. НЕПОНЯТНЫЙ ОТВЕТ =====
+    # ===== 4. УМНЫЙ КОНТРОЛЬ =====
     if state.get("pending_render"):
-        return {
-            "type": "text",
-            "data": "Подтвердить генерацию? Напиши «да» или «нет» 🙂"
-        }
+
+        if not is_confirmation(text) and not is_rejection(text) and not is_followup(text):
+
+            intent_tmp = detect_intent(text)
+
+            if intent_tmp != "question":
+                return {
+                    "type": "text",
+                    "data": "Подтвердить генерацию? Напиши «да» или «нет» 🙂"
+                }
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -167,6 +181,14 @@ async def execute(user_id, text, chat_id, run_with_typing):
         return {
             "type": "text",
             "data": f"🧠 Опыт:\n{data.get(str(user_id), {})}"
+        }
+
+    # ===== ВРЕМЯ =====
+    if "время" in t:
+        now = datetime.now().strftime("%H:%M")
+        return {
+            "type": "text",
+            "data": f"Сейчас {now}"
         }
 
     # ===== ENGINEERING =====
