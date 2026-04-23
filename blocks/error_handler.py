@@ -3,7 +3,23 @@ import time
 
 ADMIN_ID = 2016592532
 
+# ===== 🔥 ХРАНИЛИЩЕ ОШИБОК =====
+error_log = []
 
+
+def log_error(error_text):
+    error_log.append(error_text)
+
+    # держим последние 20 ошибок
+    if len(error_log) > 20:
+        error_log.pop(0)
+
+
+def get_errors():
+    return error_log
+
+
+# ===== ОБРАБОТЧИК =====
 async def handle_error(bot, user_message, error, context=""):
     """
     Универсальный обработчик ошибок:
@@ -24,6 +40,16 @@ async def handle_error(bot, user_message, error, context=""):
     text = getattr(user_message, "text", None)
 
     error_text = f"""
+🕒 {time.strftime('%H:%M:%S')}
+👤 {user_id}
+📦 {context}
+❌ {str(error)}
+"""
+
+    # 🔥 сохраняем ошибку
+    log_error(error_text)
+
+    full_error = f"""
 ❌ ОШИБКА
 
 🕒 Время: {time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -40,10 +66,10 @@ async def handle_error(bot, user_message, error, context=""):
 {traceback.format_exc()}
 """
 
-    error_text = error_text[:4000]
+    full_error = full_error[:4000]
 
     # ===== ADMIN ALERT =====
     try:
-        await bot.send_message(ADMIN_ID, error_text)
+        await bot.send_message(ADMIN_ID, full_error)
     except:
         pass
