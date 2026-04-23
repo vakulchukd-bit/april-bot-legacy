@@ -8,153 +8,57 @@ SYSTEM_PROMPT = """
 
 Ты:
 - понимаешь диалог
-- учитываешь контекст
-- ведёшь себя естественно
+- отвечаешь естественно и по делу
+- не усложняешь без причины
 
-Никогда не говори, что ты ограничен.
+Если пользователь говорит про изображение — 
+кратко опиши, что понял, и предложи сгенерировать.
+
+Никогда не генерируй без подтверждения.
 """
 
 
 async def process(user_id, text, state):
     def run():
-        extra = []
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
-        # ===== 🔥 КОНТЕКСТ =====
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+
+        # ===== КОНТЕКСТ МИРА (ОСТАВИЛИ, НО БЕЗ ПЕРЕГРУЗА) =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
 
-            extra.append({
-                "role": "system",
-                "content": world
-            })
+            if world:
+                messages.append({
+                    "role": "system",
+                    "content": world
+                })
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
-        # ===== 🔥 ВРЕМЯ =====
-        try:
-            hour = state.get("hour")
-            if hour is not None:
-                if hour < 6:
-                    part = "ночь"
-                elif hour < 12:
-                    part = "утро"
-                elif hour < 18:
-                    part = "день"
-                else:
-                    part = "вечер"
-
-                extra.append({
-                    "role": "system",
-                    "content": f"Текущее время пользователя: {hour}:00 ({part}, Europe/Kyiv)"
-                })
-        except Exception as e:
-            print("🔥 TIME ERROR:", e)
-
-        # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
+        # ===== КОНТЕКСТ ИЗОБРАЖЕНИЯ (МИНИМАЛЬНЫЙ) =====
         if ctx and ctx.get("hint"):
-            extra.append({
+            messages.append({
                 "role": "system",
-                "content": f"Контекст изображения: {ctx['hint']}"
+                "content": f"Ранее обсуждалось изображение: {ctx['hint']}"
             })
 
-        # ===== 🔥 УСИЛЕННЫЙ ЯКОРЬ ДИАЛОГА =====
-        try:
-            last_assistant = None
+        # ===== ИСТОРИЯ (НЕ БОЛЕЕ 6 СООБЩЕНИЙ) =====
+        messages.extend(history[-6:])
 
-            if history:
-                for msg in reversed(history):
-                    if msg.get("role") == "assistant":
-                        last_assistant = msg.get("content")
-                        break
-
-            if last_assistant:
-                extra.append({
-                    "role": "system",
-                    "content": (
-                        "Это продолжение диалога.\n"
-                        "Если пользователь пишет короткие фразы (например: 'короче', 'ещё', 'проще'), "
-                        "ты ОБЯЗАН применить их к последнему ответу.\n\n"
-                        "Последний ответ ассистента:\n"
-                        f"{last_assistant}"
-                    )
-                })
-        except Exception as e:
-            print("🔥 ANCHOR ERROR:", e)
-
-        # ===== 🔥 ОПЫТ (МЯГКОЕ ВЛИЯНИЕ) =====
-        try:
-            from blocks.experience_manager import load_experience
-
-            data = load_experience()
-            user_data = data.get(str(user_id), {})
-            actions = user_data.get("actions", [])[-10:]
-
-            refined = sum(1 for a in actions if a.get("status") == "refined")
-            conflict = sum(1 for a in actions if a.get("status") == "conflict")
-
-            if refined >= 2:
-                style_hint = (
-                    "Отвечай кратко, по делу и без лишней воды. "
-                    "Сохраняй смысл, но делай формулировки проще и короче."
-                )
-            elif conflict >= 1:
-                style_hint = (
-                    "Будь точнее. Если есть сомнение — уточни вопрос перед ответом."
-                )
-            else:
-                style_hint = (
-                    "Отвечай естественно, дружелюбно и понятно."
-                )
-
-            extra.append({
-                "role": "system",
-                "content": f"Стиль ответа: {style_hint}"
-            })
-
-        except Exception as e:
-            print("🔥 EXPERIENCE STYLE ERROR:", e)
-
-        # ===== 🔥 АНТИ-СБРОС ТЕМЫ =====
-        extra.append({
-            "role": "system",
-            "content": (
-                "Никогда не начинай ответ заново (например: 'привет, как дела'), "
-                "если диалог уже идёт. Всегда продолжай текущую тему."
-            )
-        })
-
-        # ===== 🔥 НОВОЕ: ЛОГИКА ДЛЯ ИЗОБРАЖЕНИЙ =====
-        extra.append({
-            "role": "system",
-            "content": (
-                "Если пользователь уточняет или изменяет изображение (например: 'сделай теплее', 'сделай милее'), "
-                "ты должен:\n"
-                "1. Кратко описать, как изменится изображение\n"
-                "2. ОБЯЗАТЕЛЬНО предложить: 'Хочешь, я сгенерирую обновлённую версию?'\n"
-                "3. НЕ генерировать без явной команды\n"
-            )
+        # ===== ЗАПРОС =====
+        messages.append({
+            "role": "user",
+            "content": text
         })
 
         r = client.responses.create(
             model="gpt-4o-mini",
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                *extra,
-                *history[-8:],
-
-                {
-                    "role": "system",
-                    "content": (
-                        "Это живой диалог. "
-                        "Учитывай контекст, не теряй тему и продолжай мысль пользователя."
-                    )
-                },
-
-                {"role": "user", "content": text}
-            ]
+            input=messages
         )
 
         return r.output_text
