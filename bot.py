@@ -33,7 +33,7 @@ from blocks.state_manager import (
 )
 
 from blocks.anchor_system import create_anchor, clear_anchor
-from blocks.error_handler import handle_error, get_errors  # 🔥 добавили
+from blocks.error_handler import handle_error, get_errors
 
 from blocks.admin_system import (
     register_user,
@@ -107,7 +107,7 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # ===== VOICE =====
+    # VOICE
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -130,7 +130,7 @@ async def handle(message: types.Message):
 
         await message.answer(f"🎤 {text}")
 
-    # ===== ADMIN PANEL =====
+    # ADMIN
     if text == "/admin":
         if user_id == ADMIN_ID:
             await message.answer(get_admin_panel(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -147,7 +147,7 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # ===== FREE LIMIT =====
+    # LIMIT
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
 
@@ -192,6 +192,49 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
+    # INFO (описание)
+    if data == "info":
+        text = (
+            "🤖 *Возможности Ayprill*\n\n"
+            "💬 Общение — ответы и диалог\n"
+            "🧠 Интеллект — идеи и объяснения\n"
+            "🖼 Генерация — изображения\n"
+            "💻 Помощь — код и задачи\n\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "📦 *Тарифы*\n\n"
+            "🆓 FREE — базовые лимиты\n"
+            "⚡ LITE — больше возможностей\n"
+            "👑 PREMIUM — без ограничений\n"
+        )
+        await callback.message.answer(text, parse_mode="Markdown")
+        return
+
+    # DOWNGRADE
+    if data == "confirm_downgrade":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no")
+            ]
+        ])
+        await callback.message.answer(
+            "⚠️ Перейти на более простой тариф?",
+            reply_markup=keyboard
+        )
+        return
+
+    if data == "confirm_yes":
+        await callback.message.answer("⚡ Тариф изменён на Lite")
+        return
+
+    if data == "confirm_no":
+        await callback.message.answer("❌ Отменено")
+        return
+
+    # NOOP
+    if data == "noop":
+        return
+
     # ТАРИФЫ
     if data == "tariffs":
         text, keyboard = build_tariffs_menu(callback.from_user.id)
@@ -217,7 +260,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("⏳ Ожидай подтверждения")
         return
 
-    # 🔥 АНАЛИЗ = ОШИБКИ
+    # АНАЛИЗ
     if data == "admin_stats":
         errors = get_errors()
 
@@ -226,25 +269,21 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         text = "❌ ОШИБКИ:\n\n"
-
         for i, err in enumerate(errors[-5:], 1):
             text += f"{i}. {err}\n\n"
 
         await callback.message.answer(text)
         return
 
-    # ОПЛАТЫ
     if data == "admin_payments":
         await callback.message.answer("💳 Платежи:", reply_markup=payments_keyboard())
         return
 
-    # РАССЫЛКА
     if data == "admin_broadcast":
         set_mode(callback.from_user.id, "broadcast")
         await callback.message.answer("📢 Введи текст")
         return
 
-    # ПОДТВЕРЖДЕНИЕ
     if data.startswith("admin_confirm_"):
         user_id = int(data.split("_")[2])
         set_subscription(user_id)
