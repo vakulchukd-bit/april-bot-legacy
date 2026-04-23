@@ -43,7 +43,7 @@ from blocks.admin_system import (
 
 from blocks.mode_manager import get_mode, set_mode, clear_mode
 from blocks.session_manager import is_session_expired
-from blocks.menu_system import get_menu, build_tariffs_menu
+from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -133,13 +133,11 @@ async def handle(message: types.Message):
 
     state = get_state(user_id)
 
-    # 🔥 ВРЕМЯ В КОНТЕКСТ
     now = datetime.now(tz)
     state["time_str"] = now.strftime("%H:%M")
     state["date_str"] = now.strftime("%d.%m.%Y")
     state["day"] = now.strftime("%A")
 
-    # 🔥 ФЛАГ ВРЕМЕНИ
     state["allow_time"] = is_time_question(text)
 
     if message.voice:
@@ -214,6 +212,8 @@ async def handle(message: types.Message):
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
+    user_id = callback.from_user.id
+    is_pro = check_subscription(user_id)
 
     if data.startswith("like_"):
         await callback.answer("👍 Сохранено", show_alert=False)
@@ -225,29 +225,60 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     if data == "menu":
         await callback.answer()
-        text, keyboard = get_menu(callback.from_user.id)
+        text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
+    # ✅ FIX INFO
     if data == "info":
         await callback.answer()
-        await callback.message.answer("🤖 Ayprill работает и развивается")
+        text, keyboard = build_info_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
     if data == "tariffs":
         await callback.answer()
-        text, keyboard = build_tariffs_menu(callback.from_user.id)
+        text, keyboard = build_tariffs_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    if data in ["buy_lite", "buy_premium"]:
+    # ✅ FIX BUY LOGIC
+    if data == "buy_lite":
         await callback.answer()
-        await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
+
+        if is_pro:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no")
+                ]
+            ])
+            await callback.message.answer("⚠️ Перейти на Lite тариф?", reply_markup=keyboard)
+        else:
+            await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
+        return
+
+    if data == "buy_premium":
+        await callback.answer()
+
+        if is_pro:
+            return  # ничего не делаем (уже Premium)
+        else:
+            await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
+        return
+
+    if data == "confirm_yes":
+        await callback.answer()
+        await callback.message.answer("⚡ Тариф изменён на Lite")
+        return
+
+    if data == "confirm_no":
+        await callback.answer()
+        await callback.message.answer("❌ Отменено")
         return
 
     if data == "buy_yes":
         await callback.answer()
-        user_id = callback.from_user.id
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
