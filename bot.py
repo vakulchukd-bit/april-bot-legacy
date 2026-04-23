@@ -8,7 +8,7 @@ import pytz
 import random
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
 from storage import (
@@ -275,15 +275,48 @@ async def handle(message: types.Message):
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
-
     await callback.answer()
 
+    # 🔥 ЗАПРОС ПОДПИСКИ → АДМИНУ
     if data == "buy_yes":
-        await callback.message.answer("💳 Оформляем подписку...\n\nНапиши /pay (заглушка)")
+        user_id = callback.from_user.id
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm_{user_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_reject_{user_id}")
+            ]
+        ])
+
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 Запрос на подписку\n\nПользователь: {user_id}",
+            reply_markup=keyboard
+        )
+
+        await callback.message.answer("⏳ Запрос отправлен администратору")
         return
 
     if data == "buy_no":
         await callback.message.answer("Ок 👍 Если передумаешь — напиши 🙂")
+        return
+
+    # 🔥 АДМИН ПОДТВЕРЖДАЕТ
+    if data.startswith("admin_confirm_"):
+        user_id = int(data.split("_")[2])
+
+        set_subscription(user_id)
+
+        await bot.send_message(user_id, "✅ Подписка активирована на 30 дней 🎉")
+        await callback.message.answer("✔ Подписка подтверждена")
+        return
+
+    # 🔥 АДМИН ОТКЛОНЯЕТ
+    if data.startswith("admin_reject_"):
+        user_id = int(data.split("_")[2])
+
+        await bot.send_message(user_id, "❌ Подписка отклонена")
+        await callback.message.answer("❌ Отклонено")
         return
 
     if data.startswith("like_"):
