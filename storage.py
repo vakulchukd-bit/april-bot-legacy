@@ -36,49 +36,56 @@ def ensure_user(data, user_id):
 
     if uid not in data["users"]:
         data["users"][uid] = {
-            "is_subscribed": False,
+            "plan": "free",  # 🔥 free / lite / premium
             "subscription_until": 0,
             "warned": False,
             "messages_today": 0,
             "images_today": 0,
             "last_reset": today()
         }
-        return uid, True  # 🔥 новый пользователь
+        return uid, True
 
     return uid, False
 
 
-# ===== SUBSCRIPTION =====
-def set_subscription(user_id, days=30):
+# ===== 🔥 PLAN MANAGEMENT =====
+def set_subscription(user_id, plan="premium"):
     data = load_data()
     uid, _ = ensure_user(data, user_id)
 
+    if plan == "lite":
+        days = 15
+    else:
+        days = 30
+
     expire_date = now().timestamp() + days * 86400
 
-    data["users"][uid]["is_subscribed"] = True
+    data["users"][uid]["plan"] = plan
     data["users"][uid]["subscription_until"] = expire_date
     data["users"][uid]["warned"] = False
 
     save_data(data)
 
 
-def check_subscription(user_id):
+def get_user_plan(user_id):
     data = load_data()
     uid, created = ensure_user(data, user_id)
 
     user = data["users"][uid]
 
-    # 🔥 если пользователь новый — сохраняем
     if created:
         save_data(data)
 
-    if not user["is_subscribed"]:
-        return False
-
+    # если истекло → free
     if user["subscription_until"] < now().timestamp():
-        return False
+        return "free"
 
-    return True
+    return user.get("plan", "free")
+
+
+def check_subscription(user_id):
+    plan = get_user_plan(user_id)
+    return plan in ["lite", "premium"]
 
 
 # ===== REMAINING TIME =====
@@ -91,7 +98,7 @@ def get_remaining_seconds(user_id):
 
     user = data["users"][uid]
 
-    if not user["is_subscribed"]:
+    if user["subscription_until"] < now().timestamp():
         return None
 
     return user["subscription_until"] - now().timestamp()
@@ -123,7 +130,7 @@ def should_warn(user_id):
     if created:
         save_data(data)
 
-    if not user["is_subscribed"]:
+    if user["subscription_until"] < now().timestamp():
         return False
 
     remaining = user["subscription_until"] - now().timestamp()
@@ -231,7 +238,7 @@ def get_all_subscriptions():
     result = []
 
     for uid, user in data["users"].items():
-        if user.get("is_subscribed") and user.get("subscription_until", 0) > now().timestamp():
+        if user.get("subscription_until", 0) > now().timestamp():
             result.append(uid)
 
     return result
@@ -247,7 +254,7 @@ def get_admin_stats():
     subs = 0
 
     for u in users.values():
-        if u.get("is_subscribed") and u.get("subscription_until", 0) > now().timestamp():
+        if u.get("subscription_until", 0) > now().timestamp():
             subs += 1
 
     income_total = subs * 150
