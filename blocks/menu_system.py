@@ -39,7 +39,7 @@ def build_free_menu(user_id):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Lite", callback_data="buy_lite")],
         [InlineKeyboardButton(text="👑 Premium", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="📋 Что даст подписка", callback_data="tariffs")]
+        [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
     ])
 
     return text, keyboard
@@ -58,8 +58,9 @@ def build_pro_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Сменить тариф", callback_data="tariffs")],
-        [InlineKeyboardButton(text="📋 Что включено", callback_data="tariffs")]
+        [InlineKeyboardButton(text="⚡ Перейти на Lite", callback_data="confirm_downgrade")],
+        [InlineKeyboardButton(text="👑 Текущий тариф: Premium", callback_data="noop")],
+        [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
     ])
 
     return text, keyboard
@@ -104,10 +105,10 @@ def build_tariffs_menu(user_id):
         "— приоритет\n"
     )
 
-    # 🔥 ЕСЛИ УЖЕ PRO
     if is_pro:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👑 У тебя уже PREMIUM", callback_data="noop")],
+            [InlineKeyboardButton(text="⚡ Перейти на Lite", callback_data="confirm_downgrade")],
+            [InlineKeyboardButton(text="👑 Текущий: Premium", callback_data="noop")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
         ])
     else:
