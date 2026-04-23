@@ -89,6 +89,8 @@ def build_admin_menu(user_id):
 
 # ===== ТАРИФЫ =====
 def build_tariffs_menu(user_id):
+    is_pro = check_subscription(user_id)
+
     text = (
         "📋 *ТАРИФЫ*\n\n"
         "🆓 FREE\n"
@@ -102,11 +104,18 @@ def build_tariffs_menu(user_id):
         "— приоритет\n"
     )
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Купить Lite", callback_data="buy_lite")],
-        [InlineKeyboardButton(text="👑 Купить Premium", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-    ])
+    # 🔥 ЕСЛИ УЖЕ PRO
+    if is_pro:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👑 У тебя уже PREMIUM", callback_data="noop")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+        ])
+    else:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Купить Lite", callback_data="buy_lite")],
+            [InlineKeyboardButton(text="👑 Купить Premium", callback_data="buy_premium")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+        ])
 
     return text, keyboard
 
