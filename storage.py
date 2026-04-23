@@ -87,6 +87,17 @@ def get_remaining_seconds(user_id):
     return user["subscription_until"] - now().timestamp()
 
 
+# ===== 🔥 ОСТАЛОСЬ ДНЕЙ ПОДПИСКИ =====
+def get_remaining_days(user_id):
+    seconds = get_remaining_seconds(user_id)
+
+    if not seconds or seconds <= 0:
+        return 0
+
+    days = int(seconds // 86400)
+    return max(0, days)
+
+
 # ===== WARNING (24 HOURS) =====
 def should_warn(user_id):
     data = load_data()
