@@ -19,8 +19,8 @@ def save_experience(data):
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except:
-        pass
+    except Exception as e:
+        print("🔥 SAVE ERROR:", e)
 
 
 def update_experience(user_id, state):
@@ -36,13 +36,17 @@ def update_experience(user_id, state):
     last = state.get("last_action")
 
     if not last:
+        print("⚠️ last_action отсутствует")
         return
 
+    # 🔥 ФИКС: гарантируем значения
     entry = {
-        "type": last.get("type"),
-        "intent": last.get("intent"),
-        "status": last.get("status")
+        "type": last.get("type", "unknown"),
+        "intent": last.get("intent", "unknown"),
+        "status": last.get("status", "unknown")
     }
+
+    print("🧠 SAVE EXPERIENCE:", entry)
 
     data[user_id]["actions"].append(entry)
 
