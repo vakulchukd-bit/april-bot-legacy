@@ -56,21 +56,17 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# ===== TYPING (УЛУЧШЕННЫЙ) =====
+# ===== TYPING =====
 async def typing_loop(chat_id):
     try:
         elapsed = 0
-
         while True:
             if elapsed < 4:
                 await bot.send_chat_action(chat_id, "typing")
             else:
-                # имитация "думает"
                 await bot.send_chat_action(chat_id, "upload_photo")
-
             await asyncio.sleep(2)
             elapsed += 2
-
     except:
         pass
 
@@ -79,7 +75,6 @@ async def run_with_typing(chat_id, coro):
     task = asyncio.create_task(typing_loop(chat_id))
     try:
         result = await coro
-        # 🔥 микро-пауза перед ответом (очень важно для UX)
         await asyncio.sleep(0.1)
         return result
     finally:
@@ -119,7 +114,6 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # VOICE
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -142,7 +136,6 @@ async def handle(message: types.Message):
 
         await message.answer(f"🎤 {text}")
 
-    # ADMIN
     if text == "/admin":
         if user_id == ADMIN_ID:
             await message.answer(get_admin_panel(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -159,14 +152,11 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # LIMIT
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
-
         if remaining == 0:
             await message.answer("⛔ Лимит исчерпан", reply_markup=buy_keyboard())
             return
-
         can_send_message(user_id)
 
     try:
@@ -196,78 +186,43 @@ async def handle(message: types.Message):
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
-    await callback.answer()
 
     # 👍 ЛАЙК
     if data.startswith("like_"):
-        await callback.answer("👍 Принято", show_alert=False)
+        await callback.answer("👍 Сохранено", show_alert=False)
         return
 
     # 👎 ДИЗЛАЙК
     if data.startswith("dislike_"):
-        await callback.answer("👎 Учту", show_alert=False)
+        await callback.answer("👎 Учту и улучшу", show_alert=False)
         return
 
     # MENU
     if data == "menu":
+        await callback.answer()
         text, keyboard = get_menu(callback.from_user.id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # INFO
     if data == "info":
-        text = (
-            "🤖 *Возможности Ayprill*\n\n"
-            "💬 Общение — ответы и диалог\n"
-            "🧠 Интеллект — идеи и объяснения\n"
-            "🖼 Генерация — изображения\n"
-            "💻 Помощь — код и задачи\n\n"
-            "━━━━━━━━━━━━━━━\n\n"
-            "📦 *Тарифы*\n\n"
-            "🆓 FREE — базовые лимиты\n"
-            "⚡ LITE — больше возможностей\n"
-            "👑 PREMIUM — без ограничений\n"
-        )
-        await callback.message.answer(text, parse_mode="Markdown")
+        await callback.answer()
+        text = "🤖 Ayprill работает и развивается"
+        await callback.message.answer(text)
         return
 
-    # DOWNGRADE
-    if data == "confirm_downgrade":
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no")
-            ]
-        ])
-        await callback.message.answer(
-            "⚠️ Перейти на более простой тариф?",
-            reply_markup=keyboard
-        )
-        return
-
-    if data == "confirm_yes":
-        await callback.message.answer("⚡ Тариф изменён на Lite")
-        return
-
-    if data == "confirm_no":
-        await callback.message.answer("❌ Отменено")
-        return
-
-    if data == "noop":
-        return
-
-    # ТАРИФЫ
     if data == "tariffs":
+        await callback.answer()
         text, keyboard = build_tariffs_menu(callback.from_user.id)
         await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # ПОКУПКА
     if data in ["buy_lite", "buy_premium"]:
-        await callback.message.answer("💳 Отправить запрос на покупку?", reply_markup=buy_keyboard())
+        await callback.answer()
+        await callback.message.answer("💳 Отправить запрос?", reply_markup=buy_keyboard())
         return
 
     if data == "buy_yes":
+        await callback.answer()
         user_id = callback.from_user.id
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -281,8 +236,8 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer("⏳ Ожидай подтверждения")
         return
 
-    # АНАЛИЗ
     if data == "admin_stats":
+        await callback.answer()
         errors = get_errors()
 
         if not errors:
@@ -290,28 +245,32 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         text = "❌ ОШИБКИ:\n\n"
-        for i, err in enumerate(errors[-5:], 1):
-            text += f"{i}. {err}\n\n"
+        for err in errors[-5:]:
+            text += f"{err}\n\n"
 
         await callback.message.answer(text)
         return
 
     if data == "admin_payments":
+        await callback.answer()
         await callback.message.answer("💳 Платежи:", reply_markup=payments_keyboard())
         return
 
     if data == "admin_broadcast":
+        await callback.answer()
         set_mode(callback.from_user.id, "broadcast")
         await callback.message.answer("📢 Введи текст")
         return
 
     if data.startswith("admin_confirm_"):
+        await callback.answer()
         user_id = int(data.split("_")[2])
         set_subscription(user_id)
         await bot.send_message(user_id, "✅ Подписка активирована")
         return
 
     if data.startswith("admin_reject_"):
+        await callback.answer()
         user_id = int(data.split("_")[2])
         await bot.send_message(user_id, "❌ Отклонено")
         return
