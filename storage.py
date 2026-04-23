@@ -150,7 +150,7 @@ def can_generate_image(user_id, limit=1):
     return True
 
 
-# ===== 🔥 НОВОЕ: ПОЛУЧИТЬ СЧЁТЧИКИ =====
+# ===== СЧЁТЧИКИ =====
 def get_limits(user_id, msg_limit=15, img_limit=1):
     data = load_data()
     uid = ensure_user(data, user_id)
@@ -166,7 +166,7 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
-# ===== 🔥 НОВОЕ: АДМИН СТАТИСТИКА =====
+# ===== АДМИН СТАТИСТИКА =====
 def get_admin_stats():
     data = load_data()
 
@@ -179,7 +179,6 @@ def get_admin_stats():
         if u.get("is_subscribed") and u.get("subscription_until", 0) > now().timestamp():
             subs += 1
 
-    # 💰 пока заглушка (потом подключим реальные платежи)
     income_total = subs * 150
     income_today = 0
 
@@ -189,3 +188,18 @@ def get_admin_stats():
         "income_total": income_total,
         "income_today": income_today
     }
+
+
+# ===== 🔥 ТАЙМЕР ДО СБРОСА =====
+def get_reset_seconds(user_id):
+    now_time = now()
+    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((tomorrow - now_time).total_seconds())
+
+
+def format_time(seconds):
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+
+    return f"{hours:02}:{minutes:02}:{secs:02}"
