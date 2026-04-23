@@ -37,7 +37,8 @@ def build_free_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Перейти на PRO", callback_data="buy_yes")]
+        [InlineKeyboardButton(text="🚀 Перейти на PRO", callback_data="buy_yes")],
+        [InlineKeyboardButton(text="📋 Тарифы", callback_data="tariffs")]
     ])
 
     return text, keyboard
@@ -57,6 +58,27 @@ def build_pro_menu(user_id):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_yes")],
         [InlineKeyboardButton(text="📋 Тарифы", callback_data="tariffs")]
+    ])
+
+    return text, keyboard
+
+
+# ===== ТАРИФЫ =====
+def build_tariffs_menu(user_id):
+    text = (
+        "📋 *ТАРИФЫ*\n\n"
+        "🆓 FREE\n"
+        "— 15 сообщений в день\n"
+        "— 1 изображение\n\n"
+        "👑 PRO — 150 грн / 30 дней\n"
+        "— Без ограничений\n"
+        "— Быстро\n"
+        "— Приоритет\n"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Купить PRO", callback_data="buy_yes")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
     ])
 
     return text, keyboard
