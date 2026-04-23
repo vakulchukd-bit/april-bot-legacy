@@ -22,7 +22,7 @@ from blocks.experience_manager import update_experience, load_experience
 from blocks.image_module import process as image_generate
 
 
-# ===== 🔥 СТРУКТУРА СЦЕНЫ =====
+# ===== СТРУКТУРА =====
 def extract_scene_object(text: str):
     t = text.lower()
 
@@ -61,85 +61,39 @@ def extract_scene_object(text: str):
     return scene.strip(), obj, color
 
 
-def build_prompt(state):
-    data = state.get("image_struct", {})
-    return f"{data.get('color','')} {data.get('object','')} {data.get('scene','')}".strip()
+def build_prompt(struct):
+    return f"{struct.get('color','')} {struct.get('object','')} {struct.get('scene','')}".strip()
 
 
 # ===== БАЗОВЫЕ =====
 def is_followup(text: str) -> bool:
     t = text.lower().strip()
-    markers = [
+    return any(x in t for x in [
         "сделай", "измени", "добавь", "убери",
-        "замени", "поменяй",
-        "ещё", "еще",
-        "короче", "подробнее",
-        "объясни проще",
-        "не это имел в виду",
-        "я про другое",
-        "уточни"
-    ]
-    return any(m in t for m in markers)
+        "замени", "поменяй"
+    ])
 
 
 def is_confirmation(text: str) -> bool:
     t = text.lower().strip()
-    positives = [
-        "да", "ага", "ок", "окей", "хорошо",
-        "давай", "согласен", "подходит",
-        "делай", "генерируй", "создавай"
-    ]
-    return any(t == p or t.startswith(p + " ") for p in positives)
+    return t in ["да", "ага", "ок", "окей", "давай"]
 
 
 def is_rejection(text: str) -> bool:
     t = text.lower().strip()
-    return t in ["нет", "не", "не так", "не то"]
+    return t in ["нет", "не"]
 
 
-def update_last_action(state, text):
-    last = state.get("last_action")
-
-    if not last or last.get("status") != "pending":
-        return
-
-    t = text.lower()
-
-    if any(x in t for x in ["добавь", "еще", "ещё", "измени", "переделай"]):
-        last["status"] = "refined"
-        return
-
-    if any(x in t for x in ["не так", "не то", "плохо", "неправильно", "ошибка", "нет"]):
-        last["status"] = "conflict"
-        return
-
-    last["status"] = "accepted"
-
-
-def commit_last_action(user_id, state):
-    last = state.get("last_action")
-    if not last or last.get("status") == "pending":
-        return
-    update_experience(user_id, state)
-
-
-# ===== ОСНОВА =====
+# ===== EXECUTE =====
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    update_last_action(state, text)
-    commit_last_action(user_id, state)
-
     intent = detect_intent(text)
-
-    if is_followup(text):
-        intent = "question"
-
     t = text.lower().strip()
 
-    # ===== 🔥 ГЛАВНЫЙ ФИКС: ПЕРЕСБОРКА STATE =====
-    if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
+    # ===== ОБНОВЛЕНИЕ STATE =====
+    if is_followup(text) and not is_confirmation(text):
 
         old = state.get("image_struct", {})
 
@@ -153,28 +107,25 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         state["image_struct"] = updated
 
-    # ===== 🔥 SNAPSHOT =====
+    # ===== ПОДТВЕРЖДЕНИЕ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
 
-        final_struct = state.get("image_struct", {}).copy()
-        final_prompt = build_prompt({"image_struct": final_struct})
+        # 🔥 БЕРЁМ ЗАФИКСИРОВАННОЕ
+        final_struct = state.get("pending_render")
 
-        if final_prompt:
-            clean_state = {
-                "image_struct": final_struct
-            }
+        if final_struct:
+            final_prompt = build_prompt(final_struct)
 
             result = await run_with_typing(
                 chat_id,
-                image_generate(user_id, final_prompt, clean_state)
+                image_generate(user_id, final_prompt, {"image_struct": final_struct})
             )
 
             if result:
+                state["pending_render"] = None
                 state["last_action"] = None
-                state["image_context"] = None
-                state["last_render_struct"] = final_struct
                 return result
 
     # ===== DEBUG =====
@@ -220,6 +171,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             text_process(user_id, text, state)
         )
 
+        # ===== СОХРАНЯЕМ СЦЕНУ =====
         scene, obj, color = extract_scene_object(text)
 
         state["image_struct"] = {
@@ -228,8 +180,11 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "color": color
         }
 
+        # 🔥 ВАЖНО: фиксируем перед вопросом
+        state["pending_render"] = state["image_struct"].copy()
+
         state["last_action"] = {
-            "type": "image" if ("изображ" in text or "картин" in text) else "text",
+            "type": "image",
             "intent": "answer",
             "status": "pending"
         }
