@@ -169,19 +169,33 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         state["image_struct"] = data
 
-    # ===== 🔥 ГЛАВНЫЙ ФИКС: ПРЯМАЯ ГЕНЕРАЦИЯ =====
+    # ===== 🔥 FINAL SNAPSHOT: ИЗОЛЯЦИЯ РЕНДЕРА =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
-        final_prompt = build_prompt(state)
+        # 1) фиксируем финальное состояние
+        final_struct = state.get("image_struct", {}).copy()
+
+        # 2) строим prompt только из финального состояния
+        final_prompt = f"{final_struct.get('color','')} {final_struct.get('object','')} {final_struct.get('scene','')}".strip()
 
         if final_prompt:
+            # 3) изолируем state для генерации (без истории/контекста)
+            clean_state = {
+                "image_struct": final_struct
+            }
+
             result = await run_with_typing(
                 chat_id,
-                image_generate(user_id, final_prompt, state)
+                image_generate(user_id, final_prompt, clean_state)
             )
 
             if result:
+                # 4) старт нового цикла (не даём старому влиять дальше)
+                state["last_action"] = None
+                state["image_context"] = None
+                state["last_render_struct"] = final_struct
+
                 return result
 
     # ===== DEBUG =====
