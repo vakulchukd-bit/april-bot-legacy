@@ -27,7 +27,41 @@ async def process(user_id, text, state):
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
 
-        # ===== КОНТЕКСТ МИРА (ОСТАВИЛИ, НО БЕЗ ПЕРЕГРУЗА) =====
+        # ===== 🔥 ОБУЧЕНИЕ (АДАПТАЦИЯ) =====
+        try:
+            from blocks.experience_manager import load_experience
+
+            data = load_experience()
+            user_data = data.get(str(user_id), {})
+            actions = user_data.get("actions", [])[-20:]
+
+            conflict = sum(1 for a in actions if a.get("status") == "conflict")
+            refined = sum(1 for a in actions if a.get("status") == "refined")
+            accepted = sum(1 for a in actions if a.get("status") == "accepted")
+
+            # мягкое влияние, без ломания поведения
+            if conflict >= 3:
+                messages.append({
+                    "role": "system",
+                    "content": "Пользователь часто недоволен. Отвечай точнее и при сомнении уточняй."
+                })
+
+            if refined >= 3:
+                messages.append({
+                    "role": "system",
+                    "content": "Пользователь часто просит переделать. Отвечай короче и ближе к сути."
+                })
+
+            if accepted >= 5:
+                messages.append({
+                    "role": "system",
+                    "content": "Пользователь доволен. Можно действовать увереннее и меньше уточнять."
+                })
+
+        except Exception as e:
+            print("🔥 EXPERIENCE APPLY ERROR:", e)
+
+        # ===== КОНТЕКСТ МИРА =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
@@ -40,14 +74,14 @@ async def process(user_id, text, state):
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
-        # ===== КОНТЕКСТ ИЗОБРАЖЕНИЯ (МИНИМАЛЬНЫЙ) =====
+        # ===== КОНТЕКСТ ИЗОБРАЖЕНИЯ =====
         if ctx and ctx.get("hint"):
             messages.append({
                 "role": "system",
                 "content": f"Ранее обсуждалось изображение: {ctx['hint']}"
             })
 
-        # ===== ИСТОРИЯ (НЕ БОЛЕЕ 6 СООБЩЕНИЙ) =====
+        # ===== ИСТОРИЯ =====
         messages.extend(history[-6:])
 
         # ===== ЗАПРОС =====
