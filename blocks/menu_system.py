@@ -5,7 +5,8 @@ from storage import (
     get_admin_stats,
     get_reset_seconds,
     format_time,
-    get_remaining_days
+    get_remaining_days,
+    get_user_plan  # 🔥 добавили
 )
 
 ADMIN_ID = 2016592532
@@ -15,8 +16,13 @@ ADMIN_ID = 2016592532
 def get_user_role(user_id):
     if user_id == ADMIN_ID:
         return "admin"
-    elif check_subscription(user_id):
+
+    plan = get_user_plan(user_id)
+
+    if plan == "premium":
         return "pro"
+    elif plan == "lite":
+        return "lite"
     else:
         return "free"
 
@@ -37,7 +43,7 @@ def build_free_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Перейти на Lite", callback_data="buy_lite")],
+        [InlineKeyboardButton(text="⚡ Перейти на Lite", callback_data="buy_lite")],
         [InlineKeyboardButton(text="👑 Перейти на Premium", callback_data="buy_premium")],
         [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
     ])
@@ -45,7 +51,27 @@ def build_free_menu(user_id):
     return text, keyboard
 
 
-# ===== PRO (PREMIUM) =====
+# ===== LITE =====
+def build_lite_menu(user_id):
+    days = get_remaining_days(user_id)
+
+    text = (
+        "⚡ *LITE*\n\n"
+        "🚀 Расширенные лимиты\n"
+        "⚡ Быстрее ответы\n\n"
+        f"📅 Осталось: {days} дн."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👑 Перейти на Premium", callback_data="buy_premium")],
+        [InlineKeyboardButton(text="⚡ Текущий тариф: Lite", callback_data="noop")],
+        [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
+    ])
+
+    return text, keyboard
+
+
+# ===== PREMIUM =====
 def build_pro_menu(user_id):
     days = get_remaining_days(user_id)
 
@@ -90,7 +116,7 @@ def build_admin_menu(user_id):
 
 # ===== ТАРИФЫ =====
 def build_tariffs_menu(user_id):
-    is_pro = check_subscription(user_id)
+    plan = get_user_plan(user_id)
 
     text = (
         "📋 *ТАРИФЫ*\n\n"
@@ -105,12 +131,20 @@ def build_tariffs_menu(user_id):
         "— приоритет\n"
     )
 
-    if is_pro:
+    if plan == "premium":
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚡ Перейти на Lite", callback_data="confirm_downgrade")],
             [InlineKeyboardButton(text="👑 Текущий: Premium", callback_data="noop")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
         ])
+
+    elif plan == "lite":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Перейти на Premium", callback_data="buy_premium")],
+            [InlineKeyboardButton(text="⚡ Текущий: Lite", callback_data="noop")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+        ])
+
     else:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Купить Lite", callback_data="buy_lite")],
@@ -149,6 +183,9 @@ def get_menu(user_id):
 
     if role == "free":
         return build_free_menu(user_id)
+
+    elif role == "lite":
+        return build_lite_menu(user_id)
 
     elif role == "pro":
         return build_pro_menu(user_id)
