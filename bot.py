@@ -17,7 +17,8 @@ from storage import (
     set_subscription,
     get_remaining_messages,
     get_remaining_days,
-    get_limits
+    get_limits,
+    is_expiring_soon  # 🔥 НОВОЕ
 )
 
 from core.executor import execute
@@ -111,19 +112,32 @@ async def handle(message: types.Message):
         set_image_context(user_id, None)
         await message.answer("🧠 Сессия обновлена")
 
-    if should_warn(user_id):
-        await message.answer("⚠️ Подписка скоро закончится")
-
     # ===== ROLE =====
     is_admin = user_id == ADMIN_ID
     is_pro = check_subscription(user_id)
 
-    # ===== LIMIT CONTROL =====
+    # ===== ПРО УВЕДОМЛЕНИЯ =====
+    if is_pro:
+        if should_warn(user_id):
+            await message.answer("⚠️ Подписка скоро закончится")
+
+        if is_expiring_soon(user_id):
+            await message.answer(
+                "⚠️ Подписка заканчивается через несколько дней\n\n💳 Продлить сейчас?",
+                reply_markup=buy_keyboard()
+            )
+
+    # ===== LIMIT CONTROL (FREE) =====
     if not is_admin and not is_pro:
         remaining = get_remaining_messages(user_id)
 
-        if remaining <= 2 and remaining > 0:
-            await message.answer(f"⚠️ Осталось {remaining} сообщений")
+        if remaining == 1:
+            await message.answer(
+                "⚠️ Осталось 1 сообщение\n\n💳 Хочешь без ограничений?",
+                reply_markup=buy_keyboard()
+            )
+        elif remaining == 2:
+            await message.answer("⚠️ Осталось 2 сообщения")
 
         if remaining == 0:
             await message.answer(
@@ -144,7 +158,7 @@ async def handle(message: types.Message):
 
         reply = final_control(result["data"])
 
-        # ===== СТАТУС В ОТВЕТЕ =====
+        # ===== СТАТУС =====
         if is_admin or is_pro:
             days = get_remaining_days(user_id)
             status = f"\n\n👑 PRO: осталось {days} дн."
