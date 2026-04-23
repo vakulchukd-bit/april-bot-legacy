@@ -194,13 +194,13 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 👍 👎
+    # 👍 👎 (🔥 исправлено: теперь всплывает сверху)
     if data.startswith("like_"):
-        await callback.answer("👍 Сохранено", show_alert=False)
+        await callback.answer("👍 Спасибо за лайк", show_alert=True)
         return
 
     if data.startswith("dislike_"):
-        await callback.answer("👎 Учту", show_alert=False)
+        await callback.answer("👎 Учту, исправлюсь", show_alert=True)
         return
 
     await callback.answer()
@@ -254,7 +254,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
             await callback.message.answer("⏳ Отправлено администратору")
 
-        # ===== 🔥 ФИКС (главный) =====
+        # ===== notify_user =====
         elif result["type"] == "notify_user":
             await bot.send_message(result["target_user"], result["data"])
 
