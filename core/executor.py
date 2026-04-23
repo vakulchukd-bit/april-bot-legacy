@@ -66,6 +66,14 @@ def build_prompt(struct):
     return f"{struct.get('color','')} {struct.get('object','')} {struct.get('scene','')}".strip()
 
 
+# ===== НОВОЕ: НАМЕРЕНИЕ КАРТИНКИ =====
+def wants_image(text: str):
+    t = text.lower()
+    return any(x in t for x in [
+        "покажи", "хочу увидеть", "сгенерируй", "картинку", "изображение"
+    ])
+
+
 # ===== ЛОГИКА =====
 def is_followup(text: str):
     t = text.lower()
@@ -102,11 +110,10 @@ async def execute(user_id, text, chat_id, run_with_typing):
             if intent_tmp == "question":
                 state["pending_render"] = None
 
-    # ===== 1. ПОДТВЕРЖДЕНИЕ (БЕЗ last_action!) =====
+    # ===== 1. ПОДТВЕРЖДЕНИЕ =====
     if is_confirmation(text) and state.get("pending_render"):
 
         final_struct = state.get("pending_render")
-
         final_prompt = build_prompt(final_struct)
 
         state["image_context"] = None
@@ -148,19 +155,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "type": "text",
             "data": f"Ок, делаю: {build_prompt(updated)}.\nПодтвердить?"
         }
-
-    # ===== 4. УМНЫЙ КОНТРОЛЬ =====
-    if state.get("pending_render"):
-
-        if not is_confirmation(text) and not is_rejection(text) and not is_followup(text):
-
-            intent_tmp = detect_intent(text)
-
-            if intent_tmp != "question":
-                return {
-                    "type": "text",
-                    "data": "Подтвердить генерацию? Напиши «да» или «нет» 🙂"
-                }
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -215,7 +209,12 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "color": color
         }
 
-        state["pending_render"] = state["image_struct"].copy()
+        # 🔥 ГЛАВНЫЙ ФИКС
+        if wants_image(text):
+            return {
+                "type": "text",
+                "data": result["content"] + "\n\nХочешь, сгенерирую это изображение?"
+            }
 
         return {"type": "text", "data": result["content"]}
 
@@ -236,13 +235,6 @@ async def execute(user_id, text, chat_id, run_with_typing):
         try:
             if room.can_handle(text, context):
                 result = await room.handle(user_id, text, context, run_with_typing)
-
-                if result and result.get("type") == "image":
-                    state["pending_render"] = {
-                        "scene": "",
-                        "object": "",
-                        "color": ""
-                    }
 
                 if result:
                     return result
