@@ -19,8 +19,11 @@ from blocks.engineering_system import analyze_code
 
 from blocks.experience_manager import update_experience, load_experience
 
+# 🔥 прямой вызов генерации
+from blocks.image_module import process as image_generate
 
-# ===== 🔥 НОВОЕ: СТРУКТУРА СЦЕНЫ =====
+
+# ===== 🔥 СТРУКТУРА СЦЕНЫ =====
 def extract_scene_object(text: str):
     t = text.lower()
 
@@ -43,8 +46,9 @@ def extract_scene_object(text: str):
         obj = "ромб"
     elif "квадрат" in t:
         obj = "квадрат"
+    elif "звезда" in t:
+        obj = "звезда"
 
-    # сцена (всё после "на")
     if "на" in t:
         idx = t.find("на")
         scene = text[idx:]
@@ -62,7 +66,7 @@ def build_prompt(state):
     return f"{color} {obj} {scene}".strip()
 
 
-# ===== БАЗОВЫЕ ФУНКЦИИ =====
+# ===== БАЗОВЫЕ =====
 def is_followup(text: str) -> bool:
     t = text.lower().strip()
 
@@ -128,7 +132,7 @@ def commit_last_action(user_id, state):
     update_experience(user_id, state)
 
 
-# ===== ОСНОВНАЯ ЛОГИКА =====
+# ===== ОСНОВА =====
 async def execute(user_id, text, chat_id, run_with_typing):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -143,7 +147,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
     t = text.lower().strip()
 
-    # ===== 🔥 ОБНОВЛЕНИЕ СТРУКТУРЫ ПРИ УТОЧНЕНИЯХ =====
+    # ===== 🔥 ОБНОВЛЕНИЕ СЦЕНЫ =====
     if is_followup(text) and not is_confirmation(text) and not is_rejection(text):
         data = state.get("image_struct", {})
 
@@ -158,39 +162,20 @@ async def execute(user_id, text, chat_id, run_with_typing):
 
         state["image_struct"] = data
 
-    # ===== 🔥 ПОДТВЕРЖДЕНИЕ =====
+    # ===== 🔥 ГЛАВНЫЙ ФИКС: ПРЯМАЯ ГЕНЕРАЦИЯ =====
     last = state.get("last_action")
 
     if is_confirmation(text) and last and last.get("type") == "image":
         final_prompt = build_prompt(state)
 
         if final_prompt:
-            ctx = get_image_context(user_id) or state.get("image_context")
+            result = await run_with_typing(
+                chat_id,
+                image_generate(user_id, final_prompt, state)
+            )
 
-            context = {
-                "chat_id": chat_id,
-                "state": state,
-                "image": ctx,
-                "anchor": get_anchor(user_id),
-                "mode": mode,
-                "task_type": "chat"
-            }
-
-            for room in ROOMS:
-                try:
-                    if room.can_handle(final_prompt, context):
-                        result = await room.handle(
-                            user_id,
-                            final_prompt,
-                            context,
-                            run_with_typing
-                        )
-
-                        if result:
-                            return result
-
-                except Exception as e:
-                    print(f"🔥 ROOM ERROR [scene system]:", e)
+            if result:
+                return result
 
     # ===== DEBUG =====
     if text == "/exp":
@@ -260,7 +245,7 @@ async def execute(user_id, text, chat_id, run_with_typing):
             "data": result["content"]
         }
 
-    # ===== CONTEXT =====
+    # ===== ROOMS =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
