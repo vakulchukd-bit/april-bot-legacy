@@ -1,5 +1,9 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import check_subscription, can_send_message, can_generate_image
+from storage import (
+    check_subscription,
+    get_limits,
+    get_admin_stats
+)
 
 ADMIN_ID = 2016592532
 
@@ -16,17 +20,13 @@ def get_user_role(user_id):
 
 # ===== FREE =====
 def build_free_menu(user_id):
-    msg_available = can_send_message(user_id)
-    img_available = can_generate_image(user_id)
-
-    msg_text = "✅ доступно" if msg_available else "❌ лимит"
-    img_text = "✅ доступно" if img_available else "❌ лимит"
+    limits = get_limits(user_id)
 
     text = (
         "🆓 *FREE*\n\n"
         "📊 *Текущие лимиты:*\n"
-        f"💬 Сообщения: {msg_text}\n"
-        f"🎨 Генерация: {img_text}\n\n"
+        f"💬 Сообщения: {limits['messages_used']} / {limits['messages_limit']}\n"
+        f"🎨 Генерация: {limits['images_used']} / {limits['images_limit']}\n\n"
         "⏳ _Лимиты обновляются автоматически_\n\n"
         "🚀 *Перейди на PRO для полного доступа*"
     )
@@ -59,9 +59,14 @@ def build_pro_menu(user_id):
 
 # ===== ADMIN =====
 def build_admin_menu(user_id):
+    stats = get_admin_stats()
+
     text = (
         "⚙️ *АДМИН-ПАНЕЛЬ*\n\n"
-        "📊 Управление системой"
+        f"👥 Пользователей: {stats['users']}\n"
+        f"💳 Подписок: {stats['subs']}\n"
+        f"💰 Доход всего: {stats['income_total']} грн\n"
+        f"💰 Сегодня: {stats['income_today']} грн\n"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
