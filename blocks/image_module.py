@@ -5,19 +5,34 @@ from openai import OpenAI
 client = OpenAI()
 
 
-# ===== 🔥 ДОБАВЛЕНО: СОХРАНЕНИЕ В ПАМЯТЬ =====
+# ===== СОХРАНЕНИЕ В ПАМЯТЬ =====
 def save_to_memory(state, item):
     memory = state.get("image_memory", [])
 
-    # добавляем новую
     memory.append(item)
 
-    # ограничиваем до 3 последних
     if len(memory) > 3:
         memory = memory[-3:]
 
     state["image_memory"] = memory
-    state["image_context"] = item  # текущая активная
+    state["image_context"] = item
+
+
+# ===== ОЧИСТКА PROMPT =====
+def clean_prompt(text: str):
+    if not text:
+        return ""
+
+    # убираем лишние переносы и мусор
+    t = text.strip()
+
+    # защита от системного мусора
+    banned = ["система", "анализ личности", "контекст:", "опыт:"]
+    for b in banned:
+        if b in t.lower():
+            t = t.lower().replace(b, "")
+
+    return t.strip()
 
 
 async def generate_image(prompt):
@@ -58,7 +73,14 @@ async def generate_image(prompt):
 
 async def process(user_id, text, state):
     try:
-        prompt = text
+        # 🔥 ЧИСТЫЙ PROMPT
+        prompt = clean_prompt(text)
+
+        if not prompt:
+            return {
+                "type": "error",
+                "data": "❌ Пустой запрос для генерации"
+            }
 
         # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
@@ -76,7 +98,6 @@ async def process(user_id, text, state):
                 "path": None
             }
 
-            # 🔥 СОХРАНЕНИЕ В ПАМЯТЬ
             save_to_memory(state, item)
 
             return {
@@ -84,7 +105,6 @@ async def process(user_id, text, state):
                 "data": img
             }
 
-        # ===== СИГНАЛ О ПОВТОРЕ =====
         print("⚠️ FIRST ATTEMPT FAILED → RETRY")
 
         return {
@@ -102,10 +122,16 @@ async def process(user_id, text, state):
         }
 
 
-# 🔥 ВТОРАЯ ПОПЫТКА (отдельно вызывается)
+# ===== ВТОРАЯ ПОПЫТКА =====
 async def retry_process(user_id, text, state):
     try:
-        prompt = text
+        prompt = clean_prompt(text)
+
+        if not prompt:
+            return {
+                "type": "final_error",
+                "data": "❌ Пустой запрос"
+            }
 
         try:
             img = await asyncio.wait_for(generate_image(prompt), timeout=60)
@@ -122,7 +148,6 @@ async def retry_process(user_id, text, state):
                 "path": None
             }
 
-            # 🔥 СОХРАНЕНИЕ В ПАМЯТЬ
             save_to_memory(state, item)
 
             return {
@@ -130,7 +155,6 @@ async def retry_process(user_id, text, state):
                 "data": img
             }
 
-        # ===== ФИНАЛЬНАЯ ОШИБКА =====
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
