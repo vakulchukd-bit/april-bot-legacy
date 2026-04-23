@@ -2,7 +2,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import (
     check_subscription,
     get_limits,
-    get_admin_stats
+    get_admin_stats,
+    get_reset_seconds,
+    format_time
 )
 
 ADMIN_ID = 2016592532
@@ -22,12 +24,15 @@ def get_user_role(user_id):
 def build_free_menu(user_id):
     limits = get_limits(user_id)
 
+    reset_sec = get_reset_seconds(user_id)
+    reset_time = format_time(reset_sec)
+
     text = (
         "🆓 *FREE*\n\n"
         "📊 *Текущие лимиты:*\n"
         f"💬 Сообщения: {limits['messages_used']} / {limits['messages_limit']}\n"
         f"🎨 Генерация: {limits['images_used']} / {limits['images_limit']}\n\n"
-        "⏳ _Лимиты обновляются автоматически_\n\n"
+        f"⏳ Сброс через: *{reset_time}*\n\n"
         "🚀 *Перейди на PRO для полного доступа*"
     )
 
@@ -46,7 +51,7 @@ def build_pro_menu(user_id):
         "∞ Без ограничений\n"
         "⚡ Быстрые ответы\n"
         "🧠 Приоритетная обработка\n\n"
-        "Спасибо, что ты с Aprill ❤️"
+        "📅 Подписка активна"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
