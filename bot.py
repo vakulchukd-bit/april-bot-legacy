@@ -205,23 +205,19 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# ===== CALLBACK (ПОЧИНЕН) =====
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 👍
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо", show_alert=False)
         return
 
-    # 👎
     if data.startswith("dislike_"):
         await callback.answer("👎 Учту", show_alert=False)
         return
 
-    # UI
     if data == "noop":
         await callback.answer()
         return
@@ -238,7 +234,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # АДМИН
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
@@ -263,7 +258,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.answer("📢 Введи текст", show_alert=True)
             return
 
-    # ВСЁ ОСТАЛЬНОЕ → execute
     try:
         result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
 
@@ -272,6 +266,30 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
         if result["type"] == "text":
             await callback.message.answer(result["data"])
+
+        elif result["type"] == "admin_request":
+            plan = result["plan"]
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить",
+                        callback_data=f"admin_confirm_{plan}_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"admin_reject_{plan}_{user_id}"
+                    )
+                ]
+            ])
+
+            await bot.send_message(
+                ADMIN_ID,
+                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
+                reply_markup=keyboard
+            )
+
+            await callback.message.answer("⏳ Отправлено администратору")
 
         elif result["type"] == "image":
             await callback.message.answer_photo(
