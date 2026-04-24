@@ -225,7 +225,41 @@ def get_remaining_days(user_id):
     return 0
 
 
+# 🔥 ВОТ ТУТ ГЛАВНЫЙ ФИКС
 def get_limits(user_id, msg_limit=15, img_limit=1):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id = %s", (uid,))
+                user = cur.fetchone()
+
+                if not user:
+                    return {
+                        "messages_used": 0,
+                        "messages_limit": msg_limit,
+                        "images_used": 0,
+                        "images_limit": img_limit
+                    }
+
+                messages = user["messages_today"] or 0
+                images = user["images_today"] or 0
+
+                # сброс дня
+                if user["last_reset"] != today():
+                    messages = 0
+                    images = 0
+
+                return {
+                    "messages_used": messages,
+                    "messages_limit": msg_limit,
+                    "images_used": images,
+                    "images_limit": img_limit
+                }
+
     return {
         "messages_used": 0,
         "messages_limit": msg_limit,
