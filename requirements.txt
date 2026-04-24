@@ -4,3 +4,6 @@ aiohttp
 requests
 pillow
 pytz
+numpy
+matplotlib
+sympy
