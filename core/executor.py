@@ -28,6 +28,9 @@ from storage import set_subscription
 # 🔥 НОВАЯ ENERGY СИСТЕМА
 from blocks.energy_manager import get_energy
 
+# 🔥 ПРЯМОЙ ИМПОРТ (ФИКС)
+from blocks.science_room import ScienceRoom
+
 
 # ===== SUBSCRIPTION HANDLER =====
 def handle_subscription(callback_data, user_id):
@@ -150,10 +153,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # 🔥 ENERGY СРАЗУ
+    # 🔥 ENERGY
     energy = get_energy(user_id)
 
-    # ===== ROOMS (🔥 ПЕРВЫЕ) =====
+    # ===== 🔥 ЖЁСТКИЙ ВЫЗОВ SCIENCE ROOM =====
+    science = ScienceRoom()
+
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
@@ -167,6 +172,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "energy": energy
     }
 
+    if science.can_handle(text, context):
+        result = await science.handle(user_id, text, context, run_with_typing)
+        if result:
+            return result
+
+    # ===== ROOMS =====
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -181,7 +192,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===== INTENT =====
     intent = detect_intent(text)
 
-    # ===== ВОПРОС =====
     if intent == "question":
 
         anchor = get_anchor(user_id)
