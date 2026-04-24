@@ -16,8 +16,6 @@ from blocks.context_system import build_context_text
 from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
-from blocks.experience_manager import load_experience, update_experience
-
 from blocks.image_module import process as image_generate
 
 from datetime import datetime
@@ -138,16 +136,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # 🔥 ENERGY
+    # ===== ENERGY =====
     energy = get_energy(user_id)
 
-    # 🔥 INTENT + MODE (НОВОЕ)
+    # ===== INTENT =====
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
-    # ===== SCIENCE =====
-    science = ScienceRoom()
-
+    # ===== CONTEXT =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
@@ -160,6 +156,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "task_type": "chat",
         "energy": energy
     }
+
+    # ===== SCIENCE =====
+    science = ScienceRoom()
 
     if science.can_handle(text, context):
         result = await science.handle(user_id, text, context, run_with_typing)
@@ -176,27 +175,27 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== 🔗 ССЫЛКИ (ФИКС ВРАНЬЯ) =====
+    # ===== 🔗 УМНЫЕ ССЫЛКИ (ФИКС) =====
     if response_mode == "link":
         return {
             "type": "text",
             "data": (
-                "Я не могу создать реальную короткую ссылку, "
-                "но можешь использовать:\n\n"
-                "• https://bit.ly\n"
-                "• https://tinyurl.com"
+                "Я не могу сократить ссылку напрямую,\n"
+                "но вот что можно сделать 👇\n\n"
+                "👉 https://example.com\n\n"
+                "Хочешь — оформлю её красиво в тексте или вставлю в сообщение."
             )
         }
 
-    # ===== ✍️ ТЕКСТЫ =====
+    # ===== ✍️ COPY MODE =====
     if response_mode == "copy":
-        text = f"Напиши готовый текст, который можно сразу скопировать:\n\n{text}"
+        text = f"Напиши готовый текст, который можно сразу использовать:\n\n{text}"
 
-    # ===== 🎨 ОФОРМЛЕНИЕ =====
+    # ===== 🎨 FORMAT MODE =====
     if response_mode == "format":
         text = f"Оформи красиво и читаемо:\n\n{text}"
 
-    # ===== ВОПРОС =====
+    # ===== QUESTION =====
     if intent == "question":
 
         if anchor:
