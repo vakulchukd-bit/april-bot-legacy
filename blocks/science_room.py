@@ -54,7 +54,34 @@ class ScienceRoom:
 
         # ===== LITE / PREMIUM =====
         if "график" in t or "y" in t or "построй" in t:
+
+            # 🔥 СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ)
             expr = self.extract_function(text)
+
+            # ================== 🔥 НОВОЕ (НЕ ЛОМАЕТ СТАРОЕ) ==================
+            if not expr:
+                interpreted = self.interpret_text_graph(text)
+
+                if interpreted:
+
+                    # 👉 ФУНКЦИЯ
+                    if interpreted["type"] == "function":
+                        expr = interpreted["expr"]
+
+                    # 👉 ТАБЛИЦА УМНОЖЕНИЯ
+                    elif interpreted["type"] == "heatmap":
+                        path = self.build_multiplication_table()
+
+                        if path:
+                            try:
+                                with open(path, "rb") as f:
+                                    return {
+                                        "type": "image",
+                                        "data": f.read()
+                                    }
+                            except Exception as e:
+                                print("🔥 READ ERROR:", e)
+            # ===============================================================
 
             if expr:
                 path = self.build_graph(expr)
@@ -82,6 +109,48 @@ class ScienceRoom:
             "type": "text",
             "data": "🧠 Не понял задачу, попробуй уточнить"
         }
+
+    # ===== 🔥 НОВОЕ: ИНТЕРПРЕТАЦИЯ ТЕКСТА =====
+    def interpret_text_graph(self, text):
+        t = text.lower()
+
+        # таблица умножения
+        if "таблица умножения" in t:
+            return {"type": "heatmap"}
+
+        # синус
+        if "синус" in t or "sin" in t:
+            return {"type": "function", "expr": "np.sin(x)"}
+
+        # косинус
+        if "косинус" in t or "cos" in t:
+            return {"type": "function", "expr": "np.cos(x)"}
+
+        # парабола / квадрат
+        if "парабола" in t or "квадрат" in t:
+            return {"type": "function", "expr": "x**2"}
+
+        return None
+
+    # ===== 🔥 НОВОЕ: ТАБЛИЦА УМНОЖЕНИЯ =====
+    def build_multiplication_table(self):
+        try:
+            data = np.outer(range(1, 11), range(1, 11))
+
+            plt.figure()
+            plt.imshow(data)
+            plt.colorbar()
+            plt.title("Таблица умножения")
+
+            path = "graph.png"
+            plt.savefig(path)
+            plt.close()
+
+            return path
+
+        except Exception as e:
+            print("🔥 TABLE ERROR:", e)
+            return None
 
     # ===== ИЗВЛЕЧЕНИЕ ФУНКЦИИ =====
     def extract_function(self, text):
