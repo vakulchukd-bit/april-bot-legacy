@@ -3,10 +3,42 @@ import os
 import math
 from datetime import datetime, timezone, timedelta
 
+# 🔥 NEW: DATABASE
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
 FILE_PATH = "data/subscriptions.json"
 
+# ===== 🔥 DB CONNECT =====
+def get_conn():
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return None
+    return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
 
-# ===== LOAD / SAVE =====
+
+def init_db():
+    conn = get_conn()
+    if not conn:
+        return
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                plan TEXT,
+                subscription_until DOUBLE PRECISION,
+                warned BOOLEAN,
+                messages_today INTEGER,
+                images_today INTEGER,
+                last_reset TEXT
+            )
+            """)
+    conn.close()
+
+
+# ===== LOAD / SAVE (FALLBACK JSON) =====
 def load_data():
     if not os.path.exists(FILE_PATH):
         return {"users": {}}
@@ -48,121 +80,130 @@ def ensure_user(data, user_id):
     return uid, False
 
 
+# ===== 🔥 DB USER =====
+def ensure_user_db(user_id):
+    conn = get_conn()
+    if not conn:
+        return None
+
+    uid = str(user_id)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
+            user = cur.fetchone()
+
+            if not user:
+                cur.execute("""
+                INSERT INTO users VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (uid, "free", 0, False, 0, 0, today()))
+                return None
+
+            return user
+
+
 # ===== 🔥 PLAN MANAGEMENT =====
 def set_subscription(user_id, plan="premium"):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        if plan == "lite":
+            days = 15
+        elif plan == "premium":
+            days = 30
+        else:
+            plan = "free"
+            days = 0
+
+        expire_date = now().timestamp() + days * 86400 if days > 0 else 0
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, last_reset)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                plan = EXCLUDED.plan,
+                subscription_until = EXCLUDED.subscription_until,
+                warned = FALSE
+                """, (uid, plan, expire_date, False, 0, 0, today()))
+        conn.close()
+        return
+
+    # fallback
     data = load_data()
     uid, _ = ensure_user(data, user_id)
-
-    if plan == "lite":
-        days = 15
-    elif plan == "premium":
-        days = 30
-    else:
-        plan = "free"
-        days = 0
-
-    if days > 0:
-        expire_date = now().timestamp() + days * 86400
-    else:
-        expire_date = 0
-
     data["users"][uid]["plan"] = plan
-    data["users"][uid]["subscription_until"] = expire_date
-    data["users"][uid]["warned"] = False
-
+    data["users"][uid]["subscription_until"] = now().timestamp() + 30 * 86400
     save_data(data)
 
 
 def get_user_plan(user_id):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT plan, subscription_until FROM users WHERE user_id = %s", (uid,))
+                user = cur.fetchone()
+
+                if not user:
+                    ensure_user_db(user_id)
+                    return "free"
+
+                if user["subscription_until"] < now().timestamp():
+                    return "free"
+
+                return user["plan"]
+
+    # fallback
     data = load_data()
-    uid, created = ensure_user(data, user_id)
-
-    user = data["users"][uid]
-
-    if created:
-        save_data(data)
-
-    if user["subscription_until"] < now().timestamp():
-        if user["plan"] != "free":
-            user["plan"] = "free"
-            save_data(data)
-        return "free"
-
-    return user.get("plan", "free")
+    uid, _ = ensure_user(data, user_id)
+    return data["users"][uid].get("plan", "free")
 
 
 def check_subscription(user_id):
     return get_user_plan(user_id) in ["lite", "premium"]
 
 
-# ===== REMAINING =====
-def get_remaining_seconds(user_id):
-    data = load_data()
-    uid, created = ensure_user(data, user_id)
-
-    if created:
-        save_data(data)
-
-    user = data["users"][uid]
-
-    if user["subscription_until"] < now().timestamp():
-        return None
-
-    return user["subscription_until"] - now().timestamp()
-
-
-def get_remaining_days(user_id):
-    seconds = get_remaining_seconds(user_id)
-
-    if not seconds or seconds <= 0:
-        return 0
-
-    return math.ceil(seconds / 86400)
-
-
-# ===== WARNING =====
-def should_warn(user_id):
-    data = load_data()
-    uid, created = ensure_user(data, user_id)
-
-    user = data["users"][uid]
-
-    if created:
-        save_data(data)
-
-    if user["subscription_until"] < now().timestamp():
-        return False
-
-    remaining = user["subscription_until"] - now().timestamp()
-
-    if remaining < 86400 and not user["warned"]:
-        user["warned"] = True
-        save_data(data)
-        return True
-
-    return False
-
-
-# ===== LIMITS =====
-def reset_if_needed(user):
-    if user["last_reset"] != today():
-        user["messages_today"] = 0
-        user["images_today"] = 0
-        user["last_reset"] = today()
-        return True
-    return False
-
-
+# ===== LIMITS (DB VERSION) =====
 def can_send_message(user_id, limit=15):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT messages_today, last_reset FROM users WHERE user_id = %s", (uid,))
+                user = cur.fetchone()
+
+                if not user:
+                    ensure_user_db(user_id)
+                    return True
+
+                if user["last_reset"] != today():
+                    cur.execute("""
+                    UPDATE users SET messages_today = 0, last_reset = %s WHERE user_id = %s
+                    """, (today(), uid))
+                    user["messages_today"] = 0
+
+                if user["messages_today"] >= limit:
+                    return False
+
+                cur.execute("""
+                UPDATE users SET messages_today = messages_today + 1 WHERE user_id = %s
+                """, (uid,))
+                return True
+
+    # fallback
     data = load_data()
-    uid, created = ensure_user(data, user_id)
+    uid, _ = ensure_user(data, user_id)
     user = data["users"][uid]
-
-    if created:
-        save_data(data)
-
-    if reset_if_needed(user):
-        save_data(data)
 
     if user["messages_today"] >= limit:
         return False
@@ -172,84 +213,14 @@ def can_send_message(user_id, limit=15):
     return True
 
 
-def get_limits(user_id, msg_limit=15, img_limit=1):
-    data = load_data()
-    uid, created = ensure_user(data, user_id)
-    user = data["users"][uid]
-
-    if created:
-        save_data(data)
-
-    reset_if_needed(user)
-
-    return {
-        "messages_used": user["messages_today"],
-        "messages_limit": msg_limit,
-        "images_used": user["images_today"],
-        "images_limit": img_limit
-    }
-
-
-def get_remaining_messages(user_id, limit=15):
-    data = load_data()
-    uid, created = ensure_user(data, user_id)
-    user = data["users"][uid]
-
-    if created:
-        save_data(data)
-
-    reset_if_needed(user)
-
-    return max(0, limit - user["messages_today"])
-
-
-# ===== 🔥 ДОБАВЛЕНО (ФИКС ПАДЕНИЯ) =====
+# ===== ADMIN =====
 def get_all_users():
+    conn = get_conn()
+    if conn:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id FROM users")
+                return [u["user_id"] for u in cur.fetchall()]
+
     data = load_data()
     return list(data["users"].keys())
-
-
-def get_all_subscriptions():
-    data = load_data()
-    result = []
-
-    for uid, user in data["users"].items():
-        if user.get("subscription_until", 0) > now().timestamp():
-            result.append(uid)
-
-    return result
-
-
-# ===== ADMIN =====
-def get_admin_stats():
-    data = load_data()
-
-    users = data["users"]
-
-    total_users = len(users)
-    subs = sum(
-        1 for u in users.values()
-        if u["subscription_until"] > now().timestamp()
-    )
-
-    return {
-        "users": total_users,
-        "subs": subs,
-        "income_total": subs * 150,
-        "income_today": 0
-    }
-
-
-# ===== TIMER =====
-def get_reset_seconds(user_id):
-    now_time = now()
-    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now_time).total_seconds())
-
-
-def format_time(seconds):
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-
-    return f"{hours:02}:{minutes:02}:{secs:02}"
