@@ -36,6 +36,20 @@ class ScienceRoom:
 
         t = text.lower()
 
+        # 🔥 ДОБАВЛЕНО: ранний перехват таблицы (чтобы не терялась)
+        if "таблица" in t and "умнож" in t:
+            path = self.build_multiplication_table()
+
+            if path:
+                try:
+                    with open(path, "rb") as f:
+                        return {
+                            "type": "image",
+                            "data": f.read()
+                        }
+                except Exception as e:
+                    print("🔥 READ ERROR:", e)
+
         # ===== FREE =====
         if plan == "free":
             if "=" in t or "реши" in t:
@@ -53,7 +67,8 @@ class ScienceRoom:
             }
 
         # ===== LITE / PREMIUM =====
-        if "график" in t or "y" in t or "построй" in t:
+        # 🔥 ИСПРАВЛЕНО: убрали "y" (он ломал всё)
+        if "график" in t or "построй" in t or "y=" in t:
 
             # 🔥 СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ)
             expr = self.extract_function(text)
@@ -68,7 +83,7 @@ class ScienceRoom:
                     if interpreted["type"] == "function":
                         expr = interpreted["expr"]
 
-                    # 👉 ТАБЛИЦА УМНОЖЕНИЯ
+                    # 👉 ТАБЛИЦА УМНОЖЕНИЯ (дублируем безопасно)
                     elif interpreted["type"] == "heatmap":
                         path = self.build_multiplication_table()
 
@@ -91,7 +106,7 @@ class ScienceRoom:
                         with open(path, "rb") as f:
                             return {
                                 "type": "image",
-                                "data": f.read()  # 🔥 ФИКС
+                                "data": f.read()
                             }
                     except Exception as e:
                         print("🔥 READ ERROR:", e)
@@ -110,25 +125,29 @@ class ScienceRoom:
             "data": "🧠 Не понял задачу, попробуй уточнить"
         }
 
-    # ===== 🔥 НОВОЕ: ИНТЕРПРЕТАЦИЯ ТЕКСТА =====
+    # ===== 🔥 УСИЛЕННЫЙ PARSER =====
     def interpret_text_graph(self, text):
         t = text.lower()
 
-        # таблица умножения
-        if "таблица умножения" in t:
+        # таблица умножения (расширено)
+        if any(w in t for w in ["таблица умножения", "умножения", "умножить", "перемнож"]):
             return {"type": "heatmap"}
 
         # синус
-        if "синус" in t or "sin" in t:
+        if any(w in t for w in ["синус", "sin", "волна"]):
             return {"type": "function", "expr": "np.sin(x)"}
 
         # косинус
-        if "косинус" in t or "cos" in t:
+        if any(w in t for w in ["косинус", "cos"]):
             return {"type": "function", "expr": "np.cos(x)"}
 
-        # парабола / квадрат
-        if "парабола" in t or "квадрат" in t:
+        # парабола
+        if any(w in t for w in ["парабола", "квадрат", "x^2"]):
             return {"type": "function", "expr": "x**2"}
+
+        # линия
+        if any(w in t for w in ["линия", "прямая", "линейный"]):
+            return {"type": "function", "expr": "x"}
 
         return None
 
@@ -194,7 +213,8 @@ class ScienceRoom:
     # ===== РЕШЕНИЕ =====
     def solve_equation(self, text):
         try:
-            expr = text.lower().replace("реши", "").strip()
+            # 🔥 УЛУЧШЕНО: теперь ловит "уравнение"
+            expr = text.lower().replace("реши", "").replace("уравнение", "").strip()
             expr = expr.replace("^", "**")
 
             x = symbols('x')
