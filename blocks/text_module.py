@@ -52,7 +52,22 @@ def trim_messages(messages):
     return list(reversed(result))
 
 
-async def process(user_id, text, state):
+# 🔥 ДОБАВИЛИ ENERGY
+def get_config(energy):
+    if energy == "LOW":
+        return {"temperature": 0.5, "max_output_tokens": 300}
+
+    if energy == "MEDIUM":
+        return {"temperature": 0.7, "max_output_tokens": 700}
+
+    if energy == "HIGH":
+        return {"temperature": 0.9, "max_output_tokens": 1500}
+
+    return {"temperature": 0.6, "max_output_tokens": 500}
+
+
+# 🔥 ДОБАВИЛИ energy параметр
+async def process(user_id, text, state, energy="MEDIUM"):
     def run():
         history = state.get("dialog", [])
         ctx = state.get("image_context")
@@ -114,7 +129,7 @@ async def process(user_id, text, state):
                 "content": trim_text(f"Ранее обсуждалось изображение: {ctx['hint']}")
             })
 
-        # ===== HISTORY (🔥 ФИКС) =====
+        # ===== HISTORY =====
         safe_history = []
         for msg in history[-MAX_HISTORY_MESSAGES:]:
             safe_history.append({
@@ -132,9 +147,14 @@ async def process(user_id, text, state):
             "content": trim_text(text)
         })
 
+        # 🔥 применяем ENERGY
+        config = get_config(energy)
+
         r = client.responses.create(
             model="gpt-4o-mini",
-            input=messages
+            input=messages,
+            temperature=config["temperature"],
+            max_output_tokens=config["max_output_tokens"]
         )
 
         return r.output_text
