@@ -25,10 +25,10 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import set_subscription
 
-# 🔥 НОВАЯ ENERGY СИСТЕМА
+# 🔥 ENERGY
 from blocks.energy_manager import get_energy
 
-# 🔥 ПРЯМОЙ ИМПОРТ (ФИКС)
+# 🔥 SCIENCE
 from blocks.science_room import ScienceRoom
 
 
@@ -60,16 +60,10 @@ def handle_subscription(callback_data, user_id):
         }
 
     if callback_data == "buy_yes_lite":
-        return {
-            "type": "admin_request",
-            "plan": "lite"
-        }
+        return {"type": "admin_request", "plan": "lite"}
 
     if callback_data == "buy_yes_premium":
-        return {
-            "type": "admin_request",
-            "plan": "premium"
-        }
+        return {"type": "admin_request", "plan": "premium"}
 
     if callback_data == "confirm_downgrade":
         return {
@@ -84,16 +78,10 @@ def handle_subscription(callback_data, user_id):
         }
 
     if callback_data == "confirm_downgrade_yes":
-        return {
-            "type": "admin_request",
-            "plan": "lite"
-        }
+        return {"type": "admin_request", "plan": "lite"}
 
     if callback_data == "confirm_downgrade_no":
-        return {
-            "type": "text",
-            "data": "❌ Отменено"
-        }
+        return {"type": "text", "data": "❌ Отменено"}
 
     if callback_data.startswith("admin_confirm_"):
         parts = callback_data.split("_")
@@ -136,10 +124,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===== TIME =====
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
-        return {
-            "type": "text",
-            "data": f"Сейчас {now}"
-        }
+        return {"type": "text", "data": f"Сейчас {now}"}
 
     # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
@@ -155,6 +140,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # 🔥 ENERGY
     energy = get_energy(user_id)
+
+    # 🔥 INTENT + MODE (НОВОЕ)
+    intent = detect_intent(text)
+    response_mode = detect_response_mode(text)
 
     # ===== SCIENCE =====
     science = ScienceRoom()
@@ -182,16 +171,32 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         try:
             if room.can_handle(text, context):
                 result = await room.handle(user_id, text, context, run_with_typing)
-
                 if result:
                     return result
-
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== INTENT =====
-    intent = detect_intent(text)
+    # ===== 🔗 ССЫЛКИ (ФИКС ВРАНЬЯ) =====
+    if response_mode == "link":
+        return {
+            "type": "text",
+            "data": (
+                "Я не могу создать реальную короткую ссылку, "
+                "но можешь использовать:\n\n"
+                "• https://bit.ly\n"
+                "• https://tinyurl.com"
+            )
+        }
 
+    # ===== ✍️ ТЕКСТЫ =====
+    if response_mode == "copy":
+        text = f"Напиши готовый текст, который можно сразу скопировать:\n\n{text}"
+
+    # ===== 🎨 ОФОРМЛЕНИЕ =====
+    if response_mode == "format":
+        text = f"Оформи красиво и читаемо:\n\n{text}"
+
+    # ===== ВОПРОС =====
     if intent == "question":
 
         if anchor:
