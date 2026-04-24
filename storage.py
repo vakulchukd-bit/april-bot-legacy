@@ -243,6 +243,20 @@ def get_admin_stats():
     }
 
 
+# ===== 🔥 ДОБАВЛЕНО (ПОСЛЕДНЕЕ) =====
+def get_reset_seconds(user_id):
+    now_time = now()
+    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((tomorrow - now_time).total_seconds())
+
+
+def format_time(seconds):
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02}:{minutes:02}:{secs:02}"
+
+
 # ===== ADMIN =====
 def get_all_users():
     conn = get_conn()
