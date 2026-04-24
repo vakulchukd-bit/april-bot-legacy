@@ -150,11 +150,36 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
+    # 🔥 ENERGY СРАЗУ
+    energy = get_energy(user_id)
+
+    # ===== ROOMS (🔥 ПЕРВЫЕ) =====
+    ctx = get_image_context(user_id) or state.get("image_context")
+    anchor = get_anchor(user_id)
+
+    context = {
+        "chat_id": chat_id,
+        "state": state,
+        "image": ctx,
+        "anchor": anchor,
+        "mode": mode,
+        "task_type": "chat",
+        "energy": energy
+    }
+
+    for room in ROOMS:
+        try:
+            if room.can_handle(text, context):
+                result = await room.handle(user_id, text, context, run_with_typing)
+
+                if result:
+                    return result
+
+        except Exception as e:
+            print(f"🔥 ROOM ERROR [{room.name}]:", e)
+
     # ===== INTENT =====
     intent = detect_intent(text)
-
-    # 🔥 ЕДИНАЯ ENERGY
-    energy = get_energy(user_id)
 
     # ===== ВОПРОС =====
     if intent == "question":
@@ -173,31 +198,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         return {"type": "text", "data": result["content"]}
 
-    # ===== ROOMS =====
-    ctx = get_image_context(user_id) or state.get("image_context")
-    anchor = get_anchor(user_id)
-
-    context = {
-        "chat_id": chat_id,
-        "state": state,
-        "image": ctx,
-        "anchor": anchor,
-        "mode": mode,
-        "task_type": "chat",
-        "energy": energy  # 🔥 ВОТ КЛЮЧ
-    }
-
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
-
-                if result:
-                    return result
-
-        except Exception as e:
-            print(f"🔥 ROOM ERROR [{room.name}]:", e)
-
+    # ===== FALLBACK =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
