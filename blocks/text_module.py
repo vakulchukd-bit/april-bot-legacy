@@ -5,22 +5,31 @@ from storage import get_user_plan
 
 client = OpenAI()
 
+# 🔥 ОБНОВЛЁННЫЙ SYSTEM PROMPT
 SYSTEM_PROMPT = """
-Ты — Aprill, интеллектуальный ассистент.
+Ты — Aprill, умный и живой ассистент.
 
-Ты:
-- понимаешь диалог
-- отвечаешь естественно и по делу
-- не усложняешь без причины
+Пиши как человек, а не как робот.
 
-Если пользователь говорит про изображение — 
-кратко опиши, что понял, и предложи сгенерировать.
+Правила:
+- не используй канцелярит ("Уважаемый клиент", "с наилучшими пожеланиями")
+- пиши естественно, просто и понятно
+- избегай шаблонных фраз
+- не делай длинных перегруженных предложений
 
-Никогда не генерируй без подтверждения.
+ВАЖНО:
+- если ты НЕ МОЖЕШЬ что-то сделать (например сократить ссылку) — честно скажи об этом
+- НИКОГДА не выдумывай результат
+- лучше сказать "не могу", чем дать неправильный ответ
+
+Стиль:
+- дружелюбный
+- уверенный
+- без лишнего пафоса
 """
 
 
-# 🔥 ЛИМИТЫ
+# ===== ЛИМИТЫ =====
 MAX_HISTORY_MESSAGES = 6
 MAX_MESSAGE_CHARS = 2000
 MAX_TOTAL_CHARS = 12000
@@ -54,7 +63,7 @@ def trim_messages(messages):
     return list(reversed(result))
 
 
-# 🔥 ENERGY CONFIG
+# ===== ENERGY CONFIG =====
 def get_config(energy):
     if energy == "LOW":
         return {"temperature": 0.5, "max_output_tokens": 300}
@@ -68,49 +77,44 @@ def get_config(energy):
     return {"temperature": 0.6, "max_output_tokens": 500}
 
 
-# 🔥 СТИЛЬ МЫШЛЕНИЯ
+# ===== СТИЛЬ МЫШЛЕНИЯ =====
 def get_energy_prompt(energy):
     if energy == "LOW":
-        return "Отвечай коротко, по делу, без лишних объяснений."
+        return "Отвечай коротко, по делу, без лишнего."
 
     if energy == "MEDIUM":
-        return "Отвечай понятно, можешь кратко объяснить суть."
+        return "Отвечай понятно и естественно."
 
     if energy == "HIGH":
         return (
-            "Отвечай глубоко и структурировано. "
-            "Используй заголовки, списки и визуально удобное оформление. "
-            "Можешь выделять ключевые моменты символами, чтобы текст было приятно читать."
+            "Отвечай глубже, но сохраняй живой стиль. "
+            "Используй структуру, но без перегруза."
         )
 
     return ""
 
 
-# 🔥 ФОРМАТИРОВАНИЕ UX
+# ===== UX ФОРМАТ =====
 def get_formatting_prompt(plan, energy):
     if plan == "free":
-        return "Пиши обычным текстом без оформления."
+        return "Пиши просто и понятно."
 
     if plan == "lite":
-        return (
-            "Иногда используй списки или разделение на абзацы, "
-            "но без перегрузки оформления."
-        )
+        return "Иногда используй абзацы и списки, без перегруза."
 
     if plan == "premium":
         return (
-            "Оформляй ответ красиво:\n"
-            "- используй заголовки\n"
-            "- делай списки\n"
-            "- выделяй важное\n"
-            "- делай текст удобным для чтения\n"
-            "- не пиши длинные сплошные абзацы"
+            "Пиши красиво, но живо:\n"
+            "- делай абзацы\n"
+            "- можно списки\n"
+            "- без канцелярита\n"
+            "- читаемо и легко"
         )
 
     return ""
 
 
-# 🔥 ПАМЯТЬ ПО ТАРИФУ
+# ===== ПАМЯТЬ =====
 def get_history_limit(plan):
     if plan == "free":
         return 3
@@ -121,7 +125,7 @@ def get_history_limit(plan):
     return 6
 
 
-# 🔥 PROCESS
+# ===== PROCESS =====
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
         history = state.get("dialog", [])
@@ -134,7 +138,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
 
-        # 🔥 ENERGY стиль мышления
+        # ===== ENERGY =====
         energy_prompt = get_energy_prompt(energy)
         if energy_prompt:
             messages.append({
@@ -142,13 +146,19 @@ async def process(user_id, text, state, energy="MEDIUM"):
                 "content": energy_prompt
             })
 
-        # 🔥 UX оформление
+        # ===== UX =====
         format_prompt = get_formatting_prompt(plan, energy)
         if format_prompt:
             messages.append({
                 "role": "system",
                 "content": format_prompt
             })
+
+        # ===== ЧЕСТНОСТЬ =====
+        messages.append({
+            "role": "system",
+            "content": "Не выдумывай факты и результаты. Если не можешь — скажи прямо."
+        })
 
         # ===== EXPERIENCE =====
         try:
@@ -177,7 +187,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
             if accepted >= 5:
                 messages.append({
                     "role": "system",
-                    "content": "Пользователь доволен. Можно действовать увереннее и меньше уточнять."
+                    "content": "Пользователь доволен. Можно действовать увереннее."
                 })
 
         except Exception as e:
@@ -220,7 +230,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
             "content": trim_text(text)
         })
 
-        # 🔥 ENERGY
+        # ===== GENERATION =====
         config = get_config(energy)
 
         r = client.responses.create(
