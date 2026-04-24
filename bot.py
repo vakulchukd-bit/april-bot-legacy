@@ -265,7 +265,10 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         if result["type"] == "text":
-            await callback.message.answer(result["data"])
+            await callback.message.answer(
+                result["data"],
+                reply_markup=result.get("keyboard")  # 🔥 ВОТ ФИКС
+            )
 
         elif result["type"] == "admin_request":
             plan = result["plan"]
