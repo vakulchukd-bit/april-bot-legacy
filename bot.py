@@ -7,7 +7,7 @@ from datetime import datetime
 import pytz
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from openai import OpenAI
 
 from storage import (
@@ -206,6 +206,13 @@ async def handle(message: types.Message):
                 reply_markup=main_keyboard(message.message_id)
             )
 
+        # 🔥 ВОТ ГЛАВНЫЙ ФИКС
+        elif result["type"] == "image":
+            await message.answer_photo(
+                BufferedInputFile(result["data"], filename="graph.png"),
+                caption="📊 График построен"
+            )
+
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
 
@@ -216,64 +223,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    if data.startswith("like_"):
-        await callback.answer("👍 Спасибо за лайк", show_alert=True)
-        return
-
-    if data.startswith("dislike_"):
-        await callback.answer("👎 Учту, исправлюсь", show_alert=True)
-        return
-
-    if data == "noop":
-        await callback.answer("Текущий тариф", show_alert=False)
-        return
-
-    # ===== АДМИНКА =====
-    if user_id == ADMIN_ID:
-
-        if data == "admin_stats":
-            errors = get_errors()
-
-            if not errors:
-                await callback.answer("📊 Анализ\n\n✅ Ошибок нет", show_alert=True)
-            else:
-                text = "📊 Анализ\n\n❌ Ошибки:\n\n"
-                for err in errors[-5:]:
-                    text += f"{err}\n"
-                await callback.answer(text[:200], show_alert=True)
-            return
-
-        # 🔥 ВОТ ЗДЕСЬ ФИКС
-        if data == "admin_payments":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
-                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-            ])
-
-            await callback.message.answer(
-                "💳 Оплаты:",
-                reply_markup=keyboard
-            )
-            return
-
-        if data == "admin_broadcast":
-            set_mode(user_id, "broadcast")
-            await callback.answer("📢 Введи текст для рассылки", show_alert=True)
-            return
-
     await callback.answer()
-
-    # ===== MENU =====
-    if data == "menu":
-        text, keyboard = get_menu(user_id)
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-        return
-
-    if data == "info":
-        text, keyboard = build_info_menu(user_id)
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-        return
 
     try:
         result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
@@ -282,37 +232,13 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         if result["type"] == "text":
-            await callback.message.answer(
-                result["data"],
-                reply_markup=result.get("keyboard")
+            await callback.message.answer(result["data"])
+
+        elif result["type"] == "image":
+            await callback.message.answer_photo(
+                BufferedInputFile(result["data"], filename="graph.png"),
+                caption="📊 График"
             )
-
-        elif result["type"] == "admin_request":
-            plan = result["plan"]
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Подтвердить",
-                        callback_data=f"admin_confirm_{plan}_{user_id}"
-                    ),
-                    InlineKeyboardButton(
-                        text="❌ Отклонить",
-                        callback_data=f"admin_reject_{plan}_{user_id}"
-                    )
-                ]
-            ])
-
-            await bot.send_message(
-                ADMIN_ID,
-                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
-                reply_markup=keyboard
-            )
-
-            await callback.message.answer("⏳ Отправлено администратору")
-
-        elif result["type"] == "notify_user":
-            await bot.send_message(result["target_user"], result["data"])
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
