@@ -5,7 +5,7 @@ from storage import get_user_plan
 
 client = OpenAI()
 
-# 🔥 ОБНОВЛЁННЫЙ SYSTEM PROMPT
+# 🔥 SYSTEM PROMPT (УЛУЧШЕН)
 SYSTEM_PROMPT = """
 Ты — Aprill, умный и живой ассистент.
 
@@ -18,14 +18,13 @@ SYSTEM_PROMPT = """
 - не делай длинных перегруженных предложений
 
 ВАЖНО:
-- если ты НЕ МОЖЕШЬ что-то сделать (например сократить ссылку) — честно скажи об этом
+- если ты НЕ МОЖЕШЬ что-то сделать — честно скажи
 - НИКОГДА не выдумывай результат
-- лучше сказать "не могу", чем дать неправильный ответ
 
 Стиль:
 - дружелюбный
 - уверенный
-- без лишнего пафоса
+- живой
 """
 
 
@@ -77,13 +76,13 @@ def get_config(energy):
     return {"temperature": 0.6, "max_output_tokens": 500}
 
 
-# ===== СТИЛЬ МЫШЛЕНИЯ =====
+# ===== СТИЛЬ =====
 def get_energy_prompt(energy):
     if energy == "LOW":
-        return "Отвечай коротко, по делу, без лишнего."
+        return "Отвечай коротко, по делу."
 
     if energy == "MEDIUM":
-        return "Отвечай понятно и естественно."
+        return "Отвечай понятно и живо."
 
     if energy == "HIGH":
         return (
@@ -94,27 +93,44 @@ def get_energy_prompt(energy):
     return ""
 
 
-# ===== UX ФОРМАТ =====
+# ===== UX =====
 def get_formatting_prompt(plan, energy):
     if plan == "free":
         return "Пиши просто и понятно."
 
     if plan == "lite":
-        return "Иногда используй абзацы и списки, без перегруза."
+        return (
+            "Пиши живо:\n"
+            "- разбивай на абзацы\n"
+            "- избегай перегруза\n"
+        )
 
     if plan == "premium":
         return (
-            "Пиши красиво, но живо:\n"
-            "- делай абзацы\n"
-            "- можно списки\n"
+            "Пиши как живой человек:\n"
             "- без канцелярита\n"
-            "- читаемо и легко"
+            "- легко читаемо\n"
+            "- с лёгкими эмоциями\n\n"
+            "Если это текст клиенту:\n"
+            "- добавляй уверенность\n"
+            "- показывай выгоду\n"
+            "- не задавай лишние вопросы\n\n"
+            "Избегай шаблонов."
         )
 
     return ""
 
 
-# ===== ПАМЯТЬ =====
+# ===== ПРОДАЖНЫЙ БЛОК =====
+def is_sales_text(text):
+    triggers = [
+        "клиент", "продай", "убеди",
+        "сомневается", "покуп", "заказ"
+    ]
+    t = text.lower()
+    return any(w in t for w in triggers)
+
+
 def get_history_limit(plan):
     if plan == "free":
         return 3
@@ -141,57 +157,31 @@ async def process(user_id, text, state, energy="MEDIUM"):
         # ===== ENERGY =====
         energy_prompt = get_energy_prompt(energy)
         if energy_prompt:
-            messages.append({
-                "role": "system",
-                "content": energy_prompt
-            })
+            messages.append({"role": "system", "content": energy_prompt})
 
         # ===== UX =====
         format_prompt = get_formatting_prompt(plan, energy)
         if format_prompt:
+            messages.append({"role": "system", "content": format_prompt})
+
+        # ===== ПРОДАЖНЫЙ ИНТЕЛЛЕКТ =====
+        if is_sales_text(text):
             messages.append({
                 "role": "system",
-                "content": format_prompt
+                "content": (
+                    "Если пишешь текст для клиента:\n"
+                    "- делай его убедительным\n"
+                    "- показывай ценность\n"
+                    "- убирай сомнения\n"
+                    "- мягко подводи к действию"
+                )
             })
 
         # ===== ЧЕСТНОСТЬ =====
         messages.append({
             "role": "system",
-            "content": "Не выдумывай факты и результаты. Если не можешь — скажи прямо."
+            "content": "Не выдумывай. Если не можешь — скажи прямо."
         })
-
-        # ===== EXPERIENCE =====
-        try:
-            from blocks.experience_manager import load_experience
-
-            data = load_experience()
-            user_data = data.get(str(user_id), {})
-            actions = user_data.get("actions", [])[-20:]
-
-            conflict = sum(1 for a in actions if a.get("status") == "conflict")
-            refined = sum(1 for a in actions if a.get("status") == "refined")
-            accepted = sum(1 for a in actions if a.get("status") == "accepted")
-
-            if conflict >= 3:
-                messages.append({
-                    "role": "system",
-                    "content": "Пользователь часто недоволен. Отвечай точнее и при сомнении уточняй."
-                })
-
-            if refined >= 3:
-                messages.append({
-                    "role": "system",
-                    "content": "Пользователь часто просит переделать. Отвечай короче и ближе к сути."
-                })
-
-            if accepted >= 5:
-                messages.append({
-                    "role": "system",
-                    "content": "Пользователь доволен. Можно действовать увереннее."
-                })
-
-        except Exception as e:
-            print("🔥 EXPERIENCE APPLY ERROR:", e)
 
         # ===== CONTEXT =====
         try:
@@ -206,11 +196,11 @@ async def process(user_id, text, state, energy="MEDIUM"):
         except Exception as e:
             print("🔥 CONTEXT ERROR:", e)
 
-        # ===== IMAGE CONTEXT =====
+        # ===== IMAGE =====
         if ctx and ctx.get("hint"):
             messages.append({
                 "role": "system",
-                "content": trim_text(f"Ранее обсуждалось изображение: {ctx['hint']}")
+                "content": trim_text(f"Ранее обсуждалось: {ctx['hint']}")
             })
 
         # ===== HISTORY =====
@@ -230,7 +220,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
             "content": trim_text(text)
         })
 
-        # ===== GENERATION =====
         config = get_config(energy)
 
         r = client.responses.create(
