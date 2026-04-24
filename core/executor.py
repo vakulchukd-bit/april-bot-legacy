@@ -25,9 +25,8 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import set_subscription
 
-# 🔥 ДОБАВИЛИ ENERGY
-from core.energy_manager import detect_energy, apply_subscription_limit
-from storage import get_user_plan
+# 🔥 НОВАЯ ENERGY СИСТЕМА
+from blocks.energy_manager import get_energy
 
 
 # ===== SUBSCRIPTION HANDLER =====
@@ -151,14 +150,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ВОПРОС =====
+    # ===== INTENT =====
     intent = detect_intent(text)
 
-    # 🔥 ENERGY (новое)
-    plan = get_user_plan(user_id)
-    energy = detect_energy(text, intent, "text")
-    energy = apply_subscription_limit(energy, plan)
+    # 🔥 ЕДИНАЯ ENERGY
+    energy = get_energy(user_id)
 
+    # ===== ВОПРОС =====
     if intent == "question":
 
         anchor = get_anchor(user_id)
@@ -170,7 +168,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         result = await run_with_typing(
             chat_id,
-            text_process(user_id, text, state, energy)  # 🔥 передали energy
+            text_process(user_id, text, state, energy)
         )
 
         return {"type": "text", "data": result["content"]}
@@ -185,7 +183,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": "chat"
+        "task_type": "chat",
+        "energy": energy  # 🔥 ВОТ КЛЮЧ
     }
 
     for room in ROOMS:
@@ -201,7 +200,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     result = await run_with_typing(
         chat_id,
-        text_process(user_id, text, state, energy)  # 🔥 и тут тоже
+        text_process(user_id, text, state, energy)
     )
 
     return {"type": "text", "data": result["content"]}
