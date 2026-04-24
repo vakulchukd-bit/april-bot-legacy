@@ -1,6 +1,19 @@
 def detect_intent(text: str):
     t = text.lower().strip()
 
+    # ===== ССЫЛКИ (СНАЧАЛА — ЧТОБ НЕ ПЕРЕБИВАЛОСЬ) =====
+    link_triggers = [
+        "ссылка",
+        "url",
+        "линк",
+        "короткая ссылка",
+        "сократи ссылку",
+        "short link"
+    ]
+
+    if any(l in t for l in link_triggers):
+        return "link"
+
     # ===== ВОПРОС =====
     question_triggers = [
         "как", "что", "почему", "зачем",
@@ -16,13 +29,14 @@ def detect_intent(text: str):
         "добавь", "измени", "убери",
         "замени", "поменяй", "улучши",
         "подправь", "сделай лучше",
-        "ярче", "темнее", "переделай"
+        "ярче", "темнее", "переделай",
+        "исправь"
     ]
 
     if any(v in t for v in edit_triggers):
         return "edit"
 
-    # ===== ГЕНЕРАЦИЯ =====
+    # ===== ГЕНЕРАЦИЯ (ВАЖНО: ПОСЛЕ EDIT) =====
     generate_triggers = [
         "создай", "сгенерируй", "нарисуй",
         "draw", "generate", "придумай",
@@ -32,24 +46,13 @@ def detect_intent(text: str):
     if any(g in t for g in generate_triggers):
         return "generate"
 
-    # ===== ССЫЛКИ (🔥 НОВОЕ) =====
-    link_triggers = [
-        "ссылка",
-        "url",
-        "линк",
-        "короткая ссылка",
-        "сократи ссылку"
-    ]
-
-    if any(l in t for l in link_triggers):
-        return "link"
-
     # ===== ТЕКСТ / СООБЩЕНИЕ =====
     text_triggers = [
         "сообщение",
         "письмо",
         "текст",
-        "шаблон"
+        "шаблон",
+        "ответ клиенту"
     ]
 
     if any(l in t for l in text_triggers):
