@@ -20,7 +20,8 @@ from storage import (
     get_limits,
     get_admin_stats,
     get_user_plan,
-    get_all_users
+    get_all_users,
+    init_db  # 🔥 ДОБАВЛЕНО
 )
 
 from core.executor import execute
@@ -311,6 +312,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
 
 async def main():
+    init_db()  # 🔥 ВОТ ЭТА СТРОКА — САМАЯ ВАЖНАЯ
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
