@@ -21,7 +21,8 @@ from storage import (
     get_admin_stats,
     get_user_plan,
     get_all_users,
-    init_db  # 🔥 ДОБАВЛЕНО
+    init_db,
+    ensure_user_db  # 🔥 ДОБАВЛЕНО
 )
 
 from core.executor import execute
@@ -108,6 +109,10 @@ def run_server():
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
+
+    # 🔥 КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ
+    ensure_user_db(user_id)
+
     text = message.text or message.caption or ""
 
     if message.voice:
@@ -191,8 +196,8 @@ async def handle(message: types.Message):
             elif plan == "lite":
                 status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
             else:
-                limits = get_limits(user_id)
-                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
+                remaining = get_remaining_messages(user_id)
+                status = f"\n\n📊 FREE: {15 - remaining} / 15"
 
             await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
 
@@ -312,7 +317,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
 
 async def main():
-    init_db()  # 🔥 ВОТ ЭТА СТРОКА — САМАЯ ВАЖНАЯ
+    init_db()
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
