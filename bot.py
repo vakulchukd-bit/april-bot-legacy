@@ -267,7 +267,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         if result["type"] == "text":
             await callback.message.answer(
                 result["data"],
-                reply_markup=result.get("keyboard")  # 🔥 ВОТ ФИКС
+                reply_markup=result.get("keyboard")
             )
 
         elif result["type"] == "admin_request":
@@ -293,6 +293,10 @@ async def handle_callbacks(callback: types.CallbackQuery):
             )
 
             await callback.message.answer("⏳ Отправлено администратору")
+
+        elif result["type"] == "notify_user":
+            await bot.send_message(result["target_user"], result["data"])
+            await callback.message.answer("✅ Подписка активирована")
 
         elif result["type"] == "image":
             await callback.message.answer_photo(
