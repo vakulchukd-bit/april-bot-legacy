@@ -1,5 +1,8 @@
 from blocks.room_protocol import Room
 
+# === SCIENCE ROOM 🔥 (ПЕРВЫМ)
+from blocks.science_room import ScienceRoom
+
 # === IMAGE GENERATE ===
 from blocks.image_module import process as image_generate
 
@@ -87,10 +90,6 @@ class ImageEditRoom(Room):
         return None
 
 
-# === SCIENCE ROOM 🔥 ===
-from blocks.science_room import ScienceRoom
-
-
 # === TEXT ===
 from blocks.text_module import process as text_process
 
@@ -115,8 +114,8 @@ class TextRoom(Room):
 
 # === РЕЕСТР ===
 ROOMS = [
+    ScienceRoom(),        # 🔥 КЛЮЧЕВОЕ — ПЕРВЫЙ
     ImageEditRoom(),
     ImageGenerateRoom(),
-    ScienceRoom(),  # 🔥 ВОТ ЭТО ГЛАВНОЕ
     TextRoom()
 ]
