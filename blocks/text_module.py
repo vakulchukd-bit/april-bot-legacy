@@ -5,21 +5,21 @@ from storage import get_user_plan
 
 client = OpenAI()
 
-# 🔥 SYSTEM PROMPT (УЛУЧШЕН)
+# 🔥 SYSTEM PROMPT
 SYSTEM_PROMPT = """
 Ты — Aprill, умный и живой ассистент.
 
 Пиши как человек, а не как робот.
 
 Правила:
-- не используй канцелярит ("Уважаемый клиент", "с наилучшими пожеланиями")
-- пиши естественно, просто и понятно
+- не используй канцелярит
+- пиши естественно и понятно
 - избегай шаблонных фраз
-- не делай длинных перегруженных предложений
 
 ВАЖНО:
-- если ты НЕ МОЖЕШЬ что-то сделать — честно скажи
+- если не можешь — честно скажи
 - НИКОГДА не выдумывай результат
+- ВСЕГДА старайся помочь, даже если не можешь сделать напрямую
 
 Стиль:
 - дружелюбный
@@ -62,73 +62,64 @@ def trim_messages(messages):
     return list(reversed(result))
 
 
-# ===== ENERGY CONFIG =====
+# ===== ENERGY =====
 def get_config(energy):
     if energy == "LOW":
         return {"temperature": 0.5, "max_output_tokens": 300}
-
     if energy == "MEDIUM":
         return {"temperature": 0.7, "max_output_tokens": 700}
-
     if energy == "HIGH":
         return {"temperature": 0.9, "max_output_tokens": 1500}
-
     return {"temperature": 0.6, "max_output_tokens": 500}
 
 
-# ===== СТИЛЬ =====
 def get_energy_prompt(energy):
     if energy == "LOW":
-        return "Отвечай коротко, по делу."
-
+        return "Отвечай коротко."
     if energy == "MEDIUM":
         return "Отвечай понятно и живо."
-
     if energy == "HIGH":
-        return (
-            "Отвечай глубже, но сохраняй живой стиль. "
-            "Используй структуру, но без перегруза."
-        )
-
+        return "Отвечай глубже, но без перегруза."
     return ""
 
 
 # ===== UX =====
 def get_formatting_prompt(plan, energy):
     if plan == "free":
-        return "Пиши просто и понятно."
-
+        return "Пиши просто."
     if plan == "lite":
-        return (
-            "Пиши живо:\n"
-            "- разбивай на абзацы\n"
-            "- избегай перегруза\n"
-        )
-
+        return "Пиши живо, с абзацами."
     if plan == "premium":
         return (
-            "Пиши как живой человек:\n"
-            "- без канцелярита\n"
+            "Пиши как живой человек.\n"
             "- легко читаемо\n"
-            "- с лёгкими эмоциями\n\n"
-            "Если это текст клиенту:\n"
+            "- без шаблонов\n"
+            "- можно эмоции\n\n"
+            "Если текст клиенту:\n"
             "- добавляй уверенность\n"
-            "- показывай выгоду\n"
-            "- не задавай лишние вопросы\n\n"
-            "Избегай шаблонов."
+            "- показывай выгоду"
         )
-
     return ""
 
 
-# ===== ПРОДАЖНЫЙ БЛОК =====
+# ===== ПРОДАЖА =====
 def is_sales_text(text):
-    triggers = [
-        "клиент", "продай", "убеди",
-        "сомневается", "покуп", "заказ"
-    ]
+    triggers = ["клиент", "продай", "убеди", "сомневается", "покуп", "заказ"]
+    return any(w in text.lower() for w in triggers)
+
+
+# ===== ССЫЛКИ (🔥 ГЛАВНЫЙ ФИКС) =====
+def enhance_link_behavior(text):
     t = text.lower()
-    return any(w in t for w in triggers)
+
+    if "ссылка" in t or "link" in t:
+        if "http" not in t:
+            return text + (
+                "\n\nИспользуй пример ссылки: https://example.com\n"
+                "Можешь встроить её в текст и оформить красиво."
+            )
+
+    return text
 
 
 def get_history_limit(plan):
@@ -147,77 +138,70 @@ async def process(user_id, text, state, energy="MEDIUM"):
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
+        # 🔥 ФИКС ССЫЛОК
+        text_fixed = enhance_link_behavior(text)
+
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # ===== ENERGY =====
-        energy_prompt = get_energy_prompt(energy)
-        if energy_prompt:
-            messages.append({"role": "system", "content": energy_prompt})
+        # ENERGY
+        ep = get_energy_prompt(energy)
+        if ep:
+            messages.append({"role": "system", "content": ep})
 
-        # ===== UX =====
-        format_prompt = get_formatting_prompt(plan, energy)
-        if format_prompt:
-            messages.append({"role": "system", "content": format_prompt})
+        # UX
+        fp = get_formatting_prompt(plan, energy)
+        if fp:
+            messages.append({"role": "system", "content": fp})
 
-        # ===== ПРОДАЖНЫЙ ИНТЕЛЛЕКТ =====
-        if is_sales_text(text):
+        # ПРОДАЖА
+        if is_sales_text(text_fixed):
             messages.append({
                 "role": "system",
                 "content": (
-                    "Если пишешь текст для клиента:\n"
-                    "- делай его убедительным\n"
+                    "Пиши убедительно:\n"
                     "- показывай ценность\n"
                     "- убирай сомнения\n"
-                    "- мягко подводи к действию"
+                    "- мягко веди к действию"
                 )
             })
 
-        # ===== ЧЕСТНОСТЬ =====
+        # ЧЕСТНОСТЬ
         messages.append({
             "role": "system",
-            "content": "Не выдумывай. Если не можешь — скажи прямо."
+            "content": "Не выдумывай. Если не можешь — предложи альтернативу."
         })
 
-        # ===== CONTEXT =====
+        # CONTEXT
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
-
             if world:
-                messages.append({
-                    "role": "system",
-                    "content": trim_text(world)
-                })
-        except Exception as e:
-            print("🔥 CONTEXT ERROR:", e)
+                messages.append({"role": "system", "content": trim_text(world)})
+        except:
+            pass
 
-        # ===== IMAGE =====
+        # IMAGE
         if ctx and ctx.get("hint"):
             messages.append({
                 "role": "system",
-                "content": trim_text(f"Ранее обсуждалось: {ctx['hint']}")
+                "content": trim_text(f"Контекст: {ctx['hint']}")
             })
 
-        # ===== HISTORY =====
-        safe_history = []
-        for msg in history[-limit:]:
-            safe_history.append({
-                "role": msg["role"],
-                "content": trim_text(msg.get("content", ""))
-            })
+        # HISTORY
+        safe_history = [
+            {"role": m["role"], "content": trim_text(m.get("content", ""))}
+            for m in history[-limit:]
+        ]
 
-        safe_history = trim_messages(safe_history)
-        messages.extend(safe_history)
+        messages.extend(trim_messages(safe_history))
 
-        # ===== USER =====
+        # USER
         messages.append({
             "role": "user",
-            "content": trim_text(text)
+            "content": trim_text(text_fixed)
         })
 
         config = get_config(energy)
