@@ -175,15 +175,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== 🔗 УМНЫЕ ССЫЛКИ (ФИКС) =====
+    # ===== 🔗 УМНЫЕ ССЫЛКИ (УЛУЧШЕНО) =====
     if response_mode == "link":
         return {
             "type": "text",
             "data": (
-                "Я не могу сократить ссылку напрямую,\n"
-                "но вот что можно сделать 👇\n\n"
+                "Я не могу сократить ссылку прямо здесь,\n"
+                "но вот тебе готовый вариант 👇\n\n"
                 "👉 https://example.com\n\n"
-                "Хочешь — оформлю её красиво в тексте или вставлю в сообщение."
+                "Хочешь — вставлю её красиво в текст или оформлю сообщение."
             )
         }
 
