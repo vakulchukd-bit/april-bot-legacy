@@ -1,217 +1,184 @@
-from blocks.response_mode import detect_response_mode
-from blocks.text_module import process as text_process
+import re
+import numpy as np
+import matplotlib.pyplot as plt
 
-from blocks.intent_system import detect_intent
+from sympy import symbols, sympify, solve
+from storage import get_user_plan
 
-from blocks.state_manager import (
-    get_state,
-    get_image_context
-)
-
-from blocks.anchor_system import get_anchor
-from blocks.mode_manager import get_mode
-
-from blocks.context_system import build_context_text
-
-from blocks.rooms_registry import ROOMS
-from blocks.engineering_system import analyze_code
-
-from blocks.experience_manager import load_experience, update_experience
-
-from blocks.image_module import process as image_generate
-
-from datetime import datetime
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription
-
-# 🔥 НОВАЯ ENERGY СИСТЕМА
-from blocks.energy_manager import get_energy
-
-# 🔥 ПРЯМОЙ ИМПОРТ (ФИКС)
-from blocks.science_room import ScienceRoom
+ADMIN_ID = 2016592532  # 🔥 твой ID
 
 
-# ===== SUBSCRIPTION HANDLER =====
-def handle_subscription(callback_data, user_id):
+class ScienceRoom:
+    name = "science"
 
-    if callback_data == "buy_lite":
-        return {
-            "type": "text",
-            "data": "💳 Подтвердить переход на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-                ]
-            ])
-        }
+    # ===== ОПРЕДЕЛЕНИЕ =====
+    def can_handle(self, text, context):
+        t = text.lower()
 
-    if callback_data == "buy_premium":
-        return {
-            "type": "text",
-            "data": "💳 Подтвердить переход на Premium?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-                ]
-            ])
-        }
+        # 🔥 ЖЁСТКИЕ ТРИГГЕРЫ (чтобы не промахивался)
+        if "график" in t or "построй" in t or "построить" in t:
+            return True
 
-    if callback_data == "buy_yes_lite":
-        return {
-            "type": "admin_request",
-            "plan": "lite"
-        }
+        if "y=" in t or "y =" in t:
+            return True
 
-    if callback_data == "buy_yes_premium":
-        return {
-            "type": "admin_request",
-            "plan": "premium"
-        }
+        if "=" in t or "реши" in t:
+            return True
 
-    if callback_data == "confirm_downgrade":
-        return {
-            "type": "text",
-            "data": "⚠️ Ты уверен, что хочешь перейти на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
-                ]
-            ])
-        }
+        return False
 
-    if callback_data == "confirm_downgrade_yes":
-        return {
-            "type": "admin_request",
-            "plan": "lite"
-        }
+    # ===== ОБРАБОТКА =====
+    async def handle(self, user_id, text, context, run_with_typing):
+        plan = get_user_plan(user_id)
 
-    if callback_data == "confirm_downgrade_no":
-        return {
-            "type": "text",
-            "data": "❌ Отменено"
-        }
+        # 🔥 АДМИН ВСЕГДА PREMIUM
+        if user_id == ADMIN_ID:
+            plan = "premium"
 
-    if callback_data.startswith("admin_confirm_"):
-        parts = callback_data.split("_")
-        plan = parts[2]
-        uid = int(parts[3])
+        t = text.lower()
 
-        set_subscription(uid, plan)
-
-        return {
-            "type": "notify_user",
-            "target_user": uid,
-            "data": f"✅ Активирован {plan.upper()}"
-        }
-
-    if callback_data.startswith("admin_reject_"):
-        uid = int(callback_data.split("_")[3])
-
-        return {
-            "type": "notify_user",
-            "target_user": uid,
-            "data": "❌ Запрос отклонён"
-        }
-
-    return None
-
-
-# ===== EXECUTE =====
-async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
-    state = get_state(user_id)
-    mode = get_mode(user_id)
-
-    # ===== CALLBACK =====
-    if callback_data:
-        sub = handle_subscription(callback_data, user_id)
-        if sub:
-            return sub
-
-    t = text.lower().strip()
-
-    # ===== TIME =====
-    if "время" in t:
-        now = datetime.now().strftime("%H:%M")
-        return {
-            "type": "text",
-            "data": f"Сейчас {now}"
-        }
-
-    # ===== ENGINEERING =====
-    if mode == "engineering" and not text.startswith("/"):
-        if text.lower() == "/analiz":
-            return {"type": "text", "data": "📥 Жду код..."}
-        return {"type": "admin_report", "data": analyze_code(text)}
-
-    if t == "привет":
-        return {"type": "text", "data": "Привет 🙂"}
-
-    if t == "2+2":
-        return {"type": "text", "data": "4"}
-
-    # 🔥 ENERGY
-    energy = get_energy(user_id)
-
-    # ===== 🔥 ЖЁСТКИЙ ВЫЗОВ SCIENCE ROOM =====
-    science = ScienceRoom()
-
-    ctx = get_image_context(user_id) or state.get("image_context")
-    anchor = get_anchor(user_id)
-
-    context = {
-        "chat_id": chat_id,
-        "state": state,
-        "image": ctx,
-        "anchor": anchor,
-        "mode": mode,
-        "task_type": "chat",
-        "energy": energy
-    }
-
-    if science.can_handle(text, context):
-        result = await science.handle(user_id, text, context, run_with_typing)
-        if result:
-            return result
-
-    # ===== ROOMS =====
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
+        # ===== FREE =====
+        if plan == "free":
+            if "=" in t or "реши" in t:
+                result = self.solve_equation(text)
 
                 if result:
-                    return result
+                    return {
+                        "type": "text",
+                        "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
+                    }
+
+            return {
+                "type": "text",
+                "data": "⚠️ В бесплатной версии доступны только простые решения"
+            }
+
+        # ===== LITE =====
+        if plan == "lite":
+            if "график" in t or "y =" in t or "построй" in t:
+                expr = self.extract_function(text)
+
+                if expr:
+                    path = self.build_graph(expr)
+
+                    if path:
+                        try:
+                            with open(path, "rb") as f:
+                                return {
+                                    "type": "image",
+                                    "data": f.read()  # 🔥 ФИКС
+                                }
+                        except Exception as e:
+                            print("🔥 READ ERROR:", e)
+
+            if "=" in t or "реши" in t:
+                result = self.solve_equation(text)
+
+                if result:
+                    return {
+                        "type": "text",
+                        "data": f"📐 Решение:\n{result}"
+                    }
+
+            return {
+                "type": "text",
+                "data": "⚡ LITE: доступно больше функций. Для полного анализа — PREMIUM"
+            }
+
+        # ===== PREMIUM =====
+        if plan == "premium":
+
+            # 🔥 ГРАФИК
+            if "график" in t or "y =" in t or "построй" in t:
+                expr = self.extract_function(text)
+
+                if expr:
+                    path = self.build_graph(expr)
+
+                    if path:
+                        try:
+                            with open(path, "rb") as f:
+                                return {
+                                    "type": "image",
+                                    "data": f.read()  # 🔥 ФИКС
+                                }
+                        except Exception as e:
+                            print("🔥 READ ERROR:", e)
+
+            # ===== УРАВНЕНИЕ =====
+            if "=" in t or "реши" in t:
+                result = self.solve_equation(text)
+
+                if result:
+                    return {
+                        "type": "text",
+                        "data": f"📐 Решение:\n{result}\n\n🧠 Хочешь — объясню шаги"
+                    }
+
+            return {
+                "type": "text",
+                "data": "🧠 Анализирую задачу глубже..."
+            }
+
+        return None
+
+    # ===== ИЗВЛЕЧЕНИЕ ФУНКЦИИ =====
+    def extract_function(self, text):
+        try:
+            text = text.lower().replace("^", "**")
+
+            match = re.search(r"y\s*=\s*(.+)", text)
+            if match:
+                return match.group(1)
+
+            return None
+        except Exception as e:
+            print("🔥 EXTRACT ERROR:", e)
+            return None
+
+    # ===== ПОСТРОЕНИЕ ГРАФИКА =====
+    def build_graph(self, expr):
+        try:
+            x = np.linspace(-10, 10, 200)
+
+            def f(x):
+                return eval(expr, {"x": x, "np": np, "__builtins__": {}})
+
+            y = f(x)
+
+            plt.figure()
+            plt.plot(x, y)
+            plt.title(f"y = {expr}")
+            plt.grid()
+
+            path = "graph.png"
+            plt.savefig(path)
+            plt.close()
+
+            return path
 
         except Exception as e:
-            print(f"🔥 ROOM ERROR [{room.name}]:", e)
+            print("🔥 GRAPH ERROR:", e)
+            return None
 
-    # ===== INTENT =====
-    intent = detect_intent(text)
+    # ===== РЕШЕНИЕ УРАВНЕНИЯ =====
+    def solve_equation(self, text):
+        try:
+            expr = text.replace("реши", "").strip()
+            expr = expr.replace("^", "**")
 
-    if intent == "question":
+            x = symbols('x')
 
-        anchor = get_anchor(user_id)
+            if "=" in expr:
+                left, right = expr.split("=")
+                equation = sympify(left) - sympify(right)
+            else:
+                equation = sympify(expr)
 
-        if anchor:
-            text = f"Контекст: {anchor['current']}\n\n{text}"
+            solution = solve(equation, x)
 
-        text = f"{build_context_text()}\n\n{text}"
+            return solution
 
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-
-        return {"type": "text", "data": result["content"]}
-
-    # ===== FALLBACK =====
-    result = await run_with_typing(
-        chat_id,
-        text_process(user_id, text, state, energy)
-    )
-
-    return {"type": "text", "data": result["content"]}
+        except Exception as e:
+            print("🔥 SOLVE ERROR:", e)
+            return None
