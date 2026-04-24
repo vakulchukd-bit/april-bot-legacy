@@ -16,7 +16,9 @@ class ScienceRoom:
         t = text.lower()
 
         triggers = [
-            "график", "функция", "y =", "x^",
+            "график", "построй", "построить", "нарисуй",
+            "draw", "generate",
+            "функция", "y =", "x^",
             "реши", "уравнение", "=",
             "sin", "cos", "tan",
             "логарифм", "корень",
@@ -53,7 +55,7 @@ class ScienceRoom:
 
         # ===== LITE =====
         if plan == "lite":
-            if "график" in t or "y =" in t:
+            if "график" in t or "y =" in t or "построй" in t:
                 expr = self.extract_function(text)
 
                 if expr:
@@ -83,7 +85,7 @@ class ScienceRoom:
         if plan == "premium":
 
             # График
-            if "график" in t or "y =" in t:
+            if "график" in t or "y =" in t or "построй" in t:
                 expr = self.extract_function(text)
 
                 if expr:
