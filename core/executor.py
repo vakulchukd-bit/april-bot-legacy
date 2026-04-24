@@ -25,11 +25,14 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import set_subscription
 
+# 🔥 ДОБАВИЛИ ENERGY
+from core.energy_manager import detect_energy, apply_subscription_limit
+from storage import get_user_plan
+
 
 # ===== SUBSCRIPTION HANDLER =====
 def handle_subscription(callback_data, user_id):
 
-    # ===== BUY =====
     if callback_data == "buy_lite":
         return {
             "type": "text",
@@ -54,7 +57,6 @@ def handle_subscription(callback_data, user_id):
             ])
         }
 
-    # ===== CONFIRM BUY =====
     if callback_data == "buy_yes_lite":
         return {
             "type": "admin_request",
@@ -67,7 +69,6 @@ def handle_subscription(callback_data, user_id):
             "plan": "premium"
         }
 
-    # ===== DOWNGRADE =====
     if callback_data == "confirm_downgrade":
         return {
             "type": "text",
@@ -92,7 +93,6 @@ def handle_subscription(callback_data, user_id):
             "data": "❌ Отменено"
         }
 
-    # ===== ADMIN CONFIRM =====
     if callback_data.startswith("admin_confirm_"):
         parts = callback_data.split("_")
         plan = parts[2]
@@ -106,7 +106,6 @@ def handle_subscription(callback_data, user_id):
             "data": f"✅ Активирован {plan.upper()}"
         }
 
-    # ===== ADMIN REJECT =====
     if callback_data.startswith("admin_reject_"):
         uid = int(callback_data.split("_")[3])
 
@@ -155,6 +154,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===== ВОПРОС =====
     intent = detect_intent(text)
 
+    # 🔥 ENERGY (новое)
+    plan = get_user_plan(user_id)
+    energy = detect_energy(text, intent, "text")
+    energy = apply_subscription_limit(energy, plan)
+
     if intent == "question":
 
         anchor = get_anchor(user_id)
@@ -166,7 +170,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         result = await run_with_typing(
             chat_id,
-            text_process(user_id, text, state)
+            text_process(user_id, text, state, energy)  # 🔥 передали energy
         )
 
         return {"type": "text", "data": result["content"]}
@@ -197,7 +201,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     result = await run_with_typing(
         chat_id,
-        text_process(user_id, text, state)
+        text_process(user_id, text, state, energy)  # 🔥 и тут тоже
     )
 
     return {"type": "text", "data": result["content"]}
