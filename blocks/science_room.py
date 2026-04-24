@@ -133,8 +133,8 @@ class ScienceRoom:
         if any(w in t for w in ["таблица умножения", "умножения", "умножить", "перемнож"]):
             return {"type": "heatmap"}
 
-        # синус
-        if any(w in t for w in ["синус", "sin", "волна"]):
+        # 🔥 СИНУС (АПГРЕЙД: добавили формы слов)
+        if any(w in t for w in ["синус", "sin", "волна", "волны", "волновой"]):
             return {"type": "function", "expr": "np.sin(x)"}
 
         # косинус
@@ -213,7 +213,6 @@ class ScienceRoom:
     # ===== РЕШЕНИЕ =====
     def solve_equation(self, text):
         try:
-            # 🔥 УЛУЧШЕНО: теперь ловит "уравнение"
             expr = text.lower().replace("реши", "").replace("уравнение", "").strip()
             expr = expr.replace("^", "**")
 
