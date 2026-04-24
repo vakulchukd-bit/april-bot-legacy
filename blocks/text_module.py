@@ -52,7 +52,7 @@ def trim_messages(messages):
     return list(reversed(result))
 
 
-# 🔥 ДОБАВИЛИ ENERGY
+# 🔥 ENERGY CONFIG
 def get_config(energy):
     if energy == "LOW":
         return {"temperature": 0.5, "max_output_tokens": 300}
@@ -66,7 +66,24 @@ def get_config(energy):
     return {"temperature": 0.6, "max_output_tokens": 500}
 
 
-# 🔥 ДОБАВИЛИ energy параметр
+# 🔥 СТИЛЬ МЫШЛЕНИЯ
+def get_energy_prompt(energy):
+    if energy == "LOW":
+        return "Отвечай коротко, по делу, без лишних объяснений."
+
+    if energy == "MEDIUM":
+        return "Отвечай понятно, можешь кратко объяснить суть."
+
+    if energy == "HIGH":
+        return (
+            "Отвечай глубоко и структурировано. "
+            "Можешь рассуждать, приводить примеры и объяснять логику."
+        )
+
+    return ""
+
+
+# 🔥 PROCESS
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
         history = state.get("dialog", [])
@@ -75,6 +92,14 @@ async def process(user_id, text, state, energy="MEDIUM"):
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
+
+        # 🔥 ENERGY В МЫШЛЕНИЕ
+        energy_prompt = get_energy_prompt(energy)
+        if energy_prompt:
+            messages.append({
+                "role": "system",
+                "content": energy_prompt
+            })
 
         # ===== EXPERIENCE =====
         try:
