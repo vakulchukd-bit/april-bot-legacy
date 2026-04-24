@@ -10,14 +10,12 @@ class ImageGenerateRoom(Room):
     def can_handle(self, text, context):
         t = text.lower().strip()
 
-        # 🔥 ЯВНАЯ ГЕНЕРАЦИЯ (основной вход)
         if any(w in t for w in [
             "сгенерируй", "создай изображение", "создай картинку",
             "нарисуй", "generate image", "draw image"
         ]):
             return True
 
-        # 🔥 ПОДТВЕРЖДЕНИЕ (фикс "да")
         state = context.get("state", {})
         if state.get("last_image_prompt"):
             if t in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
@@ -28,7 +26,6 @@ class ImageGenerateRoom(Room):
     async def handle(self, user_id, text, context, run):
         state = context.get("state", {})
 
-        # 🔥 если это "да" → берём прошлый prompt
         if text.lower().strip() in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
             text = state.get("last_image_prompt", text)
 
@@ -38,7 +35,6 @@ class ImageGenerateRoom(Room):
         )
 
         if result and result.get("type") == "image":
-            # сохраняем как последний успешный prompt
             state["last_image_prompt"] = text
             return result
 
@@ -91,6 +87,10 @@ class ImageEditRoom(Room):
         return None
 
 
+# === SCIENCE ROOM 🔥 ===
+from blocks.science_room import ScienceRoom
+
+
 # === TEXT ===
 from blocks.text_module import process as text_process
 
@@ -117,5 +117,6 @@ class TextRoom(Room):
 ROOMS = [
     ImageEditRoom(),
     ImageGenerateRoom(),
+    ScienceRoom(),  # 🔥 ВОТ ЭТО ГЛАВНОЕ
     TextRoom()
 ]
