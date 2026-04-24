@@ -63,6 +63,10 @@ def handle_subscription(callback_data, user_id):
     if callback_data == "buy_yes_premium":
         return {"type": "admin_request", "plan": "premium"}
 
+    # 🔥 FIX
+    if callback_data == "buy_no":
+        return {"type": "text", "data": "❌ Отменено"}
+
     if callback_data == "confirm_downgrade":
         return {
             "type": "text",
@@ -111,8 +115,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # ===== CALLBACK =====
-    if callback_data:
+    # 🔥 FIX
+    if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
@@ -175,7 +179,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== 🔗 УМНЫЕ ССЫЛКИ (УЛУЧШЕНО) =====
+    # ===== 🔗 ССЫЛКИ =====
     if response_mode == "link":
         return {
             "type": "text",
@@ -183,17 +187,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "Я не могу сократить ссылку прямо здесь,\n"
                 "но вот тебе готовый вариант 👇\n\n"
                 "👉 https://example.com\n\n"
-                "Хочешь — вставлю её красиво в текст или оформлю сообщение."
+                "Хочешь — оформлю красиво."
             )
         }
 
-    # ===== ✍️ COPY MODE =====
+    # ===== COPY =====
     if response_mode == "copy":
-        text = f"Напиши готовый текст, который можно сразу использовать:\n\n{text}"
+        text = f"Напиши готовый текст:\n\n{text}"
 
-    # ===== 🎨 FORMAT MODE =====
+    # ===== FORMAT =====
     if response_mode == "format":
-        text = f"Оформи красиво и читаемо:\n\n{text}"
+        text = f"Оформи красиво:\n\n{text}"
 
     # ===== QUESTION =====
     if intent == "question":
