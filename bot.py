@@ -57,7 +57,6 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# ===== TIME CHECK =====
 def is_time_question(text: str):
     text = text.lower()
     triggers = [
@@ -69,7 +68,6 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
-# ===== TYPING =====
 async def typing_loop(chat_id):
     try:
         elapsed = 0
@@ -94,7 +92,6 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
-# ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -107,13 +104,11 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
-# ===== MAIN =====
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
-    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -142,9 +137,7 @@ async def handle(message: types.Message):
     state["time_str"] = now.strftime("%H:%M")
     state["date_str"] = now.strftime("%d.%m.%Y")
 
-    state["allow_time"] = is_time_question(text)
-
-    if state.get("allow_time"):
+    if is_time_question(text):
         await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
             f"📅 Дата: {now.strftime('%d.%m.%Y')}"
@@ -153,7 +146,6 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # ===== BROADCAST =====
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -201,12 +193,8 @@ async def handle(message: types.Message):
                 limits = get_limits(user_id)
                 status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
 
-            await message.answer(
-                reply + status,
-                reply_markup=main_keyboard(message.message_id)
-            )
+            await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
 
-        # 🔥 ВОТ ГЛАВНЫЙ ФИКС
         elif result["type"] == "image":
             await message.answer_photo(
                 BufferedInputFile(result["data"], filename="graph.png"),
@@ -217,14 +205,65 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# ===== CALLBACK =====
+# ===== CALLBACK (ПОЧИНЕН) =====
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    await callback.answer()
+    # 👍
+    if data.startswith("like_"):
+        await callback.answer("👍 Спасибо", show_alert=False)
+        return
 
+    # 👎
+    if data.startswith("dislike_"):
+        await callback.answer("👎 Учту", show_alert=False)
+        return
+
+    # UI
+    if data == "noop":
+        await callback.answer()
+        return
+
+    if data == "menu":
+        text, keyboard = get_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    if data == "info":
+        text, keyboard = build_info_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    # АДМИН
+    if user_id == ADMIN_ID:
+
+        if data == "admin_stats":
+            errors = get_errors()
+            text = "📊 Анализ\n\n"
+            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
+            await callback.answer(text[:200], show_alert=True)
+            return
+
+        if data == "admin_payments":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.answer("📢 Введи текст", show_alert=True)
+            return
+
+    # ВСЁ ОСТАЛЬНОЕ → execute
     try:
         result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
 
@@ -237,14 +276,15 @@ async def handle_callbacks(callback: types.CallbackQuery):
         elif result["type"] == "image":
             await callback.message.answer_photo(
                 BufferedInputFile(result["data"], filename="graph.png"),
-                caption="📊 График"
+                caption="📊"
             )
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
 
+    await callback.answer()
 
-# ===== START =====
+
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
