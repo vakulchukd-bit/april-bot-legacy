@@ -1,6 +1,8 @@
 import asyncio
 from openai import OpenAI
 
+from storage import get_user_plan  # 🔥 ДОБАВИЛИ
+
 client = OpenAI()
 
 SYSTEM_PROMPT = """
@@ -83,11 +85,26 @@ def get_energy_prompt(energy):
     return ""
 
 
+# 🔥 ПАМЯТЬ ПО ТАРИФУ (исправлено)
+def get_history_limit(plan):
+    if plan == "free":
+        return 3
+    if plan == "lite":
+        return 6
+    if plan == "premium":
+        return 20
+    return 6
+
+
 # 🔥 PROCESS
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
         history = state.get("dialog", [])
         ctx = state.get("image_context")
+
+        # 🔥 получаем тариф
+        plan = get_user_plan(user_id)
+        limit = get_history_limit(plan)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
@@ -154,9 +171,9 @@ async def process(user_id, text, state, energy="MEDIUM"):
                 "content": trim_text(f"Ранее обсуждалось изображение: {ctx['hint']}")
             })
 
-        # ===== HISTORY =====
+        # 🔥 HISTORY (по тарифу)
         safe_history = []
-        for msg in history[-MAX_HISTORY_MESSAGES:]:
+        for msg in history[-limit:]:
             safe_history.append({
                 "role": msg["role"],
                 "content": trim_text(msg.get("content", ""))
