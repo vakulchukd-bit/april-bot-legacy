@@ -38,21 +38,6 @@ def init_db():
     conn.close()
 
 
-# ===== LOAD / SAVE (FALLBACK JSON) =====
-def load_data():
-    if not os.path.exists(FILE_PATH):
-        return {"users": {}}
-
-    with open(FILE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_data(data):
-    os.makedirs(os.path.dirname(FILE_PATH), exist_ok=True)
-    with open(FILE_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-
 # ===== TIME =====
 def now():
     return datetime.now(timezone.utc)
@@ -60,24 +45,6 @@ def now():
 
 def today():
     return now().date().isoformat()
-
-
-# ===== USER INIT =====
-def ensure_user(data, user_id):
-    uid = str(user_id)
-
-    if uid not in data["users"]:
-        data["users"][uid] = {
-            "plan": "free",
-            "subscription_until": 0,
-            "warned": False,
-            "messages_today": 0,
-            "images_today": 0,
-            "last_reset": today()
-        }
-        return uid, True
-
-    return uid, False
 
 
 # ===== 🔥 DB USER =====
@@ -132,13 +99,6 @@ def set_subscription(user_id, plan="premium"):
         conn.close()
         return
 
-    # fallback
-    data = load_data()
-    uid, _ = ensure_user(data, user_id)
-    data["users"][uid]["plan"] = plan
-    data["users"][uid]["subscription_until"] = now().timestamp() + 30 * 86400
-    save_data(data)
-
 
 def get_user_plan(user_id):
     conn = get_conn()
@@ -148,7 +108,7 @@ def get_user_plan(user_id):
 
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT plan, subscription_until FROM users WHERE user_id = %s", (uid,))
+                cur.execute("SELECT plan, subscription_until, warned FROM users WHERE user_id = %s", (uid,))
                 user = cur.fetchone()
 
                 if not user:
@@ -160,17 +120,39 @@ def get_user_plan(user_id):
 
                 return user["plan"]
 
-    # fallback
-    data = load_data()
-    uid, _ = ensure_user(data, user_id)
-    return data["users"][uid].get("plan", "free")
+    return "free"
 
 
 def check_subscription(user_id):
     return get_user_plan(user_id) in ["lite", "premium"]
 
 
-# ===== LIMITS (DB VERSION) =====
+# ===== 🔥 ДОБАВИЛИ (ВОТ ЭТО ТЕБЕ НЕ ХВАТАЛО) =====
+def should_warn(user_id):
+    conn = get_conn()
+    if not conn:
+        return False
+
+    uid = str(user_id)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT subscription_until, warned FROM users WHERE user_id = %s", (uid,))
+            user = cur.fetchone()
+
+            if not user:
+                return False
+
+            remaining = user["subscription_until"] - now().timestamp()
+
+            if remaining < 86400 and not user["warned"]:
+                cur.execute("UPDATE users SET warned = TRUE WHERE user_id = %s", (uid,))
+                return True
+
+    return False
+
+
+# ===== LIMITS =====
 def can_send_message(user_id, limit=15):
     conn = get_conn()
 
@@ -200,16 +182,6 @@ def can_send_message(user_id, limit=15):
                 """, (uid,))
                 return True
 
-    # fallback
-    data = load_data()
-    uid, _ = ensure_user(data, user_id)
-    user = data["users"][uid]
-
-    if user["messages_today"] >= limit:
-        return False
-
-    user["messages_today"] += 1
-    save_data(data)
     return True
 
 
@@ -222,5 +194,4 @@ def get_all_users():
                 cur.execute("SELECT user_id FROM users")
                 return [u["user_id"] for u in cur.fetchall()]
 
-    data = load_data()
-    return list(data["users"].keys())
+    return []
