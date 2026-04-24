@@ -127,7 +127,7 @@ def check_subscription(user_id):
     return get_user_plan(user_id) in ["lite", "premium"]
 
 
-# ===== 🔥 ДОБАВИЛИ (ВОТ ЭТО ТЕБЕ НЕ ХВАТАЛО) =====
+# ===== WARNING =====
 def should_warn(user_id):
     conn = get_conn()
     if not conn:
@@ -183,6 +183,64 @@ def can_send_message(user_id, limit=15):
                 return True
 
     return True
+
+
+# ===== 🔥 ДОБАВЛЕННЫЕ ФУНКЦИИ =====
+def get_remaining_messages(user_id, limit=15):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT messages_today FROM users WHERE user_id = %s", (uid,))
+                user = cur.fetchone()
+
+                if not user:
+                    return limit
+
+                return max(0, limit - user["messages_today"])
+
+    return limit
+
+
+def get_remaining_days(user_id):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT subscription_until FROM users WHERE user_id = %s", (uid,))
+                user = cur.fetchone()
+
+                if not user:
+                    return 0
+
+                seconds = user["subscription_until"] - now().timestamp()
+                return max(0, math.ceil(seconds / 86400))
+
+    return 0
+
+
+def get_limits(user_id, msg_limit=15, img_limit=1):
+    return {
+        "messages_used": 0,
+        "messages_limit": msg_limit,
+        "images_used": 0,
+        "images_limit": img_limit
+    }
+
+
+def get_admin_stats():
+    return {
+        "users": 0,
+        "subs": 0,
+        "income_total": 0,
+        "income_today": 0
+    }
 
 
 # ===== ADMIN =====
