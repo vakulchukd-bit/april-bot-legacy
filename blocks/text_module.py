@@ -1,7 +1,7 @@
 import asyncio
 from openai import OpenAI
 
-from storage import get_user_plan  # 🔥 ДОБАВИЛИ
+from storage import get_user_plan
 
 client = OpenAI()
 
@@ -79,13 +79,38 @@ def get_energy_prompt(energy):
     if energy == "HIGH":
         return (
             "Отвечай глубоко и структурировано. "
-            "Можешь рассуждать, приводить примеры и объяснять логику."
+            "Используй заголовки, списки и визуально удобное оформление. "
+            "Можешь выделять ключевые моменты символами, чтобы текст было приятно читать."
         )
 
     return ""
 
 
-# 🔥 ПАМЯТЬ ПО ТАРИФУ (исправлено)
+# 🔥 ФОРМАТИРОВАНИЕ UX
+def get_formatting_prompt(plan, energy):
+    if plan == "free":
+        return "Пиши обычным текстом без оформления."
+
+    if plan == "lite":
+        return (
+            "Иногда используй списки или разделение на абзацы, "
+            "но без перегрузки оформления."
+        )
+
+    if plan == "premium":
+        return (
+            "Оформляй ответ красиво:\n"
+            "- используй заголовки\n"
+            "- делай списки\n"
+            "- выделяй важное\n"
+            "- делай текст удобным для чтения\n"
+            "- не пиши длинные сплошные абзацы"
+        )
+
+    return ""
+
+
+# 🔥 ПАМЯТЬ ПО ТАРИФУ
 def get_history_limit(plan):
     if plan == "free":
         return 3
@@ -102,7 +127,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
-        # 🔥 получаем тариф
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
@@ -110,12 +134,20 @@ async def process(user_id, text, state, energy="MEDIUM"):
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
 
-        # 🔥 ENERGY В МЫШЛЕНИЕ
+        # 🔥 ENERGY стиль мышления
         energy_prompt = get_energy_prompt(energy)
         if energy_prompt:
             messages.append({
                 "role": "system",
                 "content": energy_prompt
+            })
+
+        # 🔥 UX оформление
+        format_prompt = get_formatting_prompt(plan, energy)
+        if format_prompt:
+            messages.append({
+                "role": "system",
+                "content": format_prompt
             })
 
         # ===== EXPERIENCE =====
@@ -151,7 +183,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         except Exception as e:
             print("🔥 EXPERIENCE APPLY ERROR:", e)
 
-        # ===== WORLD CONTEXT =====
+        # ===== CONTEXT =====
         try:
             from blocks.context_system import build_context_text
             world = build_context_text(state)
@@ -171,7 +203,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
                 "content": trim_text(f"Ранее обсуждалось изображение: {ctx['hint']}")
             })
 
-        # 🔥 HISTORY (по тарифу)
+        # ===== HISTORY =====
         safe_history = []
         for msg in history[-limit:]:
             safe_history.append({
@@ -180,7 +212,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
             })
 
         safe_history = trim_messages(safe_history)
-
         messages.extend(safe_history)
 
         # ===== USER =====
@@ -189,7 +220,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
             "content": trim_text(text)
         })
 
-        # 🔥 применяем ENERGY
+        # 🔥 ENERGY
         config = get_config(energy)
 
         r = client.responses.create(
