@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from sympy import symbols, sympify, solve
 from storage import get_user_plan
 
-ADMIN_ID = 2016592532  # 🔥 твой ID
+ADMIN_ID = 2016592532
 
 
 class ScienceRoom:
@@ -15,23 +15,22 @@ class ScienceRoom:
     def can_handle(self, text, context):
         t = text.lower()
 
-        triggers = [
-            "график", "построй", "построить", "нарисуй",
-            "draw", "generate",
-            "функция", "y =", "x^",
-            "реши", "уравнение", "=",
-            "sin", "cos", "tan",
-            "логарифм", "корень",
-            "скорость", "ускорение",
-        ]
+        # 🔥 ЖЁСТКИЙ ТРИГГЕР (фикс)
+        if "график" in t or "построй" in t:
+            return True
 
-        return any(w in t for w in triggers)
+        if "y=" in t or "y =" in t:
+            return True
+
+        if "=" in t or "реши" in t:
+            return True
+
+        return False
 
     # ===== ОБРАБОТКА =====
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
 
-        # 🔥 АДМИН ВСЕГДА PREMIUM
         if user_id == ADMIN_ID:
             plan = "premium"
 
@@ -45,84 +44,57 @@ class ScienceRoom:
                 if result:
                     return {
                         "type": "text",
-                        "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков и объяснений перейди на LITE"
+                        "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
                     }
 
             return {
                 "type": "text",
-                "data": "⚠️ В бесплатной версии доступны только простые решения"
+                "data": "⚠️ Только простые решения доступны"
             }
 
-        # ===== LITE =====
-        if plan == "lite":
-            if "график" in t or "y =" in t or "построй" in t:
-                expr = self.extract_function(text)
+        # ===== LITE / PREMIUM =====
+        if "график" in t or "y" in t or "построй" in t:
+            expr = self.extract_function(text)
 
-                if expr:
-                    path = self.build_graph(expr)
+            if expr:
+                path = self.build_graph(expr)
 
-                    if path:
-                        return {
-                            "type": "image",
-                            "data": path
-                        }
+                if path:
+                    try:
+                        with open(path, "rb") as f:
+                            return {
+                                "type": "image",
+                                "data": f.read()  # 🔥 ФИКС
+                            }
+                    except Exception as e:
+                        print("🔥 READ ERROR:", e)
 
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
+        if "=" in t or "реши" in t:
+            result = self.solve_equation(text)
 
-                if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Решение:\n{result}"
-                    }
+            if result:
+                return {
+                    "type": "text",
+                    "data": f"📐 Решение:\n{result}"
+                }
 
-            return {
-                "type": "text",
-                "data": "⚡ LITE: доступно больше функций. Для полного анализа — PREMIUM"
-            }
-
-        # ===== PREMIUM =====
-        if plan == "premium":
-
-            # График
-            if "график" in t or "y =" in t or "построй" in t:
-                expr = self.extract_function(text)
-
-                if expr:
-                    path = self.build_graph(expr)
-
-                    if path:
-                        return {
-                            "type": "image",
-                            "data": path
-                        }
-
-            # Уравнение
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
-
-                if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Решение:\n{result}\n\n🧠 Хочешь — объясню шаги"
-                    }
-
-            return {
-                "type": "text",
-                "data": "🧠 Анализирую задачу глубже..."
-            }
-
-        return None
+        return {
+            "type": "text",
+            "data": "🧠 Не понял задачу, попробуй уточнить"
+        }
 
     # ===== ИЗВЛЕЧЕНИЕ ФУНКЦИИ =====
     def extract_function(self, text):
         try:
-            match = re.search(r"y\s*=\s*(.+)", text.lower())
+            text = text.lower().replace("^", "**")
+
+            match = re.search(r"y\s*=\s*(.+)", text)
             if match:
-                expr = match.group(1)
-                expr = expr.replace("^", "**")
-                return expr
-        except:
+                return match.group(1)
+
+            return None
+        except Exception as e:
+            print("🔥 EXTRACT ERROR:", e)
             return None
 
     # ===== ПОСТРОЕНИЕ ГРАФИКА =====
@@ -131,7 +103,7 @@ class ScienceRoom:
             x = np.linspace(-10, 10, 200)
 
             def f(x):
-                return eval(expr, {"x": x, "np": np})
+                return eval(expr, {"x": x, "np": np, "__builtins__": {}})
 
             y = f(x)
 
@@ -150,10 +122,10 @@ class ScienceRoom:
             print("🔥 GRAPH ERROR:", e)
             return None
 
-    # ===== РЕШЕНИЕ УРАВНЕНИЯ =====
+    # ===== РЕШЕНИЕ =====
     def solve_equation(self, text):
         try:
-            expr = text.replace("реши", "").strip()
+            expr = text.lower().replace("реши", "").strip()
             expr = expr.replace("^", "**")
 
             x = symbols('x')
