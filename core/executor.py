@@ -1,184 +1,219 @@
-import re
-import numpy as np
-import matplotlib.pyplot as plt
+from blocks.response_mode import detect_response_mode
+from blocks.text_module import process as text_process
 
-from sympy import symbols, sympify, solve
-from storage import get_user_plan
+from blocks.intent_system import detect_intent
 
-ADMIN_ID = 2016592532  # 🔥 твой ID
+from blocks.state_manager import (
+get_state,
+get_image_context
+)
 
+from blocks.anchor_system import get_anchor
+from blocks.mode_manager import get_mode
 
-class ScienceRoom:
-    name = "science"
+from blocks.context_system import build_context_text
 
-    # ===== ОПРЕДЕЛЕНИЕ =====
-    def can_handle(self, text, context):
-        t = text.lower()
+from blocks.rooms_registry import ROOMS
+from blocks.engineering_system import analyze_code
 
-        # 🔥 ЖЁСТКИЕ ТРИГГЕРЫ (чтобы не промахивался)
-        if "график" in t or "построй" in t or "построить" in t:
-            return True
+from blocks.experience_manager import load_experience, update_experience
 
-        if "y=" in t or "y =" in t:
-            return True
+from blocks.image_module import process as image_generate
 
-        if "=" in t or "реши" in t:
-            return True
+from datetime import datetime
 
-        return False
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from storage import set_subscription
 
-    # ===== ОБРАБОТКА =====
-    async def handle(self, user_id, text, context, run_with_typing):
-        plan = get_user_plan(user_id)
+🔥 НОВАЯ ENERGY СИСТЕМА
 
-        # 🔥 АДМИН ВСЕГДА PREMIUM
-        if user_id == ADMIN_ID:
-            plan = "premium"
+from blocks.energy_manager import get_energy
 
-        t = text.lower()
+🔥 ПРЯМОЙ ИМПОРТ (ФИКС)
 
-        # ===== FREE =====
-        if plan == "free":
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
+from blocks.science_room import ScienceRoom
 
-                if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
-                    }
+===== SUBSCRIPTION HANDLER =====
 
-            return {
-                "type": "text",
-                "data": "⚠️ В бесплатной версии доступны только простые решения"
-            }
+def handle_subscription(callback_data, user_id):
 
-        # ===== LITE =====
-        if plan == "lite":
-            if "график" in t or "y =" in t or "построй" in t:
-                expr = self.extract_function(text)
+if callback_data == "buy_lite":  
+    return {  
+        "type": "text",  
+        "data": "💳 Подтвердить переход на Lite?",  
+        "keyboard": InlineKeyboardMarkup(inline_keyboard=[  
+            [  
+                InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),  
+                InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")  
+            ]  
+        ])  
+    }  
 
-                if expr:
-                    path = self.build_graph(expr)
+if callback_data == "buy_premium":  
+    return {  
+        "type": "text",  
+        "data": "💳 Подтвердить переход на Premium?",  
+        "keyboard": InlineKeyboardMarkup(inline_keyboard=[  
+            [  
+                InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),  
+                InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")  
+            ]  
+        ])  
+    }  
 
-                    if path:
-                        try:
-                            with open(path, "rb") as f:
-                                return {
-                                    "type": "image",
-                                    "data": f.read()  # 🔥 ФИКС
-                                }
-                        except Exception as e:
-                            print("🔥 READ ERROR:", e)
+if callback_data == "buy_yes_lite":  
+    return {  
+        "type": "admin_request",  
+        "plan": "lite"  
+    }  
 
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
+if callback_data == "buy_yes_premium":  
+    return {  
+        "type": "admin_request",  
+        "plan": "premium"  
+    }  
 
-                if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Решение:\n{result}"
-                    }
+if callback_data == "confirm_downgrade":  
+    return {  
+        "type": "text",  
+        "data": "⚠️ Ты уверен, что хочешь перейти на Lite?",  
+        "keyboard": InlineKeyboardMarkup(inline_keyboard=[  
+            [  
+                InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),  
+                InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")  
+            ]  
+        ])  
+    }  
 
-            return {
-                "type": "text",
-                "data": "⚡ LITE: доступно больше функций. Для полного анализа — PREMIUM"
-            }
+if callback_data == "confirm_downgrade_yes":  
+    return {  
+        "type": "admin_request",  
+        "plan": "lite"  
+    }  
 
-        # ===== PREMIUM =====
-        if plan == "premium":
+if callback_data == "confirm_downgrade_no":  
+    return {  
+        "type": "text",  
+        "data": "❌ Отменено"  
+    }  
 
-            # 🔥 ГРАФИК
-            if "график" in t or "y =" in t or "построй" in t:
-                expr = self.extract_function(text)
+if callback_data.startswith("admin_confirm_"):  
+    parts = callback_data.split("_")  
+    plan = parts[2]  
+    uid = int(parts[3])  
 
-                if expr:
-                    path = self.build_graph(expr)
+    set_subscription(uid, plan)  
 
-                    if path:
-                        try:
-                            with open(path, "rb") as f:
-                                return {
-                                    "type": "image",
-                                    "data": f.read()  # 🔥 ФИКС
-                                }
-                        except Exception as e:
-                            print("🔥 READ ERROR:", e)
+    return {  
+        "type": "notify_user",  
+        "target_user": uid,  
+        "data": f"✅ Активирован {plan.upper()}"  
+    }  
 
-            # ===== УРАВНЕНИЕ =====
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
+if callback_data.startswith("admin_reject_"):  
+    uid = int(callback_data.split("_")[3])  
 
-                if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Решение:\n{result}\n\n🧠 Хочешь — объясню шаги"
-                    }
+    return {  
+        "type": "notify_user",  
+        "target_user": uid,  
+        "data": "❌ Запрос отклонён"  
+    }  
 
-            return {
-                "type": "text",
-                "data": "🧠 Анализирую задачу глубже..."
-            }
+return None
 
-        return None
+===== EXECUTE =====
 
-    # ===== ИЗВЛЕЧЕНИЕ ФУНКЦИИ =====
-    def extract_function(self, text):
-        try:
-            text = text.lower().replace("^", "**")
+async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
+state = get_state(user_id)
+mode = get_mode(user_id)
 
-            match = re.search(r"y\s*=\s*(.+)", text)
-            if match:
-                return match.group(1)
+# ===== CALLBACK =====  
+if callback_data:  
+    sub = handle_subscription(callback_data, user_id)  
+    if sub:  
+        return sub  
 
-            return None
-        except Exception as e:
-            print("🔥 EXTRACT ERROR:", e)
-            return None
+t = text.lower().strip()  
 
-    # ===== ПОСТРОЕНИЕ ГРАФИКА =====
-    def build_graph(self, expr):
-        try:
-            x = np.linspace(-10, 10, 200)
+# ===== TIME =====  
+if "время" in t:  
+    now = datetime.now().strftime("%H:%M")  
+    return {  
+        "type": "text",  
+        "data": f"Сейчас {now}"  
+    }  
 
-            def f(x):
-                return eval(expr, {"x": x, "np": np, "__builtins__": {}})
+# ===== ENGINEERING =====  
+if mode == "engineering" and not text.startswith("/"):  
+    if text.lower() == "/analiz":  
+        return {"type": "text", "data": "📥 Жду код..."}  
+    return {"type": "admin_report", "data": analyze_code(text)}  
 
-            y = f(x)
+if t == "привет":  
+    return {"type": "text", "data": "Привет 🙂"}  
 
-            plt.figure()
-            plt.plot(x, y)
-            plt.title(f"y = {expr}")
-            plt.grid()
+if t == "2+2":  
+    return {"type": "text", "data": "4"}  
 
-            path = "graph.png"
-            plt.savefig(path)
-            plt.close()
+# 🔥 ENERGY  
+energy = get_energy(user_id)  
 
-            return path
+# ===== 🔥 ЖЁСТКИЙ ВЫЗОВ SCIENCE ROOM =====  
+science = ScienceRoom()  
 
-        except Exception as e:
-            print("🔥 GRAPH ERROR:", e)
-            return None
+ctx = get_image_context(user_id) or state.get("image_context")  
+anchor = get_anchor(user_id)  
 
-    # ===== РЕШЕНИЕ УРАВНЕНИЯ =====
-    def solve_equation(self, text):
-        try:
-            expr = text.replace("реши", "").strip()
-            expr = expr.replace("^", "**")
+context = {  
+    "chat_id": chat_id,  
+    "state": state,  
+    "image": ctx,  
+    "anchor": anchor,  
+    "mode": mode,  
+    "task_type": "chat",  
+    "energy": energy  
+}  
 
-            x = symbols('x')
+if science.can_handle(text, context):  
+    result = await science.handle(user_id, text, context, run_with_typing)  
+    if result:  
+        return result  
 
-            if "=" in expr:
-                left, right = expr.split("=")
-                equation = sympify(left) - sympify(right)
-            else:
-                equation = sympify(expr)
+# ===== ROOMS =====  
+for room in ROOMS:  
+    try:  
+        if room.can_handle(text, context):  
+            result = await room.handle(user_id, text, context, run_with_typing)  
 
-            solution = solve(equation, x)
+            if result:  
+                return result  
 
-            return solution
+    except Exception as e:  
+        print(f"🔥 ROOM ERROR [{room.name}]:", e)  
 
-        except Exception as e:
-            print("🔥 SOLVE ERROR:", e)
-            return None
+# ===== INTENT =====  
+intent = detect_intent(text)  
+
+if intent == "question":  
+
+    anchor = get_anchor(user_id)  
+
+    if anchor:  
+        text = f"Контекст: {anchor['current']}\n\n{text}"  
+
+    text = f"{build_context_text()}\n\n{text}"  
+
+    result = await run_with_typing(  
+        chat_id,  
+        text_process(user_id, text, state, energy)  
+    )  
+
+    return {"type": "text", "data": result["content"]}  
+
+# ===== FALLBACK =====  
+result = await run_with_typing(  
+    chat_id,  
+    text_process(user_id, text, state, energy)  
+)  
+
+return {"type": "text", "data": result["content"]}
