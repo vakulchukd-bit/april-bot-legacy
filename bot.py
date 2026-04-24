@@ -196,8 +196,8 @@ async def handle(message: types.Message):
             elif plan == "lite":
                 status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
             else:
-                remaining = get_remaining_messages(user_id)
-                status = f"\n\n📊 FREE: {15 - remaining} / 15"
+                limits = get_limits(user_id)
+                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
 
             await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
 
