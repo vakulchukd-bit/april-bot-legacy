@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 from sympy import symbols, sympify, solve
 from storage import get_user_plan
 
+ADMIN_ID = 2016592532  # 🔥 твой ID
+
 
 class ScienceRoom:
     name = "science"
@@ -26,6 +28,11 @@ class ScienceRoom:
     # ===== ОБРАБОТКА =====
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
+
+        # 🔥 АДМИН ВСЕГДА PREMIUM
+        if user_id == ADMIN_ID:
+            plan = "premium"
+
         t = text.lower()
 
         # ===== FREE =====
@@ -98,7 +105,6 @@ class ScienceRoom:
                         "data": f"📐 Решение:\n{result}\n\n🧠 Хочешь — объясню шаги"
                     }
 
-            # 🔥 FALLBACK В AI (только premium)
             return {
                 "type": "text",
                 "data": "🧠 Анализирую задачу глубже..."
