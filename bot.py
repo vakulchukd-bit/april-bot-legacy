@@ -110,7 +110,6 @@ def run_server():
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    # 🔥 КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ
     ensure_user_db(user_id)
 
     text = message.text or message.caption or ""
@@ -204,7 +203,7 @@ async def handle(message: types.Message):
         elif result["type"] == "image":
             await message.answer_photo(
                 BufferedInputFile(result["data"], filename="graph.png"),
-                caption="📊 График построен"
+                caption="🖼️ Вот изображение:"
             )
 
     except Exception as e:
@@ -307,7 +306,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         elif result["type"] == "image":
             await callback.message.answer_photo(
                 BufferedInputFile(result["data"], filename="graph.png"),
-                caption="📊"
+                caption="🖼️"
             )
 
     except Exception as e:
