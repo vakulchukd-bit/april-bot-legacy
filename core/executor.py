@@ -22,7 +22,7 @@ from blocks.image_edit_module import process as image_edit
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription, can_edit, get_user_plan
+from storage import set_subscription, can_edit, get_user_plan, can_send_message, format_time
 
 from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
@@ -152,6 +152,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
+    # 🔥 ЛИМИТ (НОВОЕ)
+    allowed, seconds = can_send_message(user_id)
+
+    if not allowed:
+        time_text = format_time(seconds) if seconds else "скоро"
+
+        return {
+            "type": "text",
+            "data": (
+                f"Лимит закончился 👀\n"
+                f"Попробуй через: {time_text}"
+            ),
+            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚀 Перейти на Lite", callback_data="buy_lite")]
+            ])
+        }
+
     if is_noise(t):
         return {
             "type": "text",
@@ -233,7 +250,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     anchor = get_anchor(user_id)
 
-    # 🔥 ЖИВОЕ НАВЕДЕНИЕ (ГЛАВНЫЙ ФИКС)
     if is_ambiguous_request(t):
         text = f"""
 Сообщение пользователя: "{text}"
