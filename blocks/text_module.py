@@ -34,6 +34,37 @@ SYSTEM_PROMPT = """
 """
 
 
+# ===== 🔥 НОВОЕ: ПОВЕДЕНИЕ =====
+def is_vague(text):
+    vague = ["что-нибудь", "что то", "что-то", "сделай", "придумай"]
+    return any(x in text.lower() for x in vague)
+
+
+def is_short(text):
+    return len(text.strip()) <= 3
+
+
+def build_behavior_hint(text):
+    t = text.lower()
+
+    # 🔥 короткие сообщения
+    if is_short(t):
+        return "Ответь живо и по-человечески. Не сухо."
+
+    # 🔥 размытые запросы
+    if is_vague(t):
+        return (
+            "Запрос размытый. Не отвечай напрямую.\n"
+            "Сначала предложи варианты:\n"
+            "- что именно можно сделать\n"
+            "- мягко направь пользователя\n"
+            "- не задавай тупых вопросов\n"
+            "- говори как живой человек"
+        )
+
+    return ""
+
+
 # ===== ЛИМИТЫ =====
 MAX_MESSAGE_CHARS = 2000
 MAX_TOTAL_CHARS = 12000
@@ -151,13 +182,17 @@ async def process(user_id, text, state, energy="MEDIUM"):
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
-        # 🔥 ФИКС ССЫЛОК
         text_fixed = enhance_link_behavior(text)
 
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # 🔥 ДОБАВИЛИ ПОВЕДЕНИЕ
+        behavior = build_behavior_hint(text_fixed)
+        if behavior:
+            messages.append({"role": "system", "content": behavior})
 
         # ENERGY
         ep = get_energy_prompt(energy)
@@ -169,7 +204,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         if fp:
             messages.append({"role": "system", "content": fp})
 
-        # ПРОДАЖА (УСИЛЕНО)
+        # ПРОДАЖА
         if is_sales_text(text_fixed):
             messages.append({
                 "role": "system",
@@ -230,7 +265,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         config = get_config(energy)
 
         r = client.responses.create(
-            model="gpt-4o-mini",  # 🔥 ТОЛЬКО ЭТО ИЗМЕНИЛ
+            model="gpt-4o-mini",
             input=messages,
             temperature=config["temperature"],
             max_output_tokens=config["max_output_tokens"]
