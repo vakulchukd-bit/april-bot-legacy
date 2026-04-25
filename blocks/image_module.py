@@ -23,16 +23,40 @@ def clean_prompt(text: str):
     if not text:
         return ""
 
-    # убираем лишние переносы и мусор
     t = text.strip()
 
-    # защита от системного мусора
     banned = ["система", "анализ личности", "контекст:", "опыт:"]
     for b in banned:
         if b in t.lower():
             t = t.lower().replace(b, "")
 
     return t.strip()
+
+
+# ===== УМНЫЙ PROMPT =====
+def build_smart_prompt(text, state):
+    base = clean_prompt(text)
+
+    last = state.get("image_context")
+
+    if last and last.get("hint"):
+        return f"""
+Используй предыдущую сцену:
+{last['hint']}
+
+Изменение:
+{base}
+
+Сохрани стиль и композицию, измени только то, что указано.
+Сделай результат естественным и аккуратным.
+"""
+    else:
+        return f"""
+Создай изображение:
+{base}
+
+Сделай его визуально приятным, с хорошим светом, композицией и деталями.
+"""
 
 
 async def generate_image(prompt):
@@ -73,10 +97,9 @@ async def generate_image(prompt):
 
 async def process(user_id, text, state):
     try:
-        # 🔥 ЧИСТЫЙ PROMPT
-        prompt = clean_prompt(text)
+        prompt = build_smart_prompt(text, state)
 
-        if not prompt:
+        if not prompt.strip():
             return {
                 "type": "error",
                 "data": "❌ Пустой запрос для генерации"
@@ -94,7 +117,7 @@ async def process(user_id, text, state):
                 "type": "generated",
                 "source": "text",
                 "prompt": prompt,
-                "hint": prompt,
+                "hint": clean_prompt(text),
                 "path": None
             }
 
@@ -109,7 +132,7 @@ async def process(user_id, text, state):
 
         return {
             "type": "retry_notice",
-            "data": "⏳ Картинка генерируется дольше обычного… пробую ещё раз"
+            "data": "⏳ Чуть дольше обычного… пробую ещё раз"
         }
 
     except Exception as e:
@@ -125,9 +148,9 @@ async def process(user_id, text, state):
 # ===== ВТОРАЯ ПОПЫТКА =====
 async def retry_process(user_id, text, state):
     try:
-        prompt = clean_prompt(text)
+        prompt = build_smart_prompt(text, state)
 
-        if not prompt:
+        if not prompt.strip():
             return {
                 "type": "final_error",
                 "data": "❌ Пустой запрос"
@@ -144,7 +167,7 @@ async def retry_process(user_id, text, state):
                 "type": "generated",
                 "source": "text",
                 "prompt": prompt,
-                "hint": prompt,
+                "hint": clean_prompt(text),
                 "path": None
             }
 
@@ -157,7 +180,7 @@ async def retry_process(user_id, text, state):
 
         return {
             "type": "final_error",
-            "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
+            "data": "⚠️ Не получилось сейчас. Попробуй чуть позже 🙏"
         }
 
     except Exception as e:
