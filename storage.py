@@ -157,7 +157,7 @@ def should_warn(user_id):
     return False
 
 
-# ===== 🔥 НОВОЕ: ВРЕМЯ СБРОСА =====
+# ===== 🔥 ВРЕМЯ СБРОСА =====
 def get_reset_seconds(user_id):
     now_time = now()
     tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -168,6 +168,17 @@ def format_time(seconds):
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     return f"{hours}ч {minutes}м"
+
+
+# ===== 🔥 ОБНОВЛЁННЫЙ RESET (КЛЮЧЕВОЕ) =====
+def sync_reset(cur, uid, user):
+    if user["last_reset"] != today():
+        cur.execute("""
+        UPDATE users SET messages_today = 0, edits_today = 0, images_today = 0, last_reset = %s WHERE user_id = %s
+        """, (today(), uid))
+        user["messages_today"] = 0
+        user["edits_today"] = 0
+        user["images_today"] = 0
 
 
 # ===== LIMITS =====
@@ -189,11 +200,8 @@ def can_send_message(user_id, limit=15):
                     ensure_user_db(user_id)
                     return True, None
 
-                if user["last_reset"] != today():
-                    cur.execute("""
-                    UPDATE users SET messages_today = 0, edits_today = 0, last_reset = %s WHERE user_id = %s
-                    """, (today(), uid))
-                    user["messages_today"] = 0
+                # 🔥 СИНХРОНИЗАЦИЯ RESET
+                sync_reset(cur, uid, user)
 
                 if user["messages_today"] >= limit:
                     seconds = get_reset_seconds(user_id)
@@ -226,11 +234,7 @@ def can_edit(user_id):
             if not user:
                 return False
 
-            if user["last_reset"] != today():
-                cur.execute("""
-                UPDATE users SET edits_today = 0, last_reset = %s WHERE user_id = %s
-                """, (today(), uid))
-                user["edits_today"] = 0
+            sync_reset(cur, uid, user)
 
             plan = user["plan"]
 
