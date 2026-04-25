@@ -3,7 +3,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 from aiogram import Bot, Dispatcher, types
@@ -71,7 +71,6 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
-# 🔥 УЛУЧШЕННАЯ АНИМАЦИЯ
 async def typing_loop(chat_id, is_image=False):
     try:
         while True:
@@ -91,7 +90,7 @@ async def run_with_typing(chat_id, coro, is_image=False):
 
     try:
         result = await coro
-        await asyncio.sleep(0.3)  # 🔥 чуть увеличили чтобы было видно
+        await asyncio.sleep(0.3)
         return result
     finally:
         task.cancel()
@@ -117,7 +116,6 @@ async def handle(message: types.Message):
 
     text = message.text or message.caption or ""
 
-    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -155,7 +153,6 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # ===== BROADCAST =====
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -177,19 +174,25 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     plan = get_user_plan(user_id)
 
-    # ===== FREE LIMIT =====
+    # ===== FREE LIMIT (НОВАЯ ЛОГИКА) =====
     if not is_admin and plan == "free":
-        remaining = get_remaining_messages(user_id)
-        if remaining == 0:
+        allowed, seconds = can_send_message(user_id)
+
+        if not allowed:
+            if seconds:
+                future_time = datetime.now(tz) + timedelta(seconds=seconds)
+                time_text = future_time.strftime("%H:%M")
+                msg = f"Лимит закончился 👀\nСледующая попытка: сегодня в {time_text}"
+            else:
+                msg = "Лимит закончился 👀\nПопробуй чуть позже"
+
             await message.answer(
-                "Ты активно используешь бота 👀\n\nХочешь продолжить без ограничений?",
+                msg,
                 reply_markup=upgrade_keyboard()
             )
             return
-        can_send_message(user_id)
 
     try:
-        # 🔥 ПРЕДВАРИТЕЛЬНО считаем тип
         is_image_request = any(x in text.lower() for x in ["картинку", "изображение", "сделай"])
 
         result = await run_with_typing(
@@ -201,7 +204,6 @@ async def handle(message: types.Message):
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
-        # ===== TEXT =====
         if result["type"] == "text":
             reply = result["data"]
 
@@ -220,7 +222,6 @@ async def handle(message: types.Message):
                 reply_markup=main_keyboard(message.message_id)
             )
 
-        # ===== IMAGE =====
         elif result["type"] == "image":
             await message.answer_photo(
                 BufferedInputFile(result["data"], filename="graph.png"),
