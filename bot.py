@@ -27,7 +27,6 @@ from storage import (
 
 from core.executor import execute
 
-# 🔥 ДОБАВИЛИ upgrade_keyboard
 from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard, upgrade_keyboard
 
 from blocks.state_manager import (
@@ -72,25 +71,27 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
-async def typing_loop(chat_id):
+# 🔥 УЛУЧШЕННАЯ АНИМАЦИЯ
+async def typing_loop(chat_id, is_image=False):
     try:
-        elapsed = 0
         while True:
-            if elapsed < 4:
-                await bot.send_chat_action(chat_id, "typing")
-            else:
+            if is_image:
                 await bot.send_chat_action(chat_id, "upload_photo")
+            else:
+                await bot.send_chat_action(chat_id, "typing")
+
             await asyncio.sleep(2)
-            elapsed += 2
+
     except:
         pass
 
 
-async def run_with_typing(chat_id, coro):
-    task = asyncio.create_task(typing_loop(chat_id))
+async def run_with_typing(chat_id, coro, is_image=False):
+    task = asyncio.create_task(typing_loop(chat_id, is_image))
+
     try:
         result = await coro
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.3)  # 🔥 чуть увеличили чтобы было видно
         return result
     finally:
         task.cancel()
@@ -182,13 +183,20 @@ async def handle(message: types.Message):
         if remaining == 0:
             await message.answer(
                 "Ты активно используешь бота 👀\n\nХочешь продолжить без ограничений?",
-                reply_markup=upgrade_keyboard()  # 🔥 ЗАМЕНА
+                reply_markup=upgrade_keyboard()
             )
             return
         can_send_message(user_id)
 
     try:
-        result = await execute(user_id, text, message.chat.id, run_with_typing)
+        # 🔥 ПРЕДВАРИТЕЛЬНО считаем тип
+        is_image_request = any(x in text.lower() for x in ["картинку", "изображение", "сделай"])
+
+        result = await run_with_typing(
+            message.chat.id,
+            execute(user_id, text, message.chat.id, run_with_typing),
+            is_image=is_image_request
+        )
 
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
@@ -223,7 +231,6 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# ===== CALLBACK =====
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
@@ -253,7 +260,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # ===== ADMIN =====
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
