@@ -59,6 +59,36 @@ EDIT_LIMIT_REPLIES = [
 ADMIN_ID = 2016592532
 
 
+# 🔥 ДОБАВЛЕНО (НЕ ЛОМАЕТ НИЧЕГО)
+def detect_visual_intent(text, state):
+    t = text.lower()
+
+    if state.get("image_context"):
+        if any(x in t for x in ["добавь", "сделай", "измени", "усиль"]):
+            return "edit"
+
+    visual_signals = [
+        "представь",
+        "выглядит",
+        "атмосфера",
+        "сцена",
+        "как будто",
+        "кадр",
+        "визуально",
+        "ночь",
+        "свет",
+        "город"
+    ]
+
+    if any(x in t for x in visual_signals):
+        return "imagine"
+
+    if "картин" in t or "изображ" in t:
+        return "imagine"
+
+    return "chat"
+
+
 def is_vague(text):
     vague = ["лучше", "не так", "красивее", "переделай", "что-нибудь", "что-то", "придумай"]
     return any(x in text.lower() for x in vague)
@@ -152,7 +182,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 ЛИМИТ (НОВОЕ)
+    # 🔥 ДОБАВЛЕНО (МЯГКОЕ ПОНЯТИЕ КАРТИНКИ)
+    intent_visual = detect_visual_intent(text, state)
+
+    if intent_visual in ["imagine", "edit"]:
+        state["visual_progress"] = state.get("visual_progress", 0) + 1
+    else:
+        state["visual_progress"] = 0
+
+    # 🔥 ЛИМИТ (НЕ ТРОГАЛ)
     allowed, seconds = can_send_message(user_id)
 
     if not allowed:
@@ -168,6 +206,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 [InlineKeyboardButton(text="🚀 Перейти на Lite", callback_data="buy_lite")]
             ])
         }
+
+    # 🔥 ДОБАВЛЕНО (АВТО-ПЕРЕХОД В КАРТИНКУ)
+    if state.get("visual_progress", 0) >= 2 and state.get("scene") != "image":
+        state["scene"] = "image"
+        return await image_generate(user_id, text, state)
 
     if is_noise(t):
         return {
