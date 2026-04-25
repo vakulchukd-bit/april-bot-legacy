@@ -157,11 +157,23 @@ def should_warn(user_id):
     return False
 
 
+# ===== 🔥 НОВОЕ: ВРЕМЯ СБРОСА =====
+def get_reset_seconds(user_id):
+    now_time = now()
+    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((tomorrow - now_time).total_seconds())
+
+
+def format_time(seconds):
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours}ч {minutes}м"
+
+
 # ===== LIMITS =====
 def can_send_message(user_id, limit=15):
-    # 👑 АДМИН БЕЗ ЛИМИТОВ
     if user_id == ADMIN_ID:
-        return True
+        return True, None
 
     conn = get_conn()
 
@@ -175,27 +187,28 @@ def can_send_message(user_id, limit=15):
 
                 if not user:
                     ensure_user_db(user_id)
-                    return True
+                    return True, None
 
                 if user["last_reset"] != today():
                     cur.execute("""
                     UPDATE users SET messages_today = 0, edits_today = 0, last_reset = %s WHERE user_id = %s
                     """, (today(), uid))
+                    user["messages_today"] = 0
 
                 if user["messages_today"] >= limit:
-                    return False
+                    seconds = get_reset_seconds(user_id)
+                    return False, seconds
 
                 cur.execute("""
                 UPDATE users SET messages_today = messages_today + 1 WHERE user_id = %s
                 """, (uid,))
-                return True
+                return True, None
 
-    return True
+    return True, None
 
 
 # ===== 🔥 EDIT LIMIT =====
 def can_edit(user_id):
-    # 👑 АДМИН БЕЗ ЛИМИТОВ
     if user_id == ADMIN_ID:
         return True
 
@@ -324,19 +337,6 @@ def get_admin_stats():
         "income_total": 0,
         "income_today": 0
     }
-
-
-def get_reset_seconds(user_id):
-    now_time = now()
-    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now_time).total_seconds())
-
-
-def format_time(seconds):
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    return f"{hours:02}:{minutes:02}:{secs:02}"
 
 
 def get_all_users():
