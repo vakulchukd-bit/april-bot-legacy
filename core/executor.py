@@ -56,7 +56,7 @@ EDIT_LIMIT_REPLIES = [
 ]
 
 
-ADMIN_ID = 2016592532  # 🔥 ДОБАВИЛ
+ADMIN_ID = 2016592532
 
 
 def is_vague(text):
@@ -66,6 +66,11 @@ def is_vague(text):
 
 def is_noise(text):
     return len(text.strip()) <= 2
+
+
+def is_ambiguous_request(text):
+    triggers = ["сделай", "создай", "кот", "картинку", "нарисуй"]
+    return any(x in text.lower() for x in triggers) and len(text.split()) <= 2
 
 
 def handle_subscription(callback_data, user_id):
@@ -138,9 +143,26 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 FIX: короткие сообщения
+    # 🔥 фикс "ау"
     if is_noise(t):
-        return {"type": "text", "data": "Я тут 🙂"}
+        return {
+            "type": "text",
+            "data": "Я тут 🙂 Что хочешь сделать?"
+        }
+
+    # 🔥 ГЛАВНОЕ — ЛОГИКА МЫШЛЕНИЯ (ВОЗВРАТ)
+    if is_ambiguous_request(t):
+        return {
+            "type": "text",
+            "data": (
+                "Сделаю 👀\n"
+                "Но уточни чуть-чуть:\n\n"
+                "• это картинка?\n"
+                "• текст?\n"
+                "• или что-то креативное?\n\n"
+                "Я подстроюсь 🙂"
+            )
+        }
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
@@ -180,7 +202,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             plan = get_user_plan(user_id)
             is_admin = user_id == ADMIN_ID
 
-            # 🔥 АДМИН БЕЗ ЛИМИТОВ
             if not is_admin:
 
                 if plan == "free":
@@ -203,7 +224,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             return await image_edit(user_id, None, text, state)
 
-        # генерация только по запросу
         if any(x in t for x in ["сделай", "создай", "нарисуй", "картинку"]):
             return await image_generate(user_id, text, state)
 
