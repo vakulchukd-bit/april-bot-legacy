@@ -225,7 +225,7 @@ def can_edit(user_id):
             return True
 
 
-# ===== 🔥 ВОТ ОН — ФИКС ОШИБКИ =====
+# ===== 🔥 LIMITS (фикс)
 def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
     conn = get_conn()
 
@@ -284,6 +284,34 @@ def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
         "images_limit": img_limit,
         "edits_used": 0,
         "edits_limit": edit_limit
+    }
+
+
+# ===== 🔥 ВАЖНО: ВЕРНУЛИ
+def get_admin_stats():
+    conn = get_conn()
+
+    if conn:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) as total FROM users")
+                total = cur.fetchone()["total"]
+
+                cur.execute("SELECT COUNT(*) as subs FROM users WHERE plan IN ('lite', 'premium')")
+                subs = cur.fetchone()["subs"]
+
+        return {
+            "users": total,
+            "subs": subs,
+            "income_total": 0,
+            "income_today": 0
+        }
+
+    return {
+        "users": 0,
+        "subs": 0,
+        "income_total": 0,
+        "income_today": 0
     }
 
 
