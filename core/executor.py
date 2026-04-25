@@ -60,7 +60,7 @@ ADMIN_ID = 2016592532
 
 
 def is_vague(text):
-    vague = ["лучше", "не так", "красивее", "переделай", "что-нибудь"]
+    vague = ["лучше", "не так", "красивее", "переделай", "что-нибудь", "что-то", "придумай"]
     return any(x in text.lower() for x in vague)
 
 
@@ -69,8 +69,20 @@ def is_noise(text):
 
 
 def is_ambiguous_request(text):
-    triggers = ["сделай", "создай", "кот", "картинку", "нарисуй"]
-    return any(x in text.lower() for x in triggers) and len(text.split()) <= 2
+    t = text.lower()
+
+    # 🔥 расширили
+    triggers = ["сделай", "создай", "кот", "картинку", "нарисуй", "придумай", "идею"]
+    
+    # короткие + непонятные
+    if len(t.split()) <= 3 and any(x in t for x in triggers):
+        return True
+
+    # вообще размыто
+    if is_vague(t) and len(t.split()) <= 4:
+        return True
+
+    return False
 
 
 def handle_subscription(callback_data, user_id):
@@ -143,23 +155,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 фикс "ау"
+    # 🔥 "ау"
     if is_noise(t):
         return {
             "type": "text",
             "data": "Я тут 🙂 Что хочешь сделать?"
         }
 
-    # 🔥 ГЛАВНОЕ — ЛОГИКА МЫШЛЕНИЯ (ВОЗВРАТ)
+    # 🔥 ГЛАВНОЕ — НАВЕДЕНИЕ
     if is_ambiguous_request(t):
         return {
             "type": "text",
             "data": (
-                "Сделаю 👀\n"
-                "Но уточни чуть-чуть:\n\n"
-                "• это картинка?\n"
-                "• текст?\n"
-                "• или что-то креативное?\n\n"
+                "Сделаю 👀\n\n"
+                "Скажи только как именно хочешь:\n"
+                "— картинку\n"
+                "— текст\n"
+                "— идею\n\n"
                 "Я подстроюсь 🙂"
             )
         }
