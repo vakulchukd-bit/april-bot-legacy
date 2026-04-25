@@ -17,12 +17,12 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
-from blocks.image_edit_module import process as image_edit  # 🔥 ДОБАВЛЕНО
+from blocks.image_edit_module import process as image_edit
 
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription
+from storage import set_subscription, can_edit, get_user_plan  # 🔥 ДОБАВИЛИ
 
 # 🔥 ENERGY
 from blocks.energy_manager import get_energy
@@ -51,6 +51,13 @@ IMAGE_GUIDE = [
     "Можно пойти мягко — подкрутить цвет/свет, или сильнее — поменять стиль. Как ближе?",
     "Тут либо слегка улучшить, либо переделать заметнее. В какую сторону идём?",
     "Можно усилить акцент или поменять окружение. Что тебе ближе?",
+]
+
+# 🔥 НОВОЕ — лимит edit
+EDIT_LIMIT_REPLIES = [
+    "Ты почти довёл до идеала 👀\nНо на сегодня правок хватит.\nХочешь продолжить без ограничений?",
+    "Ещё чуть-чуть — и было бы идеально ✨\nНо лимит правок закончился.\nПродолжим без ограничений?",
+    "Ты прямо на финише 🔥\nОсталась пара штрихов… но лимит на сегодня всё.\nДавай добьём в PRO?",
 ]
 
 
@@ -92,24 +99,6 @@ def handle_subscription(callback_data, user_id):
         return {"type": "admin_request", "plan": "premium"}
 
     if callback_data == "buy_no":
-        return {"type": "text", "data": "❌ Отменено"}
-
-    if callback_data == "confirm_downgrade":
-        return {
-            "type": "text",
-            "data": "⚠️ Ты уверен, что хочешь перейти на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
-                ]
-            ])
-        }
-
-    if callback_data == "confirm_downgrade_yes":
-        return {"type": "admin_request", "plan": "lite"}
-
-    if callback_data == "confirm_downgrade_no":
         return {"type": "text", "data": "❌ Отменено"}
 
     if callback_data.startswith("admin_confirm_"):
@@ -166,47 +155,58 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ENERGY =====
     energy = get_energy(user_id)
 
-    # ===== CONTEXT =====
     ctx = get_image_context(user_id) or state.get("image_context")
 
-    # ===== SCENE =====
     if ctx:
         state["scene"] = "image"
 
     scene = state.get("scene", "text")
 
-    # ===== IMAGE SCENE (ГЛАВНОЕ) =====
+    # ===== IMAGE SCENE =====
     if scene == "image":
 
         if not t:
-            return {
-                "type": "text",
-                "data": random.choice(IMAGE_OBSERVE)
-            }
+            return {"type": "text", "data": random.choice(IMAGE_OBSERVE)}
 
         if is_vague(t):
-            return {
-                "type": "text",
-                "data": random.choice(IMAGE_GUIDE)
-            }
+            return {"type": "text", "data": random.choice(IMAGE_GUIDE)}
 
-        # 🔥 КЛЮЧЕВОЕ: если есть картинка → редактируем
+        # 🔥 ЕСЛИ РЕДАКТИРОВАНИЕ
         if ctx and ctx.get("image_bytes"):
+
+            plan = get_user_plan(user_id)
+
+            # FREE вообще не может редактировать
+            if plan == "free":
+                return {
+                    "type": "text",
+                    "data": "Редактирование доступно только в Lite и Premium 👀",
+                    "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🚀 Выбрать тариф", callback_data="buy_lite")]
+                    ])
+                }
+
+            # проверка лимита
+            if not can_edit(user_id):
+                return {
+                    "type": "text",
+                    "data": random.choice(EDIT_LIMIT_REPLIES),
+                    "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="👑 Перейти в Premium", callback_data="buy_premium")]
+                    ])
+                }
+
             return await image_edit(user_id, None, text, state)
 
-        # иначе → генерация
+        # иначе генерация
         return await image_generate(user_id, text, state)
 
     # ===== НЕДОВОЛЬСТВО =====
     if any(x in t for x in ["не так", "не то", "не нравится"]):
         state["needs_refinement"] = True
-        return {
-            "type": "text",
-            "data": random.choice(MISSED_REPLIES)
-        }
+        return {"type": "text", "data": random.choice(MISSED_REPLIES)}
 
     # ===== ПЕРЕХОД В IMAGE =====
     if any(x in t for x in ["картинку", "изображение", "сделай нормально", "с деталями"]):
@@ -229,7 +229,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "energy": energy
     }
 
-    # ===== SCIENCE =====
     science = ScienceRoom()
 
     if science.can_handle(text, context):
@@ -237,7 +236,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if result:
             return result
 
-    # ===== ROOMS =====
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -247,27 +245,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== ССЫЛКИ =====
     if response_mode == "link":
         return {
             "type": "text",
-            "data": (
-                "Я не могу сократить ссылку прямо здесь,\n"
-                "но вот тебе готовый вариант 👇\n\n"
-                "👉 https://example.com\n\n"
-                "Хочешь — оформлю красиво."
-            )
+            "data": "Вот тебе ссылка 👇\n👉 https://example.com"
         }
 
-    # ===== COPY =====
     if response_mode == "copy":
         text = f"Напиши готовый текст:\n\n{text}"
 
-    # ===== FORMAT =====
     if response_mode == "format":
         text = f"Оформи красиво:\n\n{text}"
 
-    # ===== QUESTION =====
     if intent == "question":
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
@@ -281,7 +270,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         return {"type": "text", "data": result["content"]}
 
-    # ===== FALLBACK =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
