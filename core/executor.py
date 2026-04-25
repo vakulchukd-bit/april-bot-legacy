@@ -22,18 +22,14 @@ from blocks.image_edit_module import process as image_edit
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription, can_edit, get_user_plan  # 🔥 ДОБАВИЛИ
+from storage import set_subscription, can_edit, get_user_plan
 
-# 🔥 ENERGY
 from blocks.energy_manager import get_energy
-
-# 🔥 SCIENCE
 from blocks.science_room import ScienceRoom
 
 import random
 
 
-# ===== ЖИВЫЕ РЕАКЦИИ =====
 MISSED_REPLIES = [
     "Похоже, не туда попал. Давай чуть подправим — как ты это видишь?",
     "Окей, значит не совсем это. Куда двигаем — схема или уже нормальное изображение?",
@@ -53,7 +49,6 @@ IMAGE_GUIDE = [
     "Можно усилить акцент или поменять окружение. Что тебе ближе?",
 ]
 
-# 🔥 НОВОЕ — лимит edit
 EDIT_LIMIT_REPLIES = [
     "Ты почти довёл до идеала 👀\nНо на сегодня правок хватит.\nХочешь продолжить без ограничений?",
     "Ещё чуть-чуть — и было бы идеально ✨\nНо лимит правок закончился.\nПродолжим без ограничений?",
@@ -66,7 +61,10 @@ def is_vague(text):
     return any(x in text.lower() for x in vague)
 
 
-# ===== SUBSCRIPTION HANDLER =====
+def is_noise(text):
+    return len(text.strip()) <= 2
+
+
 def handle_subscription(callback_data, user_id):
     if callback_data == "buy_lite":
         return {
@@ -126,7 +124,6 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
-# ===== EXECUTE =====
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -138,12 +135,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ===== TIME =====
+    if is_noise(t):
+        return {"type": "text", "data": "Я тут 👀"}
+
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
         return {"type": "text", "data": f"Сейчас {now}"}
 
-    # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
         if text.lower() == "/analiz":
             return {"type": "text", "data": "📥 Жду код..."}
@@ -173,12 +171,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if is_vague(t):
             return {"type": "text", "data": random.choice(IMAGE_GUIDE)}
 
-        # 🔥 ЕСЛИ РЕДАКТИРОВАНИЕ
         if ctx and ctx.get("image_bytes"):
 
             plan = get_user_plan(user_id)
 
-            # FREE вообще не может редактировать
             if plan == "free":
                 return {
                     "type": "text",
@@ -188,7 +184,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     ])
                 }
 
-            # проверка лимита
             if not can_edit(user_id):
                 return {
                     "type": "text",
@@ -200,20 +195,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             return await image_edit(user_id, None, text, state)
 
-        # иначе генерация
-        return await image_generate(user_id, text, state)
+        # ❗ генерация только если явно просят
+        if any(x in t for x in ["сделай", "создай", "нарисуй", "картинку"]):
+            return await image_generate(user_id, text, state)
 
-    # ===== НЕДОВОЛЬСТВО =====
-    if any(x in t for x in ["не так", "не то", "не нравится"]):
-        state["needs_refinement"] = True
-        return {"type": "text", "data": random.choice(MISSED_REPLIES)}
+        return {"type": "text", "data": "Скажи, что изменить 👀"}
 
-    # ===== ПЕРЕХОД В IMAGE =====
-    if any(x in t for x in ["картинку", "изображение", "сделай нормально", "с деталями"]):
+    # ===== ВХОД В IMAGE =====
+    if any(x in t for x in ["картинку", "изображение", "нарисуй", "создай"]):
         state["scene"] = "image"
         return await image_generate(user_id, text, state)
 
-    # ===== INTENT =====
+    # ===== ТЕКСТ =====
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
@@ -244,31 +237,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     return result
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
-
-    if response_mode == "link":
-        return {
-            "type": "text",
-            "data": "Вот тебе ссылка 👇\n👉 https://example.com"
-        }
-
-    if response_mode == "copy":
-        text = f"Напиши готовый текст:\n\n{text}"
-
-    if response_mode == "format":
-        text = f"Оформи красиво:\n\n{text}"
-
-    if intent == "question":
-        if anchor:
-            text = f"Контекст: {anchor['current']}\n\n{text}"
-
-        text = f"{build_context_text()}\n\n{text}"
-
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-
-        return {"type": "text", "data": result["content"]}
 
     result = await run_with_typing(
         chat_id,
