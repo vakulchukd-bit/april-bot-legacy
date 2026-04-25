@@ -22,12 +22,14 @@ from storage import (
     get_user_plan,
     get_all_users,
     init_db,
-    ensure_user_db  # 🔥 ДОБАВЛЕНО
+    ensure_user_db
 )
 
 from core.executor import execute
 
-from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard
+# 🔥 ДОБАВИЛИ upgrade_keyboard
+from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard, upgrade_keyboard
+
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
@@ -114,6 +116,7 @@ async def handle(message: types.Message):
 
     text = message.text or message.caption or ""
 
+    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -151,6 +154,7 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
+    # ===== BROADCAST =====
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -172,10 +176,14 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     plan = get_user_plan(user_id)
 
+    # ===== FREE LIMIT =====
     if not is_admin and plan == "free":
         remaining = get_remaining_messages(user_id)
         if remaining == 0:
-            await message.answer("⛔ Лимит исчерпан", reply_markup=buy_keyboard())
+            await message.answer(
+                "Ты активно используешь бота 👀\n\nХочешь продолжить без ограничений?",
+                reply_markup=upgrade_keyboard()  # 🔥 ЗАМЕНА
+            )
             return
         can_send_message(user_id)
 
@@ -185,6 +193,7 @@ async def handle(message: types.Message):
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
+        # ===== TEXT =====
         if result["type"] == "text":
             reply = result["data"]
 
@@ -198,18 +207,23 @@ async def handle(message: types.Message):
                 limits = get_limits(user_id)
                 status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
 
-            await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
+            await message.answer(
+                reply + status,
+                reply_markup=main_keyboard(message.message_id)
+            )
 
+        # ===== IMAGE =====
         elif result["type"] == "image":
             await message.answer_photo(
                 BufferedInputFile(result["data"], filename="graph.png"),
-                caption="🖼️ Вот изображение:"
+                caption="🖼️ Готово"
             )
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
 
 
+# ===== CALLBACK =====
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
@@ -239,6 +253,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+    # ===== ADMIN =====
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
@@ -249,11 +264,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         if data == "admin_payments":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
-                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-            ])
+            keyboard = payments_keyboard()
             await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
             await callback.answer()
             return
