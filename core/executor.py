@@ -17,6 +17,7 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
+from blocks.image_edit_module import process as image_edit  # 🔥 ДОБАВЛЕНО
 
 from datetime import datetime
 
@@ -180,24 +181,26 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===== IMAGE SCENE (ГЛАВНОЕ) =====
     if scene == "image":
 
-        # если вообще нет текста (просто кинули картинку)
         if not t:
             return {
                 "type": "text",
                 "data": random.choice(IMAGE_OBSERVE)
             }
 
-        # если запрос размытый
         if is_vague(t):
             return {
                 "type": "text",
                 "data": random.choice(IMAGE_GUIDE)
             }
 
-        # если есть конкретика → сразу генерация
+        # 🔥 КЛЮЧЕВОЕ: если есть картинка → редактируем
+        if ctx and ctx.get("image_bytes"):
+            return await image_edit(user_id, None, text, state)
+
+        # иначе → генерация
         return await image_generate(user_id, text, state)
 
-    # ===== НЕДОВОЛЬСТВО (только в text сцене) =====
+    # ===== НЕДОВОЛЬСТВО =====
     if any(x in t for x in ["не так", "не то", "не нравится"]):
         state["needs_refinement"] = True
         return {
@@ -214,7 +217,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
-    # ===== CONTEXT =====
     anchor = get_anchor(user_id)
 
     context = {
