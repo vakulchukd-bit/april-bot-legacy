@@ -9,7 +9,28 @@ from openai import OpenAI
 client = OpenAI()
 
 
-# ===== СОХРАНЕНИЕ В ФАЙЛ =====
+# ===== СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ) =====
+async def edit_image(image_path, prompt):
+    def run():
+        with open(image_path, "rb") as f:
+            result = client.images.edit(
+                model="gpt-image-1",
+                image=f,
+                prompt=prompt
+            )
+
+        if not result or not result.data:
+            return None
+
+        try:
+            return base64.b64decode(result.data[0].b64_json)
+        except Exception:
+            return None
+
+    return await asyncio.to_thread(run)
+
+
+# ===== НОВОЕ: BYTES → FILE =====
 def save_temp_image(image_bytes):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     tmp.write(image_bytes)
@@ -17,7 +38,6 @@ def save_temp_image(image_bytes):
     return tmp.name
 
 
-# ===== УДАЛЕНИЕ =====
 def cleanup(path):
     try:
         os.remove(path)
@@ -25,7 +45,7 @@ def cleanup(path):
         pass
 
 
-# ===== EDIT =====
+# ===== НОВОЕ: EDIT ЧЕРЕЗ BYTES =====
 async def edit_image_bytes(image_bytes, prompt):
     def run():
         path = save_temp_image(image_bytes)
@@ -53,45 +73,44 @@ async def edit_image_bytes(image_bytes, prompt):
     return await asyncio.to_thread(run)
 
 
-# ===== PROCESS =====
-async def process(user_id, text, state):
+# ===== PROCESS (РАСШИРЕН, НО НЕ СЛОМАН) =====
+async def process(user_id, image_path, prompt, state=None):
     try:
-        ctx = state.get("image_context")
+        img = None
 
-        if not ctx or not ctx.get("image_bytes"):
-            return {
-                "type": "error",
-                "data": "⚠️ Нет изображения для редактирования"
-            }
+        # 🔥 ЕСЛИ ЕСТЬ STATE → РАБОТАЕМ С BYTES
+        if state:
+            ctx = state.get("image_context")
 
-        prompt = text.strip()
+            if ctx and ctx.get("image_bytes"):
+                img = await asyncio.wait_for(
+                    edit_image_bytes(ctx["image_bytes"], prompt),
+                    timeout=60
+                )
 
-        if not prompt:
-            return {
-                "type": "error",
-                "data": "❌ Пустой запрос"
-            }
+                if img:
+                    # 🔥 СОХРАНЯЕМ НОВУЮ ВЕРСИЮ
+                    new_ctx = {
+                        "type": "edited",
+                        "prompt": prompt,
+                        "hint": prompt,
+                        "image_bytes": img
+                    }
+                    state["image_context"] = new_ctx
 
-        img = await asyncio.wait_for(
-            edit_image_bytes(ctx["image_bytes"], prompt),
-            timeout=60
-        )
+        # 🔥 FALLBACK (СТАРАЯ ЛОГИКА)
+        if not img:
+            img = await asyncio.wait_for(
+                edit_image(image_path, prompt),
+                timeout=40
+            )
 
         if not img:
             return {
                 "type": "error",
-                "data": "⚠️ Не получилось изменить изображение"
+                "data": None,
+                "error": "edit_failed"
             }
-
-        # 🔥 СОХРАНЯЕМ КАК НОВУЮ ВЕРСИЮ
-        new_ctx = {
-            "type": "edited",
-            "prompt": prompt,
-            "hint": prompt,
-            "image_bytes": img
-        }
-
-        state["image_context"] = new_ctx
 
         return {
             "type": "image",
@@ -101,12 +120,13 @@ async def process(user_id, text, state):
     except asyncio.TimeoutError:
         return {
             "type": "error",
-            "data": "⏱️ Долго обрабатывается, попробуй ещё раз"
+            "data": None,
+            "error": "timeout"
         }
 
     except Exception as e:
         return {
             "type": "error",
-            "data": "⚠️ Ошибка при редактировании",
+            "data": None,
             "error": str(e)
         }
