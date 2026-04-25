@@ -118,7 +118,8 @@ async def process(user_id, text, state):
                 "source": "text",
                 "prompt": prompt,
                 "hint": clean_prompt(text),
-                "path": None
+                "path": None,
+                "image_bytes": img  # 🔥 ДОБАВЛЕНО (ключевое)
             }
 
             save_to_memory(state, item)
@@ -168,7 +169,8 @@ async def retry_process(user_id, text, state):
                 "source": "text",
                 "prompt": prompt,
                 "hint": clean_prompt(text),
-                "path": None
+                "path": None,
+                "image_bytes": img  # 🔥 ДОБАВЛЕНО
             }
 
             save_to_memory(state, item)
