@@ -32,7 +32,7 @@ def init_db():
                 warned BOOLEAN,
                 messages_today INTEGER,
                 images_today INTEGER,
-                edits_today INTEGER,  -- 🔥 ДОБАВИЛИ
+                edits_today INTEGER,
                 last_reset TEXT
             )
             """)
@@ -186,7 +186,7 @@ def can_send_message(user_id, limit=15):
     return True
 
 
-# ===== 🔥 EDIT LIMIT (НОВОЕ) =====
+# ===== 🔥 EDIT LIMIT =====
 def can_edit(user_id):
     conn = get_conn()
     if not conn:
@@ -202,7 +202,6 @@ def can_edit(user_id):
             if not user:
                 return False
 
-            # сброс
             if user["last_reset"] != today():
                 cur.execute("""
                 UPDATE users SET edits_today = 0, last_reset = %s WHERE user_id = %s
@@ -226,7 +225,68 @@ def can_edit(user_id):
             return True
 
 
-# ===== 🔥 ДОБАВЛЕННЫЕ ФУНКЦИИ =====
+# ===== 🔥 ВОТ ОН — ФИКС ОШИБКИ =====
+def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                SELECT messages_today, images_today, edits_today, last_reset, plan
+                FROM users WHERE user_id = %s
+                """, (uid,))
+                user = cur.fetchone()
+
+                if not user:
+                    return {
+                        "messages_used": 0,
+                        "messages_limit": msg_limit,
+                        "images_used": 0,
+                        "images_limit": img_limit,
+                        "edits_used": 0,
+                        "edits_limit": edit_limit
+                    }
+
+                messages = user["messages_today"] or 0
+                images = user["images_today"] or 0
+                edits = user["edits_today"] or 0
+
+                if user["last_reset"] != today():
+                    messages = 0
+                    images = 0
+                    edits = 0
+
+                plan = user["plan"]
+
+                if plan == "premium":
+                    edit_limit = "∞"
+                elif plan == "lite":
+                    edit_limit = 2
+                else:
+                    edit_limit = 0
+
+                return {
+                    "messages_used": messages,
+                    "messages_limit": msg_limit,
+                    "images_used": images,
+                    "images_limit": img_limit,
+                    "edits_used": edits,
+                    "edits_limit": edit_limit
+                }
+
+    return {
+        "messages_used": 0,
+        "messages_limit": msg_limit,
+        "images_used": 0,
+        "images_limit": img_limit,
+        "edits_used": 0,
+        "edits_limit": edit_limit
+    }
+
+
 def get_remaining_messages(user_id, limit=15):
     conn = get_conn()
 
