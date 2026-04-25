@@ -109,7 +109,7 @@ def get_user_plan(user_id):
 
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT plan, subscription_until, warned FROM users WHERE user_id = %s", (uid,))
+                cur.execute("SELECT plan, subscription_until FROM users WHERE user_id = %s", (uid,))
                 user = cur.fetchone()
 
                 if not user:
@@ -128,32 +128,7 @@ def check_subscription(user_id):
     return get_user_plan(user_id) in ["lite", "premium"]
 
 
-# ===== WARNING =====
-def should_warn(user_id):
-    conn = get_conn()
-    if not conn:
-        return False
-
-    uid = str(user_id)
-
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT subscription_until, warned FROM users WHERE user_id = %s", (uid,))
-            user = cur.fetchone()
-
-            if not user:
-                return False
-
-            remaining = user["subscription_until"] - now().timestamp()
-
-            if remaining < 86400 and not user["warned"]:
-                cur.execute("UPDATE users SET warned = TRUE WHERE user_id = %s", (uid,))
-                return True
-
-    return False
-
-
-# ===== LIMITS =====
+# ===== LIMITЫ СООБЩЕНИЙ =====
 def can_send_message(user_id, limit=15):
     conn = get_conn()
 
@@ -173,7 +148,6 @@ def can_send_message(user_id, limit=15):
                     cur.execute("""
                     UPDATE users SET messages_today = 0, edits_today = 0, last_reset = %s WHERE user_id = %s
                     """, (today(), uid))
-                    user["messages_today"] = 0
 
                 if user["messages_today"] >= limit:
                     return False
@@ -208,12 +182,10 @@ def can_edit(user_id):
                 """, (today(), uid))
                 user["edits_today"] = 0
 
-            plan = user["plan"]
-
-            if plan == "premium":
+            if user["plan"] == "premium":
                 return True
 
-            limit = 2 if plan == "lite" else 0
+            limit = 2 if user["plan"] == "lite" else 0
 
             if user["edits_today"] >= limit:
                 return False
@@ -221,12 +193,11 @@ def can_edit(user_id):
             cur.execute("""
             UPDATE users SET edits_today = edits_today + 1 WHERE user_id = %s
             """, (uid,))
-
             return True
 
 
-# ===== 🔥 LIMITS (фикс)
-def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
+# ===== LIMITЫ (UI) =====
+def get_limits(user_id, msg_limit=15, img_limit=1):
     conn = get_conn()
 
     if conn:
@@ -247,7 +218,7 @@ def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
                         "images_used": 0,
                         "images_limit": img_limit,
                         "edits_used": 0,
-                        "edits_limit": edit_limit
+                        "edits_limit": 0
                     }
 
                 messages = user["messages_today"] or 0
@@ -259,11 +230,9 @@ def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
                     images = 0
                     edits = 0
 
-                plan = user["plan"]
-
-                if plan == "premium":
+                if user["plan"] == "premium":
                     edit_limit = "∞"
-                elif plan == "lite":
+                elif user["plan"] == "lite":
                     edit_limit = 2
                 else:
                     edit_limit = 0
@@ -283,36 +252,31 @@ def get_limits(user_id, msg_limit=15, img_limit=1, edit_limit=2):
         "images_used": 0,
         "images_limit": img_limit,
         "edits_used": 0,
-        "edits_limit": edit_limit
+        "edits_limit": 0
     }
 
 
-# ===== 🔥 ВАЖНО: ВЕРНУЛИ
+# ===== 🔥 ФИКСЫ (ВОТ ИХ НЕ ХВАТАЛО) =====
 def get_admin_stats():
-    conn = get_conn()
-
-    if conn:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) as total FROM users")
-                total = cur.fetchone()["total"]
-
-                cur.execute("SELECT COUNT(*) as subs FROM users WHERE plan IN ('lite', 'premium')")
-                subs = cur.fetchone()["subs"]
-
-        return {
-            "users": total,
-            "subs": subs,
-            "income_total": 0,
-            "income_today": 0
-        }
-
     return {
         "users": 0,
         "subs": 0,
         "income_total": 0,
         "income_today": 0
     }
+
+
+def get_reset_seconds(user_id):
+    now_time = now()
+    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((tomorrow - now_time).total_seconds())
+
+
+def format_time(seconds):
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02}:{minutes:02}:{secs:02}"
 
 
 def get_remaining_messages(user_id, limit=15):
@@ -354,7 +318,6 @@ def get_remaining_days(user_id):
     return 0
 
 
-# ===== ADMIN =====
 def get_all_users():
     conn = get_conn()
     if conn:
