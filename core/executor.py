@@ -59,6 +59,20 @@ EDIT_LIMIT_REPLIES = [
 ADMIN_ID = 2016592532
 
 
+# 🔥 ДОБАВЛЕНО: ГОТОВНОСТЬ К ДЕЙСТВИЮ
+def is_ready_to_generate(text):
+    t = text.lower()
+    triggers = [
+        "покажи",
+        "давай",
+        "зафиксируй",
+        "вот это",
+        "делаем",
+        "подходит"
+    ]
+    return any(x in t for x in triggers)
+
+
 # 🔥 ДОБАВЛЕНО (НЕ ЛОМАЕТ НИЧЕГО)
 def detect_visual_intent(text, state):
     t = text.lower()
@@ -182,7 +196,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 ДОБАВЛЕНО (МЯГКОЕ ПОНЯТИЕ КАРТИНКИ)
     intent_visual = detect_visual_intent(text, state)
 
     if intent_visual in ["imagine", "edit"]:
@@ -190,7 +203,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["visual_progress"] = 0
 
-    # 🔥 ЛИМИТ (НЕ ТРОГАЛ)
     allowed, seconds = can_send_message(user_id)
 
     if not allowed:
@@ -207,7 +219,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             ])
         }
 
-    # 🔥 ДОБАВЛЕНО (АВТО-ПЕРЕХОД В КАРТИНКУ)
+    # 🔥 НОВОЕ: МОМЕНТ ДЕЙСТВИЯ
+    if is_ready_to_generate(text) and state.get("visual_progress", 0) >= 1:
+        state["scene"] = "image"
+        return await image_generate(user_id, text, state)
+
+    # 🔥 старый механизм остаётся
     if state.get("visual_progress", 0) >= 2 and state.get("scene") != "image":
         state["scene"] = "image"
         return await image_generate(user_id, text, state)
@@ -287,7 +304,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         state["scene"] = "image"
         return await image_generate(user_id, text, state)
 
-    # ===== TEXT =====
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
