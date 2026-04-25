@@ -230,7 +230,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         config = get_config(energy)
 
         r = client.responses.create(
-            model="gpt-4o-mini",
+            model="gpt-5.5",  # 🔥 ОБНОВЛЕНО
             input=messages,
             temperature=config["temperature"],
             max_output_tokens=config["max_output_tokens"]
