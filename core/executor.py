@@ -40,6 +40,23 @@ MISSED_REPLIES = [
     "Поймал, не то. Давай докрутим — что именно не так?",
 ]
 
+IMAGE_OBSERVE = [
+    "Интересный кадр. Тут можно поиграть со светом или фоном.",
+    "Красивая сцена. Либо усилить детали, либо поменять атмосферу.",
+    "Есть настроение. Можно аккуратно доработать или сделать сильнее.",
+]
+
+IMAGE_GUIDE = [
+    "Можно пойти мягко — подкрутить цвет/свет, или сильнее — поменять стиль. Как ближе?",
+    "Тут либо слегка улучшить, либо переделать заметнее. В какую сторону идём?",
+    "Можно усилить акцент или поменять окружение. Что тебе ближе?",
+]
+
+
+def is_vague(text):
+    vague = ["лучше", "не так", "красивее", "переделай", "что-нибудь"]
+    return any(x in text.lower() for x in vague)
+
 
 # ===== SUBSCRIPTION HANDLER =====
 def handle_subscription(callback_data, user_id):
@@ -151,9 +168,36 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===== ENERGY =====
     energy = get_energy(user_id)
 
-    # ===== НОВОЕ ПОВЕДЕНИЕ (МЫШЛЕНИЕ) =====
+    # ===== CONTEXT =====
+    ctx = get_image_context(user_id) or state.get("image_context")
 
-    # если пользователь недоволен
+    # ===== SCENE =====
+    if ctx:
+        state["scene"] = "image"
+
+    scene = state.get("scene", "text")
+
+    # ===== IMAGE SCENE (ГЛАВНОЕ) =====
+    if scene == "image":
+
+        # если вообще нет текста (просто кинули картинку)
+        if not t:
+            return {
+                "type": "text",
+                "data": random.choice(IMAGE_OBSERVE)
+            }
+
+        # если запрос размытый
+        if is_vague(t):
+            return {
+                "type": "text",
+                "data": random.choice(IMAGE_GUIDE)
+            }
+
+        # если есть конкретика → сразу генерация
+        return await image_generate(user_id, text, state)
+
+    # ===== НЕДОВОЛЬСТВО (только в text сцене) =====
     if any(x in t for x in ["не так", "не то", "не нравится"]):
         state["needs_refinement"] = True
         return {
@@ -161,21 +205,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "data": random.choice(MISSED_REPLIES)
         }
 
-    # если ранее было уточнение → можно уже генерить картинку
-    if state.get("needs_refinement") and any(x in t for x in ["картинку", "изображение", "сделай нормально", "с деталями"]):
-        state["needs_refinement"] = False
+    # ===== ПЕРЕХОД В IMAGE =====
+    if any(x in t for x in ["картинку", "изображение", "сделай нормально", "с деталями"]):
+        state["scene"] = "image"
         return await image_generate(user_id, text, state)
-
-    # если про "нарисуй", но без уточнений → сначала ASCII (через текст)
-    if "нарисуй" in t and not any(x in t for x in ["картинку", "изображение"]):
-        state["last_render"] = "ascii"
 
     # ===== INTENT =====
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
     # ===== CONTEXT =====
-    ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
     context = {
