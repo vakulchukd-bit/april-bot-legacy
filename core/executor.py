@@ -59,48 +59,34 @@ EDIT_LIMIT_REPLIES = [
 ADMIN_ID = 2016592532
 
 
-# 🔥 ДОБАВЛЕНО: ГОТОВНОСТЬ К ДЕЙСТВИЮ
-def is_ready_to_generate(text):
+# ===== НОВОЕ: СОСТОЯНИЕ ВИЗУАЛА =====
+def update_visual_state(text, state):
     t = text.lower()
-    triggers = [
-        "покажи",
-        "давай",
-        "зафиксируй",
-        "вот это",
-        "делаем",
-        "подходит"
-    ]
-    return any(x in t for x in triggers)
-
-
-# 🔥 ДОБАВЛЕНО (НЕ ЛОМАЕТ НИЧЕГО)
-def detect_visual_intent(text, state):
-    t = text.lower()
-
-    if state.get("image_context"):
-        if any(x in t for x in ["добавь", "сделай", "измени", "усиль"]):
-            return "edit"
 
     visual_signals = [
-        "представь",
-        "выглядит",
-        "атмосфера",
-        "сцена",
-        "как будто",
-        "кадр",
-        "визуально",
-        "ночь",
-        "свет",
-        "город"
+        "представь", "атмосфера", "сцена", "как будто",
+        "ночь", "свет", "город", "кадр", "выглядит"
     ]
 
     if any(x in t for x in visual_signals):
-        return "imagine"
+        state["visual_mode"] = True
+        state["visual_progress"] = state.get("visual_progress", 0) + 1
+    else:
+        # не сбрасываем резко — даём "инерцию"
+        state["visual_progress"] = max(0, state.get("visual_progress", 0) - 1)
 
-    if "картин" in t or "изображ" in t:
-        return "imagine"
+    # готовность
+    if state.get("visual_progress", 0) >= 2:
+        state["visual_ready"] = True
+    else:
+        state["visual_ready"] = False
 
-    return "chat"
+
+def is_action_intent(text):
+    t = text.lower()
+    return any(x in t for x in [
+        "покажи", "давай", "сделай", "зафиксируй", "вот это", "делаем"
+    ])
 
 
 def is_vague(text):
@@ -196,13 +182,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    intent_visual = detect_visual_intent(text, state)
+    # 🔥 ОБНОВЛЯЕМ СОСТОЯНИЕ
+    update_visual_state(text, state)
 
-    if intent_visual in ["imagine", "edit"]:
-        state["visual_progress"] = state.get("visual_progress", 0) + 1
-    else:
-        state["visual_progress"] = 0
-
+    # 🔥 ЛИМИТ
     allowed, seconds = can_send_message(user_id)
 
     if not allowed:
@@ -219,13 +202,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             ])
         }
 
-    # 🔥 НОВОЕ: МОМЕНТ ДЕЙСТВИЯ
-    if is_ready_to_generate(text) and state.get("visual_progress", 0) >= 1:
-        state["scene"] = "image"
-        return await image_generate(user_id, text, state)
-
-    # 🔥 старый механизм остаётся
-    if state.get("visual_progress", 0) >= 2 and state.get("scene") != "image":
+    # 🔥 ГЛАВНОЕ: ПЕРЕХОД К ДЕЙСТВИЮ
+    if state.get("visual_ready") and is_action_intent(text):
         state["scene"] = "image"
         return await image_generate(user_id, text, state)
 
