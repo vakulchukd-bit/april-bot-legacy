@@ -56,6 +56,9 @@ EDIT_LIMIT_REPLIES = [
 ]
 
 
+ADMIN_ID = 2016592532  # 🔥 ДОБАВИЛ
+
+
 def is_vague(text):
     vague = ["лучше", "не так", "красивее", "переделай", "что-нибудь"]
     return any(x in text.lower() for x in vague)
@@ -135,8 +138,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
+    # 🔥 FIX: короткие сообщения
     if is_noise(t):
-        return {"type": "text", "data": "Я тут 👀"}
+        return {"type": "text", "data": "Я тут 🙂"}
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
@@ -174,28 +178,32 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if ctx and ctx.get("image_bytes"):
 
             plan = get_user_plan(user_id)
+            is_admin = user_id == ADMIN_ID
 
-            if plan == "free":
-                return {
-                    "type": "text",
-                    "data": "Редактирование доступно только в Lite и Premium 👀",
-                    "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🚀 Выбрать тариф", callback_data="buy_lite")]
-                    ])
-                }
+            # 🔥 АДМИН БЕЗ ЛИМИТОВ
+            if not is_admin:
 
-            if not can_edit(user_id):
-                return {
-                    "type": "text",
-                    "data": random.choice(EDIT_LIMIT_REPLIES),
-                    "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="👑 Перейти в Premium", callback_data="buy_premium")]
-                    ])
-                }
+                if plan == "free":
+                    return {
+                        "type": "text",
+                        "data": "Редактирование доступно только в Lite и Premium 👀",
+                        "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🚀 Выбрать тариф", callback_data="buy_lite")]
+                        ])
+                    }
+
+                if not can_edit(user_id):
+                    return {
+                        "type": "text",
+                        "data": random.choice(EDIT_LIMIT_REPLIES),
+                        "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="👑 Перейти в Premium", callback_data="buy_premium")]
+                        ])
+                    }
 
             return await image_edit(user_id, None, text, state)
 
-        # ❗ генерация только если явно просят
+        # генерация только по запросу
         if any(x in t for x in ["сделай", "создай", "нарисуй", "картинку"]):
             return await image_generate(user_id, text, state)
 
@@ -206,7 +214,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         state["scene"] = "image"
         return await image_generate(user_id, text, state)
 
-    # ===== ТЕКСТ =====
+    # ===== TEXT =====
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
