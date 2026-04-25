@@ -9,6 +9,10 @@ from psycopg2.extras import RealDictCursor
 
 FILE_PATH = "data/subscriptions.json"
 
+# 👑 ADMIN
+ADMIN_ID = 2016592532
+
+
 # ===== 🔥 DB CONNECT =====
 def get_conn():
     db_url = os.getenv("DATABASE_URL")
@@ -32,7 +36,7 @@ def init_db():
                 warned BOOLEAN,
                 messages_today INTEGER,
                 images_today INTEGER,
-                edits_today INTEGER,  -- 🔥 ДОБАВЛЕНО
+                edits_today INTEGER,
                 last_reset TEXT
             )
             """)
@@ -64,7 +68,7 @@ def ensure_user_db(user_id):
             if not user:
                 cur.execute("""
                 INSERT INTO users VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (uid, "free", 0, False, 0, 0, 0, today()))  # 🔥 ДОБАВЛЕНО 0
+                """, (uid, "free", 0, False, 0, 0, 0, today()))
                 return None
 
             return user
@@ -96,7 +100,7 @@ def set_subscription(user_id, plan="premium"):
                 plan = EXCLUDED.plan,
                 subscription_until = EXCLUDED.subscription_until,
                 warned = FALSE
-                """, (uid, plan, expire_date, False, 0, 0, 0, today()))  # 🔥 ДОБАВЛЕНО edits_today
+                """, (uid, plan, expire_date, False, 0, 0, 0, today()))
         conn.close()
         return
 
@@ -155,6 +159,10 @@ def should_warn(user_id):
 
 # ===== LIMITS =====
 def can_send_message(user_id, limit=15):
+    # 👑 АДМИН БЕЗ ЛИМИТОВ
+    if user_id == ADMIN_ID:
+        return True
+
     conn = get_conn()
 
     if conn:
@@ -185,8 +193,12 @@ def can_send_message(user_id, limit=15):
     return True
 
 
-# ===== 🔥 НОВОЕ: EDIT LIMIT =====
+# ===== 🔥 EDIT LIMIT =====
 def can_edit(user_id):
+    # 👑 АДМИН БЕЗ ЛИМИТОВ
+    if user_id == ADMIN_ID:
+        return True
+
     conn = get_conn()
     if not conn:
         return True
@@ -224,7 +236,7 @@ def can_edit(user_id):
             return True
 
 
-# ===== 🔥 ДОБАВЛЕННЫЕ ФУНКЦИИ =====
+# ===== ОСТАЛЬНОЕ НЕ ТРОГАЛ =====
 def get_remaining_messages(user_id, limit=15):
     conn = get_conn()
 
@@ -264,7 +276,6 @@ def get_remaining_days(user_id):
     return 0
 
 
-# 🔥 НЕ ТРОГАЕМ
 def get_limits(user_id, msg_limit=15, img_limit=1):
     conn = get_conn()
 
