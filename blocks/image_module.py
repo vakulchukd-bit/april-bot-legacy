@@ -70,8 +70,6 @@ async def generate_image(prompt):
                 size="1024x1024"
             )
 
-            print("📦 RAW RESULT:", result)
-
             if not result or not result.data:
                 print("❌ EMPTY RESULT FROM OPENAI")
                 return None
@@ -105,11 +103,10 @@ async def process(user_id, text, state):
                 "data": "❌ Пустой запрос для генерации"
             }
 
-        # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
             img = await asyncio.wait_for(generate_image(prompt), timeout=60)
         except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT FIRST ATTEMPT")
+            print("⏱️ TIMEOUT")
             img = None
 
         if img:
@@ -119,7 +116,7 @@ async def process(user_id, text, state):
                 "prompt": prompt,
                 "hint": clean_prompt(text),
                 "path": None,
-                "image_bytes": img  # 🔥 ДОБАВЛЕНО (ключевое)
+                "image_bytes": img
             }
 
             save_to_memory(state, item)
@@ -129,66 +126,16 @@ async def process(user_id, text, state):
                 "data": img
             }
 
-        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
-
+        # 🔥 ВОТ ГЛАВНЫЙ ФИКС
         return {
-            "type": "retry_notice",
-            "data": "⏳ Чуть дольше обычного… пробую ещё раз"
+            "type": "text",
+            "data": "⚠️ Не получилось сгенерировать изображение. Попробуй ещё раз или перефразируй."
         }
 
     except Exception as e:
         print("🔥 PROCESS ERROR:", e)
 
         return {
-            "type": "error",
-            "data": None,
-            "error": str(e)
-        }
-
-
-# ===== ВТОРАЯ ПОПЫТКА =====
-async def retry_process(user_id, text, state):
-    try:
-        prompt = build_smart_prompt(text, state)
-
-        if not prompt.strip():
-            return {
-                "type": "final_error",
-                "data": "❌ Пустой запрос"
-            }
-
-        try:
-            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
-        except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT SECOND ATTEMPT")
-            img = None
-
-        if img:
-            item = {
-                "type": "generated",
-                "source": "text",
-                "prompt": prompt,
-                "hint": clean_prompt(text),
-                "path": None,
-                "image_bytes": img  # 🔥 ДОБАВЛЕНО
-            }
-
-            save_to_memory(state, item)
-
-            return {
-                "type": "image",
-                "data": img
-            }
-
-        return {
-            "type": "final_error",
-            "data": "⚠️ Не получилось сейчас. Попробуй чуть позже 🙏"
-        }
-
-    except Exception as e:
-        print("🔥 RETRY PROCESS ERROR:", e)
-
-        return {
-            "type": "final_error",
-            "data": "⚠️ Сервис временно недоступен"
+            "type": "text",
+            "data": "⚠️ Ошибка генерации. Попробуй позже."
         }
