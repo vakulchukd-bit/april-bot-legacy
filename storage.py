@@ -32,6 +32,7 @@ def init_db():
                 warned BOOLEAN,
                 messages_today INTEGER,
                 images_today INTEGER,
+                edits_today INTEGER,  -- 🔥 ДОБАВИЛИ
                 last_reset TEXT
             )
             """)
@@ -62,8 +63,8 @@ def ensure_user_db(user_id):
 
             if not user:
                 cur.execute("""
-                INSERT INTO users VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (uid, "free", 0, False, 0, 0, today()))
+                INSERT INTO users VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (uid, "free", 0, False, 0, 0, 0, today()))
                 return None
 
             return user
@@ -77,7 +78,7 @@ def set_subscription(user_id, plan="premium"):
         uid = str(user_id)
 
         if plan == "lite":
-            days = 15
+            days = 5
         elif plan == "premium":
             days = 30
         else:
@@ -89,13 +90,13 @@ def set_subscription(user_id, plan="premium"):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, last_reset)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, edits_today, last_reset)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE SET
                 plan = EXCLUDED.plan,
                 subscription_until = EXCLUDED.subscription_until,
                 warned = FALSE
-                """, (uid, plan, expire_date, False, 0, 0, today()))
+                """, (uid, plan, expire_date, False, 0, 0, 0, today()))
         conn.close()
         return
 
@@ -170,7 +171,7 @@ def can_send_message(user_id, limit=15):
 
                 if user["last_reset"] != today():
                     cur.execute("""
-                    UPDATE users SET messages_today = 0, last_reset = %s WHERE user_id = %s
+                    UPDATE users SET messages_today = 0, edits_today = 0, last_reset = %s WHERE user_id = %s
                     """, (today(), uid))
                     user["messages_today"] = 0
 
@@ -183,6 +184,46 @@ def can_send_message(user_id, limit=15):
                 return True
 
     return True
+
+
+# ===== 🔥 EDIT LIMIT (НОВОЕ) =====
+def can_edit(user_id):
+    conn = get_conn()
+    if not conn:
+        return True
+
+    uid = str(user_id)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT edits_today, last_reset, plan FROM users WHERE user_id = %s", (uid,))
+            user = cur.fetchone()
+
+            if not user:
+                return False
+
+            # сброс
+            if user["last_reset"] != today():
+                cur.execute("""
+                UPDATE users SET edits_today = 0, last_reset = %s WHERE user_id = %s
+                """, (today(), uid))
+                user["edits_today"] = 0
+
+            plan = user["plan"]
+
+            if plan == "premium":
+                return True
+
+            limit = 2 if plan == "lite" else 0
+
+            if user["edits_today"] >= limit:
+                return False
+
+            cur.execute("""
+            UPDATE users SET edits_today = edits_today + 1 WHERE user_id = %s
+            """, (uid,))
+
+            return True
 
 
 # ===== 🔥 ДОБАВЛЕННЫЕ ФУНКЦИИ =====
@@ -223,72 +264,6 @@ def get_remaining_days(user_id):
                 return max(0, math.ceil(seconds / 86400))
 
     return 0
-
-
-# 🔥 ВОТ ТУТ ГЛАВНЫЙ ФИКС
-def get_limits(user_id, msg_limit=15, img_limit=1):
-    conn = get_conn()
-
-    if conn:
-        uid = str(user_id)
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
-
-                if not user:
-                    return {
-                        "messages_used": 0,
-                        "messages_limit": msg_limit,
-                        "images_used": 0,
-                        "images_limit": img_limit
-                    }
-
-                messages = user["messages_today"] or 0
-                images = user["images_today"] or 0
-
-                # сброс дня
-                if user["last_reset"] != today():
-                    messages = 0
-                    images = 0
-
-                return {
-                    "messages_used": messages,
-                    "messages_limit": msg_limit,
-                    "images_used": images,
-                    "images_limit": img_limit
-                }
-
-    return {
-        "messages_used": 0,
-        "messages_limit": msg_limit,
-        "images_used": 0,
-        "images_limit": img_limit
-    }
-
-
-def get_admin_stats():
-    return {
-        "users": 0,
-        "subs": 0,
-        "income_total": 0,
-        "income_today": 0
-    }
-
-
-# ===== 🔥 ДОБАВЛЕНО (ПОСЛЕДНЕЕ) =====
-def get_reset_seconds(user_id):
-    now_time = now()
-    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now_time).total_seconds())
-
-
-def format_time(seconds):
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    return f"{hours:02}:{minutes:02}:{secs:02}"
 
 
 # ===== ADMIN =====
