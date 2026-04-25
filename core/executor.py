@@ -29,10 +29,20 @@ from blocks.energy_manager import get_energy
 # 🔥 SCIENCE
 from blocks.science_room import ScienceRoom
 
+import random
+
+
+# ===== ЖИВЫЕ РЕАКЦИИ =====
+MISSED_REPLIES = [
+    "Похоже, не туда попал. Давай чуть подправим — как ты это видишь?",
+    "Окей, значит не совсем это. Куда двигаем — схема или уже нормальное изображение?",
+    "Ага, мимо. Давай соберём как надо — что поменять?",
+    "Поймал, не то. Давай докрутим — что именно не так?",
+]
+
 
 # ===== SUBSCRIPTION HANDLER =====
 def handle_subscription(callback_data, user_id):
-
     if callback_data == "buy_lite":
         return {
             "type": "text",
@@ -63,7 +73,6 @@ def handle_subscription(callback_data, user_id):
     if callback_data == "buy_yes_premium":
         return {"type": "admin_request", "plan": "premium"}
 
-    # 🔥 FIX
     if callback_data == "buy_no":
         return {"type": "text", "data": "❌ Отменено"}
 
@@ -115,7 +124,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 FIX
     if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
@@ -142,6 +150,25 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # ===== ENERGY =====
     energy = get_energy(user_id)
+
+    # ===== НОВОЕ ПОВЕДЕНИЕ (МЫШЛЕНИЕ) =====
+
+    # если пользователь недоволен
+    if any(x in t for x in ["не так", "не то", "не нравится"]):
+        state["needs_refinement"] = True
+        return {
+            "type": "text",
+            "data": random.choice(MISSED_REPLIES)
+        }
+
+    # если ранее было уточнение → можно уже генерить картинку
+    if state.get("needs_refinement") and any(x in t for x in ["картинку", "изображение", "сделай нормально", "с деталями"]):
+        state["needs_refinement"] = False
+        return await image_generate(user_id, text, state)
+
+    # если про "нарисуй", но без уточнений → сначала ASCII (через текст)
+    if "нарисуй" in t and not any(x in t for x in ["картинку", "изображение"]):
+        state["last_render"] = "ascii"
 
     # ===== INTENT =====
     intent = detect_intent(text)
@@ -179,7 +206,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== 🔗 ССЫЛКИ =====
+    # ===== ССЫЛКИ =====
     if response_mode == "link":
         return {
             "type": "text",
@@ -201,7 +228,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # ===== QUESTION =====
     if intent == "question":
-
         if anchor:
             text = f"Контекст: {anchor['current']}\n\n{text}"
 
