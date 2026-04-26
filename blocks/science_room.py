@@ -25,6 +25,20 @@ class ScienceRoom:
         if "=" in t or "реши" in t:
             return True
 
+        # 🔥 НОВОЕ: РАСШИРЕННОЕ ПОНИМАНИЕ ЗАДАЧИ (без ломки)
+        if any(w in t for w in [
+            "приведи",
+            "вырази",
+            "найди",
+            "доведи",
+            "вычисли",
+            "переменн",
+            "значение",
+            "уравнен",
+            "выражен"
+        ]):
+            return True
+
         return False
 
     # ===== ОБРАБОТКА =====
@@ -67,23 +81,18 @@ class ScienceRoom:
             }
 
         # ===== LITE / PREMIUM =====
-        # 🔥 ИСПРАВЛЕНО: убрали "y" (он ломал всё)
         if "график" in t or "построй" in t or "y=" in t:
 
-            # 🔥 СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ)
             expr = self.extract_function(text)
 
-            # ================== 🔥 НОВОЕ (НЕ ЛОМАЕТ СТАРОЕ) ==================
             if not expr:
                 interpreted = self.interpret_text_graph(text)
 
                 if interpreted:
 
-                    # 👉 ФУНКЦИЯ
                     if interpreted["type"] == "function":
                         expr = interpreted["expr"]
 
-                    # 👉 ТАБЛИЦА УМНОЖЕНИЯ (дублируем безопасно)
                     elif interpreted["type"] == "heatmap":
                         path = self.build_multiplication_table()
 
@@ -96,7 +105,6 @@ class ScienceRoom:
                                     }
                             except Exception as e:
                                 print("🔥 READ ERROR:", e)
-            # ===============================================================
 
             if expr:
                 path = self.build_graph(expr)
@@ -111,7 +119,14 @@ class ScienceRoom:
                     except Exception as e:
                         print("🔥 READ ERROR:", e)
 
-        if "=" in t or "реши" in t:
+        # 🔥 УСИЛЕНО: теперь работает и на "приведи / доведи"
+        if "=" in t or "реши" in t or any(w in t for w in [
+            "приведи",
+            "доведи",
+            "найди",
+            "вырази",
+            "вычисли"
+        ]):
             result = self.solve_equation(text)
 
             if result:
@@ -129,29 +144,23 @@ class ScienceRoom:
     def interpret_text_graph(self, text):
         t = text.lower()
 
-        # таблица умножения (расширено)
         if any(w in t for w in ["таблица умножения", "умножения", "умножить", "перемнож"]):
             return {"type": "heatmap"}
 
-        # 🔥 СИНУС (АПГРЕЙД: добавили формы слов)
         if any(w in t for w in ["синус", "sin", "волна", "волны", "волновой"]):
             return {"type": "function", "expr": "np.sin(x)"}
 
-        # косинус
         if any(w in t for w in ["косинус", "cos"]):
             return {"type": "function", "expr": "np.cos(x)"}
 
-        # парабола
         if any(w in t for w in ["парабола", "квадрат", "x^2"]):
             return {"type": "function", "expr": "x**2"}
 
-        # линия
         if any(w in t for w in ["линия", "прямая", "линейный"]):
             return {"type": "function", "expr": "x"}
 
         return None
 
-    # ===== 🔥 НОВОЕ: ТАБЛИЦА УМНОЖЕНИЯ =====
     def build_multiplication_table(self):
         try:
             data = np.outer(range(1, 11), range(1, 11))
@@ -171,7 +180,6 @@ class ScienceRoom:
             print("🔥 TABLE ERROR:", e)
             return None
 
-    # ===== ИЗВЛЕЧЕНИЕ ФУНКЦИИ =====
     def extract_function(self, text):
         try:
             text = text.lower().replace("^", "**")
@@ -185,7 +193,6 @@ class ScienceRoom:
             print("🔥 EXTRACT ERROR:", e)
             return None
 
-    # ===== ПОСТРОЕНИЕ ГРАФИКА =====
     def build_graph(self, expr):
         try:
             x = np.linspace(-10, 10, 200)
@@ -210,7 +217,6 @@ class ScienceRoom:
             print("🔥 GRAPH ERROR:", e)
             return None
 
-    # ===== РЕШЕНИЕ =====
     def solve_equation(self, text):
         try:
             expr = text.lower().replace("реши", "").replace("уравнение", "").strip()
