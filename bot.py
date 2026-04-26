@@ -233,10 +233,13 @@ async def handle_callbacks(callback: types.CallbackQuery):
                 new_keyboard = base_keyboard
 
             try:
-                if callback.message.text == text:
-                    await callback.message.edit_reply_markup(reply_markup=new_keyboard)
-                else:
-                    await callback.message.edit_text(text, reply_markup=new_keyboard)
+                # ✅ ФИКС: НЕ ТРОГАЕМ ТЕКСТ
+                await callback.message.edit_reply_markup(reply_markup=new_keyboard)
+
+                # если есть новый текст — отправляем отдельно
+                if text:
+                    await callback.message.answer(text, reply_markup=new_keyboard)
+
             except:
                 await callback.message.answer(text, reply_markup=new_keyboard)
 
