@@ -1,3 +1,4 @@
+print("🔥 MENU SYSTEM LOADED")
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import (
     check_subscription,
