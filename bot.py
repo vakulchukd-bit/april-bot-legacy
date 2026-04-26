@@ -3,7 +3,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from datetime import datetime
+from datetime import datetime, timedelta  # 🔥 ДОБАВИЛ timedelta
 import pytz
 
 from aiogram import Bot, Dispatcher, types
@@ -22,7 +22,7 @@ from storage import (
     get_user_plan,
     get_all_users,
     init_db,
-    ensure_user_db  # 🔥 ДОБАВЛЕНО
+    ensure_user_db
 )
 
 from core.executor import execute
@@ -110,7 +110,6 @@ def run_server():
 async def handle(message: types.Message):
     user_id = message.from_user.id
 
-    # 🔥 КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ
     ensure_user_db(user_id)
 
     text = message.text or message.caption or ""
@@ -175,9 +174,21 @@ async def handle(message: types.Message):
 
     if not is_admin and plan == "free":
         remaining = get_remaining_messages(user_id)
+
         if remaining == 0:
-            await message.answer("⛔ Лимит исчерпан", reply_markup=buy_keyboard())
+            # 🔥 ТОЛЬКО ЗДЕСЬ ИЗМЕНЕНИЕ (логика не тронута)
+            next_time = now + timedelta(hours=24)
+
+            text_limit = (
+                "⛔ Ваш лимит на сегодня исчерпан.\n\n"
+                f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
+                "Хочешь продолжить без ожидания?\n"
+                "Выбери тариф ниже 👇"
+            )
+
+            await message.answer(text_limit, reply_markup=тариф_keyboard())
             return
+
         can_send_message(user_id)
 
     try:
