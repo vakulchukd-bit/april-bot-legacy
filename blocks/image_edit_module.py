@@ -5,7 +5,7 @@ import asyncio
 from openai import OpenAI
 
 # 🔥 ДОБАВИЛИ
-from storage import get_user_plan, get_limits
+from storage import get_user_plan, get_limits, get_conn, today
 
 client = OpenAI()
 
@@ -28,6 +28,35 @@ async def edit_image(image_path, prompt):
             return None
 
     return await asyncio.to_thread(run)
+
+
+# 🔥 ДОБАВИЛИ (счётчик)
+def increment_images(user_id):
+    conn = get_conn()
+    if not conn:
+        return
+
+    uid = str(user_id)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT images_today, last_reset FROM users WHERE user_id = %s", (uid,))
+            user = cur.fetchone()
+
+            if not user:
+                return
+
+            images = user["images_today"] or 0
+
+            # сброс если новый день
+            if user["last_reset"] != today():
+                images = 0
+
+            cur.execute("""
+            UPDATE users
+            SET images_today = %s, last_reset = %s
+            WHERE user_id = %s
+            """, (images + 1, today(), uid))
 
 
 async def process(user_id, image_path, prompt):
@@ -62,6 +91,9 @@ async def process(user_id, image_path, prompt):
                 "data": None,
                 "error": "edit_failed"
             }
+
+        # 🔥 ВАЖНО — увеличиваем счётчик
+        increment_images(user_id)
 
         return {
             "type": "image",
