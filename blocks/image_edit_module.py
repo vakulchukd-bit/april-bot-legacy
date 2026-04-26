@@ -92,8 +92,9 @@ async def process(user_id, image_path, prompt):
                 "error": "edit_failed"
             }
 
-        # 🔥 ВАЖНО — увеличиваем счётчик
-        increment_images(user_id)
+        # 🔥 ВАЖНО — считаем только не premium
+        if plan != "premium":
+            increment_images(user_id)
 
         return {
             "type": "image",
