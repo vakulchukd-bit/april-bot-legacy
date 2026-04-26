@@ -87,7 +87,9 @@ def handle_subscription(callback_data, user_id):
         uid = int(parts[3])
 
         set_subscription(uid, plan)
-        save_payment(uid, plan)  # 🔥 ВОТ ОНА, ЕДИНСТВЕННАЯ ЛОГИКА
+        save_payment(uid, plan)
+
+        print("🔥 PAYMENT SAVED")  # 🔥 ДОБАВИЛИ ПРОВЕРКУ
 
         return {
             "type": "notify_user",
@@ -136,6 +138,8 @@ def is_image_question(text: str):
 
 
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
+    print("🔥 EXECUTOR RUNNING")  # 🔥 ГЛАВНАЯ ПРОВЕРКА
+
     state = get_state(user_id)
     mode = get_mode(user_id)
 
