@@ -17,6 +17,7 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
+from blocks.image_edit_module import process as image_edit  # 🔥 ДОБАВИЛИ
 
 from datetime import datetime
 
@@ -109,12 +110,18 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
+# 🔥 ФУНКЦИЯ — ОПРЕДЕЛЕНИЕ РЕДАКТИРОВАНИЯ
+def is_edit_request(text: str):
+    t = text.lower()
+    triggers = ["убери", "добавь", "измени", "замени", "сделай"]
+    return any(word in t for word in triggers)
+
+
 # ===== EXECUTE =====
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 FIX
     if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
@@ -122,12 +129,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ===== TIME =====
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
         return {"type": "text", "data": f"Сейчас {now}"}
 
-    # ===== ENGINEERING =====
     if mode == "engineering" and not text.startswith("/"):
         if text.lower() == "/analiz":
             return {"type": "text", "data": "📥 Жду код..."}
@@ -139,23 +144,26 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "2+2":
         return {"type": "text", "data": "4"}
 
-    # ===== ENERGY =====
     energy = get_energy(user_id)
 
-    # ===== INTENT =====
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
-    # ===== CONTEXT =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # 🔥 ШАГ 1 — ОСОЗНАНИЕ КАРТИНКИ
+    # 🔥 ШАГ 1 — ОСОЗНАНИЕ
     if ctx:
         state["has_image"] = True
         state["last_intent"] = state.get("last_intent", "image")
     else:
         state["has_image"] = False
+
+    # 🔥 ШАГ 2 — РЕДАКТИРОВАНИЕ ВМЕСТО ГЕНЕРАЦИИ
+    if ctx and is_edit_request(text):
+        path = ctx.get("path")
+        if path:
+            return await image_edit(user_id, path, text)
 
     context = {
         "chat_id": chat_id,
@@ -167,7 +175,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "energy": energy
     }
 
-    # ===== SCIENCE =====
     science = ScienceRoom()
 
     if science.can_handle(text, context):
@@ -175,7 +182,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if result:
             return result
 
-    # ===== ROOMS =====
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -185,7 +191,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== 🔗 ССЫЛКИ =====
     if response_mode == "link":
         return {
             "type": "text",
@@ -197,15 +202,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             )
         }
 
-    # ===== COPY =====
     if response_mode == "copy":
         text = f"Напиши готовый текст:\n\n{text}"
 
-    # ===== FORMAT =====
     if response_mode == "format":
         text = f"Оформи красиво:\n\n{text}"
 
-    # ===== QUESTION =====
     if intent == "question":
 
         if anchor:
@@ -220,7 +222,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         return {"type": "text", "data": result["content"]}
 
-    # ===== FALLBACK =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
