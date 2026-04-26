@@ -26,8 +26,8 @@ def buy_keyboard():
 # ===== 🔥 ВЫБОР ТАРИФА =====
 def тариф_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Lite", callback_data="buy_lite")],
-        [InlineKeyboardButton(text="👑 Premium", callback_data="buy_premium")],
+        [InlineKeyboardButton(text="🚀 Lite — $6", callback_data="buy_lite")],
+        [InlineKeyboardButton(text="👑 Premium — $25", callback_data="buy_premium")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
     ])
 
