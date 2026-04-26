@@ -20,7 +20,6 @@ from blocks.engineering_system import analyze_code
 from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 
-# 🔥 ДОБАВИЛИ
 from blocks.image_system import analyze_image
 
 from datetime import datetime
@@ -30,29 +29,6 @@ from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
-
-
-# 🔥 НОВОЕ: ОПРЕДЕЛЕНИЕ ТИПА ЗАДАЧИ (НЕ ТРИГГЕРЫ, А ПАТТЕРН)
-def detect_task_type(text: str):
-    t = text.lower()
-
-    # математика / выражения
-    if any(x in t for x in ["=", "+", "-", "*", "/", "^"]):
-        return "math"
-
-    # код
-    if any(x in t for x in ["def ", "function", "class ", "print(", "python", "js"]):
-        return "code"
-
-    # генерация изображения
-    if any(x in t for x in ["нарисуй", "изобрази", "создай изображение"]):
-        return "image"
-
-    # объяснение / теория
-    if any(x in t for x in ["объясни", "почему", "как работает"]):
-        return "reasoning"
-
-    return "general"
 
 
 def handle_subscription(callback_data, user_id):
@@ -192,19 +168,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     energy = get_energy(user_id)
 
-    # 🔥 НОВОЕ: ОПРЕДЕЛЕНИЕ ТИПА ЗАДАЧИ
-    current_task = detect_task_type(text)
-    previous_task = state.get("task_type")
-
-    if current_task != previous_task:
-        state["task_type"] = current_task
-
-    # 🔥 если это математика → усиливаем как вопрос
-    if current_task == "math":
-        intent = "question"
-    else:
-        intent = detect_intent(text)
-
+    intent = detect_intent(text)
     response_mode = detect_response_mode(text)
 
     ctx = get_image_context(user_id) or state.get("image_context")
@@ -216,7 +180,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
-    # 🔥 ДОБАВИЛИ: АНАЛИЗ ИЗОБРАЖЕНИЯ
+    # ===== IMAGE ANALYZE =====
     if ctx and ctx.get("path") and not is_generate_request(text) and not is_edit_request(text):
         try:
             result = await analyze_image(user_id, ctx.get("path"), text)
@@ -224,8 +188,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 return result
         except Exception as e:
             print("🔥 IMAGE ANALYZE ERROR:", e)
-    # =================================
 
+    # ===== IMAGE GENERATE =====
     if is_generate_request(text):
         result = await image_generate(user_id, text, state)
 
@@ -238,6 +202,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         return result
 
+    # ===== IMAGE EDIT =====
     if ctx and is_edit_request(text):
         path = ctx.get("path")
         if path:
@@ -264,13 +229,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": state.get("task_type"),  # 🔥 теперь динамический
+        "task_type": None,  # 🔥 отключили сломанный механизм
         "energy": energy
     }
 
     science = ScienceRoom()
 
-    # ===== СНАЧАЛА КОМНАТЫ =====
+    # ===== 🔥 СНАЧАЛА КОМНАТЫ =====
     if science.can_handle(text, context):
         result = await science.handle(user_id, text, context, run_with_typing)
         if result:
@@ -285,7 +250,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # 🔥 MODEL PRIORITY (ТЕПЕРЬ FALLBACK)
+    # ===== 🔥 ПОТОМ GPT =====
     if intent == "question" and not is_generate_request(text):
 
         if anchor:
