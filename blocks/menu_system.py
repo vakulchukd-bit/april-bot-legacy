@@ -100,8 +100,8 @@ def build_admin_menu(user_id):
         "⚙️ *АДМИН*\n\n"
         f"👥 Пользователи: {stats['users']}\n"
         f"💳 Подписки: {stats['subs']}\n"
-        f"💰 Доход всего: {stats['income_total']} грн\n"
-        f"📅 Сегодня: {stats['income_today']} грн\n"
+        f"💰 Доход всего: ${stats['income_total']}\n"
+        f"📅 Сегодня: ${stats['income_today']}\n"
         f"⚠️ Ошибки: 0\n"
     )
 
