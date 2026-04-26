@@ -20,6 +20,9 @@ from blocks.engineering_system import analyze_code
 from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 
+# 🔥 ДОБАВИЛИ
+from blocks.image_system import analyze_image
+
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -178,6 +181,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
+    # 🔥 ДОБАВИЛИ: АНАЛИЗ ИЗОБРАЖЕНИЯ
+    if ctx and ctx.get("path") and not is_generate_request(text) and not is_edit_request(text):
+        try:
+            result = await analyze_image(user_id, ctx.get("path"), text)
+            if result:
+                return result
+        except Exception as e:
+            print("🔥 IMAGE ANALYZE ERROR:", e)
+    # =================================
+
     if is_generate_request(text):
         result = await image_generate(user_id, text, state)
 
@@ -207,7 +220,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if ctx and is_image_question(text):
         return {
             "type": "text",
-            "data": "Это изображение, которое мы недавно создали. Хочешь что-то изменить или добавить?"
+            "data": "Это изображение, которое мы недавно загрузили. Опиши, что именно хочешь узнать — разберём."
         }
 
     context = {
