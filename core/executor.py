@@ -32,6 +32,29 @@ from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
 
 
+# 🔥 НОВОЕ: ОПРЕДЕЛЕНИЕ ТИПА ЗАДАЧИ (НЕ ТРИГГЕРЫ, А ПАТТЕРН)
+def detect_task_type(text: str):
+    t = text.lower()
+
+    # математика / выражения
+    if any(x in t for x in ["=", "+", "-", "*", "/", "^"]):
+        return "math"
+
+    # код
+    if any(x in t for x in ["def ", "function", "class ", "print(", "python", "js"]):
+        return "code"
+
+    # генерация изображения
+    if any(x in t for x in ["нарисуй", "изобрази", "создай изображение"]):
+        return "image"
+
+    # объяснение / теория
+    if any(x in t for x in ["объясни", "почему", "как работает"]):
+        return "reasoning"
+
+    return "general"
+
+
 def handle_subscription(callback_data, user_id):
     print("🔥 CALLBACK:", callback_data)
 
@@ -169,7 +192,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     energy = get_energy(user_id)
 
-    intent = detect_intent(text)
+    # 🔥 НОВОЕ: ОПРЕДЕЛЕНИЕ ТИПА ЗАДАЧИ
+    current_task = detect_task_type(text)
+    previous_task = state.get("task_type")
+
+    if current_task != previous_task:
+        state["task_type"] = current_task
+
+    # 🔥 если это математика → усиливаем как вопрос
+    if current_task == "math":
+        intent = "question"
+    else:
+        intent = detect_intent(text)
+
     response_mode = detect_response_mode(text)
 
     ctx = get_image_context(user_id) or state.get("image_context")
@@ -229,7 +264,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": "chat",
+        "task_type": state.get("task_type"),  # 🔥 теперь динамический
         "energy": energy
     }
 
