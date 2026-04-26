@@ -30,7 +30,6 @@ from blocks.science_room import ScienceRoom
 import random
 
 
-# 🔥 ДОБАВЛЕНО (улучшенный детектор)
 def is_code_like(text):
     t = text.lower()
 
@@ -189,15 +188,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    # 🔥 КРИТИЧЕСКИЙ ФИКС
     if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
 
+        return None  # ← ВОТ ЭТО РЕШАЕТ ВСЁ
+
     t = (text or "").lower().strip()
 
-    # 🔥 ЕДИНСТВЕННЫЙ ФИКС (без ломания)
-    if callback_data is None and text and not text.startswith("/"):
+    # безопасный анализ кода
+    if text and not text.startswith("/"):
         try:
             if is_code_like(text):
                 analysis = analyze_code(text)
