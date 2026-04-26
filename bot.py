@@ -63,7 +63,6 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# 🔥 ДОБАВЛЕНО: карта языков → timezone
 LANG_TZ_MAP = {
     "uk": "Europe/Kyiv",
     "ru": "Europe/Kyiv",
@@ -125,7 +124,7 @@ async def handle(message: types.Message):
 
     ensure_user_db(user_id)
 
-    # 🔥 ДОБАВЛЕНО: авто-таймзона (один раз)
+    # 🔥 авто-таймзона
     try:
         lang = message.from_user.language_code or "en"
         user_tz = LANG_TZ_MAP.get(lang, "Europe/Kyiv")
@@ -160,7 +159,7 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     plan = get_user_plan(user_id)
 
-    # ===== 🔥 ИСПРАВЛЕННЫЙ ЛИМИТ =====
+    # ===== ЛИМИТ =====
     if not is_admin and plan == "free":
         remaining = get_remaining_messages(user_id)
 
@@ -173,8 +172,6 @@ async def handle(message: types.Message):
                 reply_markup=upgrade_keyboard()
             )
             return
-
-        can_send_message(user_id)
 
     try:
         result = await run_with_typing(
