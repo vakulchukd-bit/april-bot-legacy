@@ -147,8 +147,8 @@ def build_tariffs_menu(user_id):
 
     else:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Купить Lite", callback_data="buy_lite")],
-            [InlineKeyboardButton(text="👑 Купить Premium", callback_data="buy_premium")],
+            [InlineKeyboardButton(text="🚀 Купить Lite — $6", callback_data="buy_lite")],
+            [InlineKeyboardButton(text="👑 Купить Premium — $25", callback_data="buy_premium")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
         ])
 
