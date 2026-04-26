@@ -112,7 +112,7 @@ def set_subscription(user_id, plan="premium"):
         return
 
 
-# 🔥 ДОБАВИЛИ СОХРАНЕНИЕ ПЛАТЕЖА
+# 🔥 СОХРАНЕНИЕ ПЛАТЕЖА (ДОЛЛАРЫ)
 def save_payment(user_id, plan):
     conn = get_conn()
     if not conn:
@@ -120,7 +120,7 @@ def save_payment(user_id, plan):
 
     uid = str(user_id)
 
-    amount = 50 if plan == "lite" else 150 if plan == "premium" else 0
+    amount = 6 if plan == "lite" else 25 if plan == "premium" else 0
 
     with conn:
         with conn.cursor() as cur:
@@ -296,7 +296,7 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
-# 🔥 ОБНОВЛЕНА ТОЛЬКО ЛОГИКА ДОХОДА
+# 🔥 ДОХОД (теперь в долларах)
 def get_admin_stats():
     conn = get_conn()
     if not conn:
@@ -319,11 +319,9 @@ def get_admin_stats():
             """, (now().timestamp(),))
             subs = cur.fetchone()["count"]
 
-            # 💰 ОБЩИЙ ДОХОД
             cur.execute("SELECT SUM(amount) as total FROM payments")
             income_total = cur.fetchone()["total"] or 0
 
-            # 📅 СЕГОДНЯ
             cur.execute("""
             SELECT SUM(amount) as today FROM payments
             WHERE DATE(created_at) = CURRENT_DATE
