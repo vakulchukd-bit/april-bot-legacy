@@ -72,24 +72,10 @@ LANG_TZ_MAP = {
 }
 
 
-def is_time_question(text: str):
-    text = text.lower()
-    triggers = [
-        "сколько времени",
-        "который час",
-        "какая дата",
-        "какой сегодня день"
-    ]
-    return any(t in text for t in triggers)
-
-
 async def typing_loop(chat_id, is_image=False):
     try:
         while True:
-            if is_image:
-                await bot.send_chat_action(chat_id, "upload_photo")
-            else:
-                await bot.send_chat_action(chat_id, "typing")
+            await bot.send_chat_action(chat_id, "typing")
             await asyncio.sleep(2)
     except:
         pass
@@ -99,7 +85,6 @@ async def run_with_typing(chat_id, coro, is_image=False):
     task = asyncio.create_task(typing_loop(chat_id, is_image))
     try:
         result = await coro
-        await asyncio.sleep(0.3)
         return result
     finally:
         task.cancel()
@@ -120,22 +105,33 @@ def run_server():
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
-
     ensure_user_db(user_id)
 
     text = message.text or message.caption or ""
-
     state = get_state(user_id)
-
-    now = datetime.now(tz)
-    state["time_str"] = now.strftime("%H:%M")
-    state["date_str"] = now.strftime("%d.%m.%Y")
 
     register_user(user_id)
 
-    is_admin = user_id == ADMIN_ID
-    plan = get_user_plan(user_id)
+    # 🔥 ВОТ ЭТО ТЫ ПОТЕРЯЛ
+    mode = get_mode(user_id)
+    if user_id == ADMIN_ID and mode == "broadcast":
+        users = get_all_users()
+        success = 0
 
+        for uid in users:
+            if int(uid) == ADMIN_ID:
+                continue
+            try:
+                await bot.send_message(uid, f"📢 {text}")
+                success += 1
+            except:
+                pass
+
+        clear_mode(user_id)
+        await message.answer(f"✅ Рассылка отправлена: {success}")
+        return
+
+    # обычная логика
     try:
         result = await run_with_typing(
             message.chat.id,
@@ -146,24 +142,9 @@ async def handle(message: types.Message):
             await message.answer("⚠️ Ошибка. Попробуй ещё раз.")
             return
 
-        add_dialog(user_id, "user", text)
-        add_dialog(user_id, "assistant", result.get("data", ""))
-
         if result.get("type") == "text":
-            reply = result.get("data", "")
-
-            if is_admin:
-                status = "\n\n⚙️ ADMIN"
-            elif plan == "premium":
-                status = f"\n\n👑 PREMIUM: {get_remaining_days(user_id)} дн."
-            elif plan == "lite":
-                status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
-            else:
-                limits = get_limits(user_id)
-                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
-
             await message.answer(
-                reply + status,
+                result.get("data", ""),
                 reply_markup=main_keyboard(message.message_id)
             )
 
@@ -176,69 +157,32 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 📋 UI
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
         await callback.answer()
         return
 
-    if data == "info":
-        text, keyboard = build_info_menu(user_id)
-        await callback.message.answer(text, reply_markup=keyboard)
-        await callback.answer()
+    if data == "admin_broadcast":
+        set_mode(user_id, "broadcast")
+        await callback.answer("📢 Введи текст", show_alert=True)
         return
 
-    # 🛠 АДМИНКА
-    if user_id == ADMIN_ID:
-
-        if data == "admin_stats":
-            errors = get_errors()
-            text = "📊 Анализ\n\n"
-            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
-            await callback.message.answer(text)
-            await callback.answer()
-            return
-
-        if data == "admin_payments":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
-                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-            ])
-            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
-            await callback.answer()
-            return
-
-        if data == "admin_broadcast":
-            set_mode(user_id, "broadcast")
-            await callback.answer("📢 Введи текст", show_alert=True)
-            return
-
-    # 👍 лайки
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо")
         return
 
-    if data.startswith("dislike_"):
-        await callback.answer("👎 Учту")
-        return
-
-    # ⚙️ executor
     try:
         result = await execute(
             user_id,
-            text="",
-            chat_id=callback.message.chat.id,
-            run_with_typing=run_with_typing,
+            "",
+            callback.message.chat.id,
+            run_with_typing,
             callback_data=data
         )
 
         if result and result.get("type") == "text":
-            await callback.message.answer(
-                result.get("data", ""),
-                reply_markup=result.get("keyboard")
-            )
+            await callback.message.answer(result.get("data", ""))
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
@@ -248,7 +192,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
 async def main():
     init_db()
-    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
