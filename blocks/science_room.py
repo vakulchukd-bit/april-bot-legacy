@@ -15,7 +15,6 @@ class ScienceRoom:
     def can_handle(self, text, context):
         t = text.lower()
 
-        # 🔥 ЖЁСТКИЙ ТРИГГЕР (фикс)
         if "график" in t or "построй" in t:
             return True
 
@@ -36,7 +35,6 @@ class ScienceRoom:
 
         t = text.lower()
 
-        # 🔥 ДОБАВЛЕНО: ранний перехват таблицы (чтобы не терялась)
         if "таблица" in t and "умнож" in t:
             path = self.build_multiplication_table()
 
@@ -50,7 +48,6 @@ class ScienceRoom:
                 except Exception as e:
                     print("🔥 READ ERROR:", e)
 
-        # ===== FREE =====
         if plan == "free":
             if "=" in t or "реши" in t:
                 result = self.solve_equation(text)
@@ -66,24 +63,18 @@ class ScienceRoom:
                 "data": "⚠️ Только простые решения доступны"
             }
 
-        # ===== LITE / PREMIUM =====
-        # 🔥 ИСПРАВЛЕНО: убрали "y" (он ломал всё)
         if "график" in t or "построй" in t or "y=" in t:
 
-            # 🔥 СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ)
             expr = self.extract_function(text)
 
-            # ================== 🔥 НОВОЕ (НЕ ЛОМАЕТ СТАРОЕ) ==================
             if not expr:
                 interpreted = self.interpret_text_graph(text)
 
                 if interpreted:
 
-                    # 👉 ФУНКЦИЯ
                     if interpreted["type"] == "function":
                         expr = interpreted["expr"]
 
-                    # 👉 ТАБЛИЦА УМНОЖЕНИЯ (дублируем безопасно)
                     elif interpreted["type"] == "heatmap":
                         path = self.build_multiplication_table()
 
@@ -96,7 +87,6 @@ class ScienceRoom:
                                     }
                             except Exception as e:
                                 print("🔥 READ ERROR:", e)
-            # ===============================================================
 
             if expr:
                 path = self.build_graph(expr)
@@ -129,29 +119,23 @@ class ScienceRoom:
     def interpret_text_graph(self, text):
         t = text.lower()
 
-        # таблица умножения (расширено)
         if any(w in t for w in ["таблица умножения", "умножения", "умножить", "перемнож"]):
             return {"type": "heatmap"}
 
-        # 🔥 СИНУС (АПГРЕЙД: добавили формы слов)
         if any(w in t for w in ["синус", "sin", "волна", "волны", "волновой"]):
             return {"type": "function", "expr": "np.sin(x)"}
 
-        # косинус
         if any(w in t for w in ["косинус", "cos"]):
             return {"type": "function", "expr": "np.cos(x)"}
 
-        # парабола
         if any(w in t for w in ["парабола", "квадрат", "x^2"]):
             return {"type": "function", "expr": "x**2"}
 
-        # линия
         if any(w in t for w in ["линия", "прямая", "линейный"]):
             return {"type": "function", "expr": "x"}
 
         return None
 
-    # ===== 🔥 НОВОЕ: ТАБЛИЦА УМНОЖЕНИЯ =====
     def build_multiplication_table(self):
         try:
             data = np.outer(range(1, 11), range(1, 11))
@@ -171,7 +155,6 @@ class ScienceRoom:
             print("🔥 TABLE ERROR:", e)
             return None
 
-    # ===== ИЗВЛЕЧЕНИЕ ФУНКЦИИ =====
     def extract_function(self, text):
         try:
             text = text.lower().replace("^", "**")
@@ -185,7 +168,6 @@ class ScienceRoom:
             print("🔥 EXTRACT ERROR:", e)
             return None
 
-    # ===== ПОСТРОЕНИЕ ГРАФИКА =====
     def build_graph(self, expr):
         try:
             x = np.linspace(-10, 10, 200)
@@ -210,13 +192,19 @@ class ScienceRoom:
             print("🔥 GRAPH ERROR:", e)
             return None
 
-    # ===== РЕШЕНИЕ =====
+    # ===== 🔥 ГЛАВНОЕ УСИЛЕНИЕ =====
     def solve_equation(self, text):
         try:
             expr = text.lower().replace("реши", "").replace("уравнение", "").strip()
             expr = expr.replace("^", "**")
 
-            x = symbols('x')
+            # 🔥 ищем переменную автоматически
+            vars_found = re.findall(r'[a-zA-Z]', expr)
+
+            if not vars_found:
+                return None
+
+            var = symbols(vars_found[0])
 
             if "=" in expr:
                 left, right = expr.split("=")
@@ -224,7 +212,7 @@ class ScienceRoom:
             else:
                 equation = sympify(expr)
 
-            solution = solve(equation, x)
+            solution = solve(equation, var)
 
             return solution
 
