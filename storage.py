@@ -77,7 +77,7 @@ def set_subscription(user_id, plan="premium"):
         uid = str(user_id)
 
         if plan == "lite":
-            days = 5   # 🔥 ВОТ ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ (было 15)
+            days = 5
         elif plan == "premium":
             days = 30
         else:
@@ -225,7 +225,6 @@ def get_remaining_days(user_id):
     return 0
 
 
-# 🔥 ВОТ ТУТ ГЛАВНЫЙ ФИКС
 def get_limits(user_id, msg_limit=15, img_limit=1):
     conn = get_conn()
 
@@ -267,13 +266,50 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
+# 🔥 ИСПРАВЛЕНО ТОЛЬКО ЭТО
 def get_admin_stats():
-    return {
-        "users": 0,
-        "subs": 0,
-        "income_total": 0,
-        "income_today": 0
-    }
+    conn = get_conn()
+    if not conn:
+        return {
+            "users": 0,
+            "subs": 0,
+            "income_total": 0,
+            "income_today": 0
+        }
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) as count FROM users")
+            users = cur.fetchone()["count"]
+
+            cur.execute("""
+                SELECT COUNT(*) as count FROM users
+                WHERE plan IN ('lite', 'premium')
+                AND subscription_until > %s
+            """, (now().timestamp(),))
+            subs = cur.fetchone()["count"]
+
+            cur.execute("""
+                SELECT plan FROM users
+                WHERE subscription_until > %s
+            """, (now().timestamp(),))
+            plans = cur.fetchall()
+
+            income_total = 0
+            income_today = 0
+
+            for p in plans:
+                if p["plan"] == "lite":
+                    income_total += 50
+                elif p["plan"] == "premium":
+                    income_total += 150
+
+            return {
+                "users": users,
+                "subs": subs,
+                "income_total": income_total,
+                "income_today": income_today
+            }
 
 
 def get_reset_seconds(user_id):
