@@ -198,6 +198,20 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
+    # ✅ UI кнопки отдельно
+    if data == "menu":
+        text, keyboard = get_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    if data == "info":
+        text, keyboard = build_info_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    # 👍 лайки
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо", show_alert=False)
         return
@@ -220,13 +234,9 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         if result.get("type") == "text":
-            text = result.get("data", "")
-            keyboard = result.get("keyboard")
-
-            # 🔥 ГЛАВНЫЙ ФИКС — НЕ РЕДАКТИРУЕМ, НЕ СКЛЕИВАЕМ
             await callback.message.answer(
-                text,
-                reply_markup=keyboard or main_keyboard(callback.message.message_id)
+                result.get("data", ""),
+                reply_markup=result.get("keyboard")
             )
 
         elif result.get("type") == "notify_user":
