@@ -63,15 +63,6 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-LANG_TZ_MAP = {
-    "uk": "Europe/Kyiv",
-    "ru": "Europe/Kyiv",
-    "fr": "Europe/Paris",
-    "de": "Europe/Berlin",
-    "en": "Europe/London"
-}
-
-
 async def typing_loop(chat_id, is_image=False):
     try:
         while True:
@@ -102,6 +93,7 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
+# ================== MESSAGE ==================
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
@@ -112,7 +104,7 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # 🔥 ВОТ ЭТО ТЫ ПОТЕРЯЛ
+    # 🔥 РАССЫЛКА
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -131,7 +123,6 @@ async def handle(message: types.Message):
         await message.answer(f"✅ Рассылка отправлена: {success}")
         return
 
-    # обычная логика
     try:
         result = await run_with_typing(
             message.chat.id,
@@ -141,6 +132,9 @@ async def handle(message: types.Message):
         if not result:
             await message.answer("⚠️ Ошибка. Попробуй ещё раз.")
             return
+
+        add_dialog(user_id, "user", text)
+        add_dialog(user_id, "assistant", result.get("data", ""))
 
         if result.get("type") == "text":
             await message.answer(
@@ -152,26 +146,61 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
+# ================== CALLBACK ==================
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
+    # 📋 UI
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
         await callback.answer()
         return
 
-    if data == "admin_broadcast":
-        set_mode(user_id, "broadcast")
-        await callback.answer("📢 Введи текст", show_alert=True)
+    if data == "info":
+        text, keyboard = build_info_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
         return
 
+    # 🛠 АДМИНКА
+    if user_id == ADMIN_ID:
+
+        if data == "admin_stats":
+            errors = get_errors()
+            text = "📊 Анализ\n\n"
+            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
+            await callback.message.answer(text)
+            await callback.answer()
+            return
+
+        if data == "admin_payments":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.answer("📢 Введи текст", show_alert=True)
+            return
+
+    # 👍 лайки
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо")
         return
 
+    if data.startswith("dislike_"):
+        await callback.answer("👎 Учту")
+        return
+
+    # ⚙️ EXECUTOR
     try:
         result = await execute(
             user_id,
@@ -181,8 +210,42 @@ async def handle_callbacks(callback: types.CallbackQuery):
             callback_data=data
         )
 
-        if result and result.get("type") == "text":
-            await callback.message.answer(result.get("data", ""))
+        if not result:
+            await callback.answer()
+            return
+
+        if result.get("type") == "text":
+            await callback.message.answer(
+                result.get("data", ""),
+                reply_markup=result.get("keyboard")
+            )
+
+        elif result.get("type") == "notify_user":
+            await bot.send_message(result["target_user"], result["data"])
+
+        elif result.get("type") == "admin_request":
+            plan = result["plan"]
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить",
+                        callback_data=f"admin_confirm_{plan}_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"admin_reject_{plan}_{user_id}"
+                    )
+                ]
+            ])
+
+            await bot.send_message(
+                ADMIN_ID,
+                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
+                reply_markup=keyboard
+            )
+
+            await callback.message.answer("⏳ Отправлено администратору")
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
@@ -190,8 +253,10 @@ async def handle_callbacks(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ================== MAIN ==================
 async def main():
     init_db()
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
