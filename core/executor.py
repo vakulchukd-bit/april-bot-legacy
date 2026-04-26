@@ -6,7 +6,7 @@ from blocks.intent_system import detect_intent
 from blocks.state_manager import (
     get_state,
     get_image_context,
-    set_image_context  # 🔥 ДОБАВИЛИ
+    set_image_context
 )
 
 from blocks.anchor_system import get_anchor
@@ -108,8 +108,17 @@ def handle_subscription(callback_data, user_id):
 
 def is_edit_request(text: str):
     t = text.lower()
-    triggers = ["убери", "добавь", "измени", "замени", "сделай"]
+    triggers = ["убери", "добавь", "измени", "замени"]
     return any(word in t for word in triggers)
+
+
+def is_generate_request(text: str):
+    t = text.lower()
+
+    verbs = ["создай", "сгенерируй", "нарисуй", "сделай"]
+    objects = ["картинку", "изображение", "фото", "арт", "рисунок"]
+
+    return any(v in t for v in verbs) and any(o in t for o in objects)
 
 
 def is_image_question(text: str):
@@ -166,13 +175,25 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
-    # ===== ШАГ 2 + ШАГ 4 🔥
+    # ===== ШАГ 5 🔥 ГЕНЕРАЦИЯ
+    if is_generate_request(text):
+        result = await image_generate(user_id, text, state)
+
+        if result and result.get("type") == "image":
+            set_image_context(user_id, {
+                "type": "generated",
+                "path": None,
+                "prompt": text
+            })
+
+        return result
+
+    # ===== ШАГ 2 + ШАГ 4
     if ctx and is_edit_request(text):
         path = ctx.get("path")
         if path:
             result = await image_edit(user_id, path, text)
 
-            # 🔥 ШАГ 4 — обновляем текущую картинку
             if result and result.get("type") == "image":
                 set_image_context(user_id, {
                     "type": "edited",
