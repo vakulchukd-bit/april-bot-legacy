@@ -5,7 +5,8 @@ from blocks.intent_system import detect_intent
 
 from blocks.state_manager import (
     get_state,
-    get_image_context
+    get_image_context,
+    set_image_context  # 🔥 ДОБАВИЛИ
 )
 
 from blocks.anchor_system import get_anchor
@@ -29,7 +30,6 @@ from blocks.science_room import ScienceRoom
 
 
 def handle_subscription(callback_data, user_id):
-
     if callback_data == "buy_lite":
         return {
             "type": "text",
@@ -112,7 +112,6 @@ def is_edit_request(text: str):
     return any(word in t for word in triggers)
 
 
-# 🔥 НОВОЕ — ВОПРОС ПРО КАРТИНКУ
 def is_image_question(text: str):
     t = text.lower()
     triggers = [
@@ -167,13 +166,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
-    # ===== ШАГ 2
+    # ===== ШАГ 2 + ШАГ 4 🔥
     if ctx and is_edit_request(text):
         path = ctx.get("path")
         if path:
-            return await image_edit(user_id, path, text)
+            result = await image_edit(user_id, path, text)
 
-    # ===== ШАГ 3 🔥
+            # 🔥 ШАГ 4 — обновляем текущую картинку
+            if result and result.get("type") == "image":
+                set_image_context(user_id, {
+                    "type": "edited",
+                    "path": path,
+                    "prompt": text
+                })
+
+            return result
+
+    # ===== ШАГ 3
     if ctx and is_image_question(text):
         return {
             "type": "text",
