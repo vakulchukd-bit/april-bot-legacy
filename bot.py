@@ -124,7 +124,6 @@ async def handle(message: types.Message):
 
     ensure_user_db(user_id)
 
-    # 🔥 авто-таймзона
     try:
         lang = message.from_user.language_code or "en"
         user_tz = LANG_TZ_MAP.get(lang, "Europe/Kyiv")
@@ -165,7 +164,6 @@ async def handle(message: types.Message):
             execute(user_id, text, message.chat.id, run_with_typing)
         )
 
-        # 🔥 защита от None
         if not result:
             await message.answer("⚠️ Ошибка. Попробуй ещё раз.")
             return
@@ -193,6 +191,67 @@ async def handle(message: types.Message):
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
+
+
+# 🔥 ВОТ ЧЕГО НЕ ХВАТАЛО — ОБРАБОТКА КНОПОК
+@dp.callback_query()
+async def handle_callbacks(callback: types.CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+
+    try:
+        result = await execute(
+            user_id,
+            text="",
+            chat_id=callback.message.chat.id,
+            run_with_typing=run_with_typing,
+            callback_data=data
+        )
+
+        if not result:
+            await callback.answer()
+            return
+
+        if result.get("type") == "text":
+            text = result.get("data", "")
+            keyboard = result.get("keyboard")
+
+            if keyboard:
+                await callback.message.answer(text, reply_markup=keyboard)
+            else:
+                await callback.message.answer(text)
+
+        elif result.get("type") == "notify_user":
+            await bot.send_message(result["target_user"], result["data"])
+
+        elif result.get("type") == "admin_request":
+            plan = result["plan"]
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить",
+                        callback_data=f"admin_confirm_{plan}_{user_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отклонить",
+                        callback_data=f"admin_reject_{plan}_{user_id}"
+                    )
+                ]
+            ])
+
+            await bot.send_message(
+                ADMIN_ID,
+                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
+                reply_markup=keyboard
+            )
+
+            await callback.message.answer("⏳ Отправлено администратору")
+
+    except Exception as e:
+        await handle_error(bot, callback.message, e, "callback_handler")
+
+    await callback.answer()
 
 
 async def main():
