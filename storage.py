@@ -46,9 +46,19 @@ def init_db():
             )
             """)
 
-            # 🔥 безопасно добавляем колонку если нет
+            # 🔥 ДОБАВЛЕНО: гарантируем наличие колонок (ничего не ломает)
             try:
-                cur.execute("ALTER TABLE users ADD COLUMN timezone TEXT")
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS edits_today INTEGER DEFAULT 0")
+            except:
+                pass
+
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS images_today INTEGER DEFAULT 0")
+            except:
+                pass
+
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT")
             except:
                 pass
 
