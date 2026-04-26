@@ -63,6 +63,16 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
+# 🔥 ДОБАВЛЕНО: карта языков → timezone
+LANG_TZ_MAP = {
+    "uk": "Europe/Kyiv",
+    "ru": "Europe/Kyiv",
+    "fr": "Europe/Paris",
+    "de": "Europe/Berlin",
+    "en": "Europe/London"
+}
+
+
 def is_time_question(text: str):
     text = text.lower()
     triggers = [
@@ -115,6 +125,28 @@ async def handle(message: types.Message):
 
     ensure_user_db(user_id)
 
+    # 🔥 ДОБАВЛЕНО: авто-таймзона (один раз)
+    try:
+        lang = message.from_user.language_code or "en"
+        user_tz = LANG_TZ_MAP.get(lang, "Europe/Kyiv")
+
+        from storage import get_conn
+
+        conn = get_conn()
+        if conn:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT timezone FROM users WHERE user_id = %s", (str(user_id),))
+                    user = cur.fetchone()
+
+                    if user and not user.get("timezone"):
+                        cur.execute(
+                            "UPDATE users SET timezone = %s WHERE user_id = %s",
+                            (user_tz, str(user_id))
+                        )
+    except:
+        pass
+
     text = message.text or message.caption or ""
 
     state = get_state(user_id)
@@ -128,7 +160,7 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     plan = get_user_plan(user_id)
 
-    # ===== 🔥 ИСПРАВЛЕННЫЙ ЛИМИТ (ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ) =====
+    # ===== 🔥 ИСПРАВЛЕННЫЙ ЛИМИТ =====
     if not is_admin and plan == "free":
         remaining = get_remaining_messages(user_id)
 
