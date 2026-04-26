@@ -1,4 +1,3 @@
-# (твои импорты без изменений)
 import asyncio
 import os
 import threading
@@ -23,15 +22,12 @@ from storage import (
     get_user_plan,
     get_all_users,
     init_db,
-    ensure_user_db,
-    get_reset_seconds,
-    format_time
+    ensure_user_db  # 🔥 ДОБАВЛЕНО
 )
 
 from core.executor import execute
 
-from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard, upgrade_keyboard
-
+from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
@@ -63,19 +59,36 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-async def typing_loop(chat_id, is_image=False):
+def is_time_question(text: str):
+    text = text.lower()
+    triggers = [
+        "сколько времени",
+        "который час",
+        "какая дата",
+        "какой сегодня день"
+    ]
+    return any(t in text for t in triggers)
+
+
+async def typing_loop(chat_id):
     try:
+        elapsed = 0
         while True:
-            await bot.send_chat_action(chat_id, "typing")
+            if elapsed < 4:
+                await bot.send_chat_action(chat_id, "typing")
+            else:
+                await bot.send_chat_action(chat_id, "upload_photo")
             await asyncio.sleep(2)
+            elapsed += 2
     except:
         pass
 
 
-async def run_with_typing(chat_id, coro, is_image=False):
-    task = asyncio.create_task(typing_loop(chat_id, is_image))
+async def run_with_typing(chat_id, coro):
+    task = asyncio.create_task(typing_loop(chat_id))
     try:
         result = await coro
+        await asyncio.sleep(0.1)
         return result
     finally:
         task.cancel()
@@ -93,18 +106,52 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
-# ================== MESSAGE ==================
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
+
+    # 🔥 КРИТИЧЕСКОЕ ДОБАВЛЕНИЕ
     ensure_user_db(user_id)
 
     text = message.text or message.caption or ""
+
+    if message.voice:
+        file = await bot.get_file(message.voice.file_id)
+        path = f"{user_id}.ogg"
+
+        await bot.download_file(file.file_path, destination=path)
+
+        def run():
+            with open(path, "rb") as f:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+            return t.text
+
+        text = await asyncio.to_thread(run)
+
+        if not text.strip():
+            await message.answer("🎤 Не расслышал")
+            return
+
+        await message.answer(f"🎤 {text}")
+
     state = get_state(user_id)
+
+    now = datetime.now(tz)
+    state["time_str"] = now.strftime("%H:%M")
+    state["date_str"] = now.strftime("%d.%m.%Y")
+
+    if is_time_question(text):
+        await message.answer(
+            f"🕒 Время: {now.strftime('%H:%M')}\n"
+            f"📅 Дата: {now.strftime('%d.%m.%Y')}"
+        )
+        return
 
     register_user(user_id)
 
-    # 🔥 РАССЫЛКА
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -123,36 +170,64 @@ async def handle(message: types.Message):
         await message.answer(f"✅ Рассылка отправлена: {success}")
         return
 
-    try:
-        result = await run_with_typing(
-            message.chat.id,
-            execute(user_id, text, message.chat.id, run_with_typing)
-        )
+    is_admin = user_id == ADMIN_ID
+    plan = get_user_plan(user_id)
 
-        if not result:
-            await message.answer("⚠️ Ошибка. Попробуй ещё раз.")
+    if not is_admin and plan == "free":
+        remaining = get_remaining_messages(user_id)
+        if remaining == 0:
+            await message.answer("⛔ Лимит исчерпан", reply_markup=buy_keyboard())
             return
+        can_send_message(user_id)
+
+    try:
+        result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
-        if result.get("type") == "text":
-            await message.answer(
-                result.get("data", ""),
-                reply_markup=main_keyboard(message.message_id)
+        if result["type"] == "text":
+            reply = result["data"]
+
+            if is_admin:
+                status = "\n\n⚙️ ADMIN"
+            elif plan == "premium":
+                status = f"\n\n👑 PREMIUM: {get_remaining_days(user_id)} дн."
+            elif plan == "lite":
+                status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
+            else:
+                limits = get_limits(user_id)
+                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
+
+            await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
+
+        elif result["type"] == "image":
+            await message.answer_photo(
+                BufferedInputFile(result["data"], filename="graph.png"),
+                caption="📊 График построен"
             )
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
 
 
-# ================== CALLBACK ==================
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 📋 UI
+    if data.startswith("like_"):
+        await callback.answer("👍 Спасибо", show_alert=False)
+        return
+
+    if data.startswith("dislike_"):
+        await callback.answer("👎 Учту", show_alert=False)
+        return
+
+    if data == "noop":
+        await callback.answer()
+        return
+
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
@@ -165,15 +240,13 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # 🛠 АДМИНКА
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
             errors = get_errors()
             text = "📊 Анализ\n\n"
             text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
-            await callback.message.answer(text)
-            await callback.answer()
+            await callback.answer(text[:200], show_alert=True)
             return
 
         if data == "admin_payments":
@@ -191,39 +264,19 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.answer("📢 Введи текст", show_alert=True)
             return
 
-    # 👍 лайки
-    if data.startswith("like_"):
-        await callback.answer("👍 Спасибо")
-        return
-
-    if data.startswith("dislike_"):
-        await callback.answer("👎 Учту")
-        return
-
-    # ⚙️ EXECUTOR
     try:
-        result = await execute(
-            user_id,
-            "",
-            callback.message.chat.id,
-            run_with_typing,
-            callback_data=data
-        )
+        result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
 
         if not result:
-            await callback.answer()
             return
 
-        if result.get("type") == "text":
+        if result["type"] == "text":
             await callback.message.answer(
-                result.get("data", ""),
+                result["data"],
                 reply_markup=result.get("keyboard")
             )
 
-        elif result.get("type") == "notify_user":
-            await bot.send_message(result["target_user"], result["data"])
-
-        elif result.get("type") == "admin_request":
+        elif result["type"] == "admin_request":
             plan = result["plan"]
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -247,13 +300,22 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
             await callback.message.answer("⏳ Отправлено администратору")
 
+        elif result["type"] == "notify_user":
+            await bot.send_message(result["target_user"], result["data"])
+            await callback.message.answer("✅ Подписка активирована")
+
+        elif result["type"] == "image":
+            await callback.message.answer_photo(
+                BufferedInputFile(result["data"], filename="graph.png"),
+                caption="📊"
+            )
+
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
 
     await callback.answer()
 
 
-# ================== MAIN ==================
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
