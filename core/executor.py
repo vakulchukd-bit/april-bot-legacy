@@ -30,6 +30,24 @@ from blocks.science_room import ScienceRoom
 import random
 
 
+# 🔥 ДОБАВЛЕНО (SAFE)
+def is_code_like(text):
+    triggers = [
+        "Traceback",
+        "File \"",
+        "line ",
+        "ERROR",
+        "Exception",
+        "psycopg2",
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "def ",
+        "import "
+    ]
+    return any(t.lower() in text.lower() for t in triggers)
+
+
 MISSED_REPLIES = [
     "Похоже, не туда попал. Давай чуть подправим — как ты это видишь?",
     "Окей, значит не совсем это. Куда двигаем — схема или уже нормальное изображение?",
@@ -72,10 +90,8 @@ def update_visual_state(text, state):
         state["visual_mode"] = True
         state["visual_progress"] = state.get("visual_progress", 0) + 1
     else:
-        # не сбрасываем резко — даём "инерцию"
         state["visual_progress"] = max(0, state.get("visual_progress", 0) - 1)
 
-    # готовность
     if state.get("visual_progress", 0) >= 2:
         state["visual_ready"] = True
     else:
@@ -182,10 +198,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 ОБНОВЛЯЕМ СОСТОЯНИЕ
+    # 🔥 SAFE: перехват кода
+    try:
+        if is_code_like(text):
+            return {
+                "type": "admin_report",
+                "data": analyze_code(text)
+            }
+    except:
+        pass
+
     update_visual_state(text, state)
 
-    # 🔥 ЛИМИТ
     allowed, seconds = can_send_message(user_id)
 
     if not allowed:
@@ -193,25 +217,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         return {
             "type": "text",
-            "data": (
-                f"Лимит закончился 👀\n"
-                f"Попробуй через: {time_text}"
-            ),
+            "data": f"Лимит закончился 👀\nПопробуй через: {time_text}",
             "keyboard": InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🚀 Перейти на Lite", callback_data="buy_lite")]
             ])
         }
 
-    # 🔥 ГЛАВНОЕ: ПЕРЕХОД К ДЕЙСТВИЮ
     if state.get("visual_ready") and is_action_intent(text):
         state["scene"] = "image"
         return await image_generate(user_id, text, state)
 
     if is_noise(t):
-        return {
-            "type": "text",
-            "data": "Я тут 🙂 Что хочешь сделать?"
-        }
+        return {"type": "text", "data": "Я тут 🙂 Что хочешь сделать?"}
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
@@ -229,7 +246,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         return {"type": "text", "data": "4"}
 
     energy = get_energy(user_id)
-
     ctx = get_image_context(user_id) or state.get("image_context")
 
     if ctx:
@@ -237,9 +253,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     scene = state.get("scene", "text")
 
-    # ===== IMAGE =====
     if scene == "image":
-
         if not t:
             return {"type": "text", "data": random.choice(IMAGE_OBSERVE)}
 
@@ -247,12 +261,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             return {"type": "text", "data": random.choice(IMAGE_GUIDE)}
 
         if ctx and ctx.get("image_bytes"):
-
             plan = get_user_plan(user_id)
             is_admin = user_id == ADMIN_ID
 
             if not is_admin:
-
                 if plan == "free":
                     return {
                         "type": "text",
@@ -284,7 +296,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     intent = detect_intent(text)
     response_mode = detect_response_mode(text)
-
     anchor = get_anchor(user_id)
 
     if is_ambiguous_request(t):
