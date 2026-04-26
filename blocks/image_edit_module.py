@@ -2,12 +2,24 @@
 
 import base64
 import asyncio
+import random
 from openai import OpenAI
 
-# 🔥 ДОБАВИЛИ
 from storage import get_user_plan, get_limits, get_conn, today
 
 client = OpenAI()
+
+
+# 🔥 ЖИВЫЕ СООБЩЕНИЯ
+def get_limit_message():
+    messages = [
+        "Сегодня ты уже выжал максимум из редактирования 😌",
+        "Я бы продолжил менять изображение, но сегодня уже предел 👀",
+        "На сегодня с изображениями всё, завтра продолжим 😉",
+        "Похоже, лимит на сегодня закончился. Но мы ещё можем пообщаться 🙂",
+        "Сегодня лимит закончился, но я всё ещё здесь, если нужно что-то другое 👍"
+    ]
+    return random.choice(messages)
 
 
 async def edit_image(image_path, prompt):
@@ -30,7 +42,6 @@ async def edit_image(image_path, prompt):
     return await asyncio.to_thread(run)
 
 
-# 🔥 ДОБАВИЛИ (счётчик)
 def increment_images(user_id):
     conn = get_conn()
     if not conn:
@@ -48,7 +59,6 @@ def increment_images(user_id):
 
             images = user["images_today"] or 0
 
-            # сброс если новый день
             if user["last_reset"] != today():
                 images = 0
 
@@ -61,7 +71,6 @@ def increment_images(user_id):
 
 async def process(user_id, image_path, prompt):
     try:
-        # ===== 🔥 ЛИМИТ =====
         plan = get_user_plan(user_id)
 
         if plan == "premium":
@@ -76,10 +85,9 @@ async def process(user_id, image_path, prompt):
         if limits["images_used"] >= limits["images_limit"]:
             return {
                 "type": "text",
-                "data": "Сегодня лимит на редактирование изображений исчерпан 🙂 Попробуй позже или переходи на Premium 👑"
+                "data": get_limit_message()  # 🔥 ЖИВОЕ СООБЩЕНИЕ
             }
 
-        # ===== ОСНОВНАЯ ЛОГИКА =====
         img = await asyncio.wait_for(
             edit_image(image_path, prompt),
             timeout=40
@@ -92,7 +100,6 @@ async def process(user_id, image_path, prompt):
                 "error": "edit_failed"
             }
 
-        # 🔥 ВАЖНО — считаем только не premium
         if plan != "premium":
             increment_images(user_id)
 
