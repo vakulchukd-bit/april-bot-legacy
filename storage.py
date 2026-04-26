@@ -35,6 +35,18 @@ def init_db():
                 last_reset TEXT
             )
             """)
+
+            # 🔥 ДОБАВИЛИ payments
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                plan TEXT,
+                amount INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
     conn.close()
 
 
@@ -98,6 +110,24 @@ def set_subscription(user_id, plan="premium"):
                 """, (uid, plan, expire_date, False, 0, 0, today()))
         conn.close()
         return
+
+
+# 🔥 ДОБАВИЛИ СОХРАНЕНИЕ ПЛАТЕЖА
+def save_payment(user_id, plan):
+    conn = get_conn()
+    if not conn:
+        return
+
+    uid = str(user_id)
+
+    amount = 50 if plan == "lite" else 150 if plan == "premium" else 0
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO payments (user_id, plan, amount)
+            VALUES (%s, %s, %s)
+            """, (uid, plan, amount))
 
 
 def get_user_plan(user_id):
@@ -266,7 +296,7 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
-# 🔥 ИСПРАВЛЕНО ТОЛЬКО ЭТО
+# 🔥 ОБНОВЛЕНА ТОЛЬКО ЛОГИКА ДОХОДА
 def get_admin_stats():
     conn = get_conn()
     if not conn:
@@ -289,20 +319,16 @@ def get_admin_stats():
             """, (now().timestamp(),))
             subs = cur.fetchone()["count"]
 
+            # 💰 ОБЩИЙ ДОХОД
+            cur.execute("SELECT SUM(amount) as total FROM payments")
+            income_total = cur.fetchone()["total"] or 0
+
+            # 📅 СЕГОДНЯ
             cur.execute("""
-                SELECT plan FROM users
-                WHERE subscription_until > %s
-            """, (now().timestamp(),))
-            plans = cur.fetchall()
-
-            income_total = 0
-            income_today = 0
-
-            for p in plans:
-                if p["plan"] == "lite":
-                    income_total += 50
-                elif p["plan"] == "premium":
-                    income_total += 150
+            SELECT SUM(amount) as today FROM payments
+            WHERE DATE(created_at) = CURRENT_DATE
+            """)
+            income_today = cur.fetchone()["today"] or 0
 
             return {
                 "users": users,
