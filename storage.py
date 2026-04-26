@@ -77,7 +77,7 @@ def set_subscription(user_id, plan="premium"):
         uid = str(user_id)
 
         if plan == "lite":
-            days = 15
+            days = 5   # 🔥 ВОТ ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ (было 15)
         elif plan == "premium":
             days = 30
         else:
@@ -248,7 +248,6 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
                 messages = user["messages_today"] or 0
                 images = user["images_today"] or 0
 
-                # сброс дня
                 if user["last_reset"] != today():
                     messages = 0
                     images = 0
@@ -277,7 +276,6 @@ def get_admin_stats():
     }
 
 
-# ===== 🔥 ДОБАВЛЕНО (ПОСЛЕДНЕЕ) =====
 def get_reset_seconds(user_id):
     now_time = now()
     tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
