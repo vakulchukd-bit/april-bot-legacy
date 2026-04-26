@@ -196,20 +196,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = (text or "").lower().strip()
 
-    # 🔥 FIX: безопасный перехват
+    # 🔥 ЕДИНСТВЕННЫЙ ФИКС (без ломания)
     if callback_data is None and text and not text.startswith("/"):
         try:
             if is_code_like(text):
                 analysis = analyze_code(text)
-
-                if isinstance(analysis, dict) and "type" in analysis:
-                    return analysis
-
-                return {
-                    "type": "text",
-                    "data": str(analysis)
-                }
-        except Exception:
+                return {"type": "text", "data": str(analysis)}
+        except:
             pass
 
     update_visual_state(text, state)
@@ -222,15 +215,119 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "data": f"Лимит закончился 👀\nПопробуй через: {format_time(seconds)}"
         }
 
+    if state.get("visual_ready") and is_action_intent(text):
+        state["scene"] = "image"
+        return await image_generate(user_id, text, state)
+
     if is_noise(t):
         return {"type": "text", "data": "Я тут 🙂 Что хочешь сделать?"}
 
     if "время" in t:
-        return {"type": "text", "data": datetime.now().strftime("Сейчас %H:%M")}
+        return {"type": "text", "data": f"Сейчас {datetime.now().strftime('%H:%M')}"}
+
+    if mode == "engineering" and not text.startswith("/"):
+        if text.lower() == "/analiz":
+            return {"type": "text", "data": "📥 Жду код..."}
+        return {"type": "admin_report", "data": analyze_code(text)}
+
+    if t == "привет":
+        return {"type": "text", "data": "Привет 🙂"}
+
+    if t == "2+2":
+        return {"type": "text", "data": "4"}
+
+    energy = get_energy(user_id)
+    ctx = get_image_context(user_id) or state.get("image_context")
+
+    if ctx:
+        state["scene"] = "image"
+
+    scene = state.get("scene", "text")
+
+    if scene == "image":
+        if not t:
+            return {"type": "text", "data": random.choice(IMAGE_OBSERVE)}
+
+        if is_vague(t):
+            return {"type": "text", "data": random.choice(IMAGE_GUIDE)}
+
+        if ctx and ctx.get("image_bytes"):
+            plan = get_user_plan(user_id)
+            is_admin = user_id == ADMIN_ID
+
+            if not is_admin:
+                if plan == "free":
+                    return {
+                        "type": "text",
+                        "data": "Редактирование доступно только в Lite и Premium 👀",
+                        "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🚀 Выбрать тариф", callback_data="buy_lite")]
+                        ])
+                    }
+
+                if not can_edit(user_id):
+                    return {
+                        "type": "text",
+                        "data": random.choice(EDIT_LIMIT_REPLIES),
+                        "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="👑 Перейти в Premium", callback_data="buy_premium")]
+                        ])
+                    }
+
+            return await image_edit(user_id, None, text, state)
+
+        if any(x in t for x in ["сделай", "создай", "нарисуй", "картинку"]):
+            return await image_generate(user_id, text, state)
+
+        return {"type": "text", "data": "Скажи, что изменить 👀"}
+
+    if any(x in t for x in ["картинку", "изображение", "нарисуй", "создай"]):
+        state["scene"] = "image"
+        return await image_generate(user_id, text, state)
+
+    intent = detect_intent(text)
+    response_mode = detect_response_mode(text)
+
+    anchor = get_anchor(user_id)
+
+    if is_ambiguous_request(t):
+        text = f"""
+Сообщение пользователя: "{text}"
+
+Ответь как живой собеседник:
+- не задавай прямой вопрос
+- мягко предложи варианты
+"""
+
+    context = {
+        "chat_id": chat_id,
+        "state": state,
+        "image": ctx,
+        "anchor": anchor,
+        "mode": mode,
+        "task_type": "chat",
+        "energy": energy
+    }
+
+    science = ScienceRoom()
+
+    if science.can_handle(text, context):
+        result = await science.handle(user_id, text, context, run_with_typing)
+        if result:
+            return result
+
+    for room in ROOMS:
+        try:
+            if room.can_handle(text, context):
+                result = await room.handle(user_id, text, context, run_with_typing)
+                if result:
+                    return result
+        except Exception as e:
+            print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
     result = await run_with_typing(
         chat_id,
-        text_process(user_id, text, state, get_energy(user_id))
+        text_process(user_id, text, state, energy)
     )
 
     return {"type": "text", "data": result["content"]}
