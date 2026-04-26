@@ -193,7 +193,6 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# 🔥 ВОТ ЧЕГО НЕ ХВАТАЛО — ОБРАБОТКА КНОПОК
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
@@ -216,10 +215,16 @@ async def handle_callbacks(callback: types.CallbackQuery):
             text = result.get("data", "")
             keyboard = result.get("keyboard")
 
-            if keyboard:
-                await callback.message.answer(text, reply_markup=keyboard)
-            else:
-                await callback.message.answer(text)
+            try:
+                if keyboard:
+                    await callback.message.edit_text(text, reply_markup=keyboard)
+                else:
+                    await callback.message.edit_text(text)
+            except:
+                if keyboard:
+                    await callback.message.answer(text, reply_markup=keyboard)
+                else:
+                    await callback.message.answer(text)
 
         elif result.get("type") == "notify_user":
             await bot.send_message(result["target_user"], result["data"])
