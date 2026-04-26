@@ -176,7 +176,6 @@ async def handle(message: types.Message):
         remaining = get_remaining_messages(user_id)
 
         if remaining == 0:
-            # 🔥 ТОЛЬКО ЗДЕСЬ ИЗМЕНЕНИЕ (логика не тронута)
             next_time = now + timedelta(hours=24)
 
             text_limit = (
@@ -214,8 +213,7 @@ async def handle(message: types.Message):
 
         elif result["type"] == "image":
             await message.answer_photo(
-                BufferedInputFile(result["data"], filename="graph.png"),
-                caption="📊 График построен"
+                BufferedInputFile(result["data"], filename="graph.png")
             )
 
     except Exception as e:
@@ -317,8 +315,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
         elif result["type"] == "image":
             await callback.message.answer_photo(
-                BufferedInputFile(result["data"], filename="graph.png"),
-                caption="📊"
+                BufferedInputFile(result["data"], filename="graph.png")
             )
 
     except Exception as e:
