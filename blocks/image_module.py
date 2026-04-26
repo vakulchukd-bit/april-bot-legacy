@@ -110,23 +110,18 @@ async def process(user_id, text, state):
                 "data": "❌ Пустой запрос для генерации"
             }
 
-        # ===== 🔥 ЛИМИТ =====
+        # ===== 🔥 ЛИМИТ ТОЛЬКО ДЛЯ FREE =====
         plan = get_user_plan(user_id)
 
-        if plan == "premium":
-            limit = 999
-        elif plan == "lite":
-            limit = 2
-        else:
+        if plan == "free":
             limit = 1
+            limits = get_limits(user_id, img_limit=limit)
 
-        limits = get_limits(user_id, img_limit=limit)
-
-        if limits["images_used"] >= limits["images_limit"]:
-            return {
-                "type": "text",
-                "data": "Сегодня лимит на создание изображений исчерпан 🙂 Попробуй завтра или переходи на Premium 👑"
-            }
+            if limits["images_used"] >= limits["images_limit"]:
+                return {
+                    "type": "text",
+                    "data": "Сегодня лимит на создание изображений исчерпан 🙂 Попробуй завтра или переходи на Premium 👑"
+                }
 
         # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
@@ -136,7 +131,9 @@ async def process(user_id, text, state):
             img = None
 
         if img:
-            increment_images(user_id)  # 🔥 ВАЖНО
+            # считаем только для FREE (чтобы Lite был без лимита)
+            if plan == "free":
+                increment_images(user_id)
 
             item = {
                 "type": "generated",
@@ -188,7 +185,10 @@ async def retry_process(user_id, text, state):
             img = None
 
         if img:
-            increment_images(user_id)  # 🔥 ВАЖНО
+            # считаем только для FREE
+            plan = get_user_plan(user_id)
+            if plan == "free":
+                increment_images(user_id)
 
             item = {
                 "type": "generated",
