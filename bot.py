@@ -198,7 +198,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 🔥 ВАЖНО: лайки не трогают сообщение
+    # 🔥 лайки не ломают сообщение
     if data.startswith("like_"):
         await callback.answer("👍 Спасибо", show_alert=False)
         return
@@ -224,16 +224,18 @@ async def handle_callbacks(callback: types.CallbackQuery):
             text = result.get("data", "")
             keyboard = result.get("keyboard")
 
+            # 🔥 ФИКС: добавляем базовые кнопки (лайки + меню)
+            base_keyboard = main_keyboard(callback.message.message_id)
+
+            if keyboard:
+                keyboard.inline_keyboard.extend(base_keyboard.inline_keyboard)
+            else:
+                keyboard = base_keyboard
+
             try:
-                if keyboard:
-                    await callback.message.edit_text(text, reply_markup=keyboard)
-                else:
-                    await callback.message.edit_text(text)
+                await callback.message.edit_text(text, reply_markup=keyboard)
             except:
-                if keyboard:
-                    await callback.message.answer(text, reply_markup=keyboard)
-                else:
-                    await callback.message.answer(text)
+                await callback.message.answer(text, reply_markup=keyboard)
 
         elif result.get("type") == "notify_user":
             await bot.send_message(result["target_user"], result["data"])
