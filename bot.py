@@ -159,31 +159,22 @@ async def handle(message: types.Message):
     is_admin = user_id == ADMIN_ID
     plan = get_user_plan(user_id)
 
-    # ===== ЛИМИТ =====
-    if not is_admin and plan == "free":
-        remaining = get_remaining_messages(user_id)
-
-        if remaining == 0:
-            seconds = get_reset_seconds(user_id)
-            time_text = format_time(seconds)
-
-            await message.answer(
-                f"Лимит закончился 👀\nПопробуй через: {time_text}",
-                reply_markup=upgrade_keyboard()
-            )
-            return
-
     try:
         result = await run_with_typing(
             message.chat.id,
             execute(user_id, text, message.chat.id, run_with_typing)
         )
 
+        # 🔥 защита от None
+        if not result:
+            await message.answer("⚠️ Ошибка. Попробуй ещё раз.")
+            return
+
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
-        if result["type"] == "text":
-            reply = result["data"]
+        if result.get("type") == "text":
+            reply = result.get("data", "")
 
             if is_admin:
                 status = "\n\n⚙️ ADMIN"
