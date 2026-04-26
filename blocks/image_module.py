@@ -2,6 +2,9 @@ import base64
 import asyncio
 from openai import OpenAI
 
+# 🔥 ДОБАВИЛИ
+from storage import get_user_plan, get_limits, get_conn, today
+
 client = OpenAI()
 
 
@@ -23,10 +26,8 @@ def clean_prompt(text: str):
     if not text:
         return ""
 
-    # убираем лишние переносы и мусор
     t = text.strip()
 
-    # защита от системного мусора
     banned = ["система", "анализ личности", "контекст:", "опыт:"]
     for b in banned:
         if b in t.lower():
@@ -71,15 +72,60 @@ async def generate_image(prompt):
     return await asyncio.to_thread(run)
 
 
+# 🔥 ДОБАВИЛИ (инкремент)
+def increment_images(user_id):
+    conn = get_conn()
+    if not conn:
+        return
+
+    uid = str(user_id)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT images_today, last_reset FROM users WHERE user_id = %s", (uid,))
+            user = cur.fetchone()
+
+            if not user:
+                return
+
+            images = user["images_today"] or 0
+
+            if user["last_reset"] != today():
+                images = 0
+
+            cur.execute("""
+            UPDATE users
+            SET images_today = %s, last_reset = %s
+            WHERE user_id = %s
+            """, (images + 1, today(), uid))
+
+
 async def process(user_id, text, state):
     try:
-        # 🔥 ЧИСТЫЙ PROMPT
         prompt = clean_prompt(text)
 
         if not prompt:
             return {
                 "type": "error",
                 "data": "❌ Пустой запрос для генерации"
+            }
+
+        # ===== 🔥 ЛИМИТ =====
+        plan = get_user_plan(user_id)
+
+        if plan == "premium":
+            limit = 999
+        elif plan == "lite":
+            limit = 2
+        else:
+            limit = 1
+
+        limits = get_limits(user_id, img_limit=limit)
+
+        if limits["images_used"] >= limits["images_limit"]:
+            return {
+                "type": "text",
+                "data": "Сегодня лимит на создание изображений исчерпан 🙂 Попробуй завтра или переходи на Premium 👑"
             }
 
         # ===== ПЕРВАЯ ПОПЫТКА =====
@@ -90,6 +136,8 @@ async def process(user_id, text, state):
             img = None
 
         if img:
+            increment_images(user_id)  # 🔥 ВАЖНО
+
             item = {
                 "type": "generated",
                 "source": "text",
@@ -140,6 +188,8 @@ async def retry_process(user_id, text, state):
             img = None
 
         if img:
+            increment_images(user_id)  # 🔥 ВАЖНО
+
             item = {
                 "type": "generated",
                 "source": "text",
