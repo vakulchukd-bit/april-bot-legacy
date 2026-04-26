@@ -270,7 +270,22 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     science = ScienceRoom()
 
-    # 🔥 MODEL PRIORITY
+    # ===== СНАЧАЛА КОМНАТЫ =====
+    if science.can_handle(text, context):
+        result = await science.handle(user_id, text, context, run_with_typing)
+        if result:
+            return result
+
+    for room in ROOMS:
+        try:
+            if room.can_handle(text, context):
+                result = await room.handle(user_id, text, context, run_with_typing)
+                if result:
+                    return result
+        except Exception as e:
+            print(f"🔥 ROOM ERROR [{room.name}]:", e)
+
+    # 🔥 MODEL PRIORITY (ТЕПЕРЬ FALLBACK)
     if intent == "question" and not is_generate_request(text):
 
         if anchor:
@@ -293,20 +308,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             content = retry.get("content", "")
 
         return {"type": "text", "data": content}
-
-    if science.can_handle(text, context):
-        result = await science.handle(user_id, text, context, run_with_typing)
-        if result:
-            return result
-
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
-                if result:
-                    return result
-        except Exception as e:
-            print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
     if response_mode == "link":
         return {
