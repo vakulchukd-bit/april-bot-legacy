@@ -146,6 +146,12 @@ def build_variation_guard():
     )
 
 
+# ===== 🔥 РЕЖИМ ЗАДАЧ (НОВОЕ) =====
+def is_problem(text):
+    t = text.lower()
+    return any(sym in t for sym in ["=", "+", "-", "*", "/", "^"]) or "реши" in t or "график" in t
+
+
 # ===== ЛИМИТЫ =====
 MAX_MESSAGE_CHARS = 2000
 MAX_TOTAL_CHARS = 12000
@@ -263,6 +269,22 @@ async def process(user_id, text, state, energy="MEDIUM"):
         limit = get_history_limit(plan)
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # 🔥 РЕЖИМ ЗАДАЧ + БОНУС
+        if is_problem(text_fixed):
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Это задача.\n"
+                    "Ты обязан:\n"
+                    "- решить\n"
+                    "- объяснить\n"
+                    "- если нужно — нарисовать ASCII\n"
+                    "- не отказываться\n"
+                    "- не говорить 'не понял задачу'\n"
+                    "Если можно решить — решай, даже если формулировка странная."
+                )
+            })
 
         behavior = build_behavior_hint(text_fixed)
         if behavior:
