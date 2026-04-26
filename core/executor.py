@@ -23,13 +23,15 @@ from blocks.image_edit_module import process as image_edit
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription, save_payment  # 🔥 добавили
+from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
 
 
 def handle_subscription(callback_data, user_id):
+    print("🔥 CALLBACK:", callback_data)  # 🔥 НОВЫЙ PRINT
+
     if callback_data == "buy_lite":
         return {
             "type": "text",
@@ -89,7 +91,7 @@ def handle_subscription(callback_data, user_id):
         set_subscription(uid, plan)
         save_payment(uid, plan)
 
-        print("🔥 PAYMENT SAVED")  # 🔥 ДОБАВИЛИ ПРОВЕРКУ
+        print("🔥 PAYMENT SAVED")
 
         return {
             "type": "notify_user",
@@ -138,7 +140,7 @@ def is_image_question(text: str):
 
 
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
-    print("🔥 EXECUTOR RUNNING")  # 🔥 ГЛАВНАЯ ПРОВЕРКА
+    print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
     mode = get_mode(user_id)
