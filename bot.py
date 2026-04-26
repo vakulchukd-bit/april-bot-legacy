@@ -223,25 +223,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
             text = result.get("data", "")
             keyboard = result.get("keyboard")
 
-            base_keyboard = main_keyboard(callback.message.message_id)
-
-            if keyboard:
-                new_keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=keyboard.inline_keyboard + base_keyboard.inline_keyboard
-                )
-            else:
-                new_keyboard = base_keyboard
-
-            try:
-                # ✅ ФИКС: НЕ ТРОГАЕМ ТЕКСТ
-                await callback.message.edit_reply_markup(reply_markup=new_keyboard)
-
-                # если есть новый текст — отправляем отдельно
-                if text:
-                    await callback.message.answer(text, reply_markup=new_keyboard)
-
-            except:
-                await callback.message.answer(text, reply_markup=new_keyboard)
+            # 🔥 ГЛАВНЫЙ ФИКС — НЕ РЕДАКТИРУЕМ, НЕ СКЛЕИВАЕМ
+            await callback.message.answer(
+                text,
+                reply_markup=keyboard or main_keyboard(callback.message.message_id)
+            )
 
         elif result.get("type") == "notify_user":
             await bot.send_message(result["target_user"], result["data"])
