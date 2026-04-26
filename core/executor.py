@@ -63,7 +63,6 @@ def handle_subscription(callback_data, user_id):
     if callback_data == "buy_yes_premium":
         return {"type": "admin_request", "plan": "premium"}
 
-    # 🔥 FIX
     if callback_data == "buy_no":
         return {"type": "text", "data": "❌ Отменено"}
 
@@ -150,6 +149,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===== CONTEXT =====
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
+
+    # 🔥 ШАГ 1 — ОСОЗНАНИЕ КАРТИНКИ
+    if ctx:
+        state["has_image"] = True
+        state["last_intent"] = state.get("last_intent", "image")
+    else:
+        state["has_image"] = False
 
     context = {
         "chat_id": chat_id,
