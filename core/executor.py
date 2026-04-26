@@ -30,7 +30,7 @@ from blocks.science_room import ScienceRoom
 
 
 def handle_subscription(callback_data, user_id):
-    print("🔥 CALLBACK:", callback_data)  # 🔥 НОВЫЙ PRINT
+    print("🔥 CALLBACK:", callback_data)
 
     if callback_data == "buy_lite":
         return {
@@ -164,9 +164,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if t == "привет":
         return {"type": "text", "data": "Привет 🙂"}
 
-    if t == "2+2":
-        return {"type": "text", "data": "4"}
-
     energy = get_energy(user_id)
 
     intent = detect_intent(text)
@@ -225,6 +222,30 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     science = ScienceRoom()
 
+    # 🔥 MODEL PRIORITY
+    if intent == "question" and not is_generate_request(text):
+
+        if anchor:
+            text = f"Контекст: {anchor['current']}\n\n{text}"
+
+        text = f"{build_context_text()}\n\n{text}"
+
+        result = await run_with_typing(
+            chat_id,
+            text_process(user_id, text, state, energy)
+        )
+
+        content = result.get("content", "")
+
+        if not content or "не понял" in content.lower():
+            retry = await run_with_typing(
+                chat_id,
+                text_process(user_id, f"Ответь нормально и логично:\n{text}", state, energy)
+            )
+            content = retry.get("content", "")
+
+        return {"type": "text", "data": content}
+
     if science.can_handle(text, context):
         result = await science.handle(user_id, text, context, run_with_typing)
         if result:
@@ -255,20 +276,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     if response_mode == "format":
         text = f"Оформи красиво:\n\n{text}"
-
-    if intent == "question":
-
-        if anchor:
-            text = f"Контекст: {anchor['current']}\n\n{text}"
-
-        text = f"{build_context_text()}\n\n{text}"
-
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-
-        return {"type": "text", "data": result["content"]}
 
     result = await run_with_typing(
         chat_id,
