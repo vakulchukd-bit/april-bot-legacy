@@ -23,7 +23,7 @@ from blocks.image_edit_module import process as image_edit
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription
+from storage import set_subscription, save_payment  # 🔥 добавили
 
 from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
@@ -87,6 +87,7 @@ def handle_subscription(callback_data, user_id):
         uid = int(parts[3])
 
         set_subscription(uid, plan)
+        save_payment(uid, plan)  # 🔥 ВОТ ОНА, ЕДИНСТВЕННАЯ ЛОГИКА
 
         return {
             "type": "notify_user",
@@ -168,14 +169,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # ===== ШАГ 1
     if ctx:
         state["has_image"] = True
         state["last_intent"] = state.get("last_intent", "image")
     else:
         state["has_image"] = False
 
-    # ===== ШАГ 5 🔥 ГЕНЕРАЦИЯ
     if is_generate_request(text):
         result = await image_generate(user_id, text, state)
 
@@ -188,7 +187,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         return result
 
-    # ===== ШАГ 2 + ШАГ 4
     if ctx and is_edit_request(text):
         path = ctx.get("path")
         if path:
@@ -203,7 +201,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             return result
 
-    # ===== ШАГ 3
     if ctx and is_image_question(text):
         return {
             "type": "text",
