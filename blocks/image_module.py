@@ -23,40 +23,16 @@ def clean_prompt(text: str):
     if not text:
         return ""
 
+    # убираем лишние переносы и мусор
     t = text.strip()
 
+    # защита от системного мусора
     banned = ["система", "анализ личности", "контекст:", "опыт:"]
     for b in banned:
         if b in t.lower():
             t = t.lower().replace(b, "")
 
     return t.strip()
-
-
-# ===== УМНЫЙ PROMPT =====
-def build_smart_prompt(text, state):
-    base = clean_prompt(text)
-
-    last = state.get("image_context")
-
-    if last and last.get("hint"):
-        return f"""
-Используй предыдущую сцену:
-{last['hint']}
-
-Изменение:
-{base}
-
-Сохрани стиль и композицию, измени только то, что указано.
-Сделай результат естественным и аккуратным.
-"""
-    else:
-        return f"""
-Создай изображение:
-{base}
-
-Сделай его визуально приятным, с хорошим светом, композицией и деталями.
-"""
 
 
 async def generate_image(prompt):
@@ -69,6 +45,8 @@ async def generate_image(prompt):
                 prompt=prompt,
                 size="1024x1024"
             )
+
+            print("📦 RAW RESULT:", result)
 
             if not result or not result.data:
                 print("❌ EMPTY RESULT FROM OPENAI")
@@ -95,18 +73,20 @@ async def generate_image(prompt):
 
 async def process(user_id, text, state):
     try:
-        prompt = build_smart_prompt(text, state)
+        # 🔥 ЧИСТЫЙ PROMPT
+        prompt = clean_prompt(text)
 
-        if not prompt.strip():
+        if not prompt:
             return {
                 "type": "error",
                 "data": "❌ Пустой запрос для генерации"
             }
 
+        # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
             img = await asyncio.wait_for(generate_image(prompt), timeout=60)
         except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT")
+            print("⏱️ TIMEOUT FIRST ATTEMPT")
             img = None
 
         if img:
@@ -114,9 +94,8 @@ async def process(user_id, text, state):
                 "type": "generated",
                 "source": "text",
                 "prompt": prompt,
-                "hint": clean_prompt(text),
-                "path": None,
-                "image_bytes": img
+                "hint": prompt,
+                "path": None
             }
 
             save_to_memory(state, item)
@@ -126,16 +105,65 @@ async def process(user_id, text, state):
                 "data": img
             }
 
-        # 🔥 ВОТ ГЛАВНЫЙ ФИКС
+        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
+
         return {
-            "type": "text",
-            "data": "⚠️ Не получилось сгенерировать изображение. Попробуй ещё раз или перефразируй."
+            "type": "retry_notice",
+            "data": "⏳ Картинка генерируется дольше обычного… пробую ещё раз"
         }
 
     except Exception as e:
         print("🔥 PROCESS ERROR:", e)
 
         return {
-            "type": "text",
-            "data": "⚠️ Ошибка генерации. Попробуй позже."
+            "type": "error",
+            "data": None,
+            "error": str(e)
+        }
+
+
+# ===== ВТОРАЯ ПОПЫТКА =====
+async def retry_process(user_id, text, state):
+    try:
+        prompt = clean_prompt(text)
+
+        if not prompt:
+            return {
+                "type": "final_error",
+                "data": "❌ Пустой запрос"
+            }
+
+        try:
+            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
+        except asyncio.TimeoutError:
+            print("⏱️ TIMEOUT SECOND ATTEMPT")
+            img = None
+
+        if img:
+            item = {
+                "type": "generated",
+                "source": "text",
+                "prompt": prompt,
+                "hint": prompt,
+                "path": None
+            }
+
+            save_to_memory(state, item)
+
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        return {
+            "type": "final_error",
+            "data": "⚠️ Не удалось создать изображение.\nПопробуй ещё раз чуть позже 🙏"
+        }
+
+    except Exception as e:
+        print("🔥 RETRY PROCESS ERROR:", e)
+
+        return {
+            "type": "final_error",
+            "data": "⚠️ Сервис временно недоступен"
         }
