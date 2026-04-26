@@ -90,7 +90,6 @@ async def typing_loop(chat_id, is_image=False):
                 await bot.send_chat_action(chat_id, "upload_photo")
             else:
                 await bot.send_chat_action(chat_id, "typing")
-
             await asyncio.sleep(2)
     except:
         pass
@@ -123,27 +122,6 @@ async def handle(message: types.Message):
     user_id = message.from_user.id
 
     ensure_user_db(user_id)
-
-    try:
-        lang = message.from_user.language_code or "en"
-        user_tz = LANG_TZ_MAP.get(lang, "Europe/Kyiv")
-
-        from storage import get_conn
-
-        conn = get_conn()
-        if conn:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT timezone FROM users WHERE user_id = %s", (str(user_id),))
-                    user = cur.fetchone()
-
-                    if user and not user.get("timezone"):
-                        cur.execute(
-                            "UPDATE users SET timezone = %s WHERE user_id = %s",
-                            (user_tz, str(user_id))
-                        )
-    except:
-        pass
 
     text = message.text or message.caption or ""
 
@@ -198,7 +176,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # ✅ UI кнопки отдельно
+    # 📋 UI
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
@@ -211,15 +189,42 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+    # 🛠 АДМИНКА
+    if user_id == ADMIN_ID:
+
+        if data == "admin_stats":
+            errors = get_errors()
+            text = "📊 Анализ\n\n"
+            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
+            await callback.message.answer(text)
+            await callback.answer()
+            return
+
+        if data == "admin_payments":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.answer("📢 Введи текст", show_alert=True)
+            return
+
     # 👍 лайки
     if data.startswith("like_"):
-        await callback.answer("👍 Спасибо", show_alert=False)
+        await callback.answer("👍 Спасибо")
         return
 
     if data.startswith("dislike_"):
-        await callback.answer("👎 Учту", show_alert=False)
+        await callback.answer("👎 Учту")
         return
 
+    # ⚙️ executor
     try:
         result = await execute(
             user_id,
@@ -229,42 +234,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
             callback_data=data
         )
 
-        if not result:
-            await callback.answer()
-            return
-
-        if result.get("type") == "text":
+        if result and result.get("type") == "text":
             await callback.message.answer(
                 result.get("data", ""),
                 reply_markup=result.get("keyboard")
             )
-
-        elif result.get("type") == "notify_user":
-            await bot.send_message(result["target_user"], result["data"])
-
-        elif result.get("type") == "admin_request":
-            plan = result["plan"]
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Подтвердить",
-                        callback_data=f"admin_confirm_{plan}_{user_id}"
-                    ),
-                    InlineKeyboardButton(
-                        text="❌ Отклонить",
-                        callback_data=f"admin_reject_{plan}_{user_id}"
-                    )
-                ]
-            ])
-
-            await bot.send_message(
-                ADMIN_ID,
-                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
-                reply_markup=keyboard
-            )
-
-            await callback.message.answer("⏳ Отправлено администратору")
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
