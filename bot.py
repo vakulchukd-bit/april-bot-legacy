@@ -198,6 +198,15 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
+    # 🔥 ВАЖНО: лайки не трогают сообщение
+    if data.startswith("like_"):
+        await callback.answer("👍 Спасибо", show_alert=False)
+        return
+
+    if data.startswith("dislike_"):
+        await callback.answer("👎 Учту", show_alert=False)
+        return
+
     try:
         result = await execute(
             user_id,
