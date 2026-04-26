@@ -17,21 +17,17 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
-from blocks.image_edit_module import process as image_edit  # 🔥 ДОБАВИЛИ
+from blocks.image_edit_module import process as image_edit
 
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import set_subscription
 
-# 🔥 ENERGY
 from blocks.energy_manager import get_energy
-
-# 🔥 SCIENCE
 from blocks.science_room import ScienceRoom
 
 
-# ===== SUBSCRIPTION HANDLER =====
 def handle_subscription(callback_data, user_id):
 
     if callback_data == "buy_lite":
@@ -110,14 +106,26 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
-# 🔥 ФУНКЦИЯ — ОПРЕДЕЛЕНИЕ РЕДАКТИРОВАНИЯ
 def is_edit_request(text: str):
     t = text.lower()
     triggers = ["убери", "добавь", "измени", "замени", "сделай"]
     return any(word in t for word in triggers)
 
 
-# ===== EXECUTE =====
+# 🔥 НОВОЕ — ВОПРОС ПРО КАРТИНКУ
+def is_image_question(text: str):
+    t = text.lower()
+    triggers = [
+        "что на картинке",
+        "что это",
+        "что справа",
+        "что слева",
+        "что здесь",
+        "что изображено"
+    ]
+    return any(tr in t for tr in triggers)
+
+
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
@@ -152,18 +160,25 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # 🔥 ШАГ 1 — ОСОЗНАНИЕ
+    # ===== ШАГ 1
     if ctx:
         state["has_image"] = True
         state["last_intent"] = state.get("last_intent", "image")
     else:
         state["has_image"] = False
 
-    # 🔥 ШАГ 2 — РЕДАКТИРОВАНИЕ ВМЕСТО ГЕНЕРАЦИИ
+    # ===== ШАГ 2
     if ctx and is_edit_request(text):
         path = ctx.get("path")
         if path:
             return await image_edit(user_id, path, text)
+
+    # ===== ШАГ 3 🔥
+    if ctx and is_image_question(text):
+        return {
+            "type": "text",
+            "data": "Это изображение, которое мы недавно создали. Хочешь что-то изменить или добавить?"
+        }
 
     context = {
         "chat_id": chat_id,
