@@ -136,6 +136,25 @@ async def handle(message: types.Message):
 
         await message.answer(f"🎤 {text}")
 
+    # ===== 📸 ДОБАВЛЕНО: ОБРАБОТКА ФОТО =====
+    if message.photo:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+
+        path = f"{user_id}_image.jpg"
+        await bot.download_file(file.file_path, destination=path)
+
+        # сохраняем контекст изображения
+        set_image_context(user_id, {
+            "type": "uploaded",
+            "path": path
+        })
+
+        await message.answer("📸 Изображение получено. Можешь спросить про него.")
+
+        return
+    # ======================================
+
     state = get_state(user_id)
 
     now = datetime.now(tz)
