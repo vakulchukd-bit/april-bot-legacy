@@ -225,7 +225,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
             base_keyboard = main_keyboard(callback.message.message_id)
 
-            # 🔥 ПРАВИЛЬНАЯ СБОРКА КЛАВИАТУРЫ
             if keyboard:
                 new_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=keyboard.inline_keyboard + base_keyboard.inline_keyboard
@@ -234,7 +233,10 @@ async def handle_callbacks(callback: types.CallbackQuery):
                 new_keyboard = base_keyboard
 
             try:
-                await callback.message.edit_text(text, reply_markup=new_keyboard)
+                if callback.message.text == text:
+                    await callback.message.edit_reply_markup(reply_markup=new_keyboard)
+                else:
+                    await callback.message.edit_text(text, reply_markup=new_keyboard)
             except:
                 await callback.message.answer(text, reply_markup=new_keyboard)
 
