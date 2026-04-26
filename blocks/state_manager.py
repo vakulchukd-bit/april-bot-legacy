@@ -12,7 +12,8 @@ def get_state(user_id):
             "dialog": [],
             "image_context": None,
             "awaiting": False,
-            "last_prompt": None
+            "last_prompt": None,
+            "task_type": None  # 🔥 НОВОЕ ПОЛЕ (тип задачи)
         }
     return state[user_id]
 
