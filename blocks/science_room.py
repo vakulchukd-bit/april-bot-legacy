@@ -15,6 +15,11 @@ class ScienceRoom:
     def can_handle(self, text, context):
         t = text.lower()
 
+        # 🔥 ГЛАВНЫЙ ФИЛЬТР (НОВОЕ)
+        if context.get("task_type") != "math":
+            return False
+
+        # ===== СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ) =====
         if "график" in t or "построй" in t:
             return True
 
@@ -115,7 +120,6 @@ class ScienceRoom:
             "data": "🧠 Не понял задачу, попробуй уточнить"
         }
 
-    # ===== 🔥 УСИЛЕННЫЙ PARSER =====
     def interpret_text_graph(self, text):
         t = text.lower()
 
@@ -192,13 +196,11 @@ class ScienceRoom:
             print("🔥 GRAPH ERROR:", e)
             return None
 
-    # ===== 🔥 ГЛАВНОЕ УСИЛЕНИЕ =====
     def solve_equation(self, text):
         try:
             expr = text.lower().replace("реши", "").replace("уравнение", "").strip()
             expr = expr.replace("^", "**")
 
-            # 🔥 ищем переменную автоматически
             vars_found = re.findall(r'[a-zA-Z]', expr)
 
             if not vars_found:
