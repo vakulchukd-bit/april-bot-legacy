@@ -4,6 +4,9 @@ import base64
 import asyncio
 from openai import OpenAI
 
+# 🔥 ДОБАВИЛИ
+from storage import get_user_plan, get_limits
+
 client = OpenAI()
 
 
@@ -29,6 +32,25 @@ async def edit_image(image_path, prompt):
 
 async def process(user_id, image_path, prompt):
     try:
+        # ===== 🔥 ЛИМИТ =====
+        plan = get_user_plan(user_id)
+
+        if plan == "premium":
+            limit = 999
+        elif plan == "lite":
+            limit = 2
+        else:
+            limit = 1
+
+        limits = get_limits(user_id, img_limit=limit)
+
+        if limits["images_used"] >= limits["images_limit"]:
+            return {
+                "type": "text",
+                "data": "Сегодня лимит на редактирование изображений исчерпан 🙂 Попробуй позже или переходи на Premium 👑"
+            }
+
+        # ===== ОСНОВНАЯ ЛОГИКА =====
         img = await asyncio.wait_for(
             edit_image(image_path, prompt),
             timeout=40
