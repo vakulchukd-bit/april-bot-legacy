@@ -167,8 +167,8 @@ def build_info_menu(user_id):
         "━━━━━━━━━━━━━━━\n\n"
         "📦 *Тарифы*\n\n"
         "🆓 FREE — базовые лимиты\n"
-        "⚡ LITE — больше возможностей\n"
-        "👑 PREMIUM — без ограничений\n"
+        "⚡ LITE — $6 (5 дней)\n"
+        "👑 PREMIUM — $25 (30 дней)\n"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
