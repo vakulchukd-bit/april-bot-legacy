@@ -2,6 +2,7 @@ import json
 import os
 import math
 from datetime import datetime, timezone, timedelta
+import pytz  # 🔥 ДОБАВЛЕНО
 
 # 🔥 NEW: DATABASE
 import psycopg2
@@ -11,6 +12,9 @@ FILE_PATH = "data/subscriptions.json"
 
 # 👑 ADMIN
 ADMIN_ID = 2016592532
+
+# 🔥 ЛОКАЛЬНАЯ ЗОНА (FALLBACK)
+DEFAULT_TZ = "Europe/Kyiv"
 
 
 # ===== 🔥 DB CONNECT =====
@@ -37,9 +41,17 @@ def init_db():
                 messages_today INTEGER,
                 images_today INTEGER,
                 edits_today INTEGER,
-                last_reset TEXT
+                last_reset TEXT,
+                timezone TEXT
             )
             """)
+
+            # 🔥 безопасно добавляем колонку если нет
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN timezone TEXT")
+            except:
+                pass
+
     conn.close()
 
 
@@ -48,8 +60,23 @@ def now():
     return datetime.now(timezone.utc)
 
 
-def today():
-    return now().date().isoformat()
+def get_user_timezone(user):
+    tz = user.get("timezone") if user else None
+    if not tz:
+        tz = DEFAULT_TZ
+    try:
+        return pytz.timezone(tz)
+    except:
+        return pytz.timezone(DEFAULT_TZ)
+
+
+def now_local(user=None):
+    tz = get_user_timezone(user)
+    return datetime.now(tz)
+
+
+def today(user=None):
+    return now_local(user).date().isoformat()
 
 
 # ===== 🔥 DB USER =====
@@ -67,8 +94,8 @@ def ensure_user_db(user_id):
 
             if not user:
                 cur.execute("""
-                INSERT INTO users VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (uid, "free", 0, False, 0, 0, 0, today()))
+                INSERT INTO users VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (uid, "free", 0, False, 0, 0, 0, today(), DEFAULT_TZ))
                 return None
 
             return user
@@ -94,13 +121,13 @@ def set_subscription(user_id, plan="premium"):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, edits_today, last_reset)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, edits_today, last_reset, timezone)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE SET
                 plan = EXCLUDED.plan,
                 subscription_until = EXCLUDED.subscription_until,
                 warned = FALSE
-                """, (uid, plan, expire_date, False, 0, 0, 0, today()))
+                """, (uid, plan, expire_date, False, 0, 0, 0, today(), DEFAULT_TZ))
         conn.close()
         return
 
@@ -113,7 +140,7 @@ def get_user_plan(user_id):
 
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT plan, subscription_until, warned FROM users WHERE user_id = %s", (uid,))
+                cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
                 user = cur.fetchone()
 
                 if not user:
@@ -142,7 +169,7 @@ def should_warn(user_id):
 
     with conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT subscription_until, warned FROM users WHERE user_id = %s", (uid,))
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
             user = cur.fetchone()
 
             if not user:
@@ -157,10 +184,14 @@ def should_warn(user_id):
     return False
 
 
-# ===== 🔥 ВРЕМЯ СБРОСА =====
-def get_reset_seconds(user_id):
-    now_time = now()
-    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+# ===== 🔥 ВРЕМЯ СБРОСА (ТЕПЕРЬ С УЧЁТОМ TZ) =====
+def get_reset_seconds(user):
+    now_time = now_local(user)
+
+    tomorrow = (now_time + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
     return int((tomorrow - now_time).total_seconds())
 
 
@@ -170,12 +201,12 @@ def format_time(seconds):
     return f"{hours}ч {minutes}м"
 
 
-# ===== 🔥 ОБНОВЛЁННЫЙ RESET (КЛЮЧЕВОЕ) =====
+# ===== RESET =====
 def sync_reset(cur, uid, user):
-    if user["last_reset"] != today():
+    if user["last_reset"] != today(user):
         cur.execute("""
         UPDATE users SET messages_today = 0, edits_today = 0, images_today = 0, last_reset = %s WHERE user_id = %s
-        """, (today(), uid))
+        """, (today(user), uid))
         user["messages_today"] = 0
         user["edits_today"] = 0
         user["images_today"] = 0
@@ -193,18 +224,17 @@ def can_send_message(user_id, limit=15):
 
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, last_reset FROM users WHERE user_id = %s", (uid,))
+                cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
                 user = cur.fetchone()
 
                 if not user:
                     ensure_user_db(user_id)
                     return True, None
 
-                # 🔥 СИНХРОНИЗАЦИЯ RESET
                 sync_reset(cur, uid, user)
 
                 if user["messages_today"] >= limit:
-                    seconds = get_reset_seconds(user_id)
+                    seconds = get_reset_seconds(user)
                     return False, seconds
 
                 cur.execute("""
@@ -228,7 +258,7 @@ def can_edit(user_id):
 
     with conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT edits_today, last_reset, plan FROM users WHERE user_id = %s", (uid,))
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
             user = cur.fetchone()
 
             if not user:
@@ -301,7 +331,7 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
 
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id = %s", (uid,))
+                cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
                 user = cur.fetchone()
 
                 if not user:
@@ -315,7 +345,7 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
                 messages = user["messages_today"] or 0
                 images = user["images_today"] or 0
 
-                if user["last_reset"] != today():
+                if user["last_reset"] != today(user):
                     messages = 0
                     images = 0
 
