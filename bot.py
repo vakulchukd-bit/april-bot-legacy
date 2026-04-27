@@ -8,7 +8,7 @@ import pytz
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
-from aiogram.client.session.aiohttp import AiohttpSession  # ✅ ДОБАВИЛИ
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from openai import OpenAI
 
@@ -50,11 +50,11 @@ from blocks.mode_manager import get_mode, set_mode, clear_mode
 from blocks.session_manager import is_session_expired
 from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
+from blocks.image_module import process as image_generate  # 🔥 ДОБАВИЛИ
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ✅ ФИКС ТАЙМАУТА (ничего не ломает)
 session = AiohttpSession(timeout=120)
 bot = Bot(token=TOKEN, session=session)
 
@@ -200,7 +200,7 @@ async def handle(message: types.Message):
 
             text_limit = (
                 "⛔ Ваш лимит на сегодня исчерпан.\n\n"
-                f"Следующий доступ:\n{next_time.strftime('%d.%м.%Y в %H:%M')}\n\n"
+                f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
                 "Хочешь продолжить без ожидания?\n"
                 "Выбери тариф ниже 👇"
             )
@@ -230,6 +230,24 @@ async def handle(message: types.Message):
                 status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
 
             await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
+
+        # 🔥 НОВОЕ: ОБРАБОТКА image_task
+        elif result["type"] == "image_task":
+            await message.answer("🎨 Генерирую изображение...")
+
+            try:
+                img = await image_generate(user_id, result["prompt"], state)
+
+                if img and img.get("type") == "image":
+                    await message.answer_photo(
+                        BufferedInputFile(img["data"], filename="image.png")
+                    )
+                else:
+                    await message.answer("⚠️ Не удалось создать изображение")
+
+            except Exception as e:
+                print("🔥 IMAGE TASK ERROR:", e)
+                await message.answer("⚠️ Ошибка генерации изображения")
 
         elif result["type"] == "image":
             await message.answer("🎨 Генерирую изображение...")
@@ -313,34 +331,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
                 result["data"],
                 reply_markup=result.get("keyboard")
             )
-
-        elif result["type"] == "admin_request":
-            plan = result["plan"]
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Подтвердить",
-                        callback_data=f"admin_confirm_{plan}_{user_id}"
-                    ),
-                    InlineKeyboardButton(
-                        text="❌ Отклонить",
-                        callback_data=f"admin_reject_{plan}_{user_id}"
-                    )
-                ]
-            ])
-
-            await bot.send_message(
-                ADMIN_ID,
-                f"💳 ЗАПРОС: {plan.upper()}\nID: {user_id}",
-                reply_markup=keyboard
-            )
-
-            await callback.message.answer("⏳ Отправлено администратору")
-
-        elif result["type"] == "notify_user":
-            await bot.send_message(result["target_user"], result["data"])
-            await callback.message.answer("✅ Подписка активирована")
 
         elif result["type"] == "image":
             await callback.message.answer("🎨 Генерирую изображение...")
