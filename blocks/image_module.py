@@ -46,7 +46,7 @@ async def generate_image(prompt):
             result = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
-                size="1024x1024"
+                size="768x768"  # 🔥 ИЗМЕНЕНО (БЫЛО 1024)
             )
 
             print("📦 RAW RESULT:", result)
