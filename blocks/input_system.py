@@ -35,10 +35,17 @@ async def process_input(message):
 def detect_intent(text: str) -> str:
     t = text.lower()
 
+    # 🔥 МАТЕМАТИКА (ДОЛЖНА БЫТЬ ПЕРВОЙ)
+    if any(x in t for x in ["=", "x", "+", "-", "*", "/"]):
+        return "math"
+
+    # --- ИЗОБРАЖЕНИЯ ---
     if any(w in t for w in ["картин", "фото", "сгенерируй"]):
         return "generate_image"
 
+    # --- ДИАГРАММЫ ---
     if any(w in t for w in ["чертеж", "схема", "диаграмма"]):
         return "diagram"
 
+    # --- ОБЫЧНЫЙ ЧАТ ---
     return "chat"
