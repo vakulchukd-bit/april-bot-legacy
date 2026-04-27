@@ -11,7 +11,6 @@ ADMIN_ID = 2016592532
 class ScienceRoom:
     name = "science"
 
-    # ===== ОПРЕДЕЛЕНИЕ =====
     def can_handle(self, text, context):
         t = text.lower()
 
@@ -25,15 +24,9 @@ class ScienceRoom:
             return True
 
         if any(w in t for w in [
-            "приведи",
-            "вырази",
-            "найди",
-            "доведи",
-            "вычисли",
-            "переменн",
-            "значение",
-            "уравнен",
-            "выражен"
+            "приведи", "вырази", "найди", "доведи",
+            "вычисли", "переменн", "значение",
+            "уравнен", "выражен"
         ]):
             return True
 
@@ -42,7 +35,6 @@ class ScienceRoom:
 
         return False
 
-    # ===== ОЦЕНКА =====
     def evaluate(self, text, context):
         t = text.lower()
 
@@ -62,7 +54,6 @@ class ScienceRoom:
 
         return score
 
-    # ===== ОБРАБОТКА =====
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
 
@@ -73,7 +64,6 @@ class ScienceRoom:
 
         if "таблица" in t and "умнож" in t:
             path = self.build_multiplication_table()
-
             if path:
                 try:
                     with open(path, "rb") as f:
@@ -84,29 +74,23 @@ class ScienceRoom:
         if plan == "free":
             if "=" in t or "реши" in t:
                 result = self.solve_equation(text)
-
                 if result:
                     return {
                         "type": "text",
                         "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
                     }
-
             return {"type": "text", "data": "⚠️ Только простые решения доступны"}
 
         if "график" in t or "построй" in t or "y=" in t:
-
             expr = self.extract_function(text)
 
             if not expr:
                 interpreted = self.interpret_text_graph(text)
-
                 if interpreted:
                     if interpreted["type"] == "function":
                         expr = interpreted["expr"]
-
                     elif interpreted["type"] == "heatmap":
                         path = self.build_multiplication_table()
-
                         if path:
                             try:
                                 with open(path, "rb") as f:
@@ -116,7 +100,6 @@ class ScienceRoom:
 
             if expr:
                 path = self.build_graph(expr)
-
                 if path:
                     try:
                         with open(path, "rb") as f:
@@ -125,57 +108,45 @@ class ScienceRoom:
                         print("🔥 READ ERROR:", e)
 
         if "=" in t or "реши" in t or any(w in t for w in [
-            "приведи",
-            "доведи",
-            "найди",
-            "вырази",
-            "вычисли"
+            "приведи", "доведи", "найди", "вырази", "вычисли"
         ]):
             result = self.solve_equation(text)
-
             if result:
-                return {
-                    "type": "text",
-                    "data": f"📐 Решение:\n{result}"
-                }
+                return {"type": "text", "data": f"📐 Решение:\n{result}"}
 
         return {"type": "text", "data": "🧠 Не понял задачу, попробуй уточнить"}
 
-    # ===== УМНЫЙ ПАРСИНГ (ГЛАВНЫЙ ФИКС) =====
+    # ===== ПАРСИНГ =====
     def extract_math_expression(self, text):
         t = text.lower()
 
-        # нормализация
         t = t.replace("²", "**2")
         t = t.replace("^", "**")
         t = t.replace(":", " ")
 
-        # ищем уравнение
         match = re.search(r'([-+*/().\d x]+=[-+*/().\d x]+)', t)
         if match:
             return match.group(1)
 
-        # если нет "=" — ищем просто выражение
         match = re.search(r'([-+*/().\d x]+)', t)
         if match:
             return match.group(1)
 
         return t
 
-    # ===== ПАРСЕР =====
     def interpret_text_graph(self, text):
         t = text.lower()
 
         if any(w in t for w in ["таблица умножения", "умножения", "умножить", "перемнож"]):
             return {"type": "heatmap"}
 
-        if any(w in t for w in ["синус", "sin", "волна", "волны", "волновой"]):
+        if any(w in t for w in ["синус", "sin"]):
             return {"type": "function", "expr": "np.sin(x)"}
 
         if any(w in t for w in ["косинус", "cos"]):
             return {"type": "function", "expr": "np.cos(x)"}
 
-        if any(w in t for w in ["парабола", "квадрат", "x^2"]):
+        if any(w in t for w in ["парабола", "x^2"]):
             return {"type": "function", "expr": "x**2"}
 
         return None
@@ -194,7 +165,6 @@ class ScienceRoom:
             plt.close()
 
             return path
-
         except Exception as e:
             print("🔥 TABLE ERROR:", e)
             return None
@@ -233,18 +203,15 @@ class ScienceRoom:
             plt.close()
 
             return path
-
         except Exception as e:
             print("🔥 GRAPH ERROR:", e)
             return None
 
+    # ===== ФИКС РЕШЕНИЙ =====
     def solve_equation(self, text):
         try:
-            expr = self.extract_math_expression(text)
+            expr = self.extract_math_expression(text).strip()
 
-            expr = expr.strip()
-
-            # нормализация
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
             expr = re.sub(r'(x)(\d)', r'\1*\2', expr)
             expr = re.sub(r'(\d)\(', r'\1*(', expr)
@@ -263,19 +230,28 @@ class ScienceRoom:
                 equation = sympify(left) - sympify(right)
                 steps.append(f"{equation} = 0")
 
-                solution = solve(equation, x)
+                solutions = solve(equation, x)
 
-                if not solution:
+                if not solutions:
                     return "⚠️ Нет решения"
 
-                steps.append(f"x = {solution[0]}")
+                # 🔥 ФИКС: ВСЕ КОРНИ
+                if len(solutions) == 1:
+                    steps.append(f"x = {solutions[0]}")
+                else:
+                    sol_str = " или ".join([f"x = {s}" for s in solutions])
+                    steps.append(sol_str)
 
                 return "\n".join(steps)
 
             else:
                 equation = sympify(expr)
-                solution = solve(equation, x)
-                return f"x = {solution}"
+                solutions = solve(equation, x)
+
+                if len(solutions) == 1:
+                    return f"x = {solutions[0]}"
+                else:
+                    return " или ".join([f"x = {s}" for s in solutions])
 
         except Exception as e:
             print("🔥 SOLVE ERROR:", e)
