@@ -26,6 +26,22 @@ class ImageGenerateRoom(Room):
 
         return False
 
+    # 🔥 ДОБАВИЛИ
+    def evaluate(self, text, context):
+        t = text.lower()
+        score = 0.0
+
+        if self.can_handle(text, context):
+            score += 0.6
+
+        if any(w in t for w in ["картин", "изображ", "арт", "рисунок"]):
+            score += 0.5
+
+        if any(w in t for w in ["сделай", "создай", "нарисуй"]):
+            score += 0.4
+
+        return score
+
     async def handle(self, user_id, text, context, run):
         state = context.get("state", {})
 
@@ -65,6 +81,19 @@ class ImageEditRoom(Room):
             "осветли", "затемни", "улучши"
         ])
 
+    # 🔥 ДОБАВИЛИ
+    def evaluate(self, text, context):
+        t = text.lower()
+        score = 0.0
+
+        if self.can_handle(text, context):
+            score += 0.7
+
+        if any(w in t for w in ["измени", "добавь", "убери"]):
+            score += 0.4
+
+        return score
+
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
 
@@ -100,6 +129,10 @@ class TextRoom(Room):
     def can_handle(self, text, context):
         return True
 
+    # 🔥 ДОБАВИЛИ
+    def evaluate(self, text, context):
+        return 0.1  # всегда fallback
+
     async def handle(self, user_id, text, context, run):
         result = await run(
             context["chat_id"],
@@ -114,7 +147,7 @@ class TextRoom(Room):
 
 # === РЕЕСТР ===
 ROOMS = [
-    ScienceRoom(),        # 🔥 КЛЮЧЕВОЕ — ПЕРВЫЙ
+    ScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
     TextRoom()
