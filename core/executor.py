@@ -147,7 +147,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # INIT
     if "visual_intent" not in state:
         state["visual_intent"] = 0
 
@@ -161,18 +160,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 согласие (FIXED)
     if state.get("offered_visual") and any(w in t for w in [
         "да", "давай", "покажи", "хочу", "ок", "го"
     ]):
         print("✅ USER CONFIRMED VISUAL")
+        return {"type": "image_task", "prompt": text}
 
-        return {
-            "type": "image_task",
-            "prompt": text
-        }
-
-    # 🔥 накопление (FIXED)
     if any(p in t for p in [
         "хочу увидеть",
         "сложно представить",
@@ -185,7 +178,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     print("👁 VISUAL INTENT:", state["visual_intent"])
 
-    # AI intent
     try:
         ai_intent = await detect_intent_ai(text)
         print("🧠 AI INTENT:", ai_intent)
@@ -215,39 +207,29 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
-    # 🔥 предложение
     if state["visual_intent"] >= 2 and not state["offered_visual"]:
         state["offered_visual"] = True
-        return {
-            "type": "text",
-            "data": "Хочешь, покажу это на изображении?"
-        }
+        return {"type": "text", "data": "Хочешь, покажу это на изображении?"}
 
     if ctx:
         state["has_image"] = True
     else:
         state["has_image"] = False
 
-    # ===== GENERATE =====
     if route == "image_generate" or is_generate_request(text):
-        return {
-            "type": "image_task",
-            "prompt": text
-        }
+        return {"type": "image_task", "prompt": text}
 
-    # ===== EDIT =====
     if ctx and (route == "image_edit" or is_edit_request(text)):
         path = ctx.get("path")
         if path:
             return await image_edit(user_id, path, text)
 
-    # ===== ANALYZE =====
     if ctx and ctx.get("path") and (
         route == "image_analyze" or is_image_question(text)
     ):
         return await analyze_image(user_id, ctx.get("path"), text)
 
-    # ===== ROOMS =====
+    # ===== 🎼 ORCHESTRATOR =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -258,13 +240,32 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "energy": energy
     }
 
+    candidates = []
+
     science = ScienceRoom()
     if science.can_handle(text, context):
-        return await science.handle(user_id, text, context, run_with_typing)
+        candidates.append((science, 1.0))
 
     for room in ROOMS:
-        if room.can_handle(text, context):
-            return await room.handle(user_id, text, context, run_with_typing)
+        try:
+            score = 1.0 if room.can_handle(text, context) else 0.0
+            candidates.append((room, score))
+        except Exception as e:
+            print(f"⚠️ ROOM ERROR: {room} → {e}")
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
+    print("🎼 ROOM SCORES:", [(r.__class__.__name__, s) for r, s in candidates])
+
+    if candidates and candidates[0][1] > 0:
+        room = candidates[0][0]
+        print(f"🎯 SELECTED ROOM: {room.__class__.__name__}")
+        return await room.handle(user_id, text, context, run_with_typing)
+
+    # 🔥 fallback если никто не взял
+    if is_generate_request(text):
+        print("⚡ FALLBACK → IMAGE")
+        return {"type": "image_task", "prompt": text}
 
     # ===== GPT =====
     result = await run_with_typing(
