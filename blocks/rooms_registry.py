@@ -1,6 +1,9 @@
 from blocks.room_protocol import Room
 
-# === SCIENCE ROOM 🔥 (ПЕРВЫМ)
+# === TRIG ROOM 🔥 (НОВЫЙ, ПЕРВЫМ) ===
+from blocks.trig_room import TrigRoom
+
+# === SCIENCE ROOM 🔥 ===
 from blocks.science_room import ScienceRoom
 
 # === IMAGE GENERATE ===
@@ -26,12 +29,10 @@ class ImageGenerateRoom(Room):
 
         return False
 
-    # 🔥 ГЛАВНЫЙ ФИКС: слушаем task_type
     def evaluate(self, text, context):
         t = text.lower()
         score = 0.0
 
-        # 👉 ЕСЛИ ЯВНО СКАЗАЛ ДИРИЖЁР
         if context.get("task_type") == "image_generate":
             score += 1.0
 
@@ -107,7 +108,6 @@ class ImageEditRoom(Room):
         t = text.lower()
         score = 0.0
 
-        # 🔥 связь с task_type
         if context.get("task_type") == "image_edit":
             score += 1.0
 
@@ -170,7 +170,7 @@ class TextRoom(Room):
         return True
 
     def evaluate(self, text, context):
-        return 0.1  # fallback
+        return 0.1
 
     async def handle(self, user_id, text, context, run):
         result = await run(
@@ -186,6 +186,7 @@ class TextRoom(Room):
 
 # === РЕЕСТР ===
 ROOMS = [
+    TrigRoom(),      # 🔥 НОВЫЙ ПЕРВЫЙ
     ScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
