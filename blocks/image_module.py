@@ -37,40 +37,39 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== ОСНОВНОЙ ГЕНЕРАТОР =====
+# ===== ОСНОВНОЙ ГЕНЕРАТОР (УПРОЩЕННЫЙ ТЕСТ) =====
 async def generate_image(prompt):
     def run():
-        print("🟢 ENTER V1:", prompt)
+        print("🟢 TEST GENERATION START:", prompt)
 
         try:
-            result = client.images.generate(
+            response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
-                size="768x768"
+                prompt=prompt
             )
 
-            print("📦 RAW RESULT:", result)
+            print("🔍 RESPONSE DATA:", response.data)
 
-            if not result or not result.data:
-                print("❌ EMPTY RESULT")
+            if not response or not response.data:
+                print("❌ EMPTY RESPONSE")
                 return None
 
-            if not hasattr(result.data[0], "b64_json"):
-                print("❌ NO BASE64")
+            if not hasattr(response.data[0], "b64_json"):
+                print("❌ NO BASE64 FIELD")
                 return None
 
-            image_base64 = result.data[0].b64_json
+            image_base64 = response.data[0].b64_json
 
             if not image_base64:
                 print("❌ EMPTY BASE64")
                 return None
 
-            print("🟢 EXIT V1 OK")
+            print("✅ IMAGE GENERATED OK")
 
             return base64.b64decode(image_base64)
 
         except Exception as e:
-            print("🔥 IMAGE V1 ERROR:", e)
+            print("🔥 IMAGE ERROR:", e)
             return None
 
     try:
@@ -81,25 +80,26 @@ async def generate_image(prompt):
         return None
 
 
-# ===== FALLBACK =====
+# ===== FALLBACK (ПОКА НЕ ТРОГАЕМ, НО УПРОСТИЛИ) =====
 async def generate_image_v2(prompt):
     def run():
         print("🟡 ENTER V2:", prompt)
 
         try:
-            result = client.images.generate(
+            response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
-                size="768x768"
+                prompt=prompt
             )
 
-            if not result or not result.data:
+            print("🔍 V2 RESPONSE:", response.data)
+
+            if not response or not response.data:
                 return None
 
-            if not hasattr(result.data[0], "b64_json"):
+            if not hasattr(response.data[0], "b64_json"):
                 return None
 
-            image_base64 = result.data[0].b64_json
+            image_base64 = response.data[0].b64_json
 
             if not image_base64:
                 return None
