@@ -1,3 +1,4 @@
+print("🔥 MAIN IMAGE SYSTEM WORKING")
 import base64
 import os
 from openai import OpenAI
