@@ -1,6 +1,10 @@
 import traceback
 import time
 
+# 🔥 ДОБАВИЛИ
+from aiogram.types import BufferedInputFile
+from blocks.image_module import process as image_generate
+
 ADMIN_ID = 2016592532
 
 # ===== 🔥 ХРАНИЛИЩЕ ОШИБОК =====
@@ -19,7 +23,52 @@ def get_errors():
     return error_log
 
 
-# ===== ОБРАБОТЧИК =====
+# ===== ОБРАБОТЧИК РЕЗУЛЬТАТА (🔥 ДОБАВИЛИ) =====
+async def send_result(message, result, keyboard=None):
+    try:
+        if result["type"] == "text":
+            await message.answer(result["content"], reply_markup=keyboard)
+
+        elif result["type"] == "image":
+            await message.answer_photo(
+                BufferedInputFile(result["data"], filename="image.png"),
+                caption=result.get("caption", ""),
+                reply_markup=keyboard
+            )
+
+        # 🔥 ВОТ ЭТО ГЛАВНОЕ (image_task)
+        elif result["type"] == "image_task":
+            try:
+                print("🖼 IMAGE TASK START")
+
+                user_id = message.from_user.id
+                state = {}
+
+                result_img = await image_generate(user_id, result["prompt"], state)
+
+                print("🖼 IMAGE MODULE RESULT:", result_img)
+
+                if not result_img or result_img.get("type") != "image":
+                    await message.answer("❌ Не удалось создать изображение")
+                    return
+
+                await message.answer_photo(
+                    BufferedInputFile(result_img["data"], filename="image.png"),
+                    caption="🖼 Готово"
+                )
+
+            except Exception as e:
+                print("🔥 IMAGE TASK ERROR:", e)
+                await message.answer("❌ Ошибка при генерации изображения")
+
+        elif result["type"] == "error":
+            await message.answer(result["text"])
+
+    except Exception as e:
+        await handle_error(message.bot, message, e, context="send_result")
+
+
+# ===== ОБРАБОТЧИК ОШИБОК =====
 async def handle_error(bot, user_message, error, context=""):
     """
     Универсальный обработчик ошибок:
