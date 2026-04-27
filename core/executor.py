@@ -191,7 +191,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # ===== IMAGE GENERATE =====
     if is_generate_request(text):
-        result = await image_generate(user_id, text, state)
+        result = await run_with_typing(
+            chat_id,
+            image_generate(user_id, text, state)
+        )
 
         if result and result.get("type") == "image":
             set_image_context(user_id, {
@@ -229,7 +232,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": None,  # 🔥 отключили сломанный механизм
+        "task_type": None,
         "energy": energy
     }
 
