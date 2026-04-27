@@ -3,7 +3,7 @@ from blocks.text_module import process as text_process
 
 from blocks.intent_system import detect_intent
 from blocks.intent_ai import detect_intent_ai
-from blocks.router import route_request  # 🔥 ДОБАВИЛИ
+from blocks.router import route_request
 
 from blocks.state_manager import (
     get_state,
@@ -147,12 +147,32 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    # 🔥 INIT
+    if "visual_intent" not in state:
+        state["visual_intent"] = 0
+
+    if "offered_visual" not in state:
+        state["offered_visual"] = False
+
     if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
 
     t = text.lower().strip()
+
+    # 🔥 накопление намерения
+    if any(p in t for p in [
+        "хочу увидеть",
+        "сложно представить",
+        "как выглядит",
+        "покажи",
+    ]):
+        state["visual_intent"] += 1
+    else:
+        state["visual_intent"] = max(0, state["visual_intent"] - 1)
+
+    print("👁 VISUAL INTENT:", state["visual_intent"])
 
     # 🔥 AI intent
     ai_intent = None
@@ -186,27 +206,39 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
+    # 🔥 предложение
+    if state["visual_intent"] >= 2 and not state["offered_visual"]:
+        state["offered_visual"] = True
+        return {
+            "type": "text",
+            "data": "Хочешь, покажу это на изображении?"
+        }
+
     if ctx:
         state["has_image"] = True
     else:
         state["has_image"] = False
 
     # ===== GENERATE =====
-    if route == "image_generate" or ai_intent == "generate_image" or is_generate_request(text):
+    if route == "image_generate" or is_generate_request(text):
         result = await run_with_typing(chat_id, image_generate(user_id, text, state))
+
         if result and result.get("type") == "image":
             set_image_context(user_id, {"type": "generated", "path": None, "prompt": text})
+            state["visual_intent"] = 0
+            state["offered_visual"] = False
+
         return result
 
     # ===== EDIT =====
-    if ctx and (route == "image_edit" or ai_intent == "edit_image" or is_edit_request(text)):
+    if ctx and (route == "image_edit" or is_edit_request(text)):
         path = ctx.get("path")
         if path:
             return await image_edit(user_id, path, text)
 
     # ===== ANALYZE =====
     if ctx and ctx.get("path") and (
-        route == "image_analyze" or ai_intent == "analyze_image" or is_image_question(text)
+        route == "image_analyze" or is_image_question(text)
     ):
         return await analyze_image(user_id, ctx.get("path"), text)
 
