@@ -248,6 +248,14 @@ class ScienceRoom:
 
             expr = expr.strip()
 
+            # 🔥 НОРМАЛИЗАЦИЯ (ГЛАВНЫЙ ФИКС)
+            expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
+            expr = re.sub(r'(x)(\d)', r'\1*\2', expr)
+            expr = re.sub(r'(\d)\(', r'\1*(', expr)
+            expr = re.sub(r'\)\(', r')*(', expr)
+            expr = re.sub(r'(x)\(', r'\1*(', expr)
+            expr = re.sub(r'(?<!\w)-x', r'-1*x', expr)
+
             x = symbols('x')
 
             if "=" in expr:
