@@ -2,6 +2,7 @@ from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
 from blocks.intent_system import detect_intent
+from blocks.intent_ai import detect_intent_ai  # 🔥 ДОБАВИЛИ
 
 from blocks.state_manager import (
     get_state,
@@ -121,10 +122,8 @@ def is_edit_request(text: str):
 
 def is_generate_request(text: str):
     t = text.lower()
-
     verbs = ["создай", "сгенерируй", "нарисуй", "сделай"]
     objects = ["картинку", "изображение", "фото", "арт", "рисунок"]
-
     return any(v in t for v in verbs) and any(o in t for o in objects)
 
 
@@ -154,6 +153,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
+    # 🔥 AI INTENT (добавили слой понимания)
+    ai_intent = None
+    try:
+        ai_intent = await detect_intent_ai(text)
+        print("🧠 AI INTENT:", ai_intent)
+    except Exception as e:
+        print("🔥 AI INTENT ERROR:", e)
+
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
         return {"type": "text", "data": f"Сейчас {now}"}
@@ -180,7 +187,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
-    # ===== IMAGE ANALYZE =====
+    # ===== IMAGE ANALYZE (универсальный) =====
     if ctx and ctx.get("path") and not is_generate_request(text) and not is_edit_request(text):
         try:
             result = await analyze_image(user_id, ctx.get("path"), text)
@@ -190,7 +197,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             print("🔥 IMAGE ANALYZE ERROR:", e)
 
     # ===== IMAGE GENERATE =====
-    if is_generate_request(text):
+    if ai_intent == "generate_image" or is_generate_request(text):
         result = await run_with_typing(
             chat_id,
             image_generate(user_id, text, state)
@@ -206,7 +213,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         return result
 
     # ===== IMAGE EDIT =====
-    if ctx and is_edit_request(text):
+    if ctx and (ai_intent == "edit_image" or is_edit_request(text)):
         path = ctx.get("path")
         if path:
             result = await image_edit(user_id, path, text)
@@ -220,8 +227,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             return result
 
-    # 🔥 ИСПРАВЛЕННЫЙ БЛОК
-    if ctx and ctx.get("path") and is_image_question(text):
+    # ===== IMAGE ANALYZE (вопрос) =====
+    if ctx and ctx.get("path") and (
+        ai_intent == "analyze_image" or is_image_question(text)
+    ):
         try:
             result = await analyze_image(user_id, ctx.get("path"), text)
             if result:
