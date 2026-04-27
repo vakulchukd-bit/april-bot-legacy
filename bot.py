@@ -3,11 +3,13 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from datetime import datetime, timedelta  # 🔥 ДОБАВИЛ timedelta
+from datetime import datetime, timedelta
 import pytz
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.client.session.aiohttp import AiohttpSession  # ✅ ДОБАВИЛИ
+
 from openai import OpenAI
 
 from storage import (
@@ -52,7 +54,10 @@ from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-bot = Bot(token=TOKEN)
+# ✅ ФИКС ТАЙМАУТА (ничего не ломает)
+session = AiohttpSession(timeout=120)
+bot = Bot(token=TOKEN, session=session)
+
 dp = Dispatcher()
 
 ADMIN_ID = 2016592532
@@ -136,7 +141,6 @@ async def handle(message: types.Message):
 
         await message.answer(f"🎤 {text}")
 
-    # ===== 📸 ДОБАВЛЕНО: ОБРАБОТКА ФОТО =====
     if message.photo:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
@@ -144,16 +148,13 @@ async def handle(message: types.Message):
         path = f"{user_id}_image.jpg"
         await bot.download_file(file.file_path, destination=path)
 
-        # сохраняем контекст изображения
         set_image_context(user_id, {
             "type": "uploaded",
             "path": path
         })
 
         await message.answer("📸 Изображение получено. Можешь спросить про него.")
-
         return
-    # ======================================
 
     state = get_state(user_id)
 
@@ -199,7 +200,7 @@ async def handle(message: types.Message):
 
             text_limit = (
                 "⛔ Ваш лимит на сегодня исчерпан.\n\n"
-                f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
+                f"Следующий доступ:\n{next_time.strftime('%d.%м.%Y в %H:%M')}\n\n"
                 "Хочешь продолжить без ожидания?\n"
                 "Выбери тариф ниже 👇"
             )
@@ -231,9 +232,18 @@ async def handle(message: types.Message):
             await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
 
         elif result["type"] == "image":
-            await message.answer_photo(
-                BufferedInputFile(result["data"], filename="graph.png")
-            )
+            await message.answer("🎨 Генерирую изображение...")
+
+            async def send_image():
+                try:
+                    await message.answer_photo(
+                        BufferedInputFile(result["data"], filename="image.png")
+                    )
+                except Exception as e:
+                    print("🔥 TELEGRAM ERROR:", e)
+                    await message.answer("⚠️ Картинка готова, но не отправилась")
+
+            asyncio.create_task(send_image())
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
@@ -333,9 +343,18 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.message.answer("✅ Подписка активирована")
 
         elif result["type"] == "image":
-            await callback.message.answer_photo(
-                BufferedInputFile(result["data"], filename="graph.png")
-            )
+            await callback.message.answer("🎨 Генерирую изображение...")
+
+            async def send_image():
+                try:
+                    await callback.message.answer_photo(
+                        BufferedInputFile(result["data"], filename="image.png")
+                    )
+                except Exception as e:
+                    print("🔥 CALLBACK ERROR:", e)
+                    await callback.message.answer("⚠️ Ошибка отправки изображения")
+
+            asyncio.create_task(send_image())
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
