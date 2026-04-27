@@ -32,12 +32,25 @@ from storage import set_subscription, save_payment
 from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
 
+import re
 
-# ===== 🧠 СЕМАНТИКА =====
+
+# ===== 🧠 СЕМАНТИКА (ФИКС) =====
 def detect_task_type(text: str):
     t = text.lower()
 
-    if any(x in t for x in ["=", "x", "y=", "график", "реши", "уравнен"]):
+    # 🔥 ТОЛЬКО СТРУКТУРА, НЕ ЦИФРЫ
+    if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
+        return "math"
+
+    if "=" in t and re.search(r'[a-z]', t):
+        return "math"
+
+    if any(w in t for w in ["реши", "уравнение", "найди корень"]):
+        if re.search(r'[0-9x\+\-\*/=]', t):
+            return "math"
+
+    if "y=" in t or "график" in t:
         return "math"
 
     if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
@@ -102,7 +115,6 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
-# 🔥 EDIT
 def is_edit_request(text: str):
     t = text.lower()
     triggers = [
@@ -128,7 +140,6 @@ def is_image_question(text: str):
     ])
 
 
-# ===== 🧠 SUMMARY UPDATE =====
 def update_memory_summary(state):
     dialog = state.get("dialog", [])
 
@@ -161,7 +172,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     state = get_state(user_id)
 
-    # ===== 🔥 ОБНОВЛЕНИЕ ПАМЯТИ =====
     update_memory_summary(state)
 
     if state.get("image_generating"):
@@ -208,12 +218,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
-    # ===== 🔥 ПРИОРИТЕТ СПЕЦИАЛИСТА (MATH) =====
+    # ===== 🔥 FIX: math + skip =====
     if task_type == "math":
-        print("🎯 FORCE → SCIENCE ROOM")
-
         room = ScienceRoom()
-        return await room.handle(user_id, text, {
+        result = await room.handle(user_id, text, {
             "chat_id": chat_id,
             "state": state,
             "image": ctx,
@@ -222,6 +230,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "task_type": task_type,
             "energy": energy
         }, run_with_typing)
+
+        if not result or result.get("type") == "skip":
+            result = await run_with_typing(
+                chat_id,
+                text_process(user_id, text, state, energy)
+            )
+            return {"type": "text", "data": result["content"]}
+
+        return result
 
     if ctx:
         if is_edit_request(text):
@@ -257,7 +274,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     if candidates and candidates[0][1] > 0:
         room = candidates[0][0]
-        return await room.handle(user_id, text, context, run_with_typing)
+        result = await room.handle(user_id, text, context, run_with_typing)
+
+        if not result or result.get("type") == "skip":
+            result = await run_with_typing(
+                chat_id,
+                text_process(user_id, text, state, energy)
+            )
+            return {"type": "text", "data": result["content"]}
+
+        return result
 
     if is_generate_request(text):
         return {"type": "image_task", "prompt": text}
