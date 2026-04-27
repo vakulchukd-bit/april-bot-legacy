@@ -161,14 +161,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 согласие
-    if state.get("offered_visual") and any(w in t for [
+    # 🔥 согласие (FIXED)
+    if state.get("offered_visual") and any(w in t for w in [
         "да", "давай", "покажи", "хочу", "ок", "го"
     ]):
         print("✅ USER CONFIRMED VISUAL")
 
-        # 🔥 БЫЛО: генерация
-        # СТАЛО: задача
         return {
             "type": "image_task",
             "prompt": text
@@ -232,8 +230,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # ===== GENERATE =====
     if route == "image_generate" or is_generate_request(text):
-        # 🔥 БЫЛО: генерация
-        # СТАЛО: задача
         return {
             "type": "image_task",
             "prompt": text
