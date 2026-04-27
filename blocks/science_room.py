@@ -37,17 +37,15 @@ class ScienceRoom:
         ]):
             return True
 
-        # 🔥 ВАЖНО: распознаём переменные
         if "x" in t:
             return True
 
         return False
 
-    # ===== 🔥 УСИЛЕННЫЙ evaluate =====
+    # ===== ОЦЕНКА =====
     def evaluate(self, text, context):
         t = text.lower()
 
-        # 🔥 ГЛАВНОЕ: математика всегда приоритет
         if context.get("task_type") == "math":
             return 10.0
 
@@ -79,10 +77,7 @@ class ScienceRoom:
             if path:
                 try:
                     with open(path, "rb") as f:
-                        return {
-                            "type": "image",
-                            "data": f.read()
-                        }
+                        return {"type": "image", "data": f.read()}
                 except Exception as e:
                     print("🔥 READ ERROR:", e)
 
@@ -96,10 +91,7 @@ class ScienceRoom:
                         "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
                     }
 
-            return {
-                "type": "text",
-                "data": "⚠️ Только простые решения доступны"
-            }
+            return {"type": "text", "data": "⚠️ Только простые решения доступны"}
 
         if "график" in t or "построй" in t or "y=" in t:
 
@@ -109,7 +101,6 @@ class ScienceRoom:
                 interpreted = self.interpret_text_graph(text)
 
                 if interpreted:
-
                     if interpreted["type"] == "function":
                         expr = interpreted["expr"]
 
@@ -119,10 +110,7 @@ class ScienceRoom:
                         if path:
                             try:
                                 with open(path, "rb") as f:
-                                    return {
-                                        "type": "image",
-                                        "data": f.read()
-                                    }
+                                    return {"type": "image", "data": f.read()}
                             except Exception as e:
                                 print("🔥 READ ERROR:", e)
 
@@ -132,10 +120,7 @@ class ScienceRoom:
                 if path:
                     try:
                         with open(path, "rb") as f:
-                            return {
-                                "type": "image",
-                                "data": f.read()
-                            }
+                            return {"type": "image", "data": f.read()}
                     except Exception as e:
                         print("🔥 READ ERROR:", e)
 
@@ -154,10 +139,28 @@ class ScienceRoom:
                     "data": f"📐 Решение:\n{result}"
                 }
 
-        return {
-            "type": "text",
-            "data": "🧠 Не понял задачу, попробуй уточнить"
-        }
+        return {"type": "text", "data": "🧠 Не понял задачу, попробуй уточнить"}
+
+    # ===== УМНЫЙ ПАРСИНГ (ГЛАВНЫЙ ФИКС) =====
+    def extract_math_expression(self, text):
+        t = text.lower()
+
+        # нормализация
+        t = t.replace("²", "**2")
+        t = t.replace("^", "**")
+        t = t.replace(":", " ")
+
+        # ищем уравнение
+        match = re.search(r'([-+*/().\d x]+=[-+*/().\d x]+)', t)
+        if match:
+            return match.group(1)
+
+        # если нет "=" — ищем просто выражение
+        match = re.search(r'([-+*/().\d x]+)', t)
+        if match:
+            return match.group(1)
+
+        return t
 
     # ===== ПАРСЕР =====
     def interpret_text_graph(self, text):
@@ -237,18 +240,11 @@ class ScienceRoom:
 
     def solve_equation(self, text):
         try:
-            expr = text.lower()
-
-            expr = expr.replace("²", "**2")
-            expr = expr.replace("^", "**")
-            expr = expr.replace(":", "")
-
-            for w in ["реши", "уравнение", "найди", "вычисли"]:
-                expr = expr.replace(w, "")
+            expr = self.extract_math_expression(text)
 
             expr = expr.strip()
 
-            # 🔥 НОРМАЛИЗАЦИЯ (ГЛАВНЫЙ ФИКС)
+            # нормализация
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
             expr = re.sub(r'(x)(\d)', r'\1*\2', expr)
             expr = re.sub(r'(\d)\(', r'\1*(', expr)
@@ -260,8 +256,8 @@ class ScienceRoom:
 
             if "=" in expr:
                 left, right = expr.split("=")
-                steps = []
 
+                steps = []
                 steps.append(f"{left} = {right}")
 
                 equation = sympify(left) - sympify(right)
