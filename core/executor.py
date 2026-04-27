@@ -102,7 +102,7 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
-# 🔥 УСИЛЕННЫЙ EDIT (вот здесь главное изменение)
+# 🔥 EDIT
 def is_edit_request(text: str):
     t = text.lower()
     triggers = [
@@ -128,14 +128,46 @@ def is_image_question(text: str):
     ])
 
 
+# ===== 🧠 SUMMARY UPDATE =====
+def update_memory_summary(state):
+    dialog = state.get("dialog", [])
+
+    if len(dialog) < 10:
+        return
+
+    last_chunk = dialog[:-10]
+
+    if not last_chunk:
+        return
+
+    # 🔥 СЖАТИЕ СМЫСЛА (простое, безопасное)
+    texts = [m.get("content", "") for m in last_chunk if m.get("role") == "user"]
+
+    if not texts:
+        return
+
+    combined = " ".join(texts)[-1000:]
+
+    prev = state.get("memory_summary", "")
+
+    new_summary = (prev + " " + combined).strip()
+
+    # ограничение размера
+    state["memory_summary"] = new_summary[-2000:]
+
+    # оставляем только последние 10
+    state["dialog"] = dialog[-10:]
+
+
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
 
-    # 🔒 БЛОКИРОВКА ПРИ ГЕНЕРАЦИИ (НЕ ТРОГАЕМ)
+    # ===== 🔥 ОБНОВЛЕНИЕ ПАМЯТИ =====
+    update_memory_summary(state)
+
     if state.get("image_generating"):
-        print("⛔ BLOCKED: image still generating")
         return {
             "type": "text",
             "data": "⏳ Подожди, я ещё генерирую изображение..."
@@ -179,11 +211,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
-    # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
     if ctx:
         if is_edit_request(text):
-            print("🎯 CONTEXT EDIT DETECTED")
-
             path = ctx.get("path")
             if path:
                 return await image_edit(user_id, path, text)
@@ -191,7 +220,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if ctx.get("path") and is_image_question(text):
             return await analyze_image(user_id, ctx.get("path"), text)
 
-    # ===== 🎼 ORCHESTRATOR =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -219,9 +247,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         room = candidates[0][0]
         return await room.handle(user_id, text, context, run_with_typing)
 
-    # ⚡ мягкий fallback
     if is_generate_request(text):
-        print("⚡ FALLBACK → мягкая генерация")
         return {"type": "image_task", "prompt": text}
 
     result = await run_with_typing(
