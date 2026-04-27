@@ -37,28 +37,30 @@ class ScienceRoom:
         ]):
             return True
 
-        # 🔥 КЛЮЧЕВОЕ УСИЛЕНИЕ
+        # 🔥 ВАЖНО: распознаём переменные
         if "x" in t:
             return True
 
         return False
 
-    # ===== 🔥 ГЛАВНЫЙ ФИКС: слушаем task_type =====
+    # ===== 🔥 УСИЛЕННЫЙ evaluate =====
     def evaluate(self, text, context):
-        if context.get("task_type") == "math":
-            return 1.0
-
         t = text.lower()
+
+        # 🔥 ГЛАВНОЕ: математика всегда приоритет
+        if context.get("task_type") == "math":
+            return 10.0
+
         score = 0.0
 
         try:
             if self.can_handle(text, context):
-                score += 0.4
+                score += 1.0
         except:
             pass
 
         if any(w in t for w in ["синус", "график", "формула", "матем", "уравнение"]):
-            score += 0.4
+            score += 1.0
 
         return score
 
@@ -157,7 +159,7 @@ class ScienceRoom:
             "data": "🧠 Не понял задачу, попробуй уточнить"
         }
 
-    # ===== 🔥 ПАРСЕР =====
+    # ===== ПАРСЕР =====
     def interpret_text_graph(self, text):
         t = text.lower()
 
@@ -237,7 +239,6 @@ class ScienceRoom:
         try:
             expr = text.lower()
 
-            # 🔥 НОРМАЛИЗАЦИЯ
             expr = expr.replace("²", "**2")
             expr = expr.replace("^", "**")
             expr = expr.replace(":", "")
