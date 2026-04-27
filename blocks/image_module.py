@@ -7,6 +7,8 @@ from storage import get_user_plan, get_limits, get_conn, today
 
 client = OpenAI()
 
+ADMIN_ID = 2016592532  # 🔥 ДОБАВИЛИ
+
 
 # ===== СОХРАНЕНИЕ В ПАМЯТЬ =====
 def save_to_memory(state, item):
@@ -110,10 +112,13 @@ async def process(user_id, text, state):
                 "data": "❌ Пустой запрос для генерации"
             }
 
+        # 🔥 ADMIN BYPASS
+        is_admin = user_id == ADMIN_ID
+
         # ===== 🔥 ЛИМИТ ТОЛЬКО ДЛЯ FREE =====
         plan = get_user_plan(user_id)
 
-        if plan == "free":
+        if not is_admin and plan == "free":
             limit = 1
             limits = get_limits(user_id, img_limit=limit)
 
@@ -131,8 +136,8 @@ async def process(user_id, text, state):
             img = None
 
         if img:
-            # считаем только для FREE (чтобы Lite был без лимита)
-            if plan == "free":
+            # считаем только для FREE и НЕ admin
+            if not is_admin and plan == "free":
                 increment_images(user_id)
 
             item = {
@@ -178,6 +183,9 @@ async def retry_process(user_id, text, state):
                 "data": "❌ Пустой запрос"
             }
 
+        # 🔥 ADMIN BYPASS
+        is_admin = user_id == ADMIN_ID
+
         try:
             img = await asyncio.wait_for(generate_image(prompt), timeout=60)
         except asyncio.TimeoutError:
@@ -185,9 +193,9 @@ async def retry_process(user_id, text, state):
             img = None
 
         if img:
-            # считаем только для FREE
+            # считаем только для FREE и НЕ admin
             plan = get_user_plan(user_id)
-            if plan == "free":
+            if not is_admin and plan == "free":
                 increment_images(user_id)
 
             item = {
