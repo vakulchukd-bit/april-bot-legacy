@@ -26,10 +26,14 @@ class ImageGenerateRoom(Room):
 
         return False
 
-    # 🔥 evaluate (оставили как есть)
+    # 🔥 ГЛАВНЫЙ ФИКС: слушаем task_type
     def evaluate(self, text, context):
         t = text.lower()
         score = 0.0
+
+        # 👉 ЕСЛИ ЯВНО СКАЗАЛ ДИРИЖЁР
+        if context.get("task_type") == "image_generate":
+            score += 1.0
 
         if self.can_handle(text, context):
             score += 0.6
@@ -48,11 +52,15 @@ class ImageGenerateRoom(Room):
         if text.lower().strip() in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
             text = state.get("last_image_prompt", text)
 
+        print("🎨 IMAGE ROOM START:", text)
+
         try:
             result = await run(
                 context["chat_id"],
                 image_generate(user_id, text, state)
             )
+
+            print("🎨 IMAGE RESULT:", result)
 
             if result and result.get("type") == "image":
                 state["last_image_prompt"] = text
@@ -98,6 +106,10 @@ class ImageEditRoom(Room):
     def evaluate(self, text, context):
         t = text.lower()
         score = 0.0
+
+        # 🔥 связь с task_type
+        if context.get("task_type") == "image_edit":
+            score += 1.0
 
         if self.can_handle(text, context):
             score += 0.7
