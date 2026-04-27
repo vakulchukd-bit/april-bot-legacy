@@ -260,13 +260,26 @@ class ScienceRoom:
 
             if "=" in expr:
                 left, right = expr.split("=")
+                steps = []
+
+                steps.append(f"{left} = {right}")
+
                 equation = sympify(left) - sympify(right)
+                steps.append(f"{equation} = 0")
+
+                solution = solve(equation, x)
+
+                if not solution:
+                    return "⚠️ Нет решения"
+
+                steps.append(f"x = {solution[0]}")
+
+                return "\n".join(steps)
+
             else:
                 equation = sympify(expr)
-
-            solution = solve(equation, x)
-
-            return solution
+                solution = solve(equation, x)
+                return f"x = {solution}"
 
         except Exception as e:
             print("🔥 SOLVE ERROR:", e)
