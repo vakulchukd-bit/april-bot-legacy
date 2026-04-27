@@ -41,6 +41,25 @@ class ScienceRoom:
 
         return False
 
+    # ===== 🔥 НОВОЕ: ОЦЕНКА УВЕРЕННОСТИ =====
+    def evaluate(self, text, context):
+        t = text.lower()
+
+        score = 0.0
+
+        # базовое понимание
+        try:
+            if self.can_handle(text, context):
+                score += 0.6
+        except:
+            pass
+
+        # усиление по ключевым словам
+        if any(w in t for w in ["синус", "график", "формула", "матем", "уравнение"]):
+            score += 0.6
+
+        return score
+
     # ===== ОБРАБОТКА =====
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
