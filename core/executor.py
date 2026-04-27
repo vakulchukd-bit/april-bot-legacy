@@ -102,9 +102,16 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
+# 🔥 УСИЛЕННЫЙ EDIT (вот здесь главное изменение)
 def is_edit_request(text: str):
     t = text.lower()
-    return any(word in t for word in ["убери", "добавь", "измени", "замени"])
+    triggers = [
+        "убери", "добавь", "измени", "замени",
+        "сделай", "сделай более", "сделай его",
+        "усиль", "сильнее", "ярче", "темнее",
+        "злее", "добрее", "переделай", "улучши"
+    ]
+    return any(word in t for word in triggers)
 
 
 def is_generate_request(text: str):
@@ -126,7 +133,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     state = get_state(user_id)
 
-    # 🔒 БЛОКИРОВКА ПРИ ГЕНЕРАЦИИ
+    # 🔒 БЛОКИРОВКА ПРИ ГЕНЕРАЦИИ (НЕ ТРОГАЕМ)
     if state.get("image_generating"):
         print("⛔ BLOCKED: image still generating")
         return {
@@ -172,9 +179,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
-    # ===== 🔥 КОНТЕКСТ КАРТИНКИ (НО БЕЗ FORCE) =====
+    # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
     if ctx:
         if is_edit_request(text):
+            print("🎯 CONTEXT EDIT DETECTED")
+
             path = ctx.get("path")
             if path:
                 return await image_edit(user_id, path, text)
@@ -210,7 +219,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         room = candidates[0][0]
         return await room.handle(user_id, text, context, run_with_typing)
 
-    # ⚡ мягкий fallback (НЕ force)
+    # ⚡ мягкий fallback
     if is_generate_request(text):
         print("⚡ FALLBACK → мягкая генерация")
         return {"type": "image_task", "prompt": text}
