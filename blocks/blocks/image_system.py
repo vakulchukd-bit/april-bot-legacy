@@ -1,3 +1,4 @@
+print("❗ SECOND IMAGE SYSTEM WORKING")
 from openai import OpenAI
 import asyncio
 
