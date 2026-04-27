@@ -2,7 +2,6 @@
 
 from aiogram.types import BufferedInputFile
 
-# 🔥 ДОБАВЛЯЕМ генерацию
 from blocks.image_module import process as image_generate
 
 
@@ -17,17 +16,24 @@ async def send_result(message, result, keyboard=None):
             reply_markup=keyboard
         )
 
-    # 🔥 НОВЫЙ БЛОК (НЕ ЛОМАЕТ СТАРЫЕ)
     elif result["type"] == "image_task":
         try:
             print("🖼 IMAGE TASK START")
 
-            image_bytes = await image_generate(result["prompt"])
+            # 🔥 ВАЖНО: передаём всё, что нужно
+            user_id = message.from_user.id
+            state = {}  # временно, чтобы не ломать систему
 
-            print("🖼 IMAGE GENERATED")
+            result_img = await image_generate(user_id, result["prompt"], state)
+
+            print("🖼 IMAGE MODULE RESULT:", result_img)
+
+            if not result_img or result_img["type"] != "image":
+                await message.answer("❌ Не удалось создать изображение")
+                return
 
             await message.answer_photo(
-                BufferedInputFile(image_bytes, filename="image.png"),
+                BufferedInputFile(result_img["data"], filename="image.png"),
                 caption="🖼 Готово"
             )
 
