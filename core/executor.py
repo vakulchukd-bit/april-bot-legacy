@@ -2,7 +2,8 @@ from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
 from blocks.intent_system import detect_intent
-from blocks.intent_ai import detect_intent_ai  # 🔥 ДОБАВИЛИ
+from blocks.intent_ai import detect_intent_ai
+from blocks.router import route_request  # 🔥 ДОБАВИЛИ
 
 from blocks.state_manager import (
     get_state,
@@ -153,7 +154,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 AI INTENT (добавили слой понимания)
+    # 🔥 AI intent
     ai_intent = None
     try:
         ai_intent = await detect_intent_ai(text)
@@ -181,63 +182,35 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
+    # 🔥 ROUTER
+    route = await route_request(text, ctx)
+    print("🧭 ROUTE:", route)
+
     if ctx:
         state["has_image"] = True
-        state["last_intent"] = state.get("last_intent", "image")
     else:
         state["has_image"] = False
 
-    # ===== IMAGE ANALYZE (универсальный) =====
-    if ctx and ctx.get("path") and not is_generate_request(text) and not is_edit_request(text):
-        try:
-            result = await analyze_image(user_id, ctx.get("path"), text)
-            if result:
-                return result
-        except Exception as e:
-            print("🔥 IMAGE ANALYZE ERROR:", e)
-
-    # ===== IMAGE GENERATE =====
-    if ai_intent == "generate_image" or is_generate_request(text):
-        result = await run_with_typing(
-            chat_id,
-            image_generate(user_id, text, state)
-        )
-
+    # ===== GENERATE =====
+    if route == "image_generate" or ai_intent == "generate_image" or is_generate_request(text):
+        result = await run_with_typing(chat_id, image_generate(user_id, text, state))
         if result and result.get("type") == "image":
-            set_image_context(user_id, {
-                "type": "generated",
-                "path": None,
-                "prompt": text
-            })
-
+            set_image_context(user_id, {"type": "generated", "path": None, "prompt": text})
         return result
 
-    # ===== IMAGE EDIT =====
-    if ctx and (ai_intent == "edit_image" or is_edit_request(text)):
+    # ===== EDIT =====
+    if ctx and (route == "image_edit" or ai_intent == "edit_image" or is_edit_request(text)):
         path = ctx.get("path")
         if path:
-            result = await image_edit(user_id, path, text)
+            return await image_edit(user_id, path, text)
 
-            if result and result.get("type") == "image":
-                set_image_context(user_id, {
-                    "type": "edited",
-                    "path": path,
-                    "prompt": text
-                })
-
-            return result
-
-    # ===== IMAGE ANALYZE (вопрос) =====
+    # ===== ANALYZE =====
     if ctx and ctx.get("path") and (
-        ai_intent == "analyze_image" or is_image_question(text)
+        route == "image_analyze" or ai_intent == "analyze_image" or is_image_question(text)
     ):
-        try:
-            result = await analyze_image(user_id, ctx.get("path"), text)
-            if result:
-                return result
-        except Exception as e:
-            print("🔥 IMAGE ANALYZE ERROR:", e)
+        return await analyze_image(user_id, ctx.get("path"), text)
 
+    # ===== ROOMS =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -249,61 +222,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     }
 
     science = ScienceRoom()
-
     if science.can_handle(text, context):
-        result = await science.handle(user_id, text, context, run_with_typing)
-        if result:
-            return result
+        return await science.handle(user_id, text, context, run_with_typing)
 
     for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
-                if result:
-                    return result
-        except Exception as e:
-            print(f"🔥 ROOM ERROR [{room.name}]:", e)
+        if room.can_handle(text, context):
+            return await room.handle(user_id, text, context, run_with_typing)
 
-    if intent == "question" and not is_generate_request(text):
-
-        if anchor:
-            text = f"Контекст: {anchor['current']}\n\n{text}"
-
-        text = f"{build_context_text()}\n\n{text}"
-
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-
-        content = result.get("content", "")
-
-        if not content or "не понял" in content.lower():
-            retry = await run_with_typing(
-                chat_id,
-                text_process(user_id, f"Ответь нормально и логично:\n{text}", state, energy)
-            )
-            content = retry.get("content", "")
-
-        return {"type": "text", "data": content}
-
-    if response_mode == "link":
-        return {
-            "type": "text",
-            "data": (
-                "Я не могу сократить ссылку прямо здесь,\n"
-                "но вот тебе готовый вариант 👇\n\n"
-                "👉 https://example.com\n\n"
-                "Хочешь — оформлю красиво."
-            )
-        }
-
-    if response_mode == "copy":
-        text = f"Напиши готовый текст:\n\n{text}"
-
-    if response_mode == "format":
-        text = f"Оформи красиво:\n\n{text}"
-
+    # ===== GPT =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
