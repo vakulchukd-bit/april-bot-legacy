@@ -147,7 +147,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 INIT
+    # INIT
     if "visual_intent" not in state:
         state["visual_intent"] = 0
 
@@ -161,7 +161,27 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 накопление намерения
+    # 🔥 согласие
+    if state.get("offered_visual") and any(w in t for w in [
+        "да", "давай", "покажи", "хочу", "ок", "го"
+    ]):
+        print("✅ USER CONFIRMED VISUAL")
+
+        result = await run_with_typing(chat_id, image_generate(user_id, text, state))
+
+        if result and result.get("type") == "image":
+            set_image_context(user_id, {
+                "type": "generated",
+                "path": None,
+                "prompt": text
+            })
+
+        state["visual_intent"] = 0
+        state["offered_visual"] = False
+
+        return result
+
+    # 🔥 накопление
     if any(p in t for p in [
         "хочу увидеть",
         "сложно представить",
@@ -174,8 +194,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     print("👁 VISUAL INTENT:", state["visual_intent"])
 
-    # 🔥 AI intent
-    ai_intent = None
+    # AI intent (оставили)
     try:
         ai_intent = await detect_intent_ai(text)
         print("🧠 AI INTENT:", ai_intent)
@@ -202,7 +221,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # 🔥 ROUTER
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
