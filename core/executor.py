@@ -216,8 +216,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
+    # ⚠️ ВАЖНО: не делаем ранний return, чтобы не убить оркестр
     if route == "image_generate" or is_generate_request(text):
-        return {"type": "image_task", "prompt": text}
+        print("⚠️ IMAGE INTENT DETECTED → передаем в оркестр")
 
     if ctx and (route == "image_edit" or is_edit_request(text)):
         path = ctx.get("path")
@@ -242,14 +243,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     candidates = []
 
-    science = ScienceRoom()
-    if science.can_handle(text, context):
-        candidates.append((science, 1.0))
-
     for room in ROOMS:
         try:
-            score = 1.0 if room.can_handle(text, context) else 0.0
+            if hasattr(room, "evaluate"):
+                score = room.evaluate(text, context)
+            else:
+                score = 1.0 if room.can_handle(text, context) else 0.0
+
             candidates.append((room, score))
+
         except Exception as e:
             print(f"⚠️ ROOM ERROR: {room} → {e}")
 
@@ -262,7 +264,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print(f"🎯 SELECTED ROOM: {room.__class__.__name__}")
         return await room.handle(user_id, text, context, run_with_typing)
 
-    # 🔥 fallback если никто не взял
+    # fallback
     if is_generate_request(text):
         print("⚡ FALLBACK → IMAGE")
         return {"type": "image_task", "prompt": text}
