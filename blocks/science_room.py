@@ -2,7 +2,7 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sympy import symbols, sympify, solve
+from sympy import symbols, sympify, solve, solveset, S, simplify
 from storage import get_user_plan
 
 ADMIN_ID = 2016592532
@@ -11,48 +11,43 @@ ADMIN_ID = 2016592532
 class ScienceRoom:
     name = "science"
 
+    # ===== УМНЫЙ ДЕТЕКТ =====
+    def is_math_expression(self, text):
+        t = text.lower()
+
+        # есть структура выражения
+        if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
+            return True
+
+        # есть "=" и буквы
+        if "=" in t and re.search(r'[a-z]', t):
+            return True
+
+        # trig
+        if any(w in t for w in ["sin", "cos", "tan", "синус", "косинус"]):
+            return True
+
+        return False
+
     def can_handle(self, text, context):
         t = text.lower()
 
-        if "график" in t or "построй" in t:
+        if self.is_math_expression(text):
             return True
 
-        if "y=" in t or "y =" in t:
-            return True
-
-        if "=" in t or "реши" in t:
-            return True
-
-        if any(w in t for w in [
-            "приведи", "вырази", "найди", "доведи",
-            "вычисли", "переменн", "значение",
-            "уравнен", "выражен"
-        ]):
-            return True
-
-        if "x" in t:
+        if "график" in t or "y=" in t:
             return True
 
         return False
 
     def evaluate(self, text, context):
-        t = text.lower()
-
         if context.get("task_type") == "math":
             return 10.0
 
-        score = 0.0
+        if self.can_handle(text, context):
+            return 2.0
 
-        try:
-            if self.can_handle(text, context):
-                score += 1.0
-        except:
-            pass
-
-        if any(w in t for w in ["синус", "график", "формула", "матем", "уравнение"]):
-            score += 1.0
-
-        return score
+        return 0.0
 
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
@@ -62,141 +57,60 @@ class ScienceRoom:
 
         t = text.lower()
 
+        # ===== таблица =====
         if "таблица" in t and "умнож" in t:
             path = self.build_multiplication_table()
             if path:
-                try:
-                    with open(path, "rb") as f:
-                        return {"type": "image", "data": f.read()}
-                except Exception as e:
-                    print("🔥 READ ERROR:", e)
+                with open(path, "rb") as f:
+                    return {"type": "image", "data": f.read()}
 
-        if plan == "free":
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
-                if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
-                    }
-            return {"type": "text", "data": "⚠️ Только простые решения доступны"}
-
-        if "график" in t or "построй" in t or "y=" in t:
+        # ===== график =====
+        if "график" in t or "y=" in t:
             expr = self.extract_function(text)
-
-            if not expr:
-                interpreted = self.interpret_text_graph(text)
-                if interpreted:
-                    if interpreted["type"] == "function":
-                        expr = interpreted["expr"]
-                    elif interpreted["type"] == "heatmap":
-                        path = self.build_multiplication_table()
-                        if path:
-                            try:
-                                with open(path, "rb") as f:
-                                    return {"type": "image", "data": f.read()}
-                            except Exception as e:
-                                print("🔥 READ ERROR:", e)
 
             if expr:
                 path = self.build_graph(expr)
                 if path:
-                    try:
-                        with open(path, "rb") as f:
-                            return {"type": "image", "data": f.read()}
-                    except Exception as e:
-                        print("🔥 READ ERROR:", e)
+                    with open(path, "rb") as f:
+                        return {"type": "image", "data": f.read()}
 
-        if "=" in t or "реши" in t or any(w in t for w in [
-            "приведи", "доведи", "найди", "вырази", "вычисли"
-        ]):
+        # ===== решение =====
+        if self.is_math_expression(text):
             result = self.solve_equation(text)
+
             if result:
                 return {"type": "text", "data": f"📐 Решение:\n{result}"}
 
-        # 🔥 ФИКС: МЯГКИЙ ВЫХОД В ДИАЛОГ
-        return None
+        # 🔥 ВАЖНО
+        return {"type": "skip"}
 
     # ===== ПАРСИНГ =====
     def extract_math_expression(self, text):
         t = text.lower()
-
         t = t.replace("²", "**2")
         t = t.replace("^", "**")
-        t = t.replace(":", " ")
 
         match = re.search(r'([-+*/().\d x]+=[-+*/().\d x]+)', t)
         if match:
             return match.group(1)
 
-        match = re.search(r'([-+*/().\d x]+)', t)
-        if match:
-            return match.group(1)
-
         return t
 
-    def interpret_text_graph(self, text):
-        t = text.lower()
-
-        if any(w in t for w in ["таблица умножения", "умножения", "умножить", "перемнож"]):
-            return {"type": "heatmap"}
-
-        if any(w in t for w in ["синус", "sin"]):
-            return {"type": "function", "expr": "np.sin(x)"}
-
-        if any(w in t for w in ["косинус", "cos"]):
-            return {"type": "function", "expr": "np.cos(x)"}
-
-        if any(w in t for w in ["парабола", "x^2"]):
-            return {"type": "function", "expr": "x**2"}
-
-        return None
-
-    def build_multiplication_table(self):
-        try:
-            data = np.outer(range(1, 11), range(1, 11))
-
-            plt.figure()
-            plt.imshow(data)
-            plt.colorbar()
-            plt.title("Таблица умножения")
-
-            path = "graph.png"
-            plt.savefig(path)
-            plt.close()
-
-            return path
-        except Exception as e:
-            print("🔥 TABLE ERROR:", e)
-            return None
-
     def extract_function(self, text):
-        try:
-            text = text.lower()
-            text = text.replace("²", "**2")
-            text = text.replace("^", "**")
+        text = text.lower()
+        text = text.replace("^", "**")
 
-            match = re.search(r"y\s*=\s*(.+)", text)
-            if match:
-                return match.group(1)
+        match = re.search(r"y\s*=\s*(.+)", text)
+        return match.group(1) if match else None
 
-            return None
-        except Exception as e:
-            print("🔥 EXTRACT ERROR:", e)
-            return None
-
+    # ===== ГРАФИК =====
     def build_graph(self, expr):
         try:
             x = np.linspace(-10, 10, 200)
-
-            def f(x):
-                return eval(expr, {"x": x, "np": np, "__builtins__": {}})
-
-            y = f(x)
+            y = eval(expr, {"x": x, "np": np, "__builtins__": {}})
 
             plt.figure()
             plt.plot(x, y)
-            plt.title(f"y = {expr}")
             plt.grid()
 
             path = "graph.png"
@@ -204,53 +118,48 @@ class ScienceRoom:
             plt.close()
 
             return path
-        except Exception as e:
-            print("🔥 GRAPH ERROR:", e)
+        except:
             return None
 
+    def build_multiplication_table(self):
+        data = np.outer(range(1, 11), range(1, 11))
+
+        plt.figure()
+        plt.imshow(data)
+        plt.colorbar()
+
+        path = "graph.png"
+        plt.savefig(path)
+        plt.close()
+
+        return path
+
+    # ===== РЕШЕНИЕ =====
     def solve_equation(self, text):
         try:
-            expr = self.extract_math_expression(text).strip()
+            expr = self.extract_math_expression(text)
 
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
-            expr = re.sub(r'(x)(\d)', r'\1*\2', expr)
-            expr = re.sub(r'(\d)\(', r'\1*(', expr)
-            expr = re.sub(r'\)\(', r')*(', expr)
-            expr = re.sub(r'(x)\(', r'\1*(', expr)
-            expr = re.sub(r'(?<!\w)-x', r'-1*x', expr)
 
             x = symbols('x')
 
             if "=" in expr:
                 left, right = expr.split("=")
+                equation = simplify(sympify(left) - sympify(right))
 
-                steps = []
-                steps.append(f"{left} = {right}")
-
-                equation = sympify(left) - sympify(right)
-                steps.append(f"{equation} = 0")
-
-                solutions = solve(equation, x)
+                # 🔥 trig и сложные случаи
+                solutions = solveset(equation, x, domain=S.Reals)
 
                 if not solutions:
                     return "⚠️ Нет решения"
 
-                if len(solutions) == 1:
-                    steps.append(f"x = {solutions[0]}")
-                else:
-                    sol_str = " или ".join([f"x = {s}" for s in solutions])
-                    steps.append(sol_str)
-
-                return "\n".join(steps)
+                return f"x ∈ {solutions}"
 
             else:
-                equation = sympify(expr)
+                equation = simplify(sympify(expr))
                 solutions = solve(equation, x)
 
-                if len(solutions) == 1:
-                    return f"x = {solutions[0]}"
-                else:
-                    return " или ".join([f"x = {s}" for s in solutions])
+                return f"x = {solutions}"
 
         except Exception as e:
             print("🔥 SOLVE ERROR:", e)
