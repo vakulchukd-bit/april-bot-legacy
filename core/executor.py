@@ -33,19 +33,16 @@ from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
 
 
-# ===== 🧠 НОВОЕ: СЕМАНТИЧЕСКОЕ ПОНИМАНИЕ =====
+# ===== 🧠 СЕМАНТИКА =====
 def detect_task_type(text: str):
     t = text.lower()
 
-    # математика
     if any(x in t for x in ["=", "x", "y=", "график", "реши", "уравнен"]):
         return "math"
 
-    # генерация
     if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
         return "image_generate"
 
-    # редактирование
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
@@ -179,7 +176,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 НОВОЕ: СЕМАНТИКА
     task_type = detect_task_type(text)
     print("🧠 TASK TYPE:", task_type)
 
@@ -239,18 +235,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
-    if route == "image_generate" or is_generate_request(text):
-        print("⚠️ IMAGE INTENT DETECTED → оркестр решит")
+    # ===== 🔥 ПРИОРИТЕТ КОНТЕКСТА =====
+    if ctx:
+        print("🧠 CONTEXT ACTIVE")
 
-    if ctx and (route == "image_edit" or is_edit_request(text)):
-        path = ctx.get("path")
-        if path:
-            return await image_edit(user_id, path, text)
+        if is_edit_request(text):
+            print("🎯 FORCE EDIT")
+            path = ctx.get("path")
+            if path:
+                return await image_edit(user_id, path, text)
 
-    if ctx and ctx.get("path") and (
-        route == "image_analyze" or is_image_question(text)
-    ):
-        return await analyze_image(user_id, ctx.get("path"), text)
+        if is_generate_request(text):
+            print("🆕 FORCE NEW IMAGE")
+            return {"type": "image_task", "prompt": text}
+
+        if ctx.get("path") and is_image_question(text):
+            print("🔍 IMAGE QUESTION")
+            return await analyze_image(user_id, ctx.get("path"), text)
 
     # ===== 🎼 ORCHESTRATOR =====
     context = {
@@ -259,7 +260,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": task_type,  # 🔥 ВОТ ЭТО ГЛАВНОЕ
+        "task_type": task_type,
         "energy": energy
     }
 
