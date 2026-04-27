@@ -35,11 +35,10 @@ from blocks.science_room import ScienceRoom
 import re
 
 
-# ===== 🧠 СЕМАНТИКА (ФИКС) =====
+# ===== 🧠 СЕМАНТИКА =====
 def detect_task_type(text: str):
     t = text.lower()
 
-    # 🔥 ТОЛЬКО СТРУКТУРА, НЕ ЦИФРЫ
     if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
         return "math"
 
@@ -117,13 +116,10 @@ def handle_subscription(callback_data, user_id):
 
 def is_edit_request(text: str):
     t = text.lower()
-    triggers = [
+    return any(word in t for word in [
         "убери", "добавь", "измени", "замени",
-        "сделай", "сделай более", "сделай его",
-        "усиль", "сильнее", "ярче", "темнее",
-        "злее", "добрее", "переделай", "улучши"
-    ]
-    return any(word in t for word in triggers)
+        "сделай", "усиль", "ярче", "темнее"
+    ])
 
 
 def is_generate_request(text: str):
@@ -147,78 +143,44 @@ def update_memory_summary(state):
         return
 
     last_chunk = dialog[:-10]
-
     if not last_chunk:
         return
 
     texts = [m.get("content", "") for m in last_chunk if m.get("role") == "user"]
-
     if not texts:
         return
 
     combined = " ".join(texts)[-1000:]
-
     prev = state.get("memory_summary", "")
 
-    new_summary = (prev + " " + combined).strip()
-
-    state["memory_summary"] = new_summary[-2000:]
-
+    state["memory_summary"] = (prev + " " + combined)[-2000:]
     state["dialog"] = dialog[-10:]
 
 
+# ===== 🚀 EXECUTOR =====
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
-
     update_memory_summary(state)
 
     if state.get("image_generating"):
-        return {
-            "type": "text",
-            "data": "⏳ Подожди, я ещё генерирую изображение..."
-        }
+        result = await run_with_typing(chat_id, text_process(user_id, "Подожди...", state))
+        return {"type": "text", "data": result["content"]}
 
-    mode = get_mode(user_id)
-
-    if "visual_intent" not in state:
-        state["visual_intent"] = 0
-
-    if "offered_visual" not in state:
-        state["offered_visual"] = False
-
-    if callback_data is not None:
+    if callback_data:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
 
     t = text.lower().strip()
-
     task_type = detect_task_type(text)
-    print("🧠 TASK TYPE:", task_type)
-
-    if state.get("offered_visual") and any(w in t for w in ["да", "давай", "покажи", "хочу", "ок", "го"]):
-        return {"type": "image_task", "prompt": text}
-
-    try:
-        await detect_intent_ai(text)
-    except:
-        pass
-
-    if "время" in t:
-        now = datetime.now().strftime("%H:%M")
-        return {"type": "text", "data": f"Сейчас {now}"}
 
     energy = get_energy(user_id)
-
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    route = await route_request(text, ctx)
-    print("🧭 ROUTE:", route)
-
-    # ===== 🔥 FIX: math + skip =====
+    # ===== МАТЕМАТИКА =====
     if task_type == "math":
         room = ScienceRoom()
         result = await room.handle(user_id, text, {
@@ -226,46 +188,33 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "state": state,
             "image": ctx,
             "anchor": anchor,
-            "mode": mode,
             "task_type": task_type,
             "energy": energy
         }, run_with_typing)
 
-        if not result or result.get("type") == "skip":
-            result = await run_with_typing(
+        if result and result.get("type") == "text":
+            wrapped = await run_with_typing(
                 chat_id,
-                text_process(user_id, text, state, energy)
+                text_process(user_id, result["data"], state, energy)
             )
-            return {"type": "text", "data": result["content"]}
+            return {"type": "text", "data": wrapped["content"]}
 
         return result
 
-    if ctx:
-        if is_edit_request(text):
-            path = ctx.get("path")
-            if path:
-                return await image_edit(user_id, path, text)
-
-        if ctx.get("path") and is_image_question(text):
-            return await analyze_image(user_id, ctx.get("path"), text)
-
+    # ===== ОРКЕСТР =====
     context = {
         "chat_id": chat_id,
         "state": state,
         "image": ctx,
         "anchor": anchor,
-        "mode": mode,
         "task_type": task_type,
         "energy": energy
     }
 
     candidates = []
-
     for room in ROOMS:
         try:
-            score = room.evaluate(text, context) if hasattr(room, "evaluate") else \
-                (1.0 if room.can_handle(text, context) else 0.0)
-
+            score = room.evaluate(text, context)
             candidates.append((room, score))
         except:
             pass
@@ -276,18 +225,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         room = candidates[0][0]
         result = await room.handle(user_id, text, context, run_with_typing)
 
-        if not result or result.get("type") == "skip":
-            result = await run_with_typing(
+        if result and result.get("type") == "text":
+            wrapped = await run_with_typing(
                 chat_id,
-                text_process(user_id, text, state, energy)
+                text_process(user_id, result["data"], state, energy)
             )
-            return {"type": "text", "data": result["content"]}
+            return {"type": "text", "data": wrapped["content"]}
 
         return result
 
-    if is_generate_request(text):
-        return {"type": "image_task", "prompt": text}
-
+    # ===== ФОЛБЭК =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
