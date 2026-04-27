@@ -37,7 +37,7 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== V1 (ТЕПЕРЬ FALLBACK) =====
+# ===== V1 (РЕЗЕРВ, БЕЗ TIMEOUT) =====
 async def generate_image(prompt):
     def run():
         print("🟢 ENTER V1 (fallback):", prompt)
@@ -67,18 +67,18 @@ async def generate_image(prompt):
             return base64.b64decode(image_base64)
 
         except Exception as e:
-            print("🔥 IMAGE V1 ERROR:", e)
+            print("🔥 IMAGE V1 ERROR:", repr(e))
             return None
 
     try:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, run)
     except Exception as e:
-        print("🔥 EXECUTOR V1 ERROR:", e)
+        print("🔥 EXECUTOR V1 ERROR:", repr(e))
         return None
 
 
-# ===== V2 (ТЕПЕРЬ ОСНОВНОЙ) =====
+# ===== V2 (ОСНОВНОЙ, БЕЗ УБИЙСТВА) =====
 async def generate_image_v2(prompt):
     def run():
         print("🟡 ENTER V2 (main):", prompt)
@@ -108,14 +108,14 @@ async def generate_image_v2(prompt):
             return base64.b64decode(image_base64)
 
         except Exception as e:
-            print("🔥 IMAGE V2 ERROR:", e)
+            print("🔥 IMAGE V2 ERROR FULL:", repr(e))
             return None
 
     try:
         loop = asyncio.get_event_loop()
-        return await asyncio.wait_for(loop.run_in_executor(None, run), timeout=25)
+        return await loop.run_in_executor(None, run)
     except Exception as e:
-        print("🔥 EXECUTOR V2 ERROR:", e)
+        print("🔥 EXECUTOR V2 ERROR:", repr(e))
         return None
 
 
@@ -174,7 +174,7 @@ async def process(user_id, text, state):
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
-        # ===== 🔥 СНАЧАЛА V2 (ОСНОВНОЙ) =====
+        # ===== 🚀 ОСНОВНОЙ ПОТОК (ТОЛЬКО V2) =====
         print("🚀 TRY V2 FIRST")
 
         img = await generate_image_v2(prompt)
@@ -193,14 +193,10 @@ async def process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
-        # ===== 🔥 FALLBACK НА V1 =====
-        print("⚠️ FALLBACK TO V1")
+        # ===== ⚠️ РЕДКИЙ FALLBACK (БЕЗ TIMEOUT И ПАНИКИ) =====
+        print("⚠️ V2 FAILED → TRY V1 (fallback)")
 
-        try:
-            img = await asyncio.wait_for(generate_image(prompt), timeout=20)
-        except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT V1")
-            img = None
+        img = await generate_image(prompt)
 
         if img:
             if not is_admin and plan == "free":
@@ -222,11 +218,11 @@ async def process(user_id, text, state):
         }
 
     except Exception as e:
-        print("🔥 PROCESS ERROR:", e)
+        print("🔥 PROCESS ERROR:", repr(e))
         return {"type": "error", "data": None}
 
 
-# ===== RETRY =====
+# ===== RETRY (ТОЖЕ БЕЗ УБИЙСТВА) =====
 async def retry_process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
@@ -239,11 +235,10 @@ async def retry_process(user_id, text, state):
 
         is_admin = user_id == ADMIN_ID
 
-        try:
-            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
-        except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT SECOND ATTEMPT")
-            img = None
+        img = await generate_image_v2(prompt)
+
+        if not img:
+            img = await generate_image(prompt)
 
         if img:
             plan = get_user_plan(user_id)
@@ -266,5 +261,5 @@ async def retry_process(user_id, text, state):
         }
 
     except Exception as e:
-        print("🔥 RETRY ERROR:", e)
+        print("🔥 RETRY ERROR:", repr(e))
         return {"type": "final_error", "data": "⚠️ Сервис временно недоступен"}
