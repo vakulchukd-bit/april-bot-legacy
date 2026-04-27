@@ -85,24 +85,6 @@ def handle_subscription(callback_data, user_id):
     if callback_data == "buy_no":
         return {"type": "text", "data": "❌ Отменено"}
 
-    if callback_data == "confirm_downgrade":
-        return {
-            "type": "text",
-            "data": "⚠️ Ты уверен, что хочешь перейти на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
-                ]
-            ])
-        }
-
-    if callback_data == "confirm_downgrade_yes":
-        return {"type": "admin_request", "plan": "lite"}
-
-    if callback_data == "confirm_downgrade_no":
-        return {"type": "text", "data": "❌ Отменено"}
-
     if callback_data.startswith("admin_confirm_"):
         parts = callback_data.split("_")
         plan = parts[2]
@@ -111,21 +93,10 @@ def handle_subscription(callback_data, user_id):
         set_subscription(uid, plan)
         save_payment(uid, plan)
 
-        print("🔥 PAYMENT SAVED")
-
         return {
             "type": "notify_user",
             "target_user": uid,
             "data": f"✅ Активирован {plan.upper()}"
-        }
-
-    if callback_data.startswith("admin_reject_"):
-        uid = int(callback_data.split("_")[3])
-
-        return {
-            "type": "notify_user",
-            "target_user": uid,
-            "data": "❌ Запрос отклонён"
         }
 
     return None
@@ -133,34 +104,36 @@ def handle_subscription(callback_data, user_id):
 
 def is_edit_request(text: str):
     t = text.lower()
-    triggers = ["убери", "добавь", "измени", "замени"]
-    return any(word in t for word in triggers)
+    return any(word in t for word in ["убери", "добавь", "измени", "замени"])
 
 
 def is_generate_request(text: str):
     t = text.lower()
-    verbs = ["создай", "сгенерируй", "нарисуй", "сделай"]
-    objects = ["картинку", "изображение", "фото", "арт", "рисунок"]
-    return any(v in t for v in verbs) and any(o in t for o in objects)
+    return any(v in t for v in ["создай", "сгенерируй", "нарисуй", "сделай"]) and \
+           any(o in t for o in ["картинку", "изображение", "фото", "арт", "рисунок"])
 
 
 def is_image_question(text: str):
     t = text.lower()
-    triggers = [
-        "что на картинке",
-        "что это",
-        "что справа",
-        "что слева",
-        "что здесь",
-        "что изображено"
-    ]
-    return any(tr in t for tr in triggers)
+    return any(tr in t for tr in [
+        "что на картинке", "что это", "что справа",
+        "что слева", "что здесь", "что изображено"
+    ])
 
 
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
+
+    # 🔒 БЛОКИРОВКА ПРИ ГЕНЕРАЦИИ
+    if state.get("image_generating"):
+        print("⛔ BLOCKED: image still generating")
+        return {
+            "type": "text",
+            "data": "⏳ Подожди, я ещё генерирую изображение..."
+        }
+
     mode = get_mode(user_id)
 
     if "visual_intent" not in state:
@@ -179,46 +152,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     task_type = detect_task_type(text)
     print("🧠 TASK TYPE:", task_type)
 
-    if state.get("offered_visual") and any(w in t for w in [
-        "да", "давай", "покажи", "хочу", "ок", "го"
-    ]):
-        print("✅ USER CONFIRMED VISUAL")
+    if state.get("offered_visual") and any(w in t for w in ["да", "давай", "покажи", "хочу", "ок", "го"]):
         return {"type": "image_task", "prompt": text}
 
-    if any(p in t for p in [
-        "хочу увидеть",
-        "сложно представить",
-        "как выглядит",
-        "покажи",
-    ]):
-        state["visual_intent"] += 1
-    else:
-        state["visual_intent"] = max(0, state["visual_intent"] - 1)
-
-    print("👁 VISUAL INTENT:", state["visual_intent"])
-
     try:
-        ai_intent = await detect_intent_ai(text)
-        print("🧠 AI INTENT:", ai_intent)
-    except Exception as e:
-        print("🔥 AI INTENT ERROR:", e)
+        await detect_intent_ai(text)
+    except:
+        pass
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
         return {"type": "text", "data": f"Сейчас {now}"}
 
-    if mode == "engineering" and not text.startswith("/"):
-        if text.lower() == "/analiz":
-            return {"type": "text", "data": "📥 Жду код..."}
-        return {"type": "admin_report", "data": analyze_code(text)}
-
-    if t == "привет":
-        return {"type": "text", "data": "Привет 🙂"}
-
     energy = get_energy(user_id)
-
-    intent = detect_intent(text)
-    response_mode = detect_response_mode(text)
 
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
@@ -226,31 +172,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
-    if state["visual_intent"] >= 2 and not state["offered_visual"]:
-        state["offered_visual"] = True
-        return {"type": "text", "data": "Хочешь, покажу это на изображении?"}
-
+    # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
     if ctx:
-        state["has_image"] = True
-    else:
-        state["has_image"] = False
-
-    # ===== 🔥 ПРИОРИТЕТ КОНТЕКСТА =====
-    if ctx:
-        print("🧠 CONTEXT ACTIVE")
-
         if is_edit_request(text):
-            print("🎯 FORCE EDIT")
             path = ctx.get("path")
             if path:
                 return await image_edit(user_id, path, text)
 
         if is_generate_request(text):
-            print("🆕 FORCE NEW IMAGE")
             return {"type": "image_task", "prompt": text}
 
         if ctx.get("path") and is_image_question(text):
-            print("🔍 IMAGE QUESTION")
             return await analyze_image(user_id, ctx.get("path"), text)
 
     # ===== 🎼 ORCHESTRATOR =====
@@ -268,27 +200,20 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     for room in ROOMS:
         try:
-            if hasattr(room, "evaluate"):
-                score = room.evaluate(text, context)
-            else:
-                score = 1.0 if room.can_handle(text, context) else 0.0
+            score = room.evaluate(text, context) if hasattr(room, "evaluate") else \
+                (1.0 if room.can_handle(text, context) else 0.0)
 
             candidates.append((room, score))
-
-        except Exception as e:
-            print(f"⚠️ ROOM ERROR: {room} → {e}")
+        except:
+            pass
 
     candidates.sort(key=lambda x: x[1], reverse=True)
 
-    print("🎼 ROOM SCORES:", [(r.__class__.__name__, s) for r, s in candidates])
-
     if candidates and candidates[0][1] > 0:
         room = candidates[0][0]
-        print(f"🎯 SELECTED ROOM: {room.__class__.__name__}")
         return await room.handle(user_id, text, context, run_with_typing)
 
     if is_generate_request(text):
-        print("⚡ FALLBACK → IMAGE")
         return {"type": "image_task", "prompt": text}
 
     result = await run_with_typing(
