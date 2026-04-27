@@ -140,7 +140,6 @@ def update_memory_summary(state):
     if not last_chunk:
         return
 
-    # 🔥 СЖАТИЕ СМЫСЛА (простое, безопасное)
     texts = [m.get("content", "") for m in last_chunk if m.get("role") == "user"]
 
     if not texts:
@@ -152,10 +151,8 @@ def update_memory_summary(state):
 
     new_summary = (prev + " " + combined).strip()
 
-    # ограничение размера
     state["memory_summary"] = new_summary[-2000:]
 
-    # оставляем только последние 10
     state["dialog"] = dialog[-10:]
 
 
@@ -210,6 +207,21 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
+
+    # ===== 🔥 ПРИОРИТЕТ СПЕЦИАЛИСТА (MATH) =====
+    if task_type == "math":
+        print("🎯 FORCE → SCIENCE ROOM")
+
+        room = ScienceRoom()
+        return await room.handle(user_id, text, {
+            "chat_id": chat_id,
+            "state": state,
+            "image": ctx,
+            "anchor": anchor,
+            "mode": mode,
+            "task_type": task_type,
+            "energy": energy
+        }, run_with_typing)
 
     if ctx:
         if is_edit_request(text):
