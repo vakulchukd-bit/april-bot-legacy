@@ -220,11 +220,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             return result
 
-    if ctx and is_image_question(text):
-        return {
-            "type": "text",
-            "data": "Это изображение, которое мы недавно загрузили. Опиши, что именно хочешь узнать — разберём."
-        }
+    # 🔥 ИСПРАВЛЕННЫЙ БЛОК
+    if ctx and ctx.get("path") and is_image_question(text):
+        try:
+            result = await analyze_image(user_id, ctx.get("path"), text)
+            if result:
+                return result
+        except Exception as e:
+            print("🔥 IMAGE ANALYZE ERROR:", e)
 
     context = {
         "chat_id": chat_id,
@@ -238,7 +241,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     science = ScienceRoom()
 
-    # ===== 🔥 СНАЧАЛА КОМНАТЫ =====
     if science.can_handle(text, context):
         result = await science.handle(user_id, text, context, run_with_typing)
         if result:
@@ -253,7 +255,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== 🔥 ПОТОМ GPT =====
     if intent == "question" and not is_generate_request(text):
 
         if anchor:
