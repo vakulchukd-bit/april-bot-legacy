@@ -239,16 +239,13 @@ async def handle(message: types.Message):
                     image_generate(user_id, result["prompt"], state)
                 )
 
-                try:
-                    img = await asyncio.wait_for(task, timeout=5)
-                except asyncio.TimeoutError:
-                    await message.answer("⏳ Генерация заняла больше времени, продолжаю...")
+                # 🔥 НЕ УБИВАЕМ ЗАДАЧУ
+                await asyncio.sleep(5)
 
-                    try:
-                        img = await asyncio.wait_for(task, timeout=20)
-                    except asyncio.TimeoutError:
-                        await message.answer("⚠️ Не удалось создать изображение")
-                        return
+                if not task.done():
+                    await message.answer("⏳ Генерация занимает больше времени...")
+
+                img = await task
 
                 if not img:
                     await message.answer("⚠️ Не удалось создать изображение")
