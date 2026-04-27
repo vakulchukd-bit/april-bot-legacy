@@ -37,10 +37,10 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== ОСНОВНОЙ ГЕНЕРАТОР (УПРОЩЕННЫЙ ТЕСТ) =====
+# ===== V1 (ТЕПЕРЬ FALLBACK) =====
 async def generate_image(prompt):
     def run():
-        print("🟢 TEST GENERATION START:", prompt)
+        print("🟢 ENTER V1 (fallback):", prompt)
 
         try:
             response = client.images.generate(
@@ -48,28 +48,26 @@ async def generate_image(prompt):
                 prompt=prompt
             )
 
-            print("🔍 RESPONSE DATA:", response.data)
-
             if not response or not response.data:
-                print("❌ EMPTY RESPONSE")
+                print("❌ V1 EMPTY")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
-                print("❌ NO BASE64 FIELD")
+                print("❌ V1 NO BASE64")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
-                print("❌ EMPTY BASE64")
+                print("❌ V1 EMPTY BASE64")
                 return None
 
-            print("✅ IMAGE GENERATED OK")
+            print("🟢 EXIT V1 OK")
 
             return base64.b64decode(image_base64)
 
         except Exception as e:
-            print("🔥 IMAGE ERROR:", e)
+            print("🔥 IMAGE V1 ERROR:", e)
             return None
 
     try:
@@ -80,10 +78,10 @@ async def generate_image(prompt):
         return None
 
 
-# ===== FALLBACK (ПОКА НЕ ТРОГАЕМ, НО УПРОСТИЛИ) =====
+# ===== V2 (ТЕПЕРЬ ОСНОВНОЙ) =====
 async def generate_image_v2(prompt):
     def run():
-        print("🟡 ENTER V2:", prompt)
+        print("🟡 ENTER V2 (main):", prompt)
 
         try:
             response = client.images.generate(
@@ -91,17 +89,18 @@ async def generate_image_v2(prompt):
                 prompt=prompt
             )
 
-            print("🔍 V2 RESPONSE:", response.data)
-
             if not response or not response.data:
+                print("❌ V2 EMPTY")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
+                print("❌ V2 NO BASE64")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
+                print("❌ V2 EMPTY BASE64")
                 return None
 
             print("🟡 EXIT V2 OK")
@@ -175,7 +174,28 @@ async def process(user_id, text, state):
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
-        # ===== V1 =====
+        # ===== 🔥 СНАЧАЛА V2 (ОСНОВНОЙ) =====
+        print("🚀 TRY V2 FIRST")
+
+        img = await generate_image_v2(prompt)
+
+        if img:
+            if not is_admin and plan == "free":
+                increment_images(user_id)
+
+            save_to_memory(state, {
+                "type": "generated",
+                "source": "v2",
+                "prompt": prompt,
+                "hint": prompt,
+                "path": None
+            })
+
+            return {"type": "image", "data": img}
+
+        # ===== 🔥 FALLBACK НА V1 =====
+        print("⚠️ FALLBACK TO V1")
+
         try:
             img = await asyncio.wait_for(generate_image(prompt), timeout=20)
         except asyncio.TimeoutError:
@@ -189,25 +209,6 @@ async def process(user_id, text, state):
             save_to_memory(state, {
                 "type": "generated",
                 "source": "v1",
-                "prompt": prompt,
-                "hint": prompt,
-                "path": None
-            })
-
-            return {"type": "image", "data": img}
-
-        # ===== FALLBACK =====
-        print("⚠️ SWITCH TO V2")
-
-        img = await generate_image_v2(prompt)
-
-        if img:
-            if not is_admin and plan == "free":
-                increment_images(user_id)
-
-            save_to_memory(state, {
-                "type": "generated",
-                "source": "v2",
                 "prompt": prompt,
                 "hint": prompt,
                 "path": None
