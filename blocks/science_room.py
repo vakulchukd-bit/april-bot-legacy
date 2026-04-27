@@ -114,7 +114,8 @@ class ScienceRoom:
             if result:
                 return {"type": "text", "data": f"📐 Решение:\n{result}"}
 
-        return {"type": "text", "data": "🧠 Не понял задачу, попробуй уточнить"}
+        # 🔥 ФИКС: МЯГКИЙ ВЫХОД В ДИАЛОГ
+        return None
 
     # ===== ПАРСИНГ =====
     def extract_math_expression(self, text):
@@ -207,7 +208,6 @@ class ScienceRoom:
             print("🔥 GRAPH ERROR:", e)
             return None
 
-    # ===== ФИКС РЕШЕНИЙ =====
     def solve_equation(self, text):
         try:
             expr = self.extract_math_expression(text).strip()
@@ -235,7 +235,6 @@ class ScienceRoom:
                 if not solutions:
                     return "⚠️ Нет решения"
 
-                # 🔥 ФИКС: ВСЕ КОРНИ
                 if len(solutions) == 1:
                     steps.append(f"x = {solutions[0]}")
                 else:
