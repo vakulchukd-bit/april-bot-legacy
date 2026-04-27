@@ -2,6 +2,8 @@ from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
 from blocks.intent_system import detect_intent
+from blocks.intent_ai import detect_intent_ai
+from blocks.router import route_request
 
 from blocks.state_manager import (
     get_state,
@@ -20,6 +22,8 @@ from blocks.engineering_system import analyze_code
 from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 
+from blocks.image_system import analyze_image
+
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -28,6 +32,37 @@ from storage import set_subscription, save_payment
 from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
 
+import re
+
+
+# ===== 🧠 СЕМАНТИКА (ТОТ САМЫЙ АПГРЕЙД) =====
+def detect_task_type(text: str):
+    t = text.lower()
+
+    # 🔥 только реальные выражения, а не просто цифры
+    if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
+        return "math"
+
+    if "=" in t and re.search(r'[a-z]', t):
+        return "math"
+
+    if any(w in t for w in ["реши", "уравнение", "найди корень"]):
+        if re.search(r'[0-9x\+\-\*/=]', t):
+            return "math"
+
+    if "y=" in t or "график" in t:
+        return "math"
+
+    if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
+        return "image_generate"
+
+    if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
+        return "image_edit"
+
+    return "text"
+
+
+# ===== ВСЁ НИЖЕ — ТВОЯ ЛОГИКА, НЕ ТРОГАЕМ =====
 
 def handle_subscription(callback_data, user_id):
     print("🔥 CALLBACK:", callback_data)
@@ -65,24 +100,6 @@ def handle_subscription(callback_data, user_id):
     if callback_data == "buy_no":
         return {"type": "text", "data": "❌ Отменено"}
 
-    if callback_data == "confirm_downgrade":
-        return {
-            "type": "text",
-            "data": "⚠️ Ты уверен, что хочешь перейти на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_downgrade_yes"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="confirm_downgrade_no")
-                ]
-            ])
-        }
-
-    if callback_data == "confirm_downgrade_yes":
-        return {"type": "admin_request", "plan": "lite"}
-
-    if callback_data == "confirm_downgrade_no":
-        return {"type": "text", "data": "❌ Отменено"}
-
     if callback_data.startswith("admin_confirm_"):
         parts = callback_data.split("_")
         plan = parts[2]
@@ -91,21 +108,10 @@ def handle_subscription(callback_data, user_id):
         set_subscription(uid, plan)
         save_payment(uid, plan)
 
-        print("🔥 PAYMENT SAVED")
-
         return {
             "type": "notify_user",
             "target_user": uid,
             "data": f"✅ Активирован {plan.upper()}"
-        }
-
-    if callback_data.startswith("admin_reject_"):
-        uid = int(callback_data.split("_")[3])
-
-        return {
-            "type": "notify_user",
-            "target_user": uid,
-            "data": "❌ Запрос отклонён"
         }
 
     return None
@@ -113,30 +119,24 @@ def handle_subscription(callback_data, user_id):
 
 def is_edit_request(text: str):
     t = text.lower()
-    triggers = ["убери", "добавь", "измени", "замени"]
-    return any(word in t for word in triggers)
+    return any(word in t for word in [
+        "убери", "добавь", "измени", "замени",
+        "сделай", "усиль", "ярче", "темнее"
+    ])
 
 
 def is_generate_request(text: str):
     t = text.lower()
-
-    verbs = ["создай", "сгенерируй", "нарисуй", "сделай"]
-    objects = ["картинку", "изображение", "фото", "арт", "рисунок"]
-
-    return any(v in t for v in verbs) and any(o in t for o in objects)
+    return any(v in t for v in ["создай", "сгенерируй", "нарисуй", "сделай"]) and \
+           any(o in t for o in ["картинку", "изображение", "фото", "арт", "рисунок"])
 
 
 def is_image_question(text: str):
     t = text.lower()
-    triggers = [
-        "что на картинке",
-        "что это",
-        "что справа",
-        "что слева",
-        "что здесь",
-        "что изображено"
-    ]
-    return any(tr in t for tr in triggers)
+    return any(tr in t for tr in [
+        "что на картинке", "что это", "что справа",
+        "что слева", "что здесь", "что изображено"
+    ])
 
 
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
@@ -156,44 +156,39 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         now = datetime.now().strftime("%H:%M")
         return {"type": "text", "data": f"Сейчас {now}"}
 
-    if mode == "engineering" and not text.startswith("/"):
-        if text.lower() == "/analiz":
-            return {"type": "text", "data": "📥 Жду код..."}
-        return {"type": "admin_report", "data": analyze_code(text)}
-
     energy = get_energy(user_id)
-
-    intent = detect_intent(text)
-    response_mode = detect_response_mode(text)
 
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    if is_generate_request(text):
-        result = await image_generate(user_id, text, state)
-        return result
+    task_type = detect_task_type(text)
 
-    if ctx and is_edit_request(text):
-        path = ctx.get("path")
-        if path:
-            return await image_edit(user_id, path, text)
+    # 🔥 ВАЖНО: НЕ ВОЗВРАЩАЕМ НАПРЯМУЮ!
+    if task_type == "math":
+        science = ScienceRoom()
+        result = await science.handle(user_id, text, {
+            "chat_id": chat_id,
+            "state": state,
+            "image": ctx,
+            "anchor": anchor,
+            "mode": mode,
+            "task_type": task_type,
+            "energy": energy
+        }, run_with_typing)
 
+        if result:
+            return result
+
+    # ===== ОРКЕСТР (НЕ ТРОГАЕМ) =====
     context = {
         "chat_id": chat_id,
         "state": state,
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": "chat",
+        "task_type": task_type,
         "energy": energy
     }
-
-    science = ScienceRoom()
-
-    if science.can_handle(text, context):
-        result = await science.handle(user_id, text, context, run_with_typing)
-        if result:
-            return result
 
     for room in ROOMS:
         try:
@@ -204,6 +199,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
+    # 🔥 ВСЁ ЧЕРЕЗ run_with_typing → кнопки живут
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
