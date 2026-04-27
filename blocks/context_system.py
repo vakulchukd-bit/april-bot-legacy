@@ -21,10 +21,26 @@ def build_context_text(state=None):
 - отвечай естественно и точно
 """
 
-    # 🔥 динамика (если передали state)
+    # ===== 🔥 ДИНАМИКА =====
     if state:
+
+        # --- настроение ---
         mood = state.get("mood")
         if mood:
             base += f"\nТекущее состояние пользователя: {mood}"
+
+        # ===== 🧠 SUMMARY (СМЫСЛ ПРОШЛОГО) =====
+        summary = state.get("memory_summary")
+        if summary:
+            base += f"\n\nКонтекст диалога (смысл):\n{summary}"
+
+        # ===== 🖼️ IMAGE CONTEXT =====
+        img = state.get("image_context")
+        if img and isinstance(img, dict):
+
+            hint = img.get("hint") or img.get("prompt")
+
+            if hint:
+                base += f"\n\nПоследняя работа с изображением:\n{hint}"
 
     return base
