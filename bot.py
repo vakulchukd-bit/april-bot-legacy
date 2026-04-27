@@ -50,7 +50,7 @@ from blocks.mode_manager import get_mode, set_mode, clear_mode
 from blocks.session_manager import is_session_expired
 from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
-from blocks.image_module import process as image_generate  # 🔥 ДОБАВИЛИ
+from blocks.image_module import process as image_generate
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -231,19 +231,38 @@ async def handle(message: types.Message):
 
             await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
 
-        # 🔥 НОВОЕ: ОБРАБОТКА image_task
         elif result["type"] == "image_task":
             await message.answer("🎨 Генерирую изображение...")
 
             try:
                 img = await image_generate(user_id, result["prompt"], state)
 
-                if img and img.get("type") == "image":
+                if not img:
+                    await message.answer("⚠️ Не удалось создать изображение")
+                    return
+
+                if img["type"] == "image":
                     await message.answer_photo(
                         BufferedInputFile(img["data"], filename="image.png")
                     )
+
+                elif img["type"] == "retry_notice":
+                    await message.answer(img["data"])
+
+                    img2 = await image_generate(user_id, result["prompt"], state)
+
+                    if img2 and img2.get("type") == "image":
+                        await message.answer_photo(
+                            BufferedInputFile(img2["data"], filename="image.png")
+                        )
+                    else:
+                        await message.answer("⚠️ Не удалось создать изображение после повторной попытки")
+
+                elif img["type"] in ["error", "final_error"]:
+                    await message.answer(img["data"])
+
                 else:
-                    await message.answer("⚠️ Не удалось создать изображение")
+                    await message.answer("⚠️ Неизвестный ответ от генерации")
 
             except Exception as e:
                 print("🔥 IMAGE TASK ERROR:", e)
@@ -296,30 +315,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    if user_id == ADMIN_ID:
-
-        if data == "admin_stats":
-            errors = get_errors()
-            text = "📊 Анализ\n\n"
-            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
-            await callback.answer(text[:200], show_alert=True)
-            return
-
-        if data == "admin_payments":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
-                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
-            ])
-            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
-            await callback.answer()
-            return
-
-        if data == "admin_broadcast":
-            set_mode(user_id, "broadcast")
-            await callback.answer("📢 Введи текст", show_alert=True)
-            return
-
     try:
         result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
 
@@ -327,10 +322,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         if result["type"] == "text":
-            await callback.message.answer(
-                result["data"],
-                reply_markup=result.get("keyboard")
-            )
+            await callback.message.answer(result["data"], reply_markup=result.get("keyboard"))
 
         elif result["type"] == "image":
             await callback.message.answer("🎨 Генерирую изображение...")
