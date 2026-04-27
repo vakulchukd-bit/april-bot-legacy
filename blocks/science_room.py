@@ -15,7 +15,6 @@ class ScienceRoom:
     def can_handle(self, text, context):
         t = text.lower()
 
-        # 🔥 ЖЁСТКИЙ ТРИГГЕР (фикс)
         if "график" in t or "построй" in t:
             return True
 
@@ -25,7 +24,6 @@ class ScienceRoom:
         if "=" in t or "реши" in t:
             return True
 
-        # 🔥 НОВОЕ: РАСШИРЕННОЕ ПОНИМАНИЕ ЗАДАЧИ (без ломки)
         if any(w in t for w in [
             "приведи",
             "вырази",
@@ -39,24 +37,28 @@ class ScienceRoom:
         ]):
             return True
 
+        # 🔥 КЛЮЧЕВОЕ УСИЛЕНИЕ
+        if "x" in t:
+            return True
+
         return False
 
-    # ===== 🔥 НОВОЕ: ОЦЕНКА УВЕРЕННОСТИ =====
+    # ===== 🔥 ГЛАВНЫЙ ФИКС: слушаем task_type =====
     def evaluate(self, text, context):
-        t = text.lower()
+        if context.get("task_type") == "math":
+            return 1.0
 
+        t = text.lower()
         score = 0.0
 
-        # базовое понимание
         try:
             if self.can_handle(text, context):
-                score += 0.6
+                score += 0.4
         except:
             pass
 
-        # усиление по ключевым словам
         if any(w in t for w in ["синус", "график", "формула", "матем", "уравнение"]):
-            score += 0.6
+            score += 0.4
 
         return score
 
@@ -69,7 +71,6 @@ class ScienceRoom:
 
         t = text.lower()
 
-        # 🔥 ДОБАВЛЕНО: ранний перехват таблицы (чтобы не терялась)
         if "таблица" in t and "умнож" in t:
             path = self.build_multiplication_table()
 
@@ -83,7 +84,6 @@ class ScienceRoom:
                 except Exception as e:
                     print("🔥 READ ERROR:", e)
 
-        # ===== FREE =====
         if plan == "free":
             if "=" in t or "реши" in t:
                 result = self.solve_equation(text)
@@ -99,7 +99,6 @@ class ScienceRoom:
                 "data": "⚠️ Только простые решения доступны"
             }
 
-        # ===== LITE / PREMIUM =====
         if "график" in t or "построй" in t or "y=" in t:
 
             expr = self.extract_function(text)
@@ -138,7 +137,6 @@ class ScienceRoom:
                     except Exception as e:
                         print("🔥 READ ERROR:", e)
 
-        # 🔥 УСИЛЕНО: теперь работает и на "приведи / доведи"
         if "=" in t or "реши" in t or any(w in t for w in [
             "приведи",
             "доведи",
@@ -159,7 +157,7 @@ class ScienceRoom:
             "data": "🧠 Не понял задачу, попробуй уточнить"
         }
 
-    # ===== 🔥 УСИЛЕННЫЙ PARSER =====
+    # ===== 🔥 ПАРСЕР =====
     def interpret_text_graph(self, text):
         t = text.lower()
 
@@ -174,9 +172,6 @@ class ScienceRoom:
 
         if any(w in t for w in ["парабола", "квадрат", "x^2"]):
             return {"type": "function", "expr": "x**2"}
-
-        if any(w in t for w in ["линия", "прямая", "линейный"]):
-            return {"type": "function", "expr": "x"}
 
         return None
 
@@ -201,7 +196,9 @@ class ScienceRoom:
 
     def extract_function(self, text):
         try:
-            text = text.lower().replace("^", "**")
+            text = text.lower()
+            text = text.replace("²", "**2")
+            text = text.replace("^", "**")
 
             match = re.search(r"y\s*=\s*(.+)", text)
             if match:
@@ -238,8 +235,17 @@ class ScienceRoom:
 
     def solve_equation(self, text):
         try:
-            expr = text.lower().replace("реши", "").replace("уравнение", "").strip()
+            expr = text.lower()
+
+            # 🔥 НОРМАЛИЗАЦИЯ
+            expr = expr.replace("²", "**2")
             expr = expr.replace("^", "**")
+            expr = expr.replace(":", "")
+
+            for w in ["реши", "уравнение", "найди", "вычисли"]:
+                expr = expr.replace(w, "")
+
+            expr = expr.strip()
 
             x = symbols('x')
 
