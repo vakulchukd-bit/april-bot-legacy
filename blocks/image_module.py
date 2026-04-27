@@ -38,40 +38,71 @@ def clean_prompt(text: str):
     return t.strip()
 
 
+# ===== ОСНОВНОЙ ГЕНЕРАТОР =====
 async def generate_image(prompt):
     def run():
-        print("🚀 START IMAGE GENERATION:", prompt)
+        print("🚀 START IMAGE GENERATION (v1):", prompt)
 
         try:
             result = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
-                size="768x768"  # 🔥 ИЗМЕНЕНО (БЫЛО 1024)
+                size="768x768"
             )
 
-            print("📦 RAW RESULT:", result)
-
             if not result or not result.data:
-                print("❌ EMPTY RESULT FROM OPENAI")
                 return None
 
             if not hasattr(result.data[0], "b64_json"):
-                print("❌ NO b64_json IN RESPONSE:", result.data[0])
                 return None
 
             image_base64 = result.data[0].b64_json
 
             if not image_base64:
-                print("❌ EMPTY b64_json")
                 return None
 
             return base64.b64decode(image_base64)
 
         except Exception as e:
-            print("🔥 IMAGE GENERATION ERROR:", e)
+            print("🔥 IMAGE V1 ERROR:", e)
             return None
 
     return await asyncio.to_thread(run)
+
+
+# ===== FALLBACK ГЕНЕРАТОР (v2) =====
+async def generate_image_v2(prompt):
+    def run():
+        print("🟡 FALLBACK IMAGE GENERATION (v2):", prompt)
+
+        try:
+            result = client.images.generate(
+                model="gpt-image-1",  # 👉 тут потом поставишь 5.5
+                prompt=prompt,
+                size="768x768"
+            )
+
+            if not result or not result.data:
+                return None
+
+            if not hasattr(result.data[0], "b64_json"):
+                return None
+
+            image_base64 = result.data[0].b64_json
+
+            if not image_base64:
+                return None
+
+            return base64.b64decode(image_base64)
+
+        except Exception as e:
+            print("🔥 IMAGE V2 ERROR:", e)
+            return None
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(run), timeout=25)
+    except:
+        return None
 
 
 # 🔥 ДОБАВИЛИ (инкремент)
@@ -115,10 +146,7 @@ async def process(user_id, text, state):
                 "data": "❌ Пустой запрос для генерации"
             }
 
-        # 🔥 ADMIN BYPASS
         is_admin = user_id == ADMIN_ID
-
-        # ===== 🔥 ЛИМИТ ТОЛЬКО ДЛЯ FREE =====
         plan = get_user_plan(user_id)
 
         if not is_admin and plan == "free":
@@ -133,19 +161,19 @@ async def process(user_id, text, state):
 
         # ===== ПЕРВАЯ ПОПЫТКА =====
         try:
-            img = await asyncio.wait_for(generate_image(prompt), timeout=60)
+            img = await asyncio.wait_for(generate_image(prompt), timeout=20)
         except asyncio.TimeoutError:
-            print("⏱️ TIMEOUT FIRST ATTEMPT")
+            print("⏱️ TIMEOUT V1")
             img = None
 
+        # ===== УСПЕХ =====
         if img:
-            # считаем только для FREE и НЕ admin
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
             item = {
                 "type": "generated",
-                "source": "text",
+                "source": "v1",
                 "prompt": prompt,
                 "hint": prompt,
                 "path": None
@@ -158,11 +186,34 @@ async def process(user_id, text, state):
                 "data": img
             }
 
-        print("⚠️ FIRST ATTEMPT FAILED → RETRY")
+        # ===== FALLBACK =====
+        print("⚠️ SWITCH TO V2")
 
+        img = await generate_image_v2(prompt)
+
+        if img:
+            if not is_admin and plan == "free":
+                increment_images(user_id)
+
+            item = {
+                "type": "generated",
+                "source": "v2",
+                "prompt": prompt,
+                "hint": prompt,
+                "path": None
+            }
+
+            save_to_memory(state, item)
+
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        # ===== ОБА НЕ СРАБОТАЛИ =====
         return {
-            "type": "retry_notice",
-            "data": "⏳ Картинка генерируется дольше обычного… пробую ещё раз"
+            "type": "final_error",
+            "data": "⚠️ Не удалось создать изображение даже через резервную систему"
         }
 
     except Exception as e:
@@ -175,7 +226,7 @@ async def process(user_id, text, state):
         }
 
 
-# ===== ВТОРАЯ ПОПЫТКА =====
+# ===== ВТОРАЯ ПОПЫТКА (оставили как есть) =====
 async def retry_process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
@@ -186,7 +237,6 @@ async def retry_process(user_id, text, state):
                 "data": "❌ Пустой запрос"
             }
 
-        # 🔥 ADMIN BYPASS
         is_admin = user_id == ADMIN_ID
 
         try:
@@ -196,14 +246,13 @@ async def retry_process(user_id, text, state):
             img = None
 
         if img:
-            # считаем только для FREE и НЕ admin
             plan = get_user_plan(user_id)
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
             item = {
                 "type": "generated",
-                "source": "text",
+                "source": "retry",
                 "prompt": prompt,
                 "hint": prompt,
                 "path": None
