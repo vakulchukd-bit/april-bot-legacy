@@ -26,7 +26,7 @@ class ImageGenerateRoom(Room):
 
         return False
 
-    # 🔥 ДОБАВИЛИ
+    # 🔥 evaluate (оставили как есть)
     def evaluate(self, text, context):
         t = text.lower()
         score = 0.0
@@ -48,16 +48,30 @@ class ImageGenerateRoom(Room):
         if text.lower().strip() in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
             text = state.get("last_image_prompt", text)
 
-        result = await run(
-            context["chat_id"],
-            image_generate(user_id, text, state)
-        )
+        try:
+            result = await run(
+                context["chat_id"],
+                image_generate(user_id, text, state)
+            )
 
-        if result and result.get("type") == "image":
-            state["last_image_prompt"] = text
-            return result
+            if result and result.get("type") == "image":
+                state["last_image_prompt"] = text
+                return result
 
-        return None
+            print("⚠️ IMAGE GENERATION FAILED → fallback")
+
+            return {
+                "type": "error",
+                "data": "🎨 Не удалось создать изображение. Попробуй изменить запрос."
+            }
+
+        except Exception as e:
+            print("🔥 IMAGE ROOM ERROR:", e)
+
+            return {
+                "type": "error",
+                "data": "⚠️ Ошибка при генерации изображения"
+            }
 
 
 # === IMAGE EDIT ===
@@ -81,7 +95,6 @@ class ImageEditRoom(Room):
             "осветли", "затемни", "улучши"
         ])
 
-    # 🔥 ДОБАВИЛИ
     def evaluate(self, text, context):
         t = text.lower()
         score = 0.0
@@ -98,7 +111,10 @@ class ImageEditRoom(Room):
         ctx = context["image"]
 
         if not ctx or not ctx.get("path"):
-            return None
+            return {
+                "type": "error",
+                "data": "⚠️ Нет изображения для редактирования"
+            }
 
         if not ctx.get("hint"):
             try:
@@ -108,15 +124,27 @@ class ImageEditRoom(Room):
 
         new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
-        result = await run(
-            context["chat_id"],
-            image_edit(user_id, ctx["path"], new_prompt)
-        )
+        try:
+            result = await run(
+                context["chat_id"],
+                image_edit(user_id, ctx["path"], new_prompt)
+            )
 
-        if result and result.get("type") == "image":
-            return result
+            if result and result.get("type") == "image":
+                return result
 
-        return None
+            return {
+                "type": "error",
+                "data": "⚠️ Не удалось изменить изображение"
+            }
+
+        except Exception as e:
+            print("🔥 IMAGE EDIT ERROR:", e)
+
+            return {
+                "type": "error",
+                "data": "⚠️ Ошибка при редактировании изображения"
+            }
 
 
 # === TEXT ===
@@ -129,9 +157,8 @@ class TextRoom(Room):
     def can_handle(self, text, context):
         return True
 
-    # 🔥 ДОБАВИЛИ
     def evaluate(self, text, context):
-        return 0.1  # всегда fallback
+        return 0.1  # fallback
 
     async def handle(self, user_id, text, context, run):
         result = await run(
