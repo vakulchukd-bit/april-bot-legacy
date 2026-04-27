@@ -172,15 +172,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     route = await route_request(text, ctx)
     print("🧭 ROUTE:", route)
 
-    # ===== 🔥 КОНТЕКСТ КАРТИНКИ =====
+    # ===== 🔥 КОНТЕКСТ КАРТИНКИ (НО БЕЗ FORCE) =====
     if ctx:
         if is_edit_request(text):
             path = ctx.get("path")
             if path:
                 return await image_edit(user_id, path, text)
-
-        if is_generate_request(text):
-            return {"type": "image_task", "prompt": text}
 
         if ctx.get("path") and is_image_question(text):
             return await analyze_image(user_id, ctx.get("path"), text)
@@ -213,7 +210,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         room = candidates[0][0]
         return await room.handle(user_id, text, context, run_with_typing)
 
+    # ⚡ мягкий fallback (НЕ force)
     if is_generate_request(text):
+        print("⚡ FALLBACK → мягкая генерация")
         return {"type": "image_task", "prompt": text}
 
     result = await run_with_typing(
