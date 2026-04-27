@@ -235,7 +235,20 @@ async def handle(message: types.Message):
             await message.answer("🎨 Генерирую изображение...")
 
             try:
-                img = await image_generate(user_id, result["prompt"], state)
+                task = asyncio.create_task(
+                    image_generate(user_id, result["prompt"], state)
+                )
+
+                try:
+                    img = await asyncio.wait_for(task, timeout=5)
+                except asyncio.TimeoutError:
+                    await message.answer("⏳ Генерация заняла больше времени, продолжаю...")
+
+                    try:
+                        img = await asyncio.wait_for(task, timeout=20)
+                    except asyncio.TimeoutError:
+                        await message.answer("⚠️ Не удалось создать изображение")
+                        return
 
                 if not img:
                     await message.answer("⚠️ Не удалось создать изображение")
@@ -246,23 +259,11 @@ async def handle(message: types.Message):
                         BufferedInputFile(img["data"], filename="image.png")
                     )
 
-                elif img["type"] == "retry_notice":
-                    await message.answer(img["data"])
-
-                    img2 = await image_generate(user_id, result["prompt"], state)
-
-                    if img2 and img2.get("type") == "image":
-                        await message.answer_photo(
-                            BufferedInputFile(img2["data"], filename="image.png")
-                        )
-                    else:
-                        await message.answer("⚠️ Не удалось создать изображение после повторной попытки")
-
                 elif img["type"] in ["error", "final_error"]:
                     await message.answer(img["data"])
 
                 else:
-                    await message.answer("⚠️ Неизвестный ответ от генерации")
+                    await message.answer("⚠️ Ошибка генерации")
 
             except Exception as e:
                 print("🔥 IMAGE TASK ERROR:", e)
