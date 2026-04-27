@@ -52,6 +52,8 @@ from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 from blocks.image_module import process as image_generate
 
+from io import BytesIO  # 🔥 ДОБАВИЛИ
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -109,6 +111,28 @@ class Handler(BaseHTTPRequestHandler):
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
+async def safe_send_image(message, data):
+    print("📤 TRY SEND IMAGE")
+
+    try:
+        await message.answer_photo(
+            BufferedInputFile(data, filename="image.png")
+        )
+        print("✅ IMAGE SENT SUCCESS")
+
+    except Exception as e:
+        print("🔥 PHOTO FAILED, TRY DOCUMENT:", e)
+
+        try:
+            bio = BytesIO(data)
+            bio.name = "image.png"
+            await message.answer_document(bio)
+            print("✅ SENT AS DOCUMENT")
+        except Exception as e2:
+            print("🔥 DOCUMENT FAILED:", e2)
+            await message.answer("⚠️ Картинка сгенерирована, но не отправилась")
 
 
 @dp.message()
@@ -239,7 +263,6 @@ async def handle(message: types.Message):
                     image_generate(user_id, result["prompt"], state)
                 )
 
-                # 🔥 НЕ УБИВАЕМ ЗАДАЧУ
                 await asyncio.sleep(5)
 
                 if not task.done():
@@ -252,9 +275,7 @@ async def handle(message: types.Message):
                     return
 
                 if img["type"] == "image":
-                    await message.answer_photo(
-                        BufferedInputFile(img["data"], filename="image.png")
-                    )
+                    await safe_send_image(message, img["data"])
 
                 elif img["type"] in ["error", "final_error"]:
                     await message.answer(img["data"])
@@ -270,13 +291,7 @@ async def handle(message: types.Message):
             await message.answer("🎨 Генерирую изображение...")
 
             async def send_image():
-                try:
-                    await message.answer_photo(
-                        BufferedInputFile(result["data"], filename="image.png")
-                    )
-                except Exception as e:
-                    print("🔥 TELEGRAM ERROR:", e)
-                    await message.answer("⚠️ Картинка готова, но не отправилась")
+                await safe_send_image(message, result["data"])
 
             asyncio.create_task(send_image())
 
@@ -326,13 +341,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.message.answer("🎨 Генерирую изображение...")
 
             async def send_image():
-                try:
-                    await callback.message.answer_photo(
-                        BufferedInputFile(result["data"], filename="image.png")
-                    )
-                except Exception as e:
-                    print("🔥 CALLBACK ERROR:", e)
-                    await callback.message.answer("⚠️ Ошибка отправки изображения")
+                await safe_send_image(callback.message, result["data"])
 
             asyncio.create_task(send_image())
 
