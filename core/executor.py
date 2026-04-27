@@ -172,8 +172,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "prompt": text
         }
 
-    # 🔥 накопление
-    if any(p in t for [
+    # 🔥 накопление (FIXED)
+    if any(p in t for p in [
         "хочу увидеть",
         "сложно представить",
         "как выглядит",
