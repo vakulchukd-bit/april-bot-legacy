@@ -33,6 +33,25 @@ from blocks.energy_manager import get_energy
 from blocks.science_room import ScienceRoom
 
 
+# ===== 🧠 НОВОЕ: СЕМАНТИЧЕСКОЕ ПОНИМАНИЕ =====
+def detect_task_type(text: str):
+    t = text.lower()
+
+    # математика
+    if any(x in t for x in ["=", "x", "y=", "график", "реши", "уравнен"]):
+        return "math"
+
+    # генерация
+    if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
+        return "image_generate"
+
+    # редактирование
+    if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
+        return "image_edit"
+
+    return "text"
+
+
 def handle_subscription(callback_data, user_id):
     print("🔥 CALLBACK:", callback_data)
 
@@ -160,6 +179,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
+    # 🔥 НОВОЕ: СЕМАНТИКА
+    task_type = detect_task_type(text)
+    print("🧠 TASK TYPE:", task_type)
+
     if state.get("offered_visual") and any(w in t for w in [
         "да", "давай", "покажи", "хочу", "ок", "го"
     ]):
@@ -216,9 +239,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     else:
         state["has_image"] = False
 
-    # ⚠️ ВАЖНО: не делаем ранний return, чтобы не убить оркестр
     if route == "image_generate" or is_generate_request(text):
-        print("⚠️ IMAGE INTENT DETECTED → передаем в оркестр")
+        print("⚠️ IMAGE INTENT DETECTED → оркестр решит")
 
     if ctx and (route == "image_edit" or is_edit_request(text)):
         path = ctx.get("path")
@@ -237,7 +259,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": None,
+        "task_type": task_type,  # 🔥 ВОТ ЭТО ГЛАВНОЕ
         "energy": energy
     }
 
@@ -264,12 +286,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print(f"🎯 SELECTED ROOM: {room.__class__.__name__}")
         return await room.handle(user_id, text, context, run_with_typing)
 
-    # fallback
     if is_generate_request(text):
         print("⚡ FALLBACK → IMAGE")
         return {"type": "image_task", "prompt": text}
 
-    # ===== GPT =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
