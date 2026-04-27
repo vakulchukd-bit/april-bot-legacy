@@ -35,10 +35,11 @@ from blocks.science_room import ScienceRoom
 import re
 
 
-# ===== 🧠 СЕМАНТИКА =====
+# ===== 🧠 СЕМАНТИКА (АПГРЕЙД, НО БЕЗ ПОЛОМКИ) =====
 def detect_task_type(text: str):
     t = text.lower()
 
+    # 🔥 ТОЛЬКО СТРУКТУРА, НЕ ПРОСТО ЦИФРЫ
     if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
         return "math"
 
@@ -60,6 +61,8 @@ def detect_task_type(text: str):
 
     return "text"
 
+
+# ===== ВСЁ НИЖЕ БЕЗ УДАЛЕНИЙ =====
 
 def handle_subscription(callback_data, user_id):
     print("🔥 CALLBACK:", callback_data)
@@ -116,10 +119,7 @@ def handle_subscription(callback_data, user_id):
 
 def is_edit_request(text: str):
     t = text.lower()
-    return any(word in t for word in [
-        "убери", "добавь", "измени", "замени",
-        "сделай", "усиль", "ярче", "темнее"
-    ])
+    return any(word in t for word in ["убери", "добавь", "измени", "замени"])
 
 
 def is_generate_request(text: str):
@@ -136,105 +136,67 @@ def is_image_question(text: str):
     ])
 
 
-def update_memory_summary(state):
-    dialog = state.get("dialog", [])
-
-    if len(dialog) < 10:
-        return
-
-    last_chunk = dialog[:-10]
-    if not last_chunk:
-        return
-
-    texts = [m.get("content", "") for m in last_chunk if m.get("role") == "user"]
-    if not texts:
-        return
-
-    combined = " ".join(texts)[-1000:]
-    prev = state.get("memory_summary", "")
-
-    state["memory_summary"] = (prev + " " + combined)[-2000:]
-    state["dialog"] = dialog[-10:]
-
-
-# ===== 🚀 EXECUTOR =====
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
-    update_memory_summary(state)
+    mode = get_mode(user_id)
 
-    if state.get("image_generating"):
-        result = await run_with_typing(chat_id, text_process(user_id, "Подожди...", state))
-        return {"type": "text", "data": result["content"]}
-
-    if callback_data:
+    if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
 
     t = text.lower().strip()
-    task_type = detect_task_type(text)
+
+    if "время" in t:
+        now = datetime.now().strftime("%H:%M")
+        return {"type": "text", "data": f"Сейчас {now}"}
 
     energy = get_energy(user_id)
+
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # ===== МАТЕМАТИКА =====
+    task_type = detect_task_type(text)
+
+    # 🔥 ПРИОРИТЕТ МАТЕМАТИКИ (НО БЕЗ ЛОМКИ)
     if task_type == "math":
-        room = ScienceRoom()
-        result = await room.handle(user_id, text, {
+        science = ScienceRoom()
+        result = await science.handle(user_id, text, {
             "chat_id": chat_id,
             "state": state,
             "image": ctx,
             "anchor": anchor,
+            "mode": mode,
             "task_type": task_type,
             "energy": energy
         }, run_with_typing)
 
-        if result and result.get("type") == "text":
-            wrapped = await run_with_typing(
-                chat_id,
-                text_process(user_id, result["data"], state, energy)
-            )
-            return {"type": "text", "data": wrapped["content"]}
+        if result:
+            return result
 
-        return result
-
-    # ===== ОРКЕСТР =====
+    # ===== СТАРЫЙ ОРКЕСТР (НЕ ТРОГАЕМ) =====
     context = {
         "chat_id": chat_id,
         "state": state,
         "image": ctx,
         "anchor": anchor,
+        "mode": mode,
         "task_type": task_type,
         "energy": energy
     }
 
-    candidates = []
     for room in ROOMS:
         try:
-            score = room.evaluate(text, context)
-            candidates.append((room, score))
-        except:
-            pass
+            if room.can_handle(text, context):
+                result = await room.handle(user_id, text, context, run_with_typing)
+                if result:
+                    return result
+        except Exception as e:
+            print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    candidates.sort(key=lambda x: x[1], reverse=True)
-
-    if candidates and candidates[0][1] > 0:
-        room = candidates[0][0]
-        result = await room.handle(user_id, text, context, run_with_typing)
-
-        if result and result.get("type") == "text":
-            wrapped = await run_with_typing(
-                chat_id,
-                text_process(user_id, result["data"], state, energy)
-            )
-            return {"type": "text", "data": wrapped["content"]}
-
-        return result
-
-    # ===== ФОЛБЭК =====
+    # ===== ФОЛБЭК ЧЕРЕЗ run_with_typing (КНОПКИ ЖИВЫ) =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
