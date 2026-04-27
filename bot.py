@@ -52,12 +52,12 @@ from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 from blocks.image_module import process as image_generate
 
-from io import BytesIO  # 🔥 ДОБАВИЛИ
+from io import BytesIO
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-session = AiohttpSession(timeout=120)
+session = AiohttpSession(timeout=300)
 bot = Bot(token=TOKEN, session=session)
 
 dp = Dispatcher()
@@ -77,16 +77,12 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
+# 🔥 НОВЫЙ typing_loop — БЕСКОНЕЧНЫЙ ДО КОНЦА
 async def typing_loop(chat_id):
     try:
-        elapsed = 0
         while True:
-            if elapsed < 4:
-                await bot.send_chat_action(chat_id, "typing")
-            else:
-                await bot.send_chat_action(chat_id, "upload_photo")
+            await bot.send_chat_action(chat_id, "upload_photo")
             await asyncio.sleep(2)
-            elapsed += 2
     except:
         pass
 
@@ -95,7 +91,6 @@ async def run_with_typing(chat_id, coro):
     task = asyncio.create_task(typing_loop(chat_id))
     try:
         result = await coro
-        await asyncio.sleep(0.1)
         return result
     finally:
         task.cancel()
@@ -189,13 +184,14 @@ async def handle(message: types.Message):
     if is_time_question(text):
         await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
-            f"📅 Дата: {now.strftime('%d.%m.%Y')}"
+            f"📅 Дата: {now.strftime('%d.%м.%Y')}"
         )
         return
 
     register_user(user_id)
 
     mode = get_mode(user_id)
+
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
         success = 0
@@ -224,7 +220,7 @@ async def handle(message: types.Message):
 
             text_limit = (
                 "⛔ Ваш лимит на сегодня исчерпан.\n\n"
-                f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
+                f"Следующий доступ:\n{next_time.strftime('%d.%м.%Y в %H:%M')}\n\n"
                 "Хочешь продолжить без ожидания?\n"
                 "Выбери тариф ниже 👇"
             )
@@ -243,32 +239,17 @@ async def handle(message: types.Message):
         if result["type"] == "text":
             reply = result["data"]
 
-            if is_admin:
-                status = "\n\n⚙️ ADMIN"
-            elif plan == "premium":
-                status = f"\n\n👑 PREMIUM: {get_remaining_days(user_id)} дн."
-            elif plan == "lite":
-                status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
-            else:
-                limits = get_limits(user_id)
-                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
-
-            await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
+            await message.answer(reply)
 
         elif result["type"] == "image_task":
             await message.answer("🎨 Генерирую изображение...")
 
+            typing_task = asyncio.create_task(typing_loop(message.chat.id))
+
             try:
-                task = asyncio.create_task(
-                    image_generate(user_id, result["prompt"], state)
-                )
+                img = await image_generate(user_id, result["prompt"], state)
 
-                await asyncio.sleep(5)
-
-                if not task.done():
-                    await message.answer("⏳ Генерация занимает больше времени...")
-
-                img = await task
+                typing_task.cancel()
 
                 if not img:
                     await message.answer("⚠️ Не удалось создать изображение")
@@ -284,6 +265,7 @@ async def handle(message: types.Message):
                     await message.answer("⚠️ Ошибка генерации")
 
             except Exception as e:
+                typing_task.cancel()
                 print("🔥 IMAGE TASK ERROR:", e)
                 await message.answer("⚠️ Ошибка генерации изображения")
 
