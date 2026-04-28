@@ -38,19 +38,21 @@ import re
 def detect_task_type(text: str):
     t = text.lower()
 
-    if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
+    # ===== МАТЕМАТИКА ТОЛЬКО ПО ФАКТУ =====
+    if "=" in t:
         return "math"
 
-    if "=" in t and re.search(r'[a-z]', t):
+    if "sin(" in t or "cos(" in t:
         return "math"
 
-    if any(w in t for w in ["реши", "уравнение", "найди корень"]):
-        if re.search(r'[0-9x\+\-\*/=]', t):
+    if any(op in t for op in ["+", "-", "*", "/"]):
+        if any(ch.isdigit() for ch in t):
             return "math"
 
     if "y=" in t or "график" in t:
         return "math"
 
+    # ===== IMAGE =====
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
