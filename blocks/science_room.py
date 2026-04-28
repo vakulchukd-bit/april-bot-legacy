@@ -91,7 +91,6 @@ class ScienceRoom:
 
         for task in tasks:
             if "=" in task:
-                # 🔥 ВАЖНО: используем split_system
                 equations.extend(self.split_system(task))
             elif "sin" in task:
                 sin_tasks.append(task)
@@ -173,10 +172,8 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
-        return {
-            "type": "text",
-            "data": "⚠️ Не удалось распознать задачу."
-        }
+        # 🔥 ВАЖНО: НЕ ЛОМАЕМ ДИРИЖЁРА
+        return None
 
     # ===== ПАРСИНГ =====
     def extract_math_expression(self, text):
@@ -226,7 +223,11 @@ class ScienceRoom:
     def solve_equation(self, text):
         try:
             expr = self.extract_math_expression(text)
+
+            # 🔥 усиленный парсинг
+            expr = expr.replace(" ", "")
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
+            expr = re.sub(r'(\d)\(', r'\1*(', expr)
 
             x = symbols('x')
 
