@@ -24,7 +24,8 @@ from storage import (
     get_user_plan,
     get_all_users,
     init_db,
-    ensure_user_db
+    ensure_user_db,
+    save_payment
 )
 
 from core.executor import execute
@@ -66,18 +67,15 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
+# ===== TIME =====
 def is_time_question(text: str):
     text = text.lower()
-    triggers = [
-        "сколько времени",
-        "который час",
-        "какая дата",
-        "какой сегодня день"
-    ]
-    return any(t in text for t in triggers)
+    return any(t in text for t in [
+        "сколько времени", "который час", "какая дата", "какой сегодня день"
+    ])
 
 
-# ✅ ВЕРНУЛ СТАРЫЙ typing (как было)
+# ===== TYPING =====
 async def typing_loop(chat_id):
     try:
         elapsed = 0
@@ -102,6 +100,7 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
+# ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -114,13 +113,14 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
+# ===== IMAGE SEND =====
 async def safe_send_image(message, data):
     try:
         await message.answer_photo(
             BufferedInputFile(data, filename="image.png"),
             reply_markup=main_keyboard(message.message_id)
         )
-    except Exception:
+    except:
         bio = BytesIO(data)
         bio.name = "image.png"
         await message.answer_document(
@@ -129,50 +129,13 @@ async def safe_send_image(message, data):
         )
 
 
+# ===== MESSAGE =====
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
-
     ensure_user_db(user_id)
 
     text = message.text or message.caption or ""
-
-    if message.voice:
-        file = await bot.get_file(message.voice.file_id)
-        path = f"{user_id}.ogg"
-
-        await bot.download_file(file.file_path, destination=path)
-
-        def run():
-            with open(path, "rb") as f:
-                t = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=f
-                )
-            return t.text
-
-        text = await asyncio.to_thread(run)
-
-        if not text.strip():
-            await message.answer("🎤 Не расслышал")
-            return
-
-        await message.answer(f"🎤 {text}")
-
-    if message.photo:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-
-        path = f"{user_id}_image.jpg"
-        await bot.download_file(file.file_path, destination=path)
-
-        set_image_context(user_id, {
-            "type": "uploaded",
-            "path": path
-        })
-
-        await message.answer("📸 Изображение получено. Можешь спросить про него.")
-        return
 
     state = get_state(user_id)
 
@@ -182,51 +145,11 @@ async def handle(message: types.Message):
 
     if is_time_question(text):
         await message.answer(
-            f"🕒 Время: {now.strftime('%H:%M')}\n"
-            f"📅 Дата: {now.strftime('%d.%m.%Y')}"
+            f"🕒 {state['time_str']}\n📅 {state['date_str']}"
         )
         return
 
     register_user(user_id)
-
-    mode = get_mode(user_id)
-
-    if user_id == ADMIN_ID and mode == "broadcast":
-        users = get_all_users()
-        success = 0
-
-        for uid in users:
-            if int(uid) == ADMIN_ID:
-                continue
-            try:
-                await bot.send_message(uid, f"📢 {text}")
-                success += 1
-            except:
-                pass
-
-        clear_mode(user_id)
-        await message.answer(f"✅ Рассылка отправлена: {success}")
-        return
-
-    is_admin = user_id == ADMIN_ID
-    plan = get_user_plan(user_id)
-
-    if not is_admin and plan == "free":
-        remaining = get_remaining_messages(user_id)
-
-        if remaining == 0:
-            next_time = now + timedelta(hours=24)
-
-            text_limit = (
-                "⛔ Ваш лимит на сегодня исчерпан.\n\n"
-                f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
-                "Выбери тариф ниже 👇"
-            )
-
-            await message.answer(text_limit, reply_markup=тариф_keyboard())
-            return
-
-        can_send_message(user_id)
 
     try:
         result = await execute(user_id, text, message.chat.id, run_with_typing)
@@ -235,32 +158,10 @@ async def handle(message: types.Message):
         add_dialog(user_id, "assistant", result.get("data", ""))
 
         if result["type"] == "text":
-            reply = result["data"]
-
-            if is_admin:
-                status = "\n\n⚙️ ADMIN"
-            elif plan == "premium":
-                status = f"\n\n👑 PREMIUM: {get_remaining_days(user_id)} дн."
-            elif plan == "lite":
-                status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
-            else:
-                limits = get_limits(user_id)
-                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
-
-            await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
-
-        elif result["type"] == "image_task":
-            await message.answer("🎨 Генерирую изображение...")
-
-            img = await run_with_typing(
-                message.chat.id,
-                image_generate(user_id, result["prompt"], state)
+            await message.answer(
+                result["data"],
+                reply_markup=main_keyboard(message.message_id)
             )
-
-            if img and img["type"] == "image":
-                await safe_send_image(message, img["data"])
-            else:
-                await message.answer("⚠️ Ошибка генерации")
 
         elif result["type"] == "image":
             await safe_send_image(message, result["data"])
@@ -269,24 +170,22 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# ✅ ВЕРНУЛ СТАРЫЙ callback (ПОЛНОСТЬЮ РАБОЧИЙ)
+# ===== CALLBACK =====
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
+    # лайки
     if data.startswith("like_"):
-        await callback.answer("👍 Спасибо", show_alert=False)
+        await callback.answer("👍")
         return
 
     if data.startswith("dislike_"):
-        await callback.answer("👎 Учту", show_alert=False)
+        await callback.answer("👎")
         return
 
-    if data == "noop":
-        await callback.answer()
-        return
-
+    # меню
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
@@ -299,27 +198,52 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    try:
-        result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
+    # ===== ПОДПИСКА =====
+    if data == "buy_premium":
+        await callback.message.answer(
+            "💳 Подтвердить Premium?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_premium"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
+                ]
+            ])
+        )
+        await callback.answer()
+        return
 
-        if not result:
-            return
+    if data == "confirm_premium":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС PREMIUM от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_ok_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_no_{user_id}")
+                ]
+            ])
+        )
+        await callback.answer("Отправлено")
+        return
 
-        if result["type"] == "text":
-            await callback.message.answer(
-                result["data"],
-                reply_markup=result.get("keyboard")
-            )
+    if data.startswith("admin_ok_"):
+        uid = int(data.split("_")[2])
+        set_subscription(uid, "premium")
+        save_payment(uid, "premium")
+        await bot.send_message(uid, "✅ Premium активирован")
+        await callback.answer()
+        return
 
-        elif result["type"] == "image":
-            await safe_send_image(callback.message, result["data"])
-
-    except Exception as e:
-        await handle_error(bot, callback.message, e, "callback_handler")
+    if data.startswith("admin_no_"):
+        uid = int(data.split("_")[2])
+        await bot.send_message(uid, "❌ Отказано")
+        await callback.answer()
+        return
 
     await callback.answer()
 
 
+# ===== MAIN =====
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
