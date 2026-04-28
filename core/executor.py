@@ -32,7 +32,7 @@ from storage import set_subscription, save_payment
 from blocks.energy_manager import get_energy
 
 # 🔥 ДОБАВИЛИ (опыт)
-from blocks.experience import update_experience
+from blocks.experience import update_experience, load_experience
 
 import re
 
@@ -140,6 +140,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
+    # 🔥 ЗАГРУЖАЕМ ОПЫТ (НО НЕ ЛОМАЕМ ЛОГИКУ)
+    try:
+        experience = load_experience(user_id)
+    except:
+        experience = {}
+
     try:
         intent = detect_intent(text)
     except:
@@ -165,7 +171,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "anchor": anchor,
         "mode": mode,
         "task_type": detect_task_type(text),
-        "energy": energy
+        "energy": energy,
+        "experience": experience  # 🔥 ПРОКИНУЛИ В КОНТЕКСТ
     }
 
     def is_valid_result(result):
@@ -190,6 +197,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     score = room.evaluate(text, context)
                 except:
                     score = 1
+
+                # 🔥 МЯГКОЕ ВЛИЯНИЕ ОПЫТА
+                try:
+                    actions = experience.get(str(user_id), {}).get("actions", [])
+                    if actions:
+                        last = actions[-1]
+                        if last.get("status") == "positive":
+                            score += 0.1
+                        elif last.get("status") == "negative":
+                            score -= 0.1
+                except:
+                    pass
 
                 candidates.append((score, room))
                 print(f"🧠 CANDIDATE: {room.name} | score={score}")
@@ -223,7 +242,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            # ===== SELF CHECK (ИСПРАВЛЕНО: НЕ БЛОКИРУЕТ) =====
+            # ===== SELF CHECK (НЕ БЛОКИРУЕТ) =====
             try:
                 from blocks.self_check import self_check
 
