@@ -162,15 +162,21 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     task_type = detect_task_type(text)
 
-    # ===== IMAGE GENERATE (фикс) =====
+    # ===== IMAGE GENERATE (С TYPING) =====
     if task_type == "image_generate":
-        result = await image_generate(user_id, text, state)
+        result = await run_with_typing(
+            chat_id,
+            image_generate(user_id, text, state)
+        )
         if result:
             return result
 
-    # ===== IMAGE EDIT (фикс) =====
+    # ===== IMAGE EDIT (С TYPING) =====
     if task_type == "image_edit" and ctx and ctx.get("path"):
-        result = await image_edit(user_id, ctx["path"], text)
+        result = await run_with_typing(
+            chat_id,
+            image_edit(user_id, ctx["path"], text)
+        )
         if result:
             return result
 
