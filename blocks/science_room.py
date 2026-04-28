@@ -55,10 +55,40 @@ class ScienceRoom:
 
         return score
 
-    # ===== 🔥 НОВОЕ: УМНЫЙ ПАРСИНГ =====
-    def extract_equations(self, text):
-        t = text.lower().replace(" ", "")
-        return re.findall(r'([\-+*/().\dx]+=[\-+*/().\dx]+)', t)
+    # ===== 🔥 НОВЫЙ СИНТАКСИЧЕСКИЙ ПАРСЕР =====
+    def extract_math_chunks(self, text):
+        t = text.lower()
+        t = re.sub(r'[^\dx\+\-\*/=\(\)\.\s]', ' ', t)
+
+        parts = t.split()
+
+        chunks = []
+        current = ""
+
+        for p in parts:
+            if any(c in p for c in "=+-*/x"):
+                current += p
+            else:
+                if current:
+                    chunks.append(current)
+                    current = ""
+
+        if current:
+            chunks.append(current)
+
+        return chunks
+
+    def parse_equations(self, chunk):
+        if chunk.count("=") >= 2:
+            parts = chunk.split("=")
+            eqs = []
+
+            for i in range(0, len(parts) - 1, 2):
+                eqs.append(parts[i] + "=" + parts[i+1])
+
+            return eqs
+
+        return [chunk]
 
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
@@ -68,11 +98,17 @@ class ScienceRoom:
 
         t = text.lower()
 
-        equations = self.extract_equations(text)
+        # 🔥 НОВЫЙ ПАРСИНГ
+        chunks = self.extract_math_chunks(text)
+
+        equations = []
+        for c in chunks:
+            equations.extend(self.parse_equations(c))
+
         results = []
         variables = {}
 
-        # ===== 🔥 СИСТЕМЫ =====
+        # ===== СИСТЕМЫ =====
         if len(equations) >= 2:
             try:
                 x, y = symbols('x y')
@@ -92,7 +128,7 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SYSTEM ERROR:", e)
 
-        # ===== 🔥 ОДИНОЧНЫЕ =====
+        # ===== ОДИНОЧНЫЕ =====
         for eq in equations:
             if len(equations) >= 2:
                 break
@@ -105,7 +141,7 @@ class ScienceRoom:
                 if match:
                     variables["x"] = float(match.group(1))
 
-        # ===== 🔥 SIN =====
+        # ===== SIN =====
         if "sin" in t:
             try:
                 if "x" in variables:
@@ -119,7 +155,7 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ===== 🔥 ГРАФИК =====
+        # ===== ГРАФИК =====
         if "график" in t or "построй" in t:
             expr = self.extract_function(text)
 
@@ -144,7 +180,6 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
-        # ❗ УБРАЛ skip
         return {
             "type": "text",
             "data": "⚠️ Не удалось распознать задачу."
