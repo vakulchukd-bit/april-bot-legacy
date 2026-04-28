@@ -156,9 +156,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     try:
         actions = experience.get(str(user_id), {}).get("actions", [])
-        n = len(actions)
 
         for a in actions:
+            # 🔥 ФИЛЬТР ПО ТИПУ ЗАДАЧИ (ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ)
+            if a.get("intent") != detect_task_type(text):
+                continue
+
+            n += 1
+
             if a.get("status") == "positive":
                 positive += 1
             elif a.get("status") == "negative":
