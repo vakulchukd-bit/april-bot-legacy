@@ -146,14 +146,33 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except:
         experience = {}
 
-    # 🔥 ВЫДЕЛЕННЫЙ БЛОК ПОСЛЕДНЕГО ОПЫТА
-    last_feedback = None
+    # 🔥 СИСТЕМА ДОВЕРИЯ К ОПЫТУ
+    n = 0
+    positive = 0
+    negative = 0
+    confidence = 0
+    quality = 0
+    influence = 0
+
     try:
         actions = experience.get(str(user_id), {}).get("actions", [])
-        if actions:
-            last_feedback = actions[-1]
-    except:
-        pass
+        n = len(actions)
+
+        for a in actions:
+            if a.get("status") == "positive":
+                positive += 1
+            elif a.get("status") == "negative":
+                negative += 1
+
+        if n > 0:
+            quality = (positive - negative) / n
+            confidence = min(1.0, n / 20)
+            influence = confidence * quality
+
+        print(f"🧠 EXPERIENCE STATS: n={n}, +={positive}, -={negative}, conf={round(confidence,2)}, qual={round(quality,2)}, infl={round(influence,2)}")
+
+    except Exception as e:
+        print("🔥 EXPERIENCE CALC ERROR:", e)
 
     try:
         intent = detect_intent(text)
@@ -207,12 +226,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 except:
                     score = 1
 
-                # 🔥 ЧИСТОЕ ПРИМЕНЕНИЕ ОПЫТА
-                if last_feedback:
-                    if last_feedback.get("status") == "negative":
-                        score -= 0.2
-                    elif last_feedback.get("status") == "positive":
-                        score += 0.15
+                # 🔥 ГЛОБАЛЬНОЕ ВЛИЯНИЕ ОПЫТА
+                score += influence
 
                 candidates.append((score, room))
                 print(f"🧠 CANDIDATE: {room.name} | score={score}")
