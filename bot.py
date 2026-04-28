@@ -77,11 +77,17 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
+# ✅ ВЕРНУЛ СТАРЫЙ typing (как было)
 async def typing_loop(chat_id):
     try:
+        elapsed = 0
         while True:
-            await bot.send_chat_action(chat_id, "typing")
+            if elapsed < 4:
+                await bot.send_chat_action(chat_id, "typing")
+            else:
+                await bot.send_chat_action(chat_id, "upload_photo")
             await asyncio.sleep(2)
+            elapsed += 2
     except:
         pass
 
@@ -90,6 +96,7 @@ async def run_with_typing(chat_id, coro):
     task = asyncio.create_task(typing_loop(chat_id))
     try:
         result = await coro
+        await asyncio.sleep(0.1)
         return result
     finally:
         task.cancel()
@@ -228,10 +235,19 @@ async def handle(message: types.Message):
         add_dialog(user_id, "assistant", result.get("data", ""))
 
         if result["type"] == "text":
-            await message.answer(
-                result["data"],
-                reply_markup=main_keyboard(message.message_id)
-            )
+            reply = result["data"]
+
+            if is_admin:
+                status = "\n\n⚙️ ADMIN"
+            elif plan == "premium":
+                status = f"\n\n👑 PREMIUM: {get_remaining_days(user_id)} дн."
+            elif plan == "lite":
+                status = f"\n\n⚡ LITE: {get_remaining_days(user_id)} дн."
+            else:
+                limits = get_limits(user_id)
+                status = f"\n\n📊 FREE: {limits['messages_used']} / {limits['messages_limit']}"
+
+            await message.answer(reply + status, reply_markup=main_keyboard(message.message_id))
 
         elif result["type"] == "image_task":
             await message.answer("🎨 Генерирую изображение...")
@@ -247,13 +263,13 @@ async def handle(message: types.Message):
                 await message.answer("⚠️ Ошибка генерации")
 
         elif result["type"] == "image":
-            await message.answer("🎨 Генерирую изображение...")
             await safe_send_image(message, result["data"])
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
 
 
+# ✅ ВЕРНУЛ СТАРЫЙ callback (ПОЛНОСТЬЮ РАБОЧИЙ)
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
