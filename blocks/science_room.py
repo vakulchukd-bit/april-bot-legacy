@@ -41,7 +41,7 @@ class ScienceRoom:
             return 10.0
         return 1.0
 
-    # ===== 🔥 НОВОЕ: РАЗБИВКА НА ЗАДАЧИ =====
+    # ===== 🔥 РАЗБИВКА НА ЗАДАЧИ =====
     def split_into_tasks(self, text):
         t = text.lower()
 
@@ -59,6 +59,25 @@ class ScienceRoom:
 
         return tasks
 
+    # ===== 🔥 РАЗБИВКА СИСТЕМ =====
+    def split_system(self, eq):
+        parts = eq.split("=")
+
+        equations = []
+
+        if len(parts) == 3:
+            equations.append(parts[0] + "=" + parts[1])
+            equations.append(parts[1] + "=" + parts[2])
+
+        elif len(parts) > 3:
+            for i in range(len(parts) - 1):
+                equations.append(parts[i] + "=" + parts[i + 1])
+
+        else:
+            equations.append(eq)
+
+        return equations
+
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
 
@@ -72,7 +91,8 @@ class ScienceRoom:
 
         for task in tasks:
             if "=" in task:
-                equations.append(task)
+                # 🔥 ВАЖНО: используем split_system
+                equations.extend(self.split_system(task))
             elif "sin" in task:
                 sin_tasks.append(task)
 
