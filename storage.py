@@ -36,13 +36,23 @@ def init_db():
             )
             """)
 
-            # 🔥 ДОБАВИЛИ payments
+            # 🔥 payments
             cur.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT,
                 plan TEXT,
                 amount INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
+            # 🔥🔥🔥 НОВОЕ — feedback (ОПЫТ)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                is_positive BOOLEAN,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """)
@@ -112,7 +122,7 @@ def set_subscription(user_id, plan="premium"):
         return
 
 
-# 🔥 СОХРАНЕНИЕ ПЛАТЕЖА (ДОЛЛАРЫ)
+# 🔥 СОХРАНЕНИЕ ПЛАТЕЖА
 def save_payment(user_id, plan):
     conn = get_conn()
     if not conn:
@@ -128,6 +138,25 @@ def save_payment(user_id, plan):
             INSERT INTO payments (user_id, plan, amount)
             VALUES (%s, %s, %s)
             """, (uid, plan, amount))
+
+
+# 🔥🔥🔥 СОХРАНЕНИЕ ЛАЙКА / ДИЗЛАЙКА
+def save_feedback(user_id, is_positive):
+    conn = get_conn()
+    if not conn:
+        return
+
+    uid = str(user_id)
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                INSERT INTO feedback (user_id, is_positive)
+                VALUES (%s, %s)
+                """, (uid, is_positive))
+    except Exception as e:
+        print("🔥 FEEDBACK ERROR:", e)
 
 
 def get_user_plan(user_id):
@@ -213,140 +242,6 @@ def can_send_message(user_id, limit=15):
                 return True
 
     return True
-
-
-# ===== 🔥 ДОБАВЛЕННЫЕ ФУНКЦИИ =====
-def get_remaining_messages(user_id, limit=15):
-    conn = get_conn()
-
-    if conn:
-        uid = str(user_id)
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
-
-                if not user:
-                    return limit
-
-                return max(0, limit - user["messages_today"])
-
-    return limit
-
-
-def get_remaining_days(user_id):
-    conn = get_conn()
-
-    if conn:
-        uid = str(user_id)
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT subscription_until FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
-
-                if not user:
-                    return 0
-
-                seconds = user["subscription_until"] - now().timestamp()
-                return max(0, math.ceil(seconds / 86400))
-
-    return 0
-
-
-def get_limits(user_id, msg_limit=15, img_limit=1):
-    conn = get_conn()
-
-    if conn:
-        uid = str(user_id)
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
-
-                if not user:
-                    return {
-                        "messages_used": 0,
-                        "messages_limit": msg_limit,
-                        "images_used": 0,
-                        "images_limit": img_limit
-                    }
-
-                messages = user["messages_today"] or 0
-                images = user["images_today"] or 0
-
-                if user["last_reset"] != today():
-                    messages = 0
-                    images = 0
-
-                return {
-                    "messages_used": messages,
-                    "messages_limit": msg_limit,
-                    "images_used": images,
-                    "images_limit": img_limit
-                }
-
-    return {
-        "messages_used": 0,
-        "messages_limit": msg_limit,
-        "images_used": 0,
-        "images_limit": img_limit
-    }
-
-
-# 🔥 ДОХОД (теперь в долларах)
-def get_admin_stats():
-    conn = get_conn()
-    if not conn:
-        return {
-            "users": 0,
-            "subs": 0,
-            "income_total": 0,
-            "income_today": 0
-        }
-
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) as count FROM users")
-            users = cur.fetchone()["count"]
-
-            cur.execute("""
-                SELECT COUNT(*) as count FROM users
-                WHERE plan IN ('lite', 'premium')
-                AND subscription_until > %s
-            """, (now().timestamp(),))
-            subs = cur.fetchone()["count"]
-
-            cur.execute("SELECT SUM(amount) as total FROM payments")
-            income_total = cur.fetchone()["total"] or 0
-
-            cur.execute("""
-            SELECT SUM(amount) as today FROM payments
-            WHERE DATE(created_at) = CURRENT_DATE
-            """)
-            income_today = cur.fetchone()["today"] or 0
-
-            return {
-                "users": users,
-                "subs": subs,
-                "income_total": income_total,
-                "income_today": income_today
-            }
-
-
-def get_reset_seconds(user_id):
-    now_time = now()
-    tomorrow = (now_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now_time).total_seconds())
-
-
-def format_time(seconds):
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    return f"{hours:02}:{minutes:02}:{secs:02}"
 
 
 # ===== ADMIN =====
