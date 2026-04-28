@@ -67,7 +67,6 @@ ADMIN_ID = 2016592532
 tz = pytz.timezone("Europe/Kyiv")
 
 
-# ===== TIME =====
 def is_time_question(text: str):
     text = text.lower()
     return any(t in text for t in [
@@ -75,7 +74,6 @@ def is_time_question(text: str):
     ])
 
 
-# ===== TYPING =====
 async def typing_loop(chat_id):
     try:
         elapsed = 0
@@ -100,7 +98,6 @@ async def run_with_typing(chat_id, coro):
         task.cancel()
 
 
-# ===== SERVER =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -113,7 +110,6 @@ def run_server():
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
-# ===== IMAGE SEND =====
 async def safe_send_image(message, data):
     try:
         await message.answer_photo(
@@ -129,7 +125,6 @@ async def safe_send_image(message, data):
         )
 
 
-# ===== MESSAGE =====
 @dp.message()
 async def handle(message: types.Message):
     user_id = message.from_user.id
@@ -170,13 +165,11 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# ===== CALLBACK =====
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # лайки
     if data.startswith("like_"):
         await callback.answer("👍")
         return
@@ -185,7 +178,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer("👎")
         return
 
-    # меню
     if data == "menu":
         text, keyboard = get_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
@@ -198,13 +190,38 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # ===== ПОДПИСКА =====
-    if data == "buy_premium":
+    # ===== ADMIN =====
+    if user_id == ADMIN_ID:
+
+        if data == "admin_stats":
+            errors = get_errors()
+            text = "📊 Анализ\n\n"
+            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
+            await callback.answer(text[:200], show_alert=True)
+            return
+
+        if data == "admin_payments":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.answer("📢 Введи текст", show_alert=True)
+            return
+
+    # ===== ПОДПИСКИ =====
+    if data == "buy_lite":
         await callback.message.answer(
-            "💳 Подтвердить Premium?",
+            "💳 Подтвердить Lite?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Да", callback_data="confirm_premium"),
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
                     InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
                 ]
             ])
@@ -212,38 +229,73 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    if data == "confirm_premium":
-        await bot.send_message(
-            ADMIN_ID,
-            f"💳 ЗАПРОС PREMIUM от {user_id}",
+    if data == "buy_premium":
+        await callback.message.answer(
+            "💳 Подтвердить Premium?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅", callback_data=f"admin_ok_{user_id}"),
-                    InlineKeyboardButton(text="❌", callback_data=f"admin_no_{user_id}")
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
+                ]
+            ])
+        )
+        await callback.answer()
+        return
+
+    if data == "buy_yes_lite":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС LITE от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_confirm_lite_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_reject_lite_{user_id}")
                 ]
             ])
         )
         await callback.answer("Отправлено")
         return
 
-    if data.startswith("admin_ok_"):
-        uid = int(data.split("_")[2])
-        set_subscription(uid, "premium")
-        save_payment(uid, "premium")
-        await bot.send_message(uid, "✅ Premium активирован")
-        await callback.answer()
+    if data == "buy_yes_premium":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС PREMIUM от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_confirm_premium_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_reject_premium_{user_id}")
+                ]
+            ])
+        )
+        await callback.answer("Отправлено")
         return
 
-    if data.startswith("admin_no_"):
-        uid = int(data.split("_")[2])
-        await bot.send_message(uid, "❌ Отказано")
+    if data.startswith("admin_confirm_"):
+        parts = data.split("_")
+        plan = parts[2]
+        uid = int(parts[3])
+
+        set_subscription(uid, plan)
+        save_payment(uid, plan)
+
+        await bot.send_message(uid, f"✅ Активирован {plan.upper()}")
+        await callback.answer("OK", show_alert=True)
+        return
+
+    if data.startswith("admin_reject_"):
+        uid = int(data.split("_")[3])
+        await bot.send_message(uid, "❌ Отклонено")
+        await callback.answer("OK", show_alert=True)
+        return
+
+    if data == "cancel":
+        await callback.message.answer("❌ Отменено")
         await callback.answer()
         return
 
     await callback.answer()
 
 
-# ===== MAIN =====
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
