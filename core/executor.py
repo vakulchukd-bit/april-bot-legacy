@@ -144,13 +144,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # ===== 🔥 ПОЛНАЯ ИЗОЛЯЦИЯ CALLBACK =====
+    # ===== 🔥 FIX CALLBACK =====
     if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
 
-        return None  # ❗ КРИТИЧЕСКИЙ ФИКС
+        return {"type": "noop"}  # ✅ ВАЖНО
 
     t = text.lower().strip()
 
