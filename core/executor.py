@@ -35,11 +35,10 @@ from blocks.science_room import ScienceRoom
 import re
 
 
-# ===== 🧠 СЕМАНТИКА (ТОТ САМЫЙ АПГРЕЙД) =====
+# ===== 🧠 СЕМАНТИКА =====
 def detect_task_type(text: str):
     t = text.lower()
 
-    # 🔥 только реальные выражения, а не просто цифры
     if re.search(r'[0-9x\)\(]+\s*[\+\-\*/=]\s*[0-9x\)\(]+', t):
         return "math"
 
@@ -61,8 +60,6 @@ def detect_task_type(text: str):
 
     return "text"
 
-
-# ===== ВСЁ НИЖЕ — ТВОЯ ЛОГИКА, НЕ ТРОГАЕМ =====
 
 def handle_subscription(callback_data, user_id):
     print("🔥 CALLBACK:", callback_data)
@@ -163,7 +160,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     task_type = detect_task_type(text)
 
-    # 🔥 ВАЖНО: НЕ ВОЗВРАЩАЕМ НАПРЯМУЮ!
+    # ===== 🔥 ФИКС МАТЕМАТИКИ (через run_with_typing) =====
     if task_type == "math":
         science = ScienceRoom()
         result = await science.handle(user_id, text, {
@@ -177,9 +174,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         }, run_with_typing)
 
         if result:
+            if result.get("type") == "text":
+                wrapped = await run_with_typing(
+                    chat_id,
+                    text_process(user_id, result["data"], state, energy)
+                )
+                return {"type": "text", "data": wrapped["content"]}
+
             return result
 
-    # ===== ОРКЕСТР (НЕ ТРОГАЕМ) =====
+    # ===== ОРКЕСТР =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -199,7 +203,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # 🔥 ВСЁ ЧЕРЕЗ run_with_typing → кнопки живут
+    # ===== ФОЛБЭК =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
