@@ -1,6 +1,6 @@
 from blocks.room_protocol import Room
 
-# === TRIG ROOM 🔥 (НОВЫЙ, ПЕРВЫМ) ===
+# === TRIG ROOM 🔥 ===
 from blocks.trig_room import TrigRoom
 
 # === SCIENCE ROOM 🔥 ===
@@ -53,34 +53,16 @@ class ImageGenerateRoom(Room):
         if text.lower().strip() in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
             text = state.get("last_image_prompt", text)
 
-        print("🎨 IMAGE ROOM START:", text)
+        result = await run(
+            context["chat_id"],
+            image_generate(user_id, text, state)
+        )
 
-        try:
-            result = await run(
-                context["chat_id"],
-                image_generate(user_id, text, state)
-            )
+        if result and result.get("type") == "image":
+            state["last_image_prompt"] = text
+            return result
 
-            print("🎨 IMAGE RESULT:", result)
-
-            if result and result.get("type") == "image":
-                state["last_image_prompt"] = text
-                return result
-
-            print("⚠️ IMAGE GENERATION FAILED → fallback")
-
-            return {
-                "type": "error",
-                "data": "🎨 Не удалось создать изображение. Попробуй изменить запрос."
-            }
-
-        except Exception as e:
-            print("🔥 IMAGE ROOM ERROR:", e)
-
-            return {
-                "type": "error",
-                "data": "⚠️ Ошибка при генерации изображения"
-            }
+        return {"type": "error", "data": "🎨 Ошибка генерации"}
 
 
 # === IMAGE EDIT ===
@@ -100,8 +82,7 @@ class ImageEditRoom(Room):
 
         return any(v in t for v in [
             "измени", "добавь", "убери",
-            "сделай", "замени", "поменяй",
-            "осветли", "затемни", "улучши"
+            "сделай", "замени", "поменяй"
         ])
 
     def evaluate(self, text, context):
@@ -114,81 +95,40 @@ class ImageEditRoom(Room):
         if self.can_handle(text, context):
             score += 0.7
 
-        if any(w in t for w in ["измени", "добавь", "убери"]):
-            score += 0.4
-
         return score
 
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
 
         if not ctx or not ctx.get("path"):
-            return {
-                "type": "error",
-                "data": "⚠️ Нет изображения для редактирования"
-            }
+            return {"type": "error", "data": "⚠️ Нет изображения"}
 
-        if not ctx.get("hint"):
-            try:
-                ctx["hint"] = await analyze_image(ctx["path"])
-            except:
-                ctx["hint"] = "изображение"
+        new_prompt = (ctx.get("hint") or "изображение") + ", " + text
 
-        new_prompt = ctx["hint"] + ", IMPORTANT: " + text
+        result = await run(
+            context["chat_id"],
+            image_edit(user_id, ctx["path"], new_prompt)
+        )
 
-        try:
-            result = await run(
-                context["chat_id"],
-                image_edit(user_id, ctx["path"], new_prompt)
-            )
-
-            if result and result.get("type") == "image":
-                return result
-
-            return {
-                "type": "error",
-                "data": "⚠️ Не удалось изменить изображение"
-            }
-
-        except Exception as e:
-            print("🔥 IMAGE EDIT ERROR:", e)
-
-            return {
-                "type": "error",
-                "data": "⚠️ Ошибка при редактировании изображения"
-            }
+        return result
 
 
-# === TEXT ===
-from blocks.text_module import process as text_process
-
-
+# === TEXT (ФИКС) ===
 class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        return True
+        return False  # 🔥 КЛЮЧЕВОЙ ФИКС
 
     def evaluate(self, text, context):
-        return 0.1
-
-    async def handle(self, user_id, text, context, run):
-        result = await run(
-            context["chat_id"],
-            text_process(user_id, text, context["state"])
-        )
-
-        return {
-            "type": "text",
-            "data": result["content"]
-        }
+        return 0.0
 
 
 # === РЕЕСТР ===
 ROOMS = [
-    TrigRoom(),      # 🔥 НОВЫЙ ПЕРВЫЙ
+    TrigRoom(),
     ScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
-    TextRoom()
+    # TextRoom убран из активного перехвата
 ]
