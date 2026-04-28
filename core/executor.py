@@ -213,6 +213,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
 
+    # ===== 🔥 BOOST SCIENCE =====
+    boosted = []
+
+    for score, room in candidates:
+        if room.name == "science":
+            if "=" in text or "sin" in text or "x" in text:
+                score += 5
+        boosted.append((score, room))
+
+    candidates = boosted
+
     if not candidates:
         print("⚠️ NO ROOMS → fallback")
         result = await run_with_typing(
@@ -238,7 +249,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
-    # ===== ROUTER (как fallback логики) =====
+    # ===== ROUTER =====
     try:
         routed = route_request(text, intent=intent, intent_ai=intent_ai)
         if routed:
