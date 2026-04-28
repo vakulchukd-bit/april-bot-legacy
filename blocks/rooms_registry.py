@@ -120,15 +120,15 @@ class ImageEditRoom(Room):
         return result
 
 
-# === TEXT (ФИКС) ===
+# === TEXT (ВОССТАНОВЛЕН КАК FALLBACK) ===
 class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        return False  # 🔥 КЛЮЧЕВОЙ ФИКС
+        return True  # 🔥 ВОЗВРАТ БАЗОВОГО СЛОЯ
 
     def evaluate(self, text, context):
-        return 0.0
+        return 0.1  # самый низкий приоритет
 
 
 # === РЕЕСТР ===
@@ -136,4 +136,5 @@ ROOMS = [
     ScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
+    TextRoom(),  # 🔥 ДОБАВИЛИ ОБРАТНО
 ]
