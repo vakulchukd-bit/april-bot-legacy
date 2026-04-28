@@ -54,6 +54,25 @@ class ScienceRoom:
 
         return score
 
+    # ===== 🔥 НОВОЕ: РАЗБИВКА НА ЗАДАЧИ =====
+    def split_tasks(self, text):
+        parts = re.split(r'(реши|найди)', text.lower())
+        tasks = []
+
+        current = ""
+        for p in parts:
+            if p.strip() in ["реши", "найди"]:
+                if current:
+                    tasks.append(current.strip())
+                current = p
+            else:
+                current += " " + p
+
+        if current.strip():
+            tasks.append(current.strip())
+
+        return tasks if len(tasks) > 1 else [text]
+
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
 
@@ -62,59 +81,61 @@ class ScienceRoom:
 
         t = text.lower()
 
-        if "таблица" in t and "умнож" in t:
-            path = self.build_multiplication_table()
-            if path:
-                try:
-                    with open(path, "rb") as f:
-                        return {"type": "image", "data": f.read()}
-                except Exception as e:
-                    print("🔥 READ ERROR:", e)
+        # ===== 🔥 MULTI TASK FIX =====
+        tasks = self.split_tasks(text)
+        results = []
 
-        if plan == "free":
-            if "=" in t or "реши" in t:
-                result = self.solve_equation(text)
+        for task in tasks:
+
+            # ===== ГРАФИКИ =====
+            if "график" in task or "построй" in task or "y=" in task:
+                expr = self.extract_function(task)
+
+                if not expr:
+                    interpreted = self.interpret_text_graph(task)
+                    if interpreted:
+                        if interpreted["type"] == "function":
+                            expr = interpreted["expr"]
+                        elif interpreted["type"] == "heatmap":
+                            path = self.build_multiplication_table()
+                            if path:
+                                try:
+                                    with open(path, "rb") as f:
+                                        return {"type": "image", "data": f.read()}
+                                except Exception as e:
+                                    print("🔥 READ ERROR:", e)
+
+                if expr:
+                    path = self.build_graph(expr)
+                    if path:
+                        try:
+                            with open(path, "rb") as f:
+                                return {"type": "image", "data": f.read()}
+                        except Exception as e:
+                            print("🔥 READ ERROR:", e)
+
+            # ===== FREE =====
+            if plan == "free":
+                if "=" in task or "реши" in task:
+                    result = self.solve_equation(task)
+                    if result:
+                        results.append(f"📐 Ответ:\n{result}")
+                continue
+
+            # ===== РЕШЕНИЕ =====
+            if "=" in task or "реши" in task or any(w in task for w in [
+                "приведи", "доведи", "найди", "вырази", "вычисли"
+            ]):
+                result = self.solve_equation(task)
                 if result:
-                    return {
-                        "type": "text",
-                        "data": f"📐 Ответ:\n{result}\n\n⚡ Для графиков перейди на LITE"
-                    }
-            return {"type": "text", "data": "⚠️ Только простые решения доступны"}
+                    results.append(f"📐 Решение:\n{result}")
 
-        if "график" in t or "построй" in t or "y=" in t:
-            expr = self.extract_function(text)
+        if results:
+            return {
+                "type": "text",
+                "data": "\n\n".join(results)
+            }
 
-            if not expr:
-                interpreted = self.interpret_text_graph(text)
-                if interpreted:
-                    if interpreted["type"] == "function":
-                        expr = interpreted["expr"]
-                    elif interpreted["type"] == "heatmap":
-                        path = self.build_multiplication_table()
-                        if path:
-                            try:
-                                with open(path, "rb") as f:
-                                    return {"type": "image", "data": f.read()}
-                            except Exception as e:
-                                print("🔥 READ ERROR:", e)
-
-            if expr:
-                path = self.build_graph(expr)
-                if path:
-                    try:
-                        with open(path, "rb") as f:
-                            return {"type": "image", "data": f.read()}
-                    except Exception as e:
-                        print("🔥 READ ERROR:", e)
-
-        if "=" in t or "реши" in t or any(w in t for w in [
-            "приведи", "доведи", "найди", "вырази", "вычисли"
-        ]):
-            result = self.solve_equation(text)
-            if result:
-                return {"type": "text", "data": f"📐 Решение:\n{result}"}
-
-        # 🔥 ФИКС: теперь не падает система
         return {"type": "skip"}
 
     # ===== ПАРСИНГ =====
@@ -231,10 +252,8 @@ class ScienceRoom:
                 equation = simplify(sympify(left) - sympify(right))
                 steps.append(f"{equation} = 0")
 
-                # 🔥 сначала пробуем обычный solve
                 solutions = solve(equation, x)
 
-                # 🔥 если странно или пусто → trig режим
                 if not solutions:
                     solutions = solveset(equation, x, domain=S.Reals)
 
