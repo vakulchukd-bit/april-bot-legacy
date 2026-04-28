@@ -144,10 +144,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    # ===== 🔥 ПОЛНАЯ ИЗОЛЯЦИЯ CALLBACK =====
     if callback_data is not None:
         sub = handle_subscription(callback_data, user_id)
         if sub:
             return sub
+
+        return None  # ❗ КРИТИЧЕСКИЙ ФИКС
 
     t = text.lower().strip()
 
@@ -226,7 +229,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== ФОЛБЭК (ГАРАНТИЯ UI) =====
+    # ===== ФОЛБЭК =====
     try:
         result = await run_with_typing(
             chat_id,
@@ -236,7 +239,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 FALLBACK ERROR:", e)
 
-    # ===== ПОСЛЕДНИЙ ГАРАНТ =====
     return {
         "type": "text",
         "data": "⚠️ Ошибка обработки. Попробуй ещё раз."
