@@ -223,18 +223,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            # ===== SELF CHECK =====
+            # ===== SELF CHECK (ослаблен) =====
             try:
                 from blocks.self_check import self_check
 
                 valid, error = self_check(result, text, energy)
 
                 if not valid:
-                    if error < 0.2:
-                        print(f"⚠️ ACCEPT WITH WARNING: {room.name} | error={error}")
-                    else:
-                        print(f"⚠️ SELF CHECK FAIL: {room.name} | error={error}")
-                        continue
+                    print(f"⚠️ SELF CHECK WARNING: {room.name} | error={error}")
 
             except Exception as e:
                 print("🔥 SELF CHECK ERROR:", e)
