@@ -38,9 +38,6 @@ from blocks.state_manager import (
     get_state
 )
 
-# 🔥 ДОБАВИЛ (ничего не ломает)
-from blocks.experience import update_experience
-
 from blocks.anchor_system import create_anchor, clear_anchor
 from blocks.error_handler import handle_error, get_errors
 
@@ -135,7 +132,6 @@ async def handle(message: types.Message):
 
     text = message.text or message.caption or ""
 
-    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -158,7 +154,6 @@ async def handle(message: types.Message):
 
         await message.answer(f"🎤 {text}")
 
-    # ===== 🔥 ГЛАЗА (ВОЗВРАТ) =====
     if message.photo:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
@@ -188,7 +183,6 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # ===== РАССЫЛКА =====
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -231,7 +225,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
-    # 🔥 ВСТАВКА ОБУЧЕНИЯ (АККУРАТНО)
     if data.startswith("like_"):
         state = get_state(user_id)
         state["last_action"] = {
@@ -239,8 +232,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
             "intent": "like",
             "status": "positive"
         }
-        update_experience(user_id, state)
-
         await callback.answer("👍")
         return
 
@@ -251,8 +242,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
             "intent": "dislike",
             "status": "negative"
         }
-        update_experience(user_id, state)
-
         await callback.answer("👎")
         return
 
@@ -268,7 +257,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # ===== ADMIN =====
     if user_id == ADMIN_ID:
 
         if data == "admin_stats":
@@ -293,7 +281,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.answer("📢 Введи текст", show_alert=True)
             return
 
-    # ===== LITE =====
     if data in ["buy_lite", "lite", "go_lite"]:
         await callback.message.answer(
             "💳 Подтвердить Lite?",
