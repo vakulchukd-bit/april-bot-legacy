@@ -30,7 +30,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
-from blocks.science_room import ScienceRoom
 
 import re
 
@@ -165,6 +164,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except:
         intent_ai = None
 
+    # ===== IMAGE ANALYZE =====
     if is_image_question(text) and ctx and ctx.get("path"):
         try:
             result = await analyze_image(user_id, ctx["path"], text)
@@ -173,43 +173,72 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print("🔥 IMAGE ANALYZE ERROR:", e)
 
-    task_type = detect_task_type(text)
+    context = {
+        "chat_id": chat_id,
+        "state": state,
+        "image": ctx,
+        "anchor": anchor,
+        "mode": mode,
+        "task_type": detect_task_type(text),
+        "energy": energy
+    }
 
-    if (task_type == "image_edit" or is_edit_request(text)) and ctx and ctx.get("path"):
+    # ===== 🧠 ORCHESTRATOR =====
+    def is_valid_result(result):
+        if not result:
+            return False
+        if not isinstance(result, dict):
+            return False
+        if "type" not in result:
+            return False
+        if result["type"] == "text" and not result.get("data"):
+            return False
+        if result["type"] == "image" and not result.get("data"):
+            return False
+        return True
+
+    candidates = []
+
+    for room in ROOMS:
         try:
-            result = await run_with_typing(chat_id, image_edit(user_id, ctx["path"], text))
-            if isinstance(result, dict) and result.get("type"):
-                return result
-        except Exception as e:
-            print("🔥 IMAGE EDIT ERROR:", e)
+            if room.can_handle(text, context):
+                try:
+                    score = room.evaluate(text, context)
+                except:
+                    score = 1
 
-    if task_type == "image_generate":
+                candidates.append((score, room))
+                print(f"🧠 CANDIDATE: {room.name} | score={score}")
+
+        except Exception as e:
+            print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
+
+    if not candidates:
+        print("⚠️ NO ROOMS → fallback")
+        result = await run_with_typing(
+            chat_id,
+            text_process(user_id, text, state, energy)
+        )
+        return {"type": "text", "data": result["content"]}
+
+    candidates.sort(reverse=True, key=lambda x: x[0])
+
+    for score, room in candidates:
         try:
-            result = await run_with_typing(chat_id, image_generate(user_id, text, state))
-            if isinstance(result, dict) and result.get("type"):
-                return result
-        except Exception as e:
-            print("🔥 IMAGE GEN ERROR:", e)
+            print(f"🚀 TRY ROOM: {room.name} | score={score}")
 
-    if task_type == "math":
-        try:
-            science = ScienceRoom()
-            result = await science.handle(user_id, text, {
-                "chat_id": chat_id,
-                "state": state,
-                "image": ctx,
-                "anchor": anchor,
-                "mode": mode,
-                "task_type": task_type,
-                "energy": energy
-            }, run_with_typing)
+            result = await room.handle(user_id, text, context, run_with_typing)
 
-            if isinstance(result, dict) and result.get("type"):
+            if is_valid_result(result):
+                print(f"✅ SUCCESS: {room.name} | type={result['type']}")
                 return result
+            else:
+                print(f"❌ INVALID RESULT: {room.name}")
 
         except Exception as e:
-            print("🔥 SCIENCE ERROR:", e)
+            print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
+    # ===== ROUTER (как fallback логики) =====
     try:
         routed = route_request(text, intent=intent, intent_ai=intent_ai)
         if routed:
@@ -217,67 +246,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 ROUTER ERROR:", e)
 
-    context = {
-        "chat_id": chat_id,
-        "state": state,
-        "image": ctx,
-        "anchor": anchor,
-        "mode": mode,
-        "task_type": task_type,
-        "energy": energy
-    }
+    # ===== FINAL FALLBACK =====
+    print("⚠️ ALL ROOMS FAILED → fallback")
 
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
-                if isinstance(result, dict) and result.get("type"):
-                    return result
-        except Exception as e:
-            print(f"🔥 ROOM ERROR [{room.name}]:", e)
-
-    # ===== ФОЛБЭК =====
     try:
         result = await run_with_typing(
             chat_id,
             text_process(user_id, text, state, energy)
         )
+        return {"type": "text", "data": result["content"]}
     except Exception as e:
-        print("🔥 FALLBACK ERROR:", e)
-        result = None
+        print("🔥 FINAL FALLBACK ERROR:", e)
 
-    # ===== 🛡 FINAL GUARANTEE =====
-    print("🧠 EXECUTOR END REACHED")
-
-    if not result:
-        print("🔥 EMPTY RESULT → FORCE")
-        try:
-            fallback = await run_with_typing(
-                chat_id,
-                text_process(user_id, text, state, energy)
-            )
-            return {"type": "text", "data": fallback["content"]}
-        except:
-            return {"type": "text", "data": "⚠️ Ошибка обработки."}
-
-    if not isinstance(result, dict):
-        print("🔥 INVALID RESULT TYPE:", type(result))
-        return {"type": "text", "data": str(result)}
-
-    if "type" not in result:
-        print("🔥 NO TYPE")
-        result["type"] = "text"
-
-    if "data" not in result:
-        print("🔥 NO DATA → FORCE FALLBACK")
-        try:
-            fallback = await run_with_typing(
-                chat_id,
-                text_process(user_id, text, state, energy)
-            )
-            result["data"] = fallback["content"]
-        except:
-            result["data"] = "⚠️ Ошибка обработки."
-
-    print("✅ FINAL SAFE RESULT:", result["type"])
-    return result
+    return {
+        "type": "text",
+        "data": "⚠️ Не удалось обработать запрос."
+    }
