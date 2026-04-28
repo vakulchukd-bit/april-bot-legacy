@@ -132,7 +132,7 @@ async def handle(message: types.Message):
 
     text = message.text or message.caption or ""
 
-    # ===== VOICE (ВОЗВРАТ) =====
+    # ===== VOICE =====
     if message.voice:
         file = await bot.get_file(message.voice.file_id)
         path = f"{user_id}.ogg"
@@ -154,6 +154,22 @@ async def handle(message: types.Message):
             return
 
         await message.answer(f"🎤 {text}")
+
+    # ===== 🔥 ГЛАЗА (ВОЗВРАТ) =====
+    if message.photo:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+
+        path = f"{user_id}_image.jpg"
+        await bot.download_file(file.file_path, destination=path)
+
+        set_image_context(user_id, {
+            "type": "uploaded",
+            "path": path
+        })
+
+        await message.answer("📸 Изображение получено. Можешь спросить про него.")
+        return
 
     state = get_state(user_id)
 
