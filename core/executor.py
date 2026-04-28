@@ -162,46 +162,49 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     task_type = detect_task_type(text)
 
-    # ===== IMAGE GENERATE (С TYPING) =====
+    # ===== IMAGE GENERATE =====
     if task_type == "image_generate":
-        result = await run_with_typing(
-            chat_id,
-            image_generate(user_id, text, state)
-        )
-        if result:
-            return result
+        try:
+            result = await run_with_typing(
+                chat_id,
+                image_generate(user_id, text, state)
+            )
+            if isinstance(result, dict) and result.get("type"):
+                return result
+        except Exception as e:
+            print("🔥 IMAGE GEN ERROR:", e)
 
-    # ===== IMAGE EDIT (С TYPING) =====
+    # ===== IMAGE EDIT =====
     if task_type == "image_edit" and ctx and ctx.get("path"):
-        result = await run_with_typing(
-            chat_id,
-            image_edit(user_id, ctx["path"], text)
-        )
-        if result:
-            return result
+        try:
+            result = await run_with_typing(
+                chat_id,
+                image_edit(user_id, ctx["path"], text)
+            )
+            if isinstance(result, dict) and result.get("type"):
+                return result
+        except Exception as e:
+            print("🔥 IMAGE EDIT ERROR:", e)
 
     # ===== МАТЕМАТИКА =====
     if task_type == "math":
-        science = ScienceRoom()
-        result = await science.handle(user_id, text, {
-            "chat_id": chat_id,
-            "state": state,
-            "image": ctx,
-            "anchor": anchor,
-            "mode": mode,
-            "task_type": task_type,
-            "energy": energy
-        }, run_with_typing)
+        try:
+            science = ScienceRoom()
+            result = await science.handle(user_id, text, {
+                "chat_id": chat_id,
+                "state": state,
+                "image": ctx,
+                "anchor": anchor,
+                "mode": mode,
+                "task_type": task_type,
+                "energy": energy
+            }, run_with_typing)
 
-        if result:
-            if result.get("type") == "text":
-                wrapped = await run_with_typing(
-                    chat_id,
-                    text_process(user_id, result["data"], state, energy)
-                )
-                return {"type": "text", "data": wrapped["content"]}
+            if isinstance(result, dict) and result.get("type"):
+                return result
 
-            return result
+        except Exception as e:
+            print("🔥 SCIENCE ERROR:", e)
 
     # ===== ОРКЕСТР =====
     context = {
@@ -218,15 +221,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         try:
             if room.can_handle(text, context):
                 result = await room.handle(user_id, text, context, run_with_typing)
-                if result:
+                if isinstance(result, dict) and result.get("type"):
                     return result
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== ФОЛБЭК =====
-    result = await run_with_typing(
-        chat_id,
-        text_process(user_id, text, state, energy)
-    )
+    # ===== ФОЛБЭК (ГАРАНТИЯ UI) =====
+    try:
+        result = await run_with_typing(
+            chat_id,
+            text_process(user_id, text, state, energy)
+        )
+        return {"type": "text", "data": result["content"]}
+    except Exception as e:
+        print("🔥 FALLBACK ERROR:", e)
 
-    return {"type": "text", "data": result["content"]}
+    # ===== ПОСЛЕДНИЙ ГАРАНТ =====
+    return {
+        "type": "text",
+        "data": "⚠️ Ошибка обработки. Попробуй ещё раз."
+    }
