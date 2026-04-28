@@ -85,7 +85,8 @@ def build_pro_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="confirm_downgrade")],
+        # ✅ ЕДИНСТВЕННЫЙ ФИКС
+        [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="buy_lite")],
         [InlineKeyboardButton(text="👑 Текущий тариф: Premium — $25", callback_data="noop")],
         [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
     ])
@@ -144,7 +145,8 @@ def build_tariffs_menu(user_id):
 
     if plan == "premium":
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="confirm_downgrade")],
+            # ✅ ЕДИНСТВЕННЫЙ ФИКС
+            [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="buy_lite")],
             [InlineKeyboardButton(text="👑 Текущий: Premium — $25", callback_data="noop")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
         ])
