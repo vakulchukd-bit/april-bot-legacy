@@ -38,6 +38,9 @@ from blocks.state_manager import (
     get_state
 )
 
+# 🔥 ДОБАВИЛ (ничего не ломает)
+from blocks.experience import update_experience
+
 from blocks.anchor_system import create_anchor, clear_anchor
 from blocks.error_handler import handle_error, get_errors
 
@@ -228,11 +231,28 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
+    # 🔥 ВСТАВКА ОБУЧЕНИЯ (АККУРАТНО)
     if data.startswith("like_"):
+        state = get_state(user_id)
+        state["last_action"] = {
+            "type": "feedback",
+            "intent": "like",
+            "status": "positive"
+        }
+        update_experience(user_id, state)
+
         await callback.answer("👍")
         return
 
     if data.startswith("dislike_"):
+        state = get_state(user_id)
+        state["last_action"] = {
+            "type": "feedback",
+            "intent": "dislike",
+            "status": "negative"
+        }
+        update_experience(user_id, state)
+
         await callback.answer("👎")
         return
 
