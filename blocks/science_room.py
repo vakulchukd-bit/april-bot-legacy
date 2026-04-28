@@ -37,64 +37,27 @@ class ScienceRoom:
         return False
 
     def evaluate(self, text, context):
-        t = text.lower()
-
         if context.get("task_type") == "math":
             return 10.0
+        return 1.0
 
-        score = 0.0
-
-        try:
-            if self.can_handle(text, context):
-                score += 1.0
-        except:
-            pass
-
-        if any(w in t for w in ["синус", "график", "формула", "матем", "уравнение"]):
-            score += 1.0
-
-        return score
-
-    # ===== 🔥 СИНТАКСИЧЕСКИЙ ПАРСЕР =====
-    def extract_math_chunks(self, text):
+    # ===== 🔥 НОВОЕ: РАЗБИВКА НА ЗАДАЧИ =====
+    def split_into_tasks(self, text):
         t = text.lower()
-        t = re.sub(r'[^\dx\+\-\*/=\(\)\.\s]', ' ', t)
 
-        parts = t.split()
+        parts = re.split(r'(sin\([^)]+\)|[a-z0-9\+\-\*/\(\)]+\=[a-z0-9\+\-\*/\(\)]+)', t)
 
-        chunks = []
-        current = ""
+        tasks = []
 
         for p in parts:
-            if any(c in p for c in "=+-*/x"):
-                current += p
-            else:
-                if current:
-                    chunks.append(current)
-                    current = ""
+            p = p.strip()
+            if not p:
+                continue
 
-        if current:
-            chunks.append(current)
+            if "=" in p or "sin" in p:
+                tasks.append(p)
 
-        return chunks
-
-    def parse_equations(self, chunk):
-        parts = chunk.split("=")
-
-        equations = []
-
-        if len(parts) == 3:
-            equations.append(parts[0] + "=" + parts[1])
-            equations.append(parts[1] + "=" + parts[2])
-
-        elif len(parts) > 3:
-            for i in range(len(parts) - 1):
-                equations.append(parts[i] + "=" + parts[i + 1])
-
-        else:
-            equations.append(chunk)
-
-        return equations
+        return tasks
 
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
@@ -102,34 +65,44 @@ class ScienceRoom:
         if user_id == ADMIN_ID:
             plan = "premium"
 
-        t = text.lower()
-
-        # 🔥 ПАРСИНГ
-        chunks = self.extract_math_chunks(text)
+        tasks = self.split_into_tasks(text)
 
         equations = []
-        for c in chunks:
-            equations.extend(self.parse_equations(c))
+        sin_tasks = []
+
+        for task in tasks:
+            if "=" in task:
+                equations.append(task)
+            elif "sin" in task:
+                sin_tasks.append(task)
 
         results = []
         variables = {}
 
-        # ===== СИСТЕМА =====
+        # ===== СИСТЕМЫ =====
         if len(equations) >= 2:
             try:
                 x, y = symbols('x y')
 
-                eqs = []
-                for eq in equations[:2]:
-                    left, right = eq.split("=")
-                    eqs.append(sympify(left) - sympify(right))
+                for i in range(0, len(equations), 2):
+                    if i + 1 >= len(equations):
+                        break
 
-                sol = solve(eqs, (x, y))
+                    eq1 = equations[i]
+                    eq2 = equations[i + 1]
 
-                variables["x"] = float(sol[x])
-                variables["y"] = float(sol[y])
+                    left1, right1 = eq1.split("=")
+                    left2, right2 = eq2.split("=")
 
-                results.append(f"📐 Система:\nx = {sol[x]}, y = {sol[y]}")
+                    sol = solve([
+                        sympify(left1) - sympify(right1),
+                        sympify(left2) - sympify(right2)
+                    ], (x, y))
+
+                    variables["x"] = float(sol[x])
+                    variables["y"] = float(sol[y])
+
+                    results.append(f"📐 Система:\nx = {sol[x]}, y = {sol[y]}")
 
             except Exception as e:
                 print("🔥 SYSTEM ERROR:", e)
@@ -148,13 +121,13 @@ class ScienceRoom:
                     variables["x"] = float(match.group(1))
 
         # ===== SIN =====
-        if "sin" in t:
+        for s in sin_tasks:
             try:
                 if "x" in variables:
                     val = variables["x"]
                     results.append(f"sin({val}) ≈ {round(math.sin(val), 4)}")
                 else:
-                    m = re.search(r'sin\(([\d\.]+)\)', t)
+                    m = re.search(r'sin\(([\d\.]+)\)', s)
                     if m:
                         val = float(m.group(1))
                         results.append(f"sin({val}) ≈ {round(math.sin(val), 4)}")
@@ -162,14 +135,8 @@ class ScienceRoom:
                 print("🔥 SIN ERROR:", e)
 
         # ===== ГРАФИК =====
-        if "график" in t or "построй" in t:
+        if "y=" in text.lower():
             expr = self.extract_function(text)
-
-            if not expr:
-                m = re.search(r'x\+y=(\d+)', t)
-                if m:
-                    expr = f"{m.group(1)} - x"
-
             if expr:
                 path = self.build_graph(expr)
                 if path:
@@ -194,7 +161,6 @@ class ScienceRoom:
     # ===== ПАРСИНГ =====
     def extract_math_expression(self, text):
         t = text.lower()
-
         t = t.replace("²", "**2")
         t = t.replace("^", "**")
 
@@ -240,7 +206,6 @@ class ScienceRoom:
     def solve_equation(self, text):
         try:
             expr = self.extract_math_expression(text)
-
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
 
             x = symbols('x')
