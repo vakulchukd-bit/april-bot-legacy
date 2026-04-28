@@ -130,6 +130,19 @@ class TextRoom(Room):
     def evaluate(self, text, context):
         return 0.1  # самый низкий приоритет
 
+    async def handle(self, user_id, text, context, run):
+        from blocks.text_module import process as text_process
+
+        result = await run(
+            context["chat_id"],
+            text_process(user_id, text, context.get("state"), context.get("energy"))
+        )
+
+        return {
+            "type": "text",
+            "data": result.get("content", "⚠️ Пустой ответ")
+        }
+
 
 # === РЕЕСТР ===
 ROOMS = [
