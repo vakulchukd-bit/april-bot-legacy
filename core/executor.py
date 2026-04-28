@@ -223,7 +223,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            # ===== SELF CHECK (ослаблен) =====
+            # ===== SELF CHECK (ИСПРАВЛЕНО: НЕ БЛОКИРУЕТ) =====
             try:
                 from blocks.self_check import self_check
 
