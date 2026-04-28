@@ -162,14 +162,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     task_type = detect_task_type(text)
 
-    # ===== 🔥 ВОЗВРАТ IMAGE LOGIC =====
+    # ===== IMAGE GENERATE (фикс) =====
     if task_type == "image_generate":
-        return {"type": "image_task", "prompt": text}
+        result = await image_generate(user_id, text, state)
+        if result:
+            return result
 
+    # ===== IMAGE EDIT (фикс) =====
     if task_type == "image_edit" and ctx and ctx.get("path"):
-        return await image_edit(user_id, ctx["path"], text)
+        result = await image_edit(user_id, ctx["path"], text)
+        if result:
+            return result
 
-    # ===== 🔥 МАТЕМАТИКА =====
+    # ===== МАТЕМАТИКА =====
     if task_type == "math":
         science = ScienceRoom()
         result = await science.handle(user_id, text, {
@@ -212,7 +217,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
-    # ===== ФОЛБЭК (С ЛАЙКАМИ) =====
+    # ===== ФОЛБЭК =====
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
