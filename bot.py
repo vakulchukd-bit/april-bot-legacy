@@ -146,6 +146,25 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
+    # ===== FIX: РАССЫЛКА =====
+    mode = get_mode(user_id)
+    if user_id == ADMIN_ID and mode == "broadcast":
+        users = get_all_users()
+        success = 0
+
+        for uid in users:
+            if int(uid) == ADMIN_ID:
+                continue
+            try:
+                await bot.send_message(uid, f"📢 {text}")
+                success += 1
+            except:
+                pass
+
+        clear_mode(user_id)
+        await message.answer(f"✅ Рассылка отправлена: {success}")
+        return
+
     try:
         result = await execute(user_id, text, message.chat.id, run_with_typing)
 
@@ -215,8 +234,8 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.answer("📢 Введи текст", show_alert=True)
             return
 
-    # ===== ПОДПИСКИ =====
-    if data == "buy_lite":
+    # ===== FIX: LITE (универсально) =====
+    if data in ["buy_lite", "lite", "go_lite"]:
         await callback.message.answer(
             "💳 Подтвердить Lite?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
