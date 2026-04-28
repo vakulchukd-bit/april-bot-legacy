@@ -52,11 +52,12 @@ def detect_task_type(text: str):
     if "y=" in t or "график" in t:
         return "math"
 
-    if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
-        return "image_generate"
-
+    # ✅ FIX: сначала edit
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
+
+    if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
+        return "image_generate"
 
     return "text"
 
@@ -144,8 +145,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # ❗ CALLBACK НЕ ОБРАБАТЫВАЕМ ЗДЕСЬ
-
     t = text.lower().strip()
 
     if "время" in t:
@@ -157,7 +156,39 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
+    # ✅ INTENT ВОЗВРАТ
+    try:
+        intent = detect_intent(text)
+    except:
+        intent = None
+
+    try:
+        intent_ai = detect_intent_ai(text)
+    except:
+        intent_ai = None
+
+    # ===== IMAGE QUESTION =====
+    if is_image_question(text) and ctx and ctx.get("path"):
+        try:
+            result = await analyze_image(user_id, ctx["path"], text)
+            if result:
+                return result
+        except Exception as e:
+            print("🔥 IMAGE ANALYZE ERROR:", e)
+
     task_type = detect_task_type(text)
+
+    # ===== IMAGE EDIT (ПРИОРИТЕТ) =====
+    if (task_type == "image_edit" or is_edit_request(text)) and ctx and ctx.get("path"):
+        try:
+            result = await run_with_typing(
+                chat_id,
+                image_edit(user_id, ctx["path"], text)
+            )
+            if isinstance(result, dict) and result.get("type"):
+                return result
+        except Exception as e:
+            print("🔥 IMAGE EDIT ERROR:", e)
 
     # ===== IMAGE GENERATE =====
     if task_type == "image_generate":
@@ -170,18 +201,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 return result
         except Exception as e:
             print("🔥 IMAGE GEN ERROR:", e)
-
-    # ===== IMAGE EDIT =====
-    if task_type == "image_edit" and ctx and ctx.get("path"):
-        try:
-            result = await run_with_typing(
-                chat_id,
-                image_edit(user_id, ctx["path"], text)
-            )
-            if isinstance(result, dict) and result.get("type"):
-                return result
-        except Exception as e:
-            print("🔥 IMAGE EDIT ERROR:", e)
 
     # ===== МАТЕМАТИКА =====
     if task_type == "math":
@@ -202,6 +221,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         except Exception as e:
             print("🔥 SCIENCE ERROR:", e)
+
+    # ===== ROUTER ВОЗВРАТ =====
+    try:
+        routed = route_request(text, intent=intent, intent_ai=intent_ai)
+        if routed:
+            return routed
+    except Exception as e:
+        print("🔥 ROUTER ERROR:", e)
 
     # ===== ОРКЕСТР =====
     context = {
