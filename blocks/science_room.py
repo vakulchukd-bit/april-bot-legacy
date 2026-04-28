@@ -55,7 +55,7 @@ class ScienceRoom:
 
         return score
 
-    # ===== 🔥 НОВЫЙ СИНТАКСИЧЕСКИЙ ПАРСЕР =====
+    # ===== 🔥 СИНТАКСИЧЕСКИЙ ПАРСЕР =====
     def extract_math_chunks(self, text):
         t = text.lower()
         t = re.sub(r'[^\dx\+\-\*/=\(\)\.\s]', ' ', t)
@@ -79,16 +79,22 @@ class ScienceRoom:
         return chunks
 
     def parse_equations(self, chunk):
-        if chunk.count("=") >= 2:
-            parts = chunk.split("=")
-            eqs = []
+        parts = chunk.split("=")
 
-            for i in range(0, len(parts) - 1, 2):
-                eqs.append(parts[i] + "=" + parts[i+1])
+        equations = []
 
-            return eqs
+        if len(parts) == 3:
+            equations.append(parts[0] + "=" + parts[1])
+            equations.append(parts[1] + "=" + parts[2])
 
-        return [chunk]
+        elif len(parts) > 3:
+            for i in range(len(parts) - 1):
+                equations.append(parts[i] + "=" + parts[i + 1])
+
+        else:
+            equations.append(chunk)
+
+        return equations
 
     async def handle(self, user_id, text, context, run_with_typing):
         plan = get_user_plan(user_id)
@@ -98,7 +104,7 @@ class ScienceRoom:
 
         t = text.lower()
 
-        # 🔥 НОВЫЙ ПАРСИНГ
+        # 🔥 ПАРСИНГ
         chunks = self.extract_math_chunks(text)
 
         equations = []
@@ -108,7 +114,7 @@ class ScienceRoom:
         results = []
         variables = {}
 
-        # ===== СИСТЕМЫ =====
+        # ===== СИСТЕМА =====
         if len(equations) >= 2:
             try:
                 x, y = symbols('x y')
