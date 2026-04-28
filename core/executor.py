@@ -251,20 +251,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             print(f"🔥 ROOM ERROR [{room.name}]:", e)
 
     # ===== ФОЛБЭК =====
-    try:
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-        return {"type": "text", "data": result["content"]}
-    except Exception as e:
-        print("🔥 FALLBACK ERROR:", e)
+try:
+    result = await run_with_typing(
+        chat_id,
+        text_process(user_id, text, state, energy)
+    )
+except Exception as e:
+    print("🔥 FALLBACK ERROR:", e)
+    result = None
 
-    return {
-        "type": "text",
-        "data": "⚠️ Ошибка обработки. Попробуй ещё раз."
-    }
-    # ===== 🛡 FINAL GUARD (НЕ ЛОМАЕТ АРХИТЕКТУРУ) =====
+
+# ===== 🛡 FINAL GUARD + LOGGING =====
+print("🧠 EXECUTOR END REACHED")
+
 if not result:
     print("🔥 EMPTY RESULT FROM ROOMS")
     return {
@@ -285,5 +284,7 @@ if "type" not in result:
         "type": "text",
         "data": "⚠️ Ошибка структуры ответа."
     }
+
+print("✅ FINAL RESULT OK:", result["type"])
 
 return result
