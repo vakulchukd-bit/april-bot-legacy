@@ -52,7 +52,6 @@ def detect_task_type(text: str):
     if "y=" in t or "график" in t:
         return "math"
 
-    # ✅ FIX: сначала edit
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
@@ -166,7 +165,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except:
         intent_ai = None
 
-    # ===== IMAGE QUESTION =====
     if is_image_question(text) and ctx and ctx.get("path"):
         try:
             result = await analyze_image(user_id, ctx["path"], text)
@@ -177,7 +175,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     task_type = detect_task_type(text)
 
-    # ===== IMAGE EDIT =====
     if (task_type == "image_edit" or is_edit_request(text)) and ctx and ctx.get("path"):
         try:
             result = await run_with_typing(chat_id, image_edit(user_id, ctx["path"], text))
@@ -186,7 +183,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print("🔥 IMAGE EDIT ERROR:", e)
 
-    # ===== IMAGE GENERATE =====
     if task_type == "image_generate":
         try:
             result = await run_with_typing(chat_id, image_generate(user_id, text, state))
@@ -195,7 +191,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print("🔥 IMAGE GEN ERROR:", e)
 
-    # ===== МАТЕМАТИКА =====
     if task_type == "math":
         try:
             science = ScienceRoom()
@@ -215,7 +210,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print("🔥 SCIENCE ERROR:", e)
 
-    # ===== ROUTER =====
     try:
         routed = route_request(text, intent=intent, intent_ai=intent_ai)
         if routed:
@@ -223,7 +217,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 ROUTER ERROR:", e)
 
-    # ===== ОРКЕСТР =====
     context = {
         "chat_id": chat_id,
         "state": state,
@@ -253,20 +246,38 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print("🔥 FALLBACK ERROR:", e)
         result = None
 
-    # ===== 🛡 FINAL GUARD =====
+    # ===== 🛡 FINAL GUARANTEE =====
     print("🧠 EXECUTOR END REACHED")
 
     if not result:
-        print("🔥 EMPTY RESULT")
-        return {"type": "text", "data": "⚠️ Не удалось обработать запрос."}
+        print("🔥 EMPTY RESULT → FORCE")
+        try:
+            fallback = await run_with_typing(
+                chat_id,
+                text_process(user_id, text, state, energy)
+            )
+            return {"type": "text", "data": fallback["content"]}
+        except:
+            return {"type": "text", "data": "⚠️ Ошибка обработки."}
 
     if not isinstance(result, dict):
         print("🔥 INVALID RESULT TYPE:", type(result))
-        return {"type": "text", "data": "⚠️ Ошибка обработки."}
+        return {"type": "text", "data": str(result)}
 
     if "type" not in result:
-        print("🔥 RESULT WITHOUT TYPE:", result)
-        return {"type": "text", "data": "⚠️ Ошибка структуры ответа."}
+        print("🔥 NO TYPE")
+        result["type"] = "text"
 
-    print("✅ FINAL RESULT OK:", result["type"])
+    if "data" not in result:
+        print("🔥 NO DATA → FORCE FALLBACK")
+        try:
+            fallback = await run_with_typing(
+                chat_id,
+                text_process(user_id, text, state, energy)
+            )
+            result["data"] = fallback["content"]
+        except:
+            result["data"] = "⚠️ Ошибка обработки."
+
+    print("✅ FINAL SAFE RESULT:", result["type"])
     return result
