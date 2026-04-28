@@ -132,6 +132,29 @@ async def handle(message: types.Message):
 
     text = message.text or message.caption or ""
 
+    # ===== VOICE (ВОЗВРАТ) =====
+    if message.voice:
+        file = await bot.get_file(message.voice.file_id)
+        path = f"{user_id}.ogg"
+
+        await bot.download_file(file.file_path, destination=path)
+
+        def run():
+            with open(path, "rb") as f:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+            return t.text
+
+        text = await asyncio.to_thread(run)
+
+        if not text.strip():
+            await message.answer("🎤 Не расслышал")
+            return
+
+        await message.answer(f"🎤 {text}")
+
     state = get_state(user_id)
 
     now = datetime.now(tz)
@@ -146,7 +169,7 @@ async def handle(message: types.Message):
 
     register_user(user_id)
 
-    # ===== FIX: РАССЫЛКА =====
+    # ===== РАССЫЛКА =====
     mode = get_mode(user_id)
     if user_id == ADMIN_ID and mode == "broadcast":
         users = get_all_users()
@@ -234,7 +257,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
             await callback.answer("📢 Введи текст", show_alert=True)
             return
 
-    # ===== FIX: LITE (универсально) =====
+    # ===== LITE =====
     if data in ["buy_lite", "lite", "go_lite"]:
         await callback.message.answer(
             "💳 Подтвердить Lite?",
