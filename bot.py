@@ -28,8 +28,8 @@ from storage import (
 )
 
 from core.executor import execute
-
 from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard
+
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
@@ -51,6 +51,7 @@ from blocks.session_manager import is_session_expired
 from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 from blocks.image_module import process as image_generate
+from core.executor import handle_subscription  # 🔥 ВЕРНУЛИ
 
 from io import BytesIO
 
@@ -77,7 +78,7 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
-# 🔥 typing — теперь нормальный (НЕ upload_photo)
+# 🔥 typing
 async def typing_loop(chat_id):
     try:
         while True:
@@ -112,14 +113,14 @@ async def safe_send_image(message, data):
     try:
         await message.answer_photo(
             BufferedInputFile(data, filename="image.png"),
-            reply_markup=main_keyboard(message.message_id)  # 🔥 КНОПКИ ВЕРНУЛ
+            reply_markup=main_keyboard(message.message_id)
         )
-    except Exception:
+    except:
         bio = BytesIO(data)
         bio.name = "image.png"
         await message.answer_document(
             bio,
-            reply_markup=main_keyboard(message.message_id)  # 🔥 КНОПКИ ВЕРНУЛ
+            reply_markup=main_keyboard(message.message_id)
         )
 
 
@@ -214,7 +215,6 @@ async def handle(message: types.Message):
             text_limit = (
                 "⛔ Ваш лимит на сегодня исчерпан.\n\n"
                 f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
-                "Хочешь продолжить без ожидания?\n"
                 "Выбери тариф ниже 👇"
             )
 
@@ -229,25 +229,25 @@ async def handle(message: types.Message):
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
-        # ===== TEXT =====
         if result["type"] == "text":
             await message.answer(
                 result["data"],
-                reply_markup=main_keyboard(message.message_id)  # 🔥 КНОПКИ ВЕРНУЛ
+                reply_markup=main_keyboard(message.message_id)
             )
 
-        # ===== IMAGE TASK =====
         elif result["type"] == "image_task":
             await message.answer("🎨 Генерирую изображение...")
 
-            img = await image_generate(user_id, result["prompt"], state)
+            img = await run_with_typing(
+                message.chat.id,
+                image_generate(user_id, result["prompt"], state)
+            )
 
             if img and img["type"] == "image":
                 await safe_send_image(message, img["data"])
             else:
                 await message.answer("⚠️ Ошибка генерации")
 
-        # ===== IMAGE =====
         elif result["type"] == "image":
             await message.answer("🎨 Генерирую изображение...")
             await safe_send_image(message, result["data"])
@@ -261,47 +261,32 @@ async def handle_callbacks(callback: types.CallbackQuery):
     data = callback.data
     user_id = callback.from_user.id
 
+    sub = handle_subscription(data, user_id)
+    if sub:
+        if sub["type"] == "text":
+            await callback.message.edit_text(
+                sub["data"],
+                reply_markup=sub.get("keyboard")
+            )
+        return
+
     if data.startswith("like_"):
-        await callback.answer("👍 Спасибо", show_alert=False)
+        await callback.answer("👍 Спасибо")
         return
 
     if data.startswith("dislike_"):
-        await callback.answer("👎 Учту", show_alert=False)
-        return
-
-    if data == "noop":
-        await callback.answer()
+        await callback.answer("👎 Учту")
         return
 
     if data == "menu":
         text, keyboard = get_menu(user_id)
-        await callback.message.answer(text, reply_markup=keyboard)
-        await callback.answer()
+        await callback.message.edit_text(text, reply_markup=keyboard)
         return
 
     if data == "info":
         text, keyboard = build_info_menu(user_id)
-        await callback.message.answer(text, reply_markup=keyboard)
-        await callback.answer()
+        await callback.message.edit_text(text, reply_markup=keyboard)
         return
-
-    try:
-        result = await execute(user_id, "", callback.message.chat.id, run_with_typing, callback_data=data)
-
-        if not result:
-            return
-
-        if result["type"] == "text":
-            await callback.message.answer(
-                result["data"],
-                reply_markup=main_keyboard(callback.message.message_id)
-            )
-
-        elif result["type"] == "image":
-            await safe_send_image(callback.message, result["data"])
-
-    except Exception as e:
-        await handle_error(bot, callback.message, e, "callback_handler")
 
     await callback.answer()
 
