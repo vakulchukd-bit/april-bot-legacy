@@ -140,11 +140,20 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # 🔥 ЗАГРУЖАЕМ ОПЫТ (НО НЕ ЛОМАЕМ ЛОГИКУ)
+    # 🔥 ЗАГРУЖАЕМ ОПЫТ
     try:
         experience = load_experience(user_id)
     except:
         experience = {}
+
+    # 🔥 ВЫДЕЛЕННЫЙ БЛОК ПОСЛЕДНЕГО ОПЫТА
+    last_feedback = None
+    try:
+        actions = experience.get(str(user_id), {}).get("actions", [])
+        if actions:
+            last_feedback = actions[-1]
+    except:
+        pass
 
     try:
         intent = detect_intent(text)
@@ -172,7 +181,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "mode": mode,
         "task_type": detect_task_type(text),
         "energy": energy,
-        "experience": experience  # 🔥 ПРОКИНУЛИ В КОНТЕКСТ
+        "experience": experience
     }
 
     def is_valid_result(result):
@@ -198,17 +207,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 except:
                     score = 1
 
-                # 🔥 МЯГКОЕ ВЛИЯНИЕ ОПЫТА
-                try:
-                    actions = experience.get(str(user_id), {}).get("actions", [])
-                    if actions:
-                        last = actions[-1]
-                        if last.get("status") == "positive":
-                            score += 0.1
-                        elif last.get("status") == "negative":
-                            score -= 0.1
-                except:
-                    pass
+                # 🔥 ЧИСТОЕ ПРИМЕНЕНИЕ ОПЫТА
+                if last_feedback:
+                    if last_feedback.get("status") == "negative":
+                        score -= 0.2
+                    elif last_feedback.get("status") == "positive":
+                        score += 0.15
 
                 candidates.append((score, room))
                 print(f"🧠 CANDIDATE: {room.name} | score={score}")
@@ -242,7 +246,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            # ===== SELF CHECK (НЕ БЛОКИРУЕТ) =====
             try:
                 from blocks.self_check import self_check
 
@@ -257,7 +260,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             if is_valid_result(result):
                 print(f"✅ SUCCESS: {room.name} | type={result['type']}")
 
-                # 🔥 ЗАПИСЬ ОПЫТА
                 try:
                     state["last_action"] = {
                         "type": result.get("type"),
