@@ -34,7 +34,6 @@ from blocks.energy_manager import get_energy
 import re
 
 
-# ===== 🧠 СЕМАНТИКА =====
 def detect_task_type(text: str):
     t = text.lower()
 
@@ -60,7 +59,6 @@ def detect_task_type(text: str):
     return "text"
 
 
-# ===== ПОДПИСКИ =====
 def handle_subscription(callback_data, user_id):
     print("🔥 CALLBACK:", callback_data)
 
@@ -122,7 +120,6 @@ def is_image_question(text: str):
     ])
 
 
-# ===== EXECUTOR =====
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
@@ -223,14 +220,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            # ===== 🔥 SELF CHECK ВСТАВКА =====
+            # ===== SELF CHECK + REFINE =====
             try:
                 from blocks.self_check import self_check
+
                 valid, error = self_check(result, text, energy)
 
                 if not valid:
-                    print(f"⚠️ SELF CHECK FAIL: {room.name} | error={error}")
-                    continue
+                    # 🔥 если ошибка маленькая — принимаем
+                    if error < 0.2:
+                        print(f"⚠️ ACCEPT WITH WARNING: {room.name} | error={error}")
+                    else:
+                        print(f"⚠️ SELF CHECK FAIL: {room.name} | error={error}")
+                        continue
 
             except Exception as e:
                 print("🔥 SELF CHECK ERROR:", e)
