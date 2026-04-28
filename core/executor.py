@@ -264,3 +264,26 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "type": "text",
         "data": "⚠️ Ошибка обработки. Попробуй ещё раз."
     }
+    # ===== 🛡 FINAL GUARD (НЕ ЛОМАЕТ АРХИТЕКТУРУ) =====
+if not result:
+    print("🔥 EMPTY RESULT FROM ROOMS")
+    return {
+        "type": "text",
+        "data": "⚠️ Не удалось обработать запрос."
+    }
+
+if not isinstance(result, dict):
+    print("🔥 INVALID RESULT TYPE:", type(result))
+    return {
+        "type": "text",
+        "data": "⚠️ Ошибка обработки."
+    }
+
+if "type" not in result:
+    print("🔥 RESULT WITHOUT TYPE:", result)
+    return {
+        "type": "text",
+        "data": "⚠️ Ошибка структуры ответа."
+    }
+
+return result
