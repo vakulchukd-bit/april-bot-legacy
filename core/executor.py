@@ -31,6 +31,9 @@ from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
 
+# 🔥 ДОБАВИЛИ (опыт)
+from blocks.experience import update_experience
+
 import re
 
 
@@ -220,14 +223,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            # ===== SELF CHECK + REFINE =====
+            # ===== SELF CHECK =====
             try:
                 from blocks.self_check import self_check
 
                 valid, error = self_check(result, text, energy)
 
                 if not valid:
-                    # 🔥 если ошибка маленькая — принимаем
                     if error < 0.2:
                         print(f"⚠️ ACCEPT WITH WARNING: {room.name} | error={error}")
                     else:
@@ -239,6 +241,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             if is_valid_result(result):
                 print(f"✅ SUCCESS: {room.name} | type={result['type']}")
+
+                # 🔥 ЗАПИСЬ ОПЫТА
+                try:
+                    state["last_action"] = {
+                        "type": result.get("type"),
+                        "intent": context.get("task_type"),
+                        "status": "success"
+                    }
+                    update_experience(user_id, state)
+                except Exception as e:
+                    print("🔥 EXPERIENCE ERROR:", e)
+
                 return result
             else:
                 print(f"❌ INVALID RESULT: {room.name}")
