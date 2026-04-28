@@ -38,7 +38,6 @@ import re
 def detect_task_type(text: str):
     t = text.lower()
 
-    # ===== МАТЕМАТИКА ТОЛЬКО ПО ФАКТУ =====
     if "=" in t:
         return "math"
 
@@ -52,7 +51,6 @@ def detect_task_type(text: str):
     if "y=" in t or "график" in t:
         return "math"
 
-    # ===== IMAGE =====
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
@@ -116,20 +114,6 @@ def handle_subscription(callback_data, user_id):
     return None
 
 
-def is_edit_request(text: str):
-    t = text.lower()
-    return any(word in t for word in [
-        "убери", "добавь", "измени", "замени",
-        "сделай", "усиль", "ярче", "темнее"
-    ])
-
-
-def is_generate_request(text: str):
-    t = text.lower()
-    return any(v in t for v in ["создай", "сгенерируй", "нарисуй", "сделай"]) and \
-           any(o in t for o in ["картинку", "изображение", "фото", "арт", "рисунок"])
-
-
 def is_image_question(text: str):
     t = text.lower()
     return any(tr in t for tr in [
@@ -166,7 +150,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except:
         intent_ai = None
 
-    # ===== IMAGE ANALYZE =====
     if is_image_question(text) and ctx and ctx.get("path"):
         try:
             result = await analyze_image(user_id, ctx["path"], text)
@@ -185,7 +168,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "energy": energy
     }
 
-    # ===== 🧠 ORCHESTRATOR =====
     def is_valid_result(result):
         if not result:
             return False
@@ -215,7 +197,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
 
-    # ===== 🔥 BOOST SCIENCE =====
     boosted = []
 
     for score, room in candidates:
@@ -242,6 +223,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             result = await room.handle(user_id, text, context, run_with_typing)
 
+            # ===== 🔥 SELF CHECK ВСТАВКА =====
+            try:
+                from blocks.self_check import self_check
+                valid, error = self_check(result, text, energy)
+
+                if not valid:
+                    print(f"⚠️ SELF CHECK FAIL: {room.name} | error={error}")
+                    continue
+
+            except Exception as e:
+                print("🔥 SELF CHECK ERROR:", e)
+
             if is_valid_result(result):
                 print(f"✅ SUCCESS: {room.name} | type={result['type']}")
                 return result
@@ -251,7 +244,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
-    # ===== ROUTER =====
     try:
         routed = route_request(text, intent=intent, intent_ai=intent_ai)
         if routed:
@@ -259,7 +251,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 ROUTER ERROR:", e)
 
-    # ===== FINAL FALLBACK =====
     print("⚠️ ALL ROOMS FAILED → fallback")
 
     try:
