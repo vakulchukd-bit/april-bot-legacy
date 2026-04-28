@@ -1,8 +1,5 @@
 from blocks.room_protocol import Room
 
-# === TRIG ROOM 🔥 ===
-from blocks.trig_room import TrigRoom
-
 # === SCIENCE ROOM 🔥 ===
 from blocks.science_room import ScienceRoom
 
@@ -82,7 +79,8 @@ class ImageEditRoom(Room):
 
         return any(v in t for v in [
             "измени", "добавь", "убери",
-            "сделай", "замени", "поменяй"
+            "сделай", "замени", "поменяй",
+            "осветли", "затемни", "улучши"
         ])
 
     def evaluate(self, text, context):
@@ -101,9 +99,18 @@ class ImageEditRoom(Room):
         ctx = context["image"]
 
         if not ctx or not ctx.get("path"):
-            return {"type": "error", "data": "⚠️ Нет изображения"}
+            return {
+                "type": "error",
+                "data": "⚠️ Нет изображения для редактирования"
+            }
 
-        new_prompt = (ctx.get("hint") or "изображение") + ", " + text
+        if not ctx.get("hint"):
+            try:
+                ctx["hint"] = await analyze_image(ctx["path"])
+            except:
+                ctx["hint"] = "изображение"
+
+        new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
         result = await run(
             context["chat_id"],
@@ -126,9 +133,7 @@ class TextRoom(Room):
 
 # === РЕЕСТР ===
 ROOMS = [
-    TrigRoom(),
     ScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
-    # TextRoom убран из активного перехвата
 ]
