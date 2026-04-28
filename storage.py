@@ -3,13 +3,13 @@ import os
 import math
 from datetime import datetime, timezone, timedelta
 
-# 🔥 NEW: DATABASE
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 FILE_PATH = "data/subscriptions.json"
 
-# ===== 🔥 DB CONNECT =====
+
+# ===== DB CONNECT =====
 def get_conn():
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -36,7 +36,6 @@ def init_db():
             )
             """)
 
-            # 🔥 payments
             cur.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 id SERIAL PRIMARY KEY,
@@ -47,7 +46,7 @@ def init_db():
             )
             """)
 
-            # 🔥🔥🔥 НОВОЕ — feedback (ОПЫТ)
+            # 🔥 НОВОЕ — опыт
             cur.execute("""
             CREATE TABLE IF NOT EXISTS feedback (
                 id SERIAL PRIMARY KEY,
@@ -69,7 +68,7 @@ def today():
     return now().date().isoformat()
 
 
-# ===== 🔥 DB USER =====
+# ===== USER =====
 def ensure_user_db(user_id):
     conn = get_conn()
     if not conn:
@@ -91,45 +90,45 @@ def ensure_user_db(user_id):
             return user
 
 
-# ===== 🔥 PLAN MANAGEMENT =====
+# ===== PLAN =====
 def set_subscription(user_id, plan="premium"):
-    conn = get_conn()
-
-    if conn:
-        uid = str(user_id)
-
-        if plan == "lite":
-            days = 5
-        elif plan == "premium":
-            days = 30
-        else:
-            plan = "free"
-            days = 0
-
-        expire_date = now().timestamp() + days * 86400 if days > 0 else 0
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, last_reset)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET
-                plan = EXCLUDED.plan,
-                subscription_until = EXCLUDED.subscription_until,
-                warned = FALSE
-                """, (uid, plan, expire_date, False, 0, 0, today()))
-        conn.close()
-        return
-
-
-# 🔥 СОХРАНЕНИЕ ПЛАТЕЖА
-def save_payment(user_id, plan):
     conn = get_conn()
     if not conn:
         return
 
     uid = str(user_id)
 
+    if plan == "lite":
+        days = 5
+    elif plan == "premium":
+        days = 30
+    else:
+        plan = "free"
+        days = 0
+
+    expire_date = now().timestamp() + days * 86400 if days > 0 else 0
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO users (user_id, plan, subscription_until, warned, messages_today, images_today, last_reset)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET
+            plan = EXCLUDED.plan,
+            subscription_until = EXCLUDED.subscription_until,
+            warned = FALSE
+            """, (uid, plan, expire_date, False, 0, 0, today()))
+
+    conn.close()
+
+
+# ===== PAYMENTS =====
+def save_payment(user_id, plan):
+    conn = get_conn()
+    if not conn:
+        return
+
+    uid = str(user_id)
     amount = 6 if plan == "lite" else 25 if plan == "premium" else 0
 
     with conn:
@@ -140,7 +139,7 @@ def save_payment(user_id, plan):
             """, (uid, plan, amount))
 
 
-# 🔥🔥🔥 СОХРАНЕНИЕ ЛАЙКА / ДИЗЛАЙКА
+# ===== 🔥 FEEDBACK =====
 def save_feedback(user_id, is_positive):
     conn = get_conn()
     if not conn:
@@ -159,89 +158,63 @@ def save_feedback(user_id, is_positive):
         print("🔥 FEEDBACK ERROR:", e)
 
 
+# ===== PLAN CHECK =====
 def get_user_plan(user_id):
     conn = get_conn()
+    if not conn:
+        return "free"
 
-    if conn:
-        uid = str(user_id)
+    uid = str(user_id)
 
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT plan, subscription_until, warned FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT plan, subscription_until FROM users WHERE user_id = %s", (uid,))
+            user = cur.fetchone()
 
-                if not user:
-                    ensure_user_db(user_id)
-                    return "free"
+            if not user:
+                ensure_user_db(user_id)
+                return "free"
 
-                if user["subscription_until"] < now().timestamp():
-                    return "free"
+            if user["subscription_until"] < now().timestamp():
+                return "free"
 
-                return user["plan"]
-
-    return "free"
+            return user["plan"]
 
 
 def check_subscription(user_id):
     return get_user_plan(user_id) in ["lite", "premium"]
 
 
-# ===== WARNING =====
-def should_warn(user_id):
+# ===== LIMIT =====
+def can_send_message(user_id, limit=15):
     conn = get_conn()
     if not conn:
-        return False
+        return True
 
     uid = str(user_id)
 
     with conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT subscription_until, warned FROM users WHERE user_id = %s", (uid,))
+            cur.execute("SELECT messages_today, last_reset FROM users WHERE user_id = %s", (uid,))
             user = cur.fetchone()
 
             if not user:
+                ensure_user_db(user_id)
+                return True
+
+            if user["last_reset"] != today():
+                cur.execute("""
+                UPDATE users SET messages_today = 0, last_reset = %s WHERE user_id = %s
+                """, (today(), uid))
+                user["messages_today"] = 0
+
+            if user["messages_today"] >= limit:
                 return False
 
-            remaining = user["subscription_until"] - now().timestamp()
-
-            if remaining < 86400 and not user["warned"]:
-                cur.execute("UPDATE users SET warned = TRUE WHERE user_id = %s", (uid,))
-                return True
-
-    return False
-
-
-# ===== LIMITS =====
-def can_send_message(user_id, limit=15):
-    conn = get_conn()
-
-    if conn:
-        uid = str(user_id)
-
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, last_reset FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
-
-                if not user:
-                    ensure_user_db(user_id)
-                    return True
-
-                if user["last_reset"] != today():
-                    cur.execute("""
-                    UPDATE users SET messages_today = 0, last_reset = %s WHERE user_id = %s
-                    """, (today(), uid))
-                    user["messages_today"] = 0
-
-                if user["messages_today"] >= limit:
-                    return False
-
-                cur.execute("""
-                UPDATE users SET messages_today = messages_today + 1 WHERE user_id = %s
-                """, (uid,))
-                return True
-
-    return True
+            cur.execute("""
+            UPDATE users SET messages_today = messages_today + 1 WHERE user_id = %s
+            """, (uid,))
+            return True
 
 
 # ===== ADMIN =====
@@ -252,5 +225,4 @@ def get_all_users():
             with conn.cursor() as cur:
                 cur.execute("SELECT user_id FROM users")
                 return [u["user_id"] for u in cur.fetchall()]
-
     return []
