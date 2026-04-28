@@ -77,11 +77,11 @@ def is_time_question(text: str):
     return any(t in text for t in triggers)
 
 
-# 🔥 НОВЫЙ typing_loop — БЕСКОНЕЧНЫЙ ДО КОНЦА
+# 🔥 typing — теперь нормальный (НЕ upload_photo)
 async def typing_loop(chat_id):
     try:
         while True:
-            await bot.send_chat_action(chat_id, "upload_photo")
+            await bot.send_chat_action(chat_id, "typing")
             await asyncio.sleep(2)
     except:
         pass
@@ -109,25 +109,18 @@ def run_server():
 
 
 async def safe_send_image(message, data):
-    print("📤 TRY SEND IMAGE")
-
     try:
         await message.answer_photo(
-            BufferedInputFile(data, filename="image.png")
+            BufferedInputFile(data, filename="image.png"),
+            reply_markup=main_keyboard(message.message_id)  # 🔥 КНОПКИ ВЕРНУЛ
         )
-        print("✅ IMAGE SENT SUCCESS")
-
-    except Exception as e:
-        print("🔥 PHOTO FAILED, TRY DOCUMENT:", e)
-
-        try:
-            bio = BytesIO(data)
-            bio.name = "image.png"
-            await message.answer_document(bio)
-            print("✅ SENT AS DOCUMENT")
-        except Exception as e2:
-            print("🔥 DOCUMENT FAILED:", e2)
-            await message.answer("⚠️ Картинка сгенерирована, но не отправилась")
+    except Exception:
+        bio = BytesIO(data)
+        bio.name = "image.png"
+        await message.answer_document(
+            bio,
+            reply_markup=main_keyboard(message.message_id)  # 🔥 КНОПКИ ВЕРНУЛ
+        )
 
 
 @dp.message()
@@ -184,7 +177,7 @@ async def handle(message: types.Message):
     if is_time_question(text):
         await message.answer(
             f"🕒 Время: {now.strftime('%H:%M')}\n"
-            f"📅 Дата: {now.strftime('%d.%м.%Y')}"
+            f"📅 Дата: {now.strftime('%d.%m.%Y')}"
         )
         return
 
@@ -220,7 +213,7 @@ async def handle(message: types.Message):
 
             text_limit = (
                 "⛔ Ваш лимит на сегодня исчерпан.\n\n"
-                f"Следующий доступ:\n{next_time.strftime('%d.%м.%Y в %H:%M')}\n\n"
+                f"Следующий доступ:\n{next_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
                 "Хочешь продолжить без ожидания?\n"
                 "Выбери тариф ниже 👇"
             )
@@ -236,46 +229,28 @@ async def handle(message: types.Message):
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
 
+        # ===== TEXT =====
         if result["type"] == "text":
-            reply = result["data"]
+            await message.answer(
+                result["data"],
+                reply_markup=main_keyboard(message.message_id)  # 🔥 КНОПКИ ВЕРНУЛ
+            )
 
-            await message.answer(reply)
-
+        # ===== IMAGE TASK =====
         elif result["type"] == "image_task":
             await message.answer("🎨 Генерирую изображение...")
 
-            typing_task = asyncio.create_task(typing_loop(message.chat.id))
+            img = await image_generate(user_id, result["prompt"], state)
 
-            try:
-                img = await image_generate(user_id, result["prompt"], state)
+            if img and img["type"] == "image":
+                await safe_send_image(message, img["data"])
+            else:
+                await message.answer("⚠️ Ошибка генерации")
 
-                typing_task.cancel()
-
-                if not img:
-                    await message.answer("⚠️ Не удалось создать изображение")
-                    return
-
-                if img["type"] == "image":
-                    await safe_send_image(message, img["data"])
-
-                elif img["type"] in ["error", "final_error"]:
-                    await message.answer(img["data"])
-
-                else:
-                    await message.answer("⚠️ Ошибка генерации")
-
-            except Exception as e:
-                typing_task.cancel()
-                print("🔥 IMAGE TASK ERROR:", e)
-                await message.answer("⚠️ Ошибка генерации изображения")
-
+        # ===== IMAGE =====
         elif result["type"] == "image":
             await message.answer("🎨 Генерирую изображение...")
-
-            async def send_image():
-                await safe_send_image(message, result["data"])
-
-            asyncio.create_task(send_image())
+            await safe_send_image(message, result["data"])
 
     except Exception as e:
         await handle_error(bot, message, e, "global_handler")
@@ -317,15 +292,13 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
         if result["type"] == "text":
-            await callback.message.answer(result["data"], reply_markup=result.get("keyboard"))
+            await callback.message.answer(
+                result["data"],
+                reply_markup=main_keyboard(callback.message.message_id)
+            )
 
         elif result["type"] == "image":
-            await callback.message.answer("🎨 Генерирую изображение...")
-
-            async def send_image():
-                await safe_send_image(callback.message, result["data"])
-
-            asyncio.create_task(send_image())
+            await safe_send_image(callback.message, result["data"])
 
     except Exception as e:
         await handle_error(bot, callback.message, e, "callback_handler")
