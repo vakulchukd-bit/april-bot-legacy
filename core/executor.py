@@ -140,6 +140,56 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
+    # ===============================
+    # 🔥 НОВОЕ: РАННИЙ ОБХОД IMAGE
+    # ===============================
+
+    task_type = detect_task_type(text)
+
+    # --- IMAGE EDIT ---
+    if task_type == "image_edit":
+        if ctx:
+            print("🖼️ DIRECT IMAGE EDIT")
+            return await image_edit(user_id, text, state)
+        else:
+            return {
+                "type": "text",
+                "data": "Сначала нужно создать изображение 🙂"
+            }
+
+    # --- IMAGE GENERATE ---
+    if task_type == "image_generate":
+
+        # есть ли явное описание (длина > 15)
+        if len(text.strip()) > 15:
+            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
+            return await image_generate(user_id, text, state)
+
+        # есть ли контекст
+        summary = state.get("memory_summary")
+        dialog = state.get("dialog", [])
+
+        if summary:
+            prompt = summary
+            print("🖼️ GENERATE FROM SUMMARY")
+            return await image_generate(user_id, prompt, state)
+
+        if dialog:
+            last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
+            if last_user:
+                print("🖼️ GENERATE FROM DIALOG")
+                return await image_generate(user_id, last_user, state)
+
+        # если ничего нет — уточнение (дешевое)
+        return {
+            "type": "text",
+            "data": "Что именно хочешь изобразить?"
+        }
+
+    # ===============================
+    # 🔥 ДАЛЬШЕ ВСЁ КАК БЫЛО
+    # ===============================
+
     try:
         experience = load_experience(user_id)
     except:
@@ -170,8 +220,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             quality = (positive - negative) / n
             confidence = min(1.0, n / 20)
             influence = confidence * quality
-
-        print(f"🧠 EXPERIENCE STATS: n={n}, +={positive}, -={negative}, conf={round(confidence,2)}, qual={round(quality,2)}, infl={round(influence,2)}")
 
     except Exception as e:
         print("🔥 EXPERIENCE CALC ERROR:", e)
@@ -206,7 +254,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     }
 
     # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ =====
-    task_type = context.get("task_type")
     use_summary = True
 
     if task_type == "text" and len(text.strip()) < 15:
@@ -249,7 +296,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 score += influence
 
                 candidates.append((score, room))
-                print(f"🧠 CANDIDATE: {room.name} | score={score}")
 
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
@@ -265,7 +311,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     candidates = boosted
 
     if not candidates:
-        print("⚠️ NO ROOMS → fallback")
         result = await run_with_typing(
             chat_id,
             text_process(user_id, text, state, energy)
@@ -276,23 +321,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     for score, room in candidates:
         try:
-            print(f"🚀 TRY ROOM: {room.name} | score={score}")
-
             result = await room.handle(user_id, text, context, run_with_typing)
 
-            try:
-                from blocks.self_check import self_check
-
-                valid, error = self_check(result, text, energy)
-
-                if not valid:
-                    print(f"⚠️ SELF CHECK WARNING: {room.name} | error={error}")
-
-            except Exception as e:
-                print("🔥 SELF CHECK ERROR:", e)
-
             if is_valid_result(result):
-                print(f"✅ SUCCESS: {room.name} | type={result['type']}")
 
                 try:
                     state["last_action"] = {
@@ -302,7 +333,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     }
                     update_experience(user_id, state)
 
-                    # 🔥 НОВОЕ: ОБНОВЛЯЕМ SUMMARY
                     try:
                         from blocks.context_system import update_memory_summary
                         update_memory_summary(
@@ -317,8 +347,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     print("🔥 EXPERIENCE ERROR:", e)
 
                 return result
-            else:
-                print(f"❌ INVALID RESULT: {room.name}")
 
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
@@ -329,8 +357,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             return routed
     except Exception as e:
         print("🔥 ROUTER ERROR:", e)
-
-    print("⚠️ ALL ROOMS FAILED → fallback")
 
     try:
         result = await run_with_typing(
