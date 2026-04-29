@@ -161,6 +161,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         prompt = extract_image_prompt(text)
         img = await image_generate(user_id, prompt, state)
 
+        # 🔥 ФИКС (ЕДИНСТВЕННОЕ ДОБАВЛЕНИЕ)
+        if isinstance(img, dict):
+            img = img.get("data") or img.get("image") or img
+
+        if isinstance(img, str):
+            try:
+                import base64
+                img = base64.b64decode(img)
+            except:
+                pass
+
         return {
             "type": "image",
             "data": img
