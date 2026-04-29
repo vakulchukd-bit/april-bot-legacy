@@ -9,10 +9,8 @@ client = OpenAI()
 ADMIN_ID = 2016592532
 
 
-# ===== СОХРАНЕНИЕ В ПАМЯТЬ =====
 def save_to_memory(state, item):
     memory = state.get("image_memory", [])
-
     memory.append(item)
 
     if len(memory) > 3:
@@ -22,7 +20,6 @@ def save_to_memory(state, item):
     state["image_context"] = item
 
 
-# ===== ОЧИСТКА PROMPT =====
 def clean_prompt(text: str):
     if not text:
         return ""
@@ -37,7 +34,6 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== EXTRACT IMAGE PROMPT =====
 def extract_image_prompt(text: str):
     if not text:
         return ""
@@ -60,15 +56,13 @@ def extract_image_prompt(text: str):
     return t
 
 
-# ===== V1 (РЕЗЕРВ) =====
+# ===== V1 =====
 async def generate_image(prompt):
     def run():
         try:
             response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
-                size="512x512",
-                quality="low"
+                prompt=prompt
             )
 
             if not response or not response.data:
@@ -94,15 +88,13 @@ async def generate_image(prompt):
     return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
-# ===== V2 (ОСНОВНОЙ) =====
+# ===== V2 =====
 async def generate_image_v2(prompt):
     def run():
         try:
             response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
-                size="512x512",
-                quality="low"
+                prompt=prompt
             )
 
             if not response or not response.data:
@@ -128,7 +120,6 @@ async def generate_image_v2(prompt):
     return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
-# ===== ИНКРЕМЕНТ =====
 def increment_images(user_id):
     conn = get_conn()
     if not conn:
@@ -159,7 +150,6 @@ def increment_images(user_id):
             """, (images + 1, today(), uid))
 
 
-# ===== PROCESS =====
 async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
@@ -228,7 +218,6 @@ async def process(user_id, text, state):
         return {"type": "error", "data": None}
 
 
-# ===== RETRY =====
 async def retry_process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
