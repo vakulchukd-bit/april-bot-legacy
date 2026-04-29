@@ -161,6 +161,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
+        # 🔥 ДОБАВЛЕНО: UX ИНДИКАТОР
+        try:
+            await run_with_typing(chat_id, None, action="upload_photo")
+        except:
+            pass
+
         # есть ли явное описание
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
