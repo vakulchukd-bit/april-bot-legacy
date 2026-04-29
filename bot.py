@@ -74,22 +74,22 @@ def is_time_question(text: str):
     ])
 
 
-async def typing_loop(chat_id):
+# 🔥 ОБНОВЛЕНО
+async def typing_loop(chat_id, mode="text"):
     try:
-        elapsed = 0
         while True:
-            if elapsed < 4:
-                await bot.send_chat_action(chat_id, "typing")
-            else:
+            if mode == "image":
                 await bot.send_chat_action(chat_id, "upload_photo")
+            else:
+                await bot.send_chat_action(chat_id, "typing")
             await asyncio.sleep(2)
-            elapsed += 2
     except:
         pass
 
 
-async def run_with_typing(chat_id, coro):
-    task = asyncio.create_task(typing_loop(chat_id))
+# 🔥 ОБНОВЛЕНО
+async def run_with_typing(chat_id, coro, mode="text"):
+    task = asyncio.create_task(typing_loop(chat_id, mode))
     try:
         result = await coro
         await asyncio.sleep(0.1)
