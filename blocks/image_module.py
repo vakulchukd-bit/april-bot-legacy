@@ -37,11 +37,33 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== V1 (РЕЗЕРВ, БЕЗ TIMEOUT) =====
+# ===== 🔥 НОВОЕ: EXTRACT IMAGE PROMPT =====
+def extract_image_prompt(text: str):
+    if not text:
+        return ""
+
+    t = text.lower()
+
+    banned = [
+        "давай", "хочу", "сделай", "создай", "нарисуй",
+        "пожалуйста", "можешь", "как думаешь"
+    ]
+
+    for b in banned:
+        t = t.replace(b, "")
+
+    t = t.strip()
+
+    # защита от длинных промптов
+    if len(t) > 300:
+        t = t[:300]
+
+    return t
+
+
+# ===== V1 (РЕЗЕРВ) =====
 async def generate_image(prompt):
     def run():
-        print("🟢 ENTER V1 (fallback):", prompt)
-
         try:
             response = client.images.generate(
                 model="gpt-image-1",
@@ -49,40 +71,27 @@ async def generate_image(prompt):
             )
 
             if not response or not response.data:
-                print("❌ V1 EMPTY")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
-                print("❌ V1 NO BASE64")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
-                print("❌ V1 EMPTY BASE64")
                 return None
-
-            print("🟢 EXIT V1 OK")
 
             return base64.b64decode(image_base64)
 
-        except Exception as e:
-            print("🔥 IMAGE V1 ERROR:", repr(e))
+        except Exception:
             return None
 
-    try:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, run)
-    except Exception as e:
-        print("🔥 EXECUTOR V1 ERROR:", repr(e))
-        return None
+    return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
-# ===== V2 (ОСНОВНОЙ, БЕЗ УБИЙСТВА) =====
+# ===== V2 (ОСНОВНОЙ) =====
 async def generate_image_v2(prompt):
     def run():
-        print("🟡 ENTER V2 (main):", prompt)
-
         try:
             response = client.images.generate(
                 model="gpt-image-1",
@@ -90,33 +99,22 @@ async def generate_image_v2(prompt):
             )
 
             if not response or not response.data:
-                print("❌ V2 EMPTY")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
-                print("❌ V2 NO BASE64")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
-                print("❌ V2 EMPTY BASE64")
                 return None
-
-            print("🟡 EXIT V2 OK")
 
             return base64.b64decode(image_base64)
 
-        except Exception as e:
-            print("🔥 IMAGE V2 ERROR FULL:", repr(e))
+        except Exception:
             return None
 
-    try:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, run)
-    except Exception as e:
-        print("🔥 EXECUTOR V2 ERROR:", repr(e))
-        return None
+    return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
 # ===== ИНКРЕМЕНТ =====
@@ -155,6 +153,9 @@ async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
 
+        # 🔥 ПРИМЕНЯЕМ EXTRACTOR
+        prompt = extract_image_prompt(prompt)
+
         if not prompt:
             return {
                 "type": "error",
@@ -174,9 +175,6 @@ async def process(user_id, text, state):
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
-        # ===== 🚀 ОСНОВНОЙ ПОТОК (ТОЛЬКО V2) =====
-        print("🚀 TRY V2 FIRST")
-
         img = await generate_image_v2(prompt)
 
         if img:
@@ -192,9 +190,6 @@ async def process(user_id, text, state):
             })
 
             return {"type": "image", "data": img}
-
-        # ===== ⚠️ РЕДКИЙ FALLBACK (БЕЗ TIMEOUT И ПАНИКИ) =====
-        print("⚠️ V2 FAILED → TRY V1 (fallback)")
 
         img = await generate_image(prompt)
 
@@ -217,15 +212,15 @@ async def process(user_id, text, state):
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception as e:
-        print("🔥 PROCESS ERROR:", repr(e))
+    except Exception:
         return {"type": "error", "data": None}
 
 
-# ===== RETRY (ТОЖЕ БЕЗ УБИЙСТВА) =====
+# ===== RETRY =====
 async def retry_process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
+        prompt = extract_image_prompt(prompt)
 
         if not prompt:
             return {
@@ -260,6 +255,5 @@ async def retry_process(user_id, text, state):
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception as e:
-        print("🔥 RETRY ERROR:", repr(e))
+    except Exception:
         return {"type": "final_error", "data": "⚠️ Сервис временно недоступен"}
