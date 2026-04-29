@@ -126,7 +126,7 @@ def is_image_question(text: str):
     ])
 
 
-# 🔥 ДОБАВЛЕН ФИКС (НЕ ЛОМАЕТ ЛОГИКУ)
+# 🔥 ФИКС: теперь гарантирует только bytes или None
 def extract_bytes(data):
     if isinstance(data, bytes):
         return data
@@ -135,14 +135,14 @@ def extract_bytes(data):
         try:
             return base64.b64decode(data)
         except:
-            return data
+            return None
 
     if isinstance(data, dict):
         for key in ["data", "image", "result", "content"]:
             if key in data:
                 return extract_bytes(data[key])
 
-    return data
+    return None
 
 
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
@@ -183,17 +183,25 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except:
             pass
 
-        if len(text.strip()) > 15:
-            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
-            prompt = extract_image_prompt(text)
-            result = await image_generate(user_id, prompt, state)
-
+        def build_image_response(result):
             img = extract_bytes(result)
+
+            if not img:
+                return {
+                    "type": "text",
+                    "data": "⚠️ Не удалось создать изображение"
+                }
 
             return {
                 "type": "image",
                 "data": img
             }
+
+        if len(text.strip()) > 15:
+            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
+            prompt = extract_image_prompt(text)
+            result = await image_generate(user_id, prompt, state)
+            return build_image_response(result)
 
         summary = state.get("memory_summary")
         dialog = state.get("dialog", [])
@@ -202,13 +210,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             prompt = extract_image_prompt(summary)
             print("🖼️ GENERATE FROM SUMMARY")
             result = await image_generate(user_id, prompt, state)
-
-            img = extract_bytes(result)
-
-            return {
-                "type": "image",
-                "data": img
-            }
+            return build_image_response(result)
 
         if dialog:
             last_user = next(
@@ -219,13 +221,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 prompt = extract_image_prompt(last_user)
                 print("🖼️ GENERATE FROM DIALOG")
                 result = await image_generate(user_id, prompt, state)
-
-                img = extract_bytes(result)
-
-                return {
-                    "type": "image",
-                    "data": img
-                }
+                return build_image_response(result)
 
         return {
             "type": "text",
