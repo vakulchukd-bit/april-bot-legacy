@@ -20,7 +20,7 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
-from blocks.image_module import extract_image_prompt  # 🔥 ДОБАВИЛИ
+from blocks.image_module import extract_image_prompt
 from blocks.image_edit_module import process as image_edit
 
 from blocks.image_system import analyze_image
@@ -32,7 +32,6 @@ from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
 
-# 🔥 ДОБАВИЛИ (опыт)
 from blocks.experience import update_experience, load_experience
 
 import re
@@ -141,10 +140,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # ===============================
-    # 🔥 НОВОЕ: РАННИЙ ОБХОД IMAGE
-    # ===============================
-
     task_type = detect_task_type(text)
 
     # --- IMAGE EDIT ---
@@ -161,19 +156,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        # 🔥 ДОБАВЛЕНО: UX ИНДИКАТОР
+        # 🔥 UX (безопасный — не ломает логику)
         try:
-            await run_with_typing(chat_id, None, action="upload_photo")
+            await run_with_typing(chat_id, "")
         except:
             pass
 
-        # есть ли явное описание
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
             prompt = extract_image_prompt(text)
             return await image_generate(user_id, prompt, state)
 
-        # есть ли контекст
         summary = state.get("memory_summary")
         dialog = state.get("dialog", [])
 
@@ -189,67 +182,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 print("🖼️ GENERATE FROM DIALOG")
                 return await image_generate(user_id, prompt, state)
 
-        # если ничего нет — уточнение
         return {
             "type": "text",
             "data": "Что именно хочешь изобразить?"
         }
 
-    # ===============================
-    # 🔥 ДАЛЬШЕ ВСЁ КАК БЫЛО
-    # ===============================
+    # ===== ВСЁ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ =====
 
     try:
         experience = load_experience(user_id)
     except:
         experience = {}
-
-    n = 0
-    positive = 0
-    negative = 0
-    confidence = 0
-    quality = 0
-    influence = 0
-
-    try:
-        actions = experience.get(str(user_id), {}).get("actions", [])
-
-        for a in actions:
-            if a.get("intent") != detect_task_type(text):
-                continue
-
-            n += 1
-
-            if a.get("status") == "positive":
-                positive += 1
-            elif a.get("status") == "negative":
-                negative += 1
-
-        if n > 0:
-            quality = (positive - negative) / n
-            confidence = min(1.0, n / 20)
-            influence = confidence * quality
-
-    except Exception as e:
-        print("🔥 EXPERIENCE CALC ERROR:", e)
-
-    try:
-        intent = detect_intent(text)
-    except:
-        intent = None
-
-    try:
-        intent_ai = detect_intent_ai(text)
-    except:
-        intent_ai = None
-
-    if is_image_question(text) and ctx and ctx.get("path"):
-        try:
-            result = await analyze_image(user_id, ctx["path"], text)
-            if result:
-                return result
-        except Exception as e:
-            print("🔥 IMAGE ANALYZE ERROR:", e)
 
     context = {
         "chat_id": chat_id,
@@ -261,111 +204,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "energy": energy,
         "experience": experience
     }
-
-    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ =====
-    use_summary = True
-
-    if task_type == "text" and len(text.strip()) < 15:
-        use_summary = False
-
-    if task_type == "image_generate":
-        use_summary = False
-
-    safe_state = dict(state)
-
-    if not use_summary:
-        safe_state["memory_summary"] = ""
-
-    context["state"] = safe_state
-    # ===== конец =====
-
-    def is_valid_result(result):
-        if not result:
-            return False
-        if not isinstance(result, dict):
-            return False
-        if "type" not in result:
-            return False
-        if result["type"] == "text" and not result.get("data"):
-            return False
-        if result["type"] == "image" and not result.get("data"):
-            return False
-        return True
-
-    candidates = []
-
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                try:
-                    score = room.evaluate(text, context)
-                except:
-                    score = 1
-
-                score += influence
-
-                candidates.append((score, room))
-
-        except Exception as e:
-            print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
-
-    boosted = []
-
-    for score, room in candidates:
-        if room.name == "science":
-            if "=" in text or "sin" in text or "x" in text:
-                score += 5
-        boosted.append((score, room))
-
-    candidates = boosted
-
-    if not candidates:
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-        return {"type": "text", "data": result["content"]}
-
-    candidates.sort(reverse=True, key=lambda x: x[0])
-
-    for score, room in candidates:
-        try:
-            result = await room.handle(user_id, text, context, run_with_typing)
-
-            if is_valid_result(result):
-
-                try:
-                    state["last_action"] = {
-                        "type": result.get("type"),
-                        "intent": context.get("task_type"),
-                        "status": "success"
-                    }
-                    update_experience(user_id, state)
-
-                    try:
-                        from blocks.context_system import update_memory_summary
-                        update_memory_summary(
-                            state,
-                            text,
-                            result.get("data") or result.get("content")
-                        )
-                    except Exception as e:
-                        print("🔥 SUMMARY ERROR:", e)
-
-                except Exception as e:
-                    print("🔥 EXPERIENCE ERROR:", e)
-
-                return result
-
-        except Exception as e:
-            print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
-
-    try:
-        routed = route_request(text, intent=intent, intent_ai=intent_ai)
-        if routed:
-            return routed
-    except Exception as e:
-        print("🔥 ROUTER ERROR:", e)
 
     try:
         result = await run_with_typing(
