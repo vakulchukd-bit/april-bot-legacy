@@ -36,6 +36,7 @@ from blocks.energy_manager import get_energy
 from blocks.experience import update_experience, load_experience
 
 import re
+import asyncio
 
 
 def detect_task_type(text: str):
@@ -130,8 +131,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    t = text.lower().strip()
-
     energy = get_energy(user_id)
 
     ctx = get_image_context(user_id) or state.get("image_context")
@@ -153,42 +152,46 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        if len(text.strip()) > 15:
-            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
-            prompt = extract_image_prompt(text)
-            return await run_with_typing(
-                chat_id,
-                image_generate(user_id, prompt, state),
-                mode="image"
-            )
+        from loader import bot
 
-        summary = state.get("memory_summary")
-        dialog = state.get("dialog", [])
+        async def photo_loop():
+            try:
+                while True:
+                    await bot.send_chat_action(chat_id, "upload_photo")
+                    await asyncio.sleep(2)
+            except:
+                pass
 
-        if summary:
-            prompt = extract_image_prompt(summary)
-            print("🖼️ GENERATE FROM SUMMARY")
-            return await run_with_typing(
-                chat_id,
-                image_generate(user_id, prompt, state),
-                mode="image"
-            )
+        loop_task = asyncio.create_task(photo_loop())
 
-        if dialog:
-            last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
-            if last_user:
-                prompt = extract_image_prompt(last_user)
-                print("🖼️ GENERATE FROM DIALOG")
-                return await run_with_typing(
-                    chat_id,
-                    image_generate(user_id, prompt, state),
-                    mode="image"
-                )
+        try:
+            if len(text.strip()) > 15:
+                prompt = extract_image_prompt(text)
+                result = await image_generate(user_id, prompt, state)
+                return result
 
-        return {
-            "type": "text",
-            "data": "Что именно хочешь изобразить?"
-        }
+            summary = state.get("memory_summary")
+            dialog = state.get("dialog", [])
+
+            if summary:
+                prompt = extract_image_prompt(summary)
+                result = await image_generate(user_id, prompt, state)
+                return result
+
+            if dialog:
+                last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
+                if last_user:
+                    prompt = extract_image_prompt(last_user)
+                    result = await image_generate(user_id, prompt, state)
+                    return result
+
+            return {
+                "type": "text",
+                "data": "Что именно хочешь изобразить?"
+            }
+
+        finally:
+            loop_task.cancel()
 
     # ===== ВСЁ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ =====
 
