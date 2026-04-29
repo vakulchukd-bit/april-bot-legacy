@@ -20,6 +20,7 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
+from blocks.image_module import extract_image_prompt  # 🔥 ДОБАВИЛИ
 from blocks.image_edit_module import process as image_edit
 
 from blocks.image_system import analyze_image
@@ -160,27 +161,29 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        # есть ли явное описание (длина > 15)
+        # есть ли явное описание
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
-            return await image_generate(user_id, text, state)
+            prompt = extract_image_prompt(text)
+            return await image_generate(user_id, prompt, state)
 
         # есть ли контекст
         summary = state.get("memory_summary")
         dialog = state.get("dialog", [])
 
         if summary:
-            prompt = summary
+            prompt = extract_image_prompt(summary)
             print("🖼️ GENERATE FROM SUMMARY")
             return await image_generate(user_id, prompt, state)
 
         if dialog:
             last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
             if last_user:
+                prompt = extract_image_prompt(last_user)
                 print("🖼️ GENERATE FROM DIALOG")
-                return await image_generate(user_id, last_user, state)
+                return await image_generate(user_id, prompt, state)
 
-        # если ничего нет — уточнение (дешевое)
+        # если ничего нет — уточнение
         return {
             "type": "text",
             "data": "Что именно хочешь изобразить?"
