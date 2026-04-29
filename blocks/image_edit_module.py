@@ -28,7 +28,9 @@ async def edit_image(image_path, prompt):
             result = client.images.edit(
                 model="gpt-image-1",
                 image=f,
-                prompt=prompt
+                prompt=prompt,
+                size="512x512",      # 🔥 ДОБАВЛЕНО
+                quality="low"        # 🔥 ДОБАВЛЕНО
             )
 
         if not result or not result.data:
@@ -85,7 +87,7 @@ async def process(user_id, image_path, prompt):
         if limits["images_used"] >= limits["images_limit"]:
             return {
                 "type": "text",
-                "data": get_limit_message()  # 🔥 ЖИВОЕ СООБЩЕНИЕ
+                "data": get_limit_message()
             }
 
         img = await asyncio.wait_for(
