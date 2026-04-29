@@ -124,6 +124,19 @@ def is_image_question(text: str):
     ])
 
 
+# 🔥 ДОБАВЛЕНА ФУНКЦИЯ — НИЧЕГО НЕ УДАЛЯЕТ
+def extract_bytes(data):
+    if isinstance(data, bytes):
+        return data
+
+    if isinstance(data, dict):
+        for key in ["data", "image", "result", "content"]:
+            if key in data:
+                return extract_bytes(data[key])
+
+    return data
+
+
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
@@ -132,7 +145,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ❗ убрали автовыброс времени — теперь только через диалог
+    # ❗ оставлено как у тебя
     if "время" in t:
         return {"type": "text", "data": "Могу уточнить время, если скажешь, в каком ты городе 🙂"}
 
@@ -154,16 +167,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "data": "Сначала нужно создать изображение 🙂"
             }
 
-    # --- IMAGE GENERATE (БЕЗ ОГРАНИЧЕНИЙ) ---
+    # --- IMAGE GENERATE ---
     if task_type == "image_generate":
         print("🖼️ DIRECT IMAGE GENERATE")
 
         prompt = extract_image_prompt(text)
         img = await image_generate(user_id, prompt, state)
 
-        # 🔥 ФИКС (ЕДИНСТВЕННОЕ ДОБАВЛЕНИЕ)
-        if isinstance(img, dict):
-            img = img.get("data") or img.get("image") or img
+        # 🔥 ФИКС (ЕДИНСТВЕННЫЙ)
+        img = extract_bytes(img)
 
         if isinstance(img, str):
             try:
@@ -183,6 +195,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         experience = load_experience(user_id)
     except:
         experience = {}
+
+    context = {
+        "chat_id": chat_id,
+        "state": state,
+        "image": ctx,
+        "anchor": anchor,
+        "mode": mode,
+        "task_type": detect_task_type(text),
+        "energy": energy,
+        "experience": experience
+    }
 
     try:
         result = await run_with_typing(
