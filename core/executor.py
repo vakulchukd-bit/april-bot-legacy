@@ -132,10 +132,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    if "время" in t:
-        now = datetime.now().strftime("%H:%M")
-        return {"type": "text", "data": f"Сейчас {now}"}
-
     energy = get_energy(user_id)
 
     ctx = get_image_context(user_id) or state.get("image_context")
