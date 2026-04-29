@@ -162,7 +162,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             prompt = extract_image_prompt(text)
             return await run_with_typing(
                 chat_id,
-                image_generate(user_id, prompt, state)
+                image_generate(user_id, prompt, state),
+                mode="image"
             )
 
         summary = state.get("memory_summary")
@@ -173,7 +174,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             print("🖼️ GENERATE FROM SUMMARY")
             return await run_with_typing(
                 chat_id,
-                image_generate(user_id, prompt, state)
+                image_generate(user_id, prompt, state),
+                mode="image"
             )
 
         if dialog:
@@ -183,7 +185,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 print("🖼️ GENERATE FROM DIALOG")
                 return await run_with_typing(
                     chat_id,
-                    image_generate(user_id, prompt, state)
+                    image_generate(user_id, prompt, state),
+                    mode="image"
                 )
 
         return {
