@@ -132,9 +132,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ❗ убрали автовыброс времени — теперь только через диалог
     if "время" in t:
-        return {"type": "text", "data": "Могу уточнить время, если скажешь, в каком ты городе 🙂"}
+        return {"type": "text", "data": "Могу подсказать время, если уточнишь город 🙂"}
 
     energy = get_energy(user_id)
 
@@ -154,25 +153,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "data": "Сначала нужно создать изображение 🙂"
             }
 
-    # --- IMAGE GENERATE (БЕЗ ОГРАНИЧЕНИЙ) ---
+    # --- IMAGE GENERATE ---
     if task_type == "image_generate":
         print("🖼️ DIRECT IMAGE GENERATE")
 
         prompt = extract_image_prompt(text)
         img = await image_generate(user_id, prompt, state)
 
+        # 🔥 ФИКС: приводим к bytes
+        if isinstance(img, dict):
+            img = img.get("data") or img.get("image") or img
+
         return {
             "type": "image",
             "data": img
         }
 
-    # ===== ВСЁ ОСТАЛЬНОЕ =====
-
-    try:
-        experience = load_experience(user_id)
-    except:
-        experience = {}
-
+    # --- TEXT ---
     try:
         result = await run_with_typing(
             chat_id,
