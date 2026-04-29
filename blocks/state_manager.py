@@ -13,26 +13,22 @@ def get_state(user_id):
             "image_context": None,
             "awaiting": False,
             "last_prompt": None,
-            "task_type": None  # 🔥 НОВОЕ ПОЛЕ (тип задачи)
+            "task_type": None,
+            "memory_summary": ""  # 🔥 ДОБАВИЛИ
         }
     return state[user_id]
 
 
 # ===== IMAGE CONTEXT =====
 def set_image_context(user_id, ctx):
-    # 🔥 сохраняем в двух местах
     image_storage[user_id] = ctx
     get_state(user_id)["image_context"] = ctx
 
 
 def get_image_context(user_id):
-    # 🔥 сначала берём из стабильного хранилища
     ctx = image_storage.get(user_id)
-
     if ctx:
         return ctx
-
-    # 🔥 fallback (если вдруг потерялось)
     return get_state(user_id).get("image_context")
 
 
@@ -52,6 +48,26 @@ def set_last_prompt(user_id, prompt):
 
 def get_last_prompt(user_id):
     return get_state(user_id).get("last_prompt")
+
+
+# ===== SUMMARY =====
+def update_memory_summary(user_id, new_text):
+    """
+    🔥 Упрощённое накопление смысла
+    (пока без GPT — безопасно и дешево)
+    """
+    state = get_state(user_id)
+
+    current = state.get("memory_summary", "")
+
+    # 🔥 добавляем новый смысл
+    updated = (current + " " + new_text).strip()
+
+    # 🔥 ограничиваем размер (важно!)
+    if len(updated) > 500:
+        updated = updated[-500:]
+
+    state["memory_summary"] = updated
 
 
 # ===== DIALOG =====
