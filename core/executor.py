@@ -162,8 +162,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             prompt = extract_image_prompt(text)
             return await run_with_typing(
                 chat_id,
-                image_generate(user_id, prompt, state),
-                mode="image"
+                image_generate(user_id, prompt, state)
             )
 
         summary = state.get("memory_summary")
@@ -174,19 +173,20 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             print("🖼️ GENERATE FROM SUMMARY")
             return await run_with_typing(
                 chat_id,
-                image_generate(user_id, prompt, state),
-                mode="image"
+                image_generate(user_id, prompt, state)
             )
 
         if dialog:
-            last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
+            last_user = next(
+                (m["content"] for m in reversed(dialog) if m["role"] == "user"),
+                None
+            )
             if last_user:
                 prompt = extract_image_prompt(last_user)
                 print("🖼️ GENERATE FROM DIALOG")
                 return await run_with_typing(
                     chat_id,
-                    image_generate(user_id, prompt, state),
-                    mode="image"
+                    image_generate(user_id, prompt, state)
                 )
 
         return {
@@ -194,7 +194,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "data": "Что именно хочешь изобразить?"
         }
 
-    # ===== ВСЁ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ =====
+    # ===== ВСЁ ОСТАЛЬНОЕ =====
 
     try:
         experience = load_experience(user_id)
