@@ -28,6 +28,8 @@ from blocks.image_system import analyze_image
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.enums import ChatAction  # 🔥 ДОБАВИЛИ
+
 from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
@@ -156,11 +158,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        # 🔥 ВОЗВРАЩАЕМ UX (как было)
+        # 🔥 ПОКАЗЫВАЕМ "ОТПРАВКА ФОТО"
         try:
-            await run_with_typing(chat_id, "🎨 Создаю изображение...")
-        except:
-            pass
+            from loader import bot  # если у тебя другой путь — скажешь, поправлю
+
+            await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+
+        except Exception as e:
+            print("🔥 CHAT ACTION ERROR:", e)
 
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
