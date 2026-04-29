@@ -140,13 +140,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # 🔥 ЗАГРУЖАЕМ ОПЫТ
     try:
         experience = load_experience(user_id)
     except:
         experience = {}
 
-    # 🔥 СИСТЕМА ДОВЕРИЯ К ОПЫТУ
     n = 0
     positive = 0
     negative = 0
@@ -207,7 +205,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "experience": experience
     }
 
-    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ (ТОЧЕЧНО ДОБАВЛЕНО) =====
+    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ (БЕЗОПАСНЫЙ) =====
     task_type = context.get("task_type")
     use_summary = True
 
@@ -217,9 +215,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if task_type == "image_generate":
         use_summary = False
 
-    if not use_summary:
-        context["state"]["memory_summary"] = ""
+    # 🔥 КЛЮЧЕВАЯ ПРАВКА — ДЕЛАЕМ КОПИЮ STATE
+    safe_state = dict(state)
 
+    if not use_summary:
+        safe_state["memory_summary"] = ""
+
+    context["state"] = safe_state
     # ===== конец вставки =====
 
     def is_valid_result(result):
