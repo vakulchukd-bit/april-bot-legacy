@@ -156,9 +156,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        # 🔥 UX (безопасный — не ломает логику)
+        # 🔥 ВОЗВРАЩАЕМ UX (как было)
         try:
-            await run_with_typing(chat_id, "")
+            await run_with_typing(chat_id, "🎨 Создаю изображение...")
         except:
             pass
 
