@@ -126,7 +126,6 @@ def is_image_question(text: str):
     ])
 
 
-# 🔥 ФИКС: теперь гарантирует только bytes или None
 def extract_bytes(data):
     if isinstance(data, bytes):
         return data
@@ -197,36 +196,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "data": img
             }
 
-        if len(text.strip()) > 15:
-            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
-            prompt = extract_image_prompt(text)
-            result = await image_generate(user_id, prompt, state)
-            return build_image_response(result)
-
-        summary = state.get("memory_summary")
-        dialog = state.get("dialog", [])
-
-        if summary:
-            prompt = extract_image_prompt(summary)
-            print("🖼️ GENERATE FROM SUMMARY")
-            result = await image_generate(user_id, prompt, state)
-            return build_image_response(result)
-
-        if dialog:
-            last_user = next(
-                (m["content"] for m in reversed(dialog) if m["role"] == "user"),
-                None
-            )
-            if last_user:
-                prompt = extract_image_prompt(last_user)
-                print("🖼️ GENERATE FROM DIALOG")
-                result = await image_generate(user_id, prompt, state)
-                return build_image_response(result)
-
-        return {
-            "type": "text",
-            "data": "Что именно хочешь изобразить?"
-        }
+        print("🖼️ DIRECT IMAGE GENERATE (safe)")
+        prompt = extract_image_prompt(text)
+        result = await image_generate(user_id, prompt, state)
+        return build_image_response(result)
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
 
