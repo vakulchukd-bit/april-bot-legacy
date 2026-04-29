@@ -64,7 +64,6 @@ bot = Bot(token=TOKEN, session=session)
 dp = Dispatcher()
 
 ADMIN_ID = 2016592532
-tz = pytz.timezone("Europe/Kyiv")
 
 
 def is_time_question(text: str):
@@ -171,9 +170,11 @@ async def handle(message: types.Message):
 
     state = get_state(user_id)
 
-    now = datetime.now(tz)
-    state["time_str"] = now.strftime("%H:%M")
-    state["date_str"] = now.strftime("%d.%m.%Y")
+    # 🔥 ВМЕСТО КИЕВА — БЕРЕМ ВРЕМЯ TELEGRAM
+    msg_time = message.date
+
+    state["time_str"] = msg_time.strftime("%H:%M")
+    state["date_str"] = msg_time.strftime("%d.%m.%Y")
 
     if is_time_question(text):
         await message.answer(
