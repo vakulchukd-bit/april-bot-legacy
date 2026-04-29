@@ -56,7 +56,13 @@ def get_last_prompt(user_id):
 
 # ===== DIALOG =====
 def add_dialog(user_id, role, content):
-    get_state(user_id)["dialog"].append({
+    dialog = get_state(user_id)["dialog"]
+
+    dialog.append({
         "role": role,
         "content": content
     })
+
+    # 🔥 ОГРАНИЧЕНИЕ (последние 6 сообщений)
+    if len(dialog) > 6:
+        dialog.pop(0)
