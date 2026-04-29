@@ -160,10 +160,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
             prompt = extract_image_prompt(text)
-            return await run_with_typing(
-                chat_id,
-                image_generate(user_id, prompt, state)
-            )
+            return await image_generate(user_id, prompt, state)
 
         summary = state.get("memory_summary")
         dialog = state.get("dialog", [])
@@ -171,10 +168,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if summary:
             prompt = extract_image_prompt(summary)
             print("🖼️ GENERATE FROM SUMMARY")
-            return await run_with_typing(
-                chat_id,
-                image_generate(user_id, prompt, state)
-            )
+            return await image_generate(user_id, prompt, state)
 
         if dialog:
             last_user = next(
@@ -184,10 +178,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             if last_user:
                 prompt = extract_image_prompt(last_user)
                 print("🖼️ GENERATE FROM DIALOG")
-                return await run_with_typing(
-                    chat_id,
-                    image_generate(user_id, prompt, state)
-                )
+                return await image_generate(user_id, prompt, state)
 
         return {
             "type": "text",
