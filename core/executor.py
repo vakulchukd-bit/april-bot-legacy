@@ -132,9 +132,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ❗ оставлено как у тебя
     if "время" in t:
-        return {"type": "text", "data": "Могу уточнить время, если скажешь, в каком ты городе 🙂"}
+        now = datetime.now().strftime("%H:%M")
+        return {"type": "text", "data": f"Сейчас {now}"}
 
     energy = get_energy(user_id)
 
@@ -156,19 +156,39 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
-        print("🖼️ DIRECT IMAGE GENERATE")
 
-        prompt = extract_image_prompt(text)
-        result = await image_generate(user_id, prompt, state)
+        # UX как было (но аккуратно)
+        try:
+            await run_with_typing(chat_id, asyncio.sleep(0))
+        except:
+            pass
 
-        # 🔥 ПРАВИЛЬНО: возвращаем как есть
-        if isinstance(result, dict):
-            return result
+        if len(text.strip()) > 15:
+            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
+            prompt = extract_image_prompt(text)
+            return await image_generate(user_id, prompt, state)
 
-        # fallback (на всякий случай)
+        summary = state.get("memory_summary")
+        dialog = state.get("dialog", [])
+
+        if summary:
+            prompt = extract_image_prompt(summary)
+            print("🖼️ GENERATE FROM SUMMARY")
+            return await image_generate(user_id, prompt, state)
+
+        if dialog:
+            last_user = next(
+                (m["content"] for m in reversed(dialog) if m["role"] == "user"),
+                None
+            )
+            if last_user:
+                prompt = extract_image_prompt(last_user)
+                print("🖼️ GENERATE FROM DIALOG")
+                return await image_generate(user_id, prompt, state)
+
         return {
-            "type": "image",
-            "data": result
+            "type": "text",
+            "data": "Что именно хочешь изобразить?"
         }
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
