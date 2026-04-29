@@ -41,26 +41,25 @@ import base64
 
 
 def detect_task_type(text: str):
-    t = text.lower()
+    t = text.lower().strip()
 
-    if "=" in t:
-        return "math"
-
-    if "sin(" in t or "cos(" in t:
-        return "math"
-
-    if any(op in t for op in ["+", "-", "*", "/"]):
-        if any(ch.isdigit() for ch in t):
-            return "math"
-
-    if "y=" in t or "график" in t:
-        return "math"
-
+    # --- IMAGE EDIT ---
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
+    # --- IMAGE GENERATE ---
     if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
         return "image_generate"
+
+    # --- MATH (только если есть цифры + операции) ---
+    has_digits = any(ch.isdigit() for ch in t)
+
+    if has_digits:
+        if any(op in t for op in ["+", "-", "*", "/", "="]):
+            return "math"
+
+        if any(f in t for f in ["sin(", "cos(", "tan(", "y="]):
+            return "math"
 
     return "text"
 
