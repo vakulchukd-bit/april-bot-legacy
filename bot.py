@@ -73,7 +73,6 @@ def is_time_question(text: str):
     ])
 
 
-# 🔥 ОБНОВЛЕНО
 async def typing_loop(chat_id, mode="text"):
     try:
         while True:
@@ -86,7 +85,6 @@ async def typing_loop(chat_id, mode="text"):
         pass
 
 
-# 🔥 ОБНОВЛЕНО
 async def run_with_typing(chat_id, coro, mode="text"):
     task = asyncio.create_task(typing_loop(chat_id, mode))
     try:
@@ -170,9 +168,7 @@ async def handle(message: types.Message):
 
     state = get_state(user_id)
 
-    # 🔥 ВМЕСТО КИЕВА — БЕРЕМ ВРЕМЯ TELEGRAM
     msg_time = message.date
-
     state["time_str"] = msg_time.strftime("%H:%M")
     state["date_str"] = msg_time.strftime("%d.%m.%Y")
 
@@ -203,7 +199,8 @@ async def handle(message: types.Message):
         return
 
     try:
-        result = await execute(user_id, text, message.chat.id, run_with_typing)
+        # 🔥 ФИКС ЗДЕСЬ (ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ)
+        result = await execute(user_id, text, message.chat.id, None)
 
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
