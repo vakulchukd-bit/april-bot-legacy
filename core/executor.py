@@ -28,7 +28,6 @@ from blocks.image_system import analyze_image
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.enums import ChatAction  # 🔥 ДОБАВИЛИ
 
 from storage import set_subscription, save_payment
 
@@ -158,19 +157,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        # 🔥 ПОКАЗЫВАЕМ "ОТПРАВКА ФОТО"
-        try:
-            from loader import bot  # если у тебя другой путь — скажешь, поправлю
-
-            await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
-
-        except Exception as e:
-            print("🔥 CHAT ACTION ERROR:", e)
-
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
             prompt = extract_image_prompt(text)
-            return await image_generate(user_id, prompt, state)
+            return await run_with_typing(
+                chat_id,
+                image_generate(user_id, prompt, state)
+            )
 
         summary = state.get("memory_summary")
         dialog = state.get("dialog", [])
@@ -178,14 +171,20 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if summary:
             prompt = extract_image_prompt(summary)
             print("🖼️ GENERATE FROM SUMMARY")
-            return await image_generate(user_id, prompt, state)
+            return await run_with_typing(
+                chat_id,
+                image_generate(user_id, prompt, state)
+            )
 
         if dialog:
             last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
             if last_user:
                 prompt = extract_image_prompt(last_user)
                 print("🖼️ GENERATE FROM DIALOG")
-                return await image_generate(user_id, prompt, state)
+                return await run_with_typing(
+                    chat_id,
+                    image_generate(user_id, prompt, state)
+                )
 
         return {
             "type": "text",
