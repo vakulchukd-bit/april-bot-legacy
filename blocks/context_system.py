@@ -32,3 +32,28 @@ def build_context_text(state=None):
                 base += f"\n\nПоследняя работа с изображением:\n{hint}"
 
     return base
+
+
+# 🔥 НОВОЕ: УМНЫЙ SUMMARY (дешёвый, без API)
+def update_memory_summary(state, user_text, bot_reply):
+    """
+    Сжимает диалог в смысл.
+    Без использования OpenAI → бесплатно.
+    """
+
+    old = state.get("memory_summary", "")
+
+    # защищаемся от None
+    user_text = user_text or ""
+    bot_reply = bot_reply or ""
+
+    # 🔥 формируем смысловой кусок
+    chunk = f"Пользователь: {user_text}\nОтвет: {bot_reply}"
+
+    combined = (old + "\n" + chunk).strip()
+
+    # 🔥 ограничение размера (очень важно для токенов)
+    if len(combined) > 1000:
+        combined = combined[-1000:]
+
+    state["memory_summary"] = combined
