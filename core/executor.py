@@ -130,6 +130,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    t = text.lower().strip()
+
+    # ❌ УБРАЛИ ЛОМАЮЩИЙ ТРИГГЕР ВРЕМЕНИ
+    # if "время" in t:
+    #     now = datetime.now().strftime("%H:%M")
+    #     return {"type": "text", "data": f"Сейчас {now}"}
+
     energy = get_energy(user_id)
 
     ctx = get_image_context(user_id) or state.get("image_context")
@@ -176,7 +183,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "data": "Что именно хочешь изобразить?"
         }
 
-    # ===== ВСЁ ОСТАЛЬНОЕ =====
+    # ===== ВСЁ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ =====
 
     try:
         experience = load_experience(user_id)
