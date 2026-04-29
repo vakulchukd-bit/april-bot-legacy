@@ -124,19 +124,6 @@ def is_image_question(text: str):
     ])
 
 
-# 🔥 ДОБАВЛЕНА ФУНКЦИЯ — НИЧЕГО НЕ УДАЛЯЕТ
-def extract_bytes(data):
-    if isinstance(data, bytes):
-        return data
-
-    if isinstance(data, dict):
-        for key in ["data", "image", "result", "content"]:
-            if key in data:
-                return extract_bytes(data[key])
-
-    return data
-
-
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
@@ -172,21 +159,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print("🖼️ DIRECT IMAGE GENERATE")
 
         prompt = extract_image_prompt(text)
-        img = await image_generate(user_id, prompt, state)
+        result = await image_generate(user_id, prompt, state)
 
-        # 🔥 ФИКС (ЕДИНСТВЕННЫЙ)
-        img = extract_bytes(img)
+        # 🔥 ПРАВИЛЬНО: возвращаем как есть
+        if isinstance(result, dict):
+            return result
 
-        if isinstance(img, str):
-            try:
-                import base64
-                img = base64.b64decode(img)
-            except:
-                pass
-
+        # fallback (на всякий случай)
         return {
             "type": "image",
-            "data": img
+            "data": result
         }
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
