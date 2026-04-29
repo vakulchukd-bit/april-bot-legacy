@@ -36,7 +36,6 @@ from blocks.energy_manager import get_energy
 from blocks.experience import update_experience, load_experience
 
 import re
-import asyncio
 
 
 def detect_task_type(text: str):
@@ -152,46 +151,27 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        from loader import bot
+        if len(text.strip()) > 15:
+            prompt = extract_image_prompt(text)
+            return await image_generate(user_id, prompt, state)
 
-        async def photo_loop():
-            try:
-                while True:
-                    await bot.send_chat_action(chat_id, "upload_photo")
-                    await asyncio.sleep(2)
-            except:
-                pass
+        summary = state.get("memory_summary")
+        dialog = state.get("dialog", [])
 
-        loop_task = asyncio.create_task(photo_loop())
+        if summary:
+            prompt = extract_image_prompt(summary)
+            return await image_generate(user_id, prompt, state)
 
-        try:
-            if len(text.strip()) > 15:
-                prompt = extract_image_prompt(text)
-                result = await image_generate(user_id, prompt, state)
-                return result
+        if dialog:
+            last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
+            if last_user:
+                prompt = extract_image_prompt(last_user)
+                return await image_generate(user_id, prompt, state)
 
-            summary = state.get("memory_summary")
-            dialog = state.get("dialog", [])
-
-            if summary:
-                prompt = extract_image_prompt(summary)
-                result = await image_generate(user_id, prompt, state)
-                return result
-
-            if dialog:
-                last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
-                if last_user:
-                    prompt = extract_image_prompt(last_user)
-                    result = await image_generate(user_id, prompt, state)
-                    return result
-
-            return {
-                "type": "text",
-                "data": "Что именно хочешь изобразить?"
-            }
-
-        finally:
-            loop_task.cancel()
+        return {
+            "type": "text",
+            "data": "Что именно хочешь изобразить?"
+        }
 
     # ===== ВСЁ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ =====
 
