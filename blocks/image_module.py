@@ -3,6 +3,7 @@ import asyncio
 from openai import OpenAI
 
 from storage import get_user_plan, get_limits, get_conn, today
+from blocks.ai_config import IMAGE_MODEL, IMAGE_SIZE, IMAGE_QUALITY  # 👈 НОВОЕ
 
 client = OpenAI()
 
@@ -61,10 +62,10 @@ async def generate_image(prompt):
     def run():
         try:
             response = client.images.generate(
-                model="gpt-image-1",
+                model=IMAGE_MODEL,          # 👈 через config
                 prompt=prompt,
-                size="512x512",
-                quality="low"
+                size=IMAGE_SIZE,            # 👈 через config
+                quality=IMAGE_QUALITY       # 👈 через config
             )
 
             if not response or not response.data:
