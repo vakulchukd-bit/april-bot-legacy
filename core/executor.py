@@ -177,29 +177,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
-        try:
-            await run_with_typing(chat_id, asyncio.sleep(0))
-        except:
-            pass
-
-        def build_image_response(result):
-            img = extract_bytes(result)
-
-            if not img:
-                return {
-                    "type": "text",
-                    "data": "⚠️ Не удалось создать изображение"
-                }
-
-            return {
-                "type": "image",
-                "data": img
-            }
-
         print("🖼️ DIRECT IMAGE GENERATE (safe)")
         prompt = extract_image_prompt(text)
-        result = await image_generate(user_id, prompt, state)
-        return build_image_response(result)
+
+        result = await run_with_typing(
+            chat_id,
+            image_generate(user_id, prompt, state)
+        )
+
+        return result
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
 
