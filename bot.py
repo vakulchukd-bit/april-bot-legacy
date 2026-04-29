@@ -199,8 +199,8 @@ async def handle(message: types.Message):
         return
 
     try:
-        # 🔥 ФИКС ЗДЕСЬ (ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ)
-        result = await execute(user_id, text, message.chat.id, None)
+        # 🔥 ЕДИНСТВЕННЫЙ ФИКС
+        result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         add_dialog(user_id, "user", text)
         add_dialog(user_id, "assistant", result.get("data", ""))
