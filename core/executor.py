@@ -133,7 +133,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     t = text.lower().strip()
 
     if "время" in t:
-        return {"type": "text", "data": "Могу подсказать время, если уточнишь город 🙂"}
+        now = datetime.now().strftime("%H:%M")
+        return {"type": "text", "data": f"Сейчас {now}"}
 
     energy = get_energy(user_id)
 
@@ -155,21 +156,81 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
-        print("🖼️ DIRECT IMAGE GENERATE")
 
-        prompt = extract_image_prompt(text)
-        img = await image_generate(user_id, prompt, state)
+        if len(text.strip()) > 15:
+            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
+            prompt = extract_image_prompt(text)
 
-        # 🔥 ФИКС: приводим к bytes
-        if isinstance(img, dict):
-            img = img.get("data") or img.get("image") or img
+            img = await image_generate(user_id, prompt, state)
+
+            # 🔥 ЕДИНСТВЕННЫЙ ФИКС
+            if isinstance(img, dict):
+                img = img.get("data") or img.get("image") or img
+
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        summary = state.get("memory_summary")
+        dialog = state.get("dialog", [])
+
+        if summary:
+            prompt = extract_image_prompt(summary)
+            print("🖼️ GENERATE FROM SUMMARY")
+
+            img = await image_generate(user_id, prompt, state)
+
+            if isinstance(img, dict):
+                img = img.get("data") or img.get("image") or img
+
+            return {
+                "type": "image",
+                "data": img
+            }
+
+        if dialog:
+            last_user = next(
+                (m["content"] for m in reversed(dialog) if m["role"] == "user"),
+                None
+            )
+            if last_user:
+                prompt = extract_image_prompt(last_user)
+                print("🖼️ GENERATE FROM DIALOG")
+
+                img = await image_generate(user_id, prompt, state)
+
+                if isinstance(img, dict):
+                    img = img.get("data") or img.get("image") or img
+
+                return {
+                    "type": "image",
+                    "data": img
+                }
 
         return {
-            "type": "image",
-            "data": img
+            "type": "text",
+            "data": "Что именно хочешь изобразить?"
         }
 
-    # --- TEXT ---
+    # ===== ВСЁ ОСТАЛЬНОЕ =====
+
+    try:
+        experience = load_experience(user_id)
+    except:
+        experience = {}
+
+    context = {
+        "chat_id": chat_id,
+        "state": state,
+        "image": ctx,
+        "anchor": anchor,
+        "mode": mode,
+        "task_type": detect_task_type(text),
+        "energy": energy,
+        "experience": experience
+    }
+
     try:
         result = await run_with_typing(
             chat_id,
