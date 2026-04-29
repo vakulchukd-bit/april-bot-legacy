@@ -158,7 +158,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         actions = experience.get(str(user_id), {}).get("actions", [])
 
         for a in actions:
-            # 🔥 ФИЛЬТР ПО ТИПУ ЗАДАЧИ (ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ)
             if a.get("intent") != detect_task_type(text):
                 continue
 
@@ -208,6 +207,21 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "experience": experience
     }
 
+    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ (ТОЧЕЧНО ДОБАВЛЕНО) =====
+    task_type = context.get("task_type")
+    use_summary = True
+
+    if task_type == "text" and len(text.strip()) < 15:
+        use_summary = False
+
+    if task_type == "image_generate":
+        use_summary = False
+
+    if not use_summary:
+        context["state"]["memory_summary"] = ""
+
+    # ===== конец вставки =====
+
     def is_valid_result(result):
         if not result:
             return False
@@ -231,7 +245,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 except:
                     score = 1
 
-                # 🔥 ГЛОБАЛЬНОЕ ВЛИЯНИЕ ОПЫТА
                 score += influence
 
                 candidates.append((score, room))
