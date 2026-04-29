@@ -37,7 +37,7 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== 🔥 НОВОЕ: EXTRACT IMAGE PROMPT =====
+# ===== EXTRACT IMAGE PROMPT =====
 def extract_image_prompt(text: str):
     if not text:
         return ""
@@ -54,7 +54,6 @@ def extract_image_prompt(text: str):
 
     t = t.strip()
 
-    # защита от длинных промптов
     if len(t) > 300:
         t = t[:300]
 
@@ -68,24 +67,28 @@ async def generate_image(prompt):
             response = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
-                size="512x512",        # 🔥 ДЕШЕВЛЕ
-                quality="low"          # 🔥 ДЕШЕВЛЕ
+                size="512x512",
+                quality="low"
             )
 
             if not response or not response.data:
+                print("🔥 IMAGE ERROR: пустой response (v1)")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
+                print("🔥 IMAGE ERROR: нет b64_json (v1)")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
+                print("🔥 IMAGE ERROR: пустой base64 (v1)")
                 return None
 
             return base64.b64decode(image_base64)
 
-        except Exception:
+        except Exception as e:
+            print("🔥 IMAGE ERROR (v1):", e)
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
@@ -98,24 +101,28 @@ async def generate_image_v2(prompt):
             response = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
-                size="512x512",        # 🔥 ДЕШЕВЛЕ
-                quality="low"          # 🔥 ДЕШЕВЛЕ
+                size="512x512",
+                quality="low"
             )
 
             if not response or not response.data:
+                print("🔥 IMAGE ERROR: пустой response (v2)")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
+                print("🔥 IMAGE ERROR: нет b64_json (v2)")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
+                print("🔥 IMAGE ERROR: пустой base64 (v2)")
                 return None
 
             return base64.b64decode(image_base64)
 
-        except Exception:
+        except Exception as e:
+            print("🔥 IMAGE ERROR (v2):", e)
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
@@ -156,8 +163,6 @@ def increment_images(user_id):
 async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
-
-        # 🔥 ПРИМЕНЯЕМ EXTRACTOR
         prompt = extract_image_prompt(prompt)
 
         if not prompt:
@@ -211,12 +216,15 @@ async def process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
+        print("🔥 IMAGE ERROR: обе генерации вернули None")
+
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception:
+    except Exception as e:
+        print("🔥 IMAGE PROCESS ERROR:", e)
         return {"type": "error", "data": None}
 
 
@@ -254,10 +262,13 @@ async def retry_process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
+        print("🔥 IMAGE RETRY ERROR: обе генерации None")
+
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception:
+    except Exception as e:
+        print("🔥 IMAGE RETRY ERROR:", e)
         return {"type": "final_error", "data": "⚠️ Сервис временно недоступен"}
