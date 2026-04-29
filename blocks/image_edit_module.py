@@ -6,6 +6,7 @@ import random
 from openai import OpenAI
 
 from storage import get_user_plan, get_limits, get_conn, today
+from blocks.ai_config import IMAGE_MODEL, IMAGE_SIZE, IMAGE_QUALITY  # 👈 ДОБАВЛЕНО
 
 client = OpenAI()
 
@@ -26,11 +27,11 @@ async def edit_image(image_path, prompt):
     def run():
         with open(image_path, "rb") as f:
             result = client.images.edit(
-                model="gpt-image-1",
+                model=IMAGE_MODEL,        # 👈 через config
                 image=f,
                 prompt=prompt,
-                size="512x512",      # 🔥 ДОБАВЛЕНО
-                quality="low"        # 🔥 ДОБАВЛЕНО
+                size=IMAGE_SIZE,          # 👈 через config
+                quality=IMAGE_QUALITY     # 👈 через config
             )
 
         if not result or not result.data:
