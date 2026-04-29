@@ -205,7 +205,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "experience": experience
     }
 
-    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ (БЕЗОПАСНЫЙ) =====
+    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ =====
     task_type = context.get("task_type")
     use_summary = True
 
@@ -215,14 +215,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if task_type == "image_generate":
         use_summary = False
 
-    # 🔥 КЛЮЧЕВАЯ ПРАВКА — ДЕЛАЕМ КОПИЮ STATE
     safe_state = dict(state)
 
     if not use_summary:
         safe_state["memory_summary"] = ""
 
     context["state"] = safe_state
-    # ===== конец вставки =====
+    # ===== конец =====
 
     def is_valid_result(result):
         if not result:
@@ -302,6 +301,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                         "status": "success"
                     }
                     update_experience(user_id, state)
+
+                    # 🔥 НОВОЕ: ОБНОВЛЯЕМ SUMMARY
+                    try:
+                        from blocks.context_system import update_memory_summary
+                        update_memory_summary(
+                            state,
+                            text,
+                            result.get("data") or result.get("content")
+                        )
+                    except Exception as e:
+                        print("🔥 SUMMARY ERROR:", e)
+
                 except Exception as e:
                     print("🔥 EXPERIENCE ERROR:", e)
 
