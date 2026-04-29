@@ -132,9 +132,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
+    # ❗ убрали автовыброс времени — теперь только через диалог
     if "время" in t:
-        now = datetime.now().strftime("%H:%M")
-        return {"type": "text", "data": f"Сейчас {now}"}
+        return {"type": "text", "data": "Могу уточнить время, если скажешь, в каком ты городе 🙂"}
 
     energy = get_energy(user_id)
 
@@ -154,38 +154,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "data": "Сначала нужно создать изображение 🙂"
             }
 
-    # --- IMAGE GENERATE ---
+    # --- IMAGE GENERATE (БЕЗ ОГРАНИЧЕНИЙ) ---
     if task_type == "image_generate":
+        print("🖼️ DIRECT IMAGE GENERATE")
 
-        if len(text.strip()) > 15:
-            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
-            prompt = extract_image_prompt(text)
-            img = await image_generate(user_id, prompt, state)
-            return {"type": "image", "data": img}
-
-        summary = state.get("memory_summary")
-        dialog = state.get("dialog", [])
-
-        if summary:
-            prompt = extract_image_prompt(summary)
-            print("🖼️ GENERATE FROM SUMMARY")
-            img = await image_generate(user_id, prompt, state)
-            return {"type": "image", "data": img}
-
-        if dialog:
-            last_user = next(
-                (m["content"] for m in reversed(dialog) if m["role"] == "user"),
-                None
-            )
-            if last_user:
-                prompt = extract_image_prompt(last_user)
-                print("🖼️ GENERATE FROM DIALOG")
-                img = await image_generate(user_id, prompt, state)
-                return {"type": "image", "data": img}
+        prompt = extract_image_prompt(text)
+        img = await image_generate(user_id, prompt, state)
 
         return {
-            "type": "text",
-            "data": "Что именно хочешь изобразить?"
+            "type": "image",
+            "data": img
         }
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
@@ -194,17 +172,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         experience = load_experience(user_id)
     except:
         experience = {}
-
-    context = {
-        "chat_id": chat_id,
-        "state": state,
-        "image": ctx,
-        "anchor": anchor,
-        "mode": mode,
-        "task_type": detect_task_type(text),
-        "energy": energy,
-        "experience": experience
-    }
 
     try:
         result = await run_with_typing(
