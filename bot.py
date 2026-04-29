@@ -222,4 +222,52 @@ async def handle(message: types.Message):
         await handle_error(bot, message, e, "global_handler")
 
 
-# дальше код callback без изменений (оставляю как есть)
+@dp.callback_query()
+async def handle_callbacks(callback: types.CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+
+    if data.startswith("like_"):
+        state = get_state(user_id)
+        state["last_action"] = {
+            "type": "feedback",
+            "intent": "like",
+            "status": "positive"
+        }
+        await callback.answer("👍")
+        return
+
+    if data.startswith("dislike_"):
+        state = get_state(user_id)
+        state["last_action"] = {
+            "type": "feedback",
+            "intent": "dislike",
+            "status": "negative"
+        }
+        await callback.answer("👎")
+        return
+
+    if data == "menu":
+        text, keyboard = get_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    if data == "info":
+        text, keyboard = build_info_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    await callback.answer()
+
+
+async def main():
+    init_db()
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    threading.Thread(target=run_server, daemon=True).start()
+    asyncio.run(main())
