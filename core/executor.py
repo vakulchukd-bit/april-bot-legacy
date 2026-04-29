@@ -151,7 +151,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
+        # 🔥 ВАЖНО: возвращаем рабочую логику как была
         if len(text.strip()) > 15:
+            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
             prompt = extract_image_prompt(text)
             return await image_generate(user_id, prompt, state)
 
@@ -159,12 +161,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         dialog = state.get("dialog", [])
 
         if summary:
+            print("🖼️ GENERATE FROM SUMMARY")
             prompt = extract_image_prompt(summary)
             return await image_generate(user_id, prompt, state)
 
         if dialog:
-            last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
+            last_user = next(
+                (m["content"] for m in reversed(dialog) if m["role"] == "user"),
+                None
+            )
             if last_user:
+                print("🖼️ GENERATE FROM DIALOG")
                 prompt = extract_image_prompt(last_user)
                 return await image_generate(user_id, prompt, state)
 
@@ -173,7 +180,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             "data": "Что именно хочешь изобразить?"
         }
 
-    # ===== ВСЁ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ =====
+    # ===== ВСЁ ОСТАЛЬНОЕ =====
 
     try:
         experience = load_experience(user_id)
