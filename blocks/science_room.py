@@ -158,7 +158,22 @@ class ScienceRoom:
         expr = self.extract_function(text)
 
         if expr:
-            # 🔥 НОВОЕ: HTML график (приоритет)
+            # 🔥 ВАЛИДАЦИЯ (НОВОЕ)
+            valid, error = self.validate_expression(expr)
+
+            if not valid:
+                return {
+                    "type": "text",
+                    "data": (
+                        "❌ Не удалось построить график.\n"
+                        f"Причина: {error}\n\n"
+                        "👉 Пример корректного ввода:\n"
+                        "y = x**2\n"
+                        "y = np.sin(x)"
+                    )
+                }
+
+            # 🔥 HTML график
             html = self.build_html_graph(expr)
             if html:
                 return {
@@ -167,7 +182,7 @@ class ScienceRoom:
                     "filename": "graph.html"
                 }
 
-            # 🔁 fallback (старый PNG)
+            # 🔁 fallback PNG
             path = self.build_graph(expr)
             if path:
                 try:
@@ -188,6 +203,22 @@ class ScienceRoom:
             }
 
         return None
+
+    # 🔥 НОВОЕ: ВАЛИДАЦИЯ
+    def validate_expression(self, expr):
+        try:
+            x = np.linspace(-10, 10, 10)
+
+            eval(expr, {
+                "x": x,
+                "np": np,
+                "__builtins__": {}
+            })
+
+            return True, None
+
+        except Exception as e:
+            return False, str(e)
 
     def extract_math_expression(self, text):
         t = text.lower()
