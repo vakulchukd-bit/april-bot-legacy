@@ -1,16 +1,48 @@
 from blocks.intent_ai import detect_intent_ai
 
 
+def detect_intent_local(text: str):
+    t = text.lower()
+
+    # 🔥 математика (самый приоритет)
+    if any(x in t for x in ["=", "+", "-", "*", "/"]):
+        return "math"
+
+    # 🔥 генерация
+    if any(x in t for x in ["нарисуй", "создай", "сгенерируй", "картинку", "изображение"]):
+        return "image_generate"
+
+    # 🔥 редактирование
+    if any(x in t for x in ["измени", "добавь", "убери", "замени"]):
+        return "image_edit"
+
+    # 🔥 анализ картинки
+    if any(x in t for x in ["что на картинке", "что изображено", "что это"]):
+        return "image_analyze"
+
+    return None
+
+
 async def route_request(text, ctx):
     try:
-        intent = await detect_intent_ai(text)
-        print("🧭 ROUTER INTENT:", intent)
-
-        # 🔥 НЕ ДАЁМ AI ПЕРЕБИТЬ МАТЕМАТИКУ
         t = text.lower()
 
-        if any(x in t for x in ["=", "x", "+", "-", "*", "/"]):
-            return "math"
+        # 🔥 1. Сначала локально (БЕСПЛАТНО)
+        local = detect_intent_local(text)
+        if local:
+            if local == "image_edit" and not ctx:
+                return "text"
+            if local == "image_analyze" and not ctx:
+                return "text"
+            return local
+
+        # 🔥 2. Короткие сообщения не гоняем в OpenAI
+        if len(t.strip()) < 15:
+            return "text"
+
+        # 🔥 3. Только теперь подключаем AI (редко)
+        intent = await detect_intent_ai(text)
+        print("🧭 ROUTER INTENT:", intent)
 
         if intent == "generate_image":
             return "image_generate"
