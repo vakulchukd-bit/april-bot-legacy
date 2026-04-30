@@ -31,6 +31,9 @@ class ScienceRoom:
         ]):
             return True
 
+        if any(fn in t for fn in ["sin", "cos", "tan", "log"]):
+            return True
+
         if "x" in t:
             return True
 
@@ -41,11 +44,10 @@ class ScienceRoom:
             return 10.0
         return 1.0
 
-    # ===== 🔥 РАЗБИВКА НА ЗАДАЧИ =====
     def split_into_tasks(self, text):
         t = text.lower()
 
-        parts = re.split(r'(sin\([^)]+\)|[a-z0-9\+\-\*/\(\)]+\=[a-z0-9\+\-\*/\(\)]+)', t)
+        parts = re.split(r'(sin\([^)]+\)|cos\([^)]+\)|[a-z0-9\+\-\*/\(\)]+\=[a-z0-9\+\-\*/\(\)]+)', t)
 
         tasks = []
 
@@ -54,12 +56,11 @@ class ScienceRoom:
             if not p:
                 continue
 
-            if "=" in p or "sin" in p:
+            if "=" in p or "sin" in p or "cos" in p:
                 tasks.append(p)
 
         return tasks
 
-    # ===== 🔥 РАЗБИВКА СИСТЕМ =====
     def split_system(self, eq):
         parts = eq.split("=")
 
@@ -154,22 +155,22 @@ class ScienceRoom:
                 print("🔥 SIN ERROR:", e)
 
         # ===== ГРАФИК =====
-        if "y=" in text.lower():
-            expr = self.extract_function(text)
-            if expr:
-                path = self.build_graph(expr)
-                if path:
-                    try:
-                        with open(path, "rb") as f:
-                            return {
-                                "type": "image",
-                                "data": f.read(),
-                                "meta": {
-                                    "source": "math_graph"  # 🔥 ВОТ ОН (ключевой момент)
-                                }
+        expr = self.extract_function(text)
+
+        if expr:
+            path = self.build_graph(expr)
+            if path:
+                try:
+                    with open(path, "rb") as f:
+                        return {
+                            "type": "image",
+                            "data": f.read(),
+                            "meta": {
+                                "source": "math_graph"
                             }
-                    except Exception as e:
-                        print("🔥 GRAPH ERROR:", e)
+                        }
+                except Exception as e:
+                    print("🔥 GRAPH ERROR:", e)
 
         # ===== ВЫВОД =====
         if results:
@@ -193,10 +194,23 @@ class ScienceRoom:
 
     def extract_function(self, text):
         try:
-            text = text.lower().replace("^", "**")
+            text = text.lower()
+            text = text.replace("^", "**")
+
+            # 🔥 добавляем поддержку функций
+            text = text.replace("sin", "np.sin")
+            text = text.replace("cos", "np.cos")
+            text = text.replace("tan", "np.tan")
+            text = text.replace("log", "np.log")
+
             match = re.search(r"y\s*=\s*(.+)", text)
             if match:
                 return match.group(1)
+
+            # 🔥 если нет y=, но есть выражение с x
+            if "x" in text:
+                return text
+
             return None
         except:
             return None
@@ -206,7 +220,11 @@ class ScienceRoom:
             x = np.linspace(-10, 10, 200)
 
             def f(x):
-                return eval(expr, {"x": x, "np": np, "__builtins__": {}})
+                return eval(expr, {
+                    "x": x,
+                    "np": np,
+                    "__builtins__": {}
+                })
 
             y = f(x)
 
