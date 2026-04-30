@@ -67,9 +67,7 @@ async def generate_image(prompt):
         try:
             response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
-                size="512x512",        # 🔥 ДЕШЕВЛЕ
-                quality="low"          # 🔥 ДЕШЕВЛЕ
+                prompt=prompt
             )
 
             if not response or not response.data:
@@ -97,9 +95,7 @@ async def generate_image_v2(prompt):
         try:
             response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt,
-                size="512x512",        # 🔥 ДЕШЕВЛЕ
-                quality="low"          # 🔥 ДЕШЕВЛЕ
+                prompt=prompt
             )
 
             if not response or not response.data:
