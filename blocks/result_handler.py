@@ -27,6 +27,14 @@ def normalize_result(result):
             "block": result.get("block")
         }
 
+    # 🔥 НОВОЕ: файл
+    if r_type == "file":
+        return {
+            "type": "file",
+            "data": result.get("data"),
+            "filename": result.get("filename", "file.py")
+        }
+
     # 🔥 изображение
     if r_type == "image":
         return {
@@ -74,8 +82,23 @@ async def send_result(message, result, keyboard=None):
 
         await message.answer(f"```python\n{code}\n```", reply_markup=keyboard)
 
+    # 🔥 НОВОЕ: ОТПРАВКА ФАЙЛА
+    elif result["type"] == "file":
+        code = result.get("data") or ""
+        filename = result.get("filename", "file.py")
+
+        # 🔥 ДОБАВЛЯЕМ КОММЕНТ ВНУТРЬ (как ты хотел)
+        code = format_code_block(code, filename, None)
+
+        file_bytes = code.encode("utf-8")
+
+        await message.answer_document(
+            BufferedInputFile(file_bytes, filename=filename),
+            caption=f"📁 {filename}"
+        )
+
     elif result["type"] == "image":
-        # 🔥 ИНДИКАТОР
+        # 🔥 ИНДИКАТОР РАБОТЫ
         try:
             meta = result.get("meta", {})
             source = meta.get("source")
@@ -102,10 +125,12 @@ async def send_result(message, result, keyboard=None):
         try:
             print("🖼 IMAGE TASK START")
 
+            # 🔥 ИНДИКАТОР
             await message.answer("🎨 Создаю изображение...")
 
+            # 🔥 ВАЖНО: передаём всё, что нужно
             user_id = message.from_user.id
-            state = {}
+            state = {}  # временно, чтобы не ломать систему
 
             result_img = await image_generate(user_id, result["prompt"], state)
 
