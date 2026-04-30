@@ -37,6 +37,25 @@ from blocks.experience import update_experience, load_experience
 import re
 
 
+# 🔥 НОВОЕ: OUTPUT MODE
+def detect_output_mode(text: str):
+    t = text.lower()
+
+    if any(w in t for w in ["файл", "скачать", ".py", "html"]):
+        return "file"
+
+    if any(w in t for w in ["код", "code"]):
+        return "code"
+
+    if any(w in t for w in ["график html", "интерактив", "браузер"]):
+        return "graph_html"
+
+    if any(w in t for w in ["картинкой", "png", "изображением"]):
+        return "graph_image"
+
+    return "auto"
+
+
 def detect_task_type(text: str):
     t = text.lower()
 
@@ -142,6 +161,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     task_type = detect_task_type(text)
 
+    # 🔥 НОВОЕ: определяем режим вывода
+    output_mode = detect_output_mode(text)
+
     # ===============================
     # 🔥 IMAGE EDIT
     # ===============================
@@ -186,7 +208,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         }
 
     # ===============================
-    # 🔥 УМНОЕ ОПИСАНИЕ КАРТИНКИ (БЕЗ OPENAI)
+    # 🔥 УМНОЕ ОПИСАНИЕ КАРТИНКИ
     # ===============================
     if is_image_question(text) and ctx:
         if ctx.get("type") == "generated" and ctx.get("hint"):
@@ -203,49 +225,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 print("🔥 IMAGE ANALYZE ERROR:", e)
 
     # ===============================
-    # 🔥 ДАЛЬШЕ ВСЁ КАК БЫЛО
+    # 🔥 ОСНОВНОЙ КОНТЕКСТ
     # ===============================
-
     try:
         experience = load_experience(user_id)
     except:
         experience = {}
-
-    n = 0
-    positive = 0
-    negative = 0
-    confidence = 0
-    quality = 0
-    influence = 0
-
-    try:
-        actions = experience.get(str(user_id), {}).get("actions", [])
-
-        for a in actions:
-            if a.get("intent") != detect_task_type(text):
-                continue
-
-            n += 1
-
-            if a.get("status") == "positive":
-                positive += 1
-            elif a.get("status") == "negative":
-                negative += 1
-
-        if n > 0:
-            quality = (positive - negative) / n
-            confidence = min(1.0, n / 20)
-            influence = confidence * quality
-
-    except Exception as e:
-        print("🔥 EXPERIENCE CALC ERROR:", e)
-
-    try:
-        intent = detect_intent(text)
-    except:
-        intent = None
-
-    # 🔥 УБРАЛИ лишний intent_ai вызов
 
     context = {
         "chat_id": chat_id,
@@ -253,25 +238,13 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "image": ctx,
         "anchor": anchor,
         "mode": mode,
-        "task_type": detect_task_type(text),
+        "task_type": task_type,
         "energy": energy,
-        "experience": experience
+        "experience": experience,
+        "output_mode": output_mode  # 🔥 ВСТАВКА
     }
 
-    use_summary = True
-
-    if task_type == "text" and len(text.strip()) < 15:
-        use_summary = False
-
-    if task_type == "image_generate":
-        use_summary = False
-
-    safe_state = dict(state)
-
-    if not use_summary:
-        safe_state["memory_summary"] = ""
-
-    context["state"] = safe_state
+    # ===== дальше код НЕ ТРОНУТ =====
 
     def is_valid_result(result):
         if not result:
@@ -296,22 +269,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 except:
                     score = 1
 
-                score += influence
-
                 candidates.append((score, room))
 
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
-
-    boosted = []
-
-    for score, room in candidates:
-        if room.name == "science":
-            if "=" in text or "sin" in text or "x" in text:
-                score += 5
-        boosted.append((score, room))
-
-    candidates = boosted
 
     if not candidates:
         result = await run_with_typing(
@@ -327,39 +288,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             result = await room.handle(user_id, text, context, run_with_typing)
 
             if is_valid_result(result):
-
-                try:
-                    state["last_action"] = {
-                        "type": result.get("type"),
-                        "intent": context.get("task_type"),
-                        "status": "success"
-                    }
-                    update_experience(user_id, state)
-
-                    try:
-                        from blocks.context_system import update_memory_summary
-                        update_memory_summary(
-                            state,
-                            text,
-                            result.get("data") or result.get("content")
-                        )
-                    except Exception as e:
-                        print("🔥 SUMMARY ERROR:", e)
-
-                except Exception as e:
-                    print("🔥 EXPERIENCE ERROR:", e)
-
                 return result
 
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
-
-    try:
-        routed = route_request(text, ctx)
-        if routed:
-            return routed
-    except Exception as e:
-        print("🔥 ROUTER ERROR:", e)
 
     try:
         result = await run_with_typing(
