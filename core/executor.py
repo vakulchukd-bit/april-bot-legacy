@@ -34,6 +34,9 @@ from blocks.energy_manager import get_energy
 
 from blocks.experience import update_experience, load_experience
 
+# 🔥 НОВОЕ: INTERPRETATION LAYER
+from blocks.interpretation_layer import interpret_request
+
 import re
 
 
@@ -150,6 +153,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
+    # ===============================
+    # 🔥 INTERPRETATION LAYER (НОВОЕ)
+    # ===============================
+    try:
+        interpreted = interpret_request(text)
+
+        if interpreted and interpreted.get("normalized"):
+            print("🧠 INTERPRET:", interpreted)
+            text = interpreted["normalized"]
+    except Exception as e:
+        print("🔥 INTERPRET ERROR:", e)
+
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
         return {"type": "text", "data": f"Сейчас {now}"}
@@ -241,7 +256,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "task_type": task_type,
         "energy": energy,
         "experience": experience,
-        "output_mode": output_mode  # 🔥 ВСТАВКА
+        "output_mode": output_mode
     }
 
     # ===== дальше код НЕ ТРОНУТ =====
