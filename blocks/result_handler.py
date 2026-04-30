@@ -25,6 +25,19 @@ async def send_result(message, result, keyboard=None):
         await message.answer(f"```python\n{code}\n```", reply_markup=keyboard)
 
     elif result["type"] == "image":
+        # 🔥 ИНДИКАТОР РАБОТЫ
+        try:
+            meta = result.get("meta", {})
+            source = meta.get("source")
+
+            if source == "math_graph":
+                await message.answer("📊 Строю график...")
+            else:
+                await message.answer("🧠 Обрабатываю...")
+
+        except Exception as e:
+            print("🔥 INDICATOR ERROR:", e)
+
         await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png"),
             caption=result.get("caption", ""),
@@ -34,6 +47,9 @@ async def send_result(message, result, keyboard=None):
     elif result["type"] == "image_task":
         try:
             print("🖼 IMAGE TASK START")
+
+            # 🔥 ИНДИКАТОР
+            await message.answer("🎨 Создаю изображение...")
 
             # 🔥 ВАЖНО: передаём всё, что нужно
             user_id = message.from_user.id
