@@ -58,7 +58,7 @@ def is_vague_request(text: str):
 
 
 # ===============================
-# 🔥 DISSATISFACTION DETECTOR (НОВОЕ)
+# 🔥 DISSATISFACTION DETECTOR
 # ===============================
 def is_dissatisfied(text: str):
     t = text.lower()
@@ -110,8 +110,11 @@ def detect_task_type(text: str):
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
-    if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
+    if any(x in t for x in ["создай", "сгенерируй", "нарисуй"]):
         return "image_generate"
+
+    if "сделай" in t:
+        return "text"  # 🔥 ВАЖНО: убрали слепую генерацию картинки
 
     return "text"
 
@@ -229,7 +232,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print("🔥 VAGUE ERROR:", e)
 
     # ===============================
-    # 🔥 DISSATISFACTION FLOW (НОВОЕ)
+    # 🔥 DISSATISFACTION FLOW
     # ===============================
     try:
         if is_dissatisfied(text):
@@ -270,7 +273,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     anchor = get_anchor(user_id)
 
     task_type = detect_task_type(text)
+
+    # 🔥 НОВОЕ: память типа задачи
+    last_task = state.get("last_task_type")
+
+    if task_type == "image_generate" and last_task == "code":
+        print("🧠 FIX: keep CODE context")
+        task_type = "code"
+
     output_mode = detect_output_mode(text)
+
+    # 🔥 сохраняем
+    state["last_task_type"] = task_type
 
     # ===============================
     # IMAGE EDIT
