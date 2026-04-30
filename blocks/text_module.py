@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 from openai import OpenAI
 
 from storage import get_user_plan
@@ -45,7 +46,6 @@ def is_problem(text):
     t = text.lower()
     return any(sym in t for sym in ["=", "+", "-", "*", "/", "^"]) or "реши" in t or "график" in t
 
-# 🔥 НОВОЕ: точный math fallback детектор
 def is_strict_math(text):
     t = text.lower()
     return (
@@ -144,10 +144,6 @@ def need_context(text):
         "разбери" in t
     )
 
-# ===============================
-# 🔥 УМНЫЙ SMALL TALK
-# ===============================
-
 def is_small_talk(text, state):
     t = text.lower().strip()
     words = t.split()
@@ -165,9 +161,7 @@ def is_small_talk(text, state):
 def local_fast_answer(text):
     t = text.lower().strip()
 
-    greetings = [
-        "привет", "хай", "hello", "hi", "здарова"
-    ]
+    greetings = ["привет", "хай", "hello", "hi", "здарова"]
 
     if t in greetings:
         return random.choice([
@@ -199,9 +193,32 @@ def local_fast_answer(text):
     return None
 
 
+# ===============================
+# 🔥 НОВОЕ: FORMATTER (без ломки логики)
+# ===============================
+def format_output(text: str) -> str:
+    if not text:
+        return text
+
+    t = text.strip()
+
+    # HTML
+    if "<html" in t or "<!doctype html" in t:
+        return f"```html\n{t}\n```"
+
+    # Python
+    if "def " in t or "import " in t:
+        return f"```python\n{t}\n```"
+
+    # JS
+    if "function(" in t or "document." in t:
+        return f"```javascript\n{t}\n```"
+
+    return t
+
+
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
-        # 🔥 SMALL TALK
         if is_small_talk(text, state):
             fast = local_fast_answer(text)
             if fast:
@@ -217,14 +234,12 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # 🔥 УСИЛЕННЫЙ КОНТРОЛЬ ДЛЯ МАТЕМАТИКИ (fallback)
         if is_problem(text_fixed):
             messages.append({
                 "role": "system",
                 "content": "Это математическая задача. Реши максимально кратко, без лишнего текста. Не используй ASCII-графики."
             })
 
-        # 🔥 ЕЩЁ ЖЁСТЧЕ, если чистая математика
         if is_strict_math(text_fixed):
             messages.append({
                 "role": "system",
@@ -299,6 +314,9 @@ async def process(user_id, text, state, energy="MEDIUM"):
         return r.output_text
 
     reply = await asyncio.to_thread(run)
+
+    # 🔥 применяем форматирование (без изменения логики)
+    reply = format_output(reply)
 
     return {
         "type": "text",
