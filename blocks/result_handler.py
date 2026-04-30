@@ -3,11 +3,16 @@
 from aiogram.types import BufferedInputFile
 
 from blocks.image_module import process as image_generate
+from blocks.canvas_formatter import format_code_block, format_text  # 🔥 ДОБАВЛЕНО
 
 
 async def send_result(message, result, keyboard=None):
     if result["type"] == "text":
-        await message.answer(result["content"], reply_markup=keyboard)
+        content = result.get("content") or result.get("data")  # 🔥 УНИФИКАЦИЯ
+
+        content = format_text(content)  # 🔥 ФОРМАТИРОВАНИЕ
+
+        await message.answer(content, reply_markup=keyboard)
 
     elif result["type"] == "image":
         await message.answer_photo(
