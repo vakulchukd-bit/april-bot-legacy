@@ -3,57 +3,59 @@
 def build_context_text(state=None):
     """
     Главный контекст April.
-    НЕ импортирует другие модули → нет циклов.
+    УЖАТЫЙ и адаптивный → не перегружает токены.
     """
 
-    # 🔥 УЖАТЫЙ SYSTEM (экономия токенов)
-    base = "Ты — April, живой собеседник и анализатор личности. Отвечай естественно, точно и адаптируйся под пользователя."
+    base = "Ты — April, живой собеседник. Отвечай естественно и по делу."
 
-    # ===== 🔥 ДИНАМИКА =====
     if state:
 
-        # --- настроение ---
+        # --- настроение (оставляем, это дешево и полезно) ---
         mood = state.get("mood")
         if mood:
-            base += f"\nТекущее состояние пользователя: {mood}"
+            base += f"\nСостояние пользователя: {mood}"
 
-        # ===== 🧠 SUMMARY (СМЫСЛ ПРОШЛОГО) =====
+        # ===== 🧠 СЖАТЫЙ SUMMARY =====
         summary = state.get("memory_summary")
         if summary:
-            base += f"\n\nКонтекст диалога (смысл):\n{summary}"
+            # 🔥 ограничиваем до короткого смысла
+            short = summary[-200:]
+            base += f"\nКонтекст: {short}"
 
-        # ===== 🖼️ IMAGE CONTEXT =====
+        # ===== 🖼️ IMAGE CONTEXT (ТОЖЕ СЖАТЫЙ) =====
         img = state.get("image_context")
         if img and isinstance(img, dict):
 
             hint = img.get("hint") or img.get("prompt")
 
             if hint:
-                base += f"\n\nПоследняя работа с изображением:\n{hint}"
+                short_hint = hint[:120]
+                base += f"\nИзображение: {short_hint}"
 
     return base
 
 
-# 🔥 НОВОЕ: УМНЫЙ SUMMARY (дешёвый, без API)
+# 🔥 УМНЫЙ SUMMARY (РЕАЛЬНО СЖАТЫЙ)
 def update_memory_summary(state, user_text, bot_reply):
     """
-    Сжимает диалог в смысл.
-    Без использования OpenAI → бесплатно.
+    Сохраняем только СМЫСЛ, а не весь диалог.
+    Бесплатно и очень компактно.
     """
 
     old = state.get("memory_summary", "")
 
-    # защищаемся от None
-    user_text = user_text or ""
-    bot_reply = bot_reply or ""
+    user_text = (user_text or "")[:120]
 
-    # 🔥 формируем смысловой кусок
-    chunk = f"Пользователь: {user_text}\nОтвет: {bot_reply}"
+    # 🔥 берём только начало ответа (смысл)
+    bot_reply = (bot_reply or "")[:120]
 
-    combined = (old + "\n" + chunk).strip()
+    # 🔥 короткая форма (без "Пользователь/Ответ")
+    chunk = f"{user_text} → {bot_reply}"
 
-    # 🔥 ограничение размера (очень важно для токенов)
-    if len(combined) > 1000:
-        combined = combined[-1000:]
+    combined = (old + " | " + chunk).strip()
+
+    # 🔥 ЖЁСТКОЕ ограничение
+    if len(combined) > 300:
+        combined = combined[-300:]
 
     state["memory_summary"] = combined
