@@ -158,6 +158,16 @@ class ScienceRoom:
         expr = self.extract_function(text)
 
         if expr:
+            # 🔥 НОВОЕ: HTML график (приоритет)
+            html = self.build_html_graph(expr)
+            if html:
+                return {
+                    "type": "file",
+                    "data": html,
+                    "filename": "graph.html"
+                }
+
+            # 🔁 fallback (старый PNG)
             path = self.build_graph(expr)
             if path:
                 try:
@@ -165,9 +175,7 @@ class ScienceRoom:
                         return {
                             "type": "image",
                             "data": f.read(),
-                            "meta": {
-                                "source": "math_graph"
-                            }
+                            "meta": {"source": "math_graph"}
                         }
                 except Exception as e:
                     print("🔥 GRAPH ERROR:", e)
@@ -197,7 +205,6 @@ class ScienceRoom:
             text = text.lower()
             text = text.replace("^", "**")
 
-            # 🔥 добавляем поддержку функций
             text = text.replace("sin", "np.sin")
             text = text.replace("cos", "np.cos")
             text = text.replace("tan", "np.tan")
@@ -207,12 +214,51 @@ class ScienceRoom:
             if match:
                 return match.group(1)
 
-            # 🔥 если нет y=, но есть выражение с x
             if "x" in text:
                 return text
 
             return None
         except:
+            return None
+
+    def build_html_graph(self, expr):
+        try:
+            x = np.linspace(-10, 10, 200)
+            y = eval(expr, {"x": x, "np": np, "__builtins__": {}})
+
+            html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+body {{ background: #111; color: white; }}
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<script>
+var trace = {{
+  x: {x.tolist()},
+  y: {y.tolist()},
+  type: 'scatter'
+}};
+
+var layout = {{
+  paper_bgcolor: '#111',
+  plot_bgcolor: '#111',
+  font: {{color: 'white'}}
+}};
+
+Plotly.newPlot('graph', [trace], layout);
+</script>
+</body>
+</html>
+"""
+            return html
+        except Exception as e:
+            print("🔥 HTML GRAPH ERROR:", e)
             return None
 
     def build_graph(self, expr):
