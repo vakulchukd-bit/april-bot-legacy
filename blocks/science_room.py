@@ -1,3 +1,5 @@
+# blocks/science_room.py
+
 import re
 import numpy as np
 import matplotlib.pyplot as plt
@@ -158,7 +160,6 @@ class ScienceRoom:
         expr = self.extract_function(text)
 
         if expr:
-            # 🔥 ВАЛИДАЦИЯ (НОВОЕ)
             valid, error = self.validate_expression(expr)
 
             if not valid:
@@ -167,13 +168,12 @@ class ScienceRoom:
                     "data": (
                         "❌ Не удалось построить график.\n"
                         f"Причина: {error}\n\n"
-                        "👉 Пример корректного ввода:\n"
+                        "👉 Пример:\n"
                         "y = x**2\n"
                         "y = np.sin(x)"
                     )
                 }
 
-            # 🔥 HTML график
             html = self.build_html_graph(expr)
             if html:
                 return {
@@ -182,7 +182,6 @@ class ScienceRoom:
                     "filename": "graph.html"
                 }
 
-            # 🔁 fallback PNG
             path = self.build_graph(expr)
             if path:
                 try:
@@ -195,6 +194,18 @@ class ScienceRoom:
                 except Exception as e:
                     print("🔥 GRAPH ERROR:", e)
 
+        # ===== 🔥 НОВЫЙ ФИКС =====
+        if "график" in text.lower() or "построй" in text.lower():
+            return {
+                "type": "text",
+                "data": (
+                    "📊 Чтобы построить график, нужна формула.\n\n"
+                    "👉 Примеры:\n"
+                    "y = x**2\n"
+                    "y = np.sin(x)"
+                )
+            }
+
         # ===== ВЫВОД =====
         if results:
             return {
@@ -204,19 +215,11 @@ class ScienceRoom:
 
         return None
 
-    # 🔥 НОВОЕ: ВАЛИДАЦИЯ
     def validate_expression(self, expr):
         try:
             x = np.linspace(-10, 10, 10)
-
-            eval(expr, {
-                "x": x,
-                "np": np,
-                "__builtins__": {}
-            })
-
+            eval(expr, {"x": x, "np": np, "__builtins__": {}})
             return True, None
-
         except Exception as e:
             return False, str(e)
 
@@ -275,14 +278,7 @@ var trace = {{
   y: {y.tolist()},
   type: 'scatter'
 }};
-
-var layout = {{
-  paper_bgcolor: '#111',
-  plot_bgcolor: '#111',
-  font: {{color: 'white'}}
-}};
-
-Plotly.newPlot('graph', [trace], layout);
+Plotly.newPlot('graph', [trace]);
 </script>
 </body>
 </html>
@@ -295,15 +291,7 @@ Plotly.newPlot('graph', [trace], layout);
     def build_graph(self, expr):
         try:
             x = np.linspace(-10, 10, 200)
-
-            def f(x):
-                return eval(expr, {
-                    "x": x,
-                    "np": np,
-                    "__builtins__": {}
-                })
-
-            y = f(x)
+            y = eval(expr, {"x": x, "np": np, "__builtins__": {}})
 
             plt.figure()
             plt.plot(x, y)
@@ -330,7 +318,6 @@ Plotly.newPlot('graph', [trace], layout);
 
             if "=" in expr:
                 left, right = expr.split("=")
-
                 equation = simplify(sympify(left) - sympify(right))
                 solutions = solve(equation, x)
 
