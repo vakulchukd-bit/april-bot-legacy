@@ -2,11 +2,10 @@ import asyncio
 from openai import OpenAI
 
 from storage import get_user_plan
-from blocks.ai_config import TEXT_MODEL  # 👈 ДОБАВЛЕНО
+from blocks.ai_config import TEXT_MODEL
 
 client = OpenAI()
 
-# 🔥 УЖАТЫЙ SYSTEM (вместо 700 токенов → ~80)
 SYSTEM_PROMPT = (
     "Ты — Aprill, живой собеседник.\n"
     "Не ассистент, а человек в диалоге.\n\n"
@@ -17,15 +16,12 @@ SYSTEM_PROMPT = (
     "Создавай ощущение живого общения."
 )
 
-# ===== 🔥 ПОВЕДЕНИЕ =====
 def is_vague(text):
     vague = ["что-нибудь", "что то", "что-то", "сделай", "придумай"]
     return any(x in text.lower() for x in vague)
 
-
 def is_short(text):
     return len(text.strip()) <= 3
-
 
 def build_behavior_hint(text):
     t = text.lower()
@@ -41,22 +37,18 @@ def build_behavior_hint(text):
 
     return ""
 
-
 def build_variation_guard():
     return (
         "Не повторяйся.\n"
         "Пиши каждый раз немного по-разному."
     )
 
-
 def is_problem(text):
     t = text.lower()
     return any(sym in t for sym in ["=", "+", "-", "*", "/", "^"]) or "реши" in t or "график" in t
 
-
-MAX_MESSAGE_CHARS = 2000
-MAX_TOTAL_CHARS = 12000
-
+MAX_MESSAGE_CHARS = 800
+MAX_TOTAL_CHARS = 4000
 
 def trim_text(text):
     if not text:
@@ -65,7 +57,6 @@ def trim_text(text):
     if len(text) > MAX_MESSAGE_CHARS:
         return text[:MAX_MESSAGE_CHARS] + "…"
     return text
-
 
 def trim_messages(messages):
     total = 0
@@ -85,16 +76,14 @@ def trim_messages(messages):
 
     return list(reversed(result))
 
-
 def get_config(energy):
     if energy == "LOW":
-        return {"temperature": 0.5, "max_output_tokens": 300}
+        return {"temperature": 0.5, "max_output_tokens": 200}
     if energy == "MEDIUM":
-        return {"temperature": 0.7, "max_output_tokens": 700}
+        return {"temperature": 0.7, "max_output_tokens": 400}
     if energy == "HIGH":
-        return {"temperature": 0.9, "max_output_tokens": 1500}
-    return {"temperature": 0.6, "max_output_tokens": 500}
-
+        return {"temperature": 0.9, "max_output_tokens": 800}
+    return {"temperature": 0.6, "max_output_tokens": 300}
 
 def get_energy_prompt(energy):
     if energy == "LOW":
@@ -105,7 +94,6 @@ def get_energy_prompt(energy):
         return "Отвечай глубже."
     return ""
 
-
 def get_formatting_prompt(plan, energy):
     if plan == "free":
         return "Пиши просто."
@@ -115,11 +103,9 @@ def get_formatting_prompt(plan, energy):
         return "Пиши как человек."
     return ""
 
-
 def is_sales_text(text):
     triggers = ["клиент", "продай", "убеди", "сомневается", "покуп", "заказ"]
     return any(w in text.lower() for w in triggers)
-
 
 def enhance_link_behavior(text):
     t = text.lower()
@@ -130,19 +116,44 @@ def enhance_link_behavior(text):
 
     return text
 
-
 def get_history_limit(plan):
     if plan == "free":
-        return 3
+        return 2
     if plan == "lite":
-        return 6
+        return 4
     if plan == "premium":
-        return 20
-    return 6
+        return 8
+    return 4
+
+def need_context(text):
+    t = text.lower()
+    return (
+        len(t) > 40 or
+        "помнишь" in t or
+        "мы говорили" in t or
+        "объясни" in t or
+        "разбери" in t
+    )
+
+def local_fast_answer(text):
+    t = text.lower().strip()
+
+    if t in ["привет", "хай", "здарова"]:
+        return "Привет 🙂"
+
+    if t in ["ок", "понял", "ясно"]:
+        return "👌"
+
+    return None
 
 
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
+        # 🔥 ЛОКАЛЬНЫЕ ОТВЕТЫ БЕЗ OPENAI
+        fast = local_fast_answer(text)
+        if fast:
+            return fast
+
         history = state.get("dialog", [])
         ctx = state.get("image_context")
 
@@ -179,15 +190,21 @@ async def process(user_id, text, state, energy="MEDIUM"):
                 "content": "Говори уверенно."
             })
 
+        # 🔥 КОНТЕКСТ ТОЛЬКО КОГДА НУЖЕН
         try:
             from blocks.context_system import build_context_text
-            world = build_context_text(state)
-            if world:
-                messages.append({"role": "system", "content": trim_text(world)})
+            if need_context(text_fixed):
+                world = build_context_text(state)
+                if world:
+                    messages.append({
+                        "role": "system",
+                        "content": trim_text(world)
+                    })
         except:
             pass
 
-        if ctx and ctx.get("hint"):
+        # 🔥 IMAGE CONTEXT только при длинных запросах
+        if ctx and ctx.get("hint") and need_context(text_fixed):
             messages.append({
                 "role": "system",
                 "content": trim_text(f"Контекст: {ctx['hint']}")
@@ -208,7 +225,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         config = get_config(energy)
 
         r = client.responses.create(
-            model=TEXT_MODEL,  # 👈 ТОЛЬКО ЭТО ИЗМЕНЕНО
+            model=TEXT_MODEL,
             input=messages,
             temperature=config["temperature"],
             max_output_tokens=config["max_output_tokens"]
