@@ -20,7 +20,7 @@ from blocks.rooms_registry import ROOMS
 from blocks.engineering_system import analyze_code
 
 from blocks.image_module import process as image_generate
-from blocks.image_module import extract_image_prompt  # 🔥 ДОБАВИЛИ
+from blocks.image_module import extract_image_prompt
 from blocks.image_edit_module import process as image_edit
 
 from blocks.image_system import analyze_image
@@ -32,7 +32,6 @@ from storage import set_subscription, save_payment
 
 from blocks.energy_manager import get_energy
 
-# 🔥 ДОБАВИЛИ (опыт)
 from blocks.experience import update_experience, load_experience
 
 import re
@@ -141,13 +140,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     ctx = get_image_context(user_id) or state.get("image_context")
     anchor = get_anchor(user_id)
 
-    # ===============================
-    # 🔥 НОВОЕ: РАННИЙ ОБХОД IMAGE
-    # ===============================
-
     task_type = detect_task_type(text)
 
-    # --- IMAGE EDIT ---
+    # ===============================
+    # 🔥 IMAGE EDIT
+    # ===============================
     if task_type == "image_edit":
         if ctx:
             print("🖼️ DIRECT IMAGE EDIT")
@@ -158,16 +155,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "data": "Сначала нужно создать изображение 🙂"
             }
 
-    # --- IMAGE GENERATE ---
+    # ===============================
+    # 🔥 IMAGE GENERATE
+    # ===============================
     if task_type == "image_generate":
 
-        # есть ли явное описание
         if len(text.strip()) > 15:
             print("🖼️ DIRECT IMAGE GENERATE (explicit)")
             prompt = extract_image_prompt(text)
             return await image_generate(user_id, prompt, state)
 
-        # есть ли контекст
         summary = state.get("memory_summary")
         dialog = state.get("dialog", [])
 
@@ -183,11 +180,27 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 print("🖼️ GENERATE FROM DIALOG")
                 return await image_generate(user_id, prompt, state)
 
-        # если ничего нет — уточнение
         return {
             "type": "text",
             "data": "Что именно хочешь изобразить?"
         }
+
+    # ===============================
+    # 🔥 УМНОЕ ОПИСАНИЕ КАРТИНКИ (БЕЗ OPENAI)
+    # ===============================
+    if is_image_question(text) and ctx:
+        if ctx.get("type") == "generated" and ctx.get("hint"):
+            return {
+                "type": "text",
+                "data": ctx["hint"]
+            }
+
+        if ctx.get("type") == "uploaded" and ctx.get("path"):
+            try:
+                result = await analyze_image(ctx["path"])
+                return {"type": "text", "data": result}
+            except Exception as e:
+                print("🔥 IMAGE ANALYZE ERROR:", e)
 
     # ===============================
     # 🔥 ДАЛЬШЕ ВСЁ КАК БЫЛО
@@ -232,18 +245,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except:
         intent = None
 
-    try:
-        intent_ai = detect_intent_ai(text)
-    except:
-        intent_ai = None
-
-    if is_image_question(text) and ctx and ctx.get("path"):
-        try:
-            result = await analyze_image(user_id, ctx["path"], text)
-            if result:
-                return result
-        except Exception as e:
-            print("🔥 IMAGE ANALYZE ERROR:", e)
+    # 🔥 УБРАЛИ лишний intent_ai вызов
 
     context = {
         "chat_id": chat_id,
@@ -256,7 +258,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "experience": experience
     }
 
-    # ===== 🔥 ДИНАМИЧЕСКИЙ КОНТЕКСТ =====
     use_summary = True
 
     if task_type == "text" and len(text.strip()) < 15:
@@ -271,7 +272,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         safe_state["memory_summary"] = ""
 
     context["state"] = safe_state
-    # ===== конец =====
 
     def is_valid_result(result):
         if not result:
@@ -355,7 +355,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
     try:
-        routed = route_request(text, intent=intent, intent_ai=intent_ai)
+        routed = route_request(text, ctx)
         if routed:
             return routed
     except Exception as e:
