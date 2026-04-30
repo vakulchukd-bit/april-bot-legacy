@@ -9,8 +9,10 @@ client = OpenAI()
 ADMIN_ID = 2016592532
 
 
+# ===== СОХРАНЕНИЕ В ПАМЯТЬ =====
 def save_to_memory(state, item):
     memory = state.get("image_memory", [])
+
     memory.append(item)
 
     if len(memory) > 3:
@@ -20,6 +22,7 @@ def save_to_memory(state, item):
     state["image_context"] = item
 
 
+# ===== ОЧИСТКА PROMPT =====
 def clean_prompt(text: str):
     if not text:
         return ""
@@ -34,6 +37,7 @@ def clean_prompt(text: str):
     return t.strip()
 
 
+# ===== 🔥 НОВОЕ: EXTRACT IMAGE PROMPT =====
 def extract_image_prompt(text: str):
     if not text:
         return ""
@@ -50,76 +54,74 @@ def extract_image_prompt(text: str):
 
     t = t.strip()
 
+    # защита от длинных промптов
     if len(t) > 300:
         t = t[:300]
 
     return t
 
 
-# ===== V1 =====
+# ===== V1 (РЕЗЕРВ) =====
 async def generate_image(prompt):
     def run():
         try:
             response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt
+                prompt=prompt,
+                size="512x512",        # 🔥 ДЕШЕВЛЕ
+                quality="low"          # 🔥 ДЕШЕВЛЕ
             )
 
             if not response or not response.data:
-                print("🔥 IMAGE ERROR: пустой response (v1)")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
-                print("🔥 IMAGE ERROR: нет b64_json (v1)")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
-                print("🔥 IMAGE ERROR: пустой base64 (v1)")
                 return None
 
             return base64.b64decode(image_base64)
 
-        except Exception as e:
-            print("🔥 IMAGE ERROR (v1):", e)
+        except Exception:
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
-# ===== V2 =====
+# ===== V2 (ОСНОВНОЙ) =====
 async def generate_image_v2(prompt):
     def run():
         try:
             response = client.images.generate(
                 model="gpt-image-1",
-                prompt=prompt
+                prompt=prompt,
+                size="512x512",        # 🔥 ДЕШЕВЛЕ
+                quality="low"          # 🔥 ДЕШЕВЛЕ
             )
 
             if not response or not response.data:
-                print("🔥 IMAGE ERROR: пустой response (v2)")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
-                print("🔥 IMAGE ERROR: нет b64_json (v2)")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
-                print("🔥 IMAGE ERROR: пустой base64 (v2)")
                 return None
 
             return base64.b64decode(image_base64)
 
-        except Exception as e:
-            print("🔥 IMAGE ERROR (v2):", e)
+        except Exception:
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
+# ===== ИНКРЕМЕНТ =====
 def increment_images(user_id):
     conn = get_conn()
     if not conn:
@@ -150,9 +152,12 @@ def increment_images(user_id):
             """, (images + 1, today(), uid))
 
 
+# ===== PROCESS =====
 async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
+
+        # 🔥 ПРИМЕНЯЕМ EXTRACTOR
         prompt = extract_image_prompt(prompt)
 
         if not prompt:
@@ -206,18 +211,16 @@ async def process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
-        print("🔥 IMAGE ERROR: обе генерации вернули None")
-
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception as e:
-        print("🔥 IMAGE PROCESS ERROR:", e)
+    except Exception:
         return {"type": "error", "data": None}
 
 
+# ===== RETRY =====
 async def retry_process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
@@ -251,13 +254,10 @@ async def retry_process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
-        print("🔥 IMAGE RETRY ERROR: обе генерации None")
-
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception as e:
-        print("🔥 IMAGE RETRY ERROR:", e)
+    except Exception:
         return {"type": "final_error", "data": "⚠️ Сервис временно недоступен"}
