@@ -36,29 +36,30 @@ from blocks.energy_manager import get_energy
 from blocks.experience import update_experience, load_experience
 
 import re
+import asyncio
+import base64
 
 
 def detect_task_type(text: str):
-    t = text.lower()
+    t = text.lower().strip()
 
-    if "=" in t:
-        return "math"
-
-    if "sin(" in t or "cos(" in t:
-        return "math"
-
-    if any(op in t for op in ["+", "-", "*", "/"]):
-        if any(ch.isdigit() for ch in t):
-            return "math"
-
-    if "y=" in t or "график" in t:
-        return "math"
-
+    # --- IMAGE EDIT ---
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
+    # --- IMAGE GENERATE ---
     if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
         return "image_generate"
+
+    # --- MATH (только если есть цифры + операции) ---
+    has_digits = any(ch.isdigit() for ch in t)
+
+    if has_digits:
+        if any(op in t for op in ["+", "-", "*", "/", "="]):
+            return "math"
+
+        if any(f in t for f in ["sin(", "cos(", "tan(", "y="]):
+            return "math"
 
     return "text"
 
@@ -124,6 +125,24 @@ def is_image_question(text: str):
     ])
 
 
+def extract_bytes(data):
+    if isinstance(data, bytes):
+        return data
+
+    if isinstance(data, str):
+        try:
+            return base64.b64decode(data)
+        except:
+            return None
+
+    if isinstance(data, dict):
+        for key in ["data", "image", "result", "content"]:
+            if key in data:
+                return extract_bytes(data[key])
+
+    return None
+
+
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
@@ -132,9 +151,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ❗ оставлено как у тебя
     if "время" in t:
-        return {"type": "text", "data": "Могу уточнить время, если скажешь, в каком ты городе 🙂"}
+        now = datetime.now().strftime("%H:%M")
+        return {"type": "text", "data": f"Сейчас {now}"}
 
     energy = get_energy(user_id)
 
@@ -156,20 +175,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
-        print("🖼️ DIRECT IMAGE GENERATE")
 
+        print("🖼️ DIRECT IMAGE GENERATE (safe)")
         prompt = extract_image_prompt(text)
-        result = await image_generate(user_id, prompt, state)
 
-        # 🔥 ПРАВИЛЬНО: возвращаем как есть
-        if isinstance(result, dict):
-            return result
+        result = await run_with_typing(
+            chat_id,
+            image_generate(user_id, prompt, state)
+        )
 
-        # fallback (на всякий случай)
-        return {
-            "type": "image",
-            "data": result
-        }
+        return result
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
 

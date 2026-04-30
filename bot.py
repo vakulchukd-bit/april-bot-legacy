@@ -65,6 +65,8 @@ dp = Dispatcher()
 
 ADMIN_ID = 2016592532
 
+tz = pytz.timezone("Europe/Kyiv")
+
 
 def is_time_question(text: str):
     text = text.lower()
@@ -73,20 +75,22 @@ def is_time_question(text: str):
     ])
 
 
-async def typing_loop(chat_id, mode="text"):
+async def typing_loop(chat_id):
     try:
+        elapsed = 0
         while True:
-            if mode == "image":
-                await bot.send_chat_action(chat_id, "upload_photo")
-            else:
+            if elapsed < 4:
                 await bot.send_chat_action(chat_id, "typing")
+            else:
+                await bot.send_chat_action(chat_id, "upload_photo")
             await asyncio.sleep(2)
+            elapsed += 2
     except:
         pass
 
 
-async def run_with_typing(chat_id, coro, mode="text"):
-    task = asyncio.create_task(typing_loop(chat_id, mode))
+async def run_with_typing(chat_id, coro):
+    task = asyncio.create_task(typing_loop(chat_id))
     try:
         result = await coro
         await asyncio.sleep(0.1)
@@ -168,9 +172,9 @@ async def handle(message: types.Message):
 
     state = get_state(user_id)
 
-    msg_time = message.date
-    state["time_str"] = msg_time.strftime("%H:%M")
-    state["date_str"] = msg_time.strftime("%d.%m.%Y")
+    now = datetime.now(tz)
+    state["time_str"] = now.strftime("%H:%M")
+    state["date_str"] = now.strftime("%d.%m.%Y")
 
     if is_time_question(text):
         await message.answer(
@@ -202,12 +206,7 @@ async def handle(message: types.Message):
         result = await execute(user_id, text, message.chat.id, run_with_typing)
 
         add_dialog(user_id, "user", text)
-
-        # 🔥 ФИКС
-        if result["type"] == "text":
-            add_dialog(user_id, "assistant", result.get("data", ""))
-        else:
-            add_dialog(user_id, "assistant", "[image]")
+        add_dialog(user_id, "assistant", result.get("data", ""))
 
         if result["type"] == "text":
             await message.answer(
@@ -256,6 +255,106 @@ async def handle_callbacks(callback: types.CallbackQuery):
     if data == "info":
         text, keyboard = build_info_menu(user_id)
         await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    if user_id == ADMIN_ID:
+        if data == "admin_stats":
+            errors = get_errors()
+            text = "📊 Анализ\n\n"
+            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
+            await callback.answer(text[:200], show_alert=True)
+            return
+
+        if data == "admin_payments":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.answer("📢 Введи текст", show_alert=True)
+            return
+
+    if data in ["buy_lite", "lite", "go_lite"]:
+        await callback.message.answer(
+            "💳 Подтвердить Lite?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
+                ]
+            ])
+        )
+        await callback.answer()
+        return
+
+    if data == "buy_premium":
+        await callback.message.answer(
+            "💳 Подтвердить Premium?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
+                ]
+            ])
+        )
+        await callback.answer()
+        return
+
+    if data == "buy_yes_lite":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС LITE от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_confirm_lite_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_reject_lite_{user_id}")
+                ]
+            ])
+        )
+        await callback.answer("Отправлено")
+        return
+
+    if data == "buy_yes_premium":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС PREMIUM от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_confirm_premium_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_reject_premium_{user_id}")
+                ]
+            ])
+        )
+        await callback.answer("Отправлено")
+        return
+
+    if data.startswith("admin_confirm_"):
+        parts = data.split("_")
+        plan = parts[2]
+        uid = int(parts[3])
+
+        set_subscription(uid, plan)
+        save_payment(uid, plan)
+
+        await bot.send_message(uid, f"✅ Активирован {plan.upper()}")
+        await callback.answer("OK", show_alert=True)
+        return
+
+    if data.startswith("admin_reject_"):
+        uid = int(data.split("_")[3])
+        await bot.send_message(uid, "❌ Отклонено")
+        await callback.answer("OK", show_alert=True)
+        return
+
+    if data == "cancel":
+        await callback.message.answer("❌ Отменено")
         await callback.answer()
         return
 

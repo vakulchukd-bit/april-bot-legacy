@@ -2,6 +2,7 @@ import asyncio
 from openai import OpenAI
 
 from storage import get_user_plan
+from blocks.ai_config import TEXT_MODEL  # 👈 ДОБАВЛЕНО
 
 client = OpenAI()
 
@@ -207,7 +208,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         config = get_config(energy)
 
         r = client.responses.create(
-            model="gpt-4o-mini",
+            model=TEXT_MODEL,  # 👈 ТОЛЬКО ЭТО ИЗМЕНЕНО
             input=messages,
             temperature=config["temperature"],
             max_output_tokens=config["max_output_tokens"]

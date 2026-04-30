@@ -3,16 +3,15 @@ import asyncio
 from openai import OpenAI
 
 from storage import get_user_plan, get_limits, get_conn, today
+from blocks.ai_config import IMAGE_MODEL, IMAGE_SIZE, IMAGE_QUALITY  # 👈 НОВОЕ
 
 client = OpenAI()
 
 ADMIN_ID = 2016592532
 
 
-# ===== СОХРАНЕНИЕ В ПАМЯТЬ =====
 def save_to_memory(state, item):
     memory = state.get("image_memory", [])
-
     memory.append(item)
 
     if len(memory) > 3:
@@ -22,7 +21,6 @@ def save_to_memory(state, item):
     state["image_context"] = item
 
 
-# ===== ОЧИСТКА PROMPT =====
 def clean_prompt(text: str):
     if not text:
         return ""
@@ -37,7 +35,6 @@ def clean_prompt(text: str):
     return t.strip()
 
 
-# ===== 🔥 НОВОЕ: EXTRACT IMAGE PROMPT =====
 def extract_image_prompt(text: str):
     if not text:
         return ""
@@ -54,74 +51,46 @@ def extract_image_prompt(text: str):
 
     t = t.strip()
 
-    # защита от длинных промптов
     if len(t) > 300:
         t = t[:300]
 
     return t
 
 
-# ===== V1 (РЕЗЕРВ) =====
+# ===== ЕДИНСТВЕННАЯ ГЕНЕРАЦИЯ =====
 async def generate_image(prompt):
     def run():
         try:
             response = client.images.generate(
-                model="gpt-image-1",
+                model=IMAGE_MODEL,          # 👈 через config
                 prompt=prompt,
-                size="512x512",        # 🔥 ДЕШЕВЛЕ
-                quality="low"          # 🔥 ДЕШЕВЛЕ
+                size=IMAGE_SIZE,            # 👈 через config
+                quality=IMAGE_QUALITY       # 👈 через config
             )
 
             if not response or not response.data:
+                print("🔥 IMAGE ERROR: пустой response")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
+                print("🔥 IMAGE ERROR: нет b64_json")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
+                print("🔥 IMAGE ERROR: пустой base64")
                 return None
 
             return base64.b64decode(image_base64)
 
-        except Exception:
+        except Exception as e:
+            print("🔥 IMAGE ERROR:", e)
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
 
 
-# ===== V2 (ОСНОВНОЙ) =====
-async def generate_image_v2(prompt):
-    def run():
-        try:
-            response = client.images.generate(
-                model="gpt-image-1",
-                prompt=prompt,
-                size="512x512",        # 🔥 ДЕШЕВЛЕ
-                quality="low"          # 🔥 ДЕШЕВЛЕ
-            )
-
-            if not response or not response.data:
-                return None
-
-            if not hasattr(response.data[0], "b64_json"):
-                return None
-
-            image_base64 = response.data[0].b64_json
-
-            if not image_base64:
-                return None
-
-            return base64.b64decode(image_base64)
-
-        except Exception:
-            return None
-
-    return await asyncio.get_event_loop().run_in_executor(None, run)
-
-
-# ===== ИНКРЕМЕНТ =====
 def increment_images(user_id):
     conn = get_conn()
     if not conn:
@@ -152,12 +121,9 @@ def increment_images(user_id):
             """, (images + 1, today(), uid))
 
 
-# ===== PROCESS =====
 async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
-
-        # 🔥 ПРИМЕНЯЕМ EXTRACTOR
         prompt = extract_image_prompt(prompt)
 
         if not prompt:
@@ -179,7 +145,7 @@ async def process(user_id, text, state):
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
-        img = await generate_image_v2(prompt)
+        img = await generate_image(prompt)
 
         if img:
             if not is_admin and plan == "free":
@@ -195,32 +161,18 @@ async def process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
-        img = await generate_image(prompt)
-
-        if img:
-            if not is_admin and plan == "free":
-                increment_images(user_id)
-
-            save_to_memory(state, {
-                "type": "generated",
-                "source": "v1",
-                "prompt": prompt,
-                "hint": prompt,
-                "path": None
-            })
-
-            return {"type": "image", "data": img}
+        print("🔥 IMAGE ERROR: генерация вернула None")
 
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception:
+    except Exception as e:
+        print("🔥 IMAGE PROCESS ERROR:", e)
         return {"type": "error", "data": None}
 
 
-# ===== RETRY =====
 async def retry_process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
@@ -234,10 +186,7 @@ async def retry_process(user_id, text, state):
 
         is_admin = user_id == ADMIN_ID
 
-        img = await generate_image_v2(prompt)
-
-        if not img:
-            img = await generate_image(prompt)
+        img = await generate_image(prompt)
 
         if img:
             plan = get_user_plan(user_id)
@@ -254,10 +203,13 @@ async def retry_process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
+        print("🔥 IMAGE RETRY ERROR: генерация None")
+
         return {
             "type": "final_error",
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception:
+    except Exception as e:
+        print("🔥 IMAGE RETRY ERROR:", e)
         return {"type": "final_error", "data": "⚠️ Сервис временно недоступен"}
