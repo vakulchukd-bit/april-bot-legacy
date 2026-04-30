@@ -117,7 +117,6 @@ class ScienceRoom:
                 except Exception as e:
                     print("🔥 GRAPH ERROR:", e)
 
-            # 🔥 НОВОЕ: если график не построился
             return {
                 "type": "text",
                 "data": "❌ Не удалось построить график (ошибка генерации)"
@@ -197,8 +196,8 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ===== fallback =====
-        if "график" in text.lower() or "построй" in text.lower():
+        # ===== fallback (усилен) =====
+        if any(w in text.lower() for w in ["график", "построй", "функц"]):
             return {
                 "type": "text",
                 "data": (
@@ -215,7 +214,6 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
-        # 🔥 НОВОЕ: ГАРАНТИЯ ОТВЕТА
         return {
             "type": "text",
             "data": "🤔 Уточни задачу чуть подробнее"
@@ -266,6 +264,11 @@ class ScienceRoom:
 
     def solve_equation(self, text):
         try:
+            # 🔥 ФИКС: очистка входа
+            text = text.lower()
+            text = text.replace("реши", "")
+            text = text.strip()
+
             expr = text.replace(" ", "")
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
             expr = re.sub(r'(\d)\(', r'\1*(', expr)
