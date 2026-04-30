@@ -1,242 +1,372 @@
-from blocks.response_mode import detect_response_mode
-from blocks.text_module import process as text_process
+import asyncio
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from blocks.intent_system import detect_intent
-from blocks.intent_ai import detect_intent_ai
-from blocks.router import route_request
+from datetime import datetime, timedelta
+import pytz
 
-from blocks.state_manager import (
-    get_state,
-    get_image_context,
-    set_image_context
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.client.session.aiohttp import AiohttpSession
+
+from openai import OpenAI
+
+from storage import (
+    check_subscription,
+    should_warn,
+    can_send_message,
+    set_subscription,
+    get_remaining_messages,
+    get_remaining_days,
+    get_limits,
+    get_admin_stats,
+    get_user_plan,
+    get_all_users,
+    init_db,
+    ensure_user_db,
+    save_payment
 )
 
-from blocks.anchor_system import get_anchor
-from blocks.mode_manager import get_mode
+from core.executor import execute
 
-from blocks.context_system import build_context_text
+from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard
+from blocks.state_manager import (
+    set_image_context,
+    set_awaiting,
+    add_dialog,
+    get_state
+)
 
-from blocks.rooms_registry import ROOMS
-from blocks.engineering_system import analyze_code
+from blocks.anchor_system import create_anchor, clear_anchor
+from blocks.error_handler import handle_error, get_errors
+
+from blocks.admin_system import (
+    register_user,
+    log_event,
+    get_admin_panel
+)
+
+from blocks.mode_manager import get_mode, set_mode, clear_mode
+from blocks.session_manager import is_session_expired
+from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 from blocks.image_module import process as image_generate
-from blocks.image_module import extract_image_prompt
-from blocks.image_edit_module import process as image_edit
 
-from blocks.image_system import analyze_image
+from io import BytesIO
 
-from datetime import datetime
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+session = AiohttpSession(timeout=300)
+bot = Bot(token=TOKEN, session=session)
 
-from storage import set_subscription, save_payment
+dp = Dispatcher()
 
-from blocks.energy_manager import get_energy
-
-from blocks.experience import update_experience, load_experience
-
-import re
-import asyncio
-import base64
+ADMIN_ID = 2016592532
+tz = pytz.timezone("Europe/Kyiv")
 
 
-def detect_task_type(text: str):
-    t = text.lower()
-
-    if "=" in t:
-        return "math"
-
-    if "sin(" in t or "cos(" in t:
-        return "math"
-
-    if any(op in t for op in ["+", "-", "*", "/"]):
-        if any(ch.isdigit() for ch in t):
-            return "math"
-
-    if "y=" in t or "график" in t:
-        return "math"
-
-    if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
-        return "image_edit"
-
-    if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
-        return "image_generate"
-
-    return "text"
+def is_time_question(text: str):
+    text = text.lower()
+    return any(t in text for t in [
+        "сколько времени", "который час", "какая дата", "какой сегодня день"
+    ])
 
 
-def handle_subscription(callback_data, user_id):
-    print("🔥 CALLBACK:", callback_data)
+# 🔥 ОБНОВЛЕНО
+async def typing_loop(chat_id, mode="text"):
+    try:
+        while True:
+            if mode == "image":
+                await bot.send_chat_action(chat_id, "upload_photo")
+            else:
+                await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(2)
+    except:
+        pass
 
-    if callback_data == "buy_lite":
-        return {
-            "type": "text",
-            "data": "💳 Подтвердить переход на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+
+# 🔥 ОБНОВЛЕНО
+async def run_with_typing(chat_id, coro, mode="text"):
+    task = asyncio.create_task(typing_loop(chat_id, mode))
+    try:
+        result = await coro
+        await asyncio.sleep(0.1)
+        return result
+    finally:
+        task.cancel()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
+async def safe_send_image(message, data):
+    try:
+        await message.answer_photo(
+            BufferedInputFile(data, filename="image.png"),
+            reply_markup=main_keyboard(message.message_id)
+        )
+    except:
+        bio = BytesIO(data)
+        bio.name = "image.png"
+        await message.answer_document(
+            bio,
+            reply_markup=main_keyboard(message.message_id)
+        )
+
+
+@dp.message()
+async def handle(message: types.Message):
+    user_id = message.from_user.id
+    ensure_user_db(user_id)
+
+    text = message.text or message.caption or ""
+
+    if message.voice:
+        file = await bot.get_file(message.voice.file_id)
+        path = f"{user_id}.ogg"
+
+        await bot.download_file(file.file_path, destination=path)
+
+        def run():
+            with open(path, "rb") as f:
+                t = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+            return t.text
+
+        text = await asyncio.to_thread(run)
+
+        if not text.strip():
+            await message.answer("🎤 Не расслышал")
+            return
+
+        await message.answer(f"🎤 {text}")
+
+    if message.photo:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+
+        path = f"{user_id}_image.jpg"
+        await bot.download_file(file.file_path, destination=path)
+
+        set_image_context(user_id, {
+            "type": "uploaded",
+            "path": path
+        })
+
+        await message.answer("📸 Изображение получено. Можешь спросить про него.")
+        return
+
+    state = get_state(user_id)
+
+    now = datetime.now(tz)
+    state["time_str"] = now.strftime("%H:%M")
+    state["date_str"] = now.strftime("%d.%m.%Y")
+
+    if is_time_question(text):
+        await message.answer(
+            f"🕒 {state['time_str']}\n📅 {state['date_str']}"
+        )
+        return
+
+    register_user(user_id)
+
+    mode = get_mode(user_id)
+    if user_id == ADMIN_ID and mode == "broadcast":
+        users = get_all_users()
+        success = 0
+
+        for uid in users:
+            if int(uid) == ADMIN_ID:
+                continue
+            try:
+                await bot.send_message(uid, f"📢 {text}")
+                success += 1
+            except:
+                pass
+
+        clear_mode(user_id)
+        await message.answer(f"✅ Рассылка отправлена: {success}")
+        return
+
+    try:
+        result = await execute(user_id, text, message.chat.id, run_with_typing)
+
+        add_dialog(user_id, "user", text)
+        add_dialog(user_id, "assistant", result.get("data", ""))
+
+        if result["type"] == "text":
+            await message.answer(
+                result["data"],
+                reply_markup=main_keyboard(message.message_id)
+            )
+
+        elif result["type"] == "image":
+            await safe_send_image(message, result["data"])
+
+    except Exception as e:
+        await handle_error(bot, message, e, "global_handler")
+
+
+@dp.callback_query()
+async def handle_callbacks(callback: types.CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+
+    if data.startswith("like_"):
+        state = get_state(user_id)
+        state["last_action"] = {
+            "type": "feedback",
+            "intent": "like",
+            "status": "positive"
+        }
+        await callback.answer("👍")
+        return
+
+    if data.startswith("dislike_"):
+        state = get_state(user_id)
+        state["last_action"] = {
+            "type": "feedback",
+            "intent": "dislike",
+            "status": "negative"
+        }
+        await callback.answer("👎")
+        return
+
+    if data == "menu":
+        text, keyboard = get_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    if data == "info":
+        text, keyboard = build_info_menu(user_id)
+        await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
+    if user_id == ADMIN_ID:
+
+        if data == "admin_stats":
+            errors = get_errors()
+            text = "📊 Анализ\n\n"
+            text += "✅ Ошибок нет" if not errors else "\n".join(errors[-5:])
+            await callback.answer(text[:200], show_alert=True)
+            return
+
+        if data == "admin_payments":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 OpenAI", url="https://platform.openai.com/account/billing")],
+                [InlineKeyboardButton(text="🚂 Railway", url="https://railway.app/dashboard")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            ])
+            await callback.message.answer("💳 Оплаты:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        if data == "admin_broadcast":
+            set_mode(user_id, "broadcast")
+            await callback.answer("📢 Введи текст", show_alert=True)
+            return
+
+    if data in ["buy_lite", "lite", "go_lite"]:
+        await callback.message.answer(
+            "💳 Подтвердить Lite?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+                    InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
                 ]
             ])
-        }
+        )
+        await callback.answer()
+        return
 
-    if callback_data == "buy_premium":
-        return {
-            "type": "text",
-            "data": "💳 Подтвердить переход на Premium?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+    if data == "buy_premium":
+        await callback.message.answer(
+            "💳 Подтвердить Premium?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+                    InlineKeyboardButton(text="❌ Нет", callback_data="cancel")
                 ]
             ])
-        }
+        )
+        await callback.answer()
+        return
 
-    if callback_data == "buy_yes_lite":
-        return {"type": "admin_request", "plan": "lite"}
+    if data == "buy_yes_lite":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС LITE от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_confirm_lite_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_reject_lite_{user_id}")
+                ]
+            ])
+        )
+        await callback.answer("Отправлено")
+        return
 
-    if callback_data == "buy_yes_premium":
-        return {"type": "admin_request", "plan": "premium"}
+    if data == "buy_yes_premium":
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 ЗАПРОС PREMIUM от {user_id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅", callback_data=f"admin_confirm_premium_{user_id}"),
+                    InlineKeyboardButton(text="❌", callback_data=f"admin_reject_premium_{user_id}")
+                ]
+            ])
+        )
+        await callback.answer("Отправлено")
+        return
 
-    if callback_data == "buy_no":
-        return {"type": "text", "data": "❌ Отменено"}
-
-    if callback_data.startswith("admin_confirm_"):
-        parts = callback_data.split("_")
+    if data.startswith("admin_confirm_"):
+        parts = data.split("_")
         plan = parts[2]
         uid = int(parts[3])
 
         set_subscription(uid, plan)
         save_payment(uid, plan)
 
-        return {
-            "type": "notify_user",
-            "target_user": uid,
-            "data": f"✅ Активирован {plan.upper()}"
-        }
+        await bot.send_message(uid, f"✅ Активирован {plan.upper()}")
+        await callback.answer("OK", show_alert=True)
+        return
 
-    return None
+    if data.startswith("admin_reject_"):
+        uid = int(data.split("_")[3])
+        await bot.send_message(uid, "❌ Отклонено")
+        await callback.answer("OK", show_alert=True)
+        return
 
+    if data == "cancel":
+        await callback.message.answer("❌ Отменено")
+        await callback.answer()
+        return
 
-def is_image_question(text: str):
-    t = text.lower()
-    return any(tr in t for tr in [
-        "что на картинке", "что это", "что справа",
-        "что слева", "что здесь", "что изображено"
-    ])
-
-
-def extract_bytes(data):
-    if isinstance(data, bytes):
-        return data
-
-    if isinstance(data, str):
-        try:
-            return base64.b64decode(data)
-        except:
-            return None
-
-    if isinstance(data, dict):
-        for key in ["data", "image", "result", "content"]:
-            if key in data:
-                return extract_bytes(data[key])
-
-    return None
+    await callback.answer()
 
 
-async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
-    print("🔥 EXECUTOR RUNNING")
+async def main():
+    init_db()
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
-    state = get_state(user_id)
-    mode = get_mode(user_id)
 
-    t = text.lower().strip()
-
-    if "время" in t:
-        now = datetime.now().strftime("%H:%M")
-        return {"type": "text", "data": f"Сейчас {now}"}
-
-    energy = get_energy(user_id)
-
-    ctx = get_image_context(user_id) or state.get("image_context")
-    anchor = get_anchor(user_id)
-
-    task_type = detect_task_type(text)
-
-    # --- IMAGE EDIT ---
-    if task_type == "image_edit":
-        if ctx:
-            print("🖼️ DIRECT IMAGE EDIT")
-            return await image_edit(user_id, text, state)
-        else:
-            return {
-                "type": "text",
-                "data": "Сначала нужно создать изображение 🙂"
-            }
-
-    # --- IMAGE GENERATE ---
-    if task_type == "image_generate":
-
-        try:
-            await run_with_typing(chat_id, asyncio.sleep(0))
-        except:
-            pass
-
-        def build_image_response(result):
-            img = extract_bytes(result)
-
-            if not img:
-                return {
-                    "type": "text",
-                    "data": "⚠️ Не удалось создать изображение"
-                }
-
-            return {
-                "type": "image",
-                "data": img
-            }
-
-        print("🖼️ DIRECT IMAGE GENERATE (safe)")
-        prompt = extract_image_prompt(text)
-
-        # 🔥 ВАЖНЫЙ ФИКС (БЕЗ ЛОМКИ)
-        if not prompt or len(prompt.strip()) < 3:
-            return {
-                "type": "text",
-                "data": "Что именно хочешь изобразить?"
-            }
-
-        result = await image_generate(user_id, prompt, state)
-        return build_image_response(result)
-
-    # ===== ВСЁ ОСТАЛЬНОЕ =====
-
-    try:
-        experience = load_experience(user_id)
-    except:
-        experience = {}
-
-    context = {
-        "chat_id": chat_id,
-        "state": state,
-        "image": ctx,
-        "anchor": anchor,
-        "mode": mode,
-        "task_type": detect_task_type(text),
-        "energy": energy,
-        "experience": experience
-    }
-
-    try:
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-        return {"type": "text", "data": result["content"]}
-    except Exception as e:
-        print("🔥 FINAL FALLBACK ERROR:", e)
-
-    return {
-        "type": "text",
-        "data": "⚠️ Не удалось обработать запрос."
-    }
+if __name__ == "__main__":
+    threading.Thread(target=run_server, daemon=True).start()
+    asyncio.run(main())
