@@ -87,7 +87,7 @@ class ScienceRoom:
         if user_id == ADMIN_ID:
             plan = "premium"
 
-        # 🔥 1. СНАЧАЛА ПРОБУЕМ ВЫТАЩИТЬ ФУНКЦИЮ (ПРИОРИТЕТ)
+        # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
         expr = self.extract_function(text)
 
         if expr:
@@ -105,7 +105,6 @@ class ScienceRoom:
                     )
                 }
 
-            # 🔥 СТРОИМ СРАЗУ PNG (СТАБИЛЬНО)
             path = self.build_graph(expr)
             if path:
                 try:
@@ -118,7 +117,13 @@ class ScienceRoom:
                 except Exception as e:
                     print("🔥 GRAPH ERROR:", e)
 
-        # ===== дальше старая логика =====
+            # 🔥 НОВОЕ: если график не построился
+            return {
+                "type": "text",
+                "data": "❌ Не удалось построить график (ошибка генерации)"
+            }
+
+        # ===== старая логика =====
 
         tasks = self.split_into_tasks(text)
 
@@ -167,7 +172,6 @@ class ScienceRoom:
             if len(equations) >= 2:
                 break
 
-            # 🔥 НЕ РЕШАЕМ y=...
             if eq.strip().startswith("y=") or eq.strip().startswith("y ="):
                 continue
 
@@ -193,7 +197,7 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ===== fallback если просто "построй" =====
+        # ===== fallback =====
         if "график" in text.lower() or "построй" in text.lower():
             return {
                 "type": "text",
@@ -211,7 +215,11 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
-        return None
+        # 🔥 НОВОЕ: ГАРАНТИЯ ОТВЕТА
+        return {
+            "type": "text",
+            "data": "🤔 Уточни задачу чуть подробнее"
+        }
 
     def validate_expression(self, expr):
         try:
