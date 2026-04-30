@@ -77,14 +77,9 @@ def is_time_question(text: str):
 
 async def typing_loop(chat_id):
     try:
-        elapsed = 0
         while True:
-            if elapsed < 4:
-                await bot.send_chat_action(chat_id, "typing")
-            else:
-                await bot.send_chat_action(chat_id, "upload_photo")
+            await bot.send_chat_action(chat_id, "typing")
             await asyncio.sleep(2)
-            elapsed += 2
     except:
         pass
 
