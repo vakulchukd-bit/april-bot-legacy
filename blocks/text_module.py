@@ -45,6 +45,17 @@ def is_problem(text):
     t = text.lower()
     return any(sym in t for sym in ["=", "+", "-", "*", "/", "^"]) or "реши" in t or "график" in t
 
+# 🔥 НОВОЕ: точный math fallback детектор
+def is_strict_math(text):
+    t = text.lower()
+    return (
+        "=" in t or
+        "график" in t or
+        "sin(" in t or
+        "cos(" in t or
+        any(op in t for op in ["+", "-", "*", "/"])
+    )
+
 MAX_MESSAGE_CHARS = 600
 MAX_TOTAL_CHARS = 3000
 
@@ -141,12 +152,10 @@ def is_small_talk(text, state):
     t = text.lower().strip()
     words = t.split()
 
-    # защита от "да", "ок" в середине диалога
     if state.get("dialog"):
         if len(words) <= 2:
             return False
 
-    # короткие и простые фразы
     if len(words) <= 4:
         return True
 
@@ -208,10 +217,18 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+        # 🔥 УСИЛЕННЫЙ КОНТРОЛЬ ДЛЯ МАТЕМАТИКИ (fallback)
         if is_problem(text_fixed):
             messages.append({
                 "role": "system",
-                "content": "Это задача. Реши и объясни кратко."
+                "content": "Это математическая задача. Реши максимально кратко, без лишнего текста. Не используй ASCII-графики."
+            })
+
+        # 🔥 ЕЩЁ ЖЁСТЧЕ, если чистая математика
+        if is_strict_math(text_fixed):
+            messages.append({
+                "role": "system",
+                "content": "Ответ должен быть коротким, без лишнего объяснения, только результат или минимум пояснения."
             })
 
         behavior = build_behavior_hint(text_fixed)
@@ -234,14 +251,12 @@ async def process(user_id, text, state, energy="MEDIUM"):
                 "content": "Говори уверенно и кратко."
             })
 
-        # 🔥 АНТИ-РАЗДУВАНИЕ
         if "глубже" in text.lower() or "подробнее" in text.lower():
             messages.append({
                 "role": "system",
                 "content": "Отвечай глубже, но не увеличивай объем текста. Без лишних абзацев."
             })
 
-        # 🔥 КОНТЕКСТ ПО УСЛОВИЮ
         try:
             from blocks.context_system import build_context_text
             if need_context(text_fixed):
