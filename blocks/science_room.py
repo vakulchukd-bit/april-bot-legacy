@@ -161,7 +161,13 @@ class ScienceRoom:
                 if path:
                     try:
                         with open(path, "rb") as f:
-                            return {"type": "image", "data": f.read()}
+                            return {
+                                "type": "image",
+                                "data": f.read(),
+                                "meta": {
+                                    "source": "math_graph"  # 🔥 ВОТ ОН (ключевой момент)
+                                }
+                            }
                     except Exception as e:
                         print("🔥 GRAPH ERROR:", e)
 
@@ -172,10 +178,8 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
-        # 🔥 ВАЖНО: НЕ ЛОМАЕМ ДИРИЖЁРА
         return None
 
-    # ===== ПАРСИНГ =====
     def extract_math_expression(self, text):
         t = text.lower()
         t = t.replace("²", "**2")
@@ -219,12 +223,10 @@ class ScienceRoom:
             print("🔥 GRAPH ERROR:", e)
             return None
 
-    # ===== РЕШЕНИЕ =====
     def solve_equation(self, text):
         try:
             expr = self.extract_math_expression(text)
 
-            # 🔥 усиленный парсинг
             expr = expr.replace(" ", "")
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
             expr = re.sub(r'(\d)\(', r'\1*(', expr)
