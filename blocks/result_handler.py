@@ -14,6 +14,16 @@ async def send_result(message, result, keyboard=None):
 
         await message.answer(content, reply_markup=keyboard)
 
+    # 🔥 НОВОЕ: ПОДДЕРЖКА КОДА
+    elif result["type"] == "code":
+        code = format_code_block(
+            result.get("code"),
+            result.get("file"),
+            result.get("block")
+        )
+
+        await message.answer(f"```python\n{code}\n```", reply_markup=keyboard)
+
     elif result["type"] == "image":
         await message.answer_photo(
             BufferedInputFile(result["data"], filename="image.png"),
