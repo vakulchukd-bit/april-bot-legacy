@@ -41,7 +41,7 @@ import re
 
 
 # ===============================
-# 🔥 VAGUE DETECTOR (НОВОЕ)
+# 🔥 VAGUE DETECTOR
 # ===============================
 def is_vague_request(text: str):
     t = text.lower().strip()
@@ -55,6 +55,21 @@ def is_vague_request(text: str):
         return True
 
     return False
+
+
+# ===============================
+# 🔥 DISSATISFACTION DETECTOR (НОВОЕ)
+# ===============================
+def is_dissatisfied(text: str):
+    t = text.lower()
+
+    triggers = [
+        "не то", "не понял", "не это", "другое",
+        "не подходит", "не правильно", "неправильно",
+        "ты не понял", "я не это имел"
+    ]
+
+    return any(tr in t for tr in triggers)
 
 
 # 🔥 OUTPUT MODE
@@ -182,7 +197,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print("🔥 INTERPRET ERROR:", e)
 
     # ===============================
-    # 🔥 VAGUE GUARD (FIXED)
+    # 🔥 VAGUE GUARD
     # ===============================
     try:
         if is_vague_request(text):
@@ -212,6 +227,38 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     except Exception as e:
         print("🔥 VAGUE ERROR:", e)
+
+    # ===============================
+    # 🔥 DISSATISFACTION FLOW (НОВОЕ)
+    # ===============================
+    try:
+        if is_dissatisfied(text):
+            print("🧠 USER DISSATISFIED → USE AI")
+
+            result = await run_with_typing(
+                chat_id,
+                text_process(
+                    user_id,
+                    text,
+                    state,
+                    energy="LOW"
+                )
+            )
+
+            content = None
+            if isinstance(result, dict):
+                content = result.get("content")
+
+            if not content:
+                content = "Давай попробуем по-другому 🙂 Уточни, что именно ты хочешь."
+
+            return {
+                "type": "text",
+                "data": content
+            }
+
+    except Exception as e:
+        print("🔥 DISSATISFACTION ERROR:", e)
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
