@@ -182,21 +182,34 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print("🔥 INTERPRET ERROR:", e)
 
     # ===============================
-    # 🔥 VAGUE GUARD (КЛЮЧЕВОЙ СЛОЙ)
+    # 🔥 VAGUE GUARD (FIXED)
     # ===============================
     try:
         if is_vague_request(text):
             print("🧠 VAGUE DETECTED")
 
-            return await run_with_typing(
+            result = await run_with_typing(
                 chat_id,
                 text_process(
                     user_id,
-                    "Запрос размытый. Предложи варианты: график, код, изображение.",
+                    "Предложи что можно сделать: график, код или изображение. Ответ живой.",
                     state,
                     energy="LOW"
                 )
             )
+
+            content = None
+            if isinstance(result, dict):
+                content = result.get("content")
+
+            if not content:
+                content = "Могу сделать что-нибудь интересное 🙂 Например: график, код или изображение."
+
+            return {
+                "type": "text",
+                "data": content
+            }
+
     except Exception as e:
         print("🔥 VAGUE ERROR:", e)
 
