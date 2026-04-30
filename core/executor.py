@@ -41,25 +41,26 @@ import base64
 
 
 def detect_task_type(text: str):
-    t = text.lower().strip()
+    t = text.lower()
 
-    # --- IMAGE EDIT ---
+    if "=" in t:
+        return "math"
+
+    if "sin(" in t or "cos(" in t:
+        return "math"
+
+    if any(op in t for op in ["+", "-", "*", "/"]):
+        if any(ch.isdigit() for ch in t):
+            return "math"
+
+    if "y=" in t or "график" in t:
+        return "math"
+
     if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
         return "image_edit"
 
-    # --- IMAGE GENERATE ---
     if any(x in t for x in ["создай", "сгенерируй", "нарисуй", "сделай"]):
         return "image_generate"
-
-    # --- MATH (только если есть цифры + операции) ---
-    has_digits = any(ch.isdigit() for ch in t)
-
-    if has_digits:
-        if any(op in t for op in ["+", "-", "*", "/", "="]):
-            return "math"
-
-        if any(f in t for f in ["sin(", "cos(", "tan(", "y="]):
-            return "math"
 
     return "text"
 
@@ -176,15 +177,37 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # --- IMAGE GENERATE ---
     if task_type == "image_generate":
 
+        try:
+            await run_with_typing(chat_id, asyncio.sleep(0))
+        except:
+            pass
+
+        def build_image_response(result):
+            img = extract_bytes(result)
+
+            if not img:
+                return {
+                    "type": "text",
+                    "data": "⚠️ Не удалось создать изображение"
+                }
+
+            return {
+                "type": "image",
+                "data": img
+            }
+
         print("🖼️ DIRECT IMAGE GENERATE (safe)")
         prompt = extract_image_prompt(text)
 
-        result = await run_with_typing(
-            chat_id,
-            image_generate(user_id, prompt, state)
-        )
+        # 🔥 ВАЖНЫЙ ФИКС (БЕЗ ЛОМКИ)
+        if not prompt or len(prompt.strip()) < 3:
+            return {
+                "type": "text",
+                "data": "Что именно хочешь изобразить?"
+            }
 
-        return result
+        result = await image_generate(user_id, prompt, state)
+        return build_image_response(result)
 
     # ===== ВСЁ ОСТАЛЬНОЕ =====
 
