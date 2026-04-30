@@ -34,13 +34,30 @@ from blocks.energy_manager import get_energy
 
 from blocks.experience import update_experience, load_experience
 
-# 🔥 НОВОЕ: INTERPRETATION LAYER
+# 🔥 INTERPRETATION
 from blocks.interpretation_layer import interpret_request
 
 import re
 
 
-# 🔥 НОВОЕ: OUTPUT MODE
+# ===============================
+# 🔥 VAGUE DETECTOR (НОВОЕ)
+# ===============================
+def is_vague_request(text: str):
+    t = text.lower().strip()
+
+    vague_words = ["что-нибудь", "что то", "что-то", "придумай"]
+
+    if any(v in t for v in vague_words):
+        return True
+
+    if len(t.split()) <= 3 and "сделай" in t:
+        return True
+
+    return False
+
+
+# 🔥 OUTPUT MODE
 def detect_output_mode(text: str):
     t = text.lower()
 
@@ -154,16 +171,34 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     t = text.lower().strip()
 
     # ===============================
-    # 🔥 INTERPRETATION LAYER (НОВОЕ)
+    # 🔥 INTERPRETATION
     # ===============================
     try:
         interpreted = interpret_request(text)
-
         if interpreted and interpreted.get("normalized"):
             print("🧠 INTERPRET:", interpreted)
             text = interpreted["normalized"]
     except Exception as e:
         print("🔥 INTERPRET ERROR:", e)
+
+    # ===============================
+    # 🔥 VAGUE GUARD (КЛЮЧЕВОЙ СЛОЙ)
+    # ===============================
+    try:
+        if is_vague_request(text):
+            print("🧠 VAGUE DETECTED")
+
+            return await run_with_typing(
+                chat_id,
+                text_process(
+                    user_id,
+                    "Запрос размытый. Предложи варианты: график, код, изображение.",
+                    state,
+                    energy="LOW"
+                )
+            )
+    except Exception as e:
+        print("🔥 VAGUE ERROR:", e)
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
@@ -175,30 +210,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     anchor = get_anchor(user_id)
 
     task_type = detect_task_type(text)
-
-    # 🔥 НОВОЕ: определяем режим вывода
     output_mode = detect_output_mode(text)
 
     # ===============================
-    # 🔥 IMAGE EDIT
+    # IMAGE EDIT
     # ===============================
     if task_type == "image_edit":
         if ctx:
-            print("🖼️ DIRECT IMAGE EDIT")
             return await image_edit(user_id, text, state)
         else:
-            return {
-                "type": "text",
-                "data": "Сначала нужно создать изображение 🙂"
-            }
+            return {"type": "text", "data": "Сначала нужно создать изображение 🙂"}
 
     # ===============================
-    # 🔥 IMAGE GENERATE
+    # IMAGE GENERATE
     # ===============================
     if task_type == "image_generate":
 
         if len(text.strip()) > 15:
-            print("🖼️ DIRECT IMAGE GENERATE (explicit)")
             prompt = extract_image_prompt(text)
             return await image_generate(user_id, prompt, state)
 
@@ -207,30 +235,22 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         if summary:
             prompt = extract_image_prompt(summary)
-            print("🖼️ GENERATE FROM SUMMARY")
             return await image_generate(user_id, prompt, state)
 
         if dialog:
             last_user = next((m["content"] for m in reversed(dialog) if m["role"] == "user"), None)
             if last_user:
                 prompt = extract_image_prompt(last_user)
-                print("🖼️ GENERATE FROM DIALOG")
                 return await image_generate(user_id, prompt, state)
 
-        return {
-            "type": "text",
-            "data": "Что именно хочешь изобразить?"
-        }
+        return {"type": "text", "data": "Что именно хочешь изобразить?"}
 
     # ===============================
-    # 🔥 УМНОЕ ОПИСАНИЕ КАРТИНКИ
+    # IMAGE ANALYZE
     # ===============================
     if is_image_question(text) and ctx:
         if ctx.get("type") == "generated" and ctx.get("hint"):
-            return {
-                "type": "text",
-                "data": ctx["hint"]
-            }
+            return {"type": "text", "data": ctx["hint"]}
 
         if ctx.get("type") == "uploaded" and ctx.get("path"):
             try:
@@ -240,7 +260,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 print("🔥 IMAGE ANALYZE ERROR:", e)
 
     # ===============================
-    # 🔥 ОСНОВНОЙ КОНТЕКСТ
+    # CONTEXT
     # ===============================
     try:
         experience = load_experience(user_id)
@@ -259,33 +279,21 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "output_mode": output_mode
     }
 
-    # ===== дальше код НЕ ТРОНУТ =====
-
     def is_valid_result(result):
-        if not result:
-            return False
-        if not isinstance(result, dict):
-            return False
-        if "type" not in result:
-            return False
-        if result["type"] == "text" and not result.get("data"):
-            return False
-        if result["type"] == "image" and not result.get("data"):
-            return False
-        return True
+        return (
+            result
+            and isinstance(result, dict)
+            and "type" in result
+            and (result["type"] != "text" or result.get("data"))
+        )
 
     candidates = []
 
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
-                try:
-                    score = room.evaluate(text, context)
-                except:
-                    score = 1
-
+                score = room.evaluate(text, context)
                 candidates.append((score, room))
-
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
 
@@ -301,23 +309,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     for score, room in candidates:
         try:
             result = await room.handle(user_id, text, context, run_with_typing)
-
             if is_valid_result(result):
                 return result
-
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
-    try:
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-        return {"type": "text", "data": result["content"]}
-    except Exception as e:
-        print("🔥 FINAL FALLBACK ERROR:", e)
+    result = await run_with_typing(
+        chat_id,
+        text_process(user_id, text, state, energy)
+    )
 
-    return {
-        "type": "text",
-        "data": "⚠️ Не удалось обработать запрос."
-    }
+    return {"type": "text", "data": result["content"]}
