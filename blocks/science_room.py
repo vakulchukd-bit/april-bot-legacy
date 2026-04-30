@@ -87,6 +87,39 @@ class ScienceRoom:
         if user_id == ADMIN_ID:
             plan = "premium"
 
+        # 🔥 1. СНАЧАЛА ПРОБУЕМ ВЫТАЩИТЬ ФУНКЦИЮ (ПРИОРИТЕТ)
+        expr = self.extract_function(text)
+
+        if expr:
+            valid, error = self.validate_expression(expr)
+
+            if not valid:
+                return {
+                    "type": "text",
+                    "data": (
+                        "❌ Не удалось построить график.\n"
+                        f"Причина: {error}\n\n"
+                        "👉 Пример:\n"
+                        "y = x**2\n"
+                        "y = np.sin(x)"
+                    )
+                }
+
+            # 🔥 СТРОИМ СРАЗУ PNG (СТАБИЛЬНО)
+            path = self.build_graph(expr)
+            if path:
+                try:
+                    with open(path, "rb") as f:
+                        return {
+                            "type": "image",
+                            "data": f.read(),
+                            "meta": {"source": "math_graph"}
+                        }
+                except Exception as e:
+                    print("🔥 GRAPH ERROR:", e)
+
+        # ===== дальше старая логика =====
+
         tasks = self.split_into_tasks(text)
 
         equations = []
@@ -134,6 +167,10 @@ class ScienceRoom:
             if len(equations) >= 2:
                 break
 
+            # 🔥 НЕ РЕШАЕМ y=...
+            if eq.strip().startswith("y=") or eq.strip().startswith("y ="):
+                continue
+
             res = self.solve_equation(eq)
             if res:
                 results.append(f"📐 {res}")
@@ -156,57 +193,18 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ===== ГРАФИК =====
-        expr = self.extract_function(text)
-
-        if expr:
-            valid, error = self.validate_expression(expr)
-
-            if not valid:
-                return {
-                    "type": "text",
-                    "data": (
-                        "❌ Не удалось построить график.\n"
-                        f"Причина: {error}\n\n"
-                        "👉 Пример:\n"
-                        "y = x**2\n"
-                        "y = np.sin(x)"
-                    )
-                }
-
-            html = self.build_html_graph(expr)
-            if html:
-                return {
-                    "type": "file",
-                    "data": html,
-                    "filename": "graph.html"
-                }
-
-            path = self.build_graph(expr)
-            if path:
-                try:
-                    with open(path, "rb") as f:
-                        return {
-                            "type": "image",
-                            "data": f.read(),
-                            "meta": {"source": "math_graph"}
-                        }
-                except Exception as e:
-                    print("🔥 GRAPH ERROR:", e)
-
-        # ===== 🔥 НОВЫЙ ФИКС =====
+        # ===== fallback если просто "построй" =====
         if "график" in text.lower() or "построй" in text.lower():
             return {
                 "type": "text",
                 "data": (
-                    "📊 Чтобы построить график, нужна формула.\n\n"
-                    "👉 Примеры:\n"
+                    "📊 Дай формулу, и я построю график.\n\n"
+                    "👉 Пример:\n"
                     "y = x**2\n"
                     "y = np.sin(x)"
                 )
             }
 
-        # ===== ВЫВОД =====
         if results:
             return {
                 "type": "text",
@@ -223,21 +221,9 @@ class ScienceRoom:
         except Exception as e:
             return False, str(e)
 
-    def extract_math_expression(self, text):
-        t = text.lower()
-        t = t.replace("²", "**2")
-        t = t.replace("^", "**")
-
-        match = re.search(r'([-+*/().\d x]+=[-+*/().\d x]+)', t)
-        if match:
-            return match.group(1)
-
-        return t
-
     def extract_function(self, text):
         try:
-            text = text.lower()
-            text = text.replace("^", "**")
+            text = text.lower().replace("^", "**")
 
             text = text.replace("sin", "np.sin")
             text = text.replace("cos", "np.cos")
@@ -246,46 +232,10 @@ class ScienceRoom:
 
             match = re.search(r"y\s*=\s*(.+)", text)
             if match:
-                return match.group(1)
-
-            if "x" in text:
-                return text
+                return match.group(1).strip()
 
             return None
         except:
-            return None
-
-    def build_html_graph(self, expr):
-        try:
-            x = np.linspace(-10, 10, 200)
-            y = eval(expr, {"x": x, "np": np, "__builtins__": {}})
-
-            html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-<style>
-body {{ background: #111; color: white; }}
-</style>
-</head>
-<body>
-<div id="graph"></div>
-<script>
-var trace = {{
-  x: {x.tolist()},
-  y: {y.tolist()},
-  type: 'scatter'
-}};
-Plotly.newPlot('graph', [trace]);
-</script>
-</body>
-</html>
-"""
-            return html
-        except Exception as e:
-            print("🔥 HTML GRAPH ERROR:", e)
             return None
 
     def build_graph(self, expr):
@@ -308,9 +258,7 @@ Plotly.newPlot('graph', [trace]);
 
     def solve_equation(self, text):
         try:
-            expr = self.extract_math_expression(text)
-
-            expr = expr.replace(" ", "")
+            expr = text.replace(" ", "")
             expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
             expr = re.sub(r'(\d)\(', r'\1*(', expr)
 
