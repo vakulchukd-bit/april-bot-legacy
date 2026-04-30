@@ -3,7 +3,6 @@ import asyncio
 from openai import OpenAI
 
 from storage import get_user_plan, get_limits, get_conn, today
-from blocks.ai_config import IMAGE_MODEL, IMAGE_SIZE, IMAGE_QUALITY  # 👈 НОВОЕ
 
 client = OpenAI()
 
@@ -57,35 +56,65 @@ def extract_image_prompt(text: str):
     return t
 
 
-# ===== ЕДИНСТВЕННАЯ ГЕНЕРАЦИЯ =====
+# ===== V1 =====
 async def generate_image(prompt):
     def run():
         try:
             response = client.images.generate(
-                model=IMAGE_MODEL,          # 👈 через config
-                prompt=prompt,
-                size=IMAGE_SIZE,            # 👈 через config
-                quality=IMAGE_QUALITY       # 👈 через config
+                model="gpt-image-1",
+                prompt=prompt
             )
 
             if not response or not response.data:
-                print("🔥 IMAGE ERROR: пустой response")
+                print("🔥 IMAGE ERROR: пустой response (v1)")
                 return None
 
             if not hasattr(response.data[0], "b64_json"):
-                print("🔥 IMAGE ERROR: нет b64_json")
+                print("🔥 IMAGE ERROR: нет b64_json (v1)")
                 return None
 
             image_base64 = response.data[0].b64_json
 
             if not image_base64:
-                print("🔥 IMAGE ERROR: пустой base64")
+                print("🔥 IMAGE ERROR: пустой base64 (v1)")
                 return None
 
             return base64.b64decode(image_base64)
 
         except Exception as e:
-            print("🔥 IMAGE ERROR:", e)
+            print("🔥 IMAGE ERROR (v1):", e)
+            return None
+
+    return await asyncio.get_event_loop().run_in_executor(None, run)
+
+
+# ===== V2 =====
+async def generate_image_v2(prompt):
+    def run():
+        try:
+            response = client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt
+            )
+
+            if not response or not response.data:
+                print("🔥 IMAGE ERROR: пустой response (v2)")
+                return None
+
+            if not hasattr(response.data[0], "b64_json"):
+                print("🔥 IMAGE ERROR: нет b64_json (v2)")
+                return None
+
+            image_base64 = response.data[0].b64_json
+
+            if not image_base64:
+                print("🔥 IMAGE ERROR: пустой base64 (v2)")
+                return None
+
+            return base64.b64decode(image_base64)
+
+        except Exception as e:
+            print("🔥 IMAGE ERROR (v2):", e)
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
@@ -145,7 +174,7 @@ async def process(user_id, text, state):
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
-        img = await generate_image(prompt)
+        img = await generate_image_v2(prompt)
 
         if img:
             if not is_admin and plan == "free":
@@ -161,7 +190,23 @@ async def process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
-        print("🔥 IMAGE ERROR: генерация вернула None")
+        img = await generate_image(prompt)
+
+        if img:
+            if not is_admin and plan == "free":
+                increment_images(user_id)
+
+            save_to_memory(state, {
+                "type": "generated",
+                "source": "v1",
+                "prompt": prompt,
+                "hint": prompt,
+                "path": None
+            })
+
+            return {"type": "image", "data": img}
+
+        print("🔥 IMAGE ERROR: обе генерации вернули None")
 
         return {
             "type": "final_error",
@@ -186,7 +231,10 @@ async def retry_process(user_id, text, state):
 
         is_admin = user_id == ADMIN_ID
 
-        img = await generate_image(prompt)
+        img = await generate_image_v2(prompt)
+
+        if not img:
+            img = await generate_image(prompt)
 
         if img:
             plan = get_user_plan(user_id)
@@ -203,7 +251,7 @@ async def retry_process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
-        print("🔥 IMAGE RETRY ERROR: генерация None")
+        print("🔥 IMAGE RETRY ERROR: обе генерации None")
 
         return {
             "type": "final_error",
