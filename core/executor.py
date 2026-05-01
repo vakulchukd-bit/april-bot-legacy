@@ -1,12 +1,11 @@
 # ===============================
-# 🔥 AUTO CENTRAL CONTROLLER (БЕЗ ПРАВОК ВНУТРИ)
+# 🔥 CENTRAL CONTROLLER (ГАРАНТИРОВАННЫЙ ПЕРЕХВАТ)
 # ===============================
 
 def central_controller(text, state):
     try:
         t = text.lower().strip()
 
-        # --- модификация функции ---
         if any(w in t for w in ["круче", "резче", "плавнее", "мягче"]):
             last = state.get("last_math")
 
@@ -15,7 +14,6 @@ def central_controller(text, state):
 
                 if "круче" in t or "резче" in t:
                     expr = f"2*({expr})"
-
                 elif "плавнее" in t or "мягче" in t:
                     expr = f"0.5*({expr})"
 
@@ -26,11 +24,10 @@ def central_controller(text, state):
                     "data": "Окей, изменил функцию. Напиши 'построй'."
                 }
 
-        # --- если просто формула ---
         if "=" in t and not any(w in t for w in ["построй", "реши", "сделай"]):
             return {
                 "type": "text",
-                "data": "Вижу функцию. Напиши 'построй', чтобы построить график."
+                "data": "Вижу функцию. Напиши 'построй'."
             }
 
         return None
@@ -40,24 +37,45 @@ def central_controller(text, state):
         return None
 
 
-# 🔥 ОБЁРТКА EXECUTE (САМО ПОДКЛЮЧАЕТСЯ)
-try:
-    _original_execute = execute
+# 🔥 ОТЛОЖЕННЫЙ ПЕРЕХВАТ
+def apply_execute_patch():
+    try:
+        import sys
 
-    async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
-        state = get_state(user_id)
+        module = sys.modules.get(__name__)
+        original = getattr(module, "execute", None)
 
-        control = central_controller(text, state)
+        if not original:
+            return
 
-        if control:
-            return control
+        async def wrapped_execute(user_id, text, chat_id, run_with_typing, callback_data=None):
+            state = get_state(user_id)
 
-        return await _original_execute(user_id, text, chat_id, run_with_typing, callback_data)
+            control = central_controller(text, state)
 
-    print("✅ CENTRAL CONTROLLER ENABLED")
+            if control:
+                return control
 
-except Exception as e:
-    print("EXEC PATCH ERROR:", e)
+            return await original(user_id, text, chat_id, run_with_typing, callback_data)
+
+        setattr(module, "execute", wrapped_execute)
+
+        print("✅ EXECUTE PATCH APPLIED")
+
+    except Exception as e:
+        print("PATCH ERROR:", e)
+
+
+# 🔥 ЗАПУСК ПАТЧА ПОСЛЕ ЗАГРУЗКИ
+import threading
+
+def delayed_patch():
+    try:
+        apply_execute_patch()
+    except:
+        pass
+
+threading.Timer(1.0, delayed_patch).start()
 # ===============================
 # 🔥 SAFE PATCH MODE (EXECUTOR)
 # ===============================
