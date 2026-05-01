@@ -1,3 +1,26 @@
+# ===============================
+# 🔥 SAFE PATCH MODE (SCIENCE ROOM)
+# ===============================
+
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("SCIENCE PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+# 🔥 PATCH: контроль входа в комнату
+def patch_science_enter(text):
+    safe_patch_log(f"SCIENCE ENTER: {text[:50]}")
+    return None
+
+
+# 🔥 PATCH: будущая логика графиков
+def patch_science_future(*args, **kwargs):
+    return None
 # blocks/science_room.py
 
 import re
