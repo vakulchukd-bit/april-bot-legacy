@@ -176,28 +176,32 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 KNOWLEDGE
-    try:
-        known = find_knowledge(text)
-        if known:
-            add_dialog(user_id, "assistant", known)
-            return {"type": "text", "data": known}
-    except Exception as e:
-        print("KNOWLEDGE ERROR:", e)
+    # ===============================
+    # ❌ ОТКЛЮЧЕН KNOWLEDGE
+    # ===============================
+    # try:
+    #     known = find_knowledge(text)
+    #     if known:
+    #         add_dialog(user_id, "assistant", known)
+    #         return {"type": "text", "data": known}
+    # except Exception as e:
+    #     print("KNOWLEDGE ERROR:", e)
 
-    # 🔥 INTERPRET
-    try:
-        interpreted = interpret_request(text)
-        if interpreted and interpreted.get("normalized"):
-            text = interpreted["normalized"]
-    except Exception as e:
-        print("INTERPRET ERROR:", e)
+    # ===============================
+    # ❌ ОТКЛЮЧЕН INTERPRET
+    # ===============================
+    # try:
+    #     interpreted = interpret_request(text)
+    #     if interpreted and interpreted.get("normalized"):
+    #         text = interpreted["normalized"]
+    # except Exception as e:
+    #     print("INTERPRET ERROR:", e)
 
     # 🔥 ACTIVE TASK
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
-        # continue_active_task отключен осознанно
+        # continue_active_task оставили отключенным как у тебя
     except Exception as e:
         print("ACTIVE TASK ERROR:", e)
 
@@ -220,7 +224,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                 if result and result.get("type"):
 
-                    # 🔥 ВСЕГДА сохраняем
+                    # 🔥 сохраняем ответ
                     add_dialog(
                         user_id,
                         "assistant",
