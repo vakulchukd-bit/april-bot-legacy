@@ -54,6 +54,37 @@ def apply_graph_patch_if_needed(state, text):
     except Exception as e:
         print("PATCH APPLY ERROR:", e)
         return None
+        # ===============================
+# 🔥 PATCH: ПЕРЕХВАТ extract_function
+# ===============================
+
+def patch_wrap_extract_function():
+    try:
+        original = ScienceRoom.extract_function
+
+        def wrapped(self, text):
+            try:
+                state = getattr(self, "_last_state", None)
+
+                # 🔥 сначала пробуем патч
+                if state:
+                    patched = patch_override_extract(self, text, state)
+                    if patched:
+                        return patched
+
+                # 🔁 fallback — оригинальная логика
+                return original(self, text)
+
+            except Exception as e:
+                print("WRAP ERROR:", e)
+                return original(self, text)
+
+        ScienceRoom.extract_function = wrapped
+
+        print("✅ extract_function patched")
+
+    except Exception as e:
+        print("PATCH WRAP ERROR:", e)
 # blocks/science_room.py
 
 import re
