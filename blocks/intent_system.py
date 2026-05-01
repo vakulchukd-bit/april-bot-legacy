@@ -1,3 +1,26 @@
+# ===============================
+# 🔥 SAFE PATCH MODE (INTENT SYSTEM)
+# ===============================
+
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("INTENT PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+# 🔥 PATCH: контроль определения намерения
+def patch_intent_detect(text):
+    safe_patch_log(f"INTENT DETECT: {text[:50]}")
+    return text
+
+
+# 🔥 PATCH: будущая логика намерений
+def patch_intent_future(*args, **kwargs):
+    return None
 def detect_intent(text: str):
     t = text.lower().strip()
 
