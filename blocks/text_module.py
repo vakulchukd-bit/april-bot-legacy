@@ -194,9 +194,9 @@ def local_fast_answer(text):
 
 
 # ===============================
-# 🔥 НОВОЕ: FORMATTER (без ломки логики)
+# 🔥 УЛУЧШЕННЫЙ FORMATTER
 # ===============================
-def format_output(text: str) -> str:
+def enhance_code_block(text: str) -> str:
     if not text:
         return text
 
@@ -204,15 +204,30 @@ def format_output(text: str) -> str:
 
     # HTML
     if "<html" in t or "<!doctype html" in t:
-        return f"```html\n{t}\n```"
+        return (
+            "Вот готовая HTML-страница. Сохрани как .html и открой в браузере:\n\n"
+            "```html\n"
+            f"{t}\n"
+            "```"
+        )
 
     # Python
     if "def " in t or "import " in t:
-        return f"```python\n{t}\n```"
+        return (
+            "Вот готовый Python-код. Скопируй и запусти:\n\n"
+            "```python\n"
+            f"{t}\n"
+            "```"
+        )
 
     # JS
-    if "function(" in t or "document." in t:
-        return f"```javascript\n{t}\n```"
+    if "function" in t or "document." in t:
+        return (
+            "Вот JavaScript код:\n\n"
+            "```javascript\n"
+            f"{t}\n"
+            "```"
+        )
 
     return t
 
@@ -237,13 +252,13 @@ async def process(user_id, text, state, energy="MEDIUM"):
         if is_problem(text_fixed):
             messages.append({
                 "role": "system",
-                "content": "Это математическая задача. Реши максимально кратко, без лишнего текста. Не используй ASCII-графики."
+                "content": "Это математическая задача. Реши максимально кратко, без лишнего текста."
             })
 
         if is_strict_math(text_fixed):
             messages.append({
                 "role": "system",
-                "content": "Ответ должен быть коротким, без лишнего объяснения, только результат или минимум пояснения."
+                "content": "Ответ короткий, только результат."
             })
 
         behavior = build_behavior_hint(text_fixed)
@@ -259,36 +274,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
         fp = get_formatting_prompt(plan, energy)
         if fp:
             messages.append({"role": "system", "content": fp})
-
-        if is_sales_text(text_fixed):
-            messages.append({
-                "role": "system",
-                "content": "Говори уверенно и кратко."
-            })
-
-        if "глубже" in text.lower() or "подробнее" in text.lower():
-            messages.append({
-                "role": "system",
-                "content": "Отвечай глубже, но не увеличивай объем текста. Без лишних абзацев."
-            })
-
-        try:
-            from blocks.context_system import build_context_text
-            if need_context(text_fixed):
-                world = build_context_text(state)
-                if world:
-                    messages.append({
-                        "role": "system",
-                        "content": trim_text(world)
-                    })
-        except:
-            pass
-
-        if ctx and ctx.get("hint") and need_context(text_fixed):
-            messages.append({
-                "role": "system",
-                "content": trim_text(f"Контекст: {ctx['hint']}")
-            })
 
         safe_history = [
             {"role": m["role"], "content": trim_text(m.get("content", ""))}
@@ -315,8 +300,8 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
     reply = await asyncio.to_thread(run)
 
-    # 🔥 применяем форматирование (без изменения логики)
-    reply = format_output(reply)
+    # 🔥 ключевой апгрейд
+    reply = enhance_code_block(reply)
 
     return {
         "type": "text",
