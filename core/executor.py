@@ -30,7 +30,7 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from storage import set_subscription, save_payment
-from storage import find_knowledge, save_knowledge
+from storage import find_knowledge, save_knowledge  # 🔥 ДОБАВЛЕНО
 
 from blocks.energy_manager import get_energy
 
@@ -39,100 +39,18 @@ from blocks.experience import update_experience, load_experience
 from blocks.interpretation_layer import interpret_request
 
 import re
-import random
 
 
-# ===============================
-# 🔥 CONTEXT ENRICH (ОСТАВИЛ БЕЗ ЛОМКИ)
-# ===============================
-def enrich_with_context(text: str, state: dict):
-    history = state.get("dialog", [])
-    if not history:
-        return text
-
-    words = text.strip().split()
-
-    if len(words) <= 4:
-        last_user = next(
-            (m["content"] for m in reversed(history) if m["role"] == "user"),
-            None
-        )
-
-        if last_user:
-            return last_user + " → " + text
-
-    return text
-
-
-# ===============================
-# 🔥 ACTIVE TASK (ИСПРАВЛЕНО)
-# ===============================
-def update_active_task(state: dict, text: str, task_type: str):
-    t = text.lower()
-
-    active = state.get("active")
-
-    # если уже есть задача — не перетираем без причины
-    if active:
-        return
-
-    if "y=" in t:
-        state["active"] = {
-            "type": "graph",
-            "stage": "ready",
-            "function": text.strip()
-        }
-
-    elif "график" in t:
-        state["active"] = {
-            "type": "graph",
-            "stage": "choose",
-            "function": None
-        }
-
-
-# ===============================
-# 🔥 SMART FALLBACK (НЕ ЛОМАЕТ OpenAI)
-# ===============================
-def smart_fallback(text: str, task_type: str):
-    if task_type == "math":
-        return random.choice([
-            "Хочешь построить график? Дай функцию 🙂",
-            "Могу построить график — напиши формулу",
-            "Давай нарисуем график 🙂 Что строим?"
-        ])
-
-    if task_type == "image_generate":
-        return random.choice([
-            "Опиши изображение 🙂",
-            "Что хочешь увидеть?",
-            "Давай создадим картинку 🙂"
-        ])
-
-    if task_type == "code":
-        return random.choice([
-            "Что написать? 🙂",
-            "Опиши задачу — сделаю код",
-            "Это сайт, кнопка или что-то ещё?"
-        ])
-
-    return random.choice([
-        "Опиши чуть подробнее 🙂",
-        "Что именно нужно?",
-        "Давай уточним задачу"
-    ])
-
-
-# ===============================
-# БАЗОВЫЕ ПРОВЕРКИ
-# ===============================
 def is_vague_request(text: str):
     t = text.lower().strip()
     vague_words = ["что-нибудь", "что то", "что-то", "придумай"]
+
     if any(v in t for v in vague_words):
         return True
+
     if len(t.split()) <= 3 and "сделай" in t:
         return True
+
     return False
 
 
@@ -192,9 +110,67 @@ def detect_task_type(text: str):
     return "text"
 
 
-# ===============================
-# EXECUTE
-# ===============================
+def handle_subscription(callback_data, user_id):
+    print("🔥 CALLBACK:", callback_data)
+
+    if callback_data == "buy_lite":
+        return {
+            "type": "text",
+            "data": "💳 Подтвердить переход на Lite?",
+            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+                ]
+            ])
+        }
+
+    if callback_data == "buy_premium":
+        return {
+            "type": "text",
+            "data": "💳 Подтвердить переход на Premium?",
+            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
+                ]
+            ])
+        }
+
+    if callback_data == "buy_yes_lite":
+        return {"type": "admin_request", "plan": "lite"}
+
+    if callback_data == "buy_yes_premium":
+        return {"type": "admin_request", "plan": "premium"}
+
+    if callback_data == "buy_no":
+        return {"type": "text", "data": "❌ Отменено"}
+
+    if callback_data.startswith("admin_confirm_"):
+        parts = callback_data.split("_")
+        plan = parts[2]
+        uid = int(parts[3])
+
+        set_subscription(uid, plan)
+        save_payment(uid, plan)
+
+        return {
+            "type": "notify_user",
+            "target_user": uid,
+            "data": f"✅ Активирован {plan.upper()}"
+        }
+
+    return None
+
+
+def is_image_question(text: str):
+    t = text.lower()
+    return any(tr in t for tr in [
+        "что на картинке", "что это", "что справа",
+        "что слева", "что здесь", "что изображено"
+    ])
+
+
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
@@ -203,7 +179,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # KNOWLEDGE
+    # 🔥 KNOWLEDGE (ДО ОРКЕСТРА)
     try:
         known = find_knowledge(text)
         if known:
@@ -220,19 +196,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 INTERPRET ERROR:", e)
 
-    # CONTEXT ENRICH
-    try:
-        text = enrich_with_context(text, state)
-    except Exception as e:
-        print("🔥 ENRICH ERROR:", e)
-
-    # ACTIVE TASK UPDATE
-    try:
-        task_type = detect_task_type(text)
-        update_active_task(state, text, task_type)
-    except Exception as e:
-        print("🔥 ACTIVE TASK ERROR:", e)
-
     # VAGUE
     try:
         if is_vague_request(text):
@@ -240,7 +203,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 chat_id,
                 text_process(
                     user_id,
-                    "Предложи что можно сделать: график, код или изображение.",
+                    "Предложи что можно сделать: график, код или изображение. Ответ живой.",
                     state,
                     energy="LOW"
                 )
@@ -280,9 +243,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "mode": mode,
         "task_type": task_type,
         "energy": energy,
-        "output_mode": output_mode,
-        "active": state.get("active")  # 🔥 ВАЖНО
+        "output_mode": output_mode
     }
+
+    def is_valid_result(result):
+        return (
+            result
+            and isinstance(result, dict)
+            and "type" in result
+            and (result["type"] != "text" or result.get("data"))
+        )
 
     candidates = []
 
@@ -295,13 +265,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
 
     if not candidates:
-        # сначала локальный fallback
-        fallback = smart_fallback(text, task_type)
-
-        if fallback:
-            return {"type": "text", "data": fallback}
-
-        # потом OpenAI
         result = await run_with_typing(
             chat_id,
             text_process(user_id, text, state, energy)
@@ -313,24 +276,26 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     for score, room in candidates:
         try:
             result = await room.handle(user_id, text, context, run_with_typing)
-            if result and result.get("type"):
+            if is_valid_result(result):
 
+                # 🔥 СОХРАНЕНИЕ
                 try:
-                    if result["type"] == "text" and len(result.get("data", "")) < 1000:
+                    if result["type"] == "text" and len(result["data"]) < 1000:
                         save_knowledge(text.lower(), result["data"])
                 except Exception as e:
                     print("🔥 SAVE KNOWLEDGE ERROR:", e)
 
                 return result
+
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
-    # fallback → OpenAI
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
     )
 
+    # 🔥 СОХРАНЕНИЕ (fallback)
     try:
         if result and result.get("content") and len(result["content"]) < 1000:
             save_knowledge(text.lower(), result["content"])
