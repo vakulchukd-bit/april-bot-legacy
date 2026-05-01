@@ -43,6 +43,28 @@ import re
 
 
 # ===============================
+# 🔥 SAFE PATCH MODE (EXECUTOR)
+# ===============================
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+def patch_executor_start(user_id, text):
+    safe_patch_log(f"EXECUTOR START: {user_id} | {text[:50]}")
+    return None
+
+
+def patch_executor_hook(*args, **kwargs):
+    return None
+
+
+# ===============================
 # 🔥 ACTIVE TASK
 # ===============================
 def update_active_task(state: dict, text: str, task_type: str):
@@ -111,6 +133,14 @@ def extract_and_store_semantics(state: dict, text: str, result_type: str = "text
             "expr": expr
         }
 
+    if "```" in text:
+        state["last_code"] = text
+
+    if result_type == "image":
+        state["last_image"] = {
+            "exists": True
+        }
+
 
 # ===============================
 # EXECUTE
@@ -124,7 +154,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     add_dialog(user_id, "user", text)
 
     # ===============================
-    # 🔥 AI DECISION (ГЛАВНОЕ)
+    # 🔥 AI МОЗГ (ГЛАВНОЕ ДОБАВЛЕНИЕ)
     # ===============================
     try:
         decision = await detect_intent_ai(text, state)
@@ -133,28 +163,28 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         expr = decision.get("expr")
         response = decision.get("response")
 
-        # текстовый ответ
         if intent == "text_answer" and response:
             add_dialog(user_id, "assistant", response)
             return {"type": "text", "data": response}
 
-        # модификация функции
         if intent == "math_modify":
             last = state.get("last_math")
             if last and expr:
                 last["expr"] = expr
                 return {
                     "type": "text",
-                    "data": "Окей, изменила. Построить график?"
+                    "data": "Окей, изменила. Построить?"
                 }
 
-        # новая функция
         if intent == "math_graph" and expr:
             state["last_math"] = {
                 "type": "function",
                 "expr": expr
             }
-            text = f"y={expr}"
+            return {
+                "type": "text",
+                "data": "Вижу функцию. Построить график?"
+            }
 
     except Exception as e:
         print("AI ERROR:", e)
@@ -162,15 +192,23 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     # ===============================
     # 🔥 СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ)
     # ===============================
+    t = text.lower().strip()
+
+    try:
+        task_type = detect_task_type(text)
+        update_active_task(state, text, task_type)
+    except Exception as e:
+        print("ACTIVE TASK ERROR:", e)
+
     energy = get_energy(user_id)
 
     context = {
         "chat_id": chat_id,
         "state": state,
         "mode": mode,
-        "task_type": "math" if "=" in text else "text",
+        "task_type": detect_task_type(text),
         "energy": energy,
-        "output_mode": "auto"
+        "output_mode": detect_output_mode(text)
     }
 
     for room in ROOMS:
@@ -179,6 +217,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 result = await room.handle(user_id, text, context, run_with_typing)
 
                 if result and result.get("type"):
+
                     output_text = str(result.get("data", ""))
 
                     add_dialog(user_id, "assistant", output_text)
@@ -194,7 +233,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"ROOM ERROR [{room.name}]:", e)
 
-    # fallback
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
@@ -206,3 +244,52 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         extract_and_store_semantics(state, result["content"], "text")
 
     return {"type": "text", "data": result["content"]}
+
+
+# ===============================
+# ВСПОМОГАТЕЛЬНЫЕ
+# ===============================
+def detect_output_mode(text: str):
+    t = text.lower()
+
+    if any(w in t for w in ["файл", "скачать", ".py", "html"]):
+        return "file"
+
+    if any(w in t for w in ["код", "code"]):
+        return "code"
+
+    if any(w in t for w in ["график html", "интерактив", "браузер"]):
+        return "graph_html"
+
+    if any(w in t for w in ["картинкой", "png", "изображением"]):
+        return "graph_image"
+
+    return "auto"
+
+
+def detect_task_type(text: str):
+    t = text.lower()
+
+    if "=" in t:
+        return "math"
+
+    if "sin(" in t or "cos(" in t:
+        return "math"
+
+    if any(op in t for op in ["+", "-", "*", "/"]):
+        if any(ch.isdigit() for ch in t):
+            return "math"
+
+    if "y=" in t or "график" in t:
+        return "math"
+
+    if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
+        return "image_edit"
+
+    if any(x in t for x in ["создай", "сгенерируй", "нарисуй"]):
+        return "image_generate"
+
+    if "сделай" in t:
+        return "text"
+
+    return "text"
