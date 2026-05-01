@@ -158,16 +158,9 @@ def enrich_request(text, state):
     return text
 
 
-# 🔥 FIXED SMALL TALK
 def is_small_talk(text, state):
-    t = text.lower().strip()
-
-    if len(t.split()) <= 4:
-        history = state.get("dialog", [])
-        if history:
-            return False
+    if len(text.split()) <= 4:
         return True
-
     return False
 
 
@@ -239,11 +232,11 @@ def enhance_code_block(text: str) -> str:
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
 
-        # 🔥 FIXED: smart small talk
-        if is_small_talk(text, state):
-            fast = local_fast_answer(text)
-            if fast:
-                return fast
+        # 🔥 ОТКЛЮЧЕНО SMALL TALK (главный фикс)
+        # if is_small_talk(text, state) and not state.get("active_task"):
+        #     fast = local_fast_answer(text)
+        #     if fast:
+        #         return fast
 
         history = state.get("dialog", [])
 
