@@ -51,12 +51,10 @@ def is_strict_math(text):
         any(op in t for op in ["+", "-", "*", "/"])
     )
 
-# 🔥 SALES
 def is_sales_text(text):
     triggers = ["клиент", "продай", "убеди", "сомневается", "покуп", "заказ"]
     return any(w in text.lower() for w in triggers)
 
-# 🔥 НОВОЕ: детектор редактирования
 def is_edit_request(text):
     t = text.lower()
     triggers = ["измени", "добавь", "убери", "сделай", "замени", "исправь"]
@@ -110,8 +108,6 @@ def get_history_limit(plan):
     return {"free": 2, "lite": 4, "premium": 8}.get(plan, 4)
 
 
-# ===== СМЫСЛ =====
-
 def extract_topic(text):
     t = text.lower()
     if "сайт" in t and "кафе" in t:
@@ -156,35 +152,15 @@ def build_context_block(state, history, text, energy, plan):
     return ". ".join(parts)
 
 
-# ===== ЛОГИКА =====
-
 def enrich_request(text, state):
     if "график" in text.lower() and "сайт" in state.get("topic", ""):
         return text + " (вставь график в HTML)"
     return text
 
 
-# 🔥 ФИКС ЗДЕСЬ
 def is_small_talk(text, state):
-    t = text.lower()
-
-    # если есть активная задача — НЕ болтовня
-    if state.get("active_task"):
-        return False
-
-    # если есть явный математический или графический контекст
-    if any(x in t for x in ["график", "y=", "sin", "cos", "реши", "формул"]):
-        return False
-
-    # если уже есть диалог (не первый шаг)
-    history = state.get("dialog", [])
-    if len(history) >= 2:
-        return False
-
-    # только тогда считаем болтовнёй
-    if len(t.split()) <= 4:
+    if len(text.split()) <= 4:
         return True
-
     return False
 
 
@@ -196,8 +172,6 @@ def local_fast_answer(text):
         return "Нормально 🙂"
     return None
 
-
-# ===== УЛУЧШЕНИЕ КОДА =====
 
 def clean_html(text: str) -> str:
     t = text.strip()
@@ -255,11 +229,11 @@ def enhance_code_block(text: str) -> str:
     return t
 
 
-# ===== MAIN =====
-
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
-        if is_small_talk(text, state):
+
+        # 🔥 FIX: не уходим в small talk если есть активная задача
+        if is_small_talk(text, state) and not state.get("active_task"):
             fast = local_fast_answer(text)
             if fast:
                 return fast
