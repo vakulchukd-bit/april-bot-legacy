@@ -237,3 +237,78 @@ class ScienceRoom:
             "type": "text",
             "data": "Не до конца понял, уточни чуть подробнее 🙂"
         }
+
+    # 🔥 ДОБАВЛЕННЫЙ ФИКС
+    def extract_function(self, text):
+        try:
+            text = text.lower().replace("^", "**")
+
+            text = text.replace("sin", "np.sin")
+            text = text.replace("cos", "np.cos")
+            text = text.replace("tan", "np.tan")
+            text = text.replace("log", "np.log")
+            text = text.replace("ln", "np.log")
+
+            match = re.search(r"(y|f|s|c)\s*\(\s*[a-z]\s*\)\s*=\s*(.+)", text)
+            if match:
+                return match.group(2).strip()
+
+            match = re.search(r"y\s*=\s*(.+)", text)
+            if match:
+                return match.group(1).strip()
+
+            return None
+
+        except:
+            return None
+
+    def validate_expression(self, expr):
+        try:
+            x = np.linspace(-10, 10, 10)
+            eval(expr, {"x": x, "np": np, "__builtins__": {}})
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    def build_graph(self, expr):
+        try:
+            x = np.linspace(-10, 10, 200)
+            y = eval(expr, {"x": x, "np": np, "__builtins__": {}})
+
+            plt.figure()
+            plt.plot(x, y)
+            plt.grid()
+
+            path = "graph.png"
+            plt.savefig(path)
+            plt.close()
+
+            return path
+        except Exception as e:
+            print("🔥 GRAPH ERROR:", e)
+            return None
+
+    def solve_equation(self, text):
+        try:
+            text = text.lower()
+            text = text.replace("реши", "")
+            text = text.strip()
+
+            expr = text.replace(" ", "")
+            expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
+            expr = re.sub(r'(\d)\(', r'\1*(', expr)
+
+            x = symbols('x')
+
+            if "=" in expr:
+                left, right = expr.split("=")
+                equation = simplify(sympify(left) - sympify(right))
+                solutions = solve(equation, x)
+
+                if solutions:
+                    return f"x = {solutions[0]}"
+
+        except Exception as e:
+            print("🔥 SOLVE ERROR:", e)
+
+        return None
