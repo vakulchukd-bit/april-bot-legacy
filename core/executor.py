@@ -28,10 +28,9 @@ from blocks.image_system import analyze_image
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from storage import set_subscription, save_payment
 
-# 🔥 NEW
-from storage import find_knowledge, save_knowledge
+from storage import set_subscription, save_payment
+from storage import find_knowledge, save_knowledge  # 🔥 ДОБАВЛЕНО
 
 from blocks.energy_manager import get_energy
 
@@ -44,27 +43,21 @@ import re
 
 def is_vague_request(text: str):
     t = text.lower().strip()
-
     vague_words = ["что-нибудь", "что то", "что-то", "придумай"]
-
     if any(v in t for v in vague_words):
         return True
-
     if len(t.split()) <= 3 and "сделай" in t:
         return True
-
     return False
 
 
 def is_dissatisfied(text: str):
     t = text.lower()
-
     triggers = [
         "не то", "не понял", "не это", "другое",
         "не подходит", "не правильно", "неправильно",
         "ты не понял", "я не это имел"
     ]
-
     return any(tr in t for tr in triggers)
 
 
@@ -183,9 +176,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ===============================
-    # 🔥 KNOWLEDGE CHECK (НОВОЕ)
-    # ===============================
+    # 🔥 KNOWLEDGE (ДО ОРКЕСТРА)
     try:
         known = find_knowledge(text)
         if known:
@@ -194,35 +185,40 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 KNOWLEDGE ERROR:", e)
 
-    # ===============================
     # INTERPRET
-    # ===============================
     try:
         interpreted = interpret_request(text)
         if interpreted and interpreted.get("normalized"):
             text = interpreted["normalized"]
-    except:
-        pass
+    except Exception as e:
+        print("🔥 INTERPRET ERROR:", e)
 
-    # ===============================
     # VAGUE
-    # ===============================
-    if is_vague_request(text):
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, "Предложи что можно сделать: график, код или изображение.", state, energy="LOW")
-        )
-        return {"type": "text", "data": result["content"]}
+    try:
+        if is_vague_request(text):
+            result = await run_with_typing(
+                chat_id,
+                text_process(
+                    user_id,
+                    "Предложи что можно сделать: график, код или изображение. Ответ живой.",
+                    state,
+                    energy="LOW"
+                )
+            )
+            return {"type": "text", "data": result.get("content")}
+    except Exception as e:
+        print("🔥 VAGUE ERROR:", e)
 
-    # ===============================
     # DISSATISFACTION
-    # ===============================
-    if is_dissatisfied(text):
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy="LOW")
-        )
-        return {"type": "text", "data": result["content"]}
+    try:
+        if is_dissatisfied(text):
+            result = await run_with_typing(
+                chat_id,
+                text_process(user_id, text, state, energy="LOW")
+            )
+            return {"type": "text", "data": result.get("content")}
+    except Exception as e:
+        print("🔥 DISSATISFACTION ERROR:", e)
 
     if "время" in t:
         now = datetime.now().strftime("%H:%M")
@@ -247,29 +243,59 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "output_mode": output_mode
     }
 
+    def is_valid_result(result):
+        return (
+            result
+            and isinstance(result, dict)
+            and "type" in result
+            and (result["type"] != "text" or result.get("data"))
+        )
+
+    candidates = []
+
     for room in ROOMS:
-        if room.can_handle(text, context):
+        try:
+            if room.can_handle(text, context):
+                score = room.evaluate(text, context)
+                candidates.append((score, room))
+        except Exception as e:
+            print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
+
+    if not candidates:
+        result = await run_with_typing(
+            chat_id,
+            text_process(user_id, text, state, energy)
+        )
+        return {"type": "text", "data": result["content"]}
+
+    candidates.sort(reverse=True, key=lambda x: x[0])
+
+    for score, room in candidates:
+        try:
             result = await room.handle(user_id, text, context, run_with_typing)
-            if result:
-                # 🔥 SAVE KNOWLEDGE
+            if is_valid_result(result):
+
+                # 🔥 СОХРАНЕНИЕ
                 try:
                     if result["type"] == "text" and len(result["data"]) < 1000:
                         save_knowledge(text.lower(), result["data"])
-                except:
-                    pass
+                except Exception as e:
+                    print("🔥 SAVE KNOWLEDGE ERROR:", e)
 
                 return result
+        except Exception as e:
+            print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
     )
 
-    # 🔥 SAVE KNOWLEDGE
+    # 🔥 СОХРАНЕНИЕ (fallback)
     try:
         if result and result.get("content") and len(result["content"]) < 1000:
             save_knowledge(text.lower(), result["content"])
-    except:
-        pass
+    except Exception as e:
+        print("🔥 SAVE KNOWLEDGE ERROR:", e)
 
     return {"type": "text", "data": result["content"]}
