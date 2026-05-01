@@ -95,14 +95,18 @@ class ScienceRoom:
         # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
         expr = self.extract_function(text)
 
-        # 🔥 НОВОЕ: если формулы нет — ищем в истории
+        # 🔥 НОВОЕ: сохраняем последнюю формулу
+        if expr:
+            state["last_math"] = {
+                "type": "function",
+                "expr": expr
+            }
+
+        # 🔥 НОВОЕ: если формулы нет — берем из памяти
         if not expr:
-            for msg in reversed(state.get("dialog", [])):
-                content = msg.get("content", "").lower()
-                if "y=" in content or "y =" in content:
-                    expr = self.extract_function(content)
-                    if expr:
-                        break
+            last = state.get("last_math")
+            if last and last.get("type") == "function":
+                expr = last.get("expr")
 
         if expr:
             valid, error = self.validate_expression(expr)
