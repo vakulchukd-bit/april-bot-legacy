@@ -90,8 +90,19 @@ class ScienceRoom:
         if user_id == ADMIN_ID:
             plan = "premium"
 
+        state = context.get("state", {})
+
         # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
         expr = self.extract_function(text)
+
+        # 🔥 НОВОЕ: если формулы нет — ищем в истории
+        if not expr:
+            for msg in reversed(state.get("dialog", [])):
+                content = msg.get("content", "").lower()
+                if "y=" in content or "y =" in content:
+                    expr = self.extract_function(content)
+                    if expr:
+                        break
 
         if expr:
             valid, error = self.validate_expression(expr)
@@ -142,7 +153,6 @@ class ScienceRoom:
         results = []
         variables = {}
 
-        # ===== СИСТЕМЫ =====
         if len(equations) >= 2:
             try:
                 x, y = symbols('x y')
@@ -170,7 +180,6 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SYSTEM ERROR:", e)
 
-        # ===== ОДИНОЧНЫЕ =====
         for eq in equations:
             if len(equations) >= 2:
                 break
@@ -187,7 +196,6 @@ class ScienceRoom:
                 if match:
                     variables["x"] = float(match.group(1))
 
-        # ===== SIN =====
         for s in sin_tasks:
             try:
                 if "x" in variables:
@@ -201,7 +209,6 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ===== fallback =====
         if any(w in text.lower() for w in ["график", "построй", "функц"]):
             return {
                 "type": "text",
