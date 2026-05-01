@@ -164,9 +164,27 @@ def enrich_request(text, state):
     return text
 
 
+# 🔥 ФИКС ЗДЕСЬ
 def is_small_talk(text, state):
-    if len(text.split()) <= 4:
+    t = text.lower()
+
+    # если есть активная задача — НЕ болтовня
+    if state.get("active_task"):
+        return False
+
+    # если есть явный математический или графический контекст
+    if any(x in t for x in ["график", "y=", "sin", "cos", "реши", "формул"]):
+        return False
+
+    # если уже есть диалог (не первый шаг)
+    history = state.get("dialog", [])
+    if len(history) >= 2:
+        return False
+
+    # только тогда считаем болтовнёй
+    if len(t.split()) <= 4:
         return True
+
     return False
 
 
@@ -255,7 +273,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
-        # 🔥 РЕДАКТИРОВАНИЕ КОДА
         if state.get("last_code") and is_edit_request(text_fixed):
             messages = [
                 {
@@ -308,7 +325,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
     reply = await asyncio.to_thread(run)
 
-    # 🔥 сохраняем код
     if "```" in reply:
         state["last_code"] = reply
 
