@@ -3,7 +3,6 @@ import os
 import math
 from datetime import datetime, timezone, timedelta
 
-# 🔥 NEW: DATABASE
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -37,7 +36,6 @@ def init_db():
             )
             """)
 
-            # 🔥 payments
             cur.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 id SERIAL PRIMARY KEY,
@@ -48,7 +46,6 @@ def init_db():
             )
             """)
 
-            # 🔥 feedback (НОВОЕ)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS feedback (
                 id SERIAL PRIMARY KEY,
@@ -58,7 +55,51 @@ def init_db():
             )
             """)
 
+            # 🔥 НОВОЕ: knowledge база
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id SERIAL PRIMARY KEY,
+                key TEXT,
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
     conn.close()
+
+
+# ===== 🔥 KNOWLEDGE FUNCTIONS =====
+
+def save_knowledge(key: str, content: str):
+    conn = get_conn()
+    if not conn:
+        return
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO knowledge (key, content)
+            VALUES (%s, %s)
+            """, (key, content))
+
+
+def find_knowledge(text: str):
+    conn = get_conn()
+    if not conn:
+        return None
+
+    t = text.lower()
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, content FROM knowledge")
+            rows = cur.fetchall()
+
+            for row in rows:
+                if row["key"] and row["key"] in t:
+                    return row["content"]
+
+    return None
 
 
 # ===== TIME =====
@@ -122,7 +163,6 @@ def set_subscription(user_id, plan="premium"):
         return
 
 
-# 🔥 СОХРАНЕНИЕ ПЛАТЕЖА
 def save_payment(user_id, plan):
     conn = get_conn()
     if not conn:
@@ -139,7 +179,6 @@ def save_payment(user_id, plan):
             """, (uid, plan, amount))
 
 
-# 🔥 СОХРАНЕНИЕ ЛАЙКА
 def save_feedback(user_id, is_positive):
     conn = get_conn()
     if not conn:
@@ -238,7 +277,6 @@ def can_send_message(user_id, limit=15):
     return True
 
 
-# ===== ДОП =====
 def get_remaining_messages(user_id, limit=15):
     conn = get_conn()
     if conn:
@@ -316,7 +354,6 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
     }
 
 
-# ===== ДОХОД =====
 def get_admin_stats():
     conn = get_conn()
     if not conn:
@@ -369,7 +406,6 @@ def format_time(seconds):
     return f"{hours:02}:{minutes:02}:{secs:02}"
 
 
-# ===== ADMIN =====
 def get_all_users():
     conn = get_conn()
     if conn:
