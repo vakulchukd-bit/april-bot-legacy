@@ -195,7 +195,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
-        text = continue_active_task(state, text)
+        # text = continue_active_task(state, text)  # 🔥 ОТКЛЮЧИЛИ ПРИНУДИТЕЛЬНЫЙ ТРИГГЕР
     except:
         pass
 
