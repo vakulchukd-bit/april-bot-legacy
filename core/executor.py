@@ -1,4 +1,64 @@
 # ===============================
+# 🔥 AUTO CENTRAL CONTROLLER (БЕЗ ПРАВОК ВНУТРИ)
+# ===============================
+
+def central_controller(text, state):
+    try:
+        t = text.lower().strip()
+
+        # --- модификация функции ---
+        if any(w in t for w in ["круче", "резче", "плавнее", "мягче"]):
+            last = state.get("last_math")
+
+            if last and last.get("type") == "function":
+                expr = last.get("expr")
+
+                if "круче" in t or "резче" in t:
+                    expr = f"2*({expr})"
+
+                elif "плавнее" in t or "мягче" in t:
+                    expr = f"0.5*({expr})"
+
+                state["last_math"]["expr"] = expr
+
+                return {
+                    "type": "text",
+                    "data": "Окей, изменил функцию. Напиши 'построй'."
+                }
+
+        # --- если просто формула ---
+        if "=" in t and not any(w in t for w in ["построй", "реши", "сделай"]):
+            return {
+                "type": "text",
+                "data": "Вижу функцию. Напиши 'построй', чтобы построить график."
+            }
+
+        return None
+
+    except Exception as e:
+        print("CONTROLLER ERROR:", e)
+        return None
+
+
+# 🔥 ОБЁРТКА EXECUTE (САМО ПОДКЛЮЧАЕТСЯ)
+try:
+    _original_execute = execute
+
+    async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
+        state = get_state(user_id)
+
+        control = central_controller(text, state)
+
+        if control:
+            return control
+
+        return await _original_execute(user_id, text, chat_id, run_with_typing, callback_data)
+
+    print("✅ CENTRAL CONTROLLER ENABLED")
+
+except Exception as e:
+    print("EXEC PATCH ERROR:", e)
+# ===============================
 # 🔥 SAFE PATCH MODE (EXECUTOR)
 # ===============================
 
