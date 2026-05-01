@@ -51,10 +51,16 @@ def is_strict_math(text):
         any(op in t for op in ["+", "-", "*", "/"])
     )
 
-# 🔥 ВОЗВРАТ SALES
+# 🔥 SALES
 def is_sales_text(text):
     triggers = ["клиент", "продай", "убеди", "сомневается", "покуп", "заказ"]
     return any(w in text.lower() for w in triggers)
+
+# 🔥 НОВОЕ: детектор редактирования
+def is_edit_request(text):
+    t = text.lower()
+    triggers = ["измени", "добавь", "убери", "сделай", "замени", "исправь"]
+    return any(w in t for w in triggers)
 
 MAX_MESSAGE_CHARS = 600
 MAX_TOTAL_CHARS = 3000
@@ -96,10 +102,8 @@ def get_config(energy):
 
 def enhance_link_behavior(text):
     t = text.lower()
-
     if "ссылка" in t and "http" not in t:
         return text + "\n\nПример: https://example.com"
-
     return text
 
 def get_history_limit(plan):
@@ -251,6 +255,28 @@ async def process(user_id, text, state, energy="MEDIUM"):
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
+        # 🔥 РЕДАКТИРОВАНИЕ КОДА
+        if state.get("last_code") and is_edit_request(text_fixed):
+            messages = [
+                {
+                    "role": "system",
+                    "content": "Измени код по запросу пользователя. Верни полный обновленный код без объяснений."
+                },
+                {
+                    "role": "user",
+                    "content": f"Вот код:\n{state['last_code']}\n\nЗадача: {text_fixed}"
+                }
+            ]
+
+            r = client.responses.create(
+                model=TEXT_MODEL,
+                input=messages,
+                temperature=0.3,
+                max_output_tokens=600
+            )
+
+            return r.output_text
+
         context_block = build_context_block(state, history, text_fixed, energy, plan)
 
         system_full = SYSTEM_PROMPT + " " + context_block
@@ -281,6 +307,10 @@ async def process(user_id, text, state, energy="MEDIUM"):
         return r.output_text
 
     reply = await asyncio.to_thread(run)
+
+    # 🔥 сохраняем код
+    if "```" in reply:
+        state["last_code"] = reply
 
     reply = enhance_code_block(reply)
 
