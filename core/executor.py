@@ -1,3 +1,26 @@
+# ===============================
+# 🔥 SAFE PATCH MODE (EXECUTOR)
+# ===============================
+
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+# 🔥 PATCH: контроль вызова executor
+def patch_executor_start(user_id, text):
+    safe_patch_log(f"EXECUTOR START: {user_id} | {text[:50]}")
+    return None
+
+
+# 🔥 PATCH: будущая точка расширения
+def patch_executor_hook(*args, **kwargs):
+    return None
 from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
