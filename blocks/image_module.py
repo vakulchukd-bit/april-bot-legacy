@@ -1,3 +1,26 @@
+# ===============================
+# 🔥 SAFE PATCH MODE (IMAGE MODULE)
+# ===============================
+
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("IMAGE MODULE PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+# 🔥 PATCH: контроль генерации изображения
+def patch_image_generate(prompt):
+    safe_patch_log(f"IMAGE GENERATE: {str(prompt)[:50]}")
+    return prompt
+
+
+# 🔥 PATCH: будущая логика генерации
+def patch_image_module_future(*args, **kwargs):
+    return None
 import base64
 import asyncio
 from openai import OpenAI
