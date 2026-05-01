@@ -91,6 +91,49 @@ def continue_active_task(state: dict, text: str):
 
 
 # ===============================
+# 🔥 SEMANTIC MEMORY (НОВОЕ)
+# ===============================
+def extract_and_store_semantics(state: dict, text: str, result_type: str = "text"):
+    t = text.lower()
+
+    # === 1. ФОРМУЛЫ ===
+    match = re.search(r"y\s*=\s*([^\n\r]+)", t)
+    if match:
+        expr = match.group(1).strip()
+
+        expr = expr.replace("^", "**")
+        expr = expr.replace("sin", "np.sin")
+        expr = expr.replace("cos", "np.cos")
+        expr = expr.replace("tan", "np.tan")
+        expr = expr.replace("log", "np.log")
+
+        state["last_math"] = {
+            "type": "function",
+            "expr": expr
+        }
+
+    # === 2. КОД ===
+    if "```" in text:
+        state["last_code"] = text
+
+    # === 3. ИЗОБРАЖЕНИЕ ===
+    if result_type == "image":
+        state["last_image"] = {
+            "exists": True
+        }
+
+    # === 4. НАМЕРЕНИЕ ===
+    if any(w in t for w in ["график", "функц"]):
+        state["last_intent"] = "math"
+
+    elif any(w in t for w in ["код", "html", "python", "js"]):
+        state["last_intent"] = "code"
+
+    elif any(w in t for w in ["изображение", "картин", "арт"]):
+        state["last_intent"] = "image"
+
+
+# ===============================
 # ОСТАЛЬНОЕ
 # ===============================
 def is_vague_request(text: str):
@@ -176,32 +219,10 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # ===============================
-    # ❌ ОТКЛЮЧЕН KNOWLEDGE
-    # ===============================
-    # try:
-    #     known = find_knowledge(text)
-    #     if known:
-    #         add_dialog(user_id, "assistant", known)
-    #         return {"type": "text", "data": known}
-    # except Exception as e:
-    #     print("KNOWLEDGE ERROR:", e)
-
-    # ===============================
-    # ❌ ОТКЛЮЧЕН INTERPRET
-    # ===============================
-    # try:
-    #     interpreted = interpret_request(text)
-    #     if interpreted and interpreted.get("normalized"):
-    #         text = interpreted["normalized"]
-    # except Exception as e:
-    #     print("INTERPRET ERROR:", e)
-
     # 🔥 ACTIVE TASK
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
-        # continue_active_task оставили отключенным как у тебя
     except Exception as e:
         print("ACTIVE TASK ERROR:", e)
 
@@ -224,11 +245,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                 if result and result.get("type"):
 
-                    # 🔥 сохраняем ответ
-                    add_dialog(
-                        user_id,
-                        "assistant",
-                        str(result.get("data", result.get("type")))
+                    output_text = str(result.get("data", ""))
+
+                    add_dialog(user_id, "assistant", output_text)
+
+                    # 🔥 НОВОЕ: сохраняем смысл
+                    extract_and_store_semantics(
+                        state,
+                        output_text,
+                        result.get("type", "text")
                     )
 
                     return result
@@ -244,5 +269,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
+
+        # 🔥 НОВОЕ: сохраняем смысл
+        extract_and_store_semantics(state, result["content"], "text")
 
     return {"type": "text", "data": result["content"]}
