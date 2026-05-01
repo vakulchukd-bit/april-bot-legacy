@@ -112,10 +112,6 @@ def get_formatting_prompt(plan, energy):
         return "Пиши как человек, но без лишней длины."
     return ""
 
-def is_sales_text(text):
-    triggers = ["клиент", "продай", "убеди", "сомневается", "покуп", "заказ"]
-    return any(w in text.lower() for w in triggers)
-
 def enhance_link_behavior(text):
     t = text.lower()
 
@@ -134,15 +130,26 @@ def get_history_limit(plan):
         return 8
     return 4
 
-def need_context(text):
-    t = text.lower()
-    return (
-        len(t) > 40 or
-        "помнишь" in t or
-        "мы говорили" in t or
-        "объясни" in t or
-        "разбери" in t
-    )
+
+# ===============================
+# 🔥 НОВОЕ: СМЫСЛОВАЯ ПАМЯТЬ
+# ===============================
+def build_light_context(history):
+    if not history:
+        return ""
+
+    last = history[-5:]
+
+    summary = []
+    for msg in last:
+        if msg["role"] == "user":
+            summary.append(msg["content"][:60])
+
+    if not summary:
+        return ""
+
+    return "Контекст диалога: " + " | ".join(summary[-3:])
+
 
 def is_small_talk(text, state):
     t = text.lower().strip()
@@ -177,24 +184,11 @@ def local_fast_answer(text):
             "Хорошо, в процессе 🙂"
         ])
 
-    if "кто ты" in t or "что ты умеешь" in t:
-        return random.choice([
-            "Я Aprill 🙂 Помогаю разбираться в вещах, объясняю, генерирую идеи и изображения.",
-            "Я Aprill — могу объяснить сложное, помочь с задачами и просто нормально поговорить 🙂"
-        ])
-
-    if t in ["ок", "понял", "ясно"]:
-        return random.choice([
-            "👌",
-            "Понял тебя",
-            "Окей 🙂"
-        ])
-
     return None
 
 
 # ===============================
-# 🔥 УЛУЧШЕННЫЙ FORMATTER
+# 🔥 FORMATTER
 # ===============================
 def enhance_code_block(text: str) -> str:
     if not text:
@@ -202,7 +196,6 @@ def enhance_code_block(text: str) -> str:
 
     t = text.strip()
 
-    # HTML
     if "<html" in t or "<!doctype html" in t:
         return (
             "Вот готовая HTML-страница. Сохрани как .html и открой в браузере:\n\n"
@@ -211,7 +204,6 @@ def enhance_code_block(text: str) -> str:
             "```"
         )
 
-    # Python
     if "def " in t or "import " in t:
         return (
             "Вот готовый Python-код. Скопируй и запусти:\n\n"
@@ -220,7 +212,6 @@ def enhance_code_block(text: str) -> str:
             "```"
         )
 
-    # JS
     if "function" in t or "document." in t:
         return (
             "Вот JavaScript код:\n\n"
@@ -240,7 +231,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
                 return fast
 
         history = state.get("dialog", [])
-        ctx = state.get("image_context")
 
         text_fixed = enhance_link_behavior(text)
 
@@ -249,16 +239,21 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+        # 🔥 СМЫСЛ
+        context_summary = build_light_context(history)
+        if context_summary:
+            messages.append({"role": "system", "content": context_summary})
+
         if is_problem(text_fixed):
             messages.append({
                 "role": "system",
-                "content": "Это математическая задача. Реши максимально кратко, без лишнего текста."
+                "content": "Это математическая задача. Реши максимально кратко."
             })
 
         if is_strict_math(text_fixed):
             messages.append({
                 "role": "system",
-                "content": "Ответ короткий, только результат."
+                "content": "Ответ короткий."
             })
 
         behavior = build_behavior_hint(text_fixed)
@@ -300,7 +295,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
     reply = await asyncio.to_thread(run)
 
-    # 🔥 ключевой апгрейд
     reply = enhance_code_block(reply)
 
     return {
