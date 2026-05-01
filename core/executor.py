@@ -66,6 +66,46 @@ def enrich_with_context(text: str, state: dict):
 
 
 # ===============================
+# 🔥 NEW: ACTIVE TASK (КЛЮЧЕВОЕ)
+# ===============================
+def update_active_task(state: dict, text: str, task_type: str):
+    t = text.lower()
+
+    # фиксируем график
+    if "y=" in t:
+        state["active"] = {
+            "type": "graph",
+            "function": text.strip()
+        }
+
+    # если говорим про графики без формулы
+    elif "график" in t and "active" not in state:
+        state["active"] = {
+            "type": "graph",
+            "function": None
+        }
+
+
+def try_continue_active(state: dict, text: str):
+    t = text.lower().strip()
+
+    triggers = ["построй", "сделай", "давай", "построй график"]
+
+    if any(t.startswith(tr) for tr in triggers):
+        active = state.get("active")
+
+        if active and active.get("type") == "graph":
+            func = active.get("function")
+
+            if func:
+                return func + " → построить график"
+            else:
+                return "построй график"
+
+    return text
+
+
+# ===============================
 # 🔥 NEW: SMART FALLBACK
 # ===============================
 def smart_fallback(text: str, task_type: str):
@@ -198,11 +238,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 INTERPRET ERROR:", e)
 
-    # 🔥 CONTEXT ENRICH (НОВОЕ)
+    # 🔥 CONTEXT ENRICH
     try:
         text = enrich_with_context(text, state)
     except Exception as e:
         print("🔥 ENRICH ERROR:", e)
+
+    # 🔥 ACTIVE TASK UPDATE
+    try:
+        task_type = detect_task_type(text)
+        update_active_task(state, text, task_type)
+        text = try_continue_active(state, text)
+    except Exception as e:
+        print("🔥 ACTIVE TASK ERROR:", e)
 
     # VAGUE
     try:
@@ -264,7 +312,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
 
-    # 🔥 SMART FALLBACK ЕСЛИ НЕТ КАНДИДАТОВ
+    # 🔥 SMART FALLBACK
     if not candidates:
         return {
             "type": "text",
@@ -288,7 +336,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
-    # 🔥 FALLBACK → OpenAI (оставили как было)
+    # 🔥 FALLBACK → OpenAI
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
