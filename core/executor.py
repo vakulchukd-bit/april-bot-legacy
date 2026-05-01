@@ -30,7 +30,7 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from storage import set_subscription, save_payment
-from storage import find_knowledge, save_knowledge  # 🔥 ДОБАВЛЕНО
+from storage import find_knowledge, save_knowledge
 
 from blocks.energy_manager import get_energy
 
@@ -42,19 +42,26 @@ import re
 
 
 # ===============================
-# 🔥 NEW: ACTIVE TASK LAYER
+# 🔥 ACTIVE TASK (УСИЛЕННЫЙ)
 # ===============================
 def update_active_task(state: dict, text: str, task_type: str):
     t = text.lower()
 
-    # если есть формула → фиксируем как график
+    # 🔥 фиксируем формулу
     if "y=" in t:
         state["active_task"] = {
             "type": "math",
             "data": text.strip()
         }
 
-    # если явно график без формулы
+    # 🔥 если пользователь меняет форму (волнистее / сложнее)
+    elif any(w in t for w in ["сложнее", "проще", "волнист", "резче", "плавнее"]):
+        active = state.get("active_task")
+        if active and active.get("type") == "math":
+            # просто сохраняем намерение (данные остаются)
+            state["active_task"]["modify"] = t
+
+    # 🔥 если просто сказал "график"
     elif "график" in t:
         if "active_task" not in state:
             state["active_task"] = {
@@ -66,22 +73,33 @@ def update_active_task(state: dict, text: str, task_type: str):
 def continue_active_task(state: dict, text: str):
     t = text.lower().strip()
 
-    short_triggers = ["построй", "сделай", "давай", "построй график"]
+    active = state.get("active_task")
 
-    if any(t.startswith(tr) for tr in short_triggers):
-        active = state.get("active_task")
+    if not active:
+        return text
 
-        if active and active.get("type") == "math":
+    # 🔥 ключ: если человек говорит "построй", "сделай", "покажи"
+    if any(w in t for w in ["построй", "сделай", "покажи", "давай"]):
+
+        if active.get("type") == "math":
+
+            # есть формула → используем её
             if active.get("data"):
                 return f"{active['data']} построить график"
-            else:
-                return "построй график"
+
+            # нет формулы → мягкий возврат
+            return "построй график"
+
+    # 🔥 КЛЮЧЕВОЕ: "покажи это на графике"
+    if "это" in t and "график" in t:
+        if active.get("data"):
+            return f"{active['data']} построить график"
 
     return text
 
 
 # ===============================
-# ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ
+# ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ
 # ===============================
 
 def is_vague_request(text: str):
@@ -222,7 +240,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 KNOWLEDGE (ДО ОРКЕСТРА)
     try:
         known = find_knowledge(text)
         if known:
@@ -231,7 +248,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 KNOWLEDGE ERROR:", e)
 
-    # INTERPRET
     try:
         interpreted = interpret_request(text)
         if interpreted and interpreted.get("normalized"):
@@ -239,7 +255,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 INTERPRET ERROR:", e)
 
-    # 🔥 NEW: ACTIVE TASK UPDATE
+    # 🔥 ВАЖНО: СНАЧАЛА ОБНОВИЛИ → ПОТОМ ПРОДОЛЖИЛИ
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
@@ -247,7 +263,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 ACTIVE TASK ERROR:", e)
 
-    # VAGUE
     try:
         if is_vague_request(text):
             result = await run_with_typing(
@@ -263,7 +278,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 VAGUE ERROR:", e)
 
-    # DISSATISFACTION
     try:
         if is_dissatisfied(text):
             result = await run_with_typing(
@@ -329,7 +343,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             result = await room.handle(user_id, text, context, run_with_typing)
             if is_valid_result(result):
 
-                # 🔥 СОХРАНЕНИЕ
                 try:
                     if result["type"] == "text" and len(result["data"]) < 1000:
                         save_knowledge(text.lower(), result["data"])
@@ -346,7 +359,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         text_process(user_id, text, state, energy)
     )
 
-    # 🔥 СОХРАНЕНИЕ (fallback)
     try:
         if result and result.get("content") and len(result["content"]) < 1000:
             save_knowledge(text.lower(), result["content"])
