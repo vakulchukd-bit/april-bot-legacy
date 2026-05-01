@@ -95,14 +95,12 @@ class ScienceRoom:
         # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
         expr = self.extract_function(text)
 
-        # 🔥 сохраняем формулу
         if expr:
             state["last_math"] = {
                 "type": "function",
                 "expr": expr
             }
 
-        # 🔥 берем из памяти
         if not expr:
             last = state.get("last_math")
             if last and last.get("type") == "function":
@@ -128,7 +126,7 @@ class ScienceRoom:
             path = self.build_graph(expr)
 
             if path:
-                state["fail_count"] = 0  # 🔥 сброс
+                state["fail_count"] = 0
 
                 try:
                     with open(path, "rb") as f:
@@ -199,7 +197,7 @@ class ScienceRoom:
 
             if res:
                 results.append(f"📐 {res}")
-                state["fail_count"] = 0  # 🔥 сброс
+                state["fail_count"] = 0
 
                 match = re.search(r'x\s*=\s*([\-0-9\.]+)', res)
                 if match:
@@ -210,7 +208,7 @@ class ScienceRoom:
                 if "x" in variables:
                     val = variables["x"]
                     results.append(f"sin({val}) ≈ {round(math.sin(val), 4)}")
-                    state["fail_count"] = 0  # 🔥 сброс
+                    state["fail_count"] = 0
                 else:
                     m = re.search(r'sin\(([\d\.]+)\)', s)
                     if m:
@@ -220,16 +218,17 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        if any(w in text.lower() for w in ["график", "построй", "функц"]):
-            return {
-                "type": "text",
-                "data": (
-                    "📊 Дай формулу, и я построю график.\n\n"
-                    "👉 Пример:\n"
-                    "y = x**2\n"
-                    "y = np.sin(x)"
-                )
-            }
+        # ❌ СТАРЫЙ ТРИГГЕР ОТКЛЮЧЕН
+        # if any(w in text.lower() for w in ["график", "построй", "функц"]):
+        #     return {
+        #         "type": "text",
+        #         "data": (
+        #             "📊 Дай формулу, и я построю график.\n\n"
+        #             "👉 Пример:\n"
+        #             "y = x**2\n"
+        #             "y = np.sin(x)"
+        #         )
+        #     }
 
         if results:
             return {
@@ -256,14 +255,12 @@ class ScienceRoom:
                 "Не до конца понял, что именно нужно 🤔\n"
                 "Можешь чуть уточнить или привести пример?"
             )
-
         elif fail == 2:
             msg = (
                 "Похоже, мы немного мимо попадаем.\n"
                 "Ты хочешь что-то построить, посчитать или показать?\n"
                 "Скажи чуть точнее 🙂"
             )
-
         else:
             msg = (
                 "Давай попробуем по-другому.\n"
