@@ -9,7 +9,7 @@ from blocks.state_manager import (
     get_state,
     get_image_context,
     set_image_context,
-    add_dialog  # 🔥 ДОБАВИЛИ
+    add_dialog
 )
 
 from blocks.anchor_system import get_anchor
@@ -93,7 +93,6 @@ def continue_active_task(state: dict, text: str):
 # ===============================
 # ОСТАЛЬНОЕ
 # ===============================
-
 def is_vague_request(text: str):
     t = text.lower().strip()
     vague_words = ["что-нибудь", "что то", "что-то", "придумай"]
@@ -166,38 +165,41 @@ def detect_task_type(text: str):
 # ===============================
 # EXECUTE
 # ===============================
-
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔥 СОХРАНЯЕМ ВХОД ПОЛЬЗОВАТЕЛЯ
+    # 🔥 сохраняем пользователя
     add_dialog(user_id, "user", text)
 
     t = text.lower().strip()
 
+    # 🔥 KNOWLEDGE
     try:
         known = find_knowledge(text)
         if known:
+            add_dialog(user_id, "assistant", known)
             return {"type": "text", "data": known}
-    except:
-        pass
+    except Exception as e:
+        print("KNOWLEDGE ERROR:", e)
 
+    # 🔥 INTERPRET
     try:
         interpreted = interpret_request(text)
         if interpreted and interpreted.get("normalized"):
             text = interpreted["normalized"]
-    except:
-        pass
+    except Exception as e:
+        print("INTERPRET ERROR:", e)
 
+    # 🔥 ACTIVE TASK
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
-        # text = continue_active_task(state, text)  # 🔥 ОТКЛЮЧИЛИ ПРИНУДИТЕЛЬНЫЙ ТРИГГЕР
-    except:
-        pass
+        # continue_active_task отключен осознанно
+    except Exception as e:
+        print("ACTIVE TASK ERROR:", e)
 
     energy = get_energy(user_id)
 
@@ -210,6 +212,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "output_mode": detect_output_mode(text)
     }
 
+    # 🔥 ROOMS
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
@@ -217,20 +220,24 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                 if result and result.get("type"):
 
-                    # 🔥 СОХРАНЯЕМ ОТВЕТ БОТА
-                    if result["type"] == "text":
-                        add_dialog(user_id, "assistant", result["data"])
+                    # 🔥 ВСЕГДА сохраняем
+                    add_dialog(
+                        user_id,
+                        "assistant",
+                        str(result.get("data", result.get("type")))
+                    )
 
                     return result
-        except:
-            pass
 
+        except Exception as e:
+            print(f"ROOM ERROR [{room.name}]:", e)
+
+    # 🔥 FALLBACK
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
     )
 
-    # 🔥 СОХРАНЯЕМ fallback ответ
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
 
