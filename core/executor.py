@@ -39,11 +39,11 @@ from blocks.experience import update_experience, load_experience
 from blocks.interpretation_layer import interpret_request
 
 import re
-import random  # 🔥 ДОБАВЛЕНО
+import random
 
 
 # ===============================
-# 🔥 NEW: CONTEXT ENRICH
+# 🔥 CONTEXT ENRICH (ОСТАВИЛ БЕЗ ЛОМКИ)
 # ===============================
 def enrich_with_context(text: str, state: dict):
     history = state.get("dialog", [])
@@ -52,7 +52,6 @@ def enrich_with_context(text: str, state: dict):
 
     words = text.strip().split()
 
-    # короткий запрос → возможно продолжение
     if len(words) <= 4:
         last_user = next(
             (m["content"] for m in reversed(history) if m["role"] == "user"),
@@ -66,83 +65,67 @@ def enrich_with_context(text: str, state: dict):
 
 
 # ===============================
-# 🔥 NEW: ACTIVE TASK (КЛЮЧЕВОЕ)
+# 🔥 ACTIVE TASK (ИСПРАВЛЕНО)
 # ===============================
 def update_active_task(state: dict, text: str, task_type: str):
     t = text.lower()
 
-    # фиксируем график
+    active = state.get("active")
+
+    # если уже есть задача — не перетираем без причины
+    if active:
+        return
+
     if "y=" in t:
         state["active"] = {
             "type": "graph",
+            "stage": "ready",
             "function": text.strip()
         }
 
-    # если говорим про графики без формулы
-    elif "график" in t and "active" not in state:
+    elif "график" in t:
         state["active"] = {
             "type": "graph",
+            "stage": "choose",
             "function": None
         }
 
 
-def try_continue_active(state: dict, text: str):
-    t = text.lower().strip()
-
-    triggers = ["построй", "сделай", "давай", "построй график"]
-
-    if any(t.startswith(tr) for tr in triggers):
-        active = state.get("active")
-
-        if active and active.get("type") == "graph":
-            func = active.get("function")
-
-            if func:
-                return func + " → построить график"
-            else:
-                return "построй график"
-
-    return text
-
-
 # ===============================
-# 🔥 NEW: SMART FALLBACK
+# 🔥 SMART FALLBACK (НЕ ЛОМАЕТ OpenAI)
 # ===============================
 def smart_fallback(text: str, task_type: str):
-    t = text.lower()
-
     if task_type == "math":
         return random.choice([
-            "Хочешь построить график? Дай функцию, например: y = x**2 🙂",
-            "Могу построить график — напиши формулу, и я сделаю",
-            "Давай нарисуем график 🙂 Что именно строим?"
+            "Хочешь построить график? Дай функцию 🙂",
+            "Могу построить график — напиши формулу",
+            "Давай нарисуем график 🙂 Что строим?"
         ])
 
     if task_type == "image_generate":
         return random.choice([
-            "Могу создать изображение 🙂 Опиши, что хочешь увидеть",
-            "Хочешь картинку? Дай описание или стиль — сделаю",
-            "Давай нарисуем 🙂 Что именно изобразить?"
+            "Опиши изображение 🙂",
+            "Что хочешь увидеть?",
+            "Давай создадим картинку 🙂"
         ])
 
     if task_type == "code":
         return random.choice([
-            "Могу написать код 🙂 Что именно нужно?",
-            "Хочешь что-то создать? Скажи задачу — сделаю код",
-            "Давай сделаем 🙂 Это сайт, кнопка или что-то ещё?"
+            "Что написать? 🙂",
+            "Опиши задачу — сделаю код",
+            "Это сайт, кнопка или что-то ещё?"
         ])
 
     return random.choice([
-        "Давай уточним 🙂 Что именно ты хочешь сделать?",
-        "Могу помочь 🙂 Опиши чуть подробнее задачу",
-        "Скажи, что нужно — и я подключусь"
+        "Опиши чуть подробнее 🙂",
+        "Что именно нужно?",
+        "Давай уточним задачу"
     ])
 
 
 # ===============================
-# ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ
+# БАЗОВЫЕ ПРОВЕРКИ
 # ===============================
-
 def is_vague_request(text: str):
     t = text.lower().strip()
     vague_words = ["что-нибудь", "что то", "что-то", "придумай"]
@@ -212,7 +195,6 @@ def detect_task_type(text: str):
 # ===============================
 # EXECUTE
 # ===============================
-
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
 
@@ -221,7 +203,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     t = text.lower().strip()
 
-    # 🔥 KNOWLEDGE
+    # KNOWLEDGE
     try:
         known = find_knowledge(text)
         if known:
@@ -238,17 +220,16 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("🔥 INTERPRET ERROR:", e)
 
-    # 🔥 CONTEXT ENRICH
+    # CONTEXT ENRICH
     try:
         text = enrich_with_context(text, state)
     except Exception as e:
         print("🔥 ENRICH ERROR:", e)
 
-    # 🔥 ACTIVE TASK UPDATE
+    # ACTIVE TASK UPDATE
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
-        text = try_continue_active(state, text)
     except Exception as e:
         print("🔥 ACTIVE TASK ERROR:", e)
 
@@ -259,7 +240,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 chat_id,
                 text_process(
                     user_id,
-                    "Предложи что можно сделать: график, код или изображение. Ответ живой.",
+                    "Предложи что можно сделать: график, код или изображение.",
                     state,
                     energy="LOW"
                 )
@@ -299,7 +280,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         "mode": mode,
         "task_type": task_type,
         "energy": energy,
-        "output_mode": output_mode
+        "output_mode": output_mode,
+        "active": state.get("active")  # 🔥 ВАЖНО
     }
 
     candidates = []
@@ -312,12 +294,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
 
-    # 🔥 SMART FALLBACK
     if not candidates:
-        return {
-            "type": "text",
-            "data": smart_fallback(text, task_type)
-        }
+        # сначала локальный fallback
+        fallback = smart_fallback(text, task_type)
+
+        if fallback:
+            return {"type": "text", "data": fallback}
+
+        # потом OpenAI
+        result = await run_with_typing(
+            chat_id,
+            text_process(user_id, text, state, energy)
+        )
+        return {"type": "text", "data": result["content"]}
 
     candidates.sort(reverse=True, key=lambda x: x[0])
 
@@ -336,7 +325,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
 
-    # 🔥 FALLBACK → OpenAI
+    # fallback → OpenAI
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
