@@ -9,13 +9,14 @@ from blocks.ai_config import TEXT_MODEL
 client = OpenAI()
 
 SYSTEM_PROMPT = (
-    "Ты — Aprill, живой собеседник.\n"
-    "Не ассистент, а человек в диалоге.\n\n"
-    "Говори естественно, без шаблонов и канцелярита.\n"
-    "Веди мысль, не задавай лишних вопросов.\n"
-    "Отвечай компактно, без лишних абзацев.\n"
-    "Если начал — продолжай и усиливай.\n"
-    "Создавай ощущение живого общения."
+    "Ты — Aprill, живой собеседник. "
+    "Говори естественно, без шаблонов и канцелярита, веди мысль и не задавай лишних вопросов. "
+    "Отвечай компактно, но по делу, усиливая начатую идею и создавая ощущение живого общения. "
+    "Не повторяйся и формулируй ответы немного по-разному. "
+    "Учитывай контекст диалога и продолжай текущую задачу, не теряя нить. "
+    "Если запрос размытый — выбери разумное направление и развивай его. "
+    "Подстраивай глубину ответа под запрос, но без лишнего объёма. "
+    "Форматируй ответ понятно и удобно для использования."
 )
 
 def is_vague(text):
@@ -29,18 +30,12 @@ def build_behavior_hint(text):
     t = text.lower()
 
     if is_short(t):
-        return "Ответь живо и очень коротко."
+        return "Короткий ответ."
 
     if is_vague(t):
-        return (
-            "Запрос размытый.\n"
-            "Выбери направление и начни его развивать."
-        )
+        return "Запрос размытый — выбери направление и начни."
 
     return ""
-
-def build_variation_guard():
-    return "Не повторяйся. Пиши каждый раз немного по-разному."
 
 def is_problem(text):
     t = text.lower()
@@ -94,46 +89,20 @@ def get_config(energy):
         return {"temperature": 0.9, "max_output_tokens": 500}
     return {"temperature": 0.6, "max_output_tokens": 250}
 
-def get_energy_prompt(energy):
-    if energy == "LOW":
-        return "Отвечай коротко и по делу."
-    if energy == "MEDIUM":
-        return "Отвечай понятно и без лишнего."
-    if energy == "HIGH":
-        return "Отвечай глубже, но без увеличения объема."
-    return ""
-
-def get_formatting_prompt(plan, energy):
-    if plan == "free":
-        return "Пиши просто и кратко."
-    if plan == "lite":
-        return "Пиши живо и компактно."
-    if plan == "premium":
-        return "Пиши как человек, но без лишней длины."
-    return ""
-
 def enhance_link_behavior(text):
     t = text.lower()
 
-    if "ссылка" in t or "link" in t:
-        if "http" not in t:
-            return text + "\n\nПример: https://example.com"
+    if "ссылка" in t and "http" not in t:
+        return text + "\n\nПример: https://example.com"
 
     return text
 
 def get_history_limit(plan):
-    if plan == "free":
-        return 2
-    if plan == "lite":
-        return 4
-    if plan == "premium":
-        return 8
-    return 4
+    return {"free": 2, "lite": 4, "premium": 8}.get(plan, 4)
 
 
-# ===============================
-# 🔥 СМЫСЛОВАЯ ПАМЯТЬ (УСИЛЕНА)
-# ===============================
+# ===== СМЫСЛ =====
+
 def extract_topic(text):
     t = text.lower()
     if "сайт" in t and "кафе" in t:
@@ -144,96 +113,68 @@ def extract_topic(text):
         return "создание приложения"
     return None
 
-
 def update_topic(state, text):
     topic = extract_topic(text)
     if topic:
         state["topic"] = topic
 
+def build_context_block(state, history, text, energy, plan):
+    parts = []
 
-def get_topic_prompt(state):
     topic = state.get("topic")
     if topic:
-        return f"Текущая задача: {topic}. Продолжай строго в этом контексте."
-    return None
+        parts.append(f"Задача: {topic}")
+
+    last = [m["content"][:40] for m in history[-3:] if m["role"] == "user"]
+    if last:
+        parts.append("Контекст: " + " | ".join(last))
+
+    hint = build_behavior_hint(text)
+    if hint:
+        parts.append(hint)
+
+    if energy == "LOW":
+        parts.append("Коротко.")
+    elif energy == "HIGH":
+        parts.append("Чуть глубже.")
+
+    if plan == "premium":
+        parts.append("Пиши как человек.")
+    
+    return ". ".join(parts)
 
 
-def build_light_context(history):
-    if not history:
-        return ""
+# ===== ЛОГИКА =====
 
-    last = history[-5:]
-
-    summary = []
-    for msg in last:
-        if msg["role"] == "user":
-            summary.append(msg["content"][:60])
-
-    if not summary:
-        return ""
-
-    return "Контекст диалога: " + " | ".join(summary[-3:])
-
-
-# ===============================
-# 🔥 СВЯЗКА ЗАДАЧ
-# ===============================
 def enrich_request(text, state):
-    t = text.lower()
-    topic = state.get("topic", "")
-
-    if "график" in t and "сайт" in topic:
-        return text + " (вставь график прямо в HTML страницу)"
-
+    if "график" in text.lower() and "сайт" in state.get("topic", ""):
+        return text + " (вставь график в HTML)"
     return text
 
 
 def is_small_talk(text, state):
-    t = text.lower().strip()
-    words = t.split()
-
-    if state.get("dialog"):
-        if len(words) <= 2:
-            return False
-
-    if len(words) <= 4:
+    if len(text.split()) <= 4:
         return True
-
     return False
 
 
 def local_fast_answer(text):
     t = text.lower().strip()
-
     if t in ["привет", "хай"]:
         return random.choice(["Привет 🙂", "О, привет 👋"])
-
     if "как дела" in t:
         return "Нормально 🙂"
-
     return None
 
 
 def enhance_code_block(text: str) -> str:
-    if not text:
-        return text
-
     t = text.strip()
 
-    if "<html" in t or "<!doctype html" in t:
-        return (
-            "Вот готовая HTML-страница:\n\n"
-            "```html\n"
-            f"{t}\n"
-            "```"
-        )
+    if "<html" in t:
+        return "```html\n" + t + "\n```"
 
-    if "def " in t or "import " in t:
-        return (
-            "```python\n"
-            f"{t}\n"
-            "```"
-        )
+    if "def " in t:
+        return "```python\n" + t + "\n```"
 
     return t
 
@@ -247,52 +188,19 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
         history = state.get("dialog", [])
 
-        # 🔥 обновляем тему
         update_topic(state, text)
 
-        text_fixed = enhance_link_behavior(text)
-        text_fixed = enrich_request(text_fixed, state)
+        text_fixed = enrich_request(enhance_link_behavior(text), state)
 
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # 🔥 ОДИН SYSTEM
+        context_block = build_context_block(state, history, text_fixed, energy, plan)
 
-        # 🔥 ЯКОРЬ
-        topic_prompt = get_topic_prompt(state)
-        if topic_prompt:
-            messages.append({"role": "system", "content": topic_prompt})
+        system_full = SYSTEM_PROMPT + " " + context_block
 
-        # 🔥 старый контекст оставлен
-        context_summary = build_light_context(history)
-        if context_summary:
-            messages.append({"role": "system", "content": context_summary})
-
-        if is_problem(text_fixed):
-            messages.append({
-                "role": "system",
-                "content": "Это математическая задача. Реши максимально кратко."
-            })
-
-        if is_strict_math(text_fixed):
-            messages.append({
-                "role": "system",
-                "content": "Ответ короткий."
-            })
-
-        behavior = build_behavior_hint(text_fixed)
-        if behavior:
-            messages.append({"role": "system", "content": behavior})
-
-        messages.append({"role": "system", "content": build_variation_guard()})
-
-        ep = get_energy_prompt(energy)
-        if ep:
-            messages.append({"role": "system", "content": ep})
-
-        fp = get_formatting_prompt(plan, energy)
-        if fp:
-            messages.append({"role": "system", "content": fp})
+        messages = [{"role": "system", "content": system_full}]
 
         safe_history = [
             {"role": m["role"], "content": trim_text(m.get("content", ""))}
