@@ -1,3 +1,26 @@
+# ===============================
+# 🔥 SAFE PATCH MODE (IMAGE ROOM)
+# ===============================
+
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("IMAGE PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+# 🔥 PATCH: контроль входа в image room
+def patch_image_enter(text):
+    safe_patch_log(f"IMAGE ENTER: {text[:50]}")
+    return None
+
+
+# 🔥 PATCH: будущая логика изображений
+def patch_image_future(*args, **kwargs):
+    return None
 from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 from blocks.image_system import analyze_image
