@@ -1,3 +1,26 @@
+# ===============================
+# 🔥 SAFE PATCH MODE (TEXT MODULE)
+# ===============================
+
+PATCH_LOG = []
+
+def safe_patch_log(msg):
+    try:
+        print("TEXT PATCH:", msg)
+        PATCH_LOG.append(msg)
+    except:
+        pass
+
+
+# 🔥 PATCH: контроль текстовой обработки
+def patch_text_input(text):
+    safe_patch_log(f"TEXT INPUT: {text[:50]}")
+    return text
+
+
+# 🔥 PATCH: будущая логика текста
+def patch_text_future(*args, **kwargs):
+    return None
 import asyncio
 import random
 import re
