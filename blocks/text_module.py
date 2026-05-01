@@ -27,14 +27,7 @@ def is_short(text):
     return len(text.strip()) <= 3
 
 def build_behavior_hint(text):
-    t = text.lower()
-
-    if is_short(t):
-        return "Короткий ответ."
-
-    if is_vague(t):
-        return "Запрос размытый — выбери направление и начни."
-
+    # 🔥 ОТКЛЮЧЕНЫ ВСЕ ПОВЕДЕНЧЕСКИЕ ТРИГГЕРЫ
     return ""
 
 def is_problem(text):
@@ -134,9 +127,7 @@ def build_context_block(state, history, text, energy, plan):
     if last:
         parts.append("Контекст: " + " | ".join(last))
 
-    hint = build_behavior_hint(text)
-    if hint:
-        parts.append(hint)
+    # 🔥 УБРАЛИ build_behavior_hint
 
     if is_sales_text(text):
         parts.append("Говори уверенно и убедительно.")
@@ -159,18 +150,11 @@ def enrich_request(text, state):
 
 
 def is_small_talk(text, state):
-    if len(text.split()) <= 4:
-        return True
-    return False
+    return False  # 🔥 полностью отключено
 
 
 def local_fast_answer(text):
-    t = text.lower().strip()
-    if t in ["привет", "хай"]:
-        return random.choice(["Привет 🙂", "О, привет 👋"])
-    if "как дела" in t:
-        return "Нормально 🙂"
-    return None
+    return None  # 🔥 полностью отключено
 
 
 def clean_html(text: str) -> str:
@@ -232,12 +216,6 @@ def enhance_code_block(text: str) -> str:
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
 
-        # 🔥 ОТКЛЮЧЕНО SMALL TALK (главный фикс)
-        # if is_small_talk(text, state) and not state.get("active_task"):
-        #     fast = local_fast_answer(text)
-        #     if fast:
-        #         return fast
-
         history = state.get("dialog", [])
 
         update_topic(state, text)
@@ -246,27 +224,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
-
-        if state.get("last_code") and is_edit_request(text_fixed):
-            messages = [
-                {
-                    "role": "system",
-                    "content": "Измени код по запросу пользователя. Верни полный обновленный код без объяснений."
-                },
-                {
-                    "role": "user",
-                    "content": f"Вот код:\n{state['last_code']}\n\nЗадача: {text_fixed}"
-                }
-            ]
-
-            r = client.responses.create(
-                model=TEXT_MODEL,
-                input=messages,
-                temperature=0.3,
-                max_output_tokens=600
-            )
-
-            return r.output_text
 
         context_block = build_context_block(state, history, text_fixed, energy, plan)
 
