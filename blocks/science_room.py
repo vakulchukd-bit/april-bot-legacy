@@ -95,14 +95,14 @@ class ScienceRoom:
         # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
         expr = self.extract_function(text)
 
-        # 🔥 НОВОЕ: сохраняем последнюю формулу
+        # 🔥 сохраняем формулу
         if expr:
             state["last_math"] = {
                 "type": "function",
                 "expr": expr
             }
 
-        # 🔥 НОВОЕ: если формулы нет — берем из памяти
+        # 🔥 берем из памяти
         if not expr:
             last = state.get("last_math")
             if last and last.get("type") == "function":
@@ -115,17 +115,21 @@ class ScienceRoom:
                 return {
                     "type": "text",
                     "data": (
-                        "❌ Не удалось построить график.\n"
+                        "Не получилось построить график — давай поправим 👇\n\n"
                         f"Причина: {error}\n\n"
-                        "👉 Пример:\n"
-                        "y = x**2\n"
-                        "y = np.sin(x)"
+                        "Попробуй так:\n"
+                        "y = sin(x)\n"
+                        "или\n"
+                        "y = x**2\n\n"
+                        "Если хочешь — скажи «покажи», и я построю 🙂"
                     )
                 }
 
             path = self.build_graph(expr)
 
             if path:
+                state["fail_count"] = 0  # 🔥 сброс
+
                 try:
                     with open(path, "rb") as f:
                         return {
@@ -195,6 +199,7 @@ class ScienceRoom:
 
             if res:
                 results.append(f"📐 {res}")
+                state["fail_count"] = 0  # 🔥 сброс
 
                 match = re.search(r'x\s*=\s*([\-0-9\.]+)', res)
                 if match:
@@ -205,11 +210,13 @@ class ScienceRoom:
                 if "x" in variables:
                     val = variables["x"]
                     results.append(f"sin({val}) ≈ {round(math.sin(val), 4)}")
+                    state["fail_count"] = 0  # 🔥 сброс
                 else:
                     m = re.search(r'sin\(([\d\.]+)\)', s)
                     if m:
                         val = float(m.group(1))
                         results.append(f"sin({val}) ≈ {round(math.sin(val), 4)}")
+                        state["fail_count"] = 0
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
@@ -230,9 +237,47 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
+        # 🔥 УМНЫЙ FALLBACK
+        fail = state.get("fail_count", 0) + 1
+        state["fail_count"] = fail
+
+        context_hint = "задачу"
+        t = text.lower()
+
+        if "график" in t:
+            context_hint = "график"
+        elif "код" in t:
+            context_hint = "код"
+        elif "изображ" in t:
+            context_hint = "изображение"
+
+        if fail == 1:
+            msg = (
+                "Не до конца понял, что именно нужно 🤔\n"
+                "Можешь чуть уточнить или привести пример?"
+            )
+
+        elif fail == 2:
+            msg = (
+                "Похоже, мы немного мимо попадаем.\n"
+                "Ты хочешь что-то построить, посчитать или показать?\n"
+                "Скажи чуть точнее 🙂"
+            )
+
+        else:
+            msg = (
+                "Давай попробуем по-другому.\n"
+                f"Похоже, речь про {context_hint}.\n\n"
+                "Это больше про:\n"
+                "— график\n"
+                "— формулу\n"
+                "— или визуальную часть?\n\n"
+                "Скажи как ближе — я помогу 👍"
+            )
+
         return {
             "type": "text",
-            "data": "🤔 Уточни задачу чуть подробнее"
+            "data": msg
         }
 
     def validate_expression(self, expr):
