@@ -1,4 +1,31 @@
 # ===============================
+# 🔥 PATCH: СТАБИЛЬНОЕ ПОСТРОЕНИЕ ГРАФИКА
+# ===============================
+
+def patch_force_graph_from_memory(state, text):
+    try:
+        t = text.lower()
+
+        trigger_words = ["построй", "покажи", "график", "это"]
+
+        if not any(w in t for w in trigger_words):
+            return None
+
+        last = state.get("last_math")
+
+        if last and last.get("type") == "function":
+            expr = last.get("expr")
+
+            return {
+                "force_graph": True,
+                "expr": expr
+            }
+
+    except Exception as e:
+        print("PATCH GRAPH ERROR:", e)
+
+    return None
+# ===============================
 # 🔥 SAFE PATCH MODE (SCIENCE ROOM)
 # ===============================
 
