@@ -42,10 +42,8 @@ from blocks.interpretation_layer import interpret_request
 import re
 
 
-# ===============================
-# 🔥 SAFE PATCH MODE (EXECUTOR)
-# ===============================
 PATCH_LOG = []
+
 
 def safe_patch_log(msg):
     try:
@@ -64,9 +62,6 @@ def patch_executor_hook(*args, **kwargs):
     return None
 
 
-# ===============================
-# 🔥 ACTIVE TASK
-# ===============================
 def update_active_task(state: dict, text: str, task_type: str):
     t = text.lower()
 
@@ -76,45 +71,11 @@ def update_active_task(state: dict, text: str, task_type: str):
             "data": text.strip()
         }
 
-    elif any(w in t for w in ["сложнее", "проще", "волнист", "резче", "плавнее"]):
-        active = state.get("active_task")
-        if active and active.get("type") == "math":
-            state["active_task"]["modify"] = t
-
-    elif "график" in t:
-        if "active_task" not in state:
-            state["active_task"] = {
-                "type": "math",
-                "data": None
-            }
-
 
 def continue_active_task(state: dict, text: str):
-    t = text.lower().strip()
-    active = state.get("active_task")
-
-    if not active:
-        return text
-
-    if any(w in t for w in ["построй", "сделай", "покажи", "давай"]):
-
-        if active.get("type") == "math":
-
-            if active.get("data"):
-                return f"{active['data']} построить график"
-
-            return "построй график"
-
-    if "это" in t and "график" in t:
-        if active.get("data"):
-            return f"{active['data']} построить график"
-
     return text
 
 
-# ===============================
-# 🔥 SEMANTIC MEMORY
-# ===============================
 def extract_and_store_semantics(state: dict, text: str, result_type: str = "text"):
     t = text.lower()
 
@@ -125,20 +86,10 @@ def extract_and_store_semantics(state: dict, text: str, result_type: str = "text
         expr = expr.replace("^", "**")
         expr = expr.replace("sin", "np.sin")
         expr = expr.replace("cos", "np.cos")
-        expr = expr.replace("tan", "np.tan")
-        expr = expr.replace("log", "np.log")
 
         state["last_math"] = {
             "type": "function",
             "expr": expr
-        }
-
-    if "```" in text:
-        state["last_code"] = text
-
-    if result_type == "image":
-        state["last_image"] = {
-            "exists": True
         }
 
 
@@ -154,7 +105,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     add_dialog(user_id, "user", text)
 
     # ===============================
-    # 🔥 AI МОЗГ (ГЛАВНОЕ ДОБАВЛЕНИЕ)
+    # 🔥 AI РЕШЕНИЕ
     # ===============================
     try:
         decision = await detect_intent_ai(text, state)
@@ -181,6 +132,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "type": "function",
                 "expr": expr
             }
+
+            state["awaiting_graph_confirm"] = True
+
             return {
                 "type": "text",
                 "data": "Вижу функцию. Построить график?"
@@ -190,16 +144,26 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         print("AI ERROR:", e)
 
     # ===============================
-    # 🔥 СТАРАЯ ЛОГИКА (НЕ ТРОГАЕМ)
+    # 🔥 БЛОК ОЖИДАНИЯ
     # ===============================
-    t = text.lower().strip()
+    if state.get("awaiting_graph_confirm"):
+        t = text.lower()
 
-    try:
-        task_type = detect_task_type(text)
-        update_active_task(state, text, task_type)
-    except Exception as e:
-        print("ACTIVE TASK ERROR:", e)
+        if any(w in t for w in ["да", "построй", "ок", "давай"]):
+            state["awaiting_graph_confirm"] = False
 
+            last = state.get("last_math")
+            if last:
+                text = f"y={last['expr']}"
+        else:
+            return {
+                "type": "text",
+                "data": "Скажи 'построй', чтобы построить график."
+            }
+
+    # ===============================
+    # СТАРАЯ ЛОГИКА
+    # ===============================
     energy = get_energy(user_id)
 
     context = {
@@ -246,23 +210,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     return {"type": "text", "data": result["content"]}
 
 
-# ===============================
-# ВСПОМОГАТЕЛЬНЫЕ
-# ===============================
 def detect_output_mode(text: str):
     t = text.lower()
 
-    if any(w in t for w in ["файл", "скачать", ".py", "html"]):
-        return "file"
-
-    if any(w in t for w in ["код", "code"]):
+    if "код" in t:
         return "code"
-
-    if any(w in t for w in ["график html", "интерактив", "браузер"]):
-        return "graph_html"
-
-    if any(w in t for w in ["картинкой", "png", "изображением"]):
-        return "graph_image"
 
     return "auto"
 
@@ -272,24 +224,5 @@ def detect_task_type(text: str):
 
     if "=" in t:
         return "math"
-
-    if "sin(" in t or "cos(" in t:
-        return "math"
-
-    if any(op in t for op in ["+", "-", "*", "/"]):
-        if any(ch.isdigit() for ch in t):
-            return "math"
-
-    if "y=" in t or "график" in t:
-        return "math"
-
-    if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
-        return "image_edit"
-
-    if any(x in t for x in ["создай", "сгенерируй", "нарисуй"]):
-        return "image_generate"
-
-    if "сделай" in t:
-        return "text"
 
     return "text"
