@@ -167,17 +167,65 @@ def local_fast_answer(text):
     return None
 
 
-def enhance_code_block(text: str) -> str:
+# ===== УЛУЧШЕНИЕ КОДА =====
+
+def clean_html(text: str) -> str:
     t = text.strip()
+    t = re.sub(r"```html\s*```html", "```html", t)
 
-    if "<html" in t:
-        return "```html\n" + t + "\n```"
-
-    if "def " in t:
-        return "```python\n" + t + "\n```"
+    if "<!DOCTYPE html>" in t:
+        t = t[t.index("<!DOCTYPE html>"):]
 
     return t
 
+
+def add_html_comments(html: str) -> str:
+    if "<!--" in html:
+        return html
+
+    html = html.replace("<body>", "<body>\n    <!-- Основное содержимое страницы -->")
+    html = html.replace("<button", "\n    <!-- Кнопка -->\n    <button")
+
+    return html
+
+
+def enhance_code_block(text: str) -> str:
+    if not text:
+        return text
+
+    t = text.strip()
+
+    if "<html" in t or "<!DOCTYPE html>" in t:
+        t = clean_html(t)
+        t = add_html_comments(t)
+
+        return (
+            "Вот готовая HTML-страница. Сохрани как .html и открой в браузере:\n\n"
+            "```html\n"
+            f"{t}\n"
+            "```"
+        )
+
+    if "def " in t or "import " in t:
+        return (
+            "Вот готовый Python-код:\n\n"
+            "```python\n"
+            f"{t}\n"
+            "```"
+        )
+
+    if "function" in t or "document." in t:
+        return (
+            "Вот JavaScript код:\n\n"
+            "```javascript\n"
+            f"{t}\n"
+            "```"
+        )
+
+    return t
+
+
+# ===== MAIN =====
 
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
@@ -195,7 +243,6 @@ async def process(user_id, text, state, energy="MEDIUM"):
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
-        # 🔥 ОДИН SYSTEM
         context_block = build_context_block(state, history, text_fixed, energy, plan)
 
         system_full = SYSTEM_PROMPT + " " + context_block
