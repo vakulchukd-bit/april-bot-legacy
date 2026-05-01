@@ -85,6 +85,78 @@ def patch_wrap_extract_function():
 
     except Exception as e:
         print("PATCH WRAP ERROR:", e)
+        # ===============================
+# 🔥 PATCH: AUTO MODIFY (БЕЗ ПРАВОК ВНУТРИ КЛАССА)
+# ===============================
+
+def patch_auto_modify_expr(expr, text):
+    try:
+        if not expr:
+            return expr
+
+        t = text.lower()
+        original = expr
+
+        # --- круче / резче ---
+        if "круче" in t or "резче" in t:
+            match = re.search(r"([\-]?\d+(\.\d+)?)\*x\*\*2", expr)
+            if match:
+                coef = float(match.group(1))
+                expr = expr.replace(match.group(1), str(coef * 2))
+
+        # --- плавнее ---
+        elif "плавнее" in t or "менее крутой" in t:
+            match = re.search(r"([\-]?\d+(\.\d+)?)\*x\*\*2", expr)
+            if match:
+                coef = float(match.group(1))
+                expr = expr.replace(match.group(1), str(coef / 2))
+
+        return expr
+
+    except Exception as e:
+        print("AUTO MODIFY ERROR:", e)
+        return expr
+
+
+def patch_wrap_extract_with_modify():
+    try:
+        original = ScienceRoom.extract_function
+
+        def wrapped(self, text):
+            try:
+                expr = original(self, text)
+
+                state = getattr(self, "_last_state", None)
+
+                if state and expr:
+                    new_expr = patch_auto_modify_expr(expr, text)
+
+                    if new_expr != expr:
+                        state["last_math"] = {
+                            "type": "function",
+                            "expr": new_expr
+                        }
+                        print("🔥 AUTO MODIFIED:", new_expr)
+                        return new_expr
+
+                return expr
+
+            except Exception as e:
+                print("WRAP MODIFY ERROR:", e)
+                return original(self, text)
+
+        ScienceRoom.extract_function = wrapped
+        print("✅ AUTO MODIFY PATCH ACTIVE")
+
+    except Exception as e:
+        print("PATCH INIT ERROR:", e)
+
+
+# 🔥 АКТИВАЦИЯ
+try:
+    patch_wrap_extract_with_modify()
+except Exception as e:
+    print("PATCH RUN ERROR:", e)
 # blocks/science_room.py
 
 import re
