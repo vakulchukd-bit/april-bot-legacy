@@ -17,6 +17,13 @@ class ScienceRoom:
     def can_handle(self, text, context):
         t = text.lower()
 
+        state = context.get("state", {})
+
+        # 🔥 НОВОЕ: КОНТЕКСТНЫЙ ТРИГГЕР (КЛЮЧЕВОЙ ФИКС)
+        if state.get("last_math"):
+            if any(w in t for w in ["покажи", "сделай", "давай", "построй", "это", "теперь"]):
+                return True
+
         if "график" in t or "построй" in t:
             return True
 
@@ -92,7 +99,6 @@ class ScienceRoom:
 
         state = context.get("state", {})
 
-        # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
         expr = self.extract_function(text)
 
         if expr:
@@ -218,129 +224,16 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ❌ СТАРЫЙ ТРИГГЕР ОТКЛЮЧЕН
-        # if any(w in text.lower() for w in ["график", "построй", "функц"]):
-        #     return {
-        #         "type": "text",
-        #         "data": (
-        #             "📊 Дай формулу, и я построю график.\n\n"
-        #             "👉 Пример:\n"
-        #             "y = x**2\n"
-        #             "y = np.sin(x)"
-        #         )
-        #     }
-
         if results:
             return {
                 "type": "text",
                 "data": "\n\n".join(results)
             }
 
-        # 🔥 УМНЫЙ FALLBACK
         fail = state.get("fail_count", 0) + 1
         state["fail_count"] = fail
 
-        context_hint = "задачу"
-        t = text.lower()
-
-        if "график" in t:
-            context_hint = "график"
-        elif "код" in t:
-            context_hint = "код"
-        elif "изображ" in t:
-            context_hint = "изображение"
-
-        if fail == 1:
-            msg = (
-                "Не до конца понял, что именно нужно 🤔\n"
-                "Можешь чуть уточнить или привести пример?"
-            )
-        elif fail == 2:
-            msg = (
-                "Похоже, мы немного мимо попадаем.\n"
-                "Ты хочешь что-то построить, посчитать или показать?\n"
-                "Скажи чуть точнее 🙂"
-            )
-        else:
-            msg = (
-                "Давай попробуем по-другому.\n"
-                f"Похоже, речь про {context_hint}.\n\n"
-                "Это больше про:\n"
-                "— график\n"
-                "— формулу\n"
-                "— или визуальную часть?\n\n"
-                "Скажи как ближе — я помогу 👍"
-            )
-
         return {
             "type": "text",
-            "data": msg
+            "data": "Не до конца понял, уточни чуть подробнее 🙂"
         }
-
-    def validate_expression(self, expr):
-        try:
-            x = np.linspace(-10, 10, 10)
-            eval(expr, {"x": x, "np": np, "__builtins__": {}})
-            return True, None
-        except Exception as e:
-            return False, str(e)
-
-    def extract_function(self, text):
-        try:
-            text = text.lower().replace("^", "**")
-
-            text = text.replace("sin", "np.sin")
-            text = text.replace("cos", "np.cos")
-            text = text.replace("tan", "np.tan")
-            text = text.replace("log", "np.log")
-
-            match = re.search(r"y\s*=\s*(.+)", text)
-            if match:
-                return match.group(1).strip()
-
-            return None
-        except:
-            return None
-
-    def build_graph(self, expr):
-        try:
-            x = np.linspace(-10, 10, 200)
-            y = eval(expr, {"x": x, "np": np, "__builtins__": {}})
-
-            plt.figure()
-            plt.plot(x, y)
-            plt.grid()
-
-            path = "graph.png"
-            plt.savefig(path)
-            plt.close()
-
-            return path
-        except Exception as e:
-            print("🔥 GRAPH ERROR:", e)
-            return None
-
-    def solve_equation(self, text):
-        try:
-            text = text.lower()
-            text = text.replace("реши", "")
-            text = text.strip()
-
-            expr = text.replace(" ", "")
-            expr = re.sub(r'(\d)(x)', r'\1*\2', expr)
-            expr = re.sub(r'(\d)\(', r'\1*(', expr)
-
-            x = symbols('x')
-
-            if "=" in expr:
-                left, right = expr.split("=")
-                equation = simplify(sympify(left) - sympify(right))
-                solutions = solve(equation, x)
-
-                if solutions:
-                    return f"x = {solutions[0]}"
-
-        except Exception as e:
-            print("🔥 SOLVE ERROR:", e)
-
-        return None
