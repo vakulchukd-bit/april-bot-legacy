@@ -87,7 +87,40 @@ class ScienceRoom:
         if user_id == ADMIN_ID:
             plan = "premium"
 
-        # 🔥 1. ПРИОРИТЕТ: ФУНКЦИЯ → ГРАФИК
+        t = text.lower()
+        active = context.get("active")
+
+        # =========================================
+        # 🔥 НОВОЕ: ПРОДОЛЖЕНИЕ АКТИВНОЙ ЗАДАЧИ
+        # =========================================
+        if active and active.get("type") == "graph":
+            func = active.get("function")
+
+            # если есть функция — реагируем на короткие команды
+            if func:
+                if any(w in t for w in ["построй", "сделай", "давай", "новый"]):
+                    expr = self.extract_function(func)
+
+                    if expr:
+                        path = self.build_graph(expr)
+                        if path:
+                            with open(path, "rb") as f:
+                                return {
+                                    "type": "image",
+                                    "data": f.read(),
+                                    "meta": {"source": "math_graph"}
+                                }
+
+            # если функции нет — мягко ведём диалог
+            else:
+                return {
+                    "type": "text",
+                    "data": "Давай зададим функцию 🙂 Например: y = x**2 или y = np.sin(x)"
+                }
+
+        # =========================================
+        # 🔥 ПРИОРИТЕТ: ЯВНАЯ ФУНКЦИЯ
+        # =========================================
         expr = self.extract_function(text)
 
         if expr:
@@ -103,6 +136,13 @@ class ScienceRoom:
                         "y = x**2\n"
                         "y = np.sin(x)"
                     )
+                }
+
+            # сохраняем в active
+            if context.get("state") is not None:
+                context["state"]["active"] = {
+                    "type": "graph",
+                    "function": text.strip()
                 }
 
             path = self.build_graph(expr)
@@ -196,16 +236,11 @@ class ScienceRoom:
             except Exception as e:
                 print("🔥 SIN ERROR:", e)
 
-        # ===== fallback (усилен) =====
-        if any(w in text.lower() for w in ["график", "построй", "функц"]):
+        # ===== УМНЫЙ FALLBACK =====
+        if any(w in t for w in ["график", "построй", "функц"]):
             return {
                 "type": "text",
-                "data": (
-                    "📊 Дай формулу, и я построю график.\n\n"
-                    "👉 Пример:\n"
-                    "y = x**2\n"
-                    "y = np.sin(x)"
-                )
+                "data": "Могу построить график 🙂 Хочешь что-то простое или с параметрами?"
             }
 
         if results:
@@ -216,7 +251,7 @@ class ScienceRoom:
 
         return {
             "type": "text",
-            "data": "🤔 Уточни задачу чуть подробнее"
+            "data": "🤔 Давай чуть уточним задачу"
         }
 
     def validate_expression(self, expr):
@@ -264,7 +299,6 @@ class ScienceRoom:
 
     def solve_equation(self, text):
         try:
-            # 🔥 ФИКС: очистка входа
             text = text.lower()
             text = text.replace("реши", "")
             text = text.strip()
