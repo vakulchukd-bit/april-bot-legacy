@@ -41,6 +41,49 @@ from blocks.interpretation_layer import interpret_request
 import re
 
 
+# ===============================
+# 🔥 NEW: ACTIVE TASK LAYER
+# ===============================
+def update_active_task(state: dict, text: str, task_type: str):
+    t = text.lower()
+
+    # если есть формула → фиксируем как график
+    if "y=" in t:
+        state["active_task"] = {
+            "type": "math",
+            "data": text.strip()
+        }
+
+    # если явно график без формулы
+    elif "график" in t:
+        if "active_task" not in state:
+            state["active_task"] = {
+                "type": "math",
+                "data": None
+            }
+
+
+def continue_active_task(state: dict, text: str):
+    t = text.lower().strip()
+
+    short_triggers = ["построй", "сделай", "давай", "построй график"]
+
+    if any(t.startswith(tr) for tr in short_triggers):
+        active = state.get("active_task")
+
+        if active and active.get("type") == "math":
+            if active.get("data"):
+                return f"{active['data']} построить график"
+            else:
+                return "построй график"
+
+    return text
+
+
+# ===============================
+# ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ
+# ===============================
+
 def is_vague_request(text: str):
     t = text.lower().strip()
     vague_words = ["что-нибудь", "что то", "что-то", "придумай"]
@@ -195,6 +238,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             text = interpreted["normalized"]
     except Exception as e:
         print("🔥 INTERPRET ERROR:", e)
+
+    # 🔥 NEW: ACTIVE TASK UPDATE
+    try:
+        task_type = detect_task_type(text)
+        update_active_task(state, text, task_type)
+        text = continue_active_task(state, text)
+    except Exception as e:
+        print("🔥 ACTIVE TASK ERROR:", e)
 
     # VAGUE
     try:
