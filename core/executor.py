@@ -8,7 +8,8 @@ from blocks.router import route_request
 from blocks.state_manager import (
     get_state,
     get_image_context,
-    set_image_context
+    set_image_context,
+    add_dialog  # 🔥 ДОБАВИЛИ
 )
 
 from blocks.anchor_system import get_anchor
@@ -47,21 +48,17 @@ import re
 def update_active_task(state: dict, text: str, task_type: str):
     t = text.lower()
 
-    # 🔥 фиксируем формулу
     if "y=" in t:
         state["active_task"] = {
             "type": "math",
             "data": text.strip()
         }
 
-    # 🔥 если пользователь меняет форму (волнистее / сложнее)
     elif any(w in t for w in ["сложнее", "проще", "волнист", "резче", "плавнее"]):
         active = state.get("active_task")
         if active and active.get("type") == "math":
-            # просто сохраняем намерение (данные остаются)
             state["active_task"]["modify"] = t
 
-    # 🔥 если просто сказал "график"
     elif "график" in t:
         if "active_task" not in state:
             state["active_task"] = {
@@ -72,25 +69,20 @@ def update_active_task(state: dict, text: str, task_type: str):
 
 def continue_active_task(state: dict, text: str):
     t = text.lower().strip()
-
     active = state.get("active_task")
 
     if not active:
         return text
 
-    # 🔥 ключ: если человек говорит "построй", "сделай", "покажи"
     if any(w in t for w in ["построй", "сделай", "покажи", "давай"]):
 
         if active.get("type") == "math":
 
-            # есть формула → используем её
             if active.get("data"):
                 return f"{active['data']} построить график"
 
-            # нет формулы → мягкий возврат
             return "построй график"
 
-    # 🔥 КЛЮЧЕВОЕ: "покажи это на графике"
     if "это" in t and "график" in t:
         if active.get("data"):
             return f"{active['data']} построить график"
@@ -99,7 +91,7 @@ def continue_active_task(state: dict, text: str):
 
 
 # ===============================
-# ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ
+# ОСТАЛЬНОЕ
 # ===============================
 
 def is_vague_request(text: str):
@@ -171,66 +163,9 @@ def detect_task_type(text: str):
     return "text"
 
 
-def handle_subscription(callback_data, user_id):
-    print("🔥 CALLBACK:", callback_data)
-
-    if callback_data == "buy_lite":
-        return {
-            "type": "text",
-            "data": "💳 Подтвердить переход на Lite?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_lite"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-                ]
-            ])
-        }
-
-    if callback_data == "buy_premium":
-        return {
-            "type": "text",
-            "data": "💳 Подтвердить переход на Premium?",
-            "keyboard": InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Да", callback_data="buy_yes_premium"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data="buy_no")
-                ]
-            ])
-        }
-
-    if callback_data == "buy_yes_lite":
-        return {"type": "admin_request", "plan": "lite"}
-
-    if callback_data == "buy_yes_premium":
-        return {"type": "admin_request", "plan": "premium"}
-
-    if callback_data == "buy_no":
-        return {"type": "text", "data": "❌ Отменено"}
-
-    if callback_data.startswith("admin_confirm_"):
-        parts = callback_data.split("_")
-        plan = parts[2]
-        uid = int(parts[3])
-
-        set_subscription(uid, plan)
-        save_payment(uid, plan)
-
-        return {
-            "type": "notify_user",
-            "target_user": uid,
-            "data": f"✅ Активирован {plan.upper()}"
-        }
-
-    return None
-
-
-def is_image_question(text: str):
-    t = text.lower()
-    return any(tr in t for tr in [
-        "что на картинке", "что это", "что справа",
-        "что слева", "что здесь", "что изображено"
-    ])
-
+# ===============================
+# EXECUTE
+# ===============================
 
 async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     print("🔥 EXECUTOR RUNNING")
@@ -238,131 +173,65 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    # 🔥 СОХРАНЯЕМ ВХОД ПОЛЬЗОВАТЕЛЯ
+    add_dialog(user_id, "user", text)
+
     t = text.lower().strip()
 
     try:
         known = find_knowledge(text)
         if known:
-            print("🧠 KNOWLEDGE HIT")
             return {"type": "text", "data": known}
-    except Exception as e:
-        print("🔥 KNOWLEDGE ERROR:", e)
+    except:
+        pass
 
     try:
         interpreted = interpret_request(text)
         if interpreted and interpreted.get("normalized"):
             text = interpreted["normalized"]
-    except Exception as e:
-        print("🔥 INTERPRET ERROR:", e)
+    except:
+        pass
 
-    # 🔥 ВАЖНО: СНАЧАЛА ОБНОВИЛИ → ПОТОМ ПРОДОЛЖИЛИ
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
         text = continue_active_task(state, text)
-    except Exception as e:
-        print("🔥 ACTIVE TASK ERROR:", e)
-
-    try:
-        if is_vague_request(text):
-            result = await run_with_typing(
-                chat_id,
-                text_process(
-                    user_id,
-                    "Предложи что можно сделать: график, код или изображение. Ответ живой.",
-                    state,
-                    energy="LOW"
-                )
-            )
-            return {"type": "text", "data": result.get("content")}
-    except Exception as e:
-        print("🔥 VAGUE ERROR:", e)
-
-    try:
-        if is_dissatisfied(text):
-            result = await run_with_typing(
-                chat_id,
-                text_process(user_id, text, state, energy="LOW")
-            )
-            return {"type": "text", "data": result.get("content")}
-    except Exception as e:
-        print("🔥 DISSATISFACTION ERROR:", e)
-
-    if "время" in t:
-        now = datetime.now().strftime("%H:%M")
-        return {"type": "text", "data": f"Сейчас {now}"}
+    except:
+        pass
 
     energy = get_energy(user_id)
-
-    ctx = get_image_context(user_id) or state.get("image_context")
-    anchor = get_anchor(user_id)
-
-    task_type = detect_task_type(text)
-    output_mode = detect_output_mode(text)
 
     context = {
         "chat_id": chat_id,
         "state": state,
-        "image": ctx,
-        "anchor": anchor,
         "mode": mode,
-        "task_type": task_type,
+        "task_type": detect_task_type(text),
         "energy": energy,
-        "output_mode": output_mode
+        "output_mode": detect_output_mode(text)
     }
-
-    def is_valid_result(result):
-        return (
-            result
-            and isinstance(result, dict)
-            and "type" in result
-            and (result["type"] != "text" or result.get("data"))
-        )
-
-    candidates = []
 
     for room in ROOMS:
         try:
             if room.can_handle(text, context):
-                score = room.evaluate(text, context)
-                candidates.append((score, room))
-        except Exception as e:
-            print(f"🔥 CAN_HANDLE ERROR [{room.name}]:", e)
+                result = await room.handle(user_id, text, context, run_with_typing)
 
-    if not candidates:
-        result = await run_with_typing(
-            chat_id,
-            text_process(user_id, text, state, energy)
-        )
-        return {"type": "text", "data": result["content"]}
+                if result and result.get("type"):
 
-    candidates.sort(reverse=True, key=lambda x: x[0])
+                    # 🔥 СОХРАНЯЕМ ОТВЕТ БОТА
+                    if result["type"] == "text":
+                        add_dialog(user_id, "assistant", result["data"])
 
-    for score, room in candidates:
-        try:
-            result = await room.handle(user_id, text, context, run_with_typing)
-            if is_valid_result(result):
-
-                try:
-                    if result["type"] == "text" and len(result["data"]) < 1000:
-                        save_knowledge(text.lower(), result["data"])
-                except Exception as e:
-                    print("🔥 SAVE KNOWLEDGE ERROR:", e)
-
-                return result
-
-        except Exception as e:
-            print(f"🔥 ROOM HANDLE ERROR [{room.name}]:", e)
+                    return result
+        except:
+            pass
 
     result = await run_with_typing(
         chat_id,
         text_process(user_id, text, state, energy)
     )
 
-    try:
-        if result and result.get("content") and len(result["content"]) < 1000:
-            save_knowledge(text.lower(), result["content"])
-    except Exception as e:
-        print("🔥 SAVE KNOWLEDGE ERROR:", e)
+    # 🔥 СОХРАНЯЕМ fallback ответ
+    if result and result.get("content"):
+        add_dialog(user_id, "assistant", result["content"])
 
     return {"type": "text", "data": result["content"]}
