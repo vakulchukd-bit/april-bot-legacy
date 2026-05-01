@@ -21,6 +21,37 @@ def patch_science_enter(text):
 # 🔥 PATCH: будущая логика графиков
 def patch_science_future(*args, **kwargs):
     return None
+    # ===============================
+# 🔥 PATCH: СТАБИЛЬНЫЙ ГРАФИК (ПОЛНЫЙ БЛОК)
+# ===============================
+
+def patch_force_graph_from_memory(state, text):
+    try:
+        t = text.lower()
+
+        trigger_words = ["построй", "покажи", "график", "это"]
+
+        if not any(w in t for w in trigger_words):
+            return None
+
+        last = state.get("last_math")
+
+        if last and last.get("type") == "function":
+            return last.get("expr")
+
+    except Exception as e:
+        print("PATCH GRAPH ERROR:", e)
+
+    return None
+
+
+def apply_graph_patch_if_needed(state, text):
+    try:
+        expr = patch_force_graph_from_memory(state, text)
+        return expr
+    except Exception as e:
+        print("PATCH APPLY ERROR:", e)
+        return None
 # blocks/science_room.py
 
 import re
