@@ -132,8 +132,32 @@ def get_history_limit(plan):
 
 
 # ===============================
-# 🔥 НОВОЕ: СМЫСЛОВАЯ ПАМЯТЬ
+# 🔥 СМЫСЛОВАЯ ПАМЯТЬ (УСИЛЕНА)
 # ===============================
+def extract_topic(text):
+    t = text.lower()
+    if "сайт" in t and "кафе" in t:
+        return "сайт кафе"
+    if "сайт" in t:
+        return "создание сайта"
+    if "приложение" in t:
+        return "создание приложения"
+    return None
+
+
+def update_topic(state, text):
+    topic = extract_topic(text)
+    if topic:
+        state["topic"] = topic
+
+
+def get_topic_prompt(state):
+    topic = state.get("topic")
+    if topic:
+        return f"Текущая задача: {topic}. Продолжай строго в этом контексте."
+    return None
+
+
 def build_light_context(history):
     if not history:
         return ""
@@ -149,6 +173,19 @@ def build_light_context(history):
         return ""
 
     return "Контекст диалога: " + " | ".join(summary[-3:])
+
+
+# ===============================
+# 🔥 СВЯЗКА ЗАДАЧ
+# ===============================
+def enrich_request(text, state):
+    t = text.lower()
+    topic = state.get("topic", "")
+
+    if "график" in t and "сайт" in topic:
+        return text + " (вставь график прямо в HTML страницу)"
+
+    return text
 
 
 def is_small_talk(text, state):
@@ -168,28 +205,15 @@ def is_small_talk(text, state):
 def local_fast_answer(text):
     t = text.lower().strip()
 
-    greetings = ["привет", "хай", "hello", "hi", "здарова"]
+    if t in ["привет", "хай"]:
+        return random.choice(["Привет 🙂", "О, привет 👋"])
 
-    if t in greetings:
-        return random.choice([
-            "Привет 🙂",
-            "О, привет 👋",
-            "Привет, рад тебя видеть 🙂"
-        ])
-
-    if "как дела" in t or "как ты" in t:
-        return random.choice([
-            "Нормально 🙂 А у тебя?",
-            "Всё спокойно 🙂",
-            "Хорошо, в процессе 🙂"
-        ])
+    if "как дела" in t:
+        return "Нормально 🙂"
 
     return None
 
 
-# ===============================
-# 🔥 FORMATTER
-# ===============================
 def enhance_code_block(text: str) -> str:
     if not text:
         return text
@@ -198,7 +222,7 @@ def enhance_code_block(text: str) -> str:
 
     if "<html" in t or "<!doctype html" in t:
         return (
-            "Вот готовая HTML-страница. Сохрани как .html и открой в браузере:\n\n"
+            "Вот готовая HTML-страница:\n\n"
             "```html\n"
             f"{t}\n"
             "```"
@@ -206,16 +230,7 @@ def enhance_code_block(text: str) -> str:
 
     if "def " in t or "import " in t:
         return (
-            "Вот готовый Python-код. Скопируй и запусти:\n\n"
             "```python\n"
-            f"{t}\n"
-            "```"
-        )
-
-    if "function" in t or "document." in t:
-        return (
-            "Вот JavaScript код:\n\n"
-            "```javascript\n"
             f"{t}\n"
             "```"
         )
@@ -232,14 +247,23 @@ async def process(user_id, text, state, energy="MEDIUM"):
 
         history = state.get("dialog", [])
 
+        # 🔥 обновляем тему
+        update_topic(state, text)
+
         text_fixed = enhance_link_behavior(text)
+        text_fixed = enrich_request(text_fixed, state)
 
         plan = get_user_plan(user_id)
         limit = get_history_limit(plan)
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # 🔥 СМЫСЛ
+        # 🔥 ЯКОРЬ
+        topic_prompt = get_topic_prompt(state)
+        if topic_prompt:
+            messages.append({"role": "system", "content": topic_prompt})
+
+        # 🔥 старый контекст оставлен
         context_summary = build_light_context(history)
         if context_summary:
             messages.append({"role": "system", "content": context_summary})
