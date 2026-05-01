@@ -51,6 +51,11 @@ def is_strict_math(text):
         any(op in t for op in ["+", "-", "*", "/"])
     )
 
+# 🔥 ВОЗВРАТ SALES
+def is_sales_text(text):
+    triggers = ["клиент", "продай", "убеди", "сомневается", "покуп", "заказ"]
+    return any(w in text.lower() for w in triggers)
+
 MAX_MESSAGE_CHARS = 600
 MAX_TOTAL_CHARS = 3000
 
@@ -132,6 +137,9 @@ def build_context_block(state, history, text, energy, plan):
     hint = build_behavior_hint(text)
     if hint:
         parts.append(hint)
+
+    if is_sales_text(text):
+        parts.append("Говори уверенно и убедительно.")
 
     if energy == "LOW":
         parts.append("Коротко.")
