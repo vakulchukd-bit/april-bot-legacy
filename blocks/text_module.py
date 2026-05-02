@@ -21,6 +21,8 @@ def patch_text_input(text):
 # 🔥 PATCH: будущая логика текста
 def patch_text_future(*args, **kwargs):
     return None
+
+
 import asyncio
 import random
 import re
@@ -37,10 +39,16 @@ SYSTEM_PROMPT = (
     "Отвечай компактно, но по делу, усиливая начатую идею и создавая ощущение живого общения. "
     "Не повторяйся и формулируй ответы немного по-разному. "
     "Учитывай контекст диалога и продолжай текущую задачу, не теряя нить. "
-    "Если запрос размытый — выбери разумное направление и развивай его. "
-    "Подстраивай глубину ответа под запрос, но без лишнего объёма. "
-    "Форматируй ответ понятно и удобно для использования."
+    "Если пользователь говорит 'это' — обязательно используй предыдущую задачу. "
+    "Не игнорируй контекст."
 )
+
+# ===============================
+# 🔥 НОВЫЙ ФИКС (КЛЮЧЕВОЙ)
+# ===============================
+def is_context_prompt(text):
+    return "Текущий запрос:" in text and "Диалог:" in text
+
 
 def is_vague(text):
     vague = ["что-нибудь", "что то", "что-то", "сделай", "придумай"]
@@ -50,7 +58,6 @@ def is_short(text):
     return len(text.strip()) <= 3
 
 def build_behavior_hint(text):
-    # 🔥 ОТКЛЮЧЕНЫ ВСЕ ПОВЕДЕНЧЕСКИЕ ТРИГГЕРЫ
     return ""
 
 def is_problem(text):
@@ -150,8 +157,6 @@ def build_context_block(state, history, text, energy, plan):
     if last:
         parts.append("Контекст: " + " | ".join(last))
 
-    # 🔥 УБРАЛИ build_behavior_hint
-
     if is_sales_text(text):
         parts.append("Говори уверенно и убедительно.")
 
@@ -173,11 +178,11 @@ def enrich_request(text, state):
 
 
 def is_small_talk(text, state):
-    return False  # 🔥 полностью отключено
+    return False
 
 
 def local_fast_answer(text):
-    return None  # 🔥 полностью отключено
+    return None
 
 
 def clean_html(text: str) -> str:
@@ -239,32 +244,41 @@ def enhance_code_block(text: str) -> str:
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
 
-        history = state.get("dialog", [])
+        # 🔥 ЕСЛИ ПРИШЁЛ ГОТОВЫЙ КОНТЕКСТ → НЕ ЛОМАЕМ ЕГО
+        if is_context_prompt(text):
 
-        update_topic(state, text)
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text}
+            ]
 
-        text_fixed = enrich_request(enhance_link_behavior(text), state)
+        else:
+            history = state.get("dialog", [])
 
-        plan = get_user_plan(user_id)
-        limit = get_history_limit(plan)
+            update_topic(state, text)
 
-        context_block = build_context_block(state, history, text_fixed, energy, plan)
+            text_fixed = enrich_request(enhance_link_behavior(text), state)
 
-        system_full = SYSTEM_PROMPT + " " + context_block
+            plan = get_user_plan(user_id)
+            limit = get_history_limit(plan)
 
-        messages = [{"role": "system", "content": system_full}]
+            context_block = build_context_block(state, history, text_fixed, energy, plan)
 
-        safe_history = [
-            {"role": m["role"], "content": trim_text(m.get("content", ""))}
-            for m in history[-limit:]
-        ]
+            system_full = SYSTEM_PROMPT + " " + context_block
 
-        messages.extend(trim_messages(safe_history))
+            messages = [{"role": "system", "content": system_full}]
 
-        messages.append({
-            "role": "user",
-            "content": trim_text(text_fixed)
-        })
+            safe_history = [
+                {"role": m["role"], "content": trim_text(m.get("content", ""))}
+                for m in history[-limit:]
+            ]
+
+            messages.extend(trim_messages(safe_history))
+
+            messages.append({
+                "role": "user",
+                "content": trim_text(text_fixed)
+            })
 
         config = get_config(energy)
 
