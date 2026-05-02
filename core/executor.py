@@ -10,7 +10,8 @@ from blocks.state_manager import (
     get_image_context,
     set_image_context,
     add_dialog,
-    set_dialog_state
+    set_dialog_state,
+    update_memory_summary  # 🔥 NEW
 )
 
 from blocks.anchor_system import get_anchor
@@ -148,6 +149,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     mode = get_mode(user_id)
 
     add_dialog(user_id, "user", text)
+    update_memory_summary(user_id, text)  # 🔥 NEW
 
     # ===============================
     # 🔥 STEP 3: DIALOG ENGINE
@@ -167,6 +169,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 result = await analyze_image(ctx["path"], state)
 
                 add_dialog(user_id, "assistant", result)
+                update_memory_summary(user_id, result)  # 🔥 NEW
+
                 set_dialog_state(user_id, {"intent": "image", "mode": "analyze"})
 
                 return {"type": "text", "data": result}
@@ -190,6 +194,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         if intent == "text_answer" and response:
             add_dialog(user_id, "assistant", response)
+            update_memory_summary(user_id, response)  # 🔥 NEW
+
             set_dialog_state(user_id, {"intent": "text"})
             return {"type": "text", "data": response}
 
@@ -254,6 +260,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     output_text = str(result.get("data", ""))
 
                     add_dialog(user_id, "assistant", output_text)
+                    update_memory_summary(user_id, output_text)  # 🔥 NEW
 
                     # dialog state update
                     if result.get("type") == "image":
@@ -263,7 +270,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     else:
                         set_dialog_state(user_id, {"intent": "text"})
 
-                    extract_and_store_semantics(state, output_text, result.get("type", "text"))
+                    extract_and_store_semantics(
+                        state,
+                        output_text,
+                        result.get("type", "text")
+                    )
 
                     return result
 
@@ -277,6 +288,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
+        update_memory_summary(user_id, result["content"])  # 🔥 NEW
+
         set_dialog_state(user_id, {"intent": "text"})
         extract_and_store_semantics(state, result["content"], "text")
 
