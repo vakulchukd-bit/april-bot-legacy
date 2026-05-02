@@ -1,60 +1,92 @@
 # blocks/context_system.py
 
-def build_context_text(state=None):
+def build_context_text(user_id, text, state):
     """
-    Главный контекст April.
-    УЖАТЫЙ и адаптивный → не перегружает токены.
+    УМНЫЙ контекст April.
+    Решает проблему "это" через явную структуру.
     """
 
     base = "Ты — April, живой собеседник. Отвечай естественно и по делу."
 
-    if state:
+    history = ""
+    last_user_task = None
 
-        # --- настроение (оставляем, это дешево и полезно) ---
-        mood = state.get("mood")
-        if mood:
-            base += f"\nСостояние пользователя: {mood}"
+    dialog = state.get("dialog", [])
 
-        # ===== 🧠 СЖАТЫЙ SUMMARY =====
-        summary = state.get("memory_summary")
-        if summary:
-            # 🔥 ограничиваем до короткого смысла
-            short = summary[-200:]
-            base += f"\nКонтекст: {short}"
+    # ===== 🧠 ПОСЛЕДНИЕ СООБЩЕНИЯ =====
+    for msg in dialog[-5:]:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        history += f"{role}: {content}\n"
 
-        # ===== 🖼️ IMAGE CONTEXT (ТОЖЕ СЖАТЫЙ) =====
-        img = state.get("image_context")
-        if img and isinstance(img, dict):
+    # ===== 🔍 ПОИСК ПОСЛЕДНЕЙ ЗАДАЧИ =====
+    for msg in reversed(dialog):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
 
-            hint = img.get("hint") or img.get("prompt")
+            if any(x in content.lower() for x in ["было", "отдал", "сколько", "задач", "яблок"]):
+                last_user_task = content
+                break
 
-            if hint:
-                short_hint = hint[:120]
-                base += f"\nИзображение: {short_hint}"
+    # ===== 🧠 SUMMARY =====
+    summary = state.get("memory_summary")
+    if summary:
+        short = summary[-200:]
+        base += f"\nКонтекст: {short}"
 
-    return base
+    # ===== 🖼️ IMAGE CONTEXT =====
+    img = state.get("image_context")
+    if img and isinstance(img, dict):
+        hint = img.get("hint") or img.get("prompt")
+        if hint:
+            short_hint = hint[:120]
+            base += f"\nИзображение: {short_hint}"
+
+    # ===== 🔥 ФИНАЛЬНАЯ СБОРКА =====
+    if last_user_task:
+        full = f"""
+{base}
+
+Диалог:
+{history}
+
+Последняя задача:
+{last_user_task}
+
+Текущий запрос:
+{text}
+
+Если пользователь говорит "это" — используй последнюю задачу.
+"""
+    else:
+        full = f"""
+{base}
+
+Диалог:
+{history}
+
+Текущий запрос:
+{text}
+"""
+
+    return full
 
 
-# 🔥 УМНЫЙ SUMMARY (РЕАЛЬНО СЖАТЫЙ)
+# 🔥 УМНЫЙ SUMMARY (ОСТАВЛЯЕМ)
 def update_memory_summary(state, user_text, bot_reply):
     """
     Сохраняем только СМЫСЛ, а не весь диалог.
-    Бесплатно и очень компактно.
     """
 
     old = state.get("memory_summary", "")
 
     user_text = (user_text or "")[:120]
-
-    # 🔥 берём только начало ответа (смысл)
     bot_reply = (bot_reply or "")[:120]
 
-    # 🔥 короткая форма (без "Пользователь/Ответ")
     chunk = f"{user_text} → {bot_reply}"
 
     combined = (old + " | " + chunk).strip()
 
-    # 🔥 ЖЁСТКОЕ ограничение
     if len(combined) > 300:
         combined = combined[-300:]
 
