@@ -200,9 +200,6 @@ async def handle(message: types.Message):
     try:
         result = await execute(user_id, text, message.chat.id, run_with_typing)
 
-        add_dialog(user_id, "user", text)
-        add_dialog(user_id, "assistant", result.get("data", ""))
-
         if result["type"] == "text":
             await message.answer(
                 result["data"],
