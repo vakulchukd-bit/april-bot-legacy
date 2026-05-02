@@ -20,15 +20,20 @@ def detect_intent_local(text: str):
     return None
 
 
-async def detect_intent_ai(text: str):
+# 🔥 ОБНОВЛЕНО: добавили state, но НЕ ломаем логику
+async def detect_intent_ai(text: str, state: dict = None):
     # 🔥 1. Сначала пробуем бесплатно
     local = detect_intent_local(text)
     if local:
-        return local
+        return {
+            "intent": local
+        }
 
     # 🔥 2. Короткие и простые сообщения не гоняем в OpenAI
     if len(text.strip()) < 15:
-        return "text"
+        return {
+            "intent": "text"
+        }
 
     def run():
         try:
@@ -50,14 +55,19 @@ async def detect_intent_ai(text: str):
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=5  # 🔥 ограничение
+                max_tokens=5
             )
 
             intent = res.choices[0].message.content.strip().lower()
-            return intent
+
+            return {
+                "intent": intent
+            }
 
         except Exception as e:
             print("🔥 INTENT AI ERROR:", e)
-            return "text"
+            return {
+                "intent": "text"
+            }
 
     return await asyncio.to_thread(run)
