@@ -9,7 +9,8 @@ from blocks.state_manager import (
     get_state,
     get_image_context,
     set_image_context,
-    add_dialog
+    add_dialog,
+    set_dialog_state
 )
 
 from blocks.anchor_system import get_anchor
@@ -150,9 +151,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     add_dialog(user_id, "user", text)
 
-    # ===============================
-    # 🔥 AI CONTROL (ДОБАВЛЕНО)
-    # ===============================
     try:
         decision = await detect_intent_ai(text, state)
 
@@ -162,12 +160,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         if intent == "text_answer" and response:
             add_dialog(user_id, "assistant", response)
+            set_dialog_state(user_id, {"intent": "text"})
             return {"type": "text", "data": response}
 
         if intent == "math_modify":
             last = state.get("last_math")
             if last and expr:
                 last["expr"] = expr
+                set_dialog_state(user_id, {"intent": "math"})
                 return {
                     "type": "text",
                     "data": "Окей, изменила. Построить?"
@@ -181,6 +181,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             state["awaiting_graph_confirm"] = True
 
+            set_dialog_state(user_id, {"intent": "math"})
+
             return {
                 "type": "text",
                 "data": "Вижу функцию. Построить график?"
@@ -189,9 +191,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("AI ERROR:", e)
 
-    # ===============================
-    # 🔥 БЛОК ОЖИДАНИЯ (ДОБАВЛЕНО)
-    # ===============================
     if state.get("awaiting_graph_confirm"):
         t = text.lower()
 
@@ -207,9 +206,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 "data": "Скажи 'построй', чтобы построить график."
             }
 
-    # ===============================
-    # СТАРАЯ ЛОГИКА (НЕ ТРОНУТА)
-    # ===============================
     t = text.lower().strip()
 
     try:
@@ -240,6 +236,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                     add_dialog(user_id, "assistant", output_text)
 
+                    # 🔥 UPDATE DIALOG STATE
+                    if result.get("type") == "image":
+                        set_dialog_state(user_id, {"intent": "image", "mode": "active"})
+                    elif context.get("task_type") == "math":
+                        set_dialog_state(user_id, {"intent": "math"})
+                    else:
+                        set_dialog_state(user_id, {"intent": "text"})
+
                     extract_and_store_semantics(
                         state,
                         output_text,
@@ -259,14 +263,14 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
 
+        # 🔥 UPDATE DIALOG STATE
+        set_dialog_state(user_id, {"intent": "text"})
+
         extract_and_store_semantics(state, result["content"], "text")
 
     return {"type": "text", "data": result["content"]}
 
 
-# ===============================
-# ВСПОМОГАТЕЛЬНЫЕ (ВОССТАНОВЛЕНО)
-# ===============================
 def detect_output_mode(text: str):
     t = text.lower()
 
