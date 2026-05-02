@@ -173,6 +173,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     add_dialog(user_id, "user", text)
     update_memory_summary(user_id, text)
+    # ===============================
+# 🔥 INTENT RESOLVER (NEW)
+# ===============================
+history = state.get("dialog", [])
+
+decision = resolve_input(history)
+
+print("DECISION:", decision)
+
+if decision["mode"] == "execute":
+    text = decision["text"]
 
     dialog = state.get("dialog_state", {})
 
