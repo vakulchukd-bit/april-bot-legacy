@@ -149,7 +149,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     mode = get_mode(user_id)
 
     add_dialog(user_id, "user", text)
-    update_memory_summary(user_id, text)  # 🔥 NEW
+    update_memory_summary(user_id, text)
 
     # ===============================
     # 🔥 STEP 3: DIALOG ENGINE
@@ -164,12 +164,22 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             return await image_edit(user_id, text, state)
 
         if "что" in t and "картин" in t:
+
             ctx = state.get("image_context")
+
+            # 🔥 FALLBACK ИЗ EVENTS (НОВОЕ)
+            if not ctx:
+                events = state.get("events", [])
+                for e in reversed(events):
+                    if e.get("type") == "image_uploaded":
+                        ctx = {"path": e.get("path")}
+                        break
+
             if ctx and ctx.get("path"):
                 result = await analyze_image(ctx["path"], state)
 
                 add_dialog(user_id, "assistant", result)
-                update_memory_summary(user_id, result)  # 🔥 NEW
+                update_memory_summary(user_id, result)
 
                 set_dialog_state(user_id, {"intent": "image", "mode": "analyze"})
 
@@ -194,7 +204,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
         if intent == "text_answer" and response:
             add_dialog(user_id, "assistant", response)
-            update_memory_summary(user_id, response)  # 🔥 NEW
+            update_memory_summary(user_id, response)
 
             set_dialog_state(user_id, {"intent": "text"})
             return {"type": "text", "data": response}
@@ -260,9 +270,8 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     output_text = str(result.get("data", ""))
 
                     add_dialog(user_id, "assistant", output_text)
-                    update_memory_summary(user_id, output_text)  # 🔥 NEW
+                    update_memory_summary(user_id, output_text)
 
-                    # dialog state update
                     if result.get("type") == "image":
                         set_dialog_state(user_id, {"intent": "image"})
                     elif context.get("task_type") == "math":
@@ -288,7 +297,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
-        update_memory_summary(user_id, result["content"])  # 🔥 NEW
+        update_memory_summary(user_id, result["content"])
 
         set_dialog_state(user_id, {"intent": "text"})
         extract_and_store_semantics(state, result["content"], "text")
