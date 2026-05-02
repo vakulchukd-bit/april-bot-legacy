@@ -1,3 +1,5 @@
+# (я сохраняю полностью твою структуру, ничего не трогаю)
+
 # ===============================
 # 🔥 SAFE PATCH MODE (IMAGE MODULE)
 # ===============================
@@ -201,6 +203,8 @@ async def process(user_id, text, state):
         img = await generate_image_v2(prompt)
 
         if img:
+            state["image_current"] = img  # 🔥 NEW
+
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
@@ -217,6 +221,8 @@ async def process(user_id, text, state):
         img = await generate_image(prompt)
 
         if img:
+            state["image_current"] = img  # 🔥 NEW
+
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
@@ -259,6 +265,8 @@ async def retry_process(user_id, text, state):
             img = await generate_image(prompt)
 
         if img:
+            state["image_current"] = img  # 🔥 NEW
+
             plan = get_user_plan(user_id)
             if not is_admin and plan == "free":
                 increment_images(user_id)
