@@ -248,8 +248,6 @@ try:
         set_dialog_state(user_id, {"intent": "math"})
         return {"type": "text", "data": "Вижу функцию. Построить график?"}
 
-except Exception as e:
-    print("INTENT ERROR:", e)
 
 # ===============================
 # 🔥 MAIN FLOW
