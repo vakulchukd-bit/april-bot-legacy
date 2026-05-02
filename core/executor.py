@@ -203,19 +203,70 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     # ===============================
 # 🔥 SINGLE INTENT (ФИКС)
-# == 
-    # MAIN FLOW
-    try:
-        task_type = detect_task_type(text)
+# ===============================
+try:
+    decision = await detect_intent_ai(text, state)
 
-        if task_type == "math":
-            set_active_flow(user_id, {"type": "math", "original": text})
+    intent = decision.get("intent")
+    expr = decision.get("expr")
+    response = decision.get("response")
 
-        if task_type == "image_generate":
-            set_active_flow(user_id, {"type": "image"})
+    print("🧠 INTENT:", intent)
 
-        update_active_task(state, text, task_type)
+    if intent == "generate_image":
+        set_active_flow(user_id, {"type": "image"})
+        return await image_generate(user_id, text, state)
 
+    if intent == "edit_image":
+        set_active_flow(user_id, {"type": "image"})
+        return await image_edit(user_id, text, state)
+
+    if intent == "analyze_image":
+        ctx = state.get("image_context")
+        if ctx and ctx.get("path"):
+            result = await analyze_image(ctx["path"], state)
+            return {"type": "text", "data": result}
+
+    if intent == "text_answer" and response:
+        add_dialog(user_id, "assistant", response)
+        update_memory_summary(user_id, response)
+        set_dialog_state(user_id, {"intent": "text"})
+        return {"type": "text", "data": response}
+
+    if intent == "math_modify":
+        set_active_flow(user_id, {"type": "math", "original": text})
+        last = state.get("last_math")
+        if last and expr:
+            last["expr"] = expr
+            set_dialog_state(user_id, {"intent": "math"})
+            return {"type": "text", "data": "Окей, изменила. Построить?"}
+
+    if intent == "math_graph" and expr:
+        set_active_flow(user_id, {"type": "math", "original": text})
+        state["last_math"] = {"type": "function", "expr": expr}
+        state["awaiting_graph_confirm"] = True
+        set_dialog_state(user_id, {"intent": "math"})
+        return {"type": "text", "data": "Вижу функцию. Построить график?"}
+
+except Exception as e:
+    print("INTENT ERROR:", e)
+
+# ===============================
+# 🔥 MAIN FLOW
+# ===============================
+try:
+    task_type = detect_task_type(text)
+
+    if task_type == "math":
+        set_active_flow(user_id, {"type": "math", "original": text})
+
+    if task_type == "image_generate":
+        set_active_flow(user_id, {"type": "image"})
+
+    update_active_task(state, text, task_type)
+
+except Exception as e:
+    print("ACTIVE TASK ERROR:", e)
     except Exception as e:
         print("ACTIVE TASK ERROR:", e)
 
