@@ -205,7 +205,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
 
 # ===============================
-    # 🔥 MAIN FLOW (FIXED)
+    # 🔥 MAIN FLOW (FIXED + CONTEXT)
     # ===============================
     try:
         task_type = detect_task_type(text)
@@ -262,9 +262,12 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"ROOM ERROR [{room.name}]:", e)
 
+    # 🔥 ВОТ ОН ФИКС (КОНТЕКСТ)
+    context_text = build_context_text(user_id, text, state)
+
     result = await run_with_typing(
         chat_id,
-        text_process(user_id, text, state, energy)
+        text_process(user_id, context_text, state, energy)
     )
 
     if result and result.get("content"):
