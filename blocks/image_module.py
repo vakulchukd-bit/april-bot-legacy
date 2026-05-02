@@ -23,11 +23,15 @@ def patch_image_generate(prompt):
 # 🔥 PATCH: будущая логика генерации
 def patch_image_module_future(*args, **kwargs):
     return None
+
 import base64
 import asyncio
 from openai import OpenAI
 
 from storage import get_user_plan, get_limits, get_conn, today
+
+# 🔥 NEW (META)
+from blocks.state_manager import set_last_entity
 
 client = OpenAI()
 
@@ -79,7 +83,6 @@ def extract_image_prompt(text: str):
 
     t = t.strip()
 
-    # защита от длинных промптов
     if len(t) > 300:
         t = t[:300]
 
@@ -177,8 +180,6 @@ def increment_images(user_id):
 async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
-
-        # 🔥 ПРИМЕНЯЕМ EXTRACTOR
         prompt = extract_image_prompt(prompt)
 
         if not prompt:
@@ -203,7 +204,16 @@ async def process(user_id, text, state):
         img = await generate_image_v2(prompt)
 
         if img:
-            state["image_current"] = img  # 🔥 NEW
+            state["image_current"] = img
+
+            # 🔥 META SAVE
+            set_last_entity(user_id, {
+                "type": "image",
+                "data": img,
+                "source": "v2"
+            })
+
+            print("🖼 IMAGE SAVED TO META (V2)")
 
             if not is_admin and plan == "free":
                 increment_images(user_id)
@@ -221,7 +231,16 @@ async def process(user_id, text, state):
         img = await generate_image(prompt)
 
         if img:
-            state["image_current"] = img  # 🔥 NEW
+            state["image_current"] = img
+
+            # 🔥 META SAVE
+            set_last_entity(user_id, {
+                "type": "image",
+                "data": img,
+                "source": "v1"
+            })
+
+            print("🖼 IMAGE SAVED TO META (V1)")
 
             if not is_admin and plan == "free":
                 increment_images(user_id)
@@ -265,7 +284,16 @@ async def retry_process(user_id, text, state):
             img = await generate_image(prompt)
 
         if img:
-            state["image_current"] = img  # 🔥 NEW
+            state["image_current"] = img
+
+            # 🔥 META SAVE
+            set_last_entity(user_id, {
+                "type": "image",
+                "data": img,
+                "source": "retry"
+            })
+
+            print("🖼 IMAGE SAVED TO META (RETRY)")
 
             plan = get_user_plan(user_id)
             if not is_admin and plan == "free":
