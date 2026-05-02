@@ -8,6 +8,9 @@ from openai import OpenAI
 
 from storage import get_user_plan, get_limits, get_conn, today
 
+# 🔥 NEW (META)
+from blocks.state_manager import set_last_entity
+
 client = OpenAI()
 
 
@@ -123,17 +126,38 @@ async def process(user_id, prompt, state):
 
         img = None
 
-        # 🔥 1. ПРИОРИТЕТ: текущая картинка в памяти
-        image_bytes = state.get("image_current")
+        # ===============================
+        # 🔥 1. META ПРИОРИТЕТ (НОВОЕ)
+        # ===============================
+        meta = state.get("meta", {})
+        entity = meta.get("last_entity", {})
 
+        image_bytes = None
+
+        if entity.get("type") == "image" and entity.get("data"):
+            print("🧠 EDIT FROM META")
+            image_bytes = entity.get("data")
+
+        # ===============================
+        # 🔥 2. FALLBACK: state
+        # ===============================
+        if not image_bytes:
+            image_bytes = state.get("image_current")
+            if image_bytes:
+                print("🧠 EDIT FROM STATE")
+
+        # ===============================
+        # 🔥 3. EDIT FROM BYTES
+        # ===============================
         if image_bytes:
-            print("🧠 EDIT FROM MEMORY")
             img = await asyncio.wait_for(
                 edit_image_bytes(image_bytes, prompt),
                 timeout=40
             )
 
-        # 🔥 2. FALLBACK: через path (старый способ)
+        # ===============================
+        # 🔥 4. FALLBACK: PATH
+        # ===============================
         if not img:
             ctx = state.get("image_context") or {}
             path = ctx.get("path")
@@ -146,6 +170,7 @@ async def process(user_id, prompt, state):
                 )
 
         if not img:
+            print("❌ EDIT FAILED")
             return {
                 "type": "error",
                 "data": None,
@@ -158,7 +183,16 @@ async def process(user_id, prompt, state):
         # 🔥 СОХРАНЯЕМ КАК НОВУЮ ТЕКУЩУЮ
         state["image_current"] = img
 
-        # 🔥 обновляем контекст (очень важно)
+        # 🔥 META UPDATE (КЛЮЧЕВОЕ)
+        set_last_entity(user_id, {
+            "type": "image",
+            "data": img,
+            "source": "edited"
+        })
+
+        print("🧠 META UPDATED AFTER EDIT")
+
+        # 🔥 обновляем контекст
         state["image_context"] = {
             "type": "generated",
             "hint": prompt
@@ -170,6 +204,7 @@ async def process(user_id, prompt, state):
         }
 
     except asyncio.TimeoutError:
+        print("⏱ EDIT TIMEOUT")
         return {
             "type": "error",
             "data": None,
@@ -177,6 +212,7 @@ async def process(user_id, prompt, state):
         }
 
     except Exception as e:
+        print("🔥 EDIT ERROR:", e)
         return {
             "type": "error",
             "data": None,
