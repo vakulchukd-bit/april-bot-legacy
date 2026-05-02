@@ -82,3 +82,12 @@ def add_dialog(user_id, role, content):
     # 🔥 ОГРАНИЧЕНИЕ (последние 6 сообщений)
     if len(dialog) > 6:
         dialog.pop(0)
+
+
+# ===== DIALOG STATE (NEW) =====
+def get_dialog_state(user_id):
+    return get_state(user_id).get("dialog_state", {})
+
+
+def set_dialog_state(user_id, data):
+    get_state(user_id)["dialog_state"] = data
