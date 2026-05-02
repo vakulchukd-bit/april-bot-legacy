@@ -265,62 +265,60 @@ try:
 
 except Exception as e:
     print("ACTIVE TASK ERROR:", e)
+
+energy = get_energy(user_id)
+
+context = {
+    "chat_id": chat_id,
+    "state": state,
+    "mode": mode,
+    "task_type": detect_task_type(text),
+    "energy": energy,
+    "output_mode": detect_output_mode(text)
+}
+
+for room in ROOMS:
+    try:
+        if room.can_handle(text, context):
+            result = await room.handle(user_id, text, context, run_with_typing)
+
+            if result and result.get("type"):
+                output_text = str(result.get("data", ""))
+
+                add_dialog(user_id, "assistant", output_text)
+                update_memory_summary(user_id, output_text)
+
+                if result.get("type") == "image":
+                    set_active_flow(user_id, {"type": "image"})
+                    set_dialog_state(user_id, {"intent": "image"})
+                elif context.get("task_type") == "math":
+                    set_dialog_state(user_id, {"intent": "math"})
+                else:
+                    set_dialog_state(user_id, {"intent": "text"})
+
+                extract_and_store_semantics(
+                    state,
+                    output_text,
+                    result.get("type", "text")
+                )
+
+                return result
+
     except Exception as e:
-        print("ACTIVE TASK ERROR:", e)
+        print(f"ROOM ERROR [{room.name}]:", e)
 
-    energy = get_energy(user_id)
+result = await run_with_typing(
+    chat_id,
+    text_process(user_id, text, state, energy)
+)
 
-    context = {
-        "chat_id": chat_id,
-        "state": state,
-        "mode": mode,
-        "task_type": detect_task_type(text),
-        "energy": energy,
-        "output_mode": detect_output_mode(text)
-    }
+if result and result.get("content"):
+    add_dialog(user_id, "assistant", result["content"])
+    update_memory_summary(user_id, result["content"])
+    set_dialog_state(user_id, {"intent": "text"})
+    extract_and_store_semantics(state, result["content"], "text")
 
-    for room in ROOMS:
-        try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
-
-                if result and result.get("type"):
-                    output_text = str(result.get("data", ""))
-
-                    add_dialog(user_id, "assistant", output_text)
-                    update_memory_summary(user_id, output_text)
-
-                    if result.get("type") == "image":
-                        set_active_flow(user_id, {"type": "image"})
-                        set_dialog_state(user_id, {"intent": "image"})
-                    elif context.get("task_type") == "math":
-                        set_dialog_state(user_id, {"intent": "math"})
-                    else:
-                        set_dialog_state(user_id, {"intent": "text"})
-
-                    extract_and_store_semantics(
-                        state,
-                        output_text,
-                        result.get("type", "text")
-                    )
-
-                    return result
-
-        except Exception as e:
-            print(f"ROOM ERROR [{room.name}]:", e)
-
-    result = await run_with_typing(
-        chat_id,
-        text_process(user_id, text, state, energy)
-    )
-
-    if result and result.get("content"):
-        add_dialog(user_id, "assistant", result["content"])
-        update_memory_summary(user_id, result["content"])
-        set_dialog_state(user_id, {"intent": "text"})
-        extract_and_store_semantics(state, result["content"], "text")
-
-    return {"type": "text", "data": result["content"]}
+return {"type": "text", "data": result["content"]}
 
 
 # ===============================
