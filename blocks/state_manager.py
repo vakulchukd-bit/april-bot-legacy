@@ -28,7 +28,8 @@ def get_state(user_id):
             "last_prompt": None,
             "task_type": None,
             "memory_summary": "",
-            "dialog_state": {}
+            "dialog_state": {},
+            "active_flow": None  # 🔥 NEW
         }
     return state[user_id]
 
@@ -107,3 +108,18 @@ def get_dialog_state(user_id):
 
 def set_dialog_state(user_id, data):
     get_state(user_id)["dialog_state"] = data
+
+
+# ===============================
+# 🔥 ACTIVE FLOW (NEW)
+# ===============================
+def set_active_flow(user_id, flow: dict):
+    get_state(user_id)["active_flow"] = flow
+
+
+def get_active_flow(user_id):
+    return get_state(user_id).get("active_flow")
+
+
+def clear_active_flow(user_id):
+    get_state(user_id)["active_flow"] = None
