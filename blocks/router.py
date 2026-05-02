@@ -27,6 +27,24 @@ async def route_request(text, ctx):
     try:
         t = text.lower()
 
+        # ===============================
+        # 🔥 STEP 6: CONTEXT PRIORITY
+        # ===============================
+        if ctx:
+            dialog = ctx.get("dialog_state") or {}
+
+            # IMAGE CONTEXT
+            if dialog.get("intent") == "image":
+                if any(w in t for w in ["измени", "добавь", "убери", "сделай"]):
+                    return "image_edit"
+                if "что" in t and "картин" in t:
+                    return "image_analyze"
+                return "image_generate"
+
+            # MATH CONTEXT
+            if dialog.get("intent") == "math":
+                return "math"
+
         # 🔥 1. Сначала локально (БЕСПЛАТНО)
         local = detect_intent_local(text)
         if local:
