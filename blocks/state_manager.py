@@ -5,6 +5,19 @@ state = {}
 # 🔥 ДОБАВИЛИ ОТДЕЛЬНОЕ ХРАНИЛИЩЕ (стабильность)
 image_storage = {}
 
+ADMIN_ID = 2016592532
+
+
+def get_dialog_limit(user_id, plan):
+    if user_id == ADMIN_ID:
+        return 50  # 🔥 админ почти без лимита
+
+    return {
+        "free": 10,
+        "lite": 20,
+        "premium": 30
+    }.get(plan, 10)
+
 
 def get_state(user_id):
     if user_id not in state:
@@ -14,7 +27,8 @@ def get_state(user_id):
             "awaiting": False,
             "last_prompt": None,
             "task_type": None,
-            "memory_summary": ""  # 🔥 ДОБАВИЛИ
+            "memory_summary": "",
+            "dialog_state": {}
         }
     return state[user_id]
 
@@ -54,37 +68,39 @@ def get_last_prompt(user_id):
 def update_memory_summary(user_id, new_text):
     """
     🔥 Упрощённое накопление смысла
-    (пока без GPT — безопасно и дешево)
     """
-    state = get_state(user_id)
+    state_obj = get_state(user_id)
 
-    current = state.get("memory_summary", "")
-
-    # 🔥 добавляем новый смысл
+    current = state_obj.get("memory_summary", "")
     updated = (current + " " + new_text).strip()
 
-    # 🔥 ограничиваем размер (важно!)
     if len(updated) > 500:
         updated = updated[-500:]
 
-    state["memory_summary"] = updated
+    state_obj["memory_summary"] = updated
 
 
 # ===== DIALOG =====
+from storage import get_user_plan
+
 def add_dialog(user_id, role, content):
-    dialog = get_state(user_id)["dialog"]
+    state_obj = get_state(user_id)
+    dialog = state_obj["dialog"]
 
     dialog.append({
         "role": role,
         "content": content
     })
 
-    # 🔥 ОГРАНИЧЕНИЕ (последние 6 сообщений)
-    if len(dialog) > 6:
+    # 🔥 ДИНАМИЧЕСКИЙ ЛИМИТ
+    plan = get_user_plan(user_id)
+    limit = get_dialog_limit(user_id, plan)
+
+    if len(dialog) > limit:
         dialog.pop(0)
 
 
-# ===== DIALOG STATE (NEW) =====
+# ===== DIALOG STATE =====
 def get_dialog_state(user_id):
     return get_state(user_id).get("dialog_state", {})
 
