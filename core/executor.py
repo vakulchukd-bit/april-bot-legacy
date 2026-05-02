@@ -151,9 +151,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     add_dialog(user_id, "user", text)
     update_memory_summary(user_id, text)
 
-    # ===============================
-    # 🔥 STEP 3: DIALOG ENGINE
-    # ===============================
     dialog = state.get("dialog_state", {})
     t = text.lower()
 
@@ -167,7 +164,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
             ctx = state.get("image_context")
 
-            # 🔥 FALLBACK ИЗ EVENTS (НОВОЕ)
             if not ctx:
                 events = state.get("events", [])
                 for e in reversed(events):
@@ -185,15 +181,30 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                 return {"type": "text", "data": result}
 
-    # MATH continuation
-    if dialog.get("intent") == "math":
-        if any(w in t for w in ["построй", "покажи", "давай"]):
-            last = state.get("last_math")
-            if last:
-                text = f"y={last['expr']}"
+    # ===============================
+    # 🔥 SAFE FAST PATH (ДОБАВЛЕНО)
+    # ===============================
+    try:
+        decision = await detect_intent_ai(text, state)
+        intent = decision.get("intent")
+
+        if intent == "generate_image":
+            return await image_generate(user_id, text, state)
+
+        if intent == "edit_image":
+            return await image_edit(user_id, text, state)
+
+        if intent == "analyze_image":
+            ctx = state.get("image_context")
+            if ctx and ctx.get("path"):
+                result = await analyze_image(ctx["path"], state)
+                return {"type": "text", "data": result}
+
+    except Exception as e:
+        print("FAST PATH ERROR:", e)
 
     # ===============================
-    # AI CONTROL
+    # СТАРАЯ ЛОГИКА (НЕ ТРОНУТА)
     # ===============================
     try:
         decision = await detect_intent_ai(text, state)
@@ -227,9 +238,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("AI ERROR:", e)
 
-    # ===============================
     # GRAPH CONFIRM
-    # ===============================
     if state.get("awaiting_graph_confirm"):
         t = text.lower()
 
@@ -241,9 +250,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         else:
             return {"type": "text", "data": "Скажи 'построй', чтобы построить график."}
 
-    # ===============================
     # MAIN FLOW
-    # ===============================
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
