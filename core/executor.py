@@ -11,7 +11,10 @@ from blocks.state_manager import (
     set_image_context,
     add_dialog,
     set_dialog_state,
-    update_memory_summary  # 🔥 NEW
+    update_memory_summary,
+    get_active_flow,
+    set_active_flow,
+    clear_active_flow
 )
 
 from blocks.anchor_system import get_anchor
@@ -148,11 +151,28 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
+    # ===============================
+    # 🔥 ACTIVE FLOW CONTROL (NEW)
+    # ===============================
+    flow = get_active_flow(user_id)
+    t = text.lower()
+
+    if flow:
+        if flow.get("type") == "math":
+            if any(x in t for x in ["объясни", "покажи", "таблица", "график"]):
+                text = flow.get("original", text)
+
+        if flow.get("type") == "image":
+            if any(x in t for x in ["добавь", "измени", "убери"]):
+                return await image_edit(user_id, text, state)
+
+    if any(x in t for x in ["как тебя зовут", "кто ты", "давай поговорим"]):
+        clear_active_flow(user_id)
+
     add_dialog(user_id, "user", text)
     update_memory_summary(user_id, text)
 
     dialog = state.get("dialog_state", {})
-    t = text.lower()
 
     # IMAGE continuation
     if dialog.get("intent") == "image":
@@ -181,17 +201,17 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                 return {"type": "text", "data": result}
 
-    # ===============================
-    # 🔥 SAFE FAST PATH (ДОБАВЛЕНО)
-    # ===============================
+    # FAST PATH
     try:
         decision = await detect_intent_ai(text, state)
         intent = decision.get("intent")
 
         if intent == "generate_image":
+            set_active_flow(user_id, {"type": "image"})
             return await image_generate(user_id, text, state)
 
         if intent == "edit_image":
+            set_active_flow(user_id, {"type": "image"})
             return await image_edit(user_id, text, state)
 
         if intent == "analyze_image":
@@ -203,9 +223,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     except Exception as e:
         print("FAST PATH ERROR:", e)
 
-    # ===============================
-    # СТАРАЯ ЛОГИКА (НЕ ТРОНУТА)
-    # ===============================
+    # OLD LOGIC
     try:
         decision = await detect_intent_ai(text, state)
 
@@ -216,11 +234,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         if intent == "text_answer" and response:
             add_dialog(user_id, "assistant", response)
             update_memory_summary(user_id, response)
-
             set_dialog_state(user_id, {"intent": "text"})
             return {"type": "text", "data": response}
 
         if intent == "math_modify":
+            set_active_flow(user_id, {"type": "math", "original": text})
             last = state.get("last_math")
             if last and expr:
                 last["expr"] = expr
@@ -228,32 +246,27 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 return {"type": "text", "data": "Окей, изменила. Построить?"}
 
         if intent == "math_graph" and expr:
+            set_active_flow(user_id, {"type": "math", "original": text})
             state["last_math"] = {"type": "function", "expr": expr}
             state["awaiting_graph_confirm"] = True
-
             set_dialog_state(user_id, {"intent": "math"})
-
             return {"type": "text", "data": "Вижу функцию. Построить график?"}
 
     except Exception as e:
         print("AI ERROR:", e)
 
-    # GRAPH CONFIRM
-    if state.get("awaiting_graph_confirm"):
-        t = text.lower()
-
-        if any(w in t for w in ["да", "построй", "ок", "давай"]):
-            state["awaiting_graph_confirm"] = False
-            last = state.get("last_math")
-            if last:
-                text = f"y={last['expr']}"
-        else:
-            return {"type": "text", "data": "Скажи 'построй', чтобы построить график."}
-
     # MAIN FLOW
     try:
         task_type = detect_task_type(text)
+
+        if task_type == "math":
+            set_active_flow(user_id, {"type": "math", "original": text})
+
+        if task_type == "image_generate":
+            set_active_flow(user_id, {"type": "image"})
+
         update_active_task(state, text, task_type)
+
     except Exception as e:
         print("ACTIVE TASK ERROR:", e)
 
@@ -280,6 +293,7 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                     update_memory_summary(user_id, output_text)
 
                     if result.get("type") == "image":
+                        set_active_flow(user_id, {"type": "image"})
                         set_dialog_state(user_id, {"intent": "image"})
                     elif context.get("task_type") == "math":
                         set_dialog_state(user_id, {"intent": "math"})
@@ -305,7 +319,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
         update_memory_summary(user_id, result["content"])
-
         set_dialog_state(user_id, {"intent": "text"})
         extract_and_store_semantics(state, result["content"], "text")
 
