@@ -66,7 +66,7 @@ def patch_executor_hook(*args, **kwargs):
 
 
 # ===============================
-# 🔥 ACTIVE TASK (ВОССТАНОВЛЕНО)
+# 🔥 ACTIVE TASK
 # ===============================
 def update_active_task(state: dict, text: str, task_type: str):
     t = text.lower()
@@ -135,9 +135,7 @@ def extract_and_store_semantics(state: dict, text: str, result_type: str = "text
         state["last_code"] = text
 
     if result_type == "image":
-        state["last_image"] = {
-            "exists": True
-        }
+        state["last_image"] = {"exists": True}
 
 
 # ===============================
@@ -151,6 +149,38 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     add_dialog(user_id, "user", text)
 
+    # ===============================
+    # 🔥 STEP 3: DIALOG ENGINE
+    # ===============================
+    dialog = state.get("dialog_state", {})
+    t = text.lower()
+
+    # IMAGE continuation
+    if dialog.get("intent") == "image":
+
+        if any(w in t for w in ["сделай", "измени", "добавь", "убери"]):
+            return await image_edit(user_id, text, state)
+
+        if "что" in t and "картин" in t:
+            ctx = state.get("image_context")
+            if ctx and ctx.get("path"):
+                result = await analyze_image(ctx["path"], state)
+
+                add_dialog(user_id, "assistant", result)
+                set_dialog_state(user_id, {"intent": "image", "mode": "analyze"})
+
+                return {"type": "text", "data": result}
+
+    # MATH continuation
+    if dialog.get("intent") == "math":
+        if any(w in t for w in ["построй", "покажи", "давай"]):
+            last = state.get("last_math")
+            if last:
+                text = f"y={last['expr']}"
+
+    # ===============================
+    # AI CONTROL
+    # ===============================
     try:
         decision = await detect_intent_ai(text, state)
 
@@ -168,46 +198,36 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
             if last and expr:
                 last["expr"] = expr
                 set_dialog_state(user_id, {"intent": "math"})
-                return {
-                    "type": "text",
-                    "data": "Окей, изменила. Построить?"
-                }
+                return {"type": "text", "data": "Окей, изменила. Построить?"}
 
         if intent == "math_graph" and expr:
-            state["last_math"] = {
-                "type": "function",
-                "expr": expr
-            }
-
+            state["last_math"] = {"type": "function", "expr": expr}
             state["awaiting_graph_confirm"] = True
 
             set_dialog_state(user_id, {"intent": "math"})
 
-            return {
-                "type": "text",
-                "data": "Вижу функцию. Построить график?"
-            }
+            return {"type": "text", "data": "Вижу функцию. Построить график?"}
 
     except Exception as e:
         print("AI ERROR:", e)
 
+    # ===============================
+    # GRAPH CONFIRM
+    # ===============================
     if state.get("awaiting_graph_confirm"):
         t = text.lower()
 
         if any(w in t for w in ["да", "построй", "ок", "давай"]):
             state["awaiting_graph_confirm"] = False
-
             last = state.get("last_math")
             if last:
                 text = f"y={last['expr']}"
         else:
-            return {
-                "type": "text",
-                "data": "Скажи 'построй', чтобы построить график."
-            }
+            return {"type": "text", "data": "Скажи 'построй', чтобы построить график."}
 
-    t = text.lower().strip()
-
+    # ===============================
+    # MAIN FLOW
+    # ===============================
     try:
         task_type = detect_task_type(text)
         update_active_task(state, text, task_type)
@@ -231,24 +251,19 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 result = await room.handle(user_id, text, context, run_with_typing)
 
                 if result and result.get("type"):
-
                     output_text = str(result.get("data", ""))
 
                     add_dialog(user_id, "assistant", output_text)
 
-                    # 🔥 UPDATE DIALOG STATE
+                    # dialog state update
                     if result.get("type") == "image":
-                        set_dialog_state(user_id, {"intent": "image", "mode": "active"})
+                        set_dialog_state(user_id, {"intent": "image"})
                     elif context.get("task_type") == "math":
                         set_dialog_state(user_id, {"intent": "math"})
                     else:
                         set_dialog_state(user_id, {"intent": "text"})
 
-                    extract_and_store_semantics(
-                        state,
-                        output_text,
-                        result.get("type", "text")
-                    )
+                    extract_and_store_semantics(state, output_text, result.get("type", "text"))
 
                     return result
 
@@ -262,15 +277,15 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     if result and result.get("content"):
         add_dialog(user_id, "assistant", result["content"])
-
-        # 🔥 UPDATE DIALOG STATE
         set_dialog_state(user_id, {"intent": "text"})
-
         extract_and_store_semantics(state, result["content"], "text")
 
     return {"type": "text", "data": result["content"]}
 
 
+# ===============================
+# HELPERS
+# ===============================
 def detect_output_mode(text: str):
     t = text.lower()
 
