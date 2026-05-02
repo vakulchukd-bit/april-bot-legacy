@@ -29,7 +29,16 @@ def get_state(user_id):
             "task_type": None,
             "memory_summary": "",
             "dialog_state": {},
-            "active_flow": None  # 🔥 NEW
+            "active_flow": None,  # 🔥 NEW
+
+            # ===============================
+            # 🔥 META (ЕДИНАЯ СВЯЗКА ВСЕГО)
+            # ===============================
+            "meta": {
+                "last_intent": None,
+                "last_action": None,
+                "last_entity": None  # 🔥 универсально: image / graph / code / etc
+            }
         }
     return state[user_id]
 
@@ -93,6 +102,16 @@ def add_dialog(user_id, role, content):
         "content": content
     })
 
+    # 🔥 META UPDATE (СВЯЗКА ДИАЛОГА)
+    meta = state_obj.get("meta", {})
+
+    if role == "user":
+        meta["last_user_message"] = content
+    else:
+        meta["last_bot_message"] = content
+
+    state_obj["meta"] = meta
+
     # 🔥 ДИНАМИЧЕСКИЙ ЛИМИТ
     plan = get_user_plan(user_id)
     limit = get_dialog_limit(user_id, plan)
@@ -123,3 +142,20 @@ def get_active_flow(user_id):
 
 def clear_active_flow(user_id):
     get_state(user_id)["active_flow"] = None
+
+
+# ===============================
+# 🔥 META HELPERS (НОВОЕ)
+# ===============================
+def set_last_entity(user_id, entity: dict):
+    state_obj = get_state(user_id)
+    meta = state_obj.get("meta", {})
+
+    meta["last_entity"] = entity
+    state_obj["meta"] = meta
+
+    print("🧠 META UPDATED:", meta)
+
+
+def get_last_entity(user_id):
+    return get_state(user_id).get("meta", {}).get("last_entity")
