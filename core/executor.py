@@ -1,3 +1,5 @@
+from blocks.intent_resolver import resolve_input
+
 from blocks.response_mode import detect_response_mode
 from blocks.text_module import process as text_process
 
