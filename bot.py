@@ -162,7 +162,18 @@ async def handle(message: types.Message):
             "path": path
         })
 
-        await message.answer("📸 Изображение получено. Можешь спросить про него.")
+        state = get_state(user_id)
+
+        # 🔥 НОВОЕ: event система
+        from blocks.image_system import analyze_image
+        from blocks.event_system import add_event
+
+        analysis = await analyze_image(path, state)
+
+        # 🔥 теперь это событие, а не просто текст
+        add_event(user_id, "user", "image_uploaded", analysis)
+
+        await message.answer("📸 Изображение получено. Можешь работать с ним.")
         return
 
     state = get_state(user_id)
