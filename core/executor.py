@@ -205,76 +205,75 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
 
 # ===============================
-# 🔥 MAIN FLOW
-# ===============================
-
-try:
-    task_type = detect_task_type(text)
-
-    if task_type == "math":
-        set_active_flow(user_id, {"type": "math", "original": text})
-
-    if task_type == "image_generate":
-        set_active_flow(user_id, {"type": "image"})
-
-    update_active_task(state, text, task_type)
-
-except Exception as e:
-    print("ACTIVE TASK ERROR:", e)
-
-energy = get_energy(user_id)
-
-context = {
-    "chat_id": chat_id,
-    "state": state,
-    "mode": mode,
-    "task_type": detect_task_type(text),
-    "energy": energy,
-    "output_mode": detect_output_mode(text)
-}
-
-for room in ROOMS:
+    # 🔥 MAIN FLOW (FIXED)
+    # ===============================
     try:
-        if room.can_handle(text, context):
-            result = await room.handle(user_id, text, context, run_with_typing)
+        task_type = detect_task_type(text)
 
-            if result and result.get("type"):
-                output_text = str(result.get("data", ""))
+        if task_type == "math":
+            set_active_flow(user_id, {"type": "math", "original": text})
 
-                add_dialog(user_id, "assistant", output_text)
-                update_memory_summary(user_id, output_text)
+        if task_type == "image_generate":
+            set_active_flow(user_id, {"type": "image"})
 
-                if result.get("type") == "image":
-                    set_active_flow(user_id, {"type": "image"})
-                    set_dialog_state(user_id, {"intent": "image"})
-                elif context.get("task_type") == "math":
-                    set_dialog_state(user_id, {"intent": "math"})
-                else:
-                    set_dialog_state(user_id, {"intent": "text"})
-
-                extract_and_store_semantics(
-                    state,
-                    output_text,
-                    result.get("type", "text")
-                )
-
-                return result
+        update_active_task(state, text, task_type)
 
     except Exception as e:
-        print(f"ROOM ERROR [{room.name}]:", e)
+        print("ACTIVE TASK ERROR:", e)
 
-result = await run_with_typing(
-    chat_id,
-    text_process(user_id, text, state, energy)
-)
+    energy = get_energy(user_id)
 
-if result and result.get("content"):
-    add_dialog(user_id, "assistant", result["content"])
-    update_memory_summary(user_id, result["content"])
-    set_dialog_state(user_id, {"intent": "text"})
-    extract_and_store_semantics(state, result["content"], "text")
+    context = {
+        "chat_id": chat_id,
+        "state": state,
+        "mode": mode,
+        "task_type": detect_task_type(text),
+        "energy": energy,
+        "output_mode": detect_output_mode(text)
+    }
 
-return {"type": "text", "data": result["content"]}
+    for room in ROOMS:
+        try:
+            if room.can_handle(text, context):
+                result = await room.handle(user_id, text, context, run_with_typing)
+
+                if result and result.get("type"):
+                    output_text = str(result.get("data", ""))
+
+                    add_dialog(user_id, "assistant", output_text)
+                    update_memory_summary(user_id, output_text)
+
+                    if result.get("type") == "image":
+                        set_active_flow(user_id, {"type": "image"})
+                        set_dialog_state(user_id, {"intent": "image"})
+                    elif context.get("task_type") == "math":
+                        set_dialog_state(user_id, {"intent": "math"})
+                    else:
+                        set_dialog_state(user_id, {"intent": "text"})
+
+                    extract_and_store_semantics(
+                        state,
+                        output_text,
+                        result.get("type", "text")
+                    )
+
+                    return result
+
+        except Exception as e:
+            print(f"ROOM ERROR [{room.name}]:", e)
+
+    result = await run_with_typing(
+        chat_id,
+        text_process(user_id, text, state, energy)
+    )
+
+    if result and result.get("content"):
+        add_dialog(user_id, "assistant", result["content"])
+        update_memory_summary(user_id, result["content"])
+        set_dialog_state(user_id, {"intent": "text"})
+        extract_and_store_semantics(state, result["content"], "text")
+
+    return {"type": "text", "data": result["content"]}
 
 
 # ===============================
