@@ -1,5 +1,6 @@
 # blocks/image_engine.py
 import asyncio
+import tempfile
 
 # берём существующие функции, НИЧЕГО не удаляем
 from blocks.image_module import generate_image_v2, generate_image
@@ -29,6 +30,18 @@ def is_complex_prompt(text: str) -> bool:
     return any(x in t for x in triggers)
 
 
+# ===== СОХРАНЕНИЕ ФАЙЛА =====
+def save_temp_image(image_bytes):
+    try:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        tmp.write(image_bytes)
+        tmp.flush()
+        return tmp.name
+    except Exception as e:
+        print("⚠️ FILE SAVE ERROR:", e)
+        return None
+
+
 # ===== GENERATE =====
 async def generate(user_id, prompt, state):
     try:
@@ -49,9 +62,21 @@ async def generate(user_id, prompt, state):
         if not img:
             return {"type": "error", "data": "⚠️ Не удалось создать изображение"}
 
-        # 🔥 SAVE
+        # 🔥 SAVE BYTES
         state["image_current"] = img
 
+        # 🔥 СОХРАНЯЕМ ФАЙЛ
+        path = save_temp_image(img)
+
+        if path:
+            state["image_context"] = {
+                "type": "generated",
+                "path": path,
+                "hint": prompt
+            }
+            print(f"📂 ENGINE FILE SAVED: {path}")
+
+        # 🔥 META
         set_last_entity(user_id, {
             "type": "image",
             "data": img,
@@ -111,11 +136,21 @@ async def edit(user_id, image_bytes, prompt, state):
             print("❌ ENGINE EDIT FINAL FAIL")
             return {"type": "error", "data": "⚠️ Не удалось изменить изображение"}
 
-        # ===============================
-        # 🔥 SAVE ПОСЛЕ EDIT
-        # ===============================
+        # 🔥 SAVE BYTES
         state["image_current"] = img
 
+        # 🔥 ОБНОВЛЯЕМ ФАЙЛ
+        path = save_temp_image(img)
+
+        if path:
+            state["image_context"] = {
+                "type": "edited",
+                "path": path,
+                "hint": prompt
+            }
+            print(f"📂 ENGINE FILE UPDATED: {path}")
+
+        # 🔥 META
         set_last_entity(user_id, {
             "type": "image",
             "data": img,
