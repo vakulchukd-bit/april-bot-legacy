@@ -47,10 +47,22 @@ async def generate(user_id, prompt, state):
     try:
         use_advanced = is_complex_prompt(prompt)
 
+        img = None
+
+        # ===============================
+        # 🔥 2.0 ROUTE (СЛОЖНЫЕ ЗАДАЧИ)
+        # ===============================
         if use_advanced:
-            print("🧠 ENGINE: using ADVANCED (future 2.0)")
-            img = await generate_image_v2(prompt)
-        else:
+            print("🧠 ENGINE: 2.0 ACTIVE (complex prompt)")
+            try:
+                img = await generate_image_v2(prompt)  # 🔥 тут потом легко заменить на 2.0
+            except Exception as e:
+                print("⚠️ 2.0 GENERATE ERROR:", e)
+
+        # ===============================
+        # 🔥 ОБЫЧНЫЙ РЕЖИМ
+        # ===============================
+        if not img:
             print("⚡ ENGINE: using FAST V2")
             img = await generate_image_v2(prompt)
 
@@ -95,19 +107,35 @@ async def generate(user_id, prompt, state):
 # ===== EDIT =====
 async def edit(user_id, image_bytes, prompt, state):
     try:
-        print("🧠 ENGINE EDIT (priority advanced)")
+        print("🧠 ENGINE EDIT START")
 
         img = None
 
+        use_advanced = is_complex_prompt(prompt)
+
         # ===============================
-        # 🔥 1. ПЫТАЕМСЯ ЧЕРЕЗ BYTES
+        # 🔥 2.0 EDIT (СЛОЖНЫЕ ЗАДАЧИ)
         # ===============================
-        if image_bytes:
+        if use_advanced and image_bytes:
+            print("🧠 ENGINE: 2.0 EDIT ACTIVE")
             try:
                 img = await asyncio.wait_for(
                     edit_image_bytes(image_bytes, prompt),
                     timeout=40
                 )
+            except Exception as e:
+                print("⚠️ 2.0 EDIT ERROR:", e)
+
+        # ===============================
+        # 🔥 1. BYTES
+        # ===============================
+        if not img and image_bytes:
+            try:
+                img = await asyncio.wait_for(
+                    edit_image_bytes(image_bytes, prompt),
+                    timeout=40
+                )
+                print("🧠 EDIT FROM BYTES")
             except Exception as e:
                 print("⚠️ ENGINE BYTES ERROR:", e)
 
@@ -130,7 +158,7 @@ async def edit(user_id, image_bytes, prompt, state):
                     print("⚠️ ENGINE PATH ERROR:", e)
 
         # ===============================
-        # 🔥 3. ЕСЛИ ВСЁ УПАЛО
+        # 🔥 FAIL
         # ===============================
         if not img:
             print("❌ ENGINE EDIT FINAL FAIL")
