@@ -49,9 +49,7 @@ async def generate(user_id, prompt, state):
         if not img:
             return {"type": "error", "data": "⚠️ Не удалось создать изображение"}
 
-        # ===============================
-        # 🔥 ВОССТАНАВЛИВАЕМ СВЯЗКУ
-        # ===============================
+        # 🔥 SAVE
         state["image_current"] = img
 
         set_last_entity(user_id, {
@@ -74,32 +72,47 @@ async def edit(user_id, image_bytes, prompt, state):
     try:
         print("🧠 ENGINE EDIT (priority advanced)")
 
-        # 🔥 защита (если вдруг нет image_bytes)
-        if not image_bytes:
-            print("⚠️ ENGINE: image_bytes is None")
+        img = None
 
-        img = await asyncio.wait_for(
-            edit_image_bytes(image_bytes, prompt),
-            timeout=40
-        )
+        # ===============================
+        # 🔥 1. ПЫТАЕМСЯ ЧЕРЕЗ BYTES
+        # ===============================
+        if image_bytes:
+            try:
+                img = await asyncio.wait_for(
+                    edit_image_bytes(image_bytes, prompt),
+                    timeout=40
+                )
+            except Exception as e:
+                print("⚠️ ENGINE BYTES ERROR:", e)
 
-        # fallback через path
+        # ===============================
+        # 🔥 2. FALLBACK → PATH
+        # ===============================
         if not img:
+            print("⚠️ ENGINE EDIT: bytes failed → trying path")
+
             ctx = state.get("image_context") or {}
             path = ctx.get("path")
 
             if path:
-                print("↩️ ENGINE EDIT FALLBACK → PATH")
-                img = await asyncio.wait_for(
-                    edit_image(path, prompt),
-                    timeout=40
-                )
+                try:
+                    img = await asyncio.wait_for(
+                        edit_image(path, prompt),
+                        timeout=40
+                    )
+                except Exception as e:
+                    print("⚠️ ENGINE PATH ERROR:", e)
 
+        # ===============================
+        # 🔥 3. ЕСЛИ ВСЁ УПАЛО
+        # ===============================
         if not img:
+            print("❌ ENGINE EDIT FINAL FAIL")
             return {"type": "error", "data": "⚠️ Не удалось изменить изображение"}
 
         # ===============================
-        # 🔥 СОХРАНЯЕМ ПОСЛЕ EDIT
+        # 🔥 SAVE ПОСЛЕ EDIT
         # ===============================
         state["image_current"] = img
 
@@ -114,6 +127,7 @@ async def edit(user_id, image_bytes, prompt, state):
         return {"type": "image", "data": img}
 
     except asyncio.TimeoutError:
+        print("⏱ ENGINE EDIT TIMEOUT")
         return {"type": "error", "data": "⏱ Таймаут редактирования"}
 
     except Exception as e:
