@@ -34,7 +34,7 @@ async def edit_image(image_path, prompt):
                 model="gpt-image-1",
                 image=f,
                 prompt=prompt,
-                size="512x512",
+                size="auto",
                 quality="low"
             )
 
@@ -62,7 +62,7 @@ async def edit_image_bytes(image_bytes, prompt):
                         model="gpt-image-1",
                         image=f,
                         prompt=prompt,
-                        size="512x512",
+                        size="auto",
                         quality="low"
                     )
 
