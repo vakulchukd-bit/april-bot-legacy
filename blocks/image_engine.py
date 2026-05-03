@@ -6,6 +6,9 @@ from blocks.image_module import generate_image_v2, generate_image
 from blocks.image_edit_module import edit_image_bytes, edit_image
 from blocks.image_system import analyze_image
 
+# 🔥 META
+from blocks.state_manager import set_last_entity
+
 
 # ===== простая эвристика сложности =====
 def is_complex_prompt(text: str) -> bool:
@@ -29,10 +32,8 @@ def is_complex_prompt(text: str) -> bool:
 # ===== GENERATE =====
 async def generate(user_id, prompt, state):
     try:
-        # 1. выбираем модель
         use_advanced = is_complex_prompt(prompt)
 
-        # 🔥 здесь ты потом можешь заменить на Images 2.0
         if use_advanced:
             print("🧠 ENGINE: using ADVANCED (future 2.0)")
             img = await generate_image_v2(prompt)
@@ -40,13 +41,26 @@ async def generate(user_id, prompt, state):
             print("⚡ ENGINE: using FAST V2")
             img = await generate_image_v2(prompt)
 
-        # 2. fallback
+        # fallback
         if not img:
             print("↩️ ENGINE FALLBACK → V1")
             img = await generate_image(prompt)
 
         if not img:
             return {"type": "error", "data": "⚠️ Не удалось создать изображение"}
+
+        # ===============================
+        # 🔥 ВОССТАНАВЛИВАЕМ СВЯЗКУ
+        # ===============================
+        state["image_current"] = img
+
+        set_last_entity(user_id, {
+            "type": "image",
+            "data": img,
+            "source": "engine_generate"
+        })
+
+        print("🧠 ENGINE SAVE: image_current + META")
 
         return {"type": "image", "data": img}
 
@@ -60,13 +74,16 @@ async def edit(user_id, image_bytes, prompt, state):
     try:
         print("🧠 ENGINE EDIT (priority advanced)")
 
-        # 1. пробуем основной способ (будущий 2.0)
+        # 🔥 защита (если вдруг нет image_bytes)
+        if not image_bytes:
+            print("⚠️ ENGINE: image_bytes is None")
+
         img = await asyncio.wait_for(
             edit_image_bytes(image_bytes, prompt),
             timeout=40
         )
 
-        # 2. fallback через path
+        # fallback через path
         if not img:
             ctx = state.get("image_context") or {}
             path = ctx.get("path")
@@ -81,6 +98,19 @@ async def edit(user_id, image_bytes, prompt, state):
         if not img:
             return {"type": "error", "data": "⚠️ Не удалось изменить изображение"}
 
+        # ===============================
+        # 🔥 СОХРАНЯЕМ ПОСЛЕ EDIT
+        # ===============================
+        state["image_current"] = img
+
+        set_last_entity(user_id, {
+            "type": "image",
+            "data": img,
+            "source": "engine_edit"
+        })
+
+        print("🧠 ENGINE SAVE AFTER EDIT")
+
         return {"type": "image", "data": img}
 
     except asyncio.TimeoutError:
@@ -93,5 +123,4 @@ async def edit(user_id, image_bytes, prompt, state):
 
 # ===== ANALYZE =====
 async def analyze(path, state):
-    # пока оставляем как есть
     return await analyze_image(path, state)
