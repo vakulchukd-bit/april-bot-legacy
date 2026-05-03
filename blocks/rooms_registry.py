@@ -3,8 +3,10 @@ from blocks.room_protocol import Room
 # === SCIENCE ROOM 🔥 ===
 from blocks.science_room import ScienceRoom
 
-# === IMAGE GENERATE ===
-from blocks.image_module import process as image_generate
+# === IMAGE ENGINE (НОВОЕ) ===
+from blocks.image_engine import generate as image_generate
+from blocks.image_engine import edit as image_edit_engine
+from blocks.image_system import analyze_image
 
 
 class ImageGenerateRoom(Room):
@@ -63,10 +65,6 @@ class ImageGenerateRoom(Room):
 
 
 # === IMAGE EDIT ===
-from blocks.image_edit_module import process as image_edit
-from blocks.image_system import analyze_image
-
-
 class ImageEditRoom(Room):
     name = "image_edit"
 
@@ -97,6 +95,7 @@ class ImageEditRoom(Room):
 
     async def handle(self, user_id, text, context, run):
         ctx = context["image"]
+        state = context.get("state", {})
 
         if not ctx or not ctx.get("path"):
             return {
@@ -112,9 +111,12 @@ class ImageEditRoom(Room):
 
         new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
+        # 🔥 берём текущее изображение из state (bytes)
+        image_bytes = state.get("image_current")
+
         result = await run(
             context["chat_id"],
-            image_edit(user_id, ctx["path"], new_prompt)
+            image_edit_engine(user_id, image_bytes, new_prompt, state)
         )
 
         return result
@@ -149,5 +151,5 @@ ROOMS = [
     ScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
-    TextRoom(),  # 🔥 ДОБАВИЛИ ОБРАТНО
+    TextRoom(),
 ]
