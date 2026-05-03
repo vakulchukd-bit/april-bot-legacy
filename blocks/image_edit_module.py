@@ -13,6 +13,8 @@ from blocks.state_manager import set_last_entity
 
 client = OpenAI()
 
+ADMIN_ID = 2016592532  # 🔥 ДОБАВИЛИ
+
 
 # 🔥 ЖИВЫЕ СООБЩЕНИЯ
 def get_limit_message():
@@ -107,6 +109,8 @@ def increment_images(user_id):
 # ===== PROCESS =====
 async def process(user_id, prompt, state):
     try:
+        is_admin = user_id == ADMIN_ID  # 🔥 ДОБАВИЛИ
+
         plan = get_user_plan(user_id)
 
         if plan == "premium":
@@ -118,7 +122,8 @@ async def process(user_id, prompt, state):
 
         limits = get_limits(user_id, img_limit=limit)
 
-        if limits["images_used"] >= limits["images_limit"]:
+        # 🔥 FIX: админ и premium без лимитов
+        if not is_admin and plan != "premium" and limits["images_used"] >= limits["images_limit"]:
             return {
                 "type": "text",
                 "data": get_limit_message()
@@ -177,7 +182,8 @@ async def process(user_id, prompt, state):
                 "error": "edit_failed"
             }
 
-        if plan != "premium":
+        # 🔥 FIX: не увеличиваем лимиты для админа и premium
+        if not is_admin and plan != "premium":
             increment_images(user_id)
 
         # 🔥 СОХРАНЯЕМ КАК НОВУЮ ТЕКУЩУЮ
