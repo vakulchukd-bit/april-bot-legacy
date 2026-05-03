@@ -27,38 +27,44 @@ async def route_request(text, ctx):
     try:
         t = text.lower().strip()
 
+        state = (ctx or {}).get("state", {})
+        dialog = (ctx or {}).get("dialog_state", {}) or {}
+
         # ===============================
-        # 🔥 STEP 6: CONTEXT PRIORITY (УСИЛЕННЫЙ)
+        # 🔥 NEW: META AWARENESS (СИСТЕМНЫЙ СЛОЙ)
         # ===============================
-        if ctx:
-            dialog = ctx.get("dialog_state") or {}
+        meta = state.get("meta", {})
+        last_entity = meta.get("last_entity")
 
-            # IMAGE CONTEXT
-            if dialog.get("intent") == "image":
-
-                # 🔥 1. ЯВНЫЙ EDIT
-                if any(w in t for w in ["измени", "добавь", "убери", "замени"]):
-                    return "image_edit"
-
-                # 🔥 2. НЕЯВНЫЙ EDIT (КЛЮЧЕВОЕ!)
-                if any(w in t for w in [
-                    "сделай", "покажи", "изобрази", "нарисуй",
-                    "вот это", "это", "с этим", "его", "ее"
-                ]):
-                    return "image_edit"
-
-                # 🔥 3. АНАЛИЗ
-                if "что" in t and "картин" in t:
-                    return "image_analyze"
-
-                # 🔥 4. ПО УМОЛЧАНИЮ → РЕДАКТИРОВАНИЕ (а не generate!)
+        if last_entity and last_entity.get("type") == "image":
+            # если пользователь не пишет длинный новый запрос —
+            # считаем это продолжением работы с изображением
+            if len(t) < 80:
+                print("🧠 META ROUTING → IMAGE_EDIT")
                 return "image_edit"
 
-            # MATH CONTEXT
-            if dialog.get("intent") == "math":
-                return "math"
+        # ===============================
+        # 🔥 CONTEXT PRIORITY (ТВОЙ СЛОЙ)
+        # ===============================
+        if dialog.get("intent") == "image":
 
-        # 🔥 1. Сначала локально (БЕСПЛАТНО)
+            # явный edit
+            if any(w in t for w in ["измени", "добавь", "убери", "замени"]):
+                return "image_edit"
+
+            # анализ
+            if "что" in t and "картин" in t:
+                return "image_analyze"
+
+            # по умолчанию теперь логичнее edit
+            return "image_edit"
+
+        if dialog.get("intent") == "math":
+            return "math"
+
+        # ===============================
+        # 🔥 LOCAL INTENT (БЫСТРО И ДЁШЕВО)
+        # ===============================
         local = detect_intent_local(text)
         if local:
             if local == "image_edit" and not ctx:
@@ -67,11 +73,15 @@ async def route_request(text, ctx):
                 return "text"
             return local
 
-        # 🔥 2. Короткие сообщения
+        # ===============================
+        # 🔥 SHORT TEXT (НЕ ГОНЯЕМ В AI)
+        # ===============================
         if len(t) < 15:
             return "text"
 
-        # 🔥 3. AI fallback
+        # ===============================
+        # 🔥 AI FALLBACK
+        # ===============================
         intent = await detect_intent_ai(text)
         print("🧭 ROUTER INTENT:", intent)
 
