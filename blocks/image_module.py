@@ -38,6 +38,11 @@ client = OpenAI()
 ADMIN_ID = 2016592532
 
 
+# 🔥 ДОБАВЛЕНО (не влияет)
+def _patch_marker():
+    return True
+
+
 # ===== СОХРАНЕНИЕ В ПАМЯТЬ =====
 def save_to_memory(state, item):
     memory = state.get("image_memory", [])
@@ -182,6 +187,10 @@ async def process(user_id, text, state):
         prompt = clean_prompt(text)
         prompt = extract_image_prompt(prompt)
 
+        # 🔥 PATCH: добавили контекст (НЕ ломает старую логику)
+        if state.get("image_context", {}).get("hint"):
+            prompt = state["image_context"]["hint"] + ", " + prompt
+
         if not prompt:
             return {
                 "type": "error",
@@ -201,12 +210,15 @@ async def process(user_id, text, state):
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
+        # ===============================
+        # 🔥 ВАЖНО: НЕ ТРОГАЕМ ТВОЮ ЛОГИКУ
+        # ===============================
+
         img = await generate_image_v2(prompt)
 
         if img:
             state["image_current"] = img
 
-            # 🔥 META SAVE
             set_last_entity(user_id, {
                 "type": "image",
                 "data": img,
@@ -228,12 +240,12 @@ async def process(user_id, text, state):
 
             return {"type": "image", "data": img}
 
+        # 🔥 fallback остаётся КАК БЫЛО
         img = await generate_image(prompt)
 
         if img:
             state["image_current"] = img
 
-            # 🔥 META SAVE
             set_last_entity(user_id, {
                 "type": "image",
                 "data": img,
@@ -286,7 +298,6 @@ async def retry_process(user_id, text, state):
         if img:
             state["image_current"] = img
 
-            # 🔥 META SAVE
             set_last_entity(user_id, {
                 "type": "image",
                 "data": img,
