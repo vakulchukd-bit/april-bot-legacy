@@ -153,9 +153,11 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # ===============================
-    # 🔥 ACTIVE FLOW CONTROL (NEW)
-    # ===============================
+    # 🔒 ГЛОБАЛЬНЫЙ LOCK
+    if state.get("image_lock"):
+        print("⛔ IMAGE LOCK ACTIVE")
+        return {"type": "error", "data": "⏳ Обработка изображения..."}
+
     flow = get_active_flow(user_id)
     t = text.lower()
 
@@ -173,11 +175,9 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
     add_dialog(user_id, "user", text)
     update_memory_summary(user_id, text)
-     
 
     dialog = state.get("dialog_state", {})
 
-    # IMAGE continuation
     if dialog.get("intent") == "image":
 
         if any(w in t for w in ["сделай", "измени", "добавь", "убери"]):
@@ -204,12 +204,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
 
                 return {"type": "text", "data": result}
 
-    
-
-
-# ===============================
-    # 🔥 MAIN FLOW (FIXED + CONTEXT)
-    # ===============================
     try:
         task_type = detect_task_type(text)
 
@@ -241,6 +235,18 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
                 result = await room.handle(user_id, text, context, run_with_typing)
 
                 if result and result.get("type"):
+
+                    # 🔒 LOCK ТОЛЬКО НА ГЕНЕРАЦИЮ
+                    if result.get("type") == "image_task":
+                        print("🔒 IMAGE LOCK ENABLED")
+                        state["image_lock"] = True
+
+                        try:
+                            result = await image_generate(user_id, result["prompt"], state)
+                        finally:
+                            print("🔓 IMAGE LOCK DISABLED")
+                            state["image_lock"] = False
+
                     output_text = str(result.get("data", ""))
 
                     add_dialog(user_id, "assistant", output_text)
@@ -265,7 +271,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
         except Exception as e:
             print(f"ROOM ERROR [{room.name}]:", e)
 
-    # 🔥 ВОТ ОН ФИКС (КОНТЕКСТ)
     context_text = build_context_text(user_id, text, state)
 
     result = await run_with_typing(
@@ -282,9 +287,6 @@ async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
     return {"type": "text", "data": result["content"]}
 
 
-# ===============================
-# HELPERS
-# ===============================
 def detect_output_mode(text: str):
     t = text.lower()
 
