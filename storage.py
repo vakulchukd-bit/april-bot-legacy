@@ -55,7 +55,6 @@ def init_db():
             )
             """)
 
-            # 🔥 НОВОЕ: knowledge база
             cur.execute("""
             CREATE TABLE IF NOT EXISTS knowledge (
                 id SERIAL PRIMARY KEY,
@@ -253,7 +252,7 @@ def can_send_message(user_id, limit=15):
 
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, last_reset FROM users WHERE user_id = %s", (uid,))
+                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id = %s", (uid,))
                 user = cur.fetchone()
 
                 if not user:
@@ -262,7 +261,9 @@ def can_send_message(user_id, limit=15):
 
                 if user["last_reset"] != today():
                     cur.execute("""
-                    UPDATE users SET messages_today = 0, last_reset = %s WHERE user_id = %s
+                    UPDATE users 
+                    SET messages_today = 0, images_today = 0, last_reset = %s 
+                    WHERE user_id = %s
                     """, (today(), uid))
                     user["messages_today"] = 0
 
@@ -338,6 +339,13 @@ def get_limits(user_id, msg_limit=15, img_limit=1):
                 if user["last_reset"] != today():
                     messages = 0
                     images = 0
+
+                    # 🔥 ФИКС СИНХРОНИЗАЦИИ
+                    cur.execute("""
+                    UPDATE users 
+                    SET messages_today = 0, images_today = 0, last_reset = %s 
+                    WHERE user_id = %s
+                    """, (today(), uid))
 
                 return {
                     "messages_used": messages,
