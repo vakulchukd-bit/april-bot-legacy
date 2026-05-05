@@ -90,6 +90,42 @@ def update_memory_summary(user_id, new_text):
     state_obj["memory_summary"] = updated
 
 
+# ===== 🔥 NEW: HARD MEMORY CLEAN (КЛЮЧЕВОЙ ФИКС)
+def compress_dialog_to_summary(state_obj):
+    dialog = state_obj.get("dialog", [])
+
+    if not dialog:
+        return
+
+    # берём последние 5 сообщений как смысл
+    last_messages = dialog[-5:]
+    summary_parts = [m.get("content", "")[:80] for m in last_messages]
+
+    short_summary = " | ".join(summary_parts)
+
+    state_obj["memory_summary"] = short_summary
+
+    # 🔥 оставляем только 1 системное сообщение
+    state_obj["dialog"] = [{
+        "role": "system",
+        "content": short_summary
+    }]
+
+    print("🧹 DIALOG COMPRESSED")
+
+
+# ===== 🔥 NEW: IMAGE MEMORY CLEAN =====
+def trim_image_memory(state_obj):
+    memory = state_obj.get("image_memory", [])
+
+    if not memory:
+        return
+
+    if len(memory) > 3:
+        state_obj["image_memory"] = memory[-3:]
+        print("🧹 IMAGE MEMORY TRIMMED TO 3")
+
+
 # ===== DIALOG =====
 from storage import get_user_plan
 
@@ -116,8 +152,12 @@ def add_dialog(user_id, role, content):
     plan = get_user_plan(user_id)
     limit = get_dialog_limit(user_id, plan)
 
+    # 🔥 если превышен лимит → не просто pop, а СЖАТИЕ
     if len(dialog) > limit:
-        dialog.pop(0)
+        compress_dialog_to_summary(state_obj)
+
+    # 🔥 IMAGE MEMORY CONTROL
+    trim_image_memory(state_obj)
 
 
 # ===== DIALOG STATE =====
