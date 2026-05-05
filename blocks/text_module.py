@@ -244,7 +244,7 @@ def enhance_code_block(text: str) -> str:
 async def process(user_id, text, state, energy="MEDIUM"):
     def run():
 
-        # 🔥 ЕСЛИ ПРИШЁЛ ГОТОВЫЙ КОНТЕКСТ → НЕ ЛОМАЕМ ЕГО
+        # 🔥 ЕСЛИ ПРИШЁЛ ГОТОВЫЙ КОНТЕКСТ → НЕ ДУБЛИРУЕМ ИСТОРИЮ
         if is_context_prompt(text):
 
             messages = [
