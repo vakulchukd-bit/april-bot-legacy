@@ -9,6 +9,19 @@ from blocks.image_engine import edit as image_edit_engine
 from blocks.image_system import analyze_image
 
 
+# 🔥 ДОБАВЛЕНО: защита от повторной генерации
+import time
+
+def is_repeat_generation_blocked(state):
+    ts = state.get("last_image_time")
+    if not ts:
+        return False
+    return (time.time() - ts) < 8  # 8 секунд защита
+
+def mark_generation_time(state):
+    state["last_image_time"] = time.time()
+
+
 class ImageGenerateRoom(Room):
     name = "image_generate"
 
@@ -49,7 +62,17 @@ class ImageGenerateRoom(Room):
     async def handle(self, user_id, text, context, run):
         state = context.get("state", {})
 
-        if text.lower().strip() in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
+        t = text.lower().strip()
+
+        # 🔥 PATCH: защита от повторного запуска
+        if t in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
+            if is_repeat_generation_blocked(state):
+                return {
+                    "type": "text",
+                    "data": "⏳ Уже сделал недавно, не дублирую"
+                }
+
+        if t in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
             text = state.get("last_image_prompt", text)
 
         result = await run(
@@ -59,6 +82,10 @@ class ImageGenerateRoom(Room):
 
         if result and result.get("type") == "image":
             state["last_image_prompt"] = text
+
+            # 🔥 PATCH: фиксируем время генерации
+            mark_generation_time(state)
+
             return result
 
         return {"type": "error", "data": "🎨 Ошибка генерации"}
@@ -111,7 +138,6 @@ class ImageEditRoom(Room):
 
         new_prompt = ctx["hint"] + ", IMPORTANT: " + text
 
-        # 🔥 берём текущее изображение из state (bytes)
         image_bytes = state.get("image_current")
 
         result = await run(
@@ -127,10 +153,10 @@ class TextRoom(Room):
     name = "text"
 
     def can_handle(self, text, context):
-        return True  # 🔥 ВОЗВРАТ БАЗОВОГО СЛОЯ
+        return True
 
     def evaluate(self, text, context):
-        return 0.1  # самый низкий приоритет
+        return 0.1
 
     async def handle(self, user_id, text, context, run):
         from blocks.text_module import process as text_process
