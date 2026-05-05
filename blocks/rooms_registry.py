@@ -22,6 +22,15 @@ def mark_generation_time(state):
     state["last_image_time"] = time.time()
 
 
+# 🔥 NEW: единый контроль блокировки (синхронизация с ImageRoom)
+def is_image_locked(state):
+    return state.get("image_locked") is True
+
+
+def unlock_image(state):
+    state["image_locked"] = False
+
+
 class ImageGenerateRoom(Room):
     name = "image_generate"
 
@@ -64,7 +73,15 @@ class ImageGenerateRoom(Room):
 
         t = text.lower().strip()
 
-        # 🔥 PATCH: защита от повторного запуска
+        # 🔥 PATCH: если уже идет генерация → блокируем
+        if is_image_locked(state):
+            print("⛔ GENERATE BLOCKED (LOCK)")
+            return {
+                "type": "text",
+                "data": "⏳ Уже генерирую изображение..."
+            }
+
+        # 🔥 PATCH: защита от повторного запуска (таймер)
         if t in ["да", "ага", "ок", "окей", "давай", "согласен", "подходит"]:
             if is_repeat_generation_blocked(state):
                 return {
@@ -86,7 +103,13 @@ class ImageGenerateRoom(Room):
             # 🔥 PATCH: фиксируем время генерации
             mark_generation_time(state)
 
+            # 🔥 PATCH: снимаем lock после успешной генерации
+            unlock_image(state)
+
             return result
+
+        # 🔥 PATCH: снимаем lock при ошибке
+        unlock_image(state)
 
         return {"type": "error", "data": "🎨 Ошибка генерации"}
 
