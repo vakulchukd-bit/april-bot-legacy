@@ -36,6 +36,13 @@ def unlock_image(state):
     state["image_locked"] = False
 
 
+# 🔥 NEW: мягкий reset lock (на случай зависаний)
+def ensure_unlock(state):
+    if state.get("image_locked") and not state.get("image_current"):
+        print("⚠️ FORCE UNLOCK (no image result)")
+        state["image_locked"] = False
+
+
 from blocks.image_module import process as image_generate
 from blocks.image_edit_module import process as image_edit
 from blocks.image_system import analyze_image
@@ -92,6 +99,9 @@ class ImageRoom:
 
         t = text.lower()
 
+        # 🔥 PATCH: авто-проверка залипания
+        ensure_unlock(state)
+
         # 🔥 PATCH: защита от повторного запуска генерации
         if is_image_locked(state):
             print("⛔ IMAGE LOCKED → skip duplicate")
@@ -101,7 +111,12 @@ class ImageRoom:
         if ctx and any(w in t for w in ["убери", "добавь", "измени", "замени"]):
             path = ctx.get("path")
             if path:
-                return await image_edit(user_id, path, text)
+                result = await image_edit(user_id, path, text)
+
+                # 🔥 unlock после завершения
+                unlock_image(state)
+
+                return result
 
         # ===== АНАЛИЗ =====
         if ctx and any(w in t for w in [
@@ -111,7 +126,9 @@ class ImageRoom:
         ]):
             path = ctx.get("path")
             if path:
-                return await analyze_image(user_id, path, text)
+                result = await analyze_image(user_id, path, text)
+
+                return result
 
         # ===== ГЕНЕРАЦИЯ =====
         # 🔥 PATCH: ставим lock перед задачей
