@@ -24,7 +24,6 @@ async def check(user_id, action_type):
         return {"allowed": True}
 
     from storage import (
-        check_subscription,
         can_send_message,
         can_generate_image,
         get_user_plan
@@ -38,7 +37,9 @@ async def check(user_id, action_type):
 
     if plan == "free":
 
-        # ================= MESSAGE =================
+        # =================================================
+        # 💬 MESSAGE LIMIT
+        # =================================================
 
         if action_type == "message":
 
@@ -55,7 +56,9 @@ async def check(user_id, action_type):
                         "или откройте Lite / Premium"
                 }
 
-        # ================= IMAGE =================
+        # =================================================
+        # 🖼 IMAGE LIMIT
+        # =================================================
 
         if action_type == "image":
 
@@ -78,6 +81,17 @@ async def check(user_id, action_type):
 
     elif plan == "lite":
 
+        # =================================================
+        # ♾️ UNLIMITED MESSAGES
+        # =================================================
+
+        if action_type == "message":
+            return {"allowed": True}
+
+        # =================================================
+        # 🖼 IMAGE LIMIT
+        # =================================================
+
         if action_type == "image":
 
             if not can_generate_image(
@@ -89,7 +103,8 @@ async def check(user_id, action_type):
                     "allowed": False,
                     "reason":
                         "⚡ Lite лимит изображений достигнут\n\n"
-                        "Лимит обновится позже"
+                        "Попробуйте позже "
+                        "или перейдите на Premium"
                 }
 
     # =====================================================
@@ -97,6 +112,17 @@ async def check(user_id, action_type):
     # =====================================================
 
     elif plan == "premium":
+
+        # =================================================
+        # ♾️ UNLIMITED MESSAGES
+        # =================================================
+
+        if action_type == "message":
+            return {"allowed": True}
+
+        # =================================================
+        # 🖼 IMAGE LIMIT
+        # =================================================
 
         if action_type == "image":
 
@@ -108,8 +134,8 @@ async def check(user_id, action_type):
                 return {
                     "allowed": False,
                     "reason":
-                        "👑 Premium лимит достигнут\n\n"
-                        "Попробуйте немного позже"
+                        "👑 Premium лимит изображений достигнут\n\n"
+                        "Попробуйте позже"
                 }
 
     # =====================================================
