@@ -204,30 +204,7 @@ async def handle(message: types.Message):
 
     mode = get_mode(user_id)
 
-if user_id == ADMIN_ID and mode == "broadcast":
-
-    users = get_all_users()
-    success = 0
-
-    for uid in users:
-
-        if int(uid) == ADMIN_ID:
-            continue
-
-        try:
-            await bot.send_message(uid, f"📢 {text}")
-            success += 1
-
-        except:
-            pass
-
-    clear_mode(user_id)
-
-    await message.answer(
-        f"✅ Рассылка отправлена: {success}"
-    )
-
-    return
+ 
 
     try:
         result = await execute(user_id, text, message.chat.id, run_with_typing)
