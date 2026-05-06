@@ -488,9 +488,7 @@ def get_remaining_days(user_id):
     return 0
 
 
-def get_limits(
-    user_id,
-    msg_limit=FREE_MESSAGES_LIMIT,
+
 # =========================================================
 # 🔥 LIMITS
 # =========================================================
