@@ -525,22 +525,37 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     if data in ["buy_lite", "lite", "go_lite"]:
 
-        await callback.message.answer(
-            "💳 Подтвердить Lite?",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="✅ Да",
-                            callback_data="buy_yes_lite"
-                        ),
-                        InlineKeyboardButton(
-                            text="❌ Нет",
-                            callback_data="cancel"
-                        )
-                    ]
-                ]
+        payment_url = create_payment(
+            LITE_PRICE,
+            "lite",
+            user_id
+        )
+
+        if not payment_url:
+
+            await callback.message.answer(
+                "❌ Ошибка PayPal"
             )
+
+            await callback.answer()
+
+            return
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💳 Оплатить Lite",
+                        url=payment_url
+                    )
+                ]
+            ]
+        )
+
+        await callback.message.answer(
+            f"⚡ Lite — ${LITE_PRICE}\n\n"
+            f"Нажмите кнопку ниже для оплаты:",
+            reply_markup=keyboard
         )
 
         await callback.answer()
@@ -549,22 +564,37 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
     if data == "buy_premium":
 
-        await callback.message.answer(
-            "💳 Подтвердить Premium?",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="✅ Да",
-                            callback_data="buy_yes_premium"
-                        ),
-                        InlineKeyboardButton(
-                            text="❌ Нет",
-                            callback_data="cancel"
-                        )
-                    ]
-                ]
+        payment_url = create_payment(
+            PREMIUM_PRICE,
+            "premium",
+            user_id
+        )
+
+        if not payment_url:
+
+            await callback.message.answer(
+                "❌ Ошибка PayPal"
             )
+
+            await callback.answer()
+
+            return
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="👑 Оплатить Premium",
+                        url=payment_url
+                    )
+                ]
+            ]
+        )
+
+        await callback.message.answer(
+            f"👑 Premium — ${PREMIUM_PRICE}\n\n"
+            f"Нажмите кнопку ниже для оплаты:",
+            reply_markup=keyboard
         )
 
         await callback.answer()
