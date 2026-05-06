@@ -506,6 +506,18 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
             return
 
+        if data == "admin_system":
+
+            text = get_system_status()
+
+            await callback.message.answer(
+                text
+            )
+
+            await callback.answer()
+
+            return
+
     # =====================================================
     # 💳 BUY
     # =====================================================
