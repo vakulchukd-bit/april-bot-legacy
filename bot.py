@@ -63,7 +63,17 @@ bot = Bot(token=TOKEN, session=session)
 
 dp = Dispatcher()
 
-ADMIN_ID = 2016592532
+# =========================================================
+# 🔥 CENTRAL CONFIG
+# Все основные цены и ADMIN_ID берутся из одного места
+# Это безопаснее для архитектуры April
+# =========================================================
+
+from blocks.tariffs_config import (
+    ADMIN_ID,
+    LITE_PRICE,
+    PREMIUM_PRICE
+)
 
 tz = pytz.timezone("Europe/Kyiv")
 
