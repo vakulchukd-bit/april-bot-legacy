@@ -491,8 +491,213 @@ def get_remaining_days(user_id):
 def get_limits(
     user_id,
     msg_limit=FREE_MESSAGES_LIMIT,
+# =========================================================
+# 🔥 LIMITS
+# =========================================================
+
+# ===== 👑 ADMIN CHECK =====
+# Админ полностью выведен из лимитов
+# Без ограничений и reset
+from blocks.tariffs_config import ADMIN_ID
+
+
+def can_send_message(
+    user_id,
+    limit=FREE_MESSAGES_LIMIT
+):
+
+    # =====================================================
+    # 👑 ADMIN BYPASS
+    # =====================================================
+
+    if user_id == ADMIN_ID:
+        return True
+
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+
+                cur.execute("""
+                SELECT messages_today, images_today, last_reset
+                FROM users
+                WHERE user_id = %s
+                """, (uid,))
+
+                user = cur.fetchone()
+
+                if not user:
+                    ensure_user_db(user_id)
+                    return True
+
+                # =================================================
+                # 🔄 DAILY RESET
+                # =================================================
+
+                if user["last_reset"] != today():
+
+                    cur.execute("""
+                    UPDATE users
+                    SET messages_today = 0,
+                        images_today = 0,
+                        last_reset = %s
+                    WHERE user_id = %s
+                    """, (
+                        today(),
+                        uid
+                    ))
+
+                    user["messages_today"] = 0
+
+                # =================================================
+                # ♾️ UNLIMITED MODE
+                # =================================================
+
+                # -1 = безлимит
+                if limit == -1:
+                    return True
+
+                # =================================================
+                # ⛔ LIMIT CHECK
+                # =================================================
+
+                if user["messages_today"] >= limit:
+                    return False
+
+                # =================================================
+                # ➕ INCREMENT COUNTER
+                # =================================================
+
+                cur.execute("""
+                UPDATE users
+                SET messages_today = messages_today + 1
+                WHERE user_id = %s
+                """, (uid,))
+
+                return True
+
+    return True
+
+
+def get_remaining_messages(
+    user_id,
+    limit=FREE_MESSAGES_LIMIT
+):
+
+    # =====================================================
+    # 👑 ADMIN BYPASS
+    # =====================================================
+
+    if user_id == ADMIN_ID:
+        return "∞"
+
+    # =====================================================
+    # ♾️ UNLIMITED MODE
+    # =====================================================
+
+    if limit == -1:
+        return "∞"
+
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+
+                cur.execute("""
+                SELECT messages_today
+                FROM users
+                WHERE user_id = %s
+                """, (uid,))
+
+                user = cur.fetchone()
+
+                if not user:
+                    return limit
+
+                return max(
+                    0,
+                    limit - user["messages_today"]
+                )
+
+    return limit
+
+
+def get_remaining_days(user_id):
+
+    # =====================================================
+    # 👑 ADMIN BYPASS
+    # =====================================================
+
+    if user_id == ADMIN_ID:
+        return "∞"
+
+    conn = get_conn()
+
+    if conn:
+        uid = str(user_id)
+
+        with conn:
+            with conn.cursor() as cur:
+
+                cur.execute("""
+                SELECT subscription_until
+                FROM users
+                WHERE user_id = %s
+                """, (uid,))
+
+                user = cur.fetchone()
+
+                if not user:
+                    return 0
+
+                seconds = (
+                    user["subscription_until"]
+                    - now().timestamp()
+                )
+
+                return max(
+                    0,
+                    math.ceil(seconds / 86400)
+                )
+
+    return 0
+
+
+def get_limits(
+    user_id,
+    msg_limit=FREE_MESSAGES_LIMIT,
     img_limit=FREE_IMAGES_LIMIT
 ):
+
+    # =====================================================
+    # 👑 ADMIN BYPASS
+    # =====================================================
+
+    if user_id == ADMIN_ID:
+
+        return {
+            "messages_used": "∞",
+            "messages_limit": "∞",
+            "images_used": "∞",
+            "images_limit": "∞"
+        }
+
+    # =====================================================
+    # ♾️ UNLIMITED MODE
+    # =====================================================
+
+    if msg_limit == -1:
+        msg_limit = "∞"
+
+    if img_limit == -1:
+        img_limit = "∞"
+
     conn = get_conn()
 
     if conn:
@@ -520,7 +725,10 @@ def get_limits(
                 messages = user["messages_today"] or 0
                 images = user["images_today"] or 0
 
-                # ===== 🔄 DAILY RESET =====
+                # =================================================
+                # 🔄 DAILY RESET
+                # =================================================
+
                 if user["last_reset"] != today():
 
                     messages = 0
