@@ -64,6 +64,11 @@ def build_free_menu(user_id):
         f"🖼 Генерация и изменение:\n"
         f"{limits['images_used']} / {limits['images_limit']}\n\n"
 
+        "📦 Free пакет:\n"
+        "• 10 сообщений\n"
+        "• 1 генерация\n"
+        "• Умная April AI\n\n"
+
         f"⏳ Обновление:\n"
         f"{reset_time}\n\n"
 
@@ -110,8 +115,10 @@ def build_lite_menu(user_id):
     text = (
         "⚡ *LITE*\n\n"
 
-        "🚀 Расширенные лимиты\n"
-        "⚡ Быстрее ответы\n\n"
+        "♾️ Безлимит сообщений\n"
+        "🖼 До 15 генераций\n"
+        "⚡ Быстрые ответы\n"
+        "🚀 Lite доступ\n\n"
 
         f"📅 Осталось: {days} дн."
     )
@@ -154,9 +161,10 @@ def build_pro_menu(user_id):
     text = (
         "👑 *PREMIUM*\n\n"
 
-        "∞ Без ограничений\n"
-        "⚡ Быстрые ответы\n"
-        "🧠 Приоритет\n\n"
+        "♾️ Безлимит сообщений\n"
+        "🖼 До 20 генераций\n"
+        "⚡ Priority обработка\n"
+        "🛟 Premium Support\n\n"
 
         f"📅 Осталось: {days} дн."
     )
@@ -208,7 +216,9 @@ def build_admin_menu(user_id):
         "⚠️ Ошибки: 0\n\n"
 
         "🟢 System Stable\n"
-        "🟢 PayPal Ready"
+        "🟢 Limits Active\n"
+        "🟢 PayPal Ready\n"
+        "🟡 Monitoring Enabled"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
