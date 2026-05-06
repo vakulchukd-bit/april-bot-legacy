@@ -1,6 +1,9 @@
 from storage import get_user_plan
 
-ADMIN_ID = 2016592532
+# ===== 🔥 CENTRAL CONFIG =====
+# ADMIN_ID теперь берётся из единого config
+# Это безопаснее для всей архитектуры April
+from blocks.tariffs_config import ADMIN_ID
 
 
 def get_energy(user_id):
@@ -9,7 +12,8 @@ def get_energy(user_id):
     LOW / MEDIUM / HIGH
     """
 
-    # 🔥 Админ всегда максимум
+    # ===== 👑 ADMIN BYPASS =====
+    # Админ всегда без ограничений
     if user_id == ADMIN_ID:
         return "HIGH"
 
@@ -24,5 +28,5 @@ def get_energy(user_id):
     elif plan == "premium":
         return "HIGH"
 
-    # fallback
+    # ===== FALLBACK =====
     return "LOW"
