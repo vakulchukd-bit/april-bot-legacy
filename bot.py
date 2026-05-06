@@ -53,6 +53,7 @@ from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 from blocks.image_module import process as image_generate
 
+from blocks.subscription_module import check as subscription_check
 from io import BytesIO
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
