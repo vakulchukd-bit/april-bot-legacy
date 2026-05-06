@@ -1,5 +1,7 @@
 print("🔥 MENU SYSTEM LOADED")
+
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 from storage import (
     check_subscription,
     get_limits,
@@ -10,7 +12,14 @@ from storage import (
     get_user_plan
 )
 
-ADMIN_ID = 2016592532
+# ===== 🔥 CENTRAL TARIFF CONFIG =====
+# Все цены и ADMIN_ID теперь берутся из единого config
+# Это безопаснее для архитектуры April
+from blocks.tariffs_config import (
+    ADMIN_ID,
+    LITE_PRICE,
+    PREMIUM_PRICE
+)
 
 
 # ===== РОЛЬ =====
@@ -22,8 +31,10 @@ def get_user_role(user_id):
 
     if plan == "premium":
         return "pro"
+
     elif plan == "lite":
         return "lite"
+
     else:
         return "free"
 
@@ -44,9 +55,24 @@ def build_free_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="buy_lite")],
-        [InlineKeyboardButton(text="👑 Premium — $25", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
+        [
+            InlineKeyboardButton(
+                text=f"⚡ Lite — ${LITE_PRICE}",
+                callback_data="buy_lite"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"👑 Premium — ${PREMIUM_PRICE}",
+                callback_data="buy_premium"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📋 Что включено",
+                callback_data="info"
+            )
+        ]
     ])
 
     return text, keyboard
@@ -64,9 +90,24 @@ def build_lite_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👑 Premium — $25", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="⚡ Текущий тариф: Lite — $6", callback_data="noop")],
-        [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
+        [
+            InlineKeyboardButton(
+                text=f"👑 Premium — ${PREMIUM_PRICE}",
+                callback_data="buy_premium"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"⚡ Текущий тариф: Lite — ${LITE_PRICE}",
+                callback_data="noop"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📋 Что включено",
+                callback_data="info"
+            )
+        ]
     ])
 
     return text, keyboard
@@ -85,10 +126,24 @@ def build_pro_menu(user_id):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        # ✅ ЕДИНСТВЕННЫЙ ФИКС
-        [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="buy_lite")],
-        [InlineKeyboardButton(text="👑 Текущий тариф: Premium — $25", callback_data="noop")],
-        [InlineKeyboardButton(text="📋 Что включено", callback_data="info")]
+        [
+            InlineKeyboardButton(
+                text=f"⚡ Lite — ${LITE_PRICE}",
+                callback_data="buy_lite"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"👑 Текущий тариф: Premium — ${PREMIUM_PRICE}",
+                callback_data="noop"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📋 Что включено",
+                callback_data="info"
+            )
+        ]
     ])
 
     return text, keyboard
@@ -130,14 +185,14 @@ def build_tariffs_menu(user_id):
 
         "━━━━━━━━━━━━━━━\n\n"
 
-        "⚡ LITE — $6 (5 дней)\n"
+        f"⚡ LITE — ${LITE_PRICE} (5 дней)\n"
         "✔️ Расширенные лимиты\n"
         "✔️ Генерация изображений\n"
         "✔️ Редактирование — до 2 в день\n\n"
 
         "━━━━━━━━━━━━━━━\n\n"
 
-        "👑 PREMIUM — $25 (30 дней)\n"
+        f"👑 PREMIUM — ${PREMIUM_PRICE} (30 дней)\n"
         "✔️ Без ограничений\n"
         "✔️ Приоритет обработки\n"
         "✔️ Быстрые ответы\n"
@@ -145,24 +200,68 @@ def build_tariffs_menu(user_id):
 
     if plan == "premium":
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            # ✅ ЕДИНСТВЕННЫЙ ФИКС
-            [InlineKeyboardButton(text="⚡ Lite — $6", callback_data="buy_lite")],
-            [InlineKeyboardButton(text="👑 Текущий: Premium — $25", callback_data="noop")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            [
+                InlineKeyboardButton(
+                    text=f"⚡ Lite — ${LITE_PRICE}",
+                    callback_data="buy_lite"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"👑 Текущий: Premium — ${PREMIUM_PRICE}",
+                    callback_data="noop"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="menu"
+                )
+            ]
         ])
 
     elif plan == "lite":
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👑 Premium — $25", callback_data="buy_premium")],
-            [InlineKeyboardButton(text="⚡ Текущий: Lite — $6", callback_data="noop")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            [
+                InlineKeyboardButton(
+                    text=f"👑 Premium — ${PREMIUM_PRICE}",
+                    callback_data="buy_premium"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"⚡ Текущий: Lite — ${LITE_PRICE}",
+                    callback_data="noop"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="menu"
+                )
+            ]
         ])
 
     else:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Купить Lite — $6", callback_data="buy_lite")],
-            [InlineKeyboardButton(text="👑 Купить Premium — $25", callback_data="buy_premium")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+            [
+                InlineKeyboardButton(
+                    text=f"🚀 Купить Lite — ${LITE_PRICE}",
+                    callback_data="buy_lite"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"👑 Купить Premium — ${PREMIUM_PRICE}",
+                    callback_data="buy_premium"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="menu"
+                )
+            ]
         ])
 
     return text, keyboard
@@ -188,21 +287,26 @@ def build_info_menu(user_id):
 
         "━━━━━━━━━━━━━━━\n\n"
 
-        "⚡ LITE — $6 (5 дней)\n"
+        f"⚡ LITE — ${LITE_PRICE} (5 дней)\n"
         "✔️ Расширенные лимиты\n"
         "✔️ Генерация изображений\n"
         "✔️ Редактирование — до 2 в день\n\n"
 
         "━━━━━━━━━━━━━━━\n\n"
 
-        "👑 PREMIUM — $25 (30 дней)\n"
+        f"👑 PREMIUM — ${PREMIUM_PRICE} (30 дней)\n"
         "✔️ Без ограничений\n"
         "✔️ Приоритет обработки\n"
         "✔️ Быстрые ответы\n"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")]
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data="menu"
+            )
+        ]
     ])
 
     return text, keyboard
