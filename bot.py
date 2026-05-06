@@ -53,6 +53,7 @@ from blocks.session_manager import is_session_expired
 from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
 
 from blocks.image_module import process as image_generate
+from blocks.paypal_module import create_payment
 from blocks.subscription_module import check as subscription_check
 
 from io import BytesIO
