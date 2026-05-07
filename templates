@@ -1,0 +1,250 @@
+checkout.html
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>APRIL AI Checkout</title>
+
+    <script src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&components=buttons,funding-eligibility"></script>
+
+    <style>
+
+        body {
+
+            margin: 0;
+            padding: 0;
+
+            background: #0f0f0f;
+            color: white;
+
+            font-family: Arial, sans-serif;
+
+            display: flex;
+            justify-content: center;
+            align-items: center;
+
+            min-height: 100vh;
+        }
+
+        .card {
+
+            width: 92%;
+            max-width: 420px;
+
+            background: #181818;
+
+            border-radius: 24px;
+
+            padding: 28px;
+
+            box-sizing: border-box;
+
+            box-shadow:
+                0 0 40px rgba(0,0,0,0.5);
+        }
+
+        .logo {
+
+            font-size: 34px;
+            font-weight: bold;
+
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+
+            color: #aaaaaa;
+
+            margin-bottom: 28px;
+        }
+
+        .plan {
+
+            background: #202020;
+
+            border-radius: 18px;
+
+            padding: 18px;
+
+            margin-bottom: 24px;
+        }
+
+        .plan-name {
+
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .price {
+
+            margin-top: 10px;
+
+            font-size: 32px;
+            font-weight: bold;
+        }
+
+        .features {
+
+            margin-top: 16px;
+
+            color: #cccccc;
+
+            line-height: 1.7;
+        }
+
+        .secure {
+
+            margin-top: 24px;
+
+            text-align: center;
+
+            color: #777777;
+
+            font-size: 14px;
+        }
+
+        #paypal-button-container {
+
+            margin-top: 26px;
+        }
+
+        .success {
+
+            display: none;
+
+            text-align: center;
+
+            margin-top: 20px;
+
+            color: #4dff88;
+
+            font-size: 20px;
+
+            font-weight: bold;
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+    <div class="logo">
+        APRIL AI
+    </div>
+
+    <div class="subtitle">
+        Быстрая безопасная оплата
+    </div>
+
+    <div class="plan">
+
+        <div class="plan-name">
+            {{ plan_name }}
+        </div>
+
+        <div class="price">
+            ${{ amount }}
+        </div>
+
+        <div class="features">
+            ✓ Google Pay<br>
+            ✓ Apple Pay<br>
+            ✓ Банковские карты<br>
+            ✓ PayPal<br>
+            ✓ Моментальная активация
+        </div>
+
+    </div>
+
+    <div id="paypal-button-container"></div>
+
+    <div class="secure">
+        🔒 Защищено PayPal Checkout
+    </div>
+
+    <div
+        class="success"
+        id="successBox"
+    >
+        ✅ Оплата прошла успешно
+    </div>
+
+</div>
+
+<script>
+
+paypal.Buttons({
+
+    style: {
+
+        layout: 'vertical',
+        shape: 'pill',
+        label: 'pay'
+    },
+
+    createOrder: function(data, actions) {
+
+        return "{{ order_id }}";
+
+    },
+
+    onApprove: function(data, actions) {
+
+        return fetch('/capture-order', {
+
+            method: 'POST',
+
+            headers: {
+                'Content-Type': 'application/json'
+            },
+
+            body: JSON.stringify({
+                orderID: data.orderID
+            })
+
+        })
+
+        .then(res => res.json())
+
+        .then(details => {
+
+            document
+                .getElementById("successBox")
+                .style.display = "block";
+
+            setTimeout(() => {
+
+                window.location.href =
+                    "https://t.me/YOUR_BOT_USERNAME";
+
+            }, 2500);
+
+        });
+
+    },
+
+    onError: function(err) {
+
+        alert(
+            "Ошибка оплаты. Попробуйте ещё раз."
+        );
+
+        console.error(err);
+    }
+
+}).render('#paypal-button-container');
+
+</script>
+
+</body>
+</html>
