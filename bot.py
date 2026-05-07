@@ -644,11 +644,9 @@ async def handle_callbacks(
 
     if data in ["buy_lite", "lite", "go_lite"]:
 
-        payment_url = create_payment(
-            LITE_PRICE,
-            "lite",
-            user_id
-        )
+        payment_url = (
+    f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+)
 
         if not payment_url:
 
@@ -692,11 +690,9 @@ async def handle_callbacks(
 
     if data == "buy_premium":
 
-        payment_url = create_payment(
-            PREMIUM_PRICE,
-            "premium",
-            user_id
-        )
+        payment_url = (
+    f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+)
 
         if not payment_url:
 
