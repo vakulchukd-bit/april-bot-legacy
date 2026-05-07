@@ -49,10 +49,8 @@ from blocks.interpretation_layer import interpret_request
 import re
 
 
-# ===============================
-# 🔥 SAFE PATCH MODE (EXECUTOR)
-# ===============================
 PATCH_LOG = []
+
 
 def safe_patch_log(msg):
     try:
@@ -63,7 +61,9 @@ def safe_patch_log(msg):
 
 
 def patch_executor_start(user_id, text):
-    safe_patch_log(f"EXECUTOR START: {user_id} | {text[:50]}")
+    safe_patch_log(
+        f"EXECUTOR START: {user_id} | {text[:50]}"
+    )
     return None
 
 
@@ -71,66 +71,174 @@ def patch_executor_hook(*args, **kwargs):
     return None
 
 
-# ===============================
+# =====================================================
+# 🔥 SAFE TASK DETECTION
+# =====================================================
+
+def detect_task_type(text: str):
+
+    t = text.lower().strip()
+
+    # =================================================
+    # 🖼 IMAGE EDIT
+    # =================================================
+
+    image_edit_words = [
+        "измени",
+        "убери",
+        "добавь",
+        "замени",
+        "улучши"
+    ]
+
+    if any(x in t for x in image_edit_words):
+        return "image_edit"
+
+    # =================================================
+    # 🎨 IMAGE GENERATE
+    # =================================================
+
+    image_generate_words = [
+        "создай",
+        "сгенерируй",
+        "нарисуй",
+        "создай изображение",
+        "сделай картинку"
+    ]
+
+    if any(x in t for x in image_generate_words):
+        return "image_generate"
+
+    # =================================================
+    # 📈 SAFE MATH
+    # =================================================
+
+    math_words = [
+        "график",
+        "функция",
+        "уравнение",
+        "реши",
+        "матем",
+        "sin(",
+        "cos(",
+        "tan(",
+        "y="
+    ]
+
+    if any(x in t for x in math_words):
+        return "math"
+
+    if "=" in t:
+
+        has_digits = any(
+            ch.isdigit()
+            for ch in t
+        )
+
+        if has_digits:
+            return "math"
+
+    operators = ["+", "-", "*", "/"]
+
+    if any(op in t for op in operators):
+
+        digit_count = sum(
+            ch.isdigit()
+            for ch in t
+        )
+
+        if digit_count >= 2:
+            return "math"
+
+    return "text"
+
+
+# =====================================================
+# 🔥 OUTPUT MODE
+# =====================================================
+
+def detect_output_mode(text: str):
+
+    t = text.lower()
+
+    if any(w in t for w in [
+        "файл",
+        "скачать",
+        ".py",
+        "html"
+    ]):
+        return "file"
+
+    if any(w in t for w in [
+        "код",
+        "code"
+    ]):
+        return "code"
+
+    if any(w in t for w in [
+        "график html",
+        "интерактив",
+        "браузер"
+    ]):
+        return "graph_html"
+
+    if any(w in t for w in [
+        "картинкой",
+        "png",
+        "изображением"
+    ]):
+        return "graph_image"
+
+    return "auto"
+
+
+# =====================================================
 # 🔥 ACTIVE TASK
-# ===============================
-def update_active_task(state: dict, text: str, task_type: str):
+# =====================================================
+
+def update_active_task(
+    state: dict,
+    text: str,
+    task_type: str
+):
+
     t = text.lower()
 
     if "y=" in t:
+
         state["active_task"] = {
             "type": "math",
             "data": text.strip()
         }
 
-    elif any(w in t for w in ["сложнее", "проще", "волнист", "резче", "плавнее"]):
-        active = state.get("active_task")
-        if active and active.get("type") == "math":
-            state["active_task"]["modify"] = t
 
-    elif "график" in t:
-        if "active_task" not in state:
-            state["active_task"] = {
-                "type": "math",
-                "data": None
-            }
-
-
-def continue_active_task(state: dict, text: str):
-    t = text.lower().strip()
-    active = state.get("active_task")
-
-    if not active:
-        return text
-
-    if any(w in t for w in ["построй", "сделай", "покажи", "давай"]):
-        if active.get("type") == "math":
-            if active.get("data"):
-                return f"{active['data']} построить график"
-            return "построй график"
-
-    if "это" in t and "график" in t:
-        if active.get("data"):
-            return f"{active['data']} построить график"
-
+def continue_active_task(
+    state: dict,
+    text: str
+):
     return text
 
 
-# ===============================
-# 🔥 SEMANTIC MEMORY
-# ===============================
-def extract_and_store_semantics(state: dict, text: str, result_type: str = "text"):
+# =====================================================
+# 🔥 MEMORY
+# =====================================================
+
+def extract_and_store_semantics(
+    state: dict,
+    text: str,
+    result_type: str = "text"
+):
+
     t = text.lower()
 
-    match = re.search(r"y\s*=\s*([^\n\r]+)", t)
-    if match:
-        expr = match.group(1).strip()
+    match = re.search(
+        r"y\s*=\s*([^\n\r]+)",
+        t
+    )
 
-        expr = expr.replace("^", "**")
-        expr = expr.replace("sin", "np.sin")
-        expr = expr.replace("cos", "np.cos")
-        expr = expr.replace("tan", "np.tan")
-        expr = expr.replace("log", "np.log")
+    if match:
+
+        expr = match.group(1).strip()
 
         state["last_math"] = {
             "type": "function",
@@ -141,193 +249,338 @@ def extract_and_store_semantics(state: dict, text: str, result_type: str = "text
         state["last_code"] = text
 
     if result_type == "image":
-        state["last_image"] = {"exists": True}
+        state["last_image"] = {
+            "exists": True
+        }
 
 
-# ===============================
-# EXECUTE
-# ===============================
-async def execute(user_id, text, chat_id, run_with_typing, callback_data=None):
+# =====================================================
+# 🚀 EXECUTE
+# =====================================================
+
+async def execute(
+    user_id,
+    text,
+    chat_id,
+    run_with_typing,
+    callback_data=None
+):
+
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
     mode = get_mode(user_id)
 
-    # 🔒 ГЛОБАЛЬНЫЙ LOCK
+    t = text.lower().strip()
+
+    # =================================================
+    # 🔒 IMAGE LOCK
+    # =================================================
+
     if state.get("image_lock"):
-        print("⛔ IMAGE LOCK ACTIVE")
-        return {"type": "error", "data": "⏳ Обработка изображения..."}
 
-    flow = get_active_flow(user_id)
-    t = text.lower()
+        return {
+            "type": "text",
+            "data":
+                "⏳ Изображение ещё обрабатывается"
+        }
 
-    if flow:
-        if flow.get("type") == "math":
-            if any(x in t for x in ["объясни", "покажи", "таблица", "график"]):
-                text = flow.get("original", text)
-
-        if flow.get("type") == "image":
-            if any(x in t for x in ["добавь", "измени", "убери"]):
-                return await image_edit(user_id, text, state)
-
-    if any(x in t for x in ["как тебя зовут", "кто ты", "давай поговорим"]):
-        clear_active_flow(user_id)
+    # =================================================
+    # 💬 DIALOG
+    # =================================================
 
     add_dialog(user_id, "user", text)
-    update_memory_summary(user_id, text)
 
-    dialog = state.get("dialog_state", {})
+    update_memory_summary(
+        user_id,
+        text
+    )
+
+    dialog = (
+        state.get("dialog_state", {})
+        or {}
+    )
+
+    # =================================================
+    # 🖼 IMAGE PRIORITY
+    # =================================================
 
     if dialog.get("intent") == "image":
 
-        if any(w in t for w in ["сделай", "измени", "добавь", "убери"]):
-            return await image_edit(user_id, text, state)
+        image_words = [
+            "что",
+            "картин",
+            "фото",
+            "изображ",
+            "добавь",
+            "измени",
+            "убери",
+            "замени"
+        ]
 
-        if "что" in t and "картин" in t:
+        if any(x in t for x in image_words):
 
             ctx = state.get("image_context")
 
-            if not ctx:
-                events = state.get("events", [])
-                for e in reversed(events):
-                    if e.get("type") == "image_uploaded":
-                        ctx = {"path": e.get("path")}
-                        break
-
             if ctx and ctx.get("path"):
-                result = await analyze_image(ctx["path"], state)
 
-                add_dialog(user_id, "assistant", result)
-                update_memory_summary(user_id, result)
+                edit_words = [
+                    "добавь",
+                    "измени",
+                    "убери",
+                    "замени"
+                ]
 
-                set_dialog_state(user_id, {"intent": "image", "mode": "analyze"})
+                # =============================
+                # 🎨 IMAGE EDIT
+                # =============================
 
-                return {"type": "text", "data": result}
+                if any(x in t for x in edit_words):
 
-    try:
-        task_type = detect_task_type(text)
+                    result = await image_edit(
+                        user_id,
+                        text,
+                        state
+                    )
 
-        if task_type == "math":
-            set_active_flow(user_id, {"type": "math", "original": text})
+                    return result
 
-        if task_type == "image_generate":
-            set_active_flow(user_id, {"type": "image"})
+                # =============================
+                # 🔍 IMAGE ANALYZE
+                # =============================
 
-        update_active_task(state, text, task_type)
+                result = await analyze_image(
+                    ctx["path"],
+                    state
+                )
 
-    except Exception as e:
-        print("ACTIVE TASK ERROR:", e)
+                add_dialog(
+                    user_id,
+                    "assistant",
+                    result
+                )
+
+                update_memory_summary(
+                    user_id,
+                    result
+                )
+
+                return {
+                    "type": "text",
+                    "data": result
+                }
+
+    # =================================================
+    # 🔥 TASK TYPE
+    # =================================================
+
+    task_type = detect_task_type(text)
+
+    if task_type == "math":
+
+        set_active_flow(
+            user_id,
+            {
+                "type": "math",
+                "original": text
+            }
+        )
+
+    elif task_type in [
+        "image_generate",
+        "image_edit"
+    ]:
+
+        set_active_flow(
+            user_id,
+            {
+                "type": "image"
+            }
+        )
+
+    # =================================================
+    # ⚡ ENERGY
+    # =================================================
 
     energy = get_energy(user_id)
+
+    # =================================================
+    # 🧠 CONTEXT
+    # =================================================
 
     context = {
         "chat_id": chat_id,
         "state": state,
         "mode": mode,
-        "task_type": detect_task_type(text),
+        "task_type": task_type,
         "energy": energy,
-        "output_mode": detect_output_mode(text)
+        "output_mode":
+            detect_output_mode(text)
     }
 
+    # =================================================
+    # 🏠 ROOMS
+    # =================================================
+
     for room in ROOMS:
+
         try:
-            if room.can_handle(text, context):
-                result = await room.handle(user_id, text, context, run_with_typing)
 
-                if result and result.get("type"):
+            if room.can_handle(
+                text,
+                context
+            ):
 
-                    # 🔒 LOCK ТОЛЬКО НА ГЕНЕРАЦИЮ
+                result = await room.handle(
+                    user_id,
+                    text,
+                    context,
+                    run_with_typing
+                )
+
+                if (
+                    result
+                    and result.get("type")
+                ):
+
+                    # =========================
+                    # 🖼 IMAGE GENERATION
+                    # =========================
+
                     if result.get("type") == "image_task":
-                        print("🔒 IMAGE LOCK ENABLED")
+
                         state["image_lock"] = True
 
                         try:
-                            result = await image_generate(user_id, result["prompt"], state)
+
+                            result = await image_generate(
+                                user_id,
+                                result["prompt"],
+                                state
+                            )
+
                         finally:
-                            print("🔓 IMAGE LOCK DISABLED")
+
                             state["image_lock"] = False
 
-                    output_text = str(result.get("data", ""))
+                    output_text = str(
+                        result.get("data", "")
+                    )
 
-                    add_dialog(user_id, "assistant", output_text)
-                    update_memory_summary(user_id, output_text)
+                    add_dialog(
+                        user_id,
+                        "assistant",
+                        output_text
+                    )
+
+                    update_memory_summary(
+                        user_id,
+                        output_text
+                    )
+
+                    # =========================
+                    # 🔥 DIALOG STATE
+                    # =========================
 
                     if result.get("type") == "image":
-                        set_active_flow(user_id, {"type": "image"})
-                        set_dialog_state(user_id, {"intent": "image"})
-                    elif context.get("task_type") == "math":
-                        set_dialog_state(user_id, {"intent": "math"})
+
+                        set_active_flow(
+                            user_id,
+                            {
+                                "type": "image"
+                            }
+                        )
+
+                        set_dialog_state(
+                            user_id,
+                            {
+                                "intent": "image"
+                            }
+                        )
+
+                    elif task_type == "math":
+
+                        set_dialog_state(
+                            user_id,
+                            {
+                                "intent": "math"
+                            }
+                        )
+
                     else:
-                        set_dialog_state(user_id, {"intent": "text"})
+
+                        set_dialog_state(
+                            user_id,
+                            {
+                                "intent": "text"
+                            }
+                        )
 
                     extract_and_store_semantics(
                         state,
                         output_text,
-                        result.get("type", "text")
+                        result.get(
+                            "type",
+                            "text"
+                        )
                     )
 
                     return result
 
         except Exception as e:
-            print(f"ROOM ERROR [{room.name}]:", e)
 
-    context_text = build_context_text(user_id, text, state)
+            print(
+                f"ROOM ERROR [{room.name}]",
+                e
+            )
+
+    # =================================================
+    # 💬 TEXT FALLBACK
+    # =================================================
+
+    context_text = build_context_text(
+        user_id,
+        text,
+        state
+    )
 
     result = await run_with_typing(
         chat_id,
-        text_process(user_id, context_text, state, energy)
+        text_process(
+            user_id,
+            context_text,
+            state,
+            energy
+        )
     )
 
     if result and result.get("content"):
-        add_dialog(user_id, "assistant", result["content"])
-        update_memory_summary(user_id, result["content"])
-        set_dialog_state(user_id, {"intent": "text"})
-        extract_and_store_semantics(state, result["content"], "text")
 
-    return {"type": "text", "data": result["content"]}
+        add_dialog(
+            user_id,
+            "assistant",
+            result["content"]
+        )
 
+        update_memory_summary(
+            user_id,
+            result["content"]
+        )
 
-def detect_output_mode(text: str):
-    t = text.lower()
+        set_dialog_state(
+            user_id,
+            {
+                "intent": "text"
+            }
+        )
 
-    if any(w in t for w in ["файл", "скачать", ".py", "html"]):
-        return "file"
+        extract_and_store_semantics(
+            state,
+            result["content"],
+            "text"
+        )
 
-    if any(w in t for w in ["код", "code"]):
-        return "code"
-
-    if any(w in t for w in ["график html", "интерактив", "браузер"]):
-        return "graph_html"
-
-    if any(w in t for w in ["картинкой", "png", "изображением"]):
-        return "graph_image"
-
-    return "auto"
-
-
-def detect_task_type(text: str):
-    t = text.lower()
-
-    if "=" in t:
-        return "math"
-
-    if "sin(" in t or "cos(" in t:
-        return "math"
-
-    if any(op in t for op in ["+", "-", "*", "/"]):
-        if any(ch.isdigit() for ch in t):
-            return "math"
-
-    if "y=" in t or "график" in t:
-        return "math"
-
-    if any(x in t for x in ["измени", "убери", "добавь", "замени"]):
-        return "image_edit"
-
-    if any(x in t for x in ["создай", "сгенерируй", "нарисуй"]):
-        return "image_generate"
-
-    if "сделай" in t:
-        return "text"
-
-    return "text"
+    return {
+        "type": "text",
+        "data": result["content"]
+    }
