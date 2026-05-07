@@ -5,10 +5,12 @@ from flask import (
     Flask,
     request,
     redirect,
+    render_template,
     render_template_string
 )
 
 from blocks.paypal_module import (
+    create_payment,
     capture_payment,
     get_order
 )
@@ -29,6 +31,15 @@ PORT = int(
 DOMAIN = os.getenv(
     "CHECKOUT_DOMAIN",
     "https://aprill.site"
+)
+
+PAYPAL_CLIENT_ID = os.getenv(
+    "PAYPAL_CLIENT_ID"
+)
+
+BOT_USERNAME = os.getenv(
+    "BOT_USERNAME",
+    "aprill_bot"
 )
 
 # =========================================================
@@ -95,6 +106,17 @@ body{
 </div>
 
 </div>
+
+<script>
+
+setTimeout(() => {
+
+    window.location.href =
+        "https://t.me/{{ bot_username }}";
+
+}, 2500);
+
+</script>
 
 </body>
 </html>
@@ -164,6 +186,72 @@ body{
 """
 
 # =========================================================
+# 🚀 CHECKOUT PAGE
+# =========================================================
+
+@app.route("/checkout/<plan>/<user_id>")
+def checkout(plan, user_id):
+
+    # =====================================================
+    # 💰 PRICE
+    # =====================================================
+
+    if plan == "lite":
+
+        amount = 12
+        plan_name = "⚡ Lite"
+
+    else:
+
+        amount = 69
+        plan_name = "👑 Premium"
+
+    # =====================================================
+    # 🔥 CREATE PAYMENT
+    # =====================================================
+
+    approve_url = create_payment(
+        amount,
+        plan,
+        user_id
+    )
+
+    if not approve_url:
+
+        return "PAYPAL ERROR"
+
+    # =====================================================
+    # 🔥 GET ORDER ID
+    # =====================================================
+
+    try:
+
+        order_id = approve_url.split(
+            "token="
+        )[-1]
+
+    except:
+
+        return "ORDER ID ERROR"
+
+    # =====================================================
+    # 🔥 RENDER CHECKOUT
+    # =====================================================
+
+    return render_template(
+
+        "checkout.html",
+
+        client_id=PAYPAL_CLIENT_ID,
+
+        order_id=order_id,
+
+        amount=amount,
+
+        plan_name=plan_name
+    )
+
+# =========================================================
 # 🟢 SUCCESS
 # =========================================================
 
@@ -226,7 +314,8 @@ def paypal_success():
         return "SUB ERROR"
 
     return render_template_string(
-        SUCCESS_HTML
+        SUCCESS_HTML,
+        bot_username=BOT_USERNAME
     )
 
 # =========================================================
