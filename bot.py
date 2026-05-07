@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 import pytz
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BufferedInputFile
+)
+
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from openai import OpenAI
@@ -30,7 +35,13 @@ from storage import (
 
 from core.executor import execute
 
-from blocks.ui import main_keyboard, buy_keyboard, тариф_keyboard, payments_keyboard
+from blocks.ui import (
+    main_keyboard,
+    buy_keyboard,
+    тариф_keyboard,
+    payments_keyboard
+)
+
 from blocks.state_manager import (
     set_image_context,
     set_awaiting,
@@ -38,8 +49,15 @@ from blocks.state_manager import (
     get_state
 )
 
-from blocks.anchor_system import create_anchor, clear_anchor
-from blocks.error_handler import handle_error, get_errors
+from blocks.anchor_system import (
+    create_anchor,
+    clear_anchor
+)
+
+from blocks.error_handler import (
+    handle_error,
+    get_errors
+)
 
 from blocks.admin_system import (
     register_user,
@@ -48,21 +66,69 @@ from blocks.admin_system import (
     get_system_status
 )
 
-from blocks.mode_manager import get_mode, set_mode, clear_mode
-from blocks.session_manager import is_session_expired
-from blocks.menu_system import get_menu, build_tariffs_menu, build_info_menu
+from blocks.mode_manager import (
+    get_mode,
+    set_mode,
+    clear_mode
+)
 
-from blocks.image_module import process as image_generate
-from blocks.paypal_module import create_payment
-from blocks.subscription_module import check as subscription_check
+from blocks.session_manager import is_session_expired
+
+from blocks.menu_system import (
+    get_menu,
+    build_tariffs_menu,
+    build_info_menu
+)
+
+from blocks.image_module import (
+    process as image_generate
+)
+
+# =========================================================
+# 🔥 PAYPAL
+# =========================================================
+
+from blocks.paypal_module import (
+    create_payment,
+    capture_payment,
+    get_order
+)
+
+from blocks.subscription_module import (
+    check as subscription_check
+)
 
 from io import BytesIO
 
+# =========================================================
+# 🔥 TOKENS
+# =========================================================
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+# =========================================================
+# 🔥 CHECKOUT DOMAIN
+# =========================================================
+
+CHECKOUT_DOMAIN = os.getenv(
+    "CHECKOUT_DOMAIN",
+    "https://aprill.site"
+)
+
+# =========================================================
+# 🔥 BOT SESSION
+# =========================================================
 
 session = AiohttpSession(timeout=300)
-bot = Bot(token=TOKEN, session=session)
+
+bot = Bot(
+    token=TOKEN,
+    session=session
+)
 
 dp = Dispatcher()
 
@@ -79,8 +145,14 @@ from blocks.tariffs_config import (
 tz = pytz.timezone("Europe/Kyiv")
 
 
+# =========================================================
+# ⏰ TIME QUESTIONS
+# =========================================================
+
 def is_time_question(text: str):
+
     text = text.lower()
+
     return any(t in text for t in [
         "сколько времени",
         "который час",
@@ -89,43 +161,74 @@ def is_time_question(text: str):
     ])
 
 
+# =========================================================
+# ⌨️ TYPING LOOP
+# =========================================================
+
 async def typing_loop(chat_id):
+
     try:
+
         while True:
-            await bot.send_chat_action(chat_id, "typing")
+
+            await bot.send_chat_action(
+                chat_id,
+                "typing"
+            )
+
             await asyncio.sleep(2)
+
     except:
         pass
 
 
 async def run_with_typing(chat_id, coro):
-    task = asyncio.create_task(typing_loop(chat_id))
+
+    task = asyncio.create_task(
+        typing_loop(chat_id)
+    )
 
     try:
+
         result = await coro
+
         await asyncio.sleep(0.1)
+
         return result
 
     finally:
         task.cancel()
 
 
+# =========================================================
+# 🌐 SIMPLE SERVER
+# =========================================================
+
 class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
         self.end_headers()
+
         self.wfile.write(b"OK")
 
 
 def run_server():
-    port = int(os.environ.get("PORT", 10000))
+
+    port = int(
+        os.environ.get("PORT", 10000)
+    )
 
     HTTPServer(
         ("0.0.0.0", port),
         Handler
     ).serve_forever()
 
+
+# =========================================================
+# 🖼 SAFE IMAGE SEND
+# =========================================================
 
 async def safe_send_image(message, data):
 
@@ -136,7 +239,9 @@ async def safe_send_image(message, data):
                 data,
                 filename="image.png"
             ),
-            reply_markup=main_keyboard(message.message_id)
+            reply_markup=main_keyboard(
+                message.message_id
+            )
         )
 
     except:
@@ -146,9 +251,15 @@ async def safe_send_image(message, data):
 
         await message.answer_document(
             bio,
-            reply_markup=main_keyboard(message.message_id)
+            reply_markup=main_keyboard(
+                message.message_id
+            )
         )
 
+
+# =========================================================
+# 💬 MESSAGE HANDLER
+# =========================================================
 
 @dp.message()
 async def handle(message: types.Message):
@@ -279,7 +390,7 @@ async def handle(message: types.Message):
     register_user(user_id)
 
     # =====================================================
-    # 🔥 SUBSCRIPTION CHECK
+    # 🔥 SUB CHECK
     # =====================================================
 
     check_result = await subscription_check(
@@ -349,7 +460,9 @@ async def handle(message: types.Message):
 
             await message.answer(
                 result["data"],
-                reply_markup=main_keyboard(message.message_id)
+                reply_markup=main_keyboard(
+                    message.message_id
+                )
             )
 
         elif result["type"] == "image":
@@ -369,8 +482,14 @@ async def handle(message: types.Message):
         )
 
 
+# =========================================================
+# 🔘 CALLBACKS
+# =========================================================
+
 @dp.callback_query()
-async def handle_callbacks(callback: types.CallbackQuery):
+async def handle_callbacks(
+    callback: types.CallbackQuery
+):
 
     data = callback.data
     user_id = callback.from_user.id
@@ -520,7 +639,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
             return
 
     # =====================================================
-    # 💳 BUY
+    # 💳 BUY LITE
     # =====================================================
 
     if data in ["buy_lite", "lite", "go_lite"]:
@@ -545,7 +664,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="💳 Оплатить Lite",
+                        text="⚡ Оплатить Lite",
                         url=payment_url
                     )
                 ]
@@ -553,14 +672,23 @@ async def handle_callbacks(callback: types.CallbackQuery):
         )
 
         await callback.message.answer(
-            f"⚡ Lite — ${LITE_PRICE}\n\n"
-            f"Нажмите кнопку ниже для оплаты:",
+            "⚡ Lite подписка\n\n"
+            "После оплаты тариф активируется автоматически.\n\n"
+            "Поддерживаются:\n"
+            "• Google Pay\n"
+            "• Apple Pay\n"
+            "• Банковские карты\n"
+            "• PayPal",
             reply_markup=keyboard
         )
 
         await callback.answer()
 
         return
+
+    # =====================================================
+    # 👑 BUY PREMIUM
+    # =====================================================
 
     if data == "buy_premium":
 
@@ -592,8 +720,13 @@ async def handle_callbacks(callback: types.CallbackQuery):
         )
 
         await callback.message.answer(
-            f"👑 Premium — ${PREMIUM_PRICE}\n\n"
-            f"Нажмите кнопку ниже для оплаты:",
+            "👑 Premium подписка\n\n"
+            "После оплаты тариф активируется автоматически.\n\n"
+            "Поддерживаются:\n"
+            "• Google Pay\n"
+            "• Apple Pay\n"
+            "• Банковские карты\n"
+            "• PayPal",
             reply_markup=keyboard
         )
 
@@ -719,6 +852,10 @@ async def handle_callbacks(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# =========================================================
+# 🚀 MAIN
+# =========================================================
+
 async def main():
 
     init_db()
@@ -729,6 +866,10 @@ async def main():
 
     await dp.start_polling(bot)
 
+
+# =========================================================
+# ▶️ START
+# =========================================================
 
 if __name__ == "__main__":
 
