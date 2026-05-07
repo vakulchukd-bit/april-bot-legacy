@@ -1,4 +1,3 @@
-checkout.html
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -56,6 +55,8 @@ checkout.html
             font-weight: bold;
 
             margin-bottom: 10px;
+
+            text-align: center;
         }
 
         .subtitle {
@@ -63,6 +64,8 @@ checkout.html
             color: #aaaaaa;
 
             margin-bottom: 28px;
+
+            text-align: center;
         }
 
         .plan {
@@ -183,66 +186,59 @@ checkout.html
 
 <script>
 
-paypal.Buttons({
+window.paypal
+.Buttons({
+
+    fundingSource: paypal.FUNDING.PAYPAL,
 
     style: {
 
         layout: 'vertical',
         shape: 'pill',
-        label: 'pay'
+        label: 'pay',
+        height: 50,
+        tagline: false
     },
 
-    createOrder: function(data, actions) {
+    createOrder() {
 
         return "{{ order_id }}";
 
     },
 
-    onApprove: function(data, actions) {
+    onApprove(data) {
 
-        return fetch('/capture-order', {
+        document
+            .getElementById("successBox")
+            .style.display = "block";
 
-            method: 'POST',
+        setTimeout(() => {
 
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            window.location.href =
+                "/paypal-success?token=" + data.orderID;
 
-            body: JSON.stringify({
-                orderID: data.orderID
-            })
-
-        })
-
-        .then(res => res.json())
-
-        .then(details => {
-
-            document
-                .getElementById("successBox")
-                .style.display = "block";
-
-            setTimeout(() => {
-
-                window.location.href =
-                    "https://t.me/YOUR_BOT_USERNAME";
-
-            }, 2500);
-
-        });
+        }, 1200);
 
     },
 
-    onError: function(err) {
+    onCancel() {
 
-        alert(
-            "Ошибка оплаты. Попробуйте ещё раз."
-        );
+        window.location.href =
+            "/paypal-cancel";
+
+    },
+
+    onError(err) {
 
         console.error(err);
+
+        alert(
+            "Ошибка оплаты"
+        );
     }
 
-}).render('#paypal-button-container');
+})
+.render('#paypal-button-container');
 
 </script>
 
