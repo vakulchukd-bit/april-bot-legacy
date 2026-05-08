@@ -653,9 +653,10 @@ async def handle_callbacks(
             ]
         )
 
-        await callback.message.edit_reply_markup(
-            reply_markup=keyboard
-        )
+        await callback.message.answer(
+    "⚡ Lite Checkout",
+    reply_markup=keyboard
+)
 
         await callback.answer()
 
