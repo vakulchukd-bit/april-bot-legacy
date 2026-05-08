@@ -204,14 +204,7 @@ async def run_with_typing(chat_id, coro):
 # 🌐 SIMPLE SERVER
 # =========================================================
 
-class Handler(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-
-        self.send_response(200)
-        self.end_headers()
-
-        self.wfile.write(b"OK")
+from checkout_server import app
 
 
 def run_server():
@@ -220,10 +213,10 @@ def run_server():
         os.environ.get("PORT", 10000)
     )
 
-    HTTPServer(
-        ("0.0.0.0", port),
-        Handler
-    ).serve_forever()
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
 # =========================================================
@@ -648,23 +641,9 @@ async def handle_callbacks(
         f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
     )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⚡ Открыть оплату Lite",
-                    url=payment_url
-                )
-            ]
-        ]
+    await callback.answer(
+        url=payment_url
     )
-
-    await callback.message.answer(
-        "⚡ Lite — $12",
-        reply_markup=keyboard
-    )
-
-    await callback.answer()
 
     return
 
@@ -678,23 +657,9 @@ async def handle_callbacks(
         f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
     )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👑 Открыть оплату Premium",
-                    url=payment_url
-                )
-            ]
-        ]
+    await callback.answer(
+        url=payment_url
     )
-
-    await callback.message.answer(
-        "👑 Premium — $69",
-        reply_markup=keyboard
-    )
-
-    await callback.answer()
 
     return
 
