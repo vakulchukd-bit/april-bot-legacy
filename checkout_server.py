@@ -325,14 +325,11 @@ def capture_order():
 
     try:
 
-        purchase =
-            order["purchase_units"][0]
+        purchase = order["purchase_units"][0]
 
-        custom_id =
-            purchase["custom_id"]
+        custom_id = purchase["custom_id"]
 
-        user_id, plan =
-            custom_id.split(":")
+        user_id, plan = custom_id.split(":")
 
         user_id = int(user_id)
 
