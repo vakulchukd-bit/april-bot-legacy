@@ -665,14 +665,14 @@ async def handle_callbacks(
         ]
     )
 
-    await callback.message.answer(
+        await callback.message.answer(
         "⚡ Lite Пакет",
         reply_markup=keyboard
     )
 
-    await callback.answer()
+        await callback.answer()
 
-    return
+        return
 
     # =====================================================
     # 👑 BUY PREMIUM
@@ -707,14 +707,14 @@ async def handle_callbacks(
         ]
     )
 
-    await callback.message.answer(
+        await callback.message.answer(
         "👑 Premium Пакет",
         reply_markup=keyboard
     )
 
-    await callback.answer()
+        await callback.answer()
 
-    return
+        return
 
     # =====================================================
     # 💳 BUY REQUESTS
