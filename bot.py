@@ -675,7 +675,7 @@ async def handle_callbacks(
             [
                 InlineKeyboardButton(
                     text="🌐 Открыть оплату Premium • $69",
-                    url=payment_url
+                    url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
                 )
             ]
         ]
