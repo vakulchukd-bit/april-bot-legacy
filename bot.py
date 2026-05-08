@@ -666,9 +666,9 @@ async def handle_callbacks(
 
     if data in ["buy_premium", "premium", "go_premium"]:
 
-        payment_url = (
-        f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-    )
+                payment_url = (
+                    f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+            )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
