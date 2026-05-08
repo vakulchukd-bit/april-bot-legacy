@@ -714,7 +714,7 @@ async def handle_callbacks(
 
         await callback.answer()
 
-            return
+        return
 
     # =====================================================
     # 💳 BUY REQUESTS
