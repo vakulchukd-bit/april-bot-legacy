@@ -639,67 +639,67 @@ async def handle_callbacks(
             return
 
 # =====================================================
-# 💳 BUY LITE
-# =====================================================
+    # 💳 BUY LITE
+    # =====================================================
 
-if data in ["buy_lite", "lite", "go_lite"]:
+    if data in ["buy_lite", "lite", "go_lite"]:
 
-    payment_url = (
-        f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
-    )
+        payment_url = (
+            f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+        )
 
-    if not payment_url:
+        if not payment_url:
+
+            await callback.message.answer(
+                "❌ Ошибка PayPal"
+            )
+
+            await callback.answer()
+
+            return
+
+        text = (
+            "🔗 Открыть оплату Lite:\n\n"
+            f"{payment_url}"
+        )
 
         await callback.message.answer(
-            "❌ Ошибка PayPal"
+            text,
+            disable_web_page_preview=True
         )
 
         await callback.answer()
 
         return
 
-    text = (
-        "🔗 Открыть оплату Lite:\n\n"
-        f"{payment_url}"
-    )
+    # =====================================================
+    # 👑 BUY PREMIUM
+    # =====================================================
 
-    await callback.message.answer(
-        text,
-        disable_web_page_preview=True
-    )
+    if data == "buy_premium":
 
-    await callback.answer()
+        payment_url = (
+            f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+        )
 
-    return
+        if not payment_url:
 
-# =====================================================
-# 👑 BUY PREMIUM
-# =====================================================
+            await callback.message.answer(
+                "❌ Ошибка PayPal"
+            )
 
-if data == "buy_premium":
+            await callback.answer()
 
-    payment_url = (
-        f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-    )
-
-    if not payment_url:
+            return
 
         await callback.message.answer(
-            "❌ Ошибка PayPal"
+            f"🔗 Открыть оплату Premium:\n\n{payment_url}",
+            disable_web_page_preview=True
         )
 
         await callback.answer()
 
         return
-
-    await callback.message.answer(
-        f"🔗 Открыть оплату Premium:\n\n{payment_url}",
-        disable_web_page_preview=True
-    )
-
-    await callback.answer()
-
-    return
 
     # =====================================================
     # 💳 BUY REQUESTS
