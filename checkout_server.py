@@ -198,32 +198,9 @@ body{
 @app.route("/checkout/<plan>/<user_id>")
 def checkout(plan, user_id):
 
-    print("🔥 CHECKOUT ROUTE HIT")
-
-    if plan == "lite":
-
-        amount = 12
-        plan_name = "⚡ Lite"
-
-    else:
-
-        amount = 69
-        plan_name = "👑 Premium"
-
-    return render_template(
-
-        "checkout.html",
-
-        client_id=PAYPAL_CLIENT_ID,
-
-        amount=amount,
-
-        plan_name=plan_name,
-
-        plan=plan,
-
-        user_id=user_id
-    )
+    return """
+    <h1>CHECKOUT WORKS</h1>
+    """
 
 # =========================================================
 # 🔥 CREATE ORDER
