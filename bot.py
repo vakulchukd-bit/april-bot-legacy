@@ -641,9 +641,22 @@ async def handle_callbacks(
         f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
     )
 
-    await callback.answer(
-        url=payment_url
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🌐 Открыть оплату Lite • $12",
+                    url=payment_url
+                )
+            ]
+        ]
     )
+
+    await callback.message.edit_reply_markup(
+        reply_markup=keyboard
+    )
+
+    await callback.answer()
 
     return
 
@@ -657,9 +670,22 @@ async def handle_callbacks(
         f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
     )
 
-    await callback.answer(
-        url=payment_url
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🌐 Открыть оплату Premium • $69",
+                    url=payment_url
+                )
+            ]
+        ]
     )
+
+    await callback.message.edit_reply_markup(
+        reply_markup=keyboard
+    )
+
+    await callback.answer()
 
     return
 
