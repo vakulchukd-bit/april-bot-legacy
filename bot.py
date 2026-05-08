@@ -639,96 +639,62 @@ async def handle_callbacks(
             return
 
     # =====================================================
-    # 💳 BUY LITE
-    # =====================================================
+# 💳 BUY LITE
+# =====================================================
 
-    if data in ["buy_lite", "lite", "go_lite"]:
+if data in ["buy_lite", "lite", "go_lite"]:
 
-        payment_url = (
-    f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
-)
+    payment_url = (
+        f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+    )
 
-        if not payment_url:
-
-            await callback.message.answer(
-                "❌ Ошибка PayPal"
-            )
-
-            await callback.answer()
-
-            return
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-    text="⚡ Оплатить Lite",
-    url=payment_url
-)
-                ]
-            ]
-        )
+    if not payment_url:
 
         await callback.message.answer(
-            "⚡ Lite подписка\n\n"
-            "После оплаты тариф активируется автоматически.\n\n"
-            "Поддерживаются:\n"
-            "• Google Pay\n"
-            "• Apple Pay\n"
-            "• Банковские карты\n"
-            "• PayPal",
-            reply_markup=keyboard
+            "❌ Ошибка PayPal"
         )
 
         await callback.answer()
 
         return
 
-    # =====================================================
-    # 👑 BUY PREMIUM
-    # =====================================================
+    await callback.message.answer(
+        f"🔗 Открыть оплату Lite:\n\n{payment_url}",
+        disable_web_page_preview=True
+    )
 
-    if data == "buy_premium":
+    await callback.answer()
 
-        payment_url = (
-    f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-)
+    return
 
-        if not payment_url:
+# =====================================================
+# 👑 BUY PREMIUM
+# =====================================================
 
-            await callback.message.answer(
-                "❌ Ошибка PayPal"
-            )
+if data == "buy_premium":
 
-            await callback.answer()
+    payment_url = (
+        f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+    )
 
-            return
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-    text="👑 Оплатить Premium",
-    url=payment_url
-)
-                ]
-            ]
-        )
+    if not payment_url:
 
         await callback.message.answer(
-            "👑 Premium подписка\n\n"
-            "После оплаты тариф активируется автоматически.\n\n"
-            "Поддерживаются:\n"
-            "• Google Pay\n"
-            "• Apple Pay\n"
-            "• Банковские карты\n"
-            "• PayPal",
-            reply_markup=keyboard
+            "❌ Ошибка PayPal"
         )
 
         await callback.answer()
 
         return
+
+    await callback.message.answer(
+        f"🔗 Открыть оплату Premium:\n\n{payment_url}",
+        disable_web_page_preview=True
+    )
+
+    await callback.answer()
+
+    return
 
     # =====================================================
     # 💳 BUY REQUESTS
