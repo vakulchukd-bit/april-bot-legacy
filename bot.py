@@ -644,33 +644,29 @@ async def handle_callbacks(
 
     if data in ["buy_lite", "lite", "go_lite"]:
 
-        payment_url = (
-            f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
-        )
+    payment_url = (
+        f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+    )
 
-        if not payment_url:
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚡ Открыть оплату Lite",
+                    url=payment_url
+                )
+            ]
+        ]
+    )
 
-            await callback.message.answer(
-                "❌ Ошибка PayPal"
-            )
+    await callback.message.answer(
+        "⚡ Lite — $12",
+        reply_markup=keyboard
+    )
 
-            await callback.answer()
+    await callback.answer()
 
-            return
-
-        text = (
-            "🔗 Открыть оплату Lite:\n\n"
-            f"{payment_url}"
-        )
-
-        await callback.message.answer(
-            text,
-            disable_web_page_preview=True
-        )
-
-        await callback.answer()
-
-        return
+    return
 
     # =====================================================
     # 👑 BUY PREMIUM
@@ -678,28 +674,29 @@ async def handle_callbacks(
 
     if data == "buy_premium":
 
-        payment_url = (
-            f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-        )
+    payment_url = (
+        f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+    )
 
-        if not payment_url:
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👑 Открыть оплату Premium",
+                    url=payment_url
+                )
+            ]
+        ]
+    )
 
-            await callback.message.answer(
-                "❌ Ошибка PayPal"
-            )
+    await callback.message.answer(
+        "👑 Premium — $69",
+        reply_markup=keyboard
+    )
 
-            await callback.answer()
+    await callback.answer()
 
-            return
-
-        await callback.message.answer(
-            f"🔗 Открыть оплату Premium:\n\n{payment_url}",
-            disable_web_page_preview=True
-        )
-
-        await callback.answer()
-
-        return
+    return
 
     # =====================================================
     # 💳 BUY REQUESTS
