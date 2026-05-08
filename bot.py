@@ -681,7 +681,8 @@ async def handle_callbacks(
         ]
     )
 
-    await callback.message.edit_reply_markup(
+    await callback.message.answer(
+        "👑 Premium Checkout",
         reply_markup=keyboard
     )
 
