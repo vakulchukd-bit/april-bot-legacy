@@ -638,29 +638,41 @@ async def handle_callbacks(
 
     if data in ["buy_lite", "lite", "go_lite"]:
 
-        payment_url = (
-            f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
-        )
-
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🌐 Открыть оплату Lite • $12",
-                        url=payment_url
-                    )
-                ]
+        inline_keyboard=[
+
+            [
+                InlineKeyboardButton(
+                    text="💳 Карта / PayPal",
+                    url=f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    text="🤖 Android • Google Pay",
+                    url=f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    text="🍎 iPhone • Apple Pay",
+                    url=f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+                )
             ]
-        )
 
-        await callback.message.answer(
-    "⚡ Lite Checkout",
-    reply_markup=keyboard
-)
+        ]
+    )
 
-        await callback.answer()
+    await callback.message.answer(
+        "⚡ Lite Пакет",
+        reply_markup=keyboard
+    )
 
-        return
+    await callback.answer()
+
+    return
 
     # =====================================================
     # 👑 BUY PREMIUM
@@ -668,29 +680,41 @@ async def handle_callbacks(
 
     if data in ["buy_premium", "premium", "go_premium"]:
 
-        payment_url = (
-            f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-        )
-
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🌐 Открыть оплату Premium • $69",
-                        url=payment_url
-                    )
-                ]
+        inline_keyboard=[
+
+            [
+                InlineKeyboardButton(
+                    text="💳 Карта / PayPal",
+                    url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    text="🤖 Android • Google Pay",
+                    url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    text="🍎 iPhone • Apple Pay",
+                    url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+                )
             ]
-        )
 
-        await callback.message.answer(
-            "👑 Premium Checkout",
-            reply_markup=keyboard
-        )
+        ]
+    )
 
-        await callback.answer()
+    await callback.message.answer(
+        "👑 Premium Пакет",
+        reply_markup=keyboard
+    )
 
-        return
+    await callback.answer()
+
+    return
 
     # =====================================================
     # 💳 BUY REQUESTS
