@@ -15,10 +15,10 @@ from blocks.paypal_module import (
     get_order
 )
 
-#from storage import (
- #   set_subscription,
-  #  save_payment
-#)
+from storage import (
+    set_subscription,
+    save_payment
+)
 
 import requests
 
