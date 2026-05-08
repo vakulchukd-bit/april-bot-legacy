@@ -6,7 +6,8 @@ from flask import (
     request,
     jsonify,
     render_template,
-    render_template_string
+    render_template_string,
+    redirect
 )
 
 from blocks.paypal_module import (
@@ -413,6 +414,104 @@ def health():
         "status": "APRIL CHECKOUT ONLINE"
     }
 
+# =========================================================
+# 🌐 EXTERNAL BROWSER OPEN
+# =========================================================
+
+@app.route("/open/<plan>/<user_id>")
+def open_external(plan, user_id):
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>APRIL BROWSER OPEN</title>
+
+<style>
+
+body{{
+    background:#0f1117;
+    color:white;
+    font-family:Arial;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    min-height:100vh;
+    text-align:center;
+}}
+
+.box{{
+    max-width:500px;
+    padding:40px;
+}}
+
+.title{{
+    font-size:32px;
+    margin-bottom:20px;
+}}
+
+.text{{
+    opacity:.8;
+    margin-bottom:30px;
+}}
+
+.button{{
+    display:inline-block;
+    padding:16px 28px;
+    border-radius:14px;
+    background:#ffd140;
+    color:black;
+    text-decoration:none;
+    font-weight:bold;
+}}
+
+</style>
+
+<script>
+
+setTimeout(() => {{
+
+    window.location.href =
+        "{DOMAIN}/checkout/{plan}/{user_id}";
+
+}}, 400);
+
+</script>
+
+</head>
+
+<body>
+
+<div class="box">
+
+<div class="title">
+🌐 APRIL CHECKOUT
+</div>
+
+<div class="text">
+Открываем оплату во внешнем браузере...
+</div>
+
+<a
+    class="button"
+    href="{DOMAIN}/checkout/{plan}/{user_id}"
+>
+    Открыть вручную
+</a>
+
+</div>
+
+</body>
+</html>
+"""
 # =========================================================
 # 🚀 START
 # =========================================================
