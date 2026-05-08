@@ -655,12 +655,12 @@ async def handle_callbacks(
                 )
             ],
 
-            [
-                InlineKeyboardButton(
-                    text="🍎 iPhone • Apple Pay",
-                    url=f"{CHECKOUT_DOMAIN}/open/lite/{user_id}"
-                )
-            ]
+            #[
+                #InlineKeyboardButton(
+                    #text="🍎 iPhone • Apple Pay",
+                    #url=f"{CHECKOUT_DOMAIN}/open/lite/{user_id}"
+                #)
+            #]
 
         ]
     )
@@ -697,12 +697,12 @@ async def handle_callbacks(
                 )
             ],
 
-            [
-                InlineKeyboardButton(
-                    text="🍎 iPhone • Apple Pay",
-                    url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
-                )
-            ]
+            #[
+                #InlineKeyboardButton(
+                   # text="🍎 iPhone • Apple Pay",
+                   # url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
+                #)
+            #]
 
         ]
     )
