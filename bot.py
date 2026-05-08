@@ -658,8 +658,13 @@ if data in ["buy_lite", "lite", "go_lite"]:
 
         return
 
+    text = (
+        "🔗 Открыть оплату Lite:\n\n"
+        f"{payment_url}"
+    )
+
     await callback.message.answer(
-        f"🔗 Открыть оплату Lite:\n\n{payment_url}",
+        text,
         disable_web_page_preview=True
     )
 
