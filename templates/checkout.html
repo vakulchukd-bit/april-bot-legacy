@@ -14,7 +14,7 @@
 
     <!-- 🔥 PAYPAL SMART SDK -->
     <script
-        src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent=capture&components=buttons,funding-eligibility&enable-funding=venmo,paylater,card"
+        src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent=capture&components=buttons,funding-eligibility,applepay,googlepay&enable-funding=venmo,paylater,card"
         onload="console.log('✅ PAYPAL SDK LOADED')"
         onerror="console.error('❌ PAYPAL SDK FAILED')"
     ></script>
@@ -251,10 +251,6 @@ if (!window.paypal) {
 
         },
 
-        // =====================================================
-        // 🔥 CREATE ORDER
-        // =====================================================
-
         async createOrder() {
 
             debug("CREATE ORDER START");
@@ -299,10 +295,6 @@ if (!window.paypal) {
                 console.error(err);
             }
         },
-
-        // =====================================================
-        // 🔥 CAPTURE
-        // =====================================================
 
         async onApprove(data) {
 
@@ -358,10 +350,6 @@ if (!window.paypal) {
             }
         },
 
-        // =====================================================
-        // ❌ CANCEL
-        // =====================================================
-
         onCancel() {
 
             debug("PAYMENT CANCELLED");
@@ -369,10 +357,6 @@ if (!window.paypal) {
             window.location.href =
                 "/paypal-cancel";
         },
-
-        // =====================================================
-        // 🔥 ERROR
-        // =====================================================
 
         onError(err) {
 
