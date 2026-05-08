@@ -4,13 +4,13 @@ import json
 from flask import (
     Flask,
     request,
-    redirect,
+    jsonify,
     render_template,
     render_template_string
 )
 
 from blocks.paypal_module import (
-    create_payment,
+    get_access_token,
     capture_payment,
     get_order
 )
@@ -19,6 +19,8 @@ from storage import (
     set_subscription,
     save_payment
 )
+
+import requests
 
 # =========================================================
 # 🔥 CONFIG
@@ -42,6 +44,8 @@ BOT_USERNAME = os.getenv(
     "aprill_bot"
 )
 
+BASE_URL = "https://api-m.paypal.com"
+
 # =========================================================
 # 🔥 FLASK
 # =========================================================
@@ -49,7 +53,7 @@ BOT_USERNAME = os.getenv(
 app = Flask(__name__)
 
 # =========================================================
-# 🎨 HTML TEMPLATE
+# 🎨 SUCCESS HTML
 # =========================================================
 
 SUCCESS_HTML = """
@@ -192,10 +196,6 @@ body{
 @app.route("/checkout/<plan>/<user_id>")
 def checkout(plan, user_id):
 
-    # =====================================================
-    # 💰 PRICE
-    # =====================================================
-
     if plan == "lite":
 
         amount = 12
@@ -206,102 +206,135 @@ def checkout(plan, user_id):
         amount = 69
         plan_name = "👑 Premium"
 
-    # =====================================================
-    # 🔥 CREATE PAYMENT
-    # =====================================================
-
-    approve_url = create_payment(
-        amount,
-        plan,
-        user_id
-    )
-
-    if not approve_url:
-
-        return "PAYPAL ERROR"
-
-    # =====================================================
-    # 🔥 GET ORDER ID
-    # =====================================================
-
-    try:
-
-        order_id = approve_url.split(
-            "token="
-        )[-1]
-
-    except:
-
-        return "ORDER ID ERROR"
-
-    # =====================================================
-    # 🔥 RENDER CHECKOUT
-    # =====================================================
-
     return render_template(
 
         "checkout.html",
 
         client_id=PAYPAL_CLIENT_ID,
 
-        order_id=order_id,
-
         amount=amount,
 
-        plan_name=plan_name
+        plan_name=plan_name,
+
+        plan=plan,
+
+        user_id=user_id
     )
 
 # =========================================================
-# 🟢 SUCCESS
+# 🔥 CREATE ORDER
 # =========================================================
 
-@app.route("/paypal-success")
-def paypal_success():
+@app.route("/create-order", methods=["POST"])
+def create_order():
 
-    order_id = request.args.get("token")
+    data = request.json
 
-    if not order_id:
-        return "NO ORDER ID"
+    amount = data.get("amount")
+    plan = data.get("plan")
+    user_id = data.get("user_id")
 
-    # =====================================================
-    # 🔥 CAPTURE
-    # =====================================================
+    token = get_access_token()
+
+    if not token:
+        return jsonify({
+            "error": "TOKEN ERROR"
+        }), 500
+
+    response = requests.post(
+
+        f"{BASE_URL}/v2/checkout/orders",
+
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        },
+
+        json={
+
+            "intent": "CAPTURE",
+
+            "purchase_units": [
+                {
+                    "amount": {
+                        "currency_code": "USD",
+                        "value": str(amount)
+                    },
+
+                    "custom_id":
+                        f"{user_id}:{plan}",
+
+                    "description":
+                        f"APRIL AI {plan.upper()}"
+                }
+            ],
+
+            "application_context": {
+
+                "brand_name":
+                    "APRIL AI",
+
+                "landing_page":
+                    "BILLING",
+
+                "user_action":
+                    "PAY_NOW",
+
+                "shipping_preference":
+                    "NO_SHIPPING"
+            }
+        }
+    )
+
+    result = response.json()
+
+    if "id" not in result:
+
+        print("PAYPAL CREATE ERROR:", result)
+
+        return jsonify(result), 500
+
+    return jsonify({
+        "id": result["id"]
+    })
+
+# =========================================================
+# 🔥 CAPTURE ORDER
+# =========================================================
+
+@app.route("/capture-order", methods=["POST"])
+def capture_order():
+
+    data = request.json
+
+    order_id = data.get("orderID")
 
     capture = capture_payment(order_id)
 
     if not capture:
-        return "CAPTURE FAILED"
-
-    # =====================================================
-    # 🔥 GET ORDER
-    # =====================================================
+        return jsonify({
+            "error": "CAPTURE FAILED"
+        }), 500
 
     order = get_order(order_id)
 
     if not order:
-        return "ORDER ERROR"
+        return jsonify({
+            "error": "ORDER ERROR"
+        }), 500
 
     try:
 
-        purchase = order["purchase_units"][0]
+        purchase =
+            order["purchase_units"][0]
 
-        custom_id = purchase["custom_id"]
+        custom_id =
+            purchase["custom_id"]
 
-        user_id, plan = custom_id.split(":")
+        user_id, plan =
+            custom_id.split(":")
 
         user_id = int(user_id)
-
-    except Exception as e:
-
-        print("CUSTOM ID ERROR:", e)
-
-        return "CUSTOM ID ERROR"
-
-    # =====================================================
-    # 🔥 ACTIVATE SUBSCRIPTION
-    # =====================================================
-
-    try:
 
         set_subscription(user_id, plan)
 
@@ -309,9 +342,22 @@ def paypal_success():
 
     except Exception as e:
 
-        print("SUB ERROR:", e)
+        print("CAPTURE PROCESS ERROR:", e)
 
-        return "SUB ERROR"
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    return jsonify({
+        "status": "success"
+    })
+
+# =========================================================
+# 🟢 SUCCESS
+# =========================================================
+
+@app.route("/paypal-success")
+def paypal_success():
 
     return render_template_string(
         SUCCESS_HTML,
