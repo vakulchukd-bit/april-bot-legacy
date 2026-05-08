@@ -238,172 +238,173 @@ if (!window.paypal) {
 } else {
 
     debug("✅ window.paypal OK");
-}
 
-paypal.Buttons({
+    paypal.Buttons({
 
-    style: {
+        style: {
 
-        layout: 'vertical',
-        shape: 'pill',
-        label: 'pay',
-        height: 50,
-        tagline: false
+            layout: 'vertical',
+            shape: 'pill',
+            label: 'pay',
+            height: 50,
+            tagline: false
 
-    },
+        },
 
-    // =====================================================
-    // 🔥 CREATE ORDER
-    // =====================================================
+        // =====================================================
+        // 🔥 CREATE ORDER
+        // =====================================================
 
-    async createOrder() {
+        async createOrder() {
 
-        debug("CREATE ORDER START");
+            debug("CREATE ORDER START");
 
-        try {
+            try {
 
-            const response = await fetch(
-                "/create-order",
-                {
-                    method: "POST",
+                const response = await fetch(
+                    "/create-order",
+                    {
+                        method: "POST",
 
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
 
-                    body: JSON.stringify({
+                        body: JSON.stringify({
 
-                        amount: AMOUNT,
-                        plan: PLAN,
-                        user_id: USER_ID
+                            amount: AMOUNT,
+                            plan: PLAN,
+                            user_id: USER_ID
 
-                    })
-                }
-            );
+                        })
+                    }
+                );
 
-            debug("CREATE ORDER RESPONSE");
+                debug("CREATE ORDER RESPONSE");
 
-            const data = await response.json();
+                const data = await response.json();
+
+                debug(
+                    "ORDER ID: " + data.id
+                );
+
+                return data.id;
+
+            } catch(err) {
+
+                debug(
+                    "❌ CREATE ORDER ERROR: " + err
+                );
+
+                console.error(err);
+            }
+        },
+
+        // =====================================================
+        // 🔥 CAPTURE
+        // =====================================================
+
+        async onApprove(data) {
 
             debug(
-                "ORDER ID: " + data.id
+                "ON APPROVE: " + data.orderID
             );
 
-            return data.id;
+            try {
 
-        } catch(err) {
+                const response = await fetch(
+                    "/capture-order",
+                    {
+                        method: "POST",
+
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+
+                        body: JSON.stringify({
+
+                            orderID: data.orderID
+
+                        })
+                    }
+                );
+
+                const result = await response.json();
+
+                debug(
+                    "CAPTURE SUCCESS"
+                );
+
+                console.log(result);
+
+                document
+                    .getElementById("successBox")
+                    .style.display = "block";
+
+                setTimeout(() => {
+
+                    window.location.href =
+                        "/paypal-success";
+
+                }, 1200);
+
+            } catch(err) {
+
+                debug(
+                    "❌ CAPTURE ERROR: " + err
+                );
+
+                console.error(err);
+            }
+        },
+
+        // =====================================================
+        // ❌ CANCEL
+        // =====================================================
+
+        onCancel() {
+
+            debug("PAYMENT CANCELLED");
+
+            window.location.href =
+                "/paypal-cancel";
+        },
+
+        // =====================================================
+        // 🔥 ERROR
+        // =====================================================
+
+        onError(err) {
 
             debug(
-                "❌ CREATE ORDER ERROR: " + err
+                "❌ PAYPAL ERROR: " + err
             );
 
             console.error(err);
+
+            alert(
+                "Ошибка оплаты"
+            );
         }
-    },
 
-    // =====================================================
-    // 🔥 CAPTURE
-    // =====================================================
-
-    async onApprove(data) {
+    }).render('#paypal-button-container')
+    .then(() => {
 
         debug(
-            "ON APPROVE: " + data.orderID
+            "✅ BUTTONS RENDERED"
         );
 
-        try {
-
-            const response = await fetch(
-                "/capture-order",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-
-                    body: JSON.stringify({
-
-                        orderID: data.orderID
-
-                    })
-                }
-            );
-
-            const result = await response.json();
-
-            debug(
-                "CAPTURE SUCCESS"
-            );
-
-            console.log(result);
-
-            document
-                .getElementById("successBox")
-                .style.display = "block";
-
-            setTimeout(() => {
-
-                window.location.href =
-                    "/paypal-success";
-
-            }, 1200);
-
-        } catch(err) {
-
-            debug(
-                "❌ CAPTURE ERROR: " + err
-            );
-
-            console.error(err);
-        }
-    },
-
-    // =====================================================
-    // ❌ CANCEL
-    // =====================================================
-
-    onCancel() {
-
-        debug("PAYMENT CANCELLED");
-
-        window.location.href =
-            "/paypal-cancel";
-    },
-
-    // =====================================================
-    // 🔥 ERROR
-    // =====================================================
-
-    onError(err) {
+    })
+    .catch(err => {
 
         debug(
-            "❌ PAYPAL ERROR: " + err
+            "❌ RENDER ERROR: " + err
         );
 
         console.error(err);
+    });
 
-        alert(
-            "Ошибка оплаты"
-        );
-    }
-
-}).render('#paypal-button-container')
-.then(() => {
-
-    debug(
-        "✅ BUTTONS RENDERED"
-    );
-
-})
-.catch(err => {
-
-    debug(
-        "❌ RENDER ERROR: " + err
-    );
-
-    console.error(err);
-});
+}
 
 </script>
 
