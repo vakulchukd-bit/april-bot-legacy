@@ -663,7 +663,7 @@ async def handle_callbacks(
                 [
                     InlineKeyboardButton(
     text="⚡ Оплатить Lite",
-    url=f"https://t.me/share/url?url={payment_url}"
+    url=payment_url
 )
                 ]
             ]
@@ -709,7 +709,7 @@ async def handle_callbacks(
                 [
                     InlineKeyboardButton(
     text="👑 Оплатить Premium",
-    url=f"https://t.me/share/url?url={payment_url}"
+    url=payment_url
 )
                 ]
             ]
