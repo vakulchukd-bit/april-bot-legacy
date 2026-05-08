@@ -674,7 +674,7 @@ async def handle_callbacks(
 
     if data == "buy_premium":
 
-    payment_url = (
+        payment_url = (
         f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
     )
 
