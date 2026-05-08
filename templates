@@ -13,7 +13,11 @@
     <title>APRIL AI Checkout</title>
 
     <!-- 🔥 PAYPAL SMART SDK -->
-    <script src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent=capture&components=buttons,funding-eligibility&enable-funding=applepay,googlepay,venmo,paylater,card"></script>
+    <script
+        src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent=capture&components=buttons,funding-eligibility&enable-funding=venmo,paylater,card"
+        onload="console.log('✅ PAYPAL SDK LOADED')"
+        onerror="console.error('❌ PAYPAL SDK FAILED')"
+    ></script>
 
     <style>
 
@@ -133,6 +137,17 @@
             font-weight: bold;
         }
 
+        .debug {
+
+            margin-top: 20px;
+
+            font-size: 12px;
+
+            color: #777;
+
+            word-break: break-word;
+        }
+
     </style>
 
 </head>
@@ -171,7 +186,7 @@
 
     <div id="paypal-button-container"></div>
 
-    <div class="loading">
+    <div class="loading" id="loadingBox">
         🔒 Secure Smart Checkout
     </div>
 
@@ -182,13 +197,48 @@
         ✅ Оплата прошла успешно
     </div>
 
+    <div
+        class="debug"
+        id="debugBox"
+    >
+        DEBUG START...
+    </div>
+
 </div>
 
 <script>
 
+console.log("🔥 CHECKOUT START");
+
+const debugBox =
+    document.getElementById("debugBox");
+
+function debug(msg) {
+
+    console.log(msg);
+
+    debugBox.innerHTML +=
+        "<br>" + msg;
+}
+
+debug("PAGE LOADED");
+
 const AMOUNT = "{{ amount }}";
 const PLAN = "{{ plan }}";
 const USER_ID = "{{ user_id }}";
+
+debug("AMOUNT: " + AMOUNT);
+debug("PLAN: " + PLAN);
+debug("USER_ID: " + USER_ID);
+
+if (!window.paypal) {
+
+    debug("❌ window.paypal NOT FOUND");
+
+} else {
+
+    debug("✅ window.paypal OK");
+}
 
 paypal.Buttons({
 
@@ -208,28 +258,47 @@ paypal.Buttons({
 
     async createOrder() {
 
-        const response = await fetch(
-            "/create-order",
-            {
-                method: "POST",
+        debug("CREATE ORDER START");
 
-                headers: {
-                    "Content-Type": "application/json"
-                },
+        try {
 
-                body: JSON.stringify({
+            const response = await fetch(
+                "/create-order",
+                {
+                    method: "POST",
 
-                    amount: AMOUNT,
-                    plan: PLAN,
-                    user_id: USER_ID
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
 
-                })
-            }
-        );
+                    body: JSON.stringify({
 
-        const data = await response.json();
+                        amount: AMOUNT,
+                        plan: PLAN,
+                        user_id: USER_ID
 
-        return data.id;
+                    })
+                }
+            );
+
+            debug("CREATE ORDER RESPONSE");
+
+            const data = await response.json();
+
+            debug(
+                "ORDER ID: " + data.id
+            );
+
+            return data.id;
+
+        } catch(err) {
+
+            debug(
+                "❌ CREATE ORDER ERROR: " + err
+            );
+
+            console.error(err);
+        }
     },
 
     // =====================================================
@@ -238,37 +307,56 @@ paypal.Buttons({
 
     async onApprove(data) {
 
-        const response = await fetch(
-            "/capture-order",
-            {
-                method: "POST",
-
-                headers: {
-                    "Content-Type": "application/json"
-                },
-
-                body: JSON.stringify({
-
-                    orderID: data.orderID
-
-                })
-            }
+        debug(
+            "ON APPROVE: " + data.orderID
         );
 
-        const result = await response.json();
+        try {
 
-        console.log(result);
+            const response = await fetch(
+                "/capture-order",
+                {
+                    method: "POST",
 
-        document
-            .getElementById("successBox")
-            .style.display = "block";
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
 
-        setTimeout(() => {
+                    body: JSON.stringify({
 
-            window.location.href =
-                "/paypal-success";
+                        orderID: data.orderID
 
-        }, 1200);
+                    })
+                }
+            );
+
+            const result = await response.json();
+
+            debug(
+                "CAPTURE SUCCESS"
+            );
+
+            console.log(result);
+
+            document
+                .getElementById("successBox")
+                .style.display = "block";
+
+            setTimeout(() => {
+
+                window.location.href =
+                    "/paypal-success";
+
+            }, 1200);
+
+        } catch(err) {
+
+            debug(
+                "❌ CAPTURE ERROR: " + err
+            );
+
+            console.error(err);
+        }
     },
 
     // =====================================================
@@ -276,6 +364,8 @@ paypal.Buttons({
     // =====================================================
 
     onCancel() {
+
+        debug("PAYMENT CANCELLED");
 
         window.location.href =
             "/paypal-cancel";
@@ -287,6 +377,10 @@ paypal.Buttons({
 
     onError(err) {
 
+        debug(
+            "❌ PAYPAL ERROR: " + err
+        );
+
         console.error(err);
 
         alert(
@@ -294,7 +388,22 @@ paypal.Buttons({
         );
     }
 
-}).render('#paypal-button-container');
+}).render('#paypal-button-container')
+.then(() => {
+
+    debug(
+        "✅ BUTTONS RENDERED"
+    );
+
+})
+.catch(err => {
+
+    debug(
+        "❌ RENDER ERROR: " + err
+    );
+
+    console.error(err);
+});
 
 </script>
 
