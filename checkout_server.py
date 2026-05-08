@@ -475,16 +475,7 @@ body{{
 
 </style>
 
-<script>
 
-setTimeout(() => {{
-
-    window.location.href =
-        "{DOMAIN}/checkout/{plan}/{user_id}";
-
-}}, 400);
-
-</script>
 
 </head>
 
