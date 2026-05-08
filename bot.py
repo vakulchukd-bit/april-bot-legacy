@@ -712,9 +712,9 @@ async def handle_callbacks(
         reply_markup=keyboard
     )
 
-    await callback.answer()
+        await callback.answer()
 
-    return
+            return
 
     # =====================================================
     # 💳 BUY REQUESTS
