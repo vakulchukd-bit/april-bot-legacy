@@ -493,7 +493,7 @@ body{{
 
 <a
     class="button"
-    href="{DOMAIN}/checkout/{plan}/{user_id}"
+    href="intent://aprill.site/checkout/{plan}/{user_id}#Intent;scheme=https;package=com.android.chrome;end"
 >
     Открыть вручную
 </a>
