@@ -22,6 +22,8 @@ from storage import (
 
 import requests
 
+print("🔥🔥🔥 REAL CHECKOUT SERVER STARTED 🔥🔥🔥")
+
 # =========================================================
 # 🔥 CONFIG
 # =========================================================
@@ -195,6 +197,8 @@ body{
 
 @app.route("/checkout/<plan>/<user_id>")
 def checkout(plan, user_id):
+
+    print("🔥 CHECKOUT ROUTE HIT")
 
     if plan == "lite":
 
