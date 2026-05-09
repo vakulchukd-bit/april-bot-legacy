@@ -82,6 +82,14 @@ SYSTEM_PROMPT = (
     "Не ломай атмосферу. "
     "Не уходи в роботизированные ответы. "
 
+    "Сначала пойми внутренний смысл "
+    "сообщения пользователя. "
+
+    "Не отвечай абстрактно. "
+
+    "Старайся почувствовать, "
+    "что человек реально пытается донести. "
+
     "Говори естественно. "
     "Кратко. "
     "Человечно. "
@@ -422,6 +430,75 @@ def build_human_layer(
 
 
 # =====================================================
+# 🧠 SEMANTIC REFLECTION
+# =====================================================
+
+def build_semantic_reflection(
+    text,
+    semantic,
+    cognition
+):
+
+    reflections = []
+
+    if cognition.get(
+        "is_frustrated",
+        0.0
+    ) >= 0.6:
+
+        reflections.append(
+            "Пользователь пытается быть услышанным."
+        )
+
+    if cognition.get(
+        "is_confused",
+        0.0
+    ) >= 0.6:
+
+        reflections.append(
+            "Пользователь ищет ясность."
+        )
+
+    if cognition.get(
+        "exploration_mode"
+    ):
+
+        reflections.append(
+            "Пользователь исследует мысль."
+        )
+
+    if cognition.get(
+        "user_leads_direction"
+    ):
+
+        reflections.append(
+            "Пользователь уже чувствует направление."
+        )
+
+    if semantic.get(
+        "goal_stage"
+    ) == "execution":
+
+        reflections.append(
+            "Пользователь ждёт движение вперёд."
+        )
+
+    reflections.append(
+        "Сначала пойми внутренний смысл сообщения."
+    )
+
+    reflections.append(
+        "Не отвечай абстрактно."
+    )
+
+    reflections.append(
+        "Пытайся почувствовать мысль человека."
+    )
+
+    return " ".join(reflections)
+
+
+# =====================================================
 # 🔥 VISUAL GUIDANCE
 # =====================================================
 
@@ -486,10 +563,6 @@ def build_context_block(
             f"Текущая тема: {topic}"
         )
 
-    # =================================================
-    # 🔥 ACTIVE FLOW
-    # =================================================
-
     active_flow = state.get(
         "active_flow"
     )
@@ -506,10 +579,6 @@ def build_context_block(
                 f"Текущий trajectory: {flow_type}"
             )
 
-    # =================================================
-    # 🔥 MEMORY SUMMARY
-    # =================================================
-
     summary = state.get(
         "memory_summary"
     )
@@ -520,10 +589,6 @@ def build_context_block(
             "Сжатая память: "
             + summary[-400:]
         )
-
-    # =================================================
-    # 🔥 RECENT USER CONTEXT
-    # =================================================
 
     recent = []
 
@@ -545,10 +610,6 @@ def build_context_block(
             + " | ".join(recent)
         )
 
-    # =================================================
-    # 🔥 HUMANITY
-    # =================================================
-
     human_layer = build_human_layer(
         semantic,
         cognition,
@@ -561,9 +622,19 @@ def build_context_block(
             human_layer
         )
 
-    # =================================================
-    # 🔥 VISUAL
-    # =================================================
+    semantic_reflection = (
+        build_semantic_reflection(
+            text,
+            semantic,
+            cognition
+        )
+    )
+
+    if semantic_reflection:
+
+        parts.append(
+            semantic_reflection
+        )
 
     visual_hint = build_visual_hint(
         visual_reference
@@ -574,10 +645,6 @@ def build_context_block(
         parts.append(
             visual_hint
         )
-
-    # =================================================
-    # 🔥 PREMIUM
-    # =================================================
 
     if plan == "premium":
 
@@ -774,10 +841,6 @@ async def process(
                 {}
             )
 
-            # =============================================
-            # 🔥 READY CONTEXT
-            # =============================================
-
             if is_context_prompt(text):
 
                 messages = [
@@ -885,17 +948,9 @@ async def process(
                         )
                 })
 
-            # =============================================
-            # 🔥 CONFIG
-            # =============================================
-
             config = get_config(
                 energy
             )
-
-            # =============================================
-            # 🔥 OPENAI
-            # =============================================
 
             r = client.responses.create(
 
@@ -914,6 +969,47 @@ async def process(
 
             output = r.output_text
 
+            # =========================================
+            # 🧠 SELF REFLECTION
+            # =========================================
+
+            if cognition.get(
+                "user_leads_direction"
+            ):
+
+                if len(output) > 700:
+
+                    output = (
+                        output[:700]
+                        + "\n\n"
+                        + "(не перегружаю ответ)"
+                    )
+
+            if cognition.get(
+                "exploration_mode"
+            ):
+
+                robotic_phrases = [
+
+                    "конечно",
+                    "давай разберём",
+                    "отличный вопрос",
+                    "я помогу"
+                ]
+
+                cleaned = output
+
+                for phrase in robotic_phrases:
+
+                    cleaned = re.sub(
+                        phrase,
+                        "",
+                        cleaned,
+                        flags=re.IGNORECASE
+                    )
+
+                output = cleaned.strip()
+
             if not output:
 
                 output = (
@@ -931,42 +1027,22 @@ async def process(
                 + str(e)
             )
 
-    # =================================================
-    # 🔥 EXECUTION
-    # =================================================
-
     reply = await asyncio.to_thread(
         lambda: asyncio.run(run())
     )
-
-    # =================================================
-    # 🔥 CODE STORE
-    # =================================================
 
     if "```" in reply:
 
         state["last_code"] = reply
 
-    # =================================================
-    # 🔥 ENHANCE CODE
-    # =================================================
-
     reply = enhance_code_block(
         reply
     )
-
-    # =================================================
-    # 🔥 LOOP PROTECTION
-    # =================================================
 
     reply = prevent_repeat_response(
         state,
         reply
     )
-
-    # =================================================
-    # 🔥 SAVE LAST REPLY
-    # =================================================
 
     state["last_reply"] = reply
 
