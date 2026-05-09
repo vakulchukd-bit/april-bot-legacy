@@ -35,6 +35,7 @@ from blocks.image_system import analyze_image
 
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.goal_engine import detect_goal
+from blocks.reasoning_state import build_reasoning_state
 
 from datetime import datetime
 
@@ -291,6 +292,20 @@ async def execute(
         "🎯 GOAL:",
         semantic
     )
+    # =================================================
+# 🧠 REASONING STATE
+# =================================================
+
+reasoning = build_reasoning_state(
+    text=text,
+    state=state,
+    semantic=semantic
+)
+
+print(
+    "🧠 REASONING:",
+    reasoning
+)
 
     # =================================================
     # 🔒 IMAGE LOCK
@@ -446,6 +461,7 @@ async def execute(
         "output_mode":
             detect_output_mode(text),
         "semantic": semantic
+        "reasoning": reasoning
     }
 
     ## =================================================
