@@ -1,5 +1,3 @@
-# blocks/visual_reference_system.py
-
 # =====================================================
 # 🧠 VISUAL REFERENCE SYSTEM
 # =====================================================
@@ -55,7 +53,37 @@ def build_visual_reference(
         # VISUAL SUPPORT LEVEL
         # =================================================
 
-        "support_level": 0.0
+        "support_level": 0.0,
+
+        # =================================================
+        # EMOTIONAL SPACE
+        # =================================================
+
+        "emotion": None,
+
+        # =================================================
+        # REFERENCE CONFIDENCE
+        # =================================================
+
+        "reference_confidence": 0.0,
+
+        # =================================================
+        # LIGHTWEIGHT MODE
+        # =================================================
+
+        "lightweight_mode": False,
+
+        # =================================================
+        # GENERATION SUPPRESSION
+        # =================================================
+
+        "suppress_generation": False,
+
+        # =================================================
+        # RESPONSE STYLE
+        # =================================================
+
+        "response_style": "guidance"
     }
 
     # =================================================
@@ -74,7 +102,9 @@ def build_visual_reference(
         "не уверен",
         "посоветуй",
         "что лучше",
-        "как сделать уютнее"
+        "как сделать уютнее",
+        "идея",
+        "направление"
     ]
 
     if any(x in t for x in exploration_words):
@@ -85,8 +115,12 @@ def build_visual_reference(
 
         result["support_level"] += 0.5
 
+        result["lightweight_mode"] = True
+
+        result["suppress_generation"] = True
+
     # =================================================
-    # 🔥 VISUAL EXPECTATION
+    # 🔥 SEMANTIC VISUAL EXPECTATION
     # =================================================
 
     if semantic.get(
@@ -112,6 +146,36 @@ def build_visual_reference(
         result["support_level"] += 0.4
 
     # =================================================
+    # 🔥 COGNITIVE EXPLORATION
+    # =================================================
+
+    if cognition.get(
+        "exploration_mode"
+    ):
+
+        result["enabled"] = True
+
+        result["lightweight_mode"] = True
+
+        result["suppress_generation"] = True
+
+        result["response_style"] = "soft_guidance"
+
+    # =================================================
+    # 🔥 USER LEADS
+    # =================================================
+
+    if cognition.get(
+        "user_leads_direction"
+    ):
+
+        result["direction_detected"] = True
+
+        result["suppress_generation"] = True
+
+        result["lightweight_mode"] = True
+
+    # =================================================
     # 🔥 ATMOSPHERE DETECTION
     # =================================================
 
@@ -134,41 +198,153 @@ def build_visual_reference(
 
         result["mode"] = "atmosphere"
 
+        result["emotion"] = "cozy"
+
+        result["reference_confidence"] += 0.85
+
         result["references"] = [
 
             {
                 "type": "mood",
                 "title":
-                    "Тёплый локальный свет"
+                    "Тёплый локальный свет",
+                "weight": 0.9
             },
 
             {
                 "type": "interior",
                 "title":
-                    "Мягкая кофейная атмосфера"
+                    "Мягкая кофейная атмосфера",
+                "weight": 0.95
             },
 
             {
                 "type": "lighting",
                 "title":
-                    "Лампы с тёплым рассеянным светом"
+                    "Лампы с тёплым рассеянным светом",
+                "weight": 0.8
             },
 
             {
                 "type": "style",
                 "title":
-                    "Дерево, мягкие тени и спокойные цвета"
+                    "Дерево, мягкие тени и спокойные цвета",
+                "weight": 0.9
             }
         ]
 
         result["guidance"] = (
 
-            "Похоже, ты двигаешься "
-            "в сторону мягкой и уютной "
-            "вечерней атмосферы."
+            "Похоже, тебе сейчас "
+            "ближе мягкая камерная "
+            "атмосфера с тёплым светом "
+            "и спокойным интерьером."
         )
 
         result["support_level"] += 0.6
+
+    # =================================================
+    # 🔥 CYBERPUNK DETECTION
+    # =================================================
+
+    cyberpunk_words = [
+
+        "неон",
+        "cyberpunk",
+        "киберпанк",
+        "футуризм",
+        "ночной город",
+        "фиолетовый свет"
+    ]
+
+    if any(x in t for x in cyberpunk_words):
+
+        result["enabled"] = True
+
+        result["mode"] = "cyberpunk"
+
+        result["emotion"] = "futuristic"
+
+        result["reference_confidence"] += 0.85
+
+        result["references"] = [
+
+            {
+                "type": "lighting",
+                "title":
+                    "Неоновые акценты",
+                "weight": 0.95
+            },
+
+            {
+                "type": "mood",
+                "title":
+                    "Ночной futuristic city mood",
+                "weight": 0.9
+            },
+
+            {
+                "type": "style",
+                "title":
+                    "Тёмные поверхности и контрастный свет",
+                "weight": 0.85
+            }
+        ]
+
+        result["guidance"] = (
+
+            "Сейчас направление "
+            "больше уходит в futuristic "
+            "и neon атмосферу."
+        )
+
+    # =================================================
+    # 🔥 MINIMALISM DETECTION
+    # =================================================
+
+    minimal_words = [
+
+        "минимализм",
+        "minimal",
+        "чисто",
+        "просто",
+        "аккуратно",
+        "спокойно"
+    ]
+
+    if any(x in t for x in minimal_words):
+
+        result["enabled"] = True
+
+        result["mode"] = "minimal"
+
+        result["emotion"] = "calm"
+
+        result["reference_confidence"] += 0.75
+
+        result["references"] = [
+
+            {
+                "type": "style",
+                "title":
+                    "Минималистичный clean design",
+                "weight": 0.9
+            },
+
+            {
+                "type": "palette",
+                "title":
+                    "Спокойные нейтральные цвета",
+                "weight": 0.85
+            }
+        ]
+
+        result["guidance"] = (
+
+            "Похоже, тебе ближе "
+            "спокойный минималистичный стиль "
+            "без перегруза."
+        )
 
     # =================================================
     # 🔥 CONFIRMATION DETECTION
@@ -191,6 +367,8 @@ def build_visual_reference(
         # 🔥 НЕ запускаем генерацию
         result["should_generate"] = False
 
+        result["suppress_generation"] = True
+
     # =================================================
     # 🔥 HARD GENERATION REQUEST
     # =================================================
@@ -206,7 +384,25 @@ def build_visual_reference(
 
     if any(x in t for x in generate_words):
 
-        result["should_generate"] = True
+        if not result["suppress_generation"]:
+
+            result["should_generate"] = True
+
+    # =================================================
+    # 🔥 REFERENCE SORT
+    # =================================================
+
+    result["references"] = sorted(
+
+        result["references"],
+
+        key=lambda x: x.get(
+            "weight",
+            0.0
+        ),
+
+        reverse=True
+    )
 
     # =================================================
     # 🔥 NORMALIZATION
@@ -215,5 +411,9 @@ def build_visual_reference(
     if result["support_level"] > 1.0:
 
         result["support_level"] = 1.0
+
+    if result["reference_confidence"] > 1.0:
+
+        result["reference_confidence"] = 1.0
 
     return result
