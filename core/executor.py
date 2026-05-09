@@ -277,7 +277,11 @@ async def execute(
         dialog_state=state.get("dialog_state", {})
     )
 
-    print("🧠 SEMANTIC:", semantic)
+    print(
+        "🧠 SEMANTIC:",
+        semantic
+    )
+
     # =================================================
     # 🎯 GOAL ENGINE
     # =================================================
@@ -292,6 +296,7 @@ async def execute(
         "🎯 GOAL:",
         semantic
     )
+
     # =================================================
     # 🧠 REASONING STATE
     # =================================================
@@ -323,7 +328,11 @@ async def execute(
     # 💬 DIALOG
     # =================================================
 
-    add_dialog(user_id, "user", text)
+    add_dialog(
+        user_id,
+        "user",
+        text
+    )
 
     update_memory_summary(
         user_id,
@@ -397,11 +406,7 @@ async def execute(
                 }
 
     # =================================================
-    # 🔥 TASK TYPE
-    # =================================================
-
-    # =================================================
-    # 🧠 SEMANTIC TASK TYPE
+    # 🔥 SEMANTIC TASK TYPE
     # =================================================
 
     semantic_intent = semantic.get(
@@ -414,10 +419,13 @@ async def execute(
 
     else:
 
-        # 🔥 legacy fallback only
         task_type = detect_task_type(
             text
         )
+
+    # =================================================
+    # 🔥 ACTIVE FLOW MANAGEMENT
+    # =================================================
 
     if task_type == "math":
 
@@ -464,10 +472,6 @@ async def execute(
         "reasoning": reasoning
     }
 
-    ## =================================================
-    # 🏠 ROOMS
-    # =================================================
-
     # =================================================
     # 🧠 SEMANTIC ROOM SELECTION
     # =================================================
@@ -483,7 +487,6 @@ async def execute(
                 context
             )
 
-            # 🔥 fallback legacy support
             if score <= 0:
 
                 if room.can_handle(
@@ -503,11 +506,15 @@ async def execute(
                 e
             )
 
+    # =================================================
     # 🔥 BEST ROOM FIRST
+    # =================================================
+
     scored_rooms.sort(
         key=lambda x: x[0],
         reverse=True
     )
+
     # =================================================
     # 🧠 HARD ROOM AUTHORITY
     # =================================================
@@ -518,14 +525,19 @@ async def execute(
 
     if semantic_room:
 
-        scored_rooms = [
+        filtered_rooms = []
 
-            (score, room)
+        for score, room in scored_rooms:
 
-            for score, room in scored_rooms
+            if room.name == semantic_room:
 
-            if room.name == semantic_room
-        ]
+                filtered_rooms.append(
+                    (score, room)
+                )
+
+        if filtered_rooms:
+
+            scored_rooms = filtered_rooms
 
     # =================================================
     # 🚀 ROOM EXECUTION
@@ -628,6 +640,10 @@ async def execute(
                         }
                     )
 
+                # =========================
+                # 🔥 MEMORY EXTRACTION
+                # =========================
+
                 extract_and_store_semantics(
                     state,
                     output_text,
@@ -656,7 +672,7 @@ async def execute(
         state
     )
 
-    result = await run_with_typing(
+    fallback_result = await run_with_typing(
         chat_id,
         text_process(
             user_id,
@@ -666,17 +682,17 @@ async def execute(
         )
     )
 
-    if result and result.get("content"):
+    if fallback_result and fallback_result.get("content"):
 
         add_dialog(
             user_id,
             "assistant",
-            result["content"]
+            fallback_result["content"]
         )
 
         update_memory_summary(
             user_id,
-            result["content"]
+            fallback_result["content"]
         )
 
         set_dialog_state(
@@ -688,11 +704,18 @@ async def execute(
 
         extract_and_store_semantics(
             state,
-            result["content"],
+            fallback_result["content"],
             "text"
         )
 
+        return {
+            "type": "text",
+            "data":
+                fallback_result["content"]
+        }
+
     return {
         "type": "text",
-        "data": result["content"]
+        "data":
+            "⚠️ Не удалось обработать запрос"
     }
