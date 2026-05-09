@@ -293,19 +293,19 @@ async def execute(
         semantic
     )
     # =================================================
-# 🧠 REASONING STATE
-# =================================================
+    # 🧠 REASONING STATE
+    # =================================================
 
-reasoning = build_reasoning_state(
-    text=text,
-    state=state,
-    semantic=semantic
-)
+    reasoning = build_reasoning_state(
+        text=text,
+        state=state,
+        semantic=semantic
+    )
 
-print(
-    "🧠 REASONING:",
-    reasoning
-)
+    print(
+        "🧠 REASONING:",
+        reasoning
+    )
 
     # =================================================
     # 🔒 IMAGE LOCK
@@ -460,7 +460,7 @@ print(
         "energy": energy,
         "output_mode":
             detect_output_mode(text),
-        "semantic": semantic
+        "semantic": semantic,
         "reasoning": reasoning
     }
 
