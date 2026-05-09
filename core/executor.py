@@ -492,8 +492,70 @@ async def execute(
             detect_output_mode(text),
         "semantic": semantic,
         "reasoning": reasoning,
-        "cognition": cognition
+        "cognition": cognition,
+
+        "trajectory_mode":
+            semantic.get(
+                "goal_stage",
+                "exploration"
+            ),
+
+        "response_mode":
+            semantic.get(
+                "response_mode",
+                "talk"
+            ),
+
+        "execution_pressure":
+            semantic.get(
+                "execution_pressure",
+                0.0
+            ),
     }
+
+    # =================================================
+    # 🧠 EXECUTION ORCHESTRATION
+    # =================================================
+
+    if cognition.get(
+        "prefer_execution"
+    ):
+
+        semantic["should_execute"] = True
+
+    if cognition.get(
+        "prefer_visual"
+    ):
+
+        if semantic.get(
+            "room"
+        ) == "text":
+
+            semantic["attention_weight"] = 0.9
+
+    if cognition.get(
+        "needs_guidance"
+    ):
+
+        semantic["response_mode"] = "guide"
+
+    if cognition.get(
+        "reduce_talking"
+    ):
+
+        semantic["response_economy"] = "minimal"
+
+    if cognition.get(
+        "needs_continuation"
+    ):
+
+        semantic["preserve_flow"] = True
+
+    if semantic.get(
+        "goal_stage"
+    ) == "execution":
+
+        semantic["should_execute"] = True
 
     # =================================================
     # 🧠 SEMANTIC ROOM SELECTION
@@ -509,6 +571,49 @@ async def execute(
                 text,
                 context
             )
+
+            # =========================================
+            # 🔥 EXECUTION ROOM BOOST
+            # =========================================
+
+            if semantic.get(
+                "should_execute"
+            ):
+
+                if room.name in [
+                    "image_generate",
+                    "image_edit",
+                    "science"
+                ]:
+
+                    score += 1.5
+
+            # =========================================
+            # 🔥 TEXT ROOM PENALTY
+            # =========================================
+
+            if cognition.get(
+                "prefer_execution"
+            ):
+
+                if room.name == "text":
+
+                    score -= 0.7
+
+            # =========================================
+            # 🔥 VISUAL PRIORITY
+            # =========================================
+
+            if cognition.get(
+                "prefer_visual"
+            ):
+
+                if room.name in [
+                    "image_generate",
+                    "image_edit"
+                ]:
+
+                    score += 0.8
 
             if score <= 0:
 
@@ -672,6 +777,44 @@ async def execute(
                 f"ROOM ERROR [{room.name}]",
                 e
             )
+
+    # =================================================
+    # 🔥 EXECUTION FAILURE PROTECTION
+    # =================================================
+
+    if semantic.get(
+        "should_execute"
+    ):
+
+        print(
+            "⚠️ EXECUTION FALLBACK ACTIVATED"
+        )
+
+        if cognition.get(
+            "prefer_visual"
+        ):
+
+            return {
+                "type": "text",
+                "data":
+                    (
+                        "⚠️ Я поняла, что ты ожидаешь "
+                        "визуальный результат, "
+                        "но execution room "
+                        "не смог обработать запрос."
+                    )
+            }
+
+        return {
+            "type": "text",
+            "data":
+                (
+                    "⚠️ Я поняла, что ты ожидаешь "
+                    "выполнение действия, "
+                    "но execution pipeline "
+                    "не завершился."
+                )
+        }
 
     # =================================================
     # 💬 TEXT FALLBACK
