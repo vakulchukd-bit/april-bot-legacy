@@ -37,6 +37,12 @@ from blocks.semantic_core import analyze as semantic_analyze
 from blocks.goal_engine import detect_goal
 from blocks.reasoning_state import build_reasoning_state
 
+# =====================================================
+# 🧠 COGNITIVE CORE
+# =====================================================
+
+from blocks.cognitive_core import analyze_cognition
+
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -313,6 +319,22 @@ async def execute(
     )
 
     # =================================================
+    # 🧠 COGNITIVE CORE
+    # =================================================
+
+    cognition = analyze_cognition(
+        text=text,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning
+    )
+
+    print(
+        "🧠 COGNITION:",
+        cognition
+    )
+
+    # =================================================
     # 🔒 IMAGE LOCK
     # =================================================
 
@@ -469,7 +491,8 @@ async def execute(
         "output_mode":
             detect_output_mode(text),
         "semantic": semantic,
-        "reasoning": reasoning
+        "reasoning": reasoning,
+        "cognition": cognition
     }
 
     # =================================================
@@ -567,10 +590,6 @@ async def execute(
                 and result.get("type")
             ):
 
-                # =========================
-                # 🖼 IMAGE GENERATION
-                # =========================
-
                 if result.get("type") == "image_task":
 
                     state["image_lock"] = True
@@ -601,10 +620,6 @@ async def execute(
                     user_id,
                     output_text
                 )
-
-                # =========================
-                # 🔥 DIALOG STATE
-                # =========================
 
                 if result.get("type") == "image":
 
@@ -639,10 +654,6 @@ async def execute(
                             "intent": "text"
                         }
                     )
-
-                # =========================
-                # 🔥 MEMORY EXTRACTION
-                # =========================
 
                 extract_and_store_semantics(
                     state,
