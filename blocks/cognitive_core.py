@@ -37,6 +37,7 @@ def analyze_cognition(
         "is_confused": 0.0,
         "is_waiting": 0.0,
         "is_frustrated": 0.0,
+        "is_uncertain": 0.0,
 
         # =================================================
         # EXECUTION
@@ -44,6 +45,7 @@ def analyze_cognition(
 
         "execution_pressure": 0.0,
         "dialog_fatigue": 0.0,
+        "result_pressure": 0.0,
 
         # =================================================
         # RESPONSE STRATEGY
@@ -62,7 +64,10 @@ def analyze_cognition(
         "response_depth": "medium",
         "needs_guidance": False,
         "needs_examples": False,
+        "needs_clarification": False,
         "should_proactively_help": False,
+        "should_offer_direction": False,
+        "should_reduce_explanation": False,
 
         # =================================================
         # DIRECTION HYPOTHESIS
@@ -81,14 +86,58 @@ def analyze_cognition(
 
         "goal_completed": False,
         "needs_continuation": False,
+        "trajectory_locked": False,
+        "trajectory_confidence": 0.0,
+
+        # =================================================
+        # SATISFACTION MODEL
+        # =================================================
+
+        "user_satisfaction_expected": 0.5,
+        "risk_of_bolтовня": 0.0,
+        "expectation_mismatch": 0.0,
 
         # =================================================
         # CAPABILITY
         # =================================================
 
         "search_capabilities": True,
-        "needs_room_execution": False
+        "needs_room_execution": False,
+        "capability_routing": None,
+
+        # =================================================
+        # VISUAL SUPPORT
+        # =================================================
+
+        "should_offer_visual_support": False,
+        "visual_support_priority": 0.0,
+
+        # =================================================
+        # EXECUTION BEHAVIOR
+        # =================================================
+
+        "execution_urgency": 0.0,
+        "execution_confidence": 0.0
     }
+
+    # =================================================
+    # 🔥 SEMANTIC INHERITANCE
+    # =================================================
+
+    cognition["execution_pressure"] += semantic.get(
+        "execution_pressure",
+        0.0
+    )
+
+    if semantic.get(
+        "should_offer_visual"
+    ):
+
+        cognition[
+            "should_offer_visual_support"
+        ] = True
+
+        cognition["prefer_visual"] = True
 
     # =================================================
     # 🔥 ACTION SIGNALS
@@ -109,6 +158,8 @@ def analyze_cognition(
         cognition["wants_action"] += 0.8
         cognition["wants_result"] += 0.8
         cognition["execution_pressure"] += 0.7
+        cognition["result_pressure"] += 0.7
+        cognition["execution_urgency"] += 0.6
 
     # =================================================
     # 🔥 VISUAL SIGNALS
@@ -122,13 +173,18 @@ def analyze_cognition(
         "схема",
         "чертеж",
         "пример",
-        "покажи пример"
+        "покажи пример",
+        "референс"
     ]
 
     if any(w in t for w in visual_words):
 
         cognition["wants_visual"] += 1.0
         cognition["prefer_visual"] = True
+        cognition["visual_support_priority"] += 0.8
+        cognition[
+            "should_offer_visual_support"
+        ] = True
 
     # =================================================
     # 🔥 DIALOG SIGNALS
@@ -163,6 +219,7 @@ def analyze_cognition(
         cognition["wants_help"] += 0.9
         cognition["should_proactively_help"] = True
         cognition["needs_guidance"] = True
+        cognition["should_offer_direction"] = True
 
     # =================================================
     # 🔥 CONFUSION SIGNALS
@@ -181,6 +238,7 @@ def analyze_cognition(
         cognition["is_confused"] += 0.8
         cognition["needs_guidance"] = True
         cognition["prefer_visual"] = True
+        cognition["needs_examples"] = True
 
     # =================================================
     # 🔥 FRUSTRATION SIGNALS
@@ -198,9 +256,22 @@ def analyze_cognition(
         cognition["is_frustrated"] += 0.9
         cognition["execution_pressure"] += 0.9
         cognition["dialog_fatigue"] += 0.8
+        cognition["risk_of_bolтовня"] += 0.8
 
     # =================================================
-    # 🔥 SHORT RESPONSE MODE
+    # 🔥 DIALOG FATIGUE
+    # =================================================
+
+    if len(dialog) >= 10:
+
+        cognition["dialog_fatigue"] += 0.4
+
+    if len(dialog) >= 16:
+
+        cognition["risk_of_bolтовня"] += 0.5
+
+    # =================================================
+    # 🔥 RESPONSE ECONOMY
     # =================================================
 
     if cognition["dialog_fatigue"] >= 0.7:
@@ -208,6 +279,7 @@ def analyze_cognition(
         cognition["reduce_talking"] = True
         cognition["prefer_short_answer"] = True
         cognition["response_depth"] = "short"
+        cognition["should_reduce_explanation"] = True
 
     # =================================================
     # 🔥 EXECUTION MODE
@@ -217,6 +289,7 @@ def analyze_cognition(
 
         cognition["prefer_execution"] = True
         cognition["needs_room_execution"] = True
+        cognition["execution_confidence"] += 0.7
 
     # =================================================
     # 🔥 DETAILED MODE
@@ -237,14 +310,8 @@ def analyze_cognition(
     if active_flow:
 
         cognition["needs_continuation"] = True
-
-    # =================================================
-    # 🔥 LONG DIALOG FATIGUE
-    # =================================================
-
-    if len(dialog) >= 12:
-
-        cognition["dialog_fatigue"] += 0.4
+        cognition["trajectory_locked"] = True
+        cognition["trajectory_confidence"] += 0.7
 
     # =================================================
     # 🔥 DIRECTION HYPOTHESIS
@@ -257,25 +324,36 @@ def analyze_cognition(
     if cognition["wants_visual"] >= 0.5:
 
         hypothesis["direction"] = "visual"
-        hypothesis["confidence"] = 0.8
+        hypothesis["confidence"] = 0.85
         hypothesis["suggest_path"] = True
 
     elif cognition["wants_help"] >= 0.5:
 
         hypothesis["direction"] = "guided_help"
-        hypothesis["confidence"] = 0.75
+        hypothesis["confidence"] = 0.8
         hypothesis["suggest_path"] = True
 
     elif cognition["wants_action"] >= 0.5:
 
         hypothesis["direction"] = "execution"
-        hypothesis["confidence"] = 0.8
+        hypothesis["confidence"] = 0.85
         hypothesis["suggest_path"] = True
 
     elif cognition["wants_dialog"] >= 0.5:
 
         hypothesis["direction"] = "discussion"
         hypothesis["confidence"] = 0.7
+
+    # =================================================
+    # 🔥 EXPECTATION MISMATCH
+    # =================================================
+
+    if (
+        cognition["wants_result"] >= 0.7
+        and cognition["wants_dialog"] < 0.4
+    ):
+
+        cognition["expectation_mismatch"] += 0.7
 
     # =================================================
     # 🔥 PROACTIVE GUIDANCE
@@ -287,6 +365,20 @@ def analyze_cognition(
     ):
 
         cognition["needs_examples"] = True
+        cognition[
+            "should_offer_visual_support"
+        ] = True
+
+    # =================================================
+    # 🔥 CLARIFICATION LOGIC
+    # =================================================
+
+    if (
+        semantic.get("ambiguity_level", 0.0)
+        >= 0.7
+    ):
+
+        cognition["needs_clarification"] = True
 
     # =================================================
     # 🔥 FINAL NORMALIZATION
