@@ -335,6 +335,14 @@ async def execute(
     )
 
     # =================================================
+    # 🔥 STATE BRAIN BRIDGE
+    # =================================================
+
+    state["semantic"] = semantic
+    state["reasoning"] = reasoning
+    state["cognition"] = cognition
+
+    # =================================================
     # 🔒 IMAGE LOCK
     # =================================================
 
