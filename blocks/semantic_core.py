@@ -63,7 +63,35 @@ def analyze(
         "preserve_flow": True,
 
         # ===== topic changed =====
-        "topic_shift": False
+        "topic_shift": False,
+
+        # =================================================
+        # 🧠 BEHAVIOR FORMULAS
+        # =================================================
+
+        # ===== execution pressure =====
+        "execution_pressure": 0.0,
+
+        # ===== conversation usefulness =====
+        "conversation_value": 1.0,
+
+        # ===== response economy =====
+        "response_economy": "balanced",
+
+        # ===== capability confidence =====
+        "capability_confidence": 0.5,
+
+        # ===== current dialog stage =====
+        "goal_stage": "exploration",
+
+        # ===== should execute =====
+        "should_execute": False,
+
+        # ===== response mode =====
+        "response_mode": "talk",
+
+        # ===== attention weight =====
+        "attention_weight": 0.5
     }
 
     # =====================================================
@@ -95,6 +123,7 @@ def analyze(
     if flow_type:
 
         result["continuation"] = True
+
         result["continuation_target"] = flow_type
 
         result["entity"] = {
@@ -144,13 +173,138 @@ def analyze(
     intent = result["intent"]
 
     if intent == "math":
+
         result["room"] = "science"
 
+        result["capability_confidence"] = 0.9
+
     elif intent == "code":
+
         result["room"] = "text"
 
+        result["capability_confidence"] = 0.7
+
     elif intent == "image":
+
         result["room"] = "image_generate"
+
+        result["capability_confidence"] = 0.95
+
+    # =====================================================
+    # 🔥 EXECUTION PRESSURE
+    # =====================================================
+
+    pressure = 0.0
+
+    execution_words = [
+        "сделай",
+        "выполни",
+        "создай",
+        "нарисуй",
+        "покажи",
+        "сгенерируй",
+        "построй"
+    ]
+
+    if any(w in t for w in execution_words):
+
+        pressure += 0.45
+
+    # 🔥 short continuation pressure
+    if (
+        result["continuation"]
+        and len(t) <= 40
+    ):
+
+        pressure += 0.25
+
+    # 🔥 repeated unresolved flow
+    if flow_type:
+
+        pressure += 0.15
+
+    # 🔥 escalation words
+    escalation_words = [
+        "уже",
+        "хватит",
+        "просто",
+        "давай"
+    ]
+
+    if any(w in t for w in escalation_words):
+
+        pressure += 0.25
+
+        result["attention_weight"] = 0.9
+
+    result["execution_pressure"] = min(
+        pressure,
+        1.0
+    )
+
+    # =====================================================
+    # 🔥 CONVERSATION VALUE
+    # =====================================================
+
+    conversation_value = 1.0
+
+    if result["execution_pressure"] >= 0.6:
+
+        conversation_value -= 0.5
+
+    if len(history) >= 8:
+
+        conversation_value -= 0.2
+
+    result["conversation_value"] = max(
+        conversation_value,
+        0.1
+    )
+
+    # =====================================================
+    # 🔥 GOAL STAGE
+    # =====================================================
+
+    if result["execution_pressure"] >= 0.75:
+
+        result["goal_stage"] = "execution"
+
+    elif result["continuation"]:
+
+        result["goal_stage"] = "continuation"
+
+    elif result["confidence"] >= 0.8:
+
+        result["goal_stage"] = "clarification"
+
+    # =====================================================
+    # 🔥 SHOULD EXECUTE
+    # =====================================================
+
+    if (
+        result["execution_pressure"] >= 0.65
+        and result["capability_confidence"] >= 0.7
+    ):
+
+        result["should_execute"] = True
+
+        result["response_mode"] = "execute"
+
+    # =====================================================
+    # 🔥 RESPONSE ECONOMY
+    # =====================================================
+
+    if result["execution_pressure"] >= 0.7:
+
+        result["response_economy"] = "minimal"
+
+    elif result["conversation_value"] >= 0.8:
+
+        result["response_economy"] = "expanded"
+
+    else:
+
+        result["response_economy"] = "balanced"
 
     # =====================================================
     # 🔥 AI ESCALATION
@@ -170,11 +324,13 @@ def analyze(
     ):
 
         result["requires_ai"] = True
+
         result["complexity"] = "medium"
 
     if t in short_triggers:
 
         result["requires_ai"] = False
+
         result["complexity"] = "low"
 
     # =====================================================
@@ -186,6 +342,8 @@ def analyze(
         if result["entity"]["type"]:
 
             if result["entity"]["type"] not in t:
+
                 result["topic_shift"] = True
 
     return result
+    
