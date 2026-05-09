@@ -419,106 +419,162 @@ async def execute(
         "semantic": semantic
     }
 
-    # =================================================
+    ## =================================================
     # 🏠 ROOMS
     # =================================================
+
+    # =================================================
+    # 🧠 SEMANTIC ROOM SELECTION
+    # =================================================
+
+    scored_rooms = []
 
     for room in ROOMS:
 
         try:
 
-            if room.can_handle(
+            score = room.evaluate(
                 text,
                 context
+            )
+
+            # 🔥 fallback legacy support
+            if score <= 0:
+
+                if room.can_handle(
+                    text,
+                    context
+                ):
+                    score = 0.2
+
+            scored_rooms.append(
+                (score, room)
+            )
+
+        except Exception as e:
+
+            print(
+                f"ROOM EVALUATE ERROR [{room.name}]",
+                e
+            )
+
+    # 🔥 BEST ROOM FIRST
+    scored_rooms.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    # =================================================
+    # 🚀 ROOM EXECUTION
+    # =================================================
+
+    for score, room in scored_rooms:
+
+        try:
+
+            if score <= 0:
+                continue
+
+            print(
+                f"🧠 ROOM SELECTED: "
+                f"{room.name} | score={score}"
+            )
+
+            result = await room.handle(
+                user_id,
+                text,
+                context,
+                run_with_typing
+            )
+
+            if (
+                result
+                and result.get("type")
             ):
 
-                result = await room.handle(
-                    user_id,
-                    text,
-                    context,
-                    run_with_typing
+                # =========================
+                # 🖼 IMAGE GENERATION
+                # =========================
+
+                if result.get("type") == "image_task":
+
+                    state["image_lock"] = True
+
+                    try:
+
+                        result = await image_generate(
+                            user_id,
+                            result["prompt"],
+                            state
+                        )
+
+                    finally:
+
+                        state["image_lock"] = False
+
+                output_text = str(
+                    result.get("data", "")
                 )
 
-                if (
-                    result
-                    and result.get("type")
-                ):
+                add_dialog(
+                    user_id,
+                    "assistant",
+                    output_text
+                )
 
-                    if result.get("type") == "image_task":
+                update_memory_summary(
+                    user_id,
+                    output_text
+                )
 
-                        state["image_lock"] = True
+                # =========================
+                # 🔥 DIALOG STATE
+                # =========================
 
-                        try:
+                if result.get("type") == "image":
 
-                            result = await image_generate(
-                                user_id,
-                                result["prompt"],
-                                state
-                            )
-
-                        finally:
-
-                            state["image_lock"] = False
-
-                    output_text = str(
-                        result.get("data", "")
-                    )
-
-                    add_dialog(
+                    set_active_flow(
                         user_id,
-                        "assistant",
-                        output_text
+                        {
+                            "type": "image"
+                        }
                     )
 
-                    update_memory_summary(
+                    set_dialog_state(
                         user_id,
-                        output_text
+                        {
+                            "intent": "image"
+                        }
                     )
 
-                    if result.get("type") == "image":
+                elif task_type == "math":
 
-                        set_active_flow(
-                            user_id,
-                            {
-                                "type": "image"
-                            }
-                        )
-
-                        set_dialog_state(
-                            user_id,
-                            {
-                                "intent": "image"
-                            }
-                        )
-
-                    elif task_type == "math":
-
-                        set_dialog_state(
-                            user_id,
-                            {
-                                "intent": "math"
-                            }
-                        )
-
-                    else:
-
-                        set_dialog_state(
-                            user_id,
-                            {
-                                "intent": "text"
-                            }
-                        )
-
-                    extract_and_store_semantics(
-                        state,
-                        output_text,
-                        result.get(
-                            "type",
-                            "text"
-                        )
+                    set_dialog_state(
+                        user_id,
+                        {
+                            "intent": "math"
+                        }
                     )
 
-                    return result
+                else:
+
+                    set_dialog_state(
+                        user_id,
+                        {
+                            "intent": "text"
+                        }
+                    )
+
+                extract_and_store_semantics(
+                    state,
+                    output_text,
+                    result.get(
+                        "type",
+                        "text"
+                    )
+                )
+
+                return result
 
         except Exception as e:
 
