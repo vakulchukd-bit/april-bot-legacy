@@ -43,6 +43,14 @@ from blocks.reasoning_state import build_reasoning_state
 
 from blocks.cognitive_core import analyze_cognition
 
+# =====================================================
+# 🧠 VISUAL REFERENCE SYSTEM
+# =====================================================
+
+from blocks.visual_reference_system import (
+    build_visual_reference
+)
+
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -335,12 +343,29 @@ async def execute(
     )
 
     # =================================================
+    # 🧠 VISUAL REFERENCE SYSTEM
+    # =================================================
+
+    visual_reference = build_visual_reference(
+        semantic=semantic,
+        cognition=cognition,
+        text=text,
+        state=state
+    )
+
+    print(
+        "🧠 VISUAL REFERENCE:",
+        visual_reference
+    )
+
+    # =================================================
     # 🔥 STATE BRAIN BRIDGE
     # =================================================
 
     state["semantic"] = semantic
     state["reasoning"] = reasoning
     state["cognition"] = cognition
+    state["visual_reference"] = visual_reference
 
     # =================================================
     # 🔒 IMAGE LOCK
@@ -501,6 +526,8 @@ async def execute(
         "semantic": semantic,
         "reasoning": reasoning,
         "cognition": cognition,
+        "visual_reference":
+            visual_reference,
 
         "trajectory_mode":
             semantic.get(
@@ -540,6 +567,24 @@ async def execute(
         ) == "text":
 
             semantic["attention_weight"] = 0.9
+
+    # =================================================
+    # 🧠 VISUAL SUPPORT RESTRAINT
+    # =================================================
+
+    if visual_reference.get(
+        "enabled"
+    ):
+
+        if not visual_reference.get(
+            "should_generate"
+        ):
+
+            semantic["should_execute"] = False
+
+            semantic["response_mode"] = "guide"
+
+            semantic["goal_stage"] = "exploration"
 
     if cognition.get(
         "needs_guidance"
@@ -622,6 +667,26 @@ async def execute(
                 ]:
 
                     score += 0.8
+
+            # =========================================
+            # 🔥 VISUAL GUIDANCE PRIORITY
+            # =========================================
+
+            if visual_reference.get(
+                "enabled"
+            ):
+
+                if room.name == "text":
+
+                    score += 0.6
+
+                if not visual_reference.get(
+                    "should_generate"
+                ):
+
+                    if room.name == "image_generate":
+
+                        score -= 1.0
 
             if score <= 0:
 
