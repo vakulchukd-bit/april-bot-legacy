@@ -67,77 +67,53 @@ def analyze(
 
         # =================================================
         # 🧠 BEHAVIOR FORMULAS
-        # =================================================
+        # =====================================================
 
-        # ===== execution pressure =====
         "execution_pressure": 0.0,
-
-        # ===== conversation usefulness =====
         "conversation_value": 1.0,
-
-        # ===== response economy =====
         "response_economy": "balanced",
-
-        # ===== capability confidence =====
         "capability_confidence": 0.5,
-
-        # ===== current dialog stage =====
         "goal_stage": "exploration",
-
-        # ===== should execute =====
         "should_execute": False,
-
-        # ===== response mode =====
         "response_mode": "talk",
-
-        # ===== attention weight =====
         "attention_weight": 0.5,
 
         # =================================================
         # 🔥 EXPECTATION MODELING
-        # =================================================
+        # =====================================================
 
-        # ===== expected output =====
         "expected_result": None,
-
-        # ===== expected output type =====
         "expected_output_type": "text",
-
-        # ===== visual expectation =====
         "visual_expectation": 0.0,
-
-        # ===== example expectation =====
         "example_expectation": 0.0,
-
-        # ===== execution readiness =====
         "execution_readiness": 0.0,
-
-        # ===== guidance requirement =====
         "guidance_need": 0.0,
-
-        # ===== ambiguity =====
         "ambiguity_level": 0.0,
-
-        # ===== clarification need =====
         "needs_clarification": False,
-
-        # ===== proactive assistance =====
         "should_proactively_help": False,
-
-        # ===== user certainty =====
         "user_certainty": 0.5,
-
-        # ===== trajectory persistence =====
         "trajectory_strength": 0.5,
-
-        # ===== visual support =====
         "should_offer_visual": False,
-
-        # ===== example support =====
         "should_offer_examples": False,
+        "assistant_initiative": 0.0,
 
-        # ===== assistant initiative =====
-        "assistant_initiative": 0.0
+        # =================================================
+        # 🔥 VISUAL GUIDANCE SYSTEM
+        # =====================================================
+
+        "visual_routing": False,
+        "visual_lightweight_mode": False,
+        "library_visual_candidate": False,
+        "visual_demo_request": False,
+        "visual_generation_needed": False,
+
+        # =================================================
+        # 🔥 CAPABILITY AWARENESS
+        # =====================================================
+
+        "understands_capabilities": True,
+        "best_capability": None,
+        "capability_route_confidence": 0.0
     }
 
     # =====================================================
@@ -228,6 +204,8 @@ def analyze(
 
         result["expected_result"] = "solution"
 
+        result["best_capability"] = "science"
+
     elif intent == "code":
 
         result["room"] = "text"
@@ -235,6 +213,8 @@ def analyze(
         result["capability_confidence"] = 0.7
 
         result["expected_result"] = "implementation"
+
+        result["best_capability"] = "text"
 
     elif intent == "image":
 
@@ -246,8 +226,10 @@ def analyze(
 
         result["expected_output_type"] = "image"
 
+        result["best_capability"] = "image_generate"
+
     # =====================================================
-    # 🔥 EXPECTATION SIGNALS
+    # 🔥 VISUAL EXPECTATION FORMULAS
     # =====================================================
 
     visual_words = [
@@ -259,18 +241,116 @@ def analyze(
         "фото",
         "картинка",
         "схема",
-        "чертеж"
+        "чертеж",
+        "концепт",
+        "дизайн",
+        "стиль",
+        "интерьер",
+        "вариант"
     ]
 
     if any(w in t for w in visual_words):
 
-        result["visual_expectation"] += 0.8
+        result["visual_expectation"] += 0.85
 
-        result["example_expectation"] += 0.6
+        result["example_expectation"] += 0.7
 
         result["should_offer_visual"] = True
 
+        result["visual_routing"] = True
+
         result["expected_output_type"] = "visual"
+
+        result["attention_weight"] += 0.2
+
+    # =====================================================
+    # 🔥 EXAMPLE DEMONSTRATION FORMULAS
+    # =====================================================
+
+    demo_words = [
+        "покажи пример",
+        "можешь показать",
+        "примерно",
+        "как это выглядит",
+        "как будет выглядеть",
+        "можно пример",
+        "референс"
+    ]
+
+    if any(w in t for w in demo_words):
+
+        result["visual_demo_request"] = True
+
+        result["visual_expectation"] += 0.3
+
+        result["example_expectation"] += 0.4
+
+        result["assistant_initiative"] += 0.3
+
+    # =====================================================
+    # 🔥 LIGHTWEIGHT VISUAL MODE
+    # =====================================================
+
+    lightweight_words = [
+        "пример",
+        "идея",
+        "референс",
+        "вариант",
+        "концепт"
+    ]
+
+    if any(w in t for w in lightweight_words):
+
+        result["visual_lightweight_mode"] = True
+
+        result["library_visual_candidate"] = True
+
+    # =====================================================
+    # 🔥 VISUAL ROOM ESCALATION
+    # =====================================================
+
+    if (
+        result["visual_expectation"] >= 0.7
+    ):
+
+        result["room"] = "image_generate"
+
+        result["capability_confidence"] = max(
+            result["capability_confidence"],
+            0.9
+        )
+
+        result["best_capability"] = "image_generate"
+
+        result["capability_route_confidence"] = 0.9
+
+    # =====================================================
+    # 🔥 GENERATION CONTROL
+    # =====================================================
+
+    generation_words = [
+        "создай",
+        "сгенерируй",
+        "нарисуй",
+        "сделай изображение"
+    ]
+
+    if any(w in t for w in generation_words):
+
+        result["visual_generation_needed"] = True
+
+    else:
+
+        # 🔥 avoid expensive generation
+        if result["visual_demo_request"]:
+
+            result["visual_generation_needed"] = False
+
+            result["visual_lightweight_mode"] = True
+
+    # =====================================================
+    # 🔥 EXPECTATION SIGNALS
+    # =====================================================
 
     example_words = [
         "пример",
@@ -307,7 +387,6 @@ def analyze(
 
         result["execution_readiness"] += 0.5
 
-    # 🔥 continuation pressure
     if (
         result["continuation"]
         and len(t) <= 40
@@ -317,12 +396,10 @@ def analyze(
 
         result["trajectory_strength"] += 0.2
 
-    # 🔥 repeated unresolved flow
     if flow_type:
 
         pressure += 0.15
 
-    # 🔥 escalation
     escalation_words = [
         "уже",
         "хватит",
@@ -444,6 +521,8 @@ def analyze(
     ):
 
         result["should_offer_visual"] = True
+
+        result["room"] = "image_generate"
 
     # =====================================================
     # 🔥 RESPONSE ECONOMY
