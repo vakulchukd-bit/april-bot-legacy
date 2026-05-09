@@ -1,6 +1,10 @@
-# ===============================
-# 🔥 SAFE PATCH MODE (TEXT MODULE)
-# ===============================
+# =====================================================
+# 🧠 APRIL TEXT MODULE
+# =====================================================
+
+# =====================================================
+# 🔥 SAFE PATCH MODE
+# =====================================================
 
 PATCH_LOG = []
 
@@ -12,20 +16,24 @@ def safe_patch_log(msg):
         pass
 
 
-# 🔥 PATCH: контроль текстовой обработки
 def patch_text_input(text):
-    safe_patch_log(f"TEXT INPUT: {text[:50]}")
+    safe_patch_log(f"TEXT INPUT: {text[:80]}")
     return text
 
 
-# 🔥 PATCH: будущая логика текста
 def patch_text_future(*args, **kwargs):
     return None
 
 
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
 import asyncio
 import random
 import re
+import traceback
+import time
 
 from openai import OpenAI
 
@@ -39,35 +47,56 @@ client = OpenAI()
 # =====================================================
 
 SYSTEM_PROMPT = (
-    "Ты — Aprill, живой cognitive assistant. "
-    "Главная цель — помогать человеку прийти к результату. "
+    "Ты — Aprill. "
+    "Ты не trigger-бот. "
+    "Ты cognitive assistant. "
+
+    "Главная задача — понимать trajectory человека "
+    "и помогать ему прийти к результату. "
+
     "Не болтай впустую. "
-    "Если человеку нужен пример — покажи направление. "
-    "Если нужен визуал — предложи визуальный путь. "
-    "Если пользователь сам уверенно ведёт задачу — не мешай. "
-    "Если человек запутался — мягко направь. "
     "Не перехватывай инициативу без необходимости. "
-    "Не превращай подтверждение пользователя "
-    "в автоматическую генерацию. "
-    "Сначала пойми намерение. "
-    "Развивай trajectory диалога постепенно. "
-    "Если человек исследует идею — помогай исследовать. "
-    "Если человек готов к execution — помогай выполнять. "
-    "Используй visual references как помощь мышлению, "
-    "а не как замену диалогу. "
-    "Не генерируй тяжёлый визуал без необходимости. "
-    "Сначала помоги человеку понять своё направление. "
-    "Если пользователь не уверен — "
-    "помогай ему исследовать варианты. "
-    "Следи за психологией trajectory. "
-    "Говори естественно, кратко и по делу. "
-    "Избегай лишней болтовни. "
-    "Продолжай текущую мысль, а не начинай заново. "
-    "Не теряй психологию диалога."
+    "Не превращай любое подтверждение "
+    "в автоматическое execution-действие. "
+
+    "Если пользователь исследует идею — "
+    "помогай исследовать. "
+
+    "Если пользователь уже знает направление — "
+    "следуй за ним. "
+
+    "Если человек запутался — "
+    "объясняй проще и мягче. "
+
+    "Если нужен результат — "
+    "не затягивай. "
+
+    "Используй visual references "
+    "как помощь мышлению, "
+    "а не замену общения. "
+
+    "Не теряй trajectory диалога. "
+    "Продолжай мысль естественно. "
+
+    "Не начинай разговор заново. "
+    "Не ломай атмосферу. "
+    "Не уходи в роботизированные ответы. "
+
+    "Говори естественно. "
+    "Кратко. "
+    "Человечно. "
+    "По делу."
 )
 
 # =====================================================
-# 🔥 CONTEXT DETECTION
+# 🔥 LIMITS
+# =====================================================
+
+MAX_MESSAGE_CHARS = 900
+MAX_TOTAL_CHARS = 5000
+
+# =====================================================
+# 🔥 DETECTORS
 # =====================================================
 
 def is_context_prompt(text):
@@ -78,32 +107,11 @@ def is_context_prompt(text):
     )
 
 
-# =====================================================
-# 🔥 BASIC DETECTORS
-# =====================================================
-
-def is_vague(text):
-
-    vague = [
-        "что-нибудь",
-        "что то",
-        "что-то",
-        "сделай",
-        "придумай"
-    ]
-
-    return any(
-        x in text.lower()
-        for x in vague
-    )
-
-
 def is_short(text):
-    return len(text.strip()) <= 3
 
-
-def build_behavior_hint(text):
-    return ""
+    return len(
+        (text or "").strip()
+    ) <= 3
 
 
 def is_problem(text):
@@ -111,19 +119,13 @@ def is_problem(text):
     t = text.lower()
 
     return (
-        any(
-            sym in t
-            for sym in [
-                "=",
-                "+",
-                "-",
-                "*",
-                "/",
-                "^"
-            ]
-        )
+        "=" in t
         or "реши" in t
         or "график" in t
+        or "+" in t
+        or "-" in t
+        or "*" in t
+        or "/" in t
     )
 
 
@@ -133,18 +135,10 @@ def is_strict_math(text):
 
     return (
         "=" in t
-        or "график" in t
         or "sin(" in t
         or "cos(" in t
-        or any(
-            op in t
-            for op in [
-                "+",
-                "-",
-                "*",
-                "/"
-            ]
-        )
+        or "tan(" in t
+        or "график" in t
     )
 
 
@@ -154,14 +148,15 @@ def is_sales_text(text):
         "клиент",
         "продай",
         "убеди",
-        "сомневается",
-        "покуп",
-        "заказ"
+        "заказ",
+        "покуп"
     ]
 
+    t = text.lower()
+
     return any(
-        w in text.lower()
-        for w in triggers
+        x in t
+        for x in triggers
     )
 
 
@@ -173,24 +168,19 @@ def is_edit_request(text):
         "измени",
         "добавь",
         "убери",
-        "сделай",
         "замени",
         "исправь"
     ]
 
     return any(
-        w in t
-        for w in triggers
+        x in t
+        for x in triggers
     )
 
 
 # =====================================================
-# 🔥 LIMITS
+# 🔥 TEXT LIMITERS
 # =====================================================
-
-MAX_MESSAGE_CHARS = 600
-MAX_TOTAL_CHARS = 3000
-
 
 def trim_text(text):
 
@@ -201,7 +191,10 @@ def trim_text(text):
 
     if len(text) > MAX_MESSAGE_CHARS:
 
-        return text[:MAX_MESSAGE_CHARS] + "…"
+        return (
+            text[:MAX_MESSAGE_CHARS]
+            + "…"
+        )
 
     return text
 
@@ -224,11 +217,17 @@ def trim_messages(messages):
             break
 
         result.append({
-            "role": msg["role"],
-            "content": content
+
+            "role":
+                msg.get("role", "user"),
+
+            "content":
+                content
         })
 
-    return list(reversed(result))
+    return list(
+        reversed(result)
+    )
 
 
 # =====================================================
@@ -241,54 +240,35 @@ def get_config(energy):
 
         return {
             "temperature": 0.5,
-            "max_output_tokens": 150
-        }
-
-    if energy == "MEDIUM":
-
-        return {
-            "temperature": 0.7,
-            "max_output_tokens": 300
+            "max_output_tokens": 180
         }
 
     if energy == "HIGH":
 
         return {
             "temperature": 0.9,
-            "max_output_tokens": 500
+            "max_output_tokens": 700
         }
 
     return {
-        "temperature": 0.6,
-        "max_output_tokens": 250
+        "temperature": 0.7,
+        "max_output_tokens": 350
     }
 
 
 # =====================================================
-# 🔥 HELPERS
+# 🔥 HISTORY LIMIT
 # =====================================================
-
-def enhance_link_behavior(text):
-
-    t = text.lower()
-
-    if "ссылка" in t and "http" not in t:
-
-        return (
-            text
-            + "\n\nПример: https://example.com"
-        )
-
-    return text
-
 
 def get_history_limit(plan):
 
     return {
-        "free": 2,
-        "lite": 4,
-        "premium": 8
-    }.get(plan, 4)
+
+        "free": 3,
+        "lite": 6,
+        "premium": 12
+
+    }.get(plan, 6)
 
 
 # =====================================================
@@ -300,13 +280,16 @@ def extract_topic(text):
     t = text.lower()
 
     if "сайт" in t and "кафе" in t:
-        return "сайт кафе"
+        return "website_cafe"
 
     if "сайт" in t:
-        return "создание сайта"
+        return "website"
 
-    if "приложение" in t:
-        return "создание приложения"
+    if "бот" in t:
+        return "bot"
+
+    if "дизайн" in t:
+        return "design"
 
     return None
 
@@ -316,11 +299,12 @@ def update_topic(state, text):
     topic = extract_topic(text)
 
     if topic:
+
         state["topic"] = topic
 
 
 # =====================================================
-# 🧠 RESPONSE DECISION HINTS
+# 🧠 RESPONSE DECISION HINT
 # =====================================================
 
 def build_response_decision_hint(
@@ -337,32 +321,7 @@ def build_response_decision_hint(
     ):
 
         hints.append(
-            "Следуй за направлением пользователя."
-        )
-
-    if response_decision.get(
-        "should_wait_for_user"
-    ):
-
-        hints.append(
-            "Не спеши с execution."
-        )
-
-    if response_decision.get(
-        "should_offer_reference"
-    ):
-
-        hints.append(
-            "Используй лёгкие визуальные "
-            "референсы вместо генерации."
-        )
-
-    if response_decision.get(
-        "should_continue_trajectory"
-    ):
-
-        hints.append(
-            "Продолжай текущую trajectory."
+            "Следуй за пользователем."
         )
 
     if response_decision.get(
@@ -370,85 +329,40 @@ def build_response_decision_hint(
     ):
 
         hints.append(
-            "Отвечай компактнее."
+            "Отвечай короче."
+        )
+
+    if response_decision.get(
+        "should_offer_reference"
+    ):
+
+        hints.append(
+            "Лучше visual guidance, "
+            "а не heavy generation."
+        )
+
+    if response_decision.get(
+        "should_continue_trajectory"
+    ):
+
+        hints.append(
+            "Продолжай trajectory."
         )
 
     return " ".join(hints)
 
 
 # =====================================================
-# 🧠 VISUAL PSYCHOLOGY
+# 🧠 HUMANITY LAYER
 # =====================================================
 
-def build_visual_psychology_hint(
+def build_human_layer(
     semantic,
     cognition,
-    visual_reference,
     response_decision
 ):
 
     hints = []
-
-    if not visual_reference:
-        return ""
-
-    # =================================================
-    # 🔥 LIGHTWEIGHT REFERENCES
-    # =================================================
-
-    if visual_reference.get(
-        "enabled"
-    ):
-
-        if not visual_reference.get(
-            "should_generate"
-        ):
-
-            hints.append(
-                "Используй лёгкие визуальные "
-                "референсы вместо тяжёлой генерации."
-            )
-
-    # =================================================
-    # 🔥 EXPLORATION MODE
-    # =================================================
-
-    if semantic.get(
-        "goal_stage"
-    ) == "exploration":
-
-        hints.append(
-            "Пользователь исследует идею. "
-            "Помогай развивать мысль."
-        )
-
-    # =================================================
-    # 🔥 EXECUTION MODE
-    # =================================================
-
-    if semantic.get(
-        "goal_stage"
-    ) == "execution":
-
-        hints.append(
-            "Пользователь готов к результату."
-        )
-
-    # =================================================
-    # 🔥 USER LEADING
-    # =================================================
-
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        hints.append(
-            "Пользователь задаёт trajectory."
-        )
-
-    # =================================================
-    # 🔥 CONFUSION
-    # =================================================
 
     if cognition.get(
         "is_confused",
@@ -456,28 +370,46 @@ def build_visual_psychology_hint(
     ) >= 0.6:
 
         hints.append(
-            "Объясняй мягче и проще."
+            "Объясняй проще."
         )
 
-    # =================================================
-    # 🔥 VISUAL SUPPORT
-    # =================================================
+    if cognition.get(
+        "is_frustrated",
+        0.0
+    ) >= 0.6:
 
-    if semantic.get(
-        "should_offer_visual"
+        hints.append(
+            "Не растягивай."
+        )
+
+    if cognition.get(
+        "user_leads_direction"
     ):
 
         hints.append(
-            "Если поможет пониманию — "
-            "предложи визуальный ориентир."
+            "Пользователь уже ведёт направление."
         )
 
-    # =================================================
-    # 🔥 RESPONSE DECISION
-    # =================================================
+    if cognition.get(
+        "exploration_mode"
+    ):
 
-    decision_hint = build_response_decision_hint(
-        response_decision
+        hints.append(
+            "Помогай исследовать идею."
+        )
+
+    if semantic.get(
+        "goal_stage"
+    ) == "execution":
+
+        hints.append(
+            "Пользователь ждёт результат."
+        )
+
+    decision_hint = (
+        build_response_decision_hint(
+            response_decision
+        )
     )
 
     if decision_hint:
@@ -490,14 +422,51 @@ def build_visual_psychology_hint(
 
 
 # =====================================================
-# 🔥 CONTEXT BLOCK
+# 🔥 VISUAL GUIDANCE
+# =====================================================
+
+def build_visual_hint(
+    visual_reference
+):
+
+    if not visual_reference:
+        return ""
+
+    hints = []
+
+    if visual_reference.get(
+        "enabled"
+    ):
+
+        if visual_reference.get(
+            "lightweight_mode"
+        ):
+
+            hints.append(
+                "Используй лёгкие визуальные ориентиры."
+            )
+
+    if visual_reference.get(
+        "guidance"
+    ):
+
+        hints.append(
+            visual_reference.get(
+                "guidance"
+            )
+        )
+
+    return " ".join(hints)
+
+
+# =====================================================
+# 🧠 CONTEXT BLOCK
 # =====================================================
 
 def build_context_block(
     state,
     history,
     text,
-    energy,
     plan,
     semantic,
     cognition,
@@ -507,151 +476,97 @@ def build_context_block(
 
     parts = []
 
-    topic = state.get("topic")
+    topic = state.get(
+        "topic"
+    )
 
     if topic:
 
         parts.append(
-            f"Текущая задача: {topic}"
-        )
-
-    last = [
-
-        m["content"][:40]
-
-        for m in history[-3:]
-
-        if m["role"] == "user"
-    ]
-
-    if last:
-
-        parts.append(
-            "Контекст: "
-            + " | ".join(last)
+            f"Текущая тема: {topic}"
         )
 
     # =================================================
-    # 🔥 RESPONSE ECONOMY
+    # 🔥 ACTIVE FLOW
     # =================================================
 
-    response_economy = semantic.get(
-        "response_economy",
-        "balanced"
+    active_flow = state.get(
+        "active_flow"
     )
 
-    if response_economy == "minimal":
+    if active_flow:
 
-        parts.append(
-            "Отвечай коротко и по делу."
+        flow_type = active_flow.get(
+            "type"
         )
 
-    elif response_economy == "expanded":
+        if flow_type:
+
+            parts.append(
+                f"Текущий trajectory: {flow_type}"
+            )
+
+    # =================================================
+    # 🔥 MEMORY SUMMARY
+    # =================================================
+
+    summary = state.get(
+        "memory_summary"
+    )
+
+    if summary:
 
         parts.append(
-            "Можно чуть подробнее."
-        )
-
-    # =================================================
-    # 🔥 EXECUTION PRESSURE
-    # =================================================
-
-    if semantic.get(
-        "execution_pressure",
-        0.0
-    ) >= 0.7:
-
-        parts.append(
-            "Меньше разговоров. Больше результата."
-        )
-
-    # =================================================
-    # 🔥 VISUAL GUIDANCE
-    # =================================================
-
-    if semantic.get(
-        "should_offer_visual"
-    ):
-
-        parts.append(
-            "Если поможет пониманию — "
-            "предложи визуальное направление."
+            "Сжатая память: "
+            + summary[-400:]
         )
 
     # =================================================
-    # 🔥 EXAMPLES
+    # 🔥 RECENT USER CONTEXT
     # =================================================
 
-    if semantic.get(
-        "should_offer_examples"
-    ):
+    recent = []
+
+    for msg in history[-4:]:
+
+        if msg.get("role") == "user":
+
+            recent.append(
+                msg.get(
+                    "content",
+                    ""
+                )[:80]
+            )
+
+    if recent:
 
         parts.append(
-            "Если уместно — "
-            "приведи лёгкий пример."
+            "Недавний контекст: "
+            + " | ".join(recent)
         )
 
     # =================================================
-    # 🔥 USER CONFUSION
+    # 🔥 HUMANITY
     # =================================================
 
-    if cognition.get(
-        "is_confused",
-        0.0
-    ) >= 0.6:
-
-        parts.append(
-            "Пользователь запутался. "
-            "Объясняй проще."
-        )
-
-    # =================================================
-    # 🔥 USER FRUSTRATION
-    # =================================================
-
-    if cognition.get(
-        "is_frustrated",
-        0.0
-    ) >= 0.6:
-
-        parts.append(
-            "Не затягивай диалог."
-        )
-
-    # =================================================
-    # 🔥 USER LEADING
-    # =================================================
-
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        parts.append(
-            "Пользователь уже ведёт направление. "
-            "Не перехватывай trajectory."
-        )
-
-    # =================================================
-    # 🔥 GUIDANCE MODE
-    # =================================================
-
-    if cognition.get(
-        "needs_guidance"
-    ):
-
-        parts.append(
-            "Мягко направляй пользователя."
-        )
-
-    # =================================================
-    # 🔥 VISUAL PSYCHOLOGY
-    # =================================================
-
-    visual_hint = build_visual_psychology_hint(
+    human_layer = build_human_layer(
         semantic,
         cognition,
-        visual_reference,
         response_decision
+    )
+
+    if human_layer:
+
+        parts.append(
+            human_layer
+        )
+
+    # =================================================
+    # 🔥 VISUAL
+    # =================================================
+
+    visual_hint = build_visual_hint(
+        visual_reference
     )
 
     if visual_hint:
@@ -661,27 +576,50 @@ def build_context_block(
         )
 
     # =================================================
-    # 🔥 PREMIUM HUMANITY
+    # 🔥 PREMIUM
     # =================================================
 
     if plan == "premium":
 
         parts.append(
-            "Пиши максимально естественно."
+            "Максимально естественный стиль."
         )
 
     return ". ".join(parts)
 
 
 # =====================================================
-# 🔥 ENRICH REQUEST
+# 🔥 LINK ENHANCEMENT
+# =====================================================
+
+def enhance_link_behavior(text):
+
+    t = text.lower()
+
+    if (
+        "ссылка" in t
+        and "http" not in t
+    ):
+
+        return (
+            text
+            + "\n\nПример: https://example.com"
+        )
+
+    return text
+
+
+# =====================================================
+# 🔥 REQUEST ENRICH
 # =====================================================
 
 def enrich_request(text, state):
 
     if (
         "график" in text.lower()
-        and "сайт" in state.get("topic", "")
+        and "сайт" in (
+            state.get("topic") or ""
+        )
     ):
 
         return (
@@ -693,22 +631,10 @@ def enrich_request(text, state):
 
 
 # =====================================================
-# 🔥 SMALL TALK
-# =====================================================
-
-def is_small_talk(text, state):
-    return False
-
-
-def local_fast_answer(text):
-    return None
-
-
-# =====================================================
 # 🔥 HTML HELPERS
 # =====================================================
 
-def clean_html(text: str) -> str:
+def clean_html(text):
 
     t = text.strip()
 
@@ -727,32 +653,27 @@ def clean_html(text: str) -> str:
     return t
 
 
-def add_html_comments(html: str) -> str:
+def add_html_comments(html):
 
     if "<!--" in html:
         return html
 
     html = html.replace(
-        "<body>",
-        "<body>\n"
-        "    <!-- Основное содержимое страницы -->"
-    )
 
-    html = html.replace(
-        "<button",
-        "\n"
-        "    <!-- Кнопка -->\n"
-        "    <button"
+        "<body>",
+
+        "<body>\n"
+        "    <!-- Основное содержимое -->"
     )
 
     return html
 
 
 # =====================================================
-# 🔥 CODE ENHANCEMENT
+# 🔥 CODE ENHANCE
 # =====================================================
 
-def enhance_code_block(text: str) -> str:
+def enhance_code_block(text):
 
     if not text:
         return text
@@ -769,34 +690,49 @@ def enhance_code_block(text: str) -> str:
         t = add_html_comments(t)
 
         return (
-            "Вот готовая HTML-страница:\n\n"
             "```html\n"
-            f"{t}\n"
-            "```"
-        )
-
-    if "def " in t or "import " in t:
-
-        return (
-            "Вот готовый Python-код:\n\n"
-            "```python\n"
-            f"{t}\n"
-            "```"
+            + t
+            + "\n```"
         )
 
     if (
-        "function" in t
-        or "document." in t
+        "def " in t
+        or "import " in t
     ):
 
         return (
-            "Вот JavaScript код:\n\n"
-            "```javascript\n"
-            f"{t}\n"
-            "```"
+            "```python\n"
+            + t
+            + "\n```"
         )
 
     return t
+
+
+# =====================================================
+# 🔥 LOOP PROTECTION
+# =====================================================
+
+def prevent_repeat_response(
+    state,
+    reply
+):
+
+    last = state.get(
+        "last_reply"
+    )
+
+    if not last:
+        return reply
+
+    if last.strip() == reply.strip():
+
+        return (
+            reply
+            + "\n\n(продолжаю мысль)"
+        )
+
+    return reply
 
 
 # =====================================================
@@ -810,160 +746,201 @@ async def process(
     energy="MEDIUM"
 ):
 
-    def run():
+    text = patch_text_input(
+        text
+    )
 
-        semantic = state.get(
-            "semantic",
-            {}
-        )
+    async def run():
 
-        cognition = state.get(
-            "cognition",
-            {}
-        )
+        try:
 
-        visual_reference = state.get(
-            "visual_reference",
-            {}
-        )
-
-        response_decision = state.get(
-            "response_decision",
-            {}
-        )
-
-        # =================================================
-        # 🔥 READY CONTEXT
-        # =================================================
-
-        if is_context_prompt(text):
-
-            messages = [
-
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT
-                },
-
-                {
-                    "role": "user",
-                    "content": text
-                }
-            ]
-
-        else:
-
-            history = state.get(
-                "dialog",
-                []
+            semantic = state.get(
+                "semantic",
+                {}
             )
 
-            update_topic(
-                state,
-                text
+            cognition = state.get(
+                "cognition",
+                {}
             )
 
-            text_fixed = enrich_request(
-                enhance_link_behavior(text),
-                state
+            visual_reference = state.get(
+                "visual_reference",
+                {}
             )
 
-            plan = get_user_plan(
-                user_id
+            response_decision = state.get(
+                "response_decision",
+                {}
             )
 
-            limit = get_history_limit(
-                plan
-            )
+            # =============================================
+            # 🔥 READY CONTEXT
+            # =============================================
 
-            context_block = build_context_block(
-                state,
-                history,
-                text_fixed,
-                energy,
-                plan,
-                semantic,
-                cognition,
-                visual_reference,
-                response_decision
-            )
+            if is_context_prompt(text):
 
-            system_full = (
-                SYSTEM_PROMPT
-                + " "
-                + context_block
-            )
+                messages = [
 
-            messages = [
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
+                    },
 
-                {
-                    "role": "system",
-                    "content": system_full
-                }
-            ]
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ]
 
-            safe_history = [
+            else:
 
-                {
-                    "role": m["role"],
-                    "content": trim_text(
-                        m.get("content", "")
+                history = state.get(
+                    "dialog",
+                    []
+                )
+
+                update_topic(
+                    state,
+                    text
+                )
+
+                text_fixed = enrich_request(
+
+                    enhance_link_behavior(
+                        text
+                    ),
+
+                    state
+                )
+
+                plan = get_user_plan(
+                    user_id
+                )
+
+                limit = get_history_limit(
+                    plan
+                )
+
+                context_block = (
+                    build_context_block(
+
+                        state,
+                        history,
+                        text_fixed,
+                        plan,
+                        semantic,
+                        cognition,
+                        visual_reference,
+                        response_decision
                     )
-                }
-
-                for m in history[-limit:]
-            ]
-
-            messages.extend(
-                trim_messages(
-                    safe_history
                 )
+
+                system_full = (
+                    SYSTEM_PROMPT
+                    + "\n\n"
+                    + context_block
+                )
+
+                messages = [
+
+                    {
+                        "role": "system",
+                        "content": system_full
+                    }
+                ]
+
+                safe_history = [
+
+                    {
+                        "role":
+                            m.get("role"),
+
+                        "content":
+                            trim_text(
+                                m.get(
+                                    "content",
+                                    ""
+                                )
+                            )
+                    }
+
+                    for m in history[-limit:]
+                ]
+
+                messages.extend(
+
+                    trim_messages(
+                        safe_history
+                    )
+                )
+
+                messages.append({
+
+                    "role": "user",
+
+                    "content":
+                        trim_text(
+                            text_fixed
+                        )
+                })
+
+            # =============================================
+            # 🔥 CONFIG
+            # =============================================
+
+            config = get_config(
+                energy
             )
 
-            messages.append({
+            # =============================================
+            # 🔥 OPENAI
+            # =============================================
 
-                "role": "user",
+            r = client.responses.create(
 
-                "content": trim_text(
-                    text_fixed
+                model=TEXT_MODEL,
+
+                input=messages,
+
+                temperature=config[
+                    "temperature"
+                ],
+
+                max_output_tokens=config[
+                    "max_output_tokens"
+                ]
+            )
+
+            output = r.output_text
+
+            if not output:
+
+                output = (
+                    "⚠️ Пустой ответ."
                 )
-            })
 
-        # =================================================
-        # 🔥 CONFIG
-        # =================================================
+            return output
 
-        config = get_config(
-            energy
-        )
+        except Exception as e:
 
-        # =================================================
-        # 🔥 OPENAI
-        # =================================================
+            traceback.print_exc()
 
-        r = client.responses.create(
+            return (
+                "⚠️ Ошибка текстового модуля: "
+                + str(e)
+            )
 
-            model=TEXT_MODEL,
-
-            input=messages,
-
-            temperature=config[
-                "temperature"
-            ],
-
-            max_output_tokens=config[
-                "max_output_tokens"
-            ]
-        )
-
-        return r.output_text
+    # =================================================
+    # 🔥 EXECUTION
+    # =================================================
 
     reply = await asyncio.to_thread(
-        run
+        lambda: asyncio.run(run())
     )
 
     # =================================================
-    # 🔥 STORE CODE
+    # 🔥 CODE STORE
     # =================================================
 
     if "```" in reply:
@@ -978,7 +955,26 @@ async def process(
         reply
     )
 
+    # =================================================
+    # 🔥 LOOP PROTECTION
+    # =================================================
+
+    reply = prevent_repeat_response(
+        state,
+        reply
+    )
+
+    # =================================================
+    # 🔥 SAVE LAST REPLY
+    # =================================================
+
+    state["last_reply"] = reply
+
+    state["last_text_time"] = time.time()
+
     return {
+
         "type": "text",
+
         "content": reply
     }
