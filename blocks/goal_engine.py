@@ -10,8 +10,33 @@ def detect_goal(
         "active_flow"
     )
 
+    dialog = state.get(
+        "dialog",
+        []
+    )
+
+    last_user = None
+
     # =================================================
-    # 🔥 ACTIVE FLOW FIRST
+    # 🔥 LAST USER MESSAGE
+    # =================================================
+
+    for msg in reversed(dialog):
+
+        if msg.get("role") == "user":
+
+            content = (
+                msg.get("content")
+                or ""
+            ).strip()
+
+            if content != text:
+
+                last_user = content
+                break
+
+    # =================================================
+    # 🔥 ACTIVE FLOW
     # =================================================
 
     if active:
@@ -20,57 +45,61 @@ def detect_goal(
             "type"
         )
 
-        # =============================
-        # IMAGE CONTINUATION
-        # =============================
+        # =================================================
+        # 🖼 IMAGE CONTINUATION
+        # =================================================
 
         if flow_type == "image":
 
-            continuation_words = [
-                "сделай",
-                "добавь",
-                "измени",
-                "убери",
-                "ярче",
-                "темнее",
-                "ещё",
-                "дальше",
-                "теперь"
-            ]
+            semantic_room = semantic.get(
+                "room"
+            )
 
-            if any(w in t for w in continuation_words):
+            semantic_intent = semantic.get(
+                "intent"
+            )
+
+            # 🔥 semantic continuation
+            if semantic_room in [
+                "image_generate",
+                "image_edit"
+            ]:
+                return semantic
+
+            # 🔥 short continuation
+            if len(t) <= 40:
 
                 return {
                     "goal": "continue_image",
                     "room": "image_edit",
-                    "confidence": 0.9
+                    "intent": "image_edit",
+                    "confidence": 0.85
                 }
 
-        # =============================
-        # MATH CONTINUATION
-        # =============================
+        # =================================================
+        # 📈 MATH CONTINUATION
+        # =================================================
 
         if flow_type == "math":
 
-            continuation_words = [
-                "построй",
-                "покажи",
-                "реши",
-                "это",
-                "дальше",
-                "теперь"
-            ]
+            semantic_room = semantic.get(
+                "room"
+            )
 
-            if any(w in t for w in continuation_words):
+            if semantic_room == "science":
+                return semantic
+
+            if len(t) <= 40:
 
                 return {
                     "goal": "continue_math",
                     "room": "science",
-                    "confidence": 0.9
+                    "intent": "math",
+                    "confidence": 0.85
                 }
 
     # =================================================
-    # 🔥 FALLBACK TO SEMANTIC
+    # 🔥 SEMANTIC DEFAULT
     # =================================================
 
     return semantic
