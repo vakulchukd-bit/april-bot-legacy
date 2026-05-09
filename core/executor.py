@@ -492,6 +492,24 @@ async def execute(
         key=lambda x: x[0],
         reverse=True
     )
+    # =================================================
+    # 🧠 HARD ROOM AUTHORITY
+    # =================================================
+
+    semantic_room = semantic.get(
+        "room"
+    )
+
+    if semantic_room:
+
+        scored_rooms = [
+
+            (score, room)
+
+            for score, room in scored_rooms
+
+            if room.name == semantic_room
+        ]
 
     # =================================================
     # 🚀 ROOM EXECUTION
