@@ -4,7 +4,9 @@ def detect_goal(
     semantic: dict
 ):
 
-    t = text.lower()
+    semantic = semantic or {}
+
+    t = text.lower().strip()
 
     active = state.get(
         "active_flow"
@@ -36,6 +38,48 @@ def detect_goal(
                 break
 
     # =================================================
+    # 🔥 SEMANTIC VALUES
+    # =================================================
+
+    execution_pressure = semantic.get(
+        "execution_pressure",
+        0.0
+    )
+
+    capability_confidence = semantic.get(
+        "capability_confidence",
+        0.5
+    )
+
+    should_execute = semantic.get(
+        "should_execute",
+        False
+    )
+
+    semantic_room = semantic.get(
+        "room"
+    )
+
+    semantic_intent = semantic.get(
+        "intent"
+    )
+
+    # =================================================
+    # 🔥 EXECUTION ESCALATION
+    # =================================================
+
+    if (
+        should_execute
+        and capability_confidence >= 0.7
+    ):
+
+        semantic["goal"] = "execution"
+
+        semantic["response_mode"] = "execute"
+
+        semantic["goal_stage"] = "execution"
+
+    # =================================================
     # 🔥 ACTIVE FLOW
     # =================================================
 
@@ -46,60 +90,165 @@ def detect_goal(
         )
 
         # =================================================
-        # 🖼 IMAGE CONTINUATION
+        # 🖼 IMAGE TRAJECTORY
         # =================================================
 
         if flow_type == "image":
 
-            semantic_room = semantic.get(
-                "room"
-            )
-
-            semantic_intent = semantic.get(
-                "intent"
-            )
-
-            # 🔥 semantic continuation
+            # 🔥 semantic image authority
             if semantic_room in [
                 "image_generate",
                 "image_edit"
             ]:
+
+                semantic["goal"] = (
+                    "continue_image"
+                )
+
+                semantic["continuation"] = True
+
+                semantic[
+                    "continuation_target"
+                ] = "image"
+
                 return semantic
 
-            # 🔥 short continuation
-            if len(t) <= 40:
+            # 🔥 unresolved image continuation
+            if (
+                execution_pressure >= 0.45
+                or len(t) <= 50
+            ):
 
-                return {
-                    "goal": "continue_image",
-                    "room": "image_edit",
-                    "intent": "image_edit",
-                    "confidence": 0.85
-                }
+                semantic.update({
+
+                    "goal":
+                        "continue_image",
+
+                    "room":
+                        "image_edit",
+
+                    "intent":
+                        "image_edit",
+
+                    "confidence":
+                        max(
+                            semantic.get(
+                                "confidence",
+                                0.5
+                            ),
+                            0.85
+                        ),
+
+                    "continuation":
+                        True,
+
+                    "continuation_target":
+                        "image",
+
+                    "goal_stage":
+                        "execution",
+
+                    "response_mode":
+                        "execute",
+
+                    "should_execute":
+                        True
+                })
+
+                return semantic
 
         # =================================================
-        # 📈 MATH CONTINUATION
+        # 📈 MATH TRAJECTORY
         # =================================================
 
         if flow_type == "math":
 
-            semantic_room = semantic.get(
-                "room"
-            )
-
             if semantic_room == "science":
+
+                semantic["goal"] = (
+                    "continue_math"
+                )
+
+                semantic["continuation"] = True
+
+                semantic[
+                    "continuation_target"
+                ] = "math"
+
                 return semantic
 
-            if len(t) <= 40:
+            if (
+                execution_pressure >= 0.4
+                or len(t) <= 50
+            ):
 
-                return {
-                    "goal": "continue_math",
-                    "room": "science",
-                    "intent": "math",
-                    "confidence": 0.85
-                }
+                semantic.update({
+
+                    "goal":
+                        "continue_math",
+
+                    "room":
+                        "science",
+
+                    "intent":
+                        "math",
+
+                    "confidence":
+                        max(
+                            semantic.get(
+                                "confidence",
+                                0.5
+                            ),
+                            0.85
+                        ),
+
+                    "continuation":
+                        True,
+
+                    "continuation_target":
+                        "math",
+
+                    "goal_stage":
+                        "execution",
+
+                    "response_mode":
+                        "execute",
+
+                    "should_execute":
+                        True
+                })
+
+                return semantic
 
     # =================================================
-    # 🔥 SEMANTIC DEFAULT
+    # 🔥 DIALOG FATIGUE
+    # =================================================
+
+    if len(dialog) >= 12:
+
+        semantic["conversation_value"] = min(
+            semantic.get(
+                "conversation_value",
+                1.0
+            ),
+            0.4
+        )
+
+        if (
+            semantic.get(
+                "execution_pressure",
+                0.0
+            ) >= 0.45
+        ):
+
+            semantic["response_mode"] = (
+                "execute"
+            )
+
+            semantic["should_execute"] = True
+
+    # =================================================
+    # 🔥 DEFAULT
     # =================================================
 
     return semantic
