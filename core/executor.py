@@ -34,6 +34,7 @@ from blocks.image_edit_module import process as image_edit
 from blocks.image_system import analyze_image
 
 from blocks.semantic_core import analyze as semantic_analyze
+from blocks.goal_engine import detect_goal
 
 from datetime import datetime
 
@@ -276,6 +277,20 @@ async def execute(
     )
 
     print("🧠 SEMANTIC:", semantic)
+    # =================================================
+    # 🎯 GOAL ENGINE
+    # =================================================
+
+    semantic = detect_goal(
+        text=text,
+        state=state,
+        semantic=semantic
+    )
+
+    print(
+        "🎯 GOAL:",
+        semantic
+    )
 
     # =================================================
     # 🔒 IMAGE LOCK
