@@ -51,6 +51,14 @@ from blocks.visual_reference_system import (
     build_visual_reference
 )
 
+# =====================================================
+# 🧠 RESPONSE DECISION SYSTEM
+# =====================================================
+
+from blocks.response_decision import (
+    build_response_decision
+)
+
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -359,6 +367,22 @@ async def execute(
     )
 
     # =================================================
+    # 🧠 RESPONSE DECISION SYSTEM
+    # =================================================
+
+    response_decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        visual_reference=visual_reference,
+        state=state
+    )
+
+    print(
+        "🧠 RESPONSE DECISION:",
+        response_decision
+    )
+
+    # =================================================
     # 🔥 STATE BRAIN BRIDGE
     # =================================================
 
@@ -366,6 +390,7 @@ async def execute(
     state["reasoning"] = reasoning
     state["cognition"] = cognition
     state["visual_reference"] = visual_reference
+    state["response_decision"] = response_decision
 
     # =================================================
     # 🔒 IMAGE LOCK
@@ -523,11 +548,16 @@ async def execute(
         "energy": energy,
         "output_mode":
             detect_output_mode(text),
+
         "semantic": semantic,
         "reasoning": reasoning,
         "cognition": cognition,
+
         "visual_reference":
             visual_reference,
+
+        "response_decision":
+            response_decision,
 
         "trajectory_mode":
             semantic.get(
@@ -567,6 +597,32 @@ async def execute(
         ) == "text":
 
             semantic["attention_weight"] = 0.9
+
+    # =================================================
+    # 🧠 RESPONSE DECISION CONTROL
+    # =================================================
+
+    if response_decision.get(
+        "mode"
+    ) == "exploration":
+
+        semantic["should_execute"] = False
+
+        semantic["response_mode"] = "guide"
+
+        semantic["goal_stage"] = "exploration"
+
+    if response_decision.get(
+        "mode"
+    ) == "guidance":
+
+        semantic["response_mode"] = "guide"
+
+    if response_decision.get(
+        "mode"
+    ) == "execution":
+
+        semantic["should_execute"] = True
 
     # =================================================
     # 🧠 VISUAL SUPPORT RESTRAINT
@@ -688,6 +744,26 @@ async def execute(
 
                         score -= 1.0
 
+            # =========================================
+            # 🔥 RESPONSE DECISION PRIORITY
+            # =========================================
+
+            if response_decision.get(
+                "prefer_text_room"
+            ):
+
+                if room.name == "text":
+
+                    score += 1.0
+
+            if response_decision.get(
+                "avoid_generation"
+            ):
+
+                if room.name == "image_generate":
+
+                    score -= 1.5
+
             if score <= 0:
 
                 if room.can_handle(
@@ -769,6 +845,12 @@ async def execute(
             ):
 
                 if result.get("type") == "image_task":
+
+                    if response_decision.get(
+                        "avoid_generation"
+                    ):
+
+                        continue
 
                     state["image_lock"] = True
 
