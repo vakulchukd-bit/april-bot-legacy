@@ -53,6 +53,13 @@ SYSTEM_PROMPT = (
     "Развивай trajectory диалога постепенно. "
     "Если человек исследует идею — помогай исследовать. "
     "Если человек готов к execution — помогай выполнять. "
+    "Используй visual references как помощь мышлению, "
+    "а не как замену диалогу. "
+    "Не генерируй тяжёлый визуал без необходимости. "
+    "Сначала помоги человеку понять своё направление. "
+    "Если пользователь не уверен — "
+    "помогай ему исследовать варианты. "
+    "Следи за психологией trajectory. "
     "Говори естественно, кратко и по делу. "
     "Избегай лишней болтовни. "
     "Продолжай текущую мысль, а не начинай заново. "
@@ -313,13 +320,71 @@ def update_topic(state, text):
 
 
 # =====================================================
+# 🧠 RESPONSE DECISION HINTS
+# =====================================================
+
+def build_response_decision_hint(
+    response_decision
+):
+
+    if not response_decision:
+        return ""
+
+    hints = []
+
+    if response_decision.get(
+        "should_follow_user"
+    ):
+
+        hints.append(
+            "Следуй за направлением пользователя."
+        )
+
+    if response_decision.get(
+        "should_wait_for_user"
+    ):
+
+        hints.append(
+            "Не спеши с execution."
+        )
+
+    if response_decision.get(
+        "should_offer_reference"
+    ):
+
+        hints.append(
+            "Используй лёгкие визуальные "
+            "референсы вместо генерации."
+        )
+
+    if response_decision.get(
+        "should_continue_trajectory"
+    ):
+
+        hints.append(
+            "Продолжай текущую trajectory."
+        )
+
+    if response_decision.get(
+        "should_reduce_talking"
+    ):
+
+        hints.append(
+            "Отвечай компактнее."
+        )
+
+    return " ".join(hints)
+
+
+# =====================================================
 # 🧠 VISUAL PSYCHOLOGY
 # =====================================================
 
 def build_visual_psychology_hint(
     semantic,
     cognition,
-    visual_reference
+    visual_reference,
+    response_decision
 ):
 
     hints = []
@@ -374,12 +439,11 @@ def build_visual_psychology_hint(
     # =================================================
 
     if cognition.get(
-        "wants_action",
-        0.0
-    ) >= 0.7:
+        "user_leads_direction"
+    ):
 
         hints.append(
-            "Пользователь уже ведёт направление."
+            "Пользователь задаёт trajectory."
         )
 
     # =================================================
@@ -408,6 +472,20 @@ def build_visual_psychology_hint(
             "предложи визуальный ориентир."
         )
 
+    # =================================================
+    # 🔥 RESPONSE DECISION
+    # =================================================
+
+    decision_hint = build_response_decision_hint(
+        response_decision
+    )
+
+    if decision_hint:
+
+        hints.append(
+            decision_hint
+        )
+
     return " ".join(hints)
 
 
@@ -423,7 +501,8 @@ def build_context_block(
     plan,
     semantic,
     cognition,
-    visual_reference
+    visual_reference,
+    response_decision
 ):
 
     parts = []
@@ -544,13 +623,12 @@ def build_context_block(
     # =================================================
 
     if cognition.get(
-        "wants_action",
-        0.0
-    ) >= 0.7:
+        "user_leads_direction"
+    ):
 
         parts.append(
             "Пользователь уже ведёт направление. "
-            "Помогай, а не перехватывай."
+            "Не перехватывай trajectory."
         )
 
     # =================================================
@@ -572,7 +650,8 @@ def build_context_block(
     visual_hint = build_visual_psychology_hint(
         semantic,
         cognition,
-        visual_reference
+        visual_reference,
+        response_decision
     )
 
     if visual_hint:
@@ -748,6 +827,11 @@ async def process(
             {}
         )
 
+        response_decision = state.get(
+            "response_decision",
+            {}
+        )
+
         # =================================================
         # 🔥 READY CONTEXT
         # =================================================
@@ -800,7 +884,8 @@ async def process(
                 plan,
                 semantic,
                 cognition,
-                visual_reference
+                visual_reference,
+                response_decision
             )
 
             system_full = (
