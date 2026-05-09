@@ -370,10 +370,24 @@ async def execute(
     # 🔥 TASK TYPE
     # =================================================
 
-    task_type = semantic.get(
-        "intent",
-        detect_task_type(text)
+    # =================================================
+    # 🧠 SEMANTIC TASK TYPE
+    # =================================================
+
+    semantic_intent = semantic.get(
+        "intent"
     )
+
+    if semantic_intent:
+
+        task_type = semantic_intent
+
+    else:
+
+        # 🔥 legacy fallback only
+        task_type = detect_task_type(
+            text
+        )
 
     if task_type == "math":
 
