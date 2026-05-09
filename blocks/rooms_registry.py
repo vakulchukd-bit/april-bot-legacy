@@ -265,11 +265,39 @@ class SafeScienceRoom(ScienceRoom):
 
     def can_handle(self, text, context):
 
-        state = context.get("state", {})
+        semantic = context.get(
+            "semantic",
+            {}
+        )
+
+        # =================================================
+        # 🔥 SEMANTIC AUTHORITY
+        # =================================================
+
+        if semantic.get("room") == self.name:
+
+            confidence = semantic.get(
+                "confidence",
+                0.0
+            )
+
+            if confidence >= 0.6:
+                return True
+
+        # =================================================
+        # 🔥 LEGACY FALLBACK
+        # =================================================
+
+        state = context.get(
+            "state",
+            {}
+        )
 
         dialog = (
-            state.get("dialog_state", {})
-            or {}
+            state.get(
+                "dialog_state",
+                {}
+            ) or {}
         )
 
         # 🔥 IMAGE PRIORITY
