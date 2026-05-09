@@ -2,6 +2,10 @@ from blocks.visual_memory_library import (
     build_visual_memory_response
 )
 
+# =====================================================
+# 🧠 APRIL COGNITION CORE
+# =====================================================
+
 def analyze_cognition(
     text: str,
     state: dict,
@@ -16,6 +20,10 @@ def analyze_cognition(
         []
     )
 
+    active_flow = state.get(
+        "active_flow"
+    )
+
     # =================================================
     # 🧠 VISUAL MEMORY BRAIN
     # =================================================
@@ -23,6 +31,43 @@ def analyze_cognition(
     visual_memory = build_visual_memory_response(
         text
     )
+
+    # =================================================
+    # 🧠 APRIL PERSONALITY STATE
+    # =================================================
+
+    personality_state = {
+
+        "is_present": True,
+
+        "protects_trajectory": True,
+
+        "prefers_understanding": True,
+
+        "prefers_execution_over_talking": True,
+
+        "avoids_forced_generation": True,
+
+        "follows_user_direction": True,
+
+        "tracks_psychology": True,
+
+        "tracks_emotional_shift": True,
+
+        "tracks_dialog_energy": True,
+
+        "maintains_continuity": True,
+
+        "supports_exploration": True,
+
+        "supports_execution": True,
+
+        "uses_restraint": True,
+
+        "avoids_trigger_behavior": True,
+
+        "assistant_identity": "April"
+    }
 
     # =================================================
     # 🔥 BASE
@@ -154,6 +199,39 @@ def analyze_cognition(
         "emotional_trajectory": "neutral",
 
         "human_psychology_weight": 0.5,
+
+        # =================================================
+        # 🧠 PERSONALITY
+        # =================================================
+
+        "personality_active": True,
+
+        "personality_state":
+            personality_state,
+
+        "assistant_presence": 1.0,
+
+        "understands_user_direction": False,
+
+        "understands_user_goal": False,
+
+        "protects_user_trajectory": False,
+
+        "should_feel_human": True,
+
+        "should_feel_present": True,
+
+        "should_feel_supportive": True,
+
+        "should_avoid_robotic_behavior": True,
+
+        "should_avoid_trigger_behavior": True,
+
+        "should_preserve_context": True,
+
+        "should_preserve_continuity": True,
+
+        "should_preserve_user_intent": True,
 
         # =================================================
         # 🧠 VISUAL MEMORY STATE
@@ -308,8 +386,12 @@ def analyze_cognition(
     if any(w in t for w in visual_words):
 
         cognition["wants_visual"] += 1.0
+
         cognition["prefer_visual"] = True
-        cognition["visual_support_priority"] += 0.8
+
+        cognition[
+            "visual_support_priority"
+        ] += 0.8
 
         cognition[
             "should_offer_visual_support"
@@ -444,6 +526,14 @@ def analyze_cognition(
 
         cognition[
             "assistant_should_follow"
+        ] = True
+
+        cognition[
+            "understands_user_direction"
+        ] = True
+
+        cognition[
+            "protects_user_trajectory"
         ] = True
 
         cognition[
@@ -591,10 +681,6 @@ def analyze_cognition(
     # 🔥 ACTIVE FLOW
     # =================================================
 
-    active_flow = state.get(
-        "active_flow"
-    )
-
     if active_flow:
 
         cognition[
@@ -608,6 +694,44 @@ def analyze_cognition(
         cognition[
             "trajectory_confidence"
         ] += 0.7
+
+        cognition[
+            "should_preserve_continuity"
+        ] = True
+
+        cognition[
+            "protects_user_trajectory"
+        ] = True
+
+    # =================================================
+    # 🔥 REASONING INHERITANCE
+    # =================================================
+
+    if reasoning:
+
+        if reasoning.get(
+            "continuation"
+        ):
+
+            cognition[
+                "needs_continuation"
+            ] = True
+
+        if reasoning.get(
+            "dialog_overextended"
+        ):
+
+            cognition[
+                "reduce_talking"
+            ] = True
+
+        if reasoning.get(
+            "user_waiting_action"
+        ):
+
+            cognition[
+                "prefer_execution"
+            ] = True
 
     # =================================================
     # 🔥 DIRECTION HYPOTHESIS
@@ -845,6 +969,40 @@ def analyze_cognition(
         cognition[
             "human_psychology_weight"
         ] += 0.25
+
+    # =================================================
+    # 🔥 UNDERSTANDING USER GOAL
+    # =================================================
+
+    if (
+        cognition["wants_action"] >= 0.5
+        or cognition["wants_help"] >= 0.5
+        or cognition["wants_visual"] >= 0.5
+    ):
+
+        cognition[
+            "understands_user_goal"
+        ] = True
+
+    # =================================================
+    # 🔥 APRIL PRESENCE STABILIZATION
+    # =================================================
+
+    if cognition[
+        "dialog_fatigue"
+    ] >= 0.7:
+
+        cognition[
+            "assistant_presence"
+        ] -= 0.15
+
+    if cognition[
+        "is_frustrated"
+    ] >= 0.7:
+
+        cognition[
+            "assistant_should_slow_down"
+        ] = True
 
     # =================================================
     # 🔥 FINAL NORMALIZATION
