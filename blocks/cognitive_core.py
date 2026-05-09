@@ -1,3 +1,7 @@
+from blocks.visual_memory_library import (
+    build_visual_memory_response
+)
+
 def analyze_cognition(
     text: str,
     state: dict,
@@ -10,6 +14,14 @@ def analyze_cognition(
     dialog = state.get(
         "dialog",
         []
+    )
+
+    # =================================================
+    # 🧠 VISUAL MEMORY BRAIN
+    # =================================================
+
+    visual_memory = build_visual_memory_response(
+        text
     )
 
     # =================================================
@@ -141,8 +153,100 @@ def analyze_cognition(
 
         "emotional_trajectory": "neutral",
 
-        "human_psychology_weight": 0.5
+        "human_psychology_weight": 0.5,
+
+        # =================================================
+        # 🧠 VISUAL MEMORY STATE
+        # =================================================
+
+        "visual_memory": {},
+
+        "visual_atmosphere": None,
+
+        "visual_emotion": None,
+
+        "visual_exploration": False,
+
+        "visual_reference_mode": False
     }
+
+    # =================================================
+    # 🧠 VISUAL MEMORY INHERITANCE
+    # =================================================
+
+    cognition["visual_memory"] = visual_memory
+
+    atmosphere = visual_memory.get(
+        "atmosphere"
+    )
+
+    emotion = visual_memory.get(
+        "emotion",
+        {}
+    )
+
+    exploration = visual_memory.get(
+        "exploration",
+        False
+    )
+
+    if atmosphere:
+
+        cognition[
+            "visual_atmosphere"
+        ] = atmosphere.get(
+            "title"
+        )
+
+        cognition[
+            "prefer_lightweight_visual"
+        ] = True
+
+        cognition[
+            "prefer_reference_over_generation"
+        ] = True
+
+        cognition[
+            "avoid_heavy_generation"
+        ] = True
+
+        cognition[
+            "visual_reference_mode"
+        ] = True
+
+        cognition[
+            "assistant_restraint"
+        ] += 0.3
+
+    if exploration:
+
+        cognition[
+            "visual_exploration"
+        ] = True
+
+        cognition[
+            "exploration_mode"
+        ] = True
+
+        cognition[
+            "needs_examples"
+        ] = True
+
+        cognition[
+            "prefer_reference_over_generation"
+        ] = True
+
+    if emotion.get("state"):
+
+        cognition[
+            "visual_emotion"
+        ] = emotion.get(
+            "state"
+        )
+
+        cognition[
+            "human_psychology_weight"
+        ] += 0.15
 
     # =================================================
     # 🔥 SEMANTIC INHERITANCE
