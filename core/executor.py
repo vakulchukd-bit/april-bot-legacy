@@ -33,6 +33,8 @@ from blocks.image_edit_module import process as image_edit
 
 from blocks.image_system import analyze_image
 
+from blocks.semantic_core import analyze as semantic_analyze
+
 from datetime import datetime
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -79,10 +81,6 @@ def detect_task_type(text: str):
 
     t = text.lower().strip()
 
-    # =================================================
-    # 🖼 IMAGE EDIT
-    # =================================================
-
     image_edit_words = [
         "измени",
         "убери",
@@ -94,10 +92,6 @@ def detect_task_type(text: str):
     if any(x in t for x in image_edit_words):
         return "image_edit"
 
-    # =================================================
-    # 🎨 IMAGE GENERATE
-    # =================================================
-
     image_generate_words = [
         "создай",
         "сгенерируй",
@@ -108,10 +102,6 @@ def detect_task_type(text: str):
 
     if any(x in t for x in image_generate_words):
         return "image_generate"
-
-    # =================================================
-    # 📈 SAFE MATH
-    # =================================================
 
     math_words = [
         "график",
@@ -274,6 +264,20 @@ async def execute(
     t = text.lower().strip()
 
     # =================================================
+    # 🔥 SEMANTIC CORE
+    # =================================================
+
+    semantic = semantic_analyze(
+        text=text,
+        state=state,
+        history=state.get("dialog", []),
+        active_flow=get_active_flow(user_id),
+        dialog_state=state.get("dialog_state", {})
+    )
+
+    print("🧠 SEMANTIC:", semantic)
+
+    # =================================================
     # 🔒 IMAGE LOCK
     # =================================================
 
@@ -331,10 +335,6 @@ async def execute(
                     "замени"
                 ]
 
-                # =============================
-                # 🎨 IMAGE EDIT
-                # =============================
-
                 if any(x in t for x in edit_words):
 
                     result = await image_edit(
@@ -344,10 +344,6 @@ async def execute(
                     )
 
                     return result
-
-                # =============================
-                # 🔍 IMAGE ANALYZE
-                # =============================
 
                 result = await analyze_image(
                     ctx["path"],
@@ -374,7 +370,10 @@ async def execute(
     # 🔥 TASK TYPE
     # =================================================
 
-    task_type = detect_task_type(text)
+    task_type = semantic.get(
+        "intent",
+        detect_task_type(text)
+    )
 
     if task_type == "math":
 
@@ -388,7 +387,8 @@ async def execute(
 
     elif task_type in [
         "image_generate",
-        "image_edit"
+        "image_edit",
+        "image"
     ]:
 
         set_active_flow(
@@ -415,7 +415,8 @@ async def execute(
         "task_type": task_type,
         "energy": energy,
         "output_mode":
-            detect_output_mode(text)
+            detect_output_mode(text),
+        "semantic": semantic
     }
 
     # =================================================
@@ -442,10 +443,6 @@ async def execute(
                     result
                     and result.get("type")
                 ):
-
-                    # =========================
-                    # 🖼 IMAGE GENERATION
-                    # =========================
 
                     if result.get("type") == "image_task":
 
@@ -477,10 +474,6 @@ async def execute(
                         user_id,
                         output_text
                     )
-
-                    # =========================
-                    # 🔥 DIALOG STATE
-                    # =========================
 
                     if result.get("type") == "image":
 
