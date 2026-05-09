@@ -91,7 +91,53 @@ def analyze(
         "response_mode": "talk",
 
         # ===== attention weight =====
-        "attention_weight": 0.5
+        "attention_weight": 0.5,
+
+        # =================================================
+        # 🔥 EXPECTATION MODELING
+        # =================================================
+
+        # ===== expected output =====
+        "expected_result": None,
+
+        # ===== expected output type =====
+        "expected_output_type": "text",
+
+        # ===== visual expectation =====
+        "visual_expectation": 0.0,
+
+        # ===== example expectation =====
+        "example_expectation": 0.0,
+
+        # ===== execution readiness =====
+        "execution_readiness": 0.0,
+
+        # ===== guidance requirement =====
+        "guidance_need": 0.0,
+
+        # ===== ambiguity =====
+        "ambiguity_level": 0.0,
+
+        # ===== clarification need =====
+        "needs_clarification": False,
+
+        # ===== proactive assistance =====
+        "should_proactively_help": False,
+
+        # ===== user certainty =====
+        "user_certainty": 0.5,
+
+        # ===== trajectory persistence =====
+        "trajectory_strength": 0.5,
+
+        # ===== visual support =====
+        "should_offer_visual": False,
+
+        # ===== example support =====
+        "should_offer_examples": False,
+
+        # ===== assistant initiative =====
+        "assistant_initiative": 0.0
     }
 
     # =====================================================
@@ -130,6 +176,8 @@ def analyze(
             "type": flow_type,
             "weight": 0.8
         }
+
+        result["trajectory_strength"] += 0.25
 
     # =====================================================
     # 🔥 IMAGE CONTEXT
@@ -178,17 +226,64 @@ def analyze(
 
         result["capability_confidence"] = 0.9
 
+        result["expected_result"] = "solution"
+
     elif intent == "code":
 
         result["room"] = "text"
 
         result["capability_confidence"] = 0.7
 
+        result["expected_result"] = "implementation"
+
     elif intent == "image":
 
         result["room"] = "image_generate"
 
         result["capability_confidence"] = 0.95
+
+        result["expected_result"] = "visual"
+
+        result["expected_output_type"] = "image"
+
+    # =====================================================
+    # 🔥 EXPECTATION SIGNALS
+    # =====================================================
+
+    visual_words = [
+        "пример",
+        "покажи",
+        "визуально",
+        "как выглядит",
+        "референс",
+        "фото",
+        "картинка",
+        "схема",
+        "чертеж"
+    ]
+
+    if any(w in t for w in visual_words):
+
+        result["visual_expectation"] += 0.8
+
+        result["example_expectation"] += 0.6
+
+        result["should_offer_visual"] = True
+
+        result["expected_output_type"] = "visual"
+
+    example_words = [
+        "пример",
+        "вариант",
+        "образец",
+        "идея"
+    ]
+
+    if any(w in t for w in example_words):
+
+        result["should_offer_examples"] = True
+
+        result["example_expectation"] += 0.7
 
     # =====================================================
     # 🔥 EXECUTION PRESSURE
@@ -210,7 +305,9 @@ def analyze(
 
         pressure += 0.45
 
-    # 🔥 short continuation pressure
+        result["execution_readiness"] += 0.5
+
+    # 🔥 continuation pressure
     if (
         result["continuation"]
         and len(t) <= 40
@@ -218,12 +315,14 @@ def analyze(
 
         pressure += 0.25
 
+        result["trajectory_strength"] += 0.2
+
     # 🔥 repeated unresolved flow
     if flow_type:
 
         pressure += 0.15
 
-    # 🔥 escalation words
+    # 🔥 escalation
     escalation_words = [
         "уже",
         "хватит",
@@ -237,10 +336,51 @@ def analyze(
 
         result["attention_weight"] = 0.9
 
+        result["assistant_initiative"] += 0.4
+
     result["execution_pressure"] = min(
         pressure,
         1.0
     )
+
+    # =====================================================
+    # 🔥 AMBIGUITY
+    # =====================================================
+
+    if len(t.split()) <= 3:
+
+        result["ambiguity_level"] += 0.4
+
+    if (
+        result["visual_expectation"] >= 0.6
+        and result["intent"] == "text"
+    ):
+
+        result["ambiguity_level"] += 0.3
+
+    if result["ambiguity_level"] >= 0.65:
+
+        result["needs_clarification"] = True
+
+    # =====================================================
+    # 🔥 GUIDANCE MODEL
+    # =====================================================
+
+    guidance_words = [
+        "не знаю",
+        "помоги",
+        "подскажи",
+        "как лучше",
+        "что выбрать"
+    ]
+
+    if any(w in t for w in guidance_words):
+
+        result["guidance_need"] += 0.8
+
+        result["should_proactively_help"] = True
+
+        result["assistant_initiative"] += 0.5
 
     # =====================================================
     # 🔥 CONVERSATION VALUE
@@ -273,6 +413,10 @@ def analyze(
 
         result["goal_stage"] = "continuation"
 
+    elif result["guidance_need"] >= 0.7:
+
+        result["goal_stage"] = "guidance"
+
     elif result["confidence"] >= 0.8:
 
         result["goal_stage"] = "clarification"
@@ -289,6 +433,17 @@ def analyze(
         result["should_execute"] = True
 
         result["response_mode"] = "execute"
+
+    # =====================================================
+    # 🔥 VISUAL ESCALATION
+    # =====================================================
+
+    if (
+        result["visual_expectation"] >= 0.7
+        and result["capability_confidence"] >= 0.7
+    ):
+
+        result["should_offer_visual"] = True
 
     # =====================================================
     # 🔥 RESPONSE ECONOMY
@@ -346,4 +501,3 @@ def analyze(
                 result["topic_shift"] = True
 
     return result
-    
