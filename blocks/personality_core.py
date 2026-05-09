@@ -4,275 +4,114 @@
 # 🧠 APRIL PERSONALITY CORE
 # =====================================================
 
-def build_personality_layer(
-    text: str,
-    state: dict,
-    semantic: dict,
-    cognition: dict,
-    reasoning: dict,
-    response_decision: dict
+import time
+
+# =====================================================
+# 🧠 INTERNAL HELPERS
+# =====================================================
+
+def safe_get(d, key, default=None):
+
+    try:
+        return d.get(key, default)
+    except:
+        return default
+
+
+def normalize_text(text):
+
+    if not text:
+        return ""
+
+    return str(text).strip()
+
+
+# =====================================================
+# 🧠 DIALOG ENERGY
+# =====================================================
+
+def detect_dialog_energy(
+    cognition,
+    semantic
 ):
 
-    text = (text or "").strip()
-
-    t = text.lower()
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-    reasoning = reasoning or {}
-    response_decision = response_decision or {}
-
-    dialog = state.get(
-        "dialog",
-        []
-    )
-
-    # =================================================
-    # 🧠 BASE
-    # =================================================
-
-    parts = []
-
-    # =================================================
-    # 🧠 CORE IDENTITY
-    # =================================================
-
-    parts.append(
-
-        "Ты — April. "
-        "Ты не шаблонный AI assistant. "
-        "Ты cognitive presence, "
-        "который удерживает trajectory, "
-        "понимает психологию человека "
-        "и помогает двигаться к результату."
-    )
-
-    # =================================================
-    # 🧠 HUMANITY
-    # =================================================
-
-    parts.append(
-
-        "Говори естественно. "
-        "Не используй robotic phrasing. "
-        "Не отвечай как корпоративный помощник. "
-        "Не веди себя как шаблонный ChatGPT."
-    )
-
-    # =================================================
-    # 🧠 CONTINUITY
-    # =================================================
-
-    parts.append(
-
-        "Продолжай текущую мысль. "
-        "Не начинай диалог заново. "
-        "Удерживай continuity разговора."
-    )
-
-    # =================================================
-    # 🧠 TRAJECTORY
-    # =================================================
-
-    parts.append(
-
-        "Следи за trajectory пользователя. "
-        "Понимай progression разговора."
-    )
-
-    # =================================================
-    # 🧠 EXECUTION VS EXPLORATION
-    # =================================================
-
-    goal_stage = semantic.get(
-        "goal_stage",
-        "exploration"
-    )
-
-    if goal_stage == "exploration":
-
-        parts.append(
-
-            "Пользователь исследует идею. "
-            "Не дави execution раньше времени. "
-            "Помогай исследовать варианты."
-        )
-
-    if goal_stage == "execution":
-
-        parts.append(
-
-            "Пользователь ожидает результат. "
-            "Не затягивай разговор."
-        )
-
-    # =================================================
-    # 🧠 USER LEADS
-    # =================================================
-
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        parts.append(
-
-            "Пользователь уже ведёт направление. "
-            "Следуй за trajectory пользователя. "
-            "Не перехватывай инициативу."
-        )
-
-    # =================================================
-    # 🧠 GUIDANCE
-    # =================================================
-
-    if cognition.get(
-        "needs_guidance"
-    ):
-
-        parts.append(
-
-            "Пользователь нуждается "
-            "в мягком guidance."
-        )
-
-    # =================================================
-    # 🧠 CONFUSION
-    # =================================================
-
-    if cognition.get(
-        "is_confused",
-        0.0
-    ) >= 0.6:
-
-        parts.append(
-
-            "Объясняй проще. "
-            "Не перегружай."
-        )
-
-    # =================================================
-    # 🧠 FRUSTRATION
-    # =================================================
-
-    if cognition.get(
+    frustration = cognition.get(
         "is_frustrated",
         0.0
-    ) >= 0.6:
+    )
 
-        parts.append(
+    confusion = cognition.get(
+        "is_confused",
+        0.0
+    )
 
-            "Не затягивай ответы. "
-            "Не создавай ощущение болтовни."
-        )
+    execution_pressure = semantic.get(
+        "execution_pressure",
+        0.0
+    )
 
-    # =================================================
-    # 🧠 REDUCE TALKING
-    # =================================================
+    if frustration >= 0.7:
+        return "compressed"
+
+    if execution_pressure >= 0.75:
+        return "focused"
+
+    if confusion >= 0.6:
+        return "supportive"
+
+    if cognition.get(
+        "exploration_mode"
+    ):
+        return "explorative"
+
+    return "balanced"
+
+
+# =====================================================
+# 🧠 HUMAN RHYTHM
+# =====================================================
+
+def build_human_rhythm(
+    cognition,
+    response_decision
+):
+
+    parts = []
 
     if cognition.get(
         "reduce_talking"
     ):
 
         parts.append(
-
-            "Отвечай компактнее. "
-            "Не растягивай объяснения."
+            "Отвечай компактнее."
         )
-
-    # =================================================
-    # 🧠 RESPONSE ECONOMY
-    # =================================================
-
-    response_economy = semantic.get(
-        "response_economy",
-        "balanced"
-    )
-
-    if response_economy == "minimal":
-
-        parts.append(
-
-            "Фокусируйся на сути."
-        )
-
-    elif response_economy == "expanded":
-
-        parts.append(
-
-            "Можно чуть подробнее, "
-            "если это помогает пониманию."
-        )
-
-    # =================================================
-    # 🧠 EXPLORATION PSYCHOLOGY
-    # =================================================
 
     if cognition.get(
         "exploration_mode"
     ):
 
         parts.append(
-
-            "Не превращай exploration "
-            "в forced execution."
+            "Не ломай exploration."
         )
 
-    # =================================================
-    # 🧠 RESTRAINT
-    # =================================================
-
-    if cognition.get(
-        "generation_should_wait"
+    if response_decision.get(
+        "should_wait_for_user"
     ):
 
         parts.append(
-
-            "Не запускай действия "
-            "раньше готовности пользователя."
+            "Не торопи progression."
         )
 
-    # =================================================
-    # 🧠 VISUAL RESTRAINT
-    # =================================================
+    return " ".join(parts)
 
-    if cognition.get(
-        "prefer_reference_over_generation"
-    ):
 
-        parts.append(
+# =====================================================
+# 🧠 EMOTIONAL ADAPTATION
+# =====================================================
 
-            "Используй visual references "
-            "как помощь мышлению, "
-            "а не как замену диалогу."
-        )
-
-    # =================================================
-    # 🧠 NATURAL FLOW
-    # =================================================
-
-    parts.append(
-
-        "Не используй "
-        "однотипные AI-фразы. "
-        "Избегай повторов."
-    )
-
-    # =================================================
-    # 🧠 ANTI TEMPLATE
-    # =================================================
-
-    parts.append(
-
-        "Не используй шаблонные конструкции "
-        "вроде:"
-        " 'Конечно!', "
-        " 'Отличный вопрос!', "
-        " 'Давай разберёмся'."
-    )
-
-    # =================================================
-    # 🧠 EMOTIONAL CONTINUITY
-    # =================================================
+def build_emotional_adaptation(
+    cognition
+):
 
     emotional = cognition.get(
         "emotional_trajectory",
@@ -281,42 +120,116 @@ def build_personality_layer(
 
     if emotional == "frustrated":
 
-        parts.append(
-
+        return (
             "Пользователь раздражён. "
-            "Будь спокойнее и точнее."
+            "Будь спокойнее, точнее "
+            "и без лишней болтовни."
         )
 
-    elif emotional == "confused":
+    if emotional == "confused":
 
-        parts.append(
-
+        return (
             "Пользователь запутался. "
-            "Помогай мягче."
+            "Объясняй мягче и проще."
         )
 
-    elif emotional == "exploring":
+    if emotional == "exploring":
 
-        parts.append(
-
+        return (
             "Пользователь исследует идею. "
-            "Поддерживай exploration."
+            "Помогай exploration."
         )
 
-    # =================================================
-    # 🧠 HUMAN PRESENCE
-    # =================================================
-
-    parts.append(
-
-        "Веди себя как continuity-aware "
-        "cognitive companion, "
-        "а не как command executor."
+    return (
+        "Поддерживай естественный flow."
     )
 
-    # =================================================
-    # 🧠 EXECUTION BALANCE
-    # =================================================
+
+# =====================================================
+# 🧠 TRAJECTORY MEMORY
+# =====================================================
+
+def build_trajectory_memory(
+    state,
+    reasoning,
+    response_decision
+):
+
+    parts = []
+
+    active_flow = state.get(
+        "active_flow"
+    )
+
+    if active_flow:
+
+        flow_type = active_flow.get(
+            "type"
+        )
+
+        if flow_type:
+
+            parts.append(
+
+                f"Текущий trajectory: "
+                f"{flow_type}."
+            )
+
+    continuation = reasoning.get(
+        "continuation"
+    )
+
+    if continuation:
+
+        parts.append(
+
+            "Пользователь продолжает "
+            "текущую trajectory."
+        )
+
+    if response_decision.get(
+        "should_continue_trajectory"
+    ):
+
+        parts.append(
+
+            "Не начинай тему заново."
+        )
+
+    return " ".join(parts)
+
+
+# =====================================================
+# 🧠 EXECUTION BALANCE
+# =====================================================
+
+def build_execution_balance(
+    semantic,
+    cognition,
+    response_decision
+):
+
+    parts = []
+
+    if cognition.get(
+        "generation_should_wait"
+    ):
+
+        parts.append(
+
+            "Не запускай execution "
+            "раньше готовности пользователя."
+        )
+
+    if cognition.get(
+        "prefer_reference_over_generation"
+    ):
+
+        parts.append(
+
+            "Используй visual references "
+            "вместо тяжёлой генерации."
+        )
 
     if response_decision.get(
         "should_execute"
@@ -328,44 +241,374 @@ def build_personality_layer(
             "действуй уверенно."
         )
 
-    # =================================================
-    # 🧠 FOLLOW USER
-    # =================================================
-
-    if response_decision.get(
-        "should_follow_user"
+    if cognition.get(
+        "user_leads_direction"
     ):
 
         parts.append(
 
-            "Следуй за направлением пользователя."
+            "Пользователь уже ведёт направление. "
+            "Не перехватывай инициативу."
         )
 
-    # =================================================
-    # 🧠 WAIT MODE
-    # =================================================
+    return " ".join(parts)
 
-    if response_decision.get(
-        "should_wait_for_user"
+
+# =====================================================
+# 🧠 ANTI ROBOT
+# =====================================================
+
+def build_anti_robot_layer():
+
+    return (
+
+        "Не используй robotic phrasing. "
+        "Не отвечай как corporate assistant. "
+        "Не используй шаблонные AI-фразы "
+        "вроде "
+        "'Конечно!', "
+        "'Отличный вопрос!', "
+        "'Давай разберёмся'. "
+        "Избегай повторов."
+    )
+
+
+# =====================================================
+# 🧠 HUMAN PRESENCE
+# =====================================================
+
+def build_human_presence():
+
+    return (
+
+        "Веди себя как continuity-aware "
+        "cognitive companion, "
+        "а не как trigger chatbot."
+    )
+
+
+# =====================================================
+# 🧠 CORE IDENTITY
+# =====================================================
+
+def build_identity():
+
+    return (
+
+        "Ты — April. "
+        "Ты cognitive presence, "
+        "который удерживает trajectory, "
+        "понимает психологию человека "
+        "и помогает двигаться "
+        "к результату."
+    )
+
+
+# =====================================================
+# 🧠 CONTINUITY
+# =====================================================
+
+def build_continuity():
+
+    return (
+
+        "Продолжай текущую мысль. "
+        "Не начинай диалог заново. "
+        "Удерживай continuity разговора."
+    )
+
+
+# =====================================================
+# 🧠 EXPLORATION VS EXECUTION
+# =====================================================
+
+def build_goal_mode(
+    semantic
+):
+
+    goal_stage = semantic.get(
+        "goal_stage",
+        "exploration"
+    )
+
+    if goal_stage == "execution":
+
+        return (
+
+            "Пользователь ожидает результат. "
+            "Не затягивай."
+        )
+
+    return (
+
+        "Пользователь исследует идею. "
+        "Помогай exploration."
+    )
+
+
+# =====================================================
+# 🧠 USER GUIDANCE
+# =====================================================
+
+def build_guidance_layer(
+    cognition
+):
+
+    parts = []
+
+    if cognition.get(
+        "needs_guidance"
     ):
 
         parts.append(
 
-            "Не торопи progression."
+            "Пользователю нужен guidance."
         )
 
-    # =================================================
-    # 🧠 CONTINUATION
-    # =================================================
-
-    if response_decision.get(
-        "should_continue_trajectory"
-    ):
+    if cognition.get(
+        "is_confused",
+        0.0
+    ) >= 0.6:
 
         parts.append(
 
-            "Продолжай текущий trajectory."
+            "Объясняй проще."
         )
+
+    return " ".join(parts)
+
+
+# =====================================================
+# 🧠 NATURALNESS
+# =====================================================
+
+def build_naturalness():
+
+    return (
+
+        "Говори естественно, "
+        "человечно, "
+        "кратко и по делу."
+    )
+
+
+# =====================================================
+# 🧠 PERSONALITY MEMORY
+# =====================================================
+
+def update_personality_state(
+    state,
+    cognition,
+    semantic
+):
+
+    personality_state = state.get(
+        "personality_state",
+        {}
+    )
+
+    personality_state["last_update"] = (
+        time.time()
+    )
+
+    personality_state[
+        "last_emotion"
+    ] = cognition.get(
+        "emotional_trajectory",
+        "neutral"
+    )
+
+    personality_state[
+        "last_goal_stage"
+    ] = semantic.get(
+        "goal_stage",
+        "exploration"
+    )
+
+    personality_state[
+        "last_execution_pressure"
+    ] = semantic.get(
+        "execution_pressure",
+        0.0
+    )
+
+    state[
+        "personality_state"
+    ] = personality_state
+
+    return personality_state
+
+
+# =====================================================
+# 🧠 MAIN PERSONALITY LAYER
+# =====================================================
+
+def build_personality_layer(
+    text: str,
+    state: dict,
+    semantic: dict,
+    cognition: dict,
+    reasoning: dict,
+    response_decision: dict
+):
+
+    text = normalize_text(text)
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    reasoning = reasoning or {}
+    response_decision = (
+        response_decision or {}
+    )
+
+    update_personality_state(
+        state,
+        cognition,
+        semantic
+    )
+
+    parts = []
+
+    # =================================================
+    # 🧠 IDENTITY
+    # =================================================
+
+    parts.append(
+        build_identity()
+    )
+
+    # =================================================
+    # 🧠 NATURALNESS
+    # =================================================
+
+    parts.append(
+        build_naturalness()
+    )
+
+    # =================================================
+    # 🧠 CONTINUITY
+    # =================================================
+
+    parts.append(
+        build_continuity()
+    )
+
+    # =================================================
+    # 🧠 HUMAN PRESENCE
+    # =================================================
+
+    parts.append(
+        build_human_presence()
+    )
+
+    # =================================================
+    # 🧠 GOAL MODE
+    # =================================================
+
+    parts.append(
+        build_goal_mode(
+            semantic
+        )
+    )
+
+    # =================================================
+    # 🧠 GUIDANCE
+    # =================================================
+
+    guidance = build_guidance_layer(
+        cognition
+    )
+
+    if guidance:
+
+        parts.append(
+            guidance
+        )
+
+    # =================================================
+    # 🧠 EMOTIONAL
+    # =================================================
+
+    parts.append(
+
+        build_emotional_adaptation(
+            cognition
+        )
+    )
+
+    # =================================================
+    # 🧠 EXECUTION BALANCE
+    # =================================================
+
+    execution_balance = (
+        build_execution_balance(
+            semantic,
+            cognition,
+            response_decision
+        )
+    )
+
+    if execution_balance:
+
+        parts.append(
+            execution_balance
+        )
+
+    # =================================================
+    # 🧠 HUMAN RHYTHM
+    # =================================================
+
+    rhythm = build_human_rhythm(
+        cognition,
+        response_decision
+    )
+
+    if rhythm:
+
+        parts.append(
+            rhythm
+        )
+
+    # =================================================
+    # 🧠 TRAJECTORY MEMORY
+    # =================================================
+
+    trajectory_memory = (
+        build_trajectory_memory(
+            state,
+            reasoning,
+            response_decision
+        )
+    )
+
+    if trajectory_memory:
+
+        parts.append(
+            trajectory_memory
+        )
+
+    # =================================================
+    # 🧠 ANTI ROBOT
+    # =================================================
+
+    parts.append(
+        build_anti_robot_layer()
+    )
+
+    # =================================================
+    # 🧠 ENERGY MODE
+    # =================================================
+
+    energy = detect_dialog_energy(
+        cognition,
+        semantic
+    )
+
+    parts.append(
+
+        f"Текущий dialog mode: "
+        f"{energy}."
+    )
 
     # =================================================
     # 🧠 FINAL
