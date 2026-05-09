@@ -41,6 +41,71 @@ def unlock_image(state):
 
 
 # =====================================================
+# 🔥 COGNITIVE HELPERS
+# =====================================================
+
+def wants_visual_support(context):
+
+    cognition = context.get(
+        "cognition",
+        {}
+    )
+
+    if cognition.get(
+        "prefer_visual"
+    ):
+        return True
+
+    if cognition.get(
+        "needs_examples"
+    ):
+        return True
+
+    return False
+
+
+def wants_execution(context):
+
+    cognition = context.get(
+        "cognition",
+        {}
+    )
+
+    semantic = context.get(
+        "semantic",
+        {}
+    )
+
+    if cognition.get(
+        "prefer_execution"
+    ):
+        return True
+
+    if semantic.get(
+        "should_execute"
+    ):
+        return True
+
+    return False
+
+
+def dialog_overextended(context):
+
+    cognition = context.get(
+        "cognition",
+        {}
+    )
+
+    if cognition.get(
+        "dialog_fatigue",
+        0.0
+    ) >= 0.7:
+        return True
+
+    return False
+
+
+# =====================================================
 # 🎨 IMAGE GENERATE
 # =====================================================
 
@@ -55,6 +120,11 @@ class ImageGenerateRoom(Room):
             {}
         )
 
+        cognition = context.get(
+            "cognition",
+            {}
+        )
+
         if semantic.get("room") == self.name:
 
             confidence = semantic.get(
@@ -65,14 +135,51 @@ class ImageGenerateRoom(Room):
             if confidence >= 0.6:
                 return True
 
+        # =================================================
+        # 🔥 VISUAL ESCALATION
+        # =================================================
+
+        if cognition.get(
+            "prefer_visual"
+        ):
+
+            visual_words = [
+                "пример",
+                "покажи",
+                "визуально",
+                "как выглядит",
+                "референс"
+            ]
+
+            t = text.lower()
+
+            if any(
+                w in t
+                for w in visual_words
+            ):
+                return True
+
         return False
 
     def evaluate(self, text, context):
 
-        return super().evaluate(
+        score = super().evaluate(
             text,
             context
         )
+
+        cognition = context.get(
+            "cognition",
+            {}
+        )
+
+        if cognition.get(
+            "prefer_visual"
+        ):
+
+            score += 0.3
+
+        return score
 
     async def handle(self, user_id, text, context, run):
 
@@ -85,6 +192,11 @@ class ImageGenerateRoom(Room):
 
         reasoning = context.get(
             "reasoning",
+            {}
+        )
+
+        cognition = context.get(
+            "cognition",
             {}
         )
 
@@ -145,18 +257,36 @@ class ImageGenerateRoom(Room):
                     text = last_prompt
 
         # =================================================
-        # 🔥 EXECUTION AUTHORITY
+        # 🔥 COGNITIVE EXECUTION
         # =================================================
 
-        if not semantic.get(
-            "should_execute",
-            False
+        should_execute = False
+
+        if semantic.get(
+            "should_execute"
         ):
+
+            should_execute = True
+
+        if cognition.get(
+            "prefer_visual"
+        ):
+
+            should_execute = True
+
+        if cognition.get(
+            "wants_result",
+            0.0
+        ) >= 0.7:
+
+            should_execute = True
+
+        if not should_execute:
 
             return {
                 "type": "text",
                 "data":
-                    "⚠️ Выполнение не подтверждено"
+                    "⚠️ Недостаточно execution intent"
             }
 
         state["image_locked"] = True
@@ -324,37 +454,45 @@ class TextRoom(Room):
 
     def evaluate(self, text, context):
 
-        semantic = context.get(
-            "semantic",
-            {}
-        )
+        score = 0.1
 
-        reasoning = context.get(
-            "reasoning",
+        cognition = context.get(
+            "cognition",
             {}
         )
 
         # =================================================
-        # 🔥 EXECUTION PRIORITY
+        # 🔥 EXECUTION SUPPRESSION
         # =================================================
 
-        if semantic.get(
-            "should_execute"
+        if cognition.get(
+            "prefer_execution"
         ):
 
-            return 0.01
+            score -= 0.08
+
+        # =================================================
+        # 🔥 VISUAL SUPPRESSION
+        # =================================================
+
+        if cognition.get(
+            "prefer_visual"
+        ):
+
+            score -= 0.05
 
         # =================================================
         # 🔥 DIALOG FATIGUE
         # =================================================
 
-        if reasoning.get(
-            "dialog_overextended"
-        ):
+        if cognition.get(
+            "dialog_fatigue",
+            0.0
+        ) >= 0.7:
 
-            return 0.05
+            score -= 0.03
 
-        return 0.1
+        return max(score, 0.01)
 
     async def handle(self, user_id, text, context, run):
 
@@ -362,8 +500,8 @@ class TextRoom(Room):
             process as text_process
         )
 
-        reasoning = context.get(
-            "reasoning",
+        cognition = context.get(
+            "cognition",
             {}
         )
 
@@ -372,34 +510,72 @@ class TextRoom(Room):
             {}
         )
 
+        reasoning = context.get(
+            "reasoning",
+            {}
+        )
+
+        # =================================================
+        # 🔥 VISUAL REDIRECT
+        # =================================================
+
+        if (
+            cognition.get("prefer_visual")
+            and cognition.get("wants_result", 0.0) >= 0.6
+        ):
+
+            visual_words = [
+                "пример",
+                "покажи",
+                "визуально",
+                "референс"
+            ]
+
+            t = text.lower()
+
+            if any(
+                w in t
+                for w in visual_words
+            ):
+
+                return {
+                    "type": "image_task",
+                    "prompt": text
+                }
+
         # =================================================
         # 🔥 RESPONSE ECONOMY
         # =================================================
 
         text_input = text
 
-        if reasoning.get(
-            "response_economy"
-        ) == "minimal":
+        if cognition.get(
+            "reduce_talking"
+        ):
 
             text_input = (
-                "Коротко и по делу:\n\n"
+                "Ответь коротко и по делу.\n\n"
                 + text
             )
 
         # =================================================
-        # 🔥 EXECUTION AVOIDANCE
+        # 🔥 EXECUTION SUPPRESSION
         # =================================================
 
-        if semantic.get(
-            "should_execute"
+        if cognition.get(
+            "prefer_execution"
         ):
 
-            return {
-                "type": "text",
-                "data":
-                    "⚠️ Требуется execution room"
-            }
+            if cognition.get(
+                "wants_result",
+                0.0
+            ) >= 0.7:
+
+                return {
+                    "type": "text",
+                    "data":
+                        "⚡ Перехожу к выполнению"
+                }
 
         result = await run(
             context["chat_id"],
