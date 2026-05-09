@@ -1,5 +1,122 @@
 # blocks/context_system.py
 
+# =====================================================
+# 🧠 TRAJECTORY MEMORY SYSTEM
+# =====================================================
+
+def detect_topic_shift(
+    text,
+    active_flow,
+    state
+):
+
+    text = (text or "").lower()
+
+    if not active_flow:
+        return False
+
+    flow_type = active_flow.get(
+        "type"
+    )
+
+    if not flow_type:
+        return False
+
+    # =================================================
+    # 🔥 MATH SHIFT
+    # =================================================
+
+    if flow_type == "math":
+
+        unrelated = [
+            "кафе",
+            "дизайн",
+            "сайт",
+            "одежда",
+            "фото",
+            "кофе"
+        ]
+
+        if any(
+            w in text
+            for w in unrelated
+        ):
+
+            return True
+
+    # =================================================
+    # 🔥 IMAGE SHIFT
+    # =================================================
+
+    if flow_type == "image":
+
+        unrelated = [
+            "код",
+            "python",
+            "ошибка",
+            "уравнение",
+            "сервер"
+        ]
+
+        if any(
+            w in text
+            for w in unrelated
+        ):
+
+            return True
+
+    return False
+
+
+# =====================================================
+# 🔥 PASSIVE MEMORY ARCHIVE
+# =====================================================
+
+def archive_completed_flow(
+    state,
+    active_flow
+):
+
+    if not active_flow:
+        return
+
+    memory = state.get(
+        "passive_memory",
+        []
+    )
+
+    flow_type = active_flow.get(
+        "type",
+        "unknown"
+    )
+
+    original = active_flow.get(
+        "original",
+        ""
+    )
+
+    compressed = (
+        f"[{flow_type}] "
+        f"{original[:120]}"
+    )
+
+    if compressed not in memory:
+
+        memory.append(
+            compressed
+        )
+
+    if len(memory) > 12:
+
+        memory = memory[-12:]
+
+    state["passive_memory"] = memory
+
+
+# =====================================================
+# 🔥 CONTEXT BUILD
+# =====================================================
+
 def build_context_text(
     user_id,
     text,
@@ -43,7 +160,7 @@ def build_context_text(
 5. естественность
 
 Если пользователь ожидает:
-- визуализацию → предлагай визуальный путь
+- визуализацию → предлагай visual path
 - пример → давай пример
 - действие → выполняй
 - guidance → направляй
@@ -80,6 +197,15 @@ def build_context_text(
     )
 
     # =====================================================
+    # 🔥 PASSIVE MEMORY
+    # =====================================================
+
+    passive_memory = state.get(
+        "passive_memory",
+        []
+    )
+
+    # =====================================================
     # 🔥 IMAGE CONTEXT
     # =====================================================
 
@@ -94,6 +220,31 @@ def build_context_text(
     last_math = state.get(
         "last_math"
     )
+
+    # =====================================================
+    # 🔥 TOPIC SHIFT DETECTION
+    # =====================================================
+
+    topic_shift = detect_topic_shift(
+        text,
+        active_flow,
+        state
+    )
+
+    # =====================================================
+    # 🔥 FLOW RELEASE
+    # =====================================================
+
+    if topic_shift:
+
+        archive_completed_flow(
+            state,
+            active_flow
+        )
+
+        state["active_flow"] = None
+
+        active_flow = None
 
     # =====================================================
     # 🔥 RELEVANCE FILTERING
@@ -129,11 +280,11 @@ def build_context_text(
 
         priority = 0
 
+        lowered = content.lower()
+
         # =================================================
         # 🔥 KEYWORD MATCH
         # =================================================
-
-        lowered = content.lower()
 
         for kw in keywords:
 
@@ -248,6 +399,13 @@ def build_context_text(
                 f"{original[:300]}"
             )
 
+    else:
+
+        trajectory += (
+            "\nТекущий trajectory "
+            "не зафиксирован."
+        )
+
     # =====================================================
     # 🔥 SUMMARY
     # =====================================================
@@ -258,7 +416,24 @@ def build_context_text(
 
         summary_block = (
             "\nСжатая память:\n"
-            + summary[-400:]
+            + summary[-500:]
+        )
+
+    # =====================================================
+    # 🔥 PASSIVE MEMORY BLOCK
+    # =====================================================
+
+    passive_block = ""
+
+    if passive_memory:
+
+        compressed = "\n".join(
+            passive_memory[-5:]
+        )
+
+        passive_block = (
+            "\nАрхив trajectory:\n"
+            + compressed
         )
 
     # =====================================================
@@ -319,10 +494,13 @@ def build_context_text(
 если пользователь продолжает тему —
 НЕ теряй trajectory.
 
+Если тема сменилась —
+не тащи старый flow насильно.
+
 Если пользователь ожидает:
 - пример → покажи пример
-- визуал → предложи visual path
-- результат → не затягивай диалог
+- visual path → предложи visual guidance
+- результат → не затягивай
 - guidance → направляй
 
 Не уходи в длинную болтологию.
@@ -339,6 +517,8 @@ def build_context_text(
 {trajectory}
 
 {summary_block}
+
+{passive_block}
 
 {image_block}
 
@@ -435,8 +615,8 @@ def update_memory_summary(
     # 🔥 MEMORY LIMIT
     # =====================================================
 
-    if len(combined) > 1200:
+    if len(combined) > 1400:
 
-        combined = combined[-1200:]
+        combined = combined[-1400:]
 
     state["memory_summary"] = combined
