@@ -98,6 +98,105 @@ def patch_executor_hook(*args, **kwargs):
 
 
 # =====================================================
+# 🧠 RESPONSE QUALITY ANALYSIS
+# =====================================================
+
+def evaluate_response_quality(
+    result: dict,
+    semantic: dict,
+    cognition: dict
+):
+
+    if not result:
+        return {
+            "success": False,
+            "helpful": False,
+            "needs_continuation": True
+        }
+
+    output = str(
+        result.get("data", "")
+    ).strip()
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    helpful = True
+
+    if len(output) <= 8:
+        helpful = False
+
+    if "не удалось" in output.lower():
+        helpful = False
+
+    if "pipeline" in output.lower():
+        helpful = False
+
+    if "execution room" in output.lower():
+        helpful = False
+
+    if result_type == "text":
+
+        if semantic.get(
+            "should_execute"
+        ):
+
+            if cognition.get(
+                "wants_result",
+                0.0
+            ) >= 0.7:
+
+                if len(output) < 25:
+                    helpful = False
+
+    return {
+
+        "success": True,
+
+        "helpful": helpful,
+
+        "needs_continuation":
+            not helpful,
+
+        "result_type": result_type
+    }
+
+
+# =====================================================
+# 🧠 CAPABILITY AWARENESS
+# =====================================================
+
+def build_capability_awareness():
+
+    return {
+
+        "math": [
+            "science"
+        ],
+
+        "image": [
+            "image_generate",
+            "image_edit"
+        ],
+
+        "visual_help": [
+            "text",
+            "image_generate"
+        ],
+
+        "guidance": [
+            "text"
+        ],
+
+        "code": [
+            "text"
+        ]
+    }
+
+
+# =====================================================
 # 🔥 SAFE TASK DETECTION
 # =====================================================
 
@@ -287,6 +386,10 @@ async def execute(
 
     t = text.lower().strip()
 
+    capability_awareness = (
+        build_capability_awareness()
+    )
+
     # =================================================
     # 🔥 SEMANTIC CORE
     # =================================================
@@ -383,6 +486,43 @@ async def execute(
     )
 
     # =================================================
+    # 🧠 INTERNAL DIALOG ANALYSIS
+    # =================================================
+
+    state["dialog_analysis"] = {
+
+        "trajectory_active":
+            cognition.get(
+                "needs_continuation"
+            ),
+
+        "user_waiting_action":
+            reasoning.get(
+                "user_waiting_action"
+            ),
+
+        "response_mode":
+            response_decision.get(
+                "final_action"
+            ),
+
+        "goal_stage":
+            semantic.get(
+                "goal_stage"
+            ),
+
+        "assistant_understands_goal":
+            cognition.get(
+                "understands_user_goal"
+            ),
+
+        "assistant_understands_direction":
+            cognition.get(
+                "understands_user_direction"
+            )
+    }
+
+    # =================================================
     # 🔥 STATE BRAIN BRIDGE
     # =================================================
 
@@ -461,6 +601,18 @@ async def execute(
                         text,
                         state
                     )
+
+                    quality = (
+                        evaluate_response_quality(
+                            result,
+                            semantic,
+                            cognition
+                        )
+                    )
+
+                    state[
+                        "last_response_quality"
+                    ] = quality
 
                     return result
 
@@ -576,6 +728,9 @@ async def execute(
                 "execution_pressure",
                 0.0
             ),
+
+        "capability_awareness":
+            capability_awareness
     }
 
     # =================================================
@@ -602,9 +757,12 @@ async def execute(
     # 🧠 RESPONSE DECISION CONTROL
     # =================================================
 
-    if response_decision.get(
-        "mode"
-    ) == "exploration":
+    final_action = response_decision.get(
+        "final_action",
+        "talk"
+    )
+
+    if final_action == "guide":
 
         semantic["should_execute"] = False
 
@@ -612,17 +770,23 @@ async def execute(
 
         semantic["goal_stage"] = "exploration"
 
-    if response_decision.get(
-        "mode"
-    ) == "guidance":
-
-        semantic["response_mode"] = "guide"
-
-    if response_decision.get(
-        "mode"
-    ) == "execution":
+    elif final_action == "execute":
 
         semantic["should_execute"] = True
+
+        semantic["response_mode"] = "execute"
+
+    elif final_action == "reference":
+
+        semantic["response_mode"] = (
+            "visual_guidance"
+        )
+
+        semantic["should_execute"] = False
+
+    elif final_action == "wait":
+
+        semantic["should_execute"] = False
 
     # =================================================
     # 🧠 VISUAL SUPPORT RESTRAINT
@@ -725,6 +889,33 @@ async def execute(
                     score += 0.8
 
             # =========================================
+            # 🔥 TRAJECTORY PRIORITY
+            # =========================================
+
+            if cognition.get(
+                "needs_continuation"
+            ):
+
+                continuation_target = semantic.get(
+                    "continuation_target"
+                )
+
+                if continuation_target:
+
+                    if continuation_target == "math":
+
+                        if room.name == "science":
+                            score += 1.5
+
+                    if continuation_target == "image":
+
+                        if room.name in [
+                            "image_generate",
+                            "image_edit"
+                        ]:
+                            score += 1.5
+
+            # =========================================
             # 🔥 VISUAL GUIDANCE PRIORITY
             # =========================================
 
@@ -763,6 +954,24 @@ async def execute(
                 if room.name == "image_generate":
 
                     score -= 1.5
+
+            # =========================================
+            # 🔥 CAPABILITY CONFIDENCE
+            # =========================================
+
+            if semantic.get(
+                "best_capability"
+            ):
+
+                if room.name == semantic.get(
+                    "best_capability"
+                ):
+
+                    score += 1.2
+
+            # =========================================
+            # 🔥 MINIMUM SURVIVAL
+            # =========================================
 
             if score <= 0:
 
@@ -820,6 +1029,8 @@ async def execute(
     # 🚀 ROOM EXECUTION
     # =================================================
 
+    best_result = None
+
     for score, room in scored_rooms:
 
         try:
@@ -865,6 +1076,28 @@ async def execute(
                     finally:
 
                         state["image_lock"] = False
+
+                quality = (
+                    evaluate_response_quality(
+                        result,
+                        semantic,
+                        cognition
+                    )
+                )
+
+                state[
+                    "last_response_quality"
+                ] = quality
+
+                if not quality.get(
+                    "helpful"
+                ):
+
+                    print(
+                        "⚠️ RESULT NOT HELPFUL"
+                    )
+
+                    continue
 
                 output_text = str(
                     result.get("data", "")
@@ -924,7 +1157,9 @@ async def execute(
                     )
                 )
 
-                return result
+                best_result = result
+
+                break
 
         except Exception as e:
 
@@ -932,6 +1167,33 @@ async def execute(
                 f"ROOM ERROR [{room.name}]",
                 e
             )
+
+    # =================================================
+    # 🧠 POST RESPONSE ANALYSIS
+    # =================================================
+
+    if best_result:
+
+        quality = state.get(
+            "last_response_quality",
+            {}
+        )
+
+        if quality.get(
+            "needs_continuation"
+        ):
+
+            state[
+                "continuation_required"
+            ] = True
+
+        else:
+
+            state[
+                "continuation_required"
+            ] = False
+
+        return best_result
 
     # =================================================
     # 🔥 EXECUTION FAILURE PROTECTION
@@ -953,10 +1215,10 @@ async def execute(
                 "type": "text",
                 "data":
                     (
-                        "⚠️ Я поняла, что ты ожидаешь "
+                        "⚠️ Я вижу, что тебе нужен "
                         "визуальный результат, "
-                        "но execution room "
-                        "не смог обработать запрос."
+                        "но текущий execution path "
+                        "не смог его завершить."
                     )
             }
 
@@ -964,10 +1226,10 @@ async def execute(
             "type": "text",
             "data":
                 (
-                    "⚠️ Я поняла, что ты ожидаешь "
-                    "выполнение действия, "
-                    "но execution pipeline "
-                    "не завершился."
+                    "⚠️ Я вижу, что задача "
+                    "ещё не была нормально "
+                    "завершена. Нужно "
+                    "продолжить обработку."
                 )
         }
 
