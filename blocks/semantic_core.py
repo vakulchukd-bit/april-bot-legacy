@@ -66,6 +66,24 @@ def analyze(
         "topic_shift": False,
 
         # =================================================
+        # 🧠 DIALOG STATE
+        # =====================================================
+
+        "dialog_state": "exploration",
+
+        "dialog_continuity": True,
+
+        "trajectory_active": True,
+
+        "trajectory_priority": 1.0,
+
+        "unresolved_intent": True,
+
+        "conversation_alive": True,
+
+        "response_requires_reflection": True,
+
+        # =================================================
         # 🧠 BEHAVIOR FORMULAS
         # =====================================================
 
@@ -112,8 +130,20 @@ def analyze(
         # =====================================================
 
         "understands_capabilities": True,
+
         "best_capability": None,
-        "capability_route_confidence": 0.0
+
+        "capability_route_confidence": 0.0,
+
+        "capability_should_wait": False,
+
+        "capability_is_guidance": False,
+
+        "capability_is_supportive": True,
+
+        "capability_requires_permission": True,
+
+        "capability_must_follow_dialogue": True
     }
 
     # =====================================================
@@ -134,7 +164,7 @@ def analyze(
             text
         )
 
-        result["confidence"] = 0.9
+        result["confidence"] = 0.82
 
     # =====================================================
     # 🔥 ACTIVE FLOW
@@ -155,6 +185,8 @@ def analyze(
 
         result["trajectory_strength"] += 0.25
 
+        result["dialog_state"] = "continuation"
+
     # =====================================================
     # 🔥 IMAGE CONTEXT
     # =====================================================
@@ -167,8 +199,11 @@ def analyze(
 
             result["entity"] = {
                 "type": "image",
-                "weight": 0.7
+                "weight": 0.55
             }
+
+            # 🔥 image context НЕ должен ломать trajectory
+            result["trajectory_strength"] += 0.1
 
     # =====================================================
     # 🔥 LAST MATH
@@ -180,14 +215,13 @@ def analyze(
 
         if any(w in t for w in [
             "график",
-            "покажи",
             "это",
             "теперь"
         ]):
 
             result["entity"] = {
                 "type": "math",
-                "weight": 0.75
+                "weight": 0.7
             }
 
     # =====================================================
@@ -200,7 +234,7 @@ def analyze(
 
         result["room"] = "science"
 
-        result["capability_confidence"] = 0.9
+        result["capability_confidence"] = 0.88
 
         result["expected_result"] = "solution"
 
@@ -210,7 +244,7 @@ def analyze(
 
         result["room"] = "text"
 
-        result["capability_confidence"] = 0.7
+        result["capability_confidence"] = 0.72
 
         result["expected_result"] = "implementation"
 
@@ -220,7 +254,7 @@ def analyze(
 
         result["room"] = "image_generate"
 
-        result["capability_confidence"] = 0.95
+        result["capability_confidence"] = 0.88
 
         result["expected_result"] = "visual"
 
@@ -229,12 +263,44 @@ def analyze(
         result["best_capability"] = "image_generate"
 
     # =====================================================
+    # 🔥 EXPLORATION DETECTION
+    # =====================================================
+
+    exploration_words = [
+        "что умеешь",
+        "примерно",
+        "идея",
+        "вариант",
+        "посмотрим",
+        "подумаем",
+        "как думаешь",
+        "что можешь",
+        "референс",
+        "атмосфера"
+    ]
+
+    if any(w in t for w in exploration_words):
+
+        result["dialog_state"] = "exploration"
+
+        result["ambiguity_level"] += 0.35
+
+        result["conversation_value"] += 0.25
+
+        result["trajectory_strength"] += 0.25
+
+        result["capability_should_wait"] = True
+
+        result["needs_clarification"] = True
+
+        result["goal_stage"] = "exploration"
+
+    # =====================================================
     # 🔥 VISUAL EXPECTATION FORMULAS
     # =====================================================
 
     visual_words = [
         "пример",
-        "покажи",
         "визуально",
         "как выглядит",
         "референс",
@@ -251,9 +317,9 @@ def analyze(
 
     if any(w in t for w in visual_words):
 
-        result["visual_expectation"] += 0.85
+        result["visual_expectation"] += 0.55
 
-        result["example_expectation"] += 0.7
+        result["example_expectation"] += 0.45
 
         result["should_offer_visual"] = True
 
@@ -261,31 +327,32 @@ def analyze(
 
         result["expected_output_type"] = "visual"
 
-        result["attention_weight"] += 0.2
+        result["attention_weight"] += 0.15
 
     # =====================================================
-    # 🔥 EXAMPLE DEMONSTRATION FORMULAS
+    # 🔥 DEMO / GUIDED VISUALS
     # =====================================================
 
     demo_words = [
         "покажи пример",
         "можешь показать",
-        "примерно",
         "как это выглядит",
-        "как будет выглядеть",
-        "можно пример",
-        "референс"
+        "можно пример"
     ]
 
     if any(w in t for w in demo_words):
 
         result["visual_demo_request"] = True
 
-        result["visual_expectation"] += 0.3
+        result["visual_expectation"] += 0.2
 
-        result["example_expectation"] += 0.4
+        result["example_expectation"] += 0.3
 
-        result["assistant_initiative"] += 0.3
+        result["assistant_initiative"] += 0.2
+
+        result["visual_lightweight_mode"] = True
+
+        result["capability_is_guidance"] = True
 
     # =====================================================
     # 🔥 LIGHTWEIGHT VISUAL MODE
@@ -305,24 +372,7 @@ def analyze(
 
         result["library_visual_candidate"] = True
 
-    # =====================================================
-    # 🔥 VISUAL ROOM ESCALATION
-    # =====================================================
-
-    if (
-        result["visual_expectation"] >= 0.7
-    ):
-
-        result["room"] = "image_generate"
-
-        result["capability_confidence"] = max(
-            result["capability_confidence"],
-            0.9
-        )
-
-        result["best_capability"] = "image_generate"
-
-        result["capability_route_confidence"] = 0.9
+        result["capability_should_wait"] = True
 
     # =====================================================
     # 🔥 GENERATION CONTROL
@@ -339,9 +389,10 @@ def analyze(
 
         result["visual_generation_needed"] = True
 
+        result["execution_readiness"] += 0.35
+
     else:
 
-        # 🔥 avoid expensive generation
         if result["visual_demo_request"]:
 
             result["visual_generation_needed"] = False
@@ -363,7 +414,7 @@ def analyze(
 
         result["should_offer_examples"] = True
 
-        result["example_expectation"] += 0.7
+        result["example_expectation"] += 0.5
 
     # =====================================================
     # 🔥 EXECUTION PRESSURE
@@ -376,29 +427,41 @@ def analyze(
         "выполни",
         "создай",
         "нарисуй",
-        "покажи",
         "сгенерируй",
         "построй"
     ]
 
     if any(w in t for w in execution_words):
 
-        pressure += 0.45
+        pressure += 0.4
 
-        result["execution_readiness"] += 0.5
+        result["execution_readiness"] += 0.4
+
+    # 🔥 "покажи" больше НЕ является execution trigger
+    if "покажи" in t:
+
+        result["example_expectation"] += 0.3
+
+        result["visual_expectation"] += 0.2
+
+        result["capability_is_guidance"] = True
+
+        result["capability_should_wait"] = True
+
+        result["ambiguity_level"] += 0.2
 
     if (
         result["continuation"]
         and len(t) <= 40
     ):
 
-        pressure += 0.25
+        pressure += 0.15
 
         result["trajectory_strength"] += 0.2
 
     if flow_type:
 
-        pressure += 0.15
+        pressure += 0.08
 
     escalation_words = [
         "уже",
@@ -409,11 +472,11 @@ def analyze(
 
     if any(w in t for w in escalation_words):
 
-        pressure += 0.25
+        pressure += 0.2
 
         result["attention_weight"] = 0.9
 
-        result["assistant_initiative"] += 0.4
+        result["assistant_initiative"] += 0.3
 
     result["execution_pressure"] = min(
         pressure,
@@ -426,16 +489,20 @@ def analyze(
 
     if len(t.split()) <= 3:
 
-        result["ambiguity_level"] += 0.4
+        result["ambiguity_level"] += 0.35
 
     if (
         result["visual_expectation"] >= 0.6
         and result["intent"] == "text"
     ):
 
-        result["ambiguity_level"] += 0.3
+        result["ambiguity_level"] += 0.25
 
-    if result["ambiguity_level"] >= 0.65:
+    if result["dialog_state"] == "exploration":
+
+        result["ambiguity_level"] += 0.2
+
+    if result["ambiguity_level"] >= 0.55:
 
         result["needs_clarification"] = True
 
@@ -457,7 +524,9 @@ def analyze(
 
         result["should_proactively_help"] = True
 
-        result["assistant_initiative"] += 0.5
+        result["assistant_initiative"] += 0.4
+
+        result["dialog_state"] = "guidance"
 
     # =====================================================
     # 🔥 CONVERSATION VALUE
@@ -465,13 +534,17 @@ def analyze(
 
     conversation_value = 1.0
 
-    if result["execution_pressure"] >= 0.6:
+    if result["execution_pressure"] >= 0.65:
 
-        conversation_value -= 0.5
+        conversation_value -= 0.25
 
     if len(history) >= 8:
 
-        conversation_value -= 0.2
+        conversation_value -= 0.15
+
+    if result["dialog_state"] == "exploration":
+
+        conversation_value += 0.2
 
     result["conversation_value"] = max(
         conversation_value,
@@ -482,7 +555,15 @@ def analyze(
     # 🔥 GOAL STAGE
     # =====================================================
 
-    if result["execution_pressure"] >= 0.75:
+    if result["dialog_state"] == "exploration":
+
+        result["goal_stage"] = "exploration"
+
+    elif result["guidance_need"] >= 0.7:
+
+        result["goal_stage"] = "guidance"
+
+    elif result["execution_pressure"] >= 0.8:
 
         result["goal_stage"] = "execution"
 
@@ -490,34 +571,35 @@ def analyze(
 
         result["goal_stage"] = "continuation"
 
-    elif result["guidance_need"] >= 0.7:
-
-        result["goal_stage"] = "guidance"
-
-    elif result["confidence"] >= 0.8:
-
-        result["goal_stage"] = "clarification"
-
     # =====================================================
     # 🔥 SHOULD EXECUTE
     # =====================================================
 
     if (
-        result["execution_pressure"] >= 0.65
-        and result["capability_confidence"] >= 0.7
+        result["execution_pressure"] >= 0.72
+        and result["capability_confidence"] >= 0.72
+        and not result["capability_should_wait"]
+        and result["ambiguity_level"] < 0.55
     ):
 
         result["should_execute"] = True
 
         result["response_mode"] = "execute"
 
+    else:
+
+        result["should_execute"] = False
+
+        result["response_mode"] = "talk"
+
     # =====================================================
     # 🔥 VISUAL ESCALATION
     # =====================================================
 
     if (
-        result["visual_expectation"] >= 0.7
-        and result["capability_confidence"] >= 0.7
+        result["visual_expectation"] >= 0.8
+        and result["visual_generation_needed"]
+        and not result["capability_should_wait"]
     ):
 
         result["should_offer_visual"] = True
@@ -528,11 +610,11 @@ def analyze(
     # 🔥 RESPONSE ECONOMY
     # =====================================================
 
-    if result["execution_pressure"] >= 0.7:
+    if result["execution_pressure"] >= 0.75:
 
         result["response_economy"] = "minimal"
 
-    elif result["conversation_value"] >= 0.8:
+    elif result["conversation_value"] >= 0.85:
 
         result["response_economy"] = "expanded"
 
@@ -548,13 +630,12 @@ def analyze(
         "да",
         "ок",
         "ага",
-        "поехали",
-        "покажи"
+        "поехали"
     ]
 
     if (
         len(t) > 120
-        or result["confidence"] < 0.6
+        or result["confidence"] < 0.58
     ):
 
         result["requires_ai"] = True
@@ -578,5 +659,19 @@ def analyze(
             if result["entity"]["type"] not in t:
 
                 result["topic_shift"] = True
+
+    # =====================================================
+    # 🔥 FINAL TRAJECTORY STABILIZATION
+    # =====================================================
+
+    if result["dialog_state"] == "exploration":
+
+        result["preserve_flow"] = True
+
+        result["conversation_alive"] = True
+
+        result["unresolved_intent"] = True
+
+        result["response_requires_reflection"] = True
 
     return result
