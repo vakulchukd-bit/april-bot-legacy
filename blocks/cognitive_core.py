@@ -93,6 +93,13 @@ def analyze_cognition(
         "trajectory_support": True,
         "psychological_support": True,
         "screenshot_understanding": True,
+        # 🌐 internet cognition
+        "internet_reasoning": True,
+        "realtime_awareness": True,
+        "transport_awareness": True,
+        "geo_awareness": True,
+        "travel_guidance": True,
+        "human_support_reasoning": True,
 
         # 🔥 awareness
         "capabilities_are_tools": True,
@@ -158,6 +165,42 @@ def analyze_cognition(
         "should_proactively_help": False,
         "should_offer_direction": False,
         "should_reduce_explanation": False,
+        # =================================================
+# 🌐 HUMAN SUPPORT LAYER
+# =====================================================
+
+"should_help_like_human": True,
+"should_feel_reliable": True,
+"should_support_navigation": True,
+"should_reduce_uncertainty": True,
+"should_protect_user": True,
+"should_feel_grounded": True,
+
+# =================================================
+# 🌐 INTERNET / REALTIME
+# =====================================================
+
+"internet_context_needed": False,
+"realtime_context_needed": False,
+"travel_context_needed": False,
+"geo_context_needed": False,
+"transport_context_needed": False,
+
+"needs_live_lookup": False,
+"needs_route_guidance": False,
+"needs_ticket_help": False,
+"needs_location_guidance": False,
+
+# =================================================
+# 🌐 HUMAN SUPPORT TRAJECTORY
+# =====================================================
+
+"user_may_be_lost": False,
+"user_may_need_orientation": False,
+"user_may_need_safe_direction": False,
+
+"assistant_should_stabilize": False,
+"assistant_should_guide_stepwise": False,
 
         # =================================================
         # DIRECTION HYPOTHESIS
@@ -509,6 +552,71 @@ def analyze_cognition(
         cognition[
             "should_offer_direction"
         ] = True
+        # =================================================
+# 🌐 INTERNET HUMAN SUPPORT SIGNALS
+# =====================================================
+
+travel_words = [
+
+    "где я",
+    "как добраться",
+    "как доехать",
+    "маршрут",
+    "рейс",
+    "самолет",
+    "поезд",
+    "автобус",
+    "корабль",
+    "судно",
+    "порт",
+    "аэропорт",
+    "станция",
+    "билет",
+    "карта",
+    "навигация",
+    "локация",
+    "местоположение",
+    "отель",
+    "гостиница",
+    "обмен валют",
+    "валюта",
+    "такси",
+    "где купить",
+    "где находится"
+]
+
+if any(
+    w in t
+    for w in travel_words
+):
+
+    cognition[
+        "internet_context_needed"
+    ] = True
+
+    cognition[
+        "travel_context_needed"
+    ] = True
+
+    cognition[
+        "should_proactively_help"
+    ] = True
+
+    cognition[
+        "should_offer_direction"
+    ] = True
+
+    cognition[
+        "should_help_like_human"
+    ] = True
+
+    cognition[
+        "needs_guidance"
+    ] = True
+
+    cognition[
+        "human_psychology_weight"
+    ] += 0.25
 
     # =================================================
     # 🔥 CONFUSION SIGNALS
