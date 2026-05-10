@@ -661,29 +661,29 @@ async def execute(
     # 🔥 EXTERNAL KNOWLEDGE DECISION
     # =================================================
 
-    external_context = ""
+        external_context = ""
 
     external_result = build_external_context(
 
-    text=text,
+        text=text,
 
-    semantic=semantic,
+        semantic=semantic,
 
-    cognition=cognition,
+        cognition=cognition,
 
-    response_decision=response_decision
-)
+        response_decision=response_decision
+    )
 
-external_context = external_result.get(
-    "content",
-    ""
-)
+    external_context = external_result.get(
+        "content",
+        ""
+    )
 
-# =================================================
-# 🧠 INTERNAL DIALOG ANALYSIS
-# =================================================
+    # =================================================
+    # 🧠 INTERNAL DIALOG ANALYSIS
+    # =================================================
 
-state["dialog_analysis"] = {
+    state["dialog_analysis"] = {
 
         "trajectory_active":
             cognition.get(
