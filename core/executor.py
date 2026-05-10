@@ -661,7 +661,60 @@ async def execute(
     # 🔥 EXTERNAL KNOWLEDGE DECISION
     # =================================================
 
-        #temb
+        external_context = ""
+
+    external_result = build_external_context(
+
+        text=text,
+
+        semantic=semantic,
+
+        cognition=cognition,
+
+        response_decision=response_decision
+    )
+
+    external_context = external_result.get(
+        "content",
+        ""
+    )
+
+    # =================================================
+    # 🧠 INTERNAL DIALOG ANALYSIS
+    # =================================================
+
+    state["dialog_analysis"] = {
+
+        "trajectory_active":
+            cognition.get(
+                "needs_continuation"
+            ),
+
+        "user_waiting_action":
+            reasoning.get(
+                "user_waiting_action"
+            ),
+
+        "response_mode":
+            response_decision.get(
+                "final_action"
+            ),
+
+        "goal_stage":
+            semantic.get(
+                "goal_stage"
+            ),
+
+        "assistant_understands_goal":
+            cognition.get(
+                "understands_user_goal"
+            ),
+
+        "assistant_understands_direction":
+            cognition.get(
+                "understands_user_direction"
+            )
+    }
 
     # =================================================
     # 🧠 STATE BRAIN
