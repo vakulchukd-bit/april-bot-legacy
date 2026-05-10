@@ -21,6 +21,9 @@ Presentation layer April.
 Работает как formatting capability самой April.
 """
 
+import re
+
+
 # =====================================================
 # 🔥 EMOJI MAP
 # =====================================================
@@ -42,8 +45,100 @@ EMOJI_MAP = {
     "news": "📰",
     "success": "✅",
     "rest": "🏖️",
-    "map": "🗺️"
+    "map": "🗺️",
+
+    # =================================================
+    # 🌐 INTERNET
+    # =================================================
+
+    "youtube": "▶️",
+    "telegram": "📨",
+    "instagram": "📸",
+    "facebook": "📘",
+    "twitter": "𝕏",
+    "x": "𝕏",
+    "github": "💻",
+    "wikipedia": "📚",
+    "linkedin": "💼",
+    "reddit": "👽",
+    "tiktok": "🎬",
+    "discord": "🎮",
+    "website": "🔗"
 }
+
+
+# =====================================================
+# 🧠 PLATFORM LABELS
+# =====================================================
+
+PLATFORM_LABELS = [
+
+    (
+        r"https?://(www\.)?youtube\.com/[^\s]+",
+        "▶️ YouTube"
+    ),
+
+    (
+        r"https?://youtu\.be/[^\s]+",
+        "▶️ YouTube"
+    ),
+
+    (
+        r"https?://t\.me/[^\s]+",
+        "📨 Telegram"
+    ),
+
+    (
+        r"https?://(www\.)?instagram\.com/[^\s]+",
+        "📸 Instagram"
+    ),
+
+    (
+        r"https?://(www\.)?facebook\.com/[^\s]+",
+        "📘 Facebook"
+    ),
+
+    (
+        r"https?://(www\.)?twitter\.com/[^\s]+",
+        "𝕏 Twitter"
+    ),
+
+    (
+        r"https?://(www\.)?x\.com/[^\s]+",
+        "𝕏 X"
+    ),
+
+    (
+        r"https?://(www\.)?github\.com/[^\s]+",
+        "💻 GitHub"
+    ),
+
+    (
+        r"https?://(www\.)?wikipedia\.org/[^\s]+",
+        "📚 Wikipedia"
+    ),
+
+    (
+        r"https?://(www\.)?linkedin\.com/[^\s]+",
+        "💼 LinkedIn"
+    ),
+
+    (
+        r"https?://(www\.)?reddit\.com/[^\s]+",
+        "👽 Reddit"
+    ),
+
+    (
+        r"https?://(www\.)?tiktok\.com/[^\s]+",
+        "🎬 TikTok"
+    ),
+
+    (
+        r"https?://(www\.)?discord\.gg/[^\s]+",
+        "🎮 Discord"
+    )
+]
+
 
 # =====================================================
 # 🧠 KEYWORD EMOJI DETECTION
@@ -104,6 +199,25 @@ def detect_primary_emoji(text: str):
                 return emoji
 
     return "✨"
+
+
+# =====================================================
+# 🧠 LINK BEAUTIFIER
+# =====================================================
+
+def beautify_links(text: str):
+
+    text = text or ""
+
+    for pattern, replacement in PLATFORM_LABELS:
+
+        text = re.sub(
+            pattern,
+            replacement,
+            text
+        )
+
+    return text
 
 
 # =====================================================
@@ -219,6 +333,8 @@ def build_smart_presentation(
 
     if not text:
         return text
+
+    text = beautify_links(text)
 
     # =================================================
     # 🔥 REDUCE TALKING MODE
