@@ -49,7 +49,7 @@ EMOJI_MAP = {
 
     # =================================================
     # 🌐 INTERNET
-    # =================================================
+    # =====================================================
 
     "youtube": "▶️",
     "telegram": "📨",
@@ -141,6 +141,98 @@ PLATFORM_LABELS = [
 
 
 # =====================================================
+# 🌐 PLATFORM DETECTION
+# =====================================================
+
+def detect_platform_label(
+    url: str
+):
+
+    url = (url or "").lower()
+
+    if "youtube.com" in url:
+        return "▶️ YouTube"
+
+    if "youtu.be" in url:
+        return "▶️ YouTube"
+
+    if "t.me" in url:
+        return "📨 Telegram"
+
+    if "instagram.com" in url:
+        return "📸 Instagram"
+
+    if "facebook.com" in url:
+        return "📘 Facebook"
+
+    if "twitter.com" in url:
+        return "𝕏 Twitter"
+
+    if "x.com" in url:
+        return "𝕏 X"
+
+    if "github.com" in url:
+        return "💻 GitHub"
+
+    if "reddit.com" in url:
+        return "👽 Reddit"
+
+    if "linkedin.com" in url:
+        return "💼 LinkedIn"
+
+    if "tiktok.com" in url:
+        return "🎬 TikTok"
+
+    if "discord.gg" in url:
+        return "🎮 Discord"
+
+    return "🔗 Website"
+
+
+# =====================================================
+# 🌐 LINK CARD FORMATTER
+# =====================================================
+
+def build_link_card(
+    url: str
+):
+
+    url = (url or "").strip()
+
+    if not url:
+        return ""
+
+    label = detect_platform_label(
+        url
+    )
+
+    return (
+        f"{label}:\n"
+        f"{url}"
+    )
+
+
+# =====================================================
+# 🌐 EXTRACT URLS
+# =====================================================
+
+def extract_urls(
+    text: str
+):
+
+    text = text or ""
+
+    pattern = (
+        r"https?://[^\s]+"
+    )
+
+    return re.findall(
+        pattern,
+        text
+    )
+
+
+# =====================================================
 # 🧠 KEYWORD EMOJI DETECTION
 # =====================================================
 
@@ -209,12 +301,22 @@ def beautify_links(text: str):
 
     text = text or ""
 
-    for pattern, replacement in PLATFORM_LABELS:
+    urls = extract_urls(
+        text
+    )
 
-        text = re.sub(
-            pattern,
-            replacement,
-            text
+    if not urls:
+        return text
+
+    for url in urls:
+
+        card = build_link_card(
+            url
+        )
+
+        text = text.replace(
+            url,
+            card
         )
 
     return text
@@ -334,11 +436,17 @@ def build_smart_presentation(
     if not text:
         return text
 
-    text = beautify_links(text)
+    # =================================================
+    # 🌐 SAFE LINK BEAUTIFICATION
+    # =====================================================
+
+    text = beautify_links(
+        text
+    )
 
     # =================================================
     # 🔥 REDUCE TALKING MODE
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "reduce_talking"
@@ -350,7 +458,7 @@ def build_smart_presentation(
 
     # =================================================
     # 🔥 EXECUTION MODE
-    # =================================================
+    # =====================================================
 
     if semantic.get(
         "goal_stage"
@@ -364,7 +472,7 @@ def build_smart_presentation(
 
     # =================================================
     # 🔥 EXPLORATION MODE
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "exploration_mode"
@@ -378,7 +486,7 @@ def build_smart_presentation(
 
     # =================================================
     # 🔥 VISUAL GUIDANCE
-    # =================================================
+    # =====================================================
 
     if response_decision.get(
         "should_offer_reference"
@@ -392,7 +500,7 @@ def build_smart_presentation(
 
     # =================================================
     # 🔥 DEFAULT
-    # =================================================
+    # =====================================================
 
     return apply_visual_enrichment(
         apply_light_formatting(
