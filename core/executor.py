@@ -679,11 +679,11 @@ external_context = external_result.get(
     ""
 )
 
-    # =================================================
-    # 🧠 INTERNAL DIALOG ANALYSIS
-    # =================================================
+# =================================================
+# 🧠 INTERNAL DIALOG ANALYSIS
+# =================================================
 
-    state["dialog_analysis"] = {
+state["dialog_analysis"] = {
 
         "trajectory_active":
             cognition.get(
