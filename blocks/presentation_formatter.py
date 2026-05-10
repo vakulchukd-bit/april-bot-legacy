@@ -314,7 +314,8 @@ def beautify_response(
 # =====================================================
 
 def format_response_presentation(
-    response: str,
+    text: str = "",
+    response: str = "",
     semantic: dict = None,
     cognition: dict = None,
     response_decision: dict = None,
@@ -327,11 +328,13 @@ def format_response_presentation(
     response_decision = response_decision or {}
     visual_reference = visual_reference or {}
 
-    if not response:
-        return response
+    final_text = response or text
+
+    if not final_text:
+        return final_text
 
     return beautify_response(
-        response,
+        final_text,
         semantic,
         cognition,
         response_decision
