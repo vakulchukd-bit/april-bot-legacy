@@ -181,6 +181,7 @@ def should_use_external_knowledge(
 
     return False
 
+
 # =====================================================
 # 🧠 EXTERNAL KNOWLEDGE REQUEST
 # =====================================================
@@ -242,6 +243,7 @@ def build_external_prompt(
 - contextual enrichment,
 - без воды.
 """
+
 
 # =====================================================
 # 🧠 EXTERNAL KNOWLEDGE FETCH
@@ -320,6 +322,7 @@ def fetch_external_knowledge(
             "error": str(e)
         }
 
+
 # =====================================================
 # 🧠 KNOWLEDGE ENRICHMENT
 # =====================================================
@@ -357,7 +360,9 @@ def enrich_with_external_knowledge(
         + "\n\n"
         + knowledge
     )
-    # =====================================================
+
+
+# =====================================================
 # 🧠 EXTERNAL CONTEXT BUILDER
 # =====================================================
 
