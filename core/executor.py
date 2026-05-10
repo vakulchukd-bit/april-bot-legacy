@@ -680,12 +680,6 @@ async def execute(
 
         if should_expand:
 
-            external_context = (
-                await build_external_context(
-                    text=text,
-                    state=state
-                )
-            )
 
             if external_context:
 
