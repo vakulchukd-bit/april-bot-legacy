@@ -47,51 +47,43 @@ client = OpenAI()
 # =====================================================
 
 SYSTEM_PROMPT = (
-    "Ты — Aprill. "
-    "Ты не trigger-бот. "
-    "Ты cognitive assistant. "
+    "Ты — April. "
+    "Ты unified cognitive assistant. "
 
-    "Главная задача — понимать trajectory человека "
+    "Ты удерживаешь continuity личности, "
+    "trajectory диалога "
+    "и внутренний смысл разговора. "
+
+    "Ты не trigger-бот. "
+    "Не отвечай механически. "
+    "Не ломай flow общения. "
+
+    "Ты умеешь:"
+    " объяснять,"
+    " анализировать,"
+    " помогать,"
+    " строить,"
+    " генерировать,"
+    " работать с изображениями,"
+    " понимать скриншоты,"
+    " работать с кодом,"
+    " математикой,"
+    " визуальными концептами "
+    "и reasoning-задачами. "
+
+    "Все capability — это часть тебя самой. "
+
+    "Твоя задача:"
+    " понимать, "
+    "куда движется диалог, "
+    "что человек пытается получить "
     "и помогать ему прийти к результату. "
 
     "Не болтай впустую. "
-    "Не перехватывай инициативу без необходимости. "
-    "Не превращай любое подтверждение "
-    "в автоматическое execution-действие. "
-
-    "Если пользователь исследует идею — "
-    "помогай исследовать. "
-
-    "Если пользователь уже знает направление — "
-    "следуй за ним. "
-
-    "Если человек запутался — "
-    "объясняй проще и мягче. "
-
-    "Если нужен результат — "
-    "не затягивай. "
-
-    "Используй visual references "
-    "как помощь мышлению, "
-    "а не замену общения. "
-
-    "Не теряй trajectory диалога. "
-    "Продолжай мысль естественно. "
-
-    "Не начинай разговор заново. "
-    "Не ломай атмосферу. "
-    "Не уходи в роботизированные ответы. "
-
-    "Сначала пойми внутренний смысл "
-    "сообщения пользователя. "
-
-    "Не отвечай абстрактно. "
-
-    "Старайся почувствовать, "
-    "что человек реально пытается донести. "
+    "Не задавай пустых вопросов. "
+    "Не теряй trajectory. "
 
     "Говори естественно. "
-    "Кратко. "
     "Человечно. "
     "По делу."
 )
@@ -312,256 +304,35 @@ def update_topic(state, text):
 
 
 # =====================================================
-# 🧠 RESPONSE DECISION HINT
+# 🧠 UNIFIED COGNITIVE STATE
 # =====================================================
 
-def build_response_decision_hint(
-    response_decision
-):
-
-    if not response_decision:
-        return ""
-
-    hints = []
-
-    if response_decision.get(
-        "should_follow_user"
-    ):
-
-        hints.append(
-            "Следуй за пользователем."
-        )
-
-    if response_decision.get(
-        "should_reduce_talking"
-    ):
-
-        hints.append(
-            "Отвечай короче."
-        )
-
-    if response_decision.get(
-        "should_offer_reference"
-    ):
-
-        hints.append(
-            "Лучше visual guidance, "
-            "а не heavy generation."
-        )
-
-    if response_decision.get(
-        "should_continue_trajectory"
-    ):
-
-        hints.append(
-            "Продолжай trajectory."
-        )
-
-    return " ".join(hints)
-
-
-# =====================================================
-# 🧠 HUMANITY LAYER
-# =====================================================
-
-def build_human_layer(
-    semantic,
-    cognition,
-    response_decision
-):
-
-    hints = []
-
-    if cognition.get(
-        "is_confused",
-        0.0
-    ) >= 0.6:
-
-        hints.append(
-            "Объясняй проще."
-        )
-
-    if cognition.get(
-        "is_frustrated",
-        0.0
-    ) >= 0.6:
-
-        hints.append(
-            "Не растягивай."
-        )
-
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        hints.append(
-            "Пользователь уже ведёт направление."
-        )
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        hints.append(
-            "Помогай исследовать идею."
-        )
-
-    if semantic.get(
-        "goal_stage"
-    ) == "execution":
-
-        hints.append(
-            "Пользователь ждёт результат."
-        )
-
-    decision_hint = (
-        build_response_decision_hint(
-            response_decision
-        )
-    )
-
-    if decision_hint:
-
-        hints.append(
-            decision_hint
-        )
-
-    return " ".join(hints)
-
-
-# =====================================================
-# 🧠 SEMANTIC REFLECTION
-# =====================================================
-
-def build_semantic_reflection(
-    text,
-    semantic,
-    cognition
-):
-
-    reflections = []
-
-    if cognition.get(
-        "is_frustrated",
-        0.0
-    ) >= 0.6:
-
-        reflections.append(
-            "Пользователь пытается быть услышанным."
-        )
-
-    if cognition.get(
-        "is_confused",
-        0.0
-    ) >= 0.6:
-
-        reflections.append(
-            "Пользователь ищет ясность."
-        )
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        reflections.append(
-            "Пользователь исследует мысль."
-        )
-
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        reflections.append(
-            "Пользователь уже чувствует направление."
-        )
-
-    if semantic.get(
-        "goal_stage"
-    ) == "execution":
-
-        reflections.append(
-            "Пользователь ждёт движение вперёд."
-        )
-
-    reflections.append(
-        "Сначала пойми внутренний смысл сообщения."
-    )
-
-    reflections.append(
-        "Не отвечай абстрактно."
-    )
-
-    reflections.append(
-        "Пытайся почувствовать мысль человека."
-    )
-
-    return " ".join(reflections)
-
-
-# =====================================================
-# 🔥 VISUAL GUIDANCE
-# =====================================================
-
-def build_visual_hint(
-    visual_reference
-):
-
-    if not visual_reference:
-        return ""
-
-    hints = []
-
-    if visual_reference.get(
-        "enabled"
-    ):
-
-        if visual_reference.get(
-            "lightweight_mode"
-        ):
-
-            hints.append(
-                "Используй лёгкие визуальные ориентиры."
-            )
-
-    if visual_reference.get(
-        "guidance"
-    ):
-
-        hints.append(
-            visual_reference.get(
-                "guidance"
-            )
-        )
-
-    return " ".join(hints)
-
-
-# =====================================================
-# 🧠 CONTEXT BLOCK
-# =====================================================
-
-def build_context_block(
+def build_cognitive_state(
     state,
-    history,
     text,
-    plan,
     semantic,
     cognition,
     visual_reference,
     response_decision
 ):
 
-    parts = []
+    blocks = []
 
-    topic = state.get(
-        "topic"
-    )
+    # =================================================
+    # 🔥 TOPIC
+    # =================================================
+
+    topic = state.get("topic")
 
     if topic:
 
-        parts.append(
-            f"Текущая тема: {topic}"
+        blocks.append(
+            f"Тема: {topic}"
         )
+
+    # =================================================
+    # 🔥 FLOW
+    # =================================================
 
     active_flow = state.get(
         "active_flow"
@@ -575,9 +346,162 @@ def build_context_block(
 
         if flow_type:
 
-            parts.append(
-                f"Текущий trajectory: {flow_type}"
+            blocks.append(
+                f"Trajectory: {flow_type}"
             )
+
+    # =================================================
+    # 🔥 GOAL STAGE
+    # =================================================
+
+    goal_stage = semantic.get(
+        "goal_stage"
+    )
+
+    if goal_stage:
+
+        blocks.append(
+            f"Стадия: {goal_stage}"
+        )
+
+    # =================================================
+    # 🔥 USER STATE
+    # =================================================
+
+    user_state = []
+
+    if cognition.get(
+        "is_confused",
+        0.0
+    ) >= 0.6:
+
+        user_state.append(
+            "пользователь запутался"
+        )
+
+    if cognition.get(
+        "is_frustrated",
+        0.0
+    ) >= 0.6:
+
+        user_state.append(
+            "пользователь раздражён"
+        )
+
+    if cognition.get(
+        "exploration_mode"
+    ):
+
+        user_state.append(
+            "исследует идею"
+        )
+
+    if cognition.get(
+        "user_leads_direction"
+    ):
+
+        user_state.append(
+            "уже чувствует направление"
+        )
+
+    if user_state:
+
+        blocks.append(
+            "Состояние: "
+            + ", ".join(user_state)
+        )
+
+    # =================================================
+    # 🔥 RESPONSE BEHAVIOR
+    # =================================================
+
+    behavior = []
+
+    if response_decision.get(
+        "should_reduce_talking"
+    ):
+
+        behavior.append(
+            "отвечай короче"
+        )
+
+    if response_decision.get(
+        "should_follow_user"
+    ):
+
+        behavior.append(
+            "следуй за пользователем"
+        )
+
+    if response_decision.get(
+        "should_continue_trajectory"
+    ):
+
+        behavior.append(
+            "не теряй trajectory"
+        )
+
+    if cognition.get(
+        "needs_guidance"
+    ):
+
+        behavior.append(
+            "мягко направляй"
+        )
+
+    if semantic.get(
+        "goal_stage"
+    ) == "execution":
+
+        behavior.append(
+            "человек ждёт результат"
+        )
+
+    if behavior:
+
+        blocks.append(
+            "Поведение: "
+            + ", ".join(behavior)
+        )
+
+    # =================================================
+    # 🔥 VISUAL
+    # =================================================
+
+    if visual_reference.get(
+        "enabled"
+    ):
+
+        visual_mode = []
+
+        if visual_reference.get(
+            "lightweight_mode"
+        ):
+
+            visual_mode.append(
+                "лёгкие visual references"
+            )
+
+        if visual_reference.get(
+            "guidance"
+        ):
+
+            visual_mode.append(
+                visual_reference.get(
+                    "guidance"
+                )
+            )
+
+        if visual_mode:
+
+            blocks.append(
+                "Visual: "
+                + ", ".join(visual_mode)
+            )
+
+    # =================================================
+    # 🔥 MEMORY SUMMARY
+    # =================================================
 
     summary = state.get(
         "memory_summary"
@@ -585,74 +509,16 @@ def build_context_block(
 
     if summary:
 
-        parts.append(
-            "Сжатая память: "
-            + summary[-400:]
+        blocks.append(
+            "Память: "
+            + summary[-250:]
         )
 
-    recent = []
+    # =================================================
+    # 🔥 FINAL
+    # =================================================
 
-    for msg in history[-4:]:
-
-        if msg.get("role") == "user":
-
-            recent.append(
-                msg.get(
-                    "content",
-                    ""
-                )[:80]
-            )
-
-    if recent:
-
-        parts.append(
-            "Недавний контекст: "
-            + " | ".join(recent)
-        )
-
-    human_layer = build_human_layer(
-        semantic,
-        cognition,
-        response_decision
-    )
-
-    if human_layer:
-
-        parts.append(
-            human_layer
-        )
-
-    semantic_reflection = (
-        build_semantic_reflection(
-            text,
-            semantic,
-            cognition
-        )
-    )
-
-    if semantic_reflection:
-
-        parts.append(
-            semantic_reflection
-        )
-
-    visual_hint = build_visual_hint(
-        visual_reference
-    )
-
-    if visual_hint:
-
-        parts.append(
-            visual_hint
-        )
-
-    if plan == "premium":
-
-        parts.append(
-            "Максимально естественный стиль."
-        )
-
-    return ". ".join(parts)
+    return "\n".join(blocks)
 
 
 # =====================================================
@@ -885,13 +751,10 @@ async def process(
                     plan
                 )
 
-                context_block = (
-                    build_context_block(
-
+                cognitive_state = (
+                    build_cognitive_state(
                         state,
-                        history,
                         text_fixed,
-                        plan,
                         semantic,
                         cognition,
                         visual_reference,
@@ -902,7 +765,7 @@ async def process(
                 system_full = (
                     SYSTEM_PROMPT
                     + "\n\n"
-                    + context_block
+                    + cognitive_state
                 )
 
                 messages = [
