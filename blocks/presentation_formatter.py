@@ -314,18 +314,24 @@ def beautify_response(
 # =====================================================
 
 def format_response_presentation(
-    text: str,
+    response: str,
     semantic: dict = None,
     cognition: dict = None,
-    response_decision: dict = None
+    response_decision: dict = None,
+    user_text: str = "",
+    visual_reference: dict = None
 ):
 
     semantic = semantic or {}
     cognition = cognition or {}
     response_decision = response_decision or {}
+    visual_reference = visual_reference or {}
+
+    if not response:
+        return response
 
     return beautify_response(
-        text,
+        response,
         semantic,
         cognition,
         response_decision
