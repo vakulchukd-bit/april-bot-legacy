@@ -50,7 +50,7 @@ HEADERS = {
 
 SEARCH_TIMEOUT = 10
 
-MAX_RESULTS = 5
+MAX_RESULTS = 7
 
 
 # =====================================================
@@ -76,11 +76,17 @@ TRANSPORT_KEYWORDS = [
     "автобус",
     "bus",
 
+    "такси",
+    "taxi",
+
+    "метро",
+
     "маршрут",
     "route",
 
     "где я",
     "где сейчас",
+
     "tracking",
     "live"
 ]
@@ -97,9 +103,65 @@ GEO_KEYWORDS = [
     "локация",
     "местоположение",
     "координаты",
+
     "карта",
     "map",
-    "gps"
+    "gps",
+
+    "рядом",
+    "поблизости",
+    "nearby",
+
+    "улица",
+    "адрес",
+
+    "аэропорт",
+    "вокзал",
+    "порт"
+]
+
+
+# =====================================================
+# 🌐 TRAVEL / SURVIVAL KEYWORDS
+# =====================================================
+
+TRAVEL_SUPPORT_KEYWORDS = [
+
+    "билет",
+    "купить билет",
+    "где купить",
+
+    "отель",
+    "гостиница",
+    "хостел",
+
+    "еда",
+    "ресторан",
+    "кафе",
+
+    "банкомат",
+    "обмен валют",
+
+    "аптека",
+    "больница",
+
+    "туалет",
+
+    "зарядка",
+    "wifi",
+    "сим карта",
+
+    "полиция",
+    "экстренно",
+
+    "какой валютой",
+    "чем платить",
+
+    "сколько стоит",
+
+    "как добраться",
+
+    "маршрут"
 ]
 
 
@@ -194,7 +256,7 @@ def extract_links(html: str):
 
 
 # =====================================================
-# 🌐 FILTER SOCIAL LINKS
+# 🌐 FILTER PLATFORM LINKS
 # =====================================================
 
 def filter_platform_links(
@@ -202,6 +264,10 @@ def filter_platform_links(
 ):
 
     allowed = [
+
+        # =============================================
+        # 🌐 SOCIAL / MEDIA
+        # =============================================
 
         "youtube.com",
         "youtu.be",
@@ -224,22 +290,64 @@ def filter_platform_links(
         "tiktok.com",
 
         # =============================================
-        # 🌐 NEW
+        # ✈️ FLIGHTS
         # =============================================
 
         "flightradar24.com",
-
-        "marinetraffic.com",
-
-        "vesselfinder.com",
 
         "flightaware.com",
 
         "airnavradar.com",
 
+        # =============================================
+        # 🚢 SHIPS
+        # =============================================
+
+        "marinetraffic.com",
+
+        "vesselfinder.com",
+
+        # =============================================
+        # 🗺 MAPS
+        # =============================================
+
         "google.com/maps",
 
-        "openstreetmap.org"
+        "openstreetmap.org",
+
+        # =============================================
+        # 🚌 TRAVEL
+        # =============================================
+
+        "booking.com",
+
+        "airbnb.com",
+
+        "tripadvisor.com",
+
+        "rome2rio.com",
+
+        "kayak.com",
+
+        "skyscanner.com",
+
+        "omio.com",
+
+        "12go.asia",
+
+        "uber.com",
+
+        "bolt.eu",
+
+        "blaBlaCar",
+
+        # =============================================
+        # 🌍 SERVICES
+        # =============================================
+
+        "google.com",
+
+        "apple.com/maps"
     ]
 
     filtered = []
@@ -248,7 +356,7 @@ def filter_platform_links(
 
         for platform in allowed:
 
-            if platform in link:
+            if platform.lower() in link.lower():
 
                 filtered.append(
                     link
@@ -271,16 +379,131 @@ def detect_live_lookup_intent(
         query or ""
     ).lower()
 
-    for keyword in (
+    all_keywords = (
+
         TRANSPORT_KEYWORDS
         + GEO_KEYWORDS
-    ):
+        + TRAVEL_SUPPORT_KEYWORDS
+    )
+
+    for keyword in all_keywords:
 
         if keyword in query:
 
             return True
 
     return False
+
+
+# =====================================================
+# 🌐 DETECT NEED TYPE
+# =====================================================
+
+def detect_support_category(
+    query: str
+):
+
+    q = (
+        query or ""
+    ).lower()
+
+    # =============================================
+    # ✈️ TRANSPORT
+    # =============================================
+
+    if any(
+
+        x in q
+
+        for x in [
+
+            "рейс",
+            "самолет",
+            "поезд",
+            "автобус",
+            "такси",
+            "метро",
+            "корабль"
+        ]
+    ):
+
+        return "transport"
+
+    # =============================================
+    # 🏨 HOTELS
+    # =============================================
+
+    if any(
+
+        x in q
+
+        for x in [
+
+            "отель",
+            "гостиница",
+            "хостел"
+        ]
+    ):
+
+        return "hotel"
+
+    # =============================================
+    # 🍔 FOOD
+    # =============================================
+
+    if any(
+
+        x in q
+
+        for x in [
+
+            "еда",
+            "ресторан",
+            "кафе"
+        ]
+    ):
+
+        return "food"
+
+    # =============================================
+    # 💳 MONEY
+    # =============================================
+
+    if any(
+
+        x in q
+
+        for x in [
+
+            "валюта",
+            "обмен",
+            "банкомат",
+            "чем платить"
+        ]
+    ):
+
+        return "money"
+
+    # =============================================
+    # 🚨 EMERGENCY
+    # =============================================
+
+    if any(
+
+        x in q
+
+        for x in [
+
+            "экстренно",
+            "больница",
+            "аптека",
+            "полиция"
+        ]
+    ):
+
+        return "emergency"
+
+    return "general"
 
 
 # =====================================================
@@ -357,7 +580,49 @@ def build_search_query(
 
         return (
             query
-            + " map"
+            + " google maps"
+        )
+
+    # =============================================
+    # 🏨 HOTELS
+    # =============================================
+
+    if any(
+
+        x in lower
+
+        for x in [
+
+            "отель",
+            "гостиница",
+            "хостел"
+        ]
+    ):
+
+        return (
+            query
+            + " booking"
+        )
+
+    # =============================================
+    # 🍔 FOOD
+    # =============================================
+
+    if any(
+
+        x in lower
+
+        for x in [
+
+            "еда",
+            "ресторан",
+            "кафе"
+        ]
+    ):
+
+        return (
+            query
+            + " nearby food"
         )
 
     return query
@@ -388,6 +653,12 @@ def search_web(
 
         smart_query = (
             build_search_query(
+                query
+            )
+        )
+
+        support_category = (
+            detect_support_category(
                 query
             )
         )
@@ -438,7 +709,10 @@ def search_web(
                     "live_related":
                         detect_live_lookup_intent(
                             query
-                        )
+                        ),
+
+                    "support_category":
+                        support_category
                 })
 
         return {
@@ -450,7 +724,10 @@ def search_web(
             "live_intent":
                 detect_live_lookup_intent(
                     query
-                )
+                ),
+
+            "support_category":
+                support_category
         }
 
     except Exception as e:
@@ -501,7 +778,7 @@ def build_search_summary(
     lines = []
 
     # =================================================
-    # 🌐 LIVE CONTEXT
+    # 🌍 LIVE CONTEXT
     # =================================================
 
     if results.get(
@@ -510,6 +787,45 @@ def build_search_summary(
 
         lines.append(
             "🌍 Найдены live/realtime источники:"
+        )
+
+    # =================================================
+    # 🧠 SUPPORT CATEGORY
+    # =================================================
+
+    category = results.get(
+        "support_category",
+        "general"
+    )
+
+    if category == "transport":
+
+        lines.append(
+            "🚌 Найдены транспортные сервисы:"
+        )
+
+    elif category == "hotel":
+
+        lines.append(
+            "🏨 Найдены сервисы жилья:"
+        )
+
+    elif category == "food":
+
+        lines.append(
+            "🍔 Найдены сервисы еды:"
+        )
+
+    elif category == "money":
+
+        lines.append(
+            "💳 Найдены финансовые сервисы:"
+        )
+
+    elif category == "emergency":
+
+        lines.append(
+            "🚨 Найдены emergency сервисы:"
         )
 
     for item in links:
