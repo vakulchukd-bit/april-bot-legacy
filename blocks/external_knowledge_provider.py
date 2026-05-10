@@ -33,7 +33,8 @@ from openai import OpenAI
 
 from blocks.web_search_system import (
     search_web,
-    build_search_summary
+    build_search_summary,
+    detect_live_lookup_intent
 )
 
 client = OpenAI()
@@ -122,7 +123,21 @@ WEB_KNOWLEDGE_TOPICS = [
     "карта",
     "маршрут",
     "локация",
-    "район"
+    "район",
+
+    # =============================================
+    # 🌐 LIVE / REALTIME
+    # =============================================
+
+    "где я",
+    "где сейчас",
+    "самолет",
+    "рейс",
+    "корабль",
+    "судно",
+    "маршрут рейса",
+    "tracking",
+    "live"
 ]
 
 
@@ -172,6 +187,10 @@ WEB_CAPABILITIES = {
 
     "live_internet_access": True,
 
+    "transport_lookup": True,
+
+    "geo_lookup": True,
+
     # =================================================
     # 🧠 COGNITIVE AWARENESS
     # =================================================
@@ -182,6 +201,8 @@ WEB_CAPABILITIES = {
 
     "link_reasoning": True,
 
+    "realtime_reasoning": True,
+
     # =================================================
     # 🔥 SAFETY
     # =================================================
@@ -190,6 +211,52 @@ WEB_CAPABILITIES = {
 
     "requires_verification": True
 }
+
+
+# =====================================================
+# 🧠 LIVE INTENT DETECTION
+# =====================================================
+
+def detect_realtime_need(
+    text: str,
+    semantic: dict
+):
+
+    text = (
+        text or ""
+    ).lower()
+
+    semantic = semantic or {}
+
+    if detect_live_lookup_intent(
+        text
+    ):
+        return True
+
+    realtime_words = [
+
+        "сейчас",
+        "live",
+        "онлайн",
+        "где находится",
+        "местоположение",
+        "координаты",
+        "tracking"
+    ]
+
+    for word in realtime_words:
+
+        if word in text:
+
+            return True
+
+    if semantic.get(
+        "goal_stage"
+    ) == "realtime_lookup":
+
+        return True
+
+    return False
 
 
 # =====================================================
@@ -241,6 +308,17 @@ def should_use_external_knowledge(
         "image_edit"
     ]:
         return False
+
+    # =================================================
+    # 🌐 REALTIME NEED
+    # =================================================
+
+    if detect_realtime_need(
+        text,
+        semantic
+    ):
+
+        return True
 
     # =================================================
     # 🔥 USER EXPLORATION
@@ -335,13 +413,13 @@ def build_external_prompt(
 
 КРИТИЧЕСКИ ВАЖНО:
 - НЕ придумывай ссылки.
-- НЕ выдумывай Telegram.
-- НЕ выдумывай YouTube.
-- НЕ выдумывай сайты.
-- НЕ придумывай соцсети.
 - НЕ hallucinate URL.
+- НЕ выдумывай платформы.
+- НЕ выдумывай маршруты.
+- НЕ выдумывай местоположение.
 
-Если информация не проверена:
+Если live информация
+не подтверждена:
 - честно скажи это.
 
 Нужна:
@@ -367,8 +445,8 @@ def build_external_prompt(
 
 Дай:
 - ключевые факты,
-- полезные детали,
 - contextual enrichment,
+- verified internet context,
 - без воды.
 """
 
@@ -417,6 +495,12 @@ def fetch_external_knowledge(
                     web_results.get(
                         "results",
                         []
+                    ),
+
+                "live_intent":
+                    web_results.get(
+                        "live_intent",
+                        False
                     ),
 
                 "used_real_web": True
@@ -524,6 +608,19 @@ def enrich_with_external_knowledge(
         return base_response
 
     # =================================================
+    # 🌐 LIVE CONTEXT LABEL
+    # =================================================
+
+    if knowledge_result.get(
+        "live_intent"
+    ):
+
+        knowledge = (
+            "🌍 Live internet context:\n\n"
+            + knowledge
+        )
+
+    # =================================================
     # 🔥 SAFE MERGE
     # =================================================
 
@@ -605,6 +702,12 @@ def build_external_context(
             result.get(
                 "results",
                 []
+            ),
+
+        "live_intent":
+            result.get(
+                "live_intent",
+                False
             ),
 
         "used_real_web":
