@@ -29,6 +29,7 @@ from openai import OpenAI
 
 client = OpenAI()
 
+
 # =====================================================
 # 🧠 KNOWLEDGE TRIGGERS
 # =====================================================
@@ -85,6 +86,27 @@ WEB_KNOWLEDGE_TOPICS = [
     "что такое",
 
     # =============================================
+    # INTERNET
+    # =============================================
+
+    "youtube",
+    "ютуб",
+    "telegram",
+    "телеграм",
+    "instagram",
+    "facebook",
+    "twitter",
+    "x.com",
+    "reddit",
+    "github",
+    "tiktok",
+    "discord",
+    "ссылка",
+    "канал",
+    "сайт",
+    "соцсеть",
+
+    # =============================================
     # MAPS / LOCATION
     # =============================================
 
@@ -93,6 +115,59 @@ WEB_KNOWLEDGE_TOPICS = [
     "локация",
     "район"
 ]
+
+
+# =====================================================
+# 🧠 INTERNET PLATFORM AWARENESS
+# =====================================================
+
+INTERNET_PLATFORM_TYPES = {
+
+    "youtube": "media_platform",
+
+    "telegram": "community_platform",
+
+    "instagram": "social_platform",
+
+    "facebook": "social_platform",
+
+    "twitter": "social_platform",
+
+    "x": "social_platform",
+
+    "reddit": "discussion_platform",
+
+    "github": "development_platform",
+
+    "tiktok": "media_platform",
+
+    "discord": "community_platform",
+
+    "wikipedia": "knowledge_platform"
+}
+
+
+# =====================================================
+# 🧠 WEB CAPABILITY STATE
+# =====================================================
+
+WEB_CAPABILITIES = {
+
+    "real_time_search": False,
+
+    "verified_links": False,
+
+    "live_internet_access": False,
+
+    "platform_understanding": True,
+
+    "social_media_awareness": True,
+
+    "link_reasoning": True,
+
+    "hallucination_risk": True
+}
+
 
 # =====================================================
 # 🧠 WEB ESCALATION DETECTION
@@ -216,6 +291,17 @@ def build_external_prompt(
   "я не могу",
   "я модель".
 
+КРИТИЧЕСКИ ВАЖНО:
+- НЕ придумывай ссылки.
+- НЕ выдумывай Telegram.
+- НЕ выдумывай YouTube.
+- НЕ выдумывай сайты.
+- НЕ придумывай соцсети.
+- НЕ hallucinate URL.
+
+Если информация не проверена:
+- честно скажи это.
+
 Нужна:
 - краткая,
 - полезная,
@@ -280,7 +366,7 @@ def fetch_external_knowledge(
                 }
             ],
 
-            temperature=0.5,
+            temperature=0.2,
 
             max_output_tokens=350
         )
@@ -303,7 +389,9 @@ def fetch_external_knowledge(
 
             "content": output,
 
-            "source": "external_knowledge"
+            "source": "external_knowledge",
+
+            "verified": False
         }
 
     except Exception as e:
@@ -382,7 +470,9 @@ def build_external_context(
 
         return {
             "enabled": False,
-            "content": ""
+            "content": "",
+            "web_capabilities":
+                WEB_CAPABILITIES
         }
 
     result = fetch_external_knowledge(
@@ -395,7 +485,9 @@ def build_external_context(
 
         return {
             "enabled": False,
-            "content": ""
+            "content": "",
+            "web_capabilities":
+                WEB_CAPABILITIES
         }
 
     return {
@@ -406,5 +498,14 @@ def build_external_context(
             result.get(
                 "content",
                 ""
-            )
+            ),
+
+        "verified":
+            result.get(
+                "verified",
+                False
+            ),
+
+        "web_capabilities":
+            WEB_CAPABILITIES
     }
