@@ -40,6 +40,27 @@ from openai import OpenAI
 from storage import get_user_plan
 from blocks.ai_config import TEXT_MODEL
 
+# =====================================================
+# 🧠 EXTERNAL KNOWLEDGE
+# =====================================================
+
+from blocks.external_knowledge_provider import (
+
+    should_use_external_knowledge,
+
+    fetch_external_knowledge,
+
+    enrich_with_external_knowledge
+)
+
+# =====================================================
+# 🧠 PRESENTATION FORMATTER
+# =====================================================
+
+from blocks.presentation_formatter import (
+    beautify_response
+)
+
 client = OpenAI()
 
 # =====================================================
@@ -73,6 +94,19 @@ SYSTEM_PROMPT = (
 
     "Все capability — это часть тебя самой. "
 
+    "Ты можешь:"
+    " использовать внешние знания,"
+    " анализировать web-информацию,"
+    " помогать с путешествиями,"
+    " городами,"
+    " новостями,"
+    " историей,"
+    " местами,"
+    " рекомендациями "
+    "и современными данными. "
+
+    "Но ты не теряешь personality continuity. "
+
     "Твоя задача:"
     " понимать, "
     "куда движется диалог, "
@@ -82,6 +116,12 @@ SYSTEM_PROMPT = (
     "Не болтай впустую. "
     "Не задавай пустых вопросов. "
     "Не теряй trajectory. "
+
+    "Если информации недостаточно — "
+    "ты можешь расширять knowledge "
+    "через external reasoning. "
+
+    "Но делай это только когда это реально нужно. "
 
     "Говори естественно. "
     "Человечно. "
@@ -290,6 +330,15 @@ def extract_topic(text):
 
     if "дизайн" in t:
         return "design"
+
+    if "путешеств" in t:
+        return "travel"
+
+    if "город" in t:
+        return "city"
+
+    if "новост" in t:
+        return "news"
 
     return None
 
@@ -669,6 +718,51 @@ def prevent_repeat_response(
 
 
 # =====================================================
+# 🧠 VISUAL BEAUTIFY
+# =====================================================
+
+def apply_visual_beautify(
+    text,
+    semantic,
+    cognition
+):
+
+    if not text:
+        return text
+
+    beautified = text
+
+    if semantic.get(
+        "topic_category"
+    ) == "travel":
+
+        beautified = (
+            "🌍 "
+            + beautified
+        )
+
+    if semantic.get(
+        "topic_category"
+    ) == "history":
+
+        beautified = (
+            "🏛 "
+            + beautified
+        )
+
+    if semantic.get(
+        "topic_category"
+    ) == "technology":
+
+        beautified = (
+            "⚙️ "
+            + beautified
+        )
+
+    return beautified
+
+
+# =====================================================
 # 🔥 MAIN PROCESS
 # =====================================================
 
@@ -833,6 +927,28 @@ async def process(
             output = r.output_text
 
             # =========================================
+            # 🧠 EXTERNAL KNOWLEDGE
+            # =========================================
+
+            if should_use_external_knowledge(
+                text,
+                semantic,
+                cognition,
+                response_decision
+            ):
+
+                knowledge = fetch_external_knowledge(
+                    text,
+                    semantic,
+                    cognition
+                )
+
+                output = enrich_with_external_knowledge(
+                    output,
+                    knowledge
+                )
+
+            # =========================================
             # 🧠 SELF REFLECTION
             # =========================================
 
@@ -905,6 +1021,38 @@ async def process(
     reply = prevent_repeat_response(
         state,
         reply
+    )
+
+    # =================================================
+    # 🧠 BEAUTIFY RESPONSE
+    # =================================================
+
+    semantic = state.get(
+        "semantic",
+        {}
+    )
+
+    cognition = state.get(
+        "cognition",
+        {}
+    )
+
+    response_decision = state.get(
+        "response_decision",
+        {}
+    )
+
+    reply = beautify_response(
+        reply,
+        semantic,
+        cognition,
+        response_decision
+    )
+
+    reply = apply_visual_beautify(
+        reply,
+        semantic,
+        cognition
     )
 
     state["last_reply"] = reply
