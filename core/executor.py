@@ -37,23 +37,11 @@ from blocks.semantic_core import analyze as semantic_analyze
 from blocks.goal_engine import detect_goal
 from blocks.reasoning_state import build_reasoning_state
 
-# =====================================================
-# 🧠 COGNITIVE CORE
-# =====================================================
-
 from blocks.cognitive_core import analyze_cognition
-
-# =====================================================
-# 🧠 VISUAL REFERENCE SYSTEM
-# =====================================================
 
 from blocks.visual_reference_system import (
     build_visual_reference
 )
-
-# =====================================================
-# 🧠 RESPONSE DECISION SYSTEM
-# =====================================================
 
 from blocks.response_decision import (
     build_response_decision
@@ -61,16 +49,33 @@ from blocks.response_decision import (
 
 from datetime import datetime
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 
-from storage import set_subscription, save_payment
-from storage import find_knowledge, save_knowledge
+from storage import (
+    set_subscription,
+    save_payment
+)
 
-from blocks.energy_manager import get_energy
+from storage import (
+    find_knowledge,
+    save_knowledge
+)
 
-from blocks.experience import update_experience, load_experience
+from blocks.energy_manager import (
+    get_energy
+)
 
-from blocks.interpretation_layer import interpret_request
+from blocks.experience import (
+    update_experience,
+    load_experience
+)
+
+from blocks.interpretation_layer import (
+    interpret_request
+)
 
 import re
 
@@ -79,21 +84,37 @@ PATCH_LOG = []
 
 
 def safe_patch_log(msg):
+
     try:
+
         print("PATCH:", msg)
+
         PATCH_LOG.append(msg)
+
     except:
+
         pass
 
 
-def patch_executor_start(user_id, text):
+def patch_executor_start(
+    user_id,
+    text
+):
+
     safe_patch_log(
-        f"EXECUTOR START: {user_id} | {text[:50]}"
+
+        f"EXECUTOR START: "
+        f"{user_id} | {text[:50]}"
     )
+
     return None
 
 
-def patch_executor_hook(*args, **kwargs):
+def patch_executor_hook(
+    *args,
+    **kwargs
+):
+
     return None
 
 
@@ -108,9 +129,13 @@ def evaluate_response_quality(
 ):
 
     if not result:
+
         return {
+
             "success": False,
+
             "helpful": False,
+
             "needs_continuation": True
         }
 
@@ -126,15 +151,23 @@ def evaluate_response_quality(
     helpful = True
 
     if len(output) <= 8:
+
         helpful = False
 
-    if "не удалось" in output.lower():
-        helpful = False
+    bad_words = [
 
-    if "pipeline" in output.lower():
-        helpful = False
+        "не удалось",
+        "pipeline",
+        "execution room",
+        "traceback",
+        "syntaxerror"
+    ]
 
-    if "execution room" in output.lower():
+    if any(
+        x in output.lower()
+        for x in bad_words
+    ):
+
         helpful = False
 
     if result_type == "text":
@@ -149,6 +182,7 @@ def evaluate_response_quality(
             ) >= 0.7:
 
                 if len(output) < 25:
+
                     helpful = False
 
     return {
@@ -162,6 +196,109 @@ def evaluate_response_quality(
 
         "result_type": result_type
     }
+
+
+# =====================================================
+# 🧠 EXECUTION ERROR REFLECTION
+# =====================================================
+
+def analyze_execution_failure(
+    error,
+    room_name: str,
+    semantic: dict,
+    cognition: dict,
+    text: str
+):
+
+    error_text = str(error).lower()
+
+    analysis = {
+
+        "failed": True,
+
+        "room": room_name,
+
+        "reason": "unknown",
+
+        "retry_possible": False,
+
+        "should_change_room": False,
+
+        "should_simplify": False,
+
+        "should_hide_error": True,
+
+        "user_safe_message": None
+    }
+
+    syntax_words = [
+
+        "syntax",
+        "unexpected character",
+        "invalid syntax",
+        "line continuation"
+    ]
+
+    if any(
+        x in error_text
+        for x in syntax_words
+    ):
+
+        analysis["reason"] = "syntax"
+
+        analysis["retry_possible"] = True
+
+        analysis["should_simplify"] = True
+
+        analysis["user_safe_message"] = (
+
+            "⚠️ Я почти завершила "
+            "обработку, но execution "
+            "столкнулся с syntax-конфликтом. "
+            "Продолжаю искать решение."
+        )
+
+        return analysis
+
+    timeout_words = [
+
+        "timeout",
+        "timed out"
+    ]
+
+    if any(
+        x in error_text
+        for x in timeout_words
+    ):
+
+        analysis["reason"] = "timeout"
+
+        analysis["retry_possible"] = True
+
+        analysis["user_safe_message"] = (
+
+            "⚠️ Обработка заняла "
+            "слишком много времени. "
+            "Пробую более лёгкий путь."
+        )
+
+        return analysis
+
+    analysis["reason"] = (
+        "execution_failure"
+    )
+
+    analysis["should_change_room"] = True
+
+    analysis["user_safe_message"] = (
+
+        "⚠️ Текущий execution path "
+        "не смог нормально завершить "
+        "задачу. Продолжаю искать "
+        "другой способ."
+    )
+
+    return analysis
 
 
 # =====================================================
@@ -200,11 +337,14 @@ def build_capability_awareness():
 # 🔥 SAFE TASK DETECTION
 # =====================================================
 
-def detect_task_type(text: str):
+def detect_task_type(
+    text: str
+):
 
     t = text.lower().strip()
 
     image_edit_words = [
+
         "измени",
         "убери",
         "добавь",
@@ -212,10 +352,15 @@ def detect_task_type(text: str):
         "улучши"
     ]
 
-    if any(x in t for x in image_edit_words):
+    if any(
+        x in t
+        for x in image_edit_words
+    ):
+
         return "image_edit"
 
     image_generate_words = [
+
         "создай",
         "сгенерируй",
         "нарисуй",
@@ -223,10 +368,15 @@ def detect_task_type(text: str):
         "сделай картинку"
     ]
 
-    if any(x in t for x in image_generate_words):
+    if any(
+        x in t
+        for x in image_generate_words
+    ):
+
         return "image_generate"
 
     math_words = [
+
         "график",
         "функция",
         "уравнение",
@@ -238,7 +388,11 @@ def detect_task_type(text: str):
         "y="
     ]
 
-    if any(x in t for x in math_words):
+    if any(
+        x in t
+        for x in math_words
+    ):
+
         return "math"
 
     if "=" in t:
@@ -249,11 +403,21 @@ def detect_task_type(text: str):
         )
 
         if has_digits:
+
             return "math"
 
-    operators = ["+", "-", "*", "/"]
+    operators = [
 
-    if any(op in t for op in operators):
+        "+",
+        "-",
+        "*",
+        "/"
+    ]
+
+    if any(
+        op in t
+        for op in operators
+    ):
 
         digit_count = sum(
             ch.isdigit()
@@ -261,6 +425,7 @@ def detect_task_type(text: str):
         )
 
         if digit_count >= 2:
+
             return "math"
 
     return "text"
@@ -270,66 +435,61 @@ def detect_task_type(text: str):
 # 🔥 OUTPUT MODE
 # =====================================================
 
-def detect_output_mode(text: str):
+def detect_output_mode(
+    text: str
+):
 
     t = text.lower()
 
-    if any(w in t for w in [
-        "файл",
-        "скачать",
-        ".py",
-        "html"
-    ]):
+    if any(
+        w in t
+        for w in [
+
+            "файл",
+            "скачать",
+            ".py",
+            "html"
+        ]
+    ):
+
         return "file"
 
-    if any(w in t for w in [
-        "код",
-        "code"
-    ]):
+    if any(
+        w in t
+        for w in [
+
+            "код",
+            "code"
+        ]
+    ):
+
         return "code"
 
-    if any(w in t for w in [
-        "график html",
-        "интерактив",
-        "браузер"
-    ]):
+    if any(
+        w in t
+        for w in [
+
+            "график html",
+            "интерактив",
+            "браузер"
+        ]
+    ):
+
         return "graph_html"
 
-    if any(w in t for w in [
-        "картинкой",
-        "png",
-        "изображением"
-    ]):
+    if any(
+        w in t
+        for w in [
+
+            "картинкой",
+            "png",
+            "изображением"
+        ]
+    ):
+
         return "graph_image"
 
     return "auto"
-
-
-# =====================================================
-# 🔥 ACTIVE TASK
-# =====================================================
-
-def update_active_task(
-    state: dict,
-    text: str,
-    task_type: str
-):
-
-    t = text.lower()
-
-    if "y=" in t:
-
-        state["active_task"] = {
-            "type": "math",
-            "data": text.strip()
-        }
-
-
-def continue_active_task(
-    state: dict,
-    text: str
-):
-    return text
 
 
 # =====================================================
@@ -354,15 +514,20 @@ def extract_and_store_semantics(
         expr = match.group(1).strip()
 
         state["last_math"] = {
+
             "type": "function",
+
             "expr": expr
         }
 
     if "```" in text:
+
         state["last_code"] = text
 
     if result_type == "image":
+
         state["last_image"] = {
+
             "exists": True
         }
 
@@ -382,6 +547,7 @@ async def execute(
     print("🔥 EXECUTOR RUNNING")
 
     state = get_state(user_id)
+
     mode = get_mode(user_id)
 
     t = text.lower().strip()
@@ -391,98 +557,83 @@ async def execute(
     )
 
     # =================================================
-    # 🔥 SEMANTIC CORE
+    # 🧠 SEMANTIC CORE
     # =================================================
 
     semantic = semantic_analyze(
+
         text=text,
+
         state=state,
-        history=state.get("dialog", []),
-        active_flow=get_active_flow(user_id),
-        dialog_state=state.get("dialog_state", {})
-    )
 
-    print(
-        "🧠 SEMANTIC:",
-        semantic
-    )
+        history=state.get(
+            "dialog",
+            []
+        ),
 
-    # =================================================
-    # 🎯 GOAL ENGINE
-    # =================================================
+        active_flow=get_active_flow(
+            user_id
+        ),
+
+        dialog_state=state.get(
+            "dialog_state",
+            {}
+        )
+    )
 
     semantic = detect_goal(
+
         text=text,
+
         state=state,
+
         semantic=semantic
     )
-
-    print(
-        "🎯 GOAL:",
-        semantic
-    )
-
-    # =================================================
-    # 🧠 REASONING STATE
-    # =================================================
 
     reasoning = build_reasoning_state(
+
         text=text,
+
         state=state,
+
         semantic=semantic
     )
 
-    print(
-        "🧠 REASONING:",
-        reasoning
-    )
-
-    # =================================================
-    # 🧠 COGNITIVE CORE
-    # =================================================
-
     cognition = analyze_cognition(
+
         text=text,
+
         state=state,
+
         semantic=semantic,
+
         reasoning=reasoning
     )
 
-    print(
-        "🧠 COGNITION:",
-        cognition
+    visual_reference = (
+        build_visual_reference(
+
+            semantic=semantic,
+
+            cognition=cognition,
+
+            text=text,
+
+            state=state
+        )
     )
 
-    # =================================================
-    # 🧠 VISUAL REFERENCE SYSTEM
-    # =================================================
+    response_decision = (
+        build_response_decision(
 
-    visual_reference = build_visual_reference(
-        semantic=semantic,
-        cognition=cognition,
-        text=text,
-        state=state
-    )
+            semantic=semantic,
 
-    print(
-        "🧠 VISUAL REFERENCE:",
-        visual_reference
-    )
+            cognition=cognition,
 
-    # =================================================
-    # 🧠 RESPONSE DECISION SYSTEM
-    # =================================================
+            visual_reference=visual_reference,
 
-    response_decision = build_response_decision(
-        semantic=semantic,
-        cognition=cognition,
-        visual_reference=visual_reference,
-        state=state
-    )
-
-    print(
-        "🧠 RESPONSE DECISION:",
-        response_decision
+            state=state
+        )
     )
 
     # =================================================
@@ -523,14 +674,18 @@ async def execute(
     }
 
     # =================================================
-    # 🔥 STATE BRAIN BRIDGE
+    # 🧠 STATE BRAIN
     # =================================================
 
     state["semantic"] = semantic
     state["reasoning"] = reasoning
     state["cognition"] = cognition
-    state["visual_reference"] = visual_reference
-    state["response_decision"] = response_decision
+    state["visual_reference"] = (
+        visual_reference
+    )
+    state["response_decision"] = (
+        response_decision
+    )
 
     # =================================================
     # 🔒 IMAGE LOCK
@@ -539,13 +694,15 @@ async def execute(
     if state.get("image_lock"):
 
         return {
+
             "type": "text",
+
             "data":
                 "⏳ Изображение ещё обрабатывается"
         }
 
     # =================================================
-    # 💬 DIALOG
+    # 💬 DIALOG SAVE
     # =================================================
 
     add_dialog(
@@ -559,86 +716,8 @@ async def execute(
         text
     )
 
-    dialog = (
-        state.get("dialog_state", {})
-        or {}
-    )
-
     # =================================================
-    # 🖼 IMAGE PRIORITY
-    # =================================================
-
-    if dialog.get("intent") == "image":
-
-        image_words = [
-            "что",
-            "картин",
-            "фото",
-            "изображ",
-            "добавь",
-            "измени",
-            "убери",
-            "замени"
-        ]
-
-        if any(x in t for x in image_words):
-
-            ctx = state.get("image_context")
-
-            if ctx and ctx.get("path"):
-
-                edit_words = [
-                    "добавь",
-                    "измени",
-                    "убери",
-                    "замени"
-                ]
-
-                if any(x in t for x in edit_words):
-
-                    result = await image_edit(
-                        user_id,
-                        text,
-                        state
-                    )
-
-                    quality = (
-                        evaluate_response_quality(
-                            result,
-                            semantic,
-                            cognition
-                        )
-                    )
-
-                    state[
-                        "last_response_quality"
-                    ] = quality
-
-                    return result
-
-                result = await analyze_image(
-                    ctx["path"],
-                    state
-                )
-
-                add_dialog(
-                    user_id,
-                    "assistant",
-                    result
-                )
-
-                update_memory_summary(
-                    user_id,
-                    result
-                )
-
-                return {
-                    "type": "text",
-                    "data": result
-                }
-
-    # =================================================
-    # 🔥 SEMANTIC TASK TYPE
+    # 🔥 TASK TYPE
     # =================================================
 
     semantic_intent = semantic.get(
@@ -656,13 +735,15 @@ async def execute(
         )
 
     # =================================================
-    # 🔥 ACTIVE FLOW MANAGEMENT
+    # 🔥 ACTIVE FLOW
     # =================================================
 
     if task_type == "math":
 
         set_active_flow(
+
             user_id,
+
             {
                 "type": "math",
                 "original": text
@@ -670,13 +751,16 @@ async def execute(
         )
 
     elif task_type in [
+
         "image_generate",
         "image_edit",
         "image"
     ]:
 
         set_active_flow(
+
             user_id,
+
             {
                 "type": "image"
             }
@@ -693,16 +777,24 @@ async def execute(
     # =================================================
 
     context = {
+
         "chat_id": chat_id,
+
         "state": state,
+
         "mode": mode,
+
         "task_type": task_type,
+
         "energy": energy,
+
         "output_mode":
             detect_output_mode(text),
 
         "semantic": semantic,
+
         "reasoning": reasoning,
+
         "cognition": cognition,
 
         "visual_reference":
@@ -734,27 +826,7 @@ async def execute(
     }
 
     # =================================================
-    # 🧠 EXECUTION ORCHESTRATION
-    # =================================================
-
-    if cognition.get(
-        "prefer_execution"
-    ):
-
-        semantic["should_execute"] = True
-
-    if cognition.get(
-        "prefer_visual"
-    ):
-
-        if semantic.get(
-            "room"
-        ) == "text":
-
-            semantic["attention_weight"] = 0.9
-
-    # =================================================
-    # 🧠 RESPONSE DECISION CONTROL
+    # 🧠 RESPONSE DECISION
     # =================================================
 
     final_action = response_decision.get(
@@ -768,70 +840,28 @@ async def execute(
 
         semantic["response_mode"] = "guide"
 
-        semantic["goal_stage"] = "exploration"
+        semantic["goal_stage"] = (
+            "exploration"
+        )
 
     elif final_action == "execute":
 
         semantic["should_execute"] = True
 
-        semantic["response_mode"] = "execute"
+        semantic["response_mode"] = (
+            "execute"
+        )
 
     elif final_action == "reference":
+
+        semantic["should_execute"] = False
 
         semantic["response_mode"] = (
             "visual_guidance"
         )
 
-        semantic["should_execute"] = False
-
-    elif final_action == "wait":
-
-        semantic["should_execute"] = False
-
     # =================================================
-    # 🧠 VISUAL SUPPORT RESTRAINT
-    # =================================================
-
-    if visual_reference.get(
-        "enabled"
-    ):
-
-        if not visual_reference.get(
-            "should_generate"
-        ):
-
-            semantic["should_execute"] = False
-
-            semantic["response_mode"] = "guide"
-
-            semantic["goal_stage"] = "exploration"
-
-    if cognition.get(
-        "needs_guidance"
-    ):
-
-        semantic["response_mode"] = "guide"
-
-    if cognition.get(
-        "reduce_talking"
-    ):
-
-        semantic["response_economy"] = "minimal"
-
-    if cognition.get(
-        "needs_continuation"
-    ):
-
-        semantic["preserve_flow"] = True
-
-    if semantic.get(
-        "goal_stage"
-    ) == "execution":
-
-        semantic["should_execute"] = True
-
-    # =================================================
-    # 🧠 SEMANTIC ROOM SELECTION
+    # 🧠 ROOM SELECTION
     # =================================================
 
     scored_rooms = []
@@ -845,25 +875,18 @@ async def execute(
                 context
             )
 
-            # =========================================
-            # 🔥 EXECUTION ROOM BOOST
-            # =========================================
-
             if semantic.get(
                 "should_execute"
             ):
 
                 if room.name in [
+
                     "image_generate",
                     "image_edit",
                     "science"
                 ]:
 
                     score += 1.5
-
-            # =========================================
-            # 🔥 TEXT ROOM PENALTY
-            # =========================================
 
             if cognition.get(
                 "prefer_execution"
@@ -873,91 +896,37 @@ async def execute(
 
                     score -= 0.7
 
-            # =========================================
-            # 🔥 VISUAL PRIORITY
-            # =========================================
-
             if cognition.get(
                 "prefer_visual"
             ):
 
                 if room.name in [
+
                     "image_generate",
                     "image_edit"
                 ]:
 
                     score += 0.8
 
-            # =========================================
-            # 🔥 TRAJECTORY PRIORITY
-            # =========================================
+            continuation_target = semantic.get(
+                "continuation_target"
+            )
 
-            if cognition.get(
-                "needs_continuation"
-            ):
+            if continuation_target == "math":
 
-                continuation_target = semantic.get(
-                    "continuation_target"
-                )
+                if room.name == "science":
 
-                if continuation_target:
+                    score += 1.5
 
-                    if continuation_target == "math":
+            if continuation_target == "image":
 
-                        if room.name == "science":
-                            score += 1.5
+                if room.name in [
 
-                    if continuation_target == "image":
+                    "image_generate",
+                    "image_edit"
+                ]:
 
-                        if room.name in [
-                            "image_generate",
-                            "image_edit"
-                        ]:
-                            score += 1.5
-
-            # =========================================
-            # 🔥 VISUAL GUIDANCE PRIORITY
-            # =========================================
-
-            if visual_reference.get(
-                "enabled"
-            ):
-
-                if room.name == "text":
-
-                    score += 0.6
-
-                if not visual_reference.get(
-                    "should_generate"
-                ):
-
-                    if room.name == "image_generate":
-
-                        score -= 1.0
-
-            # =========================================
-            # 🔥 RESPONSE DECISION PRIORITY
-            # =========================================
-
-            if response_decision.get(
-                "prefer_text_room"
-            ):
-
-                if room.name == "text":
-
-                    score += 1.0
-
-            if response_decision.get(
-                "avoid_generation"
-            ):
-
-                if room.name == "image_generate":
-
-                    score -= 1.5
-
-            # =========================================
-            # 🔥 CAPABILITY CONFIDENCE
-            # =========================================
+                    score += 1.5
 
             if semantic.get(
                 "best_capability"
@@ -969,16 +938,13 @@ async def execute(
 
                     score += 1.2
 
-            # =========================================
-            # 🔥 MINIMUM SURVIVAL
-            # =========================================
-
             if score <= 0:
 
                 if room.can_handle(
                     text,
                     context
                 ):
+
                     score = 0.2
 
             scored_rooms.append(
@@ -988,16 +954,15 @@ async def execute(
         except Exception as e:
 
             print(
-                f"ROOM EVALUATE ERROR [{room.name}]",
+                f"ROOM EVALUATE ERROR "
+                f"[{room.name}]",
                 e
             )
 
-    # =================================================
-    # 🔥 BEST ROOM FIRST
-    # =================================================
-
     scored_rooms.sort(
+
         key=lambda x: x[0],
+
         reverse=True
     )
 
@@ -1036,40 +1001,44 @@ async def execute(
         try:
 
             if score <= 0:
+
                 continue
 
             print(
+
                 f"🧠 ROOM SELECTED: "
                 f"{room.name} | score={score}"
             )
 
             result = await room.handle(
+
                 user_id,
+
                 text,
+
                 context,
+
                 run_with_typing
             )
 
             if (
+
                 result
                 and result.get("type")
             ):
 
                 if result.get("type") == "image_task":
 
-                    if response_decision.get(
-                        "avoid_generation"
-                    ):
-
-                        continue
-
                     state["image_lock"] = True
 
                     try:
 
                         result = await image_generate(
+
                             user_id,
+
                             result["prompt"],
+
                             state
                         )
 
@@ -1079,8 +1048,11 @@ async def execute(
 
                 quality = (
                     evaluate_response_quality(
+
                         result,
+
                         semantic,
+
                         cognition
                     )
                 )
@@ -1104,53 +1076,27 @@ async def execute(
                 )
 
                 add_dialog(
+
                     user_id,
+
                     "assistant",
+
                     output_text
                 )
 
                 update_memory_summary(
+
                     user_id,
+
                     output_text
                 )
 
-                if result.get("type") == "image":
-
-                    set_active_flow(
-                        user_id,
-                        {
-                            "type": "image"
-                        }
-                    )
-
-                    set_dialog_state(
-                        user_id,
-                        {
-                            "intent": "image"
-                        }
-                    )
-
-                elif task_type == "math":
-
-                    set_dialog_state(
-                        user_id,
-                        {
-                            "intent": "math"
-                        }
-                    )
-
-                else:
-
-                    set_dialog_state(
-                        user_id,
-                        {
-                            "intent": "text"
-                        }
-                    )
-
                 extract_and_store_semantics(
+
                     state,
+
                     output_text,
+
                     result.get(
                         "type",
                         "text"
@@ -1167,6 +1113,45 @@ async def execute(
                 f"ROOM ERROR [{room.name}]",
                 e
             )
+
+            failure = (
+                analyze_execution_failure(
+
+                    error=e,
+
+                    room_name=room.name,
+
+                    semantic=semantic,
+
+                    cognition=cognition,
+
+                    text=text
+                )
+            )
+
+            state[
+                "last_execution_failure"
+            ] = failure
+
+            if failure.get(
+                "retry_possible"
+            ):
+
+                print(
+                    "🧠 EXECUTION RETRY POSSIBLE"
+                )
+
+                continue
+
+            if failure.get(
+                "should_change_room"
+            ):
+
+                print(
+                    "🧠 TRYING DIFFERENT ROOM"
+                )
+
+                continue
 
     # =================================================
     # 🧠 POST RESPONSE ANALYSIS
@@ -1196,40 +1181,44 @@ async def execute(
         return best_result
 
     # =================================================
-    # 🔥 EXECUTION FAILURE PROTECTION
+    # 🔥 EXECUTION FAILURE
     # =================================================
 
-    if semantic.get(
-        "should_execute"
-    ):
+    if (
 
-        print(
-            "⚠️ EXECUTION FALLBACK ACTIVATED"
+        semantic.get(
+            "should_execute"
         )
 
-        if cognition.get(
-            "prefer_visual"
-        ):
+        or state.get(
+            "continuation_required"
+        )
+    ):
 
-            return {
-                "type": "text",
-                "data":
-                    (
-                        "⚠️ Я вижу, что тебе нужен "
-                        "визуальный результат, "
-                        "но текущий execution path "
-                        "не смог его завершить."
-                    )
-            }
+        failure = state.get(
+            "last_execution_failure",
+            {}
+        )
+
+        safe_message = failure.get(
+            "user_safe_message"
+        )
 
         return {
+
             "type": "text",
+
             "data":
+
+                safe_message
+
+                or
+
                 (
                     "⚠️ Я вижу, что задача "
-                    "ещё не была нормально "
-                    "завершена. Нужно "
-                    "продолжить обработку."
+                    "ещё не завершена "
+                    "нормально. Продолжаю "
+                    "искать решение."
                 )
         }
 
@@ -1238,55 +1227,83 @@ async def execute(
     # =================================================
 
     context_text = build_context_text(
+
         user_id,
+
         text,
+
         state
     )
 
     fallback_result = await run_with_typing(
+
         chat_id,
+
         text_process(
+
             user_id,
+
             context_text,
+
             state,
+
             energy
         )
     )
 
-    if fallback_result and fallback_result.get("content"):
+    if (
+
+        fallback_result
+        and fallback_result.get(
+            "content"
+        )
+    ):
 
         add_dialog(
+
             user_id,
+
             "assistant",
-            fallback_result["content"]
+
+            fallback_result[
+                "content"
+            ]
         )
 
         update_memory_summary(
-            user_id,
-            fallback_result["content"]
-        )
 
-        set_dialog_state(
             user_id,
-            {
-                "intent": "text"
-            }
+
+            fallback_result[
+                "content"
+            ]
         )
 
         extract_and_store_semantics(
+
             state,
-            fallback_result["content"],
+
+            fallback_result[
+                "content"
+            ],
+
             "text"
         )
 
         return {
+
             "type": "text",
+
             "data":
-                fallback_result["content"]
+                fallback_result[
+                    "content"
+                ]
         }
 
     return {
+
         "type": "text",
+
         "data":
             "⚠️ Не удалось обработать запрос"
     }
