@@ -47,6 +47,19 @@ from blocks.response_decision import (
     build_response_decision
 )
 
+# =====================================================
+# 🔥 NEW MODULES
+# =====================================================
+
+from blocks.external_knowledge_provider import (
+    should_use_external_knowledge,
+    build_external_context
+)
+
+from blocks.presentation_formatter import (
+    format_response_presentation
+)
+
 from datetime import datetime
 
 from aiogram.types import (
@@ -328,6 +341,14 @@ def build_capability_awareness():
         ],
 
         "code": [
+            "text"
+        ],
+
+        # =================================================
+        # 🔥 NEW
+        # =================================================
+
+        "external_knowledge": [
             "text"
         ]
     }
@@ -637,6 +658,53 @@ async def execute(
     )
 
     # =================================================
+    # 🔥 EXTERNAL KNOWLEDGE DECISION
+    # =================================================
+
+    external_context = ""
+
+    try:
+
+        should_expand = (
+            should_use_external_knowledge(
+
+                text=text,
+
+                semantic=semantic,
+
+                cognition=cognition,
+
+                state=state
+            )
+        )
+
+        if should_expand:
+
+            external_context = (
+                await build_external_context(
+                    text=text,
+                    state=state
+                )
+            )
+
+            if external_context:
+
+                state[
+                    "external_context_active"
+                ] = True
+
+                print(
+                    "🌍 EXTERNAL KNOWLEDGE ENABLED"
+                )
+
+    except Exception as e:
+
+        print(
+            "EXTERNAL KNOWLEDGE ERROR:",
+            e
+        )
+
+    # =================================================
     # 🧠 INTERNAL DIALOG ANALYSIS
     # =================================================
 
@@ -822,7 +890,14 @@ async def execute(
             ),
 
         "capability_awareness":
-            capability_awareness
+            capability_awareness,
+
+        # =================================================
+        # 🔥 NEW
+        # =================================================
+
+        "external_context":
+            external_context
     }
 
     # =================================================
@@ -937,6 +1012,16 @@ async def execute(
                 ):
 
                     score += 1.2
+
+            # =================================================
+            # 🔥 EXTERNAL KNOWLEDGE SAFETY
+            # =================================================
+
+            if external_context:
+
+                if room.name == "text":
+
+                    score += 0.6
 
             if score <= 0:
 
@@ -1070,6 +1155,27 @@ async def execute(
                     )
 
                     continue
+
+                # =================================================
+                # 🔥 PRESENTATION FORMATTER
+                # =================================================
+
+                if result.get("data"):
+
+                    result["data"] = (
+                        format_response_presentation(
+
+                            text=result["data"],
+
+                            user_text=text,
+
+                            semantic=semantic,
+
+                            cognition=cognition,
+
+                            visual_reference=visual_reference
+                        )
+                    )
 
                 output_text = str(
                     result.get("data", "")
@@ -1235,6 +1341,19 @@ async def execute(
         state
     )
 
+    # =================================================
+    # 🔥 EXTERNAL CONTEXT ENRICH
+    # =================================================
+
+    if external_context:
+
+        context_text += (
+
+            "\n\n"
+            "🌍 Дополнительный контекст:\n"
+            f"{external_context}"
+        )
+
     fallback_result = await run_with_typing(
 
         chat_id,
@@ -1258,6 +1377,25 @@ async def execute(
             "content"
         )
     ):
+
+        # =================================================
+        # 🔥 PRESENTATION FORMATTER
+        # =================================================
+
+        fallback_result["content"] = (
+            format_response_presentation(
+
+                text=fallback_result["content"],
+
+                user_text=text,
+
+                semantic=semantic,
+
+                cognition=cognition,
+
+                visual_reference=visual_reference
+            )
+        )
 
         add_dialog(
 
