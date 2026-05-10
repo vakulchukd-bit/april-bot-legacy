@@ -661,7 +661,7 @@ async def execute(
     # 🔥 EXTERNAL KNOWLEDGE DECISION
     # =================================================
 
-        external_context = ""
+    external_context = ""
 
     external_result = build_external_context(
 
