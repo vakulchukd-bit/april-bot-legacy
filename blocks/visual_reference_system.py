@@ -11,6 +11,19 @@ def build_visual_reference(
 
     t = (text or "").lower().strip()
 
+    active_flow = state.get(
+        "active_flow"
+    )
+
+    reasoning = state.get(
+        "reasoning",
+        {}
+    )
+
+    # =================================================
+    # 🧠 BASE
+    # =====================================================
+
     result = {
 
         # =================================================
@@ -83,12 +96,53 @@ def build_visual_reference(
         # RESPONSE STYLE
         # =================================================
 
-        "response_style": "guidance"
+        "response_style": "guidance",
+
+        # =================================================
+        # DIALOG INTEGRATION
+        # =================================================
+
+        "trajectory_aligned": True,
+
+        "dialogue_centered": True,
+
+        "visual_is_supportive": True,
+
+        "visual_should_continue_dialogue": True,
+
+        "visual_should_not_interrupt": True,
+
+        "visual_requires_meaning": True,
+
+        "visual_requires_context": True,
+
+        "visual_is_not_random": True,
+
+        "capability_awareness": True
     }
 
     # =================================================
-    # 🔥 SEARCHING / EXPLORATION STATE
+    # 🔥 DIALOG STATE
+    # =====================================================
+
+    dialog_state = semantic.get(
+        "dialog_state",
+        "exploration"
+    )
+
+    ambiguity = semantic.get(
+        "ambiguity_level",
+        0.0
+    )
+
+    unresolved_intent = reasoning.get(
+        "unresolved_intent",
+        True
+    )
+
     # =================================================
+    # 🔥 SEARCHING / EXPLORATION STATE
+    # =====================================================
 
     exploration_words = [
 
@@ -113,15 +167,19 @@ def build_visual_reference(
 
         result["mode"] = "exploration"
 
-        result["support_level"] += 0.5
+        result["support_level"] += 0.45
 
         result["lightweight_mode"] = True
 
         result["suppress_generation"] = True
 
+        result["response_style"] = (
+            "soft_guidance"
+        )
+
     # =================================================
     # 🔥 SEMANTIC VISUAL EXPECTATION
-    # =================================================
+    # =====================================================
 
     if semantic.get(
         "visual_expectation",
@@ -130,11 +188,11 @@ def build_visual_reference(
 
         result["enabled"] = True
 
-        result["support_level"] += 0.4
+        result["support_level"] += 0.3
 
     # =================================================
     # 🔥 EXAMPLE EXPECTATION
-    # =================================================
+    # =====================================================
 
     if semantic.get(
         "example_expectation",
@@ -143,11 +201,11 @@ def build_visual_reference(
 
         result["enabled"] = True
 
-        result["support_level"] += 0.4
+        result["support_level"] += 0.3
 
     # =================================================
     # 🔥 COGNITIVE EXPLORATION
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "exploration_mode"
@@ -159,11 +217,13 @@ def build_visual_reference(
 
         result["suppress_generation"] = True
 
-        result["response_style"] = "soft_guidance"
+        result["response_style"] = (
+            "soft_guidance"
+        )
 
     # =================================================
     # 🔥 USER LEADS
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "user_leads_direction"
@@ -176,8 +236,51 @@ def build_visual_reference(
         result["lightweight_mode"] = True
 
     # =================================================
-    # 🔥 ATMOSPHERE DETECTION
+    # 🔥 VISUALS MUST FOLLOW DIALOGUE
+    # =====================================================
+
+    if (
+        dialog_state == "exploration"
+        or ambiguity >= 0.45
+        or unresolved_intent
+    ):
+
+        result["lightweight_mode"] = True
+
+        result["suppress_generation"] = True
+
     # =================================================
+    # 🔥 SCREENSHOT PROTECTION
+    # =====================================================
+
+    screenshot_words = [
+
+        "скрин",
+        "скриншот",
+        "screenshot"
+    ]
+
+    if any(x in t for x in screenshot_words):
+
+        result["enabled"] = True
+
+        result["lightweight_mode"] = True
+
+        result["suppress_generation"] = True
+
+        result["mode"] = "context_support"
+
+        result["guidance"] = (
+
+            "Скриншот лучше использовать "
+            "как помощь для понимания темы "
+            "или проблемы, а не отдельно "
+            "от смысла разговора."
+        )
+
+    # =================================================
+    # 🔥 ATMOSPHERE DETECTION
+    # =====================================================
 
     cozy_words = [
 
@@ -200,7 +303,7 @@ def build_visual_reference(
 
         result["emotion"] = "cozy"
 
-        result["reference_confidence"] += 0.85
+        result["reference_confidence"] += 0.82
 
         result["references"] = [
 
@@ -214,38 +317,38 @@ def build_visual_reference(
             {
                 "type": "interior",
                 "title":
-                    "Мягкая кофейная атмосфера",
+                    "Мягкая камерная атмосфера",
                 "weight": 0.95
             },
 
             {
                 "type": "lighting",
                 "title":
-                    "Лампы с тёплым рассеянным светом",
+                    "Тёплое мягкое освещение",
                 "weight": 0.8
             },
 
             {
                 "type": "style",
                 "title":
-                    "Дерево, мягкие тени и спокойные цвета",
-                "weight": 0.9
+                    "Спокойные натуральные материалы",
+                "weight": 0.85
             }
         ]
 
         result["guidance"] = (
 
-            "Похоже, тебе сейчас "
-            "ближе мягкая камерная "
-            "атмосфера с тёплым светом "
-            "и спокойным интерьером."
+            "Похоже, разговор сейчас "
+            "движется в сторону "
+            "мягкой спокойной атмосферы "
+            "с тёплым визуальным ощущением."
         )
 
-        result["support_level"] += 0.6
+        result["support_level"] += 0.5
 
     # =================================================
     # 🔥 CYBERPUNK DETECTION
-    # =================================================
+    # =====================================================
 
     cyberpunk_words = [
 
@@ -265,7 +368,7 @@ def build_visual_reference(
 
         result["emotion"] = "futuristic"
 
-        result["reference_confidence"] += 0.85
+        result["reference_confidence"] += 0.82
 
         result["references"] = [
 
@@ -279,35 +382,34 @@ def build_visual_reference(
             {
                 "type": "mood",
                 "title":
-                    "Ночной futuristic city mood",
+                    "Футуристическая ночная атмосфера",
                 "weight": 0.9
             },
 
             {
                 "type": "style",
                 "title":
-                    "Тёмные поверхности и контрастный свет",
+                    "Контрастный свет и тёмные поверхности",
                 "weight": 0.85
             }
         ]
 
         result["guidance"] = (
 
-            "Сейчас направление "
-            "больше уходит в futuristic "
-            "и neon атмосферу."
+            "Разговор сейчас больше "
+            "уходит в futuristic "
+            "и neon настроение."
         )
 
     # =================================================
     # 🔥 MINIMALISM DETECTION
-    # =================================================
+    # =====================================================
 
     minimal_words = [
 
         "минимализм",
         "minimal",
         "чисто",
-        "просто",
         "аккуратно",
         "спокойно"
     ]
@@ -320,35 +422,35 @@ def build_visual_reference(
 
         result["emotion"] = "calm"
 
-        result["reference_confidence"] += 0.75
+        result["reference_confidence"] += 0.72
 
         result["references"] = [
 
             {
                 "type": "style",
                 "title":
-                    "Минималистичный clean design",
+                    "Чистый минималистичный стиль",
                 "weight": 0.9
             },
 
             {
                 "type": "palette",
                 "title":
-                    "Спокойные нейтральные цвета",
-                "weight": 0.85
+                    "Нейтральные спокойные цвета",
+                "weight": 0.82
             }
         ]
 
         result["guidance"] = (
 
-            "Похоже, тебе ближе "
-            "спокойный минималистичный стиль "
-            "без перегруза."
+            "Сейчас направление разговора "
+            "скорее идёт к спокойному "
+            "минималистичному ощущению."
         )
 
     # =================================================
     # 🔥 CONFIRMATION DETECTION
-    # =================================================
+    # =====================================================
 
     confirmation_words = [
 
@@ -364,33 +466,51 @@ def build_visual_reference(
 
         result["direction_detected"] = True
 
-        # 🔥 НЕ запускаем генерацию
         result["should_generate"] = False
 
         result["suppress_generation"] = True
 
     # =================================================
     # 🔥 HARD GENERATION REQUEST
-    # =================================================
+    # =====================================================
 
     generate_words = [
 
         "сгенерируй",
         "создай изображение",
         "нарисуй",
-        "сделай картинку",
-        "покажи изображение"
+        "сделай картинку"
     ]
 
-    if any(x in t for x in generate_words):
+    explicit_generation = any(
+        x in t
+        for x in generate_words
+    )
 
-        if not result["suppress_generation"]:
+    if explicit_generation:
+
+        # 🔥 generation только если trajectory готов
+        if (
+            not result["suppress_generation"]
+            and ambiguity < 0.45
+            and dialog_state != "exploration"
+        ):
 
             result["should_generate"] = True
 
     # =================================================
-    # 🔥 REFERENCE SORT
+    # 🔥 ACTIVE FLOW STABILIZATION
+    # =====================================================
+
+    if active_flow:
+
+        result["trajectory_aligned"] = True
+
+        result["dialogue_centered"] = True
+
     # =================================================
+    # 🔥 REFERENCE SORT
+    # =====================================================
 
     result["references"] = sorted(
 
@@ -406,7 +526,7 @@ def build_visual_reference(
 
     # =================================================
     # 🔥 NORMALIZATION
-    # =================================================
+    # =====================================================
 
     if result["support_level"] > 1.0:
 
@@ -415,5 +535,13 @@ def build_visual_reference(
     if result["reference_confidence"] > 1.0:
 
         result["reference_confidence"] = 1.0
+
+    # =================================================
+    # 🔥 FINAL TRAJECTORY SAFETY
+    # =====================================================
+
+    if result["lightweight_mode"]:
+
+        result["should_generate"] = False
 
     return result
