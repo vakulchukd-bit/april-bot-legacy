@@ -105,6 +105,7 @@ def detect_primary_emoji(text: str):
 
     return "✨"
 
+
 # =====================================================
 # 🧠 SECTION SPLITTER
 # =====================================================
@@ -127,6 +128,7 @@ def split_into_sections(text: str):
             parts.append(cleaned)
 
     return parts
+
 
 # =====================================================
 # 🧠 LIGHT FORMAT
@@ -153,6 +155,7 @@ def apply_light_formatting(
 
     return "\n\n".join(result)
 
+
 # =====================================================
 # 🧠 VISUAL ENRICHMENT
 # =====================================================
@@ -175,6 +178,7 @@ def apply_visual_enrichment(
         + text
     )
 
+
 # =====================================================
 # 🧠 MINI CARD FORMAT
 # =====================================================
@@ -194,6 +198,7 @@ def build_mini_card(
         f"━━━ {title} ━━━\n"
         f"{content}"
     )
+
 
 # =====================================================
 # 🧠 SMART PRESENTATION
@@ -279,6 +284,7 @@ def build_smart_presentation(
         )
     )
 
+
 # =====================================================
 # 🧠 RESPONSE BEAUTIFIER
 # =====================================================
@@ -301,3 +307,26 @@ def beautify_response(
     )
 
     return formatted.strip()
+
+
+# =====================================================
+# 🧠 MAIN PUBLIC FORMATTER
+# =====================================================
+
+def format_response_presentation(
+    text: str,
+    semantic: dict = None,
+    cognition: dict = None,
+    response_decision: dict = None
+):
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+
+    return beautify_response(
+        text,
+        semantic,
+        cognition,
+        response_decision
+    )
