@@ -18,6 +18,11 @@ def build_response_decision(
         "active_flow"
     )
 
+    reasoning = state.get(
+        "reasoning",
+        {}
+    )
+
     # =====================================================
     # 🧠 BASE
     # =====================================================
@@ -105,7 +110,33 @@ def build_response_decision(
 
         "generation_allowed": False,
 
-        "guidance_allowed": False
+        "guidance_allowed": False,
+
+        # =================================================
+        # 🧠 POST ACTION REASONING
+        # =================================================
+
+        "dialogue_still_alive": True,
+
+        "goal_completed": False,
+
+        "needs_reflection": True,
+
+        "needs_post_action_analysis": True,
+
+        "should_recheck_user_state": True,
+
+        "should_preserve_meaning": True,
+
+        "capability_is_not_final": True,
+
+        "trajectory_before_capability": True,
+
+        "response_requires_usefulness_check": True,
+
+        "response_requires_context_check": True,
+
+        "response_requires_psychology_check": True
     }
 
     # =====================================================
@@ -135,6 +166,21 @@ def build_response_decision(
     assistant_restraint = cognition.get(
         "assistant_restraint",
         0.0
+    )
+
+    unresolved_intent = semantic.get(
+        "unresolved_intent",
+        True
+    )
+
+    ambiguity = semantic.get(
+        "ambiguity_level",
+        0.0
+    )
+
+    goal_stage = semantic.get(
+        "goal_stage",
+        "exploration"
     )
 
     # =====================================================
@@ -188,6 +234,10 @@ def build_response_decision(
 
         result[
             "maintain_goal_trajectory"
+        ] = True
+
+        result[
+            "dialogue_still_alive"
         ] = True
 
     # =====================================================
@@ -247,10 +297,6 @@ def build_response_decision(
         result[
             "avoid_heavy_generation"
         ] = True
-
-        result[
-            "final_action"
-        ] = "reference"
 
     # =====================================================
     # 🔥 VISUAL REFERENCE SYSTEM
@@ -336,11 +382,17 @@ def build_response_decision(
 
         should_execute = True
 
-    if execution_pressure >= 0.7:
+    if (
+        execution_pressure >= 0.75
+        and ambiguity < 0.45
+    ):
 
         should_execute = True
 
-    if wants_result >= 0.75:
+    if (
+        wants_result >= 0.8
+        and ambiguity < 0.45
+    ):
 
         should_execute = True
 
@@ -357,6 +409,20 @@ def build_response_decision(
         ):
 
             should_execute = False
+
+    # =====================================================
+    # 🔥 UNRESOLVED INTENT PROTECTION
+    # =====================================================
+
+    if unresolved_intent:
+
+        result[
+            "dialogue_still_alive"
+        ] = True
+
+        result[
+            "goal_completed"
+        ] = False
 
     # =====================================================
     # 🔥 FINAL EXECUTION
@@ -385,11 +451,12 @@ def build_response_decision(
         should_generate = True
 
     if (
-        wants_visual >= 0.8
-        and wants_result >= 0.7
+        wants_visual >= 0.85
+        and wants_result >= 0.75
         and not cognition.get(
             "prefer_reference_over_generation"
         )
+        and ambiguity < 0.4
     ):
 
         should_generate = True
@@ -429,12 +496,34 @@ def build_response_decision(
         ] = True
 
     # =====================================================
+    # 🔥 POST ACTION ANALYSIS
+    # =====================================================
+
+    if result[
+        "should_generate"
+    ] or result[
+        "should_execute"
+    ]:
+
+        result[
+            "needs_post_action_analysis"
+        ] = True
+
+        result[
+            "dialogue_still_alive"
+        ] = True
+
+        result[
+            "goal_completed"
+        ] = False
+
+    # =====================================================
     # 🔥 RESPONSE PRIORITY SYSTEM
     # =====================================================
 
     # =================================================
     # 1. WAIT
-    # =================================================
+    # =====================================================
 
     if result[
         "should_wait_for_user"
@@ -446,7 +535,7 @@ def build_response_decision(
 
     # =================================================
     # 2. REFERENCE
-    # =================================================
+    # =====================================================
 
     elif result[
         "should_offer_reference"
@@ -458,7 +547,7 @@ def build_response_decision(
 
     # =================================================
     # 3. GENERATE
-    # =================================================
+    # =====================================================
 
     elif result[
         "should_generate"
@@ -470,7 +559,7 @@ def build_response_decision(
 
     # =================================================
     # 4. EXECUTE
-    # =================================================
+    # =====================================================
 
     elif result[
         "should_execute"
@@ -482,7 +571,7 @@ def build_response_decision(
 
     # =================================================
     # 5. GUIDE
-    # =================================================
+    # =====================================================
 
     elif result[
         "should_guide"
@@ -494,7 +583,7 @@ def build_response_decision(
 
     # =================================================
     # 6. TALK
-    # =================================================
+    # =====================================================
 
     else:
 
@@ -556,6 +645,24 @@ def build_response_decision(
         ] = True
 
     # =====================================================
+    # 🔥 TRAJECTORY STABILIZATION
+    # =====================================================
+
+    if goal_stage == "exploration":
+
+        result[
+            "goal_completed"
+        ] = False
+
+        result[
+            "dialogue_still_alive"
+        ] = True
+
+        result[
+            "should_continue_trajectory"
+        ] = True
+
+    # =====================================================
     # 🔥 FINAL SAFETY
     # =====================================================
 
@@ -578,5 +685,33 @@ def build_response_decision(
             result[
                 "should_generate"
             ] = False
+
+    # =====================================================
+    # 🔥 CAPABILITY SAFETY
+    # =====================================================
+
+    if (
+        result["final_action"] in [
+            "generate",
+            "execute"
+        ]
+        and ambiguity >= 0.45
+    ):
+
+        result[
+            "final_action"
+        ] = "guide"
+
+        result[
+            "response_mode"
+        ] = "human_guidance"
+
+        result[
+            "should_generate"
+        ] = False
+
+        result[
+            "should_execute"
+        ] = False
 
     return result
