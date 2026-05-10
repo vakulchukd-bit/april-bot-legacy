@@ -54,6 +54,56 @@ MAX_RESULTS = 5
 
 
 # =====================================================
+# 🌐 REALTIME TRANSPORT KEYWORDS
+# =====================================================
+
+TRANSPORT_KEYWORDS = [
+
+    "самолет",
+    "рейс",
+    "flight",
+    "airbus",
+    "boeing",
+
+    "корабль",
+    "судно",
+    "лайнер",
+    "ship",
+
+    "поезд",
+    "train",
+
+    "автобус",
+    "bus",
+
+    "маршрут",
+    "route",
+
+    "где я",
+    "где сейчас",
+    "tracking",
+    "live"
+]
+
+
+# =====================================================
+# 🌐 GEO KEYWORDS
+# =====================================================
+
+GEO_KEYWORDS = [
+
+    "страна",
+    "город",
+    "локация",
+    "местоположение",
+    "координаты",
+    "карта",
+    "map",
+    "gps"
+]
+
+
+# =====================================================
 # 🌐 SAFE REQUEST
 # =====================================================
 
@@ -127,11 +177,16 @@ def extract_links(html: str):
 
     results = []
 
-    for a in soup.find_all("a", href=True):
+    for a in soup.find_all(
+        "a",
+        href=True
+    ):
 
         href = a["href"]
 
-        if href.startswith("http"):
+        if href.startswith(
+            "http"
+        ):
 
             results.append(href)
 
@@ -150,16 +205,41 @@ def filter_platform_links(
 
         "youtube.com",
         "youtu.be",
+
         "t.me",
         "telegram.me",
+
         "instagram.com",
         "facebook.com",
+
         "x.com",
         "twitter.com",
+
         "github.com",
+
         "linkedin.com",
+
         "reddit.com",
-        "tiktok.com"
+
+        "tiktok.com",
+
+        # =============================================
+        # 🌐 NEW
+        # =============================================
+
+        "flightradar24.com",
+
+        "marinetraffic.com",
+
+        "vesselfinder.com",
+
+        "flightaware.com",
+
+        "airnavradar.com",
+
+        "google.com/maps",
+
+        "openstreetmap.org"
     ]
 
     filtered = []
@@ -170,11 +250,117 @@ def filter_platform_links(
 
             if platform in link:
 
-                filtered.append(link)
+                filtered.append(
+                    link
+                )
 
                 break
 
     return list(set(filtered))
+
+
+# =====================================================
+# 🌐 DETECT LIVE INTENT
+# =====================================================
+
+def detect_live_lookup_intent(
+    query: str
+):
+
+    query = (
+        query or ""
+    ).lower()
+
+    for keyword in (
+        TRANSPORT_KEYWORDS
+        + GEO_KEYWORDS
+    ):
+
+        if keyword in query:
+
+            return True
+
+    return False
+
+
+# =====================================================
+# 🌐 BUILD SMART SEARCH QUERY
+# =====================================================
+
+def build_search_query(
+    query: str
+):
+
+    query = (
+        query or ""
+    ).strip()
+
+    lower = query.lower()
+
+    # =============================================
+    # ✈️ FLIGHTS
+    # =============================================
+
+    if any(
+
+        x in lower
+
+        for x in [
+
+            "рейс",
+            "flight",
+            "самолет"
+        ]
+    ):
+
+        return (
+            query
+            + " flightradar24"
+        )
+
+    # =============================================
+    # 🚢 SHIPS
+    # =============================================
+
+    if any(
+
+        x in lower
+
+        for x in [
+
+            "судно",
+            "корабль",
+            "ship"
+        ]
+    ):
+
+        return (
+            query
+            + " marinetraffic"
+        )
+
+    # =============================================
+    # 🗺 MAPS
+    # =============================================
+
+    if any(
+
+        x in lower
+
+        for x in [
+
+            "карта",
+            "локация",
+            "координаты"
+        ]
+    ):
+
+        return (
+            query
+            + " map"
+        )
+
+    return query
 
 
 # =====================================================
@@ -185,7 +371,9 @@ def search_web(
     query: str
 ):
 
-    query = (query or "").strip()
+    query = (
+        query or ""
+    ).strip()
 
     if not query:
 
@@ -198,13 +386,23 @@ def search_web(
 
     try:
 
-        encoded = quote(query)
+        smart_query = (
+            build_search_query(
+                query
+            )
+        )
+
+        encoded = quote(
+            smart_query
+        )
 
         url = (
             f"https://duckduckgo.com/html/?q={encoded}"
         )
 
-        html = safe_request(url)
+        html = safe_request(
+            url
+        )
 
         if not html:
 
@@ -215,10 +413,14 @@ def search_web(
                 "results": []
             }
 
-        links = extract_links(html)
+        links = extract_links(
+            html
+        )
 
-        links = filter_platform_links(
-            links
+        links = (
+            filter_platform_links(
+                links
+            )
         )
 
         verified = []
@@ -231,14 +433,24 @@ def search_web(
 
                     "url": link,
 
-                    "verified": True
+                    "verified": True,
+
+                    "live_related":
+                        detect_live_lookup_intent(
+                            query
+                        )
                 })
 
         return {
 
             "success": True,
 
-            "results": verified
+            "results": verified,
+
+            "live_intent":
+                detect_live_lookup_intent(
+                    query
+                )
         }
 
     except Exception as e:
@@ -287,6 +499,18 @@ def build_search_summary(
         )
 
     lines = []
+
+    # =================================================
+    # 🌐 LIVE CONTEXT
+    # =================================================
+
+    if results.get(
+        "live_intent"
+    ):
+
+        lines.append(
+            "🌍 Найдены live/realtime источники:"
+        )
 
     for item in links:
 
