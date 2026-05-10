@@ -64,13 +64,87 @@ def detect_goal(
         "intent"
     )
 
+    ambiguity_level = semantic.get(
+        "ambiguity_level",
+        0.0
+    )
+
+    dialog_state = semantic.get(
+        "dialog_state",
+        "exploration"
+    )
+
+    # =================================================
+    # 🔥 TRAJECTORY DEFAULT
+    # =================================================
+
+    semantic["trajectory_active"] = True
+
+    semantic["goal_persistent"] = True
+
+    semantic["goal_completed"] = False
+
+    semantic["conversation_alive"] = True
+
+    semantic["unresolved_intent"] = True
+
+    semantic["preserve_flow"] = True
+
+    semantic["preserve_trajectory"] = True
+
+    semantic["response_requires_reflection"] = True
+
+    # =================================================
+    # 🔥 EXPLORATION PROTECTION
+    # =================================================
+
+    exploration_words = [
+        "примерно",
+        "идея",
+        "вариант",
+        "что умеешь",
+        "как думаешь",
+        "посмотрим",
+        "подумаем",
+        "референс",
+        "атмосфера"
+    ]
+
+    exploration_detected = any(
+        w in t
+        for w in exploration_words
+    )
+
+    if exploration_detected:
+
+        semantic["goal"] = "exploration"
+
+        semantic["goal_stage"] = "exploration"
+
+        semantic["response_mode"] = "guide"
+
+        semantic["should_execute"] = False
+
+        semantic["goal_completed"] = False
+
+        semantic["unresolved_intent"] = True
+
+        semantic["conversation_alive"] = True
+
+        semantic["capability_should_wait"] = True
+
     # =================================================
     # 🔥 EXECUTION ESCALATION
     # =================================================
 
     if (
         should_execute
-        and capability_confidence >= 0.7
+        and capability_confidence >= 0.72
+        and ambiguity_level < 0.45
+        and not semantic.get(
+            "capability_should_wait",
+            False
+        )
     ):
 
         semantic["goal"] = "execution"
@@ -78,6 +152,10 @@ def detect_goal(
         semantic["response_mode"] = "execute"
 
         semantic["goal_stage"] = "execution"
+
+        semantic["goal_completed"] = False
+
+        semantic["unresolved_intent"] = True
 
     # =================================================
     # 🔥 ACTIVE FLOW
@@ -89,13 +167,19 @@ def detect_goal(
             "type"
         )
 
+        semantic["continuation"] = True
+
+        semantic["trajectory_active"] = True
+
+        semantic["preserve_flow"] = True
+
         # =================================================
         # 🖼 IMAGE TRAJECTORY
         # =================================================
 
         if flow_type == "image":
 
-            # 🔥 semantic image authority
+            # 🔥 image continuation authority
             if semantic_room in [
                 "image_generate",
                 "image_edit"
@@ -111,9 +195,21 @@ def detect_goal(
                     "continuation_target"
                 ] = "image"
 
+                semantic[
+                    "goal_completed"
+                ] = False
+
+                semantic[
+                    "unresolved_intent"
+                ] = True
+
+                semantic[
+                    "conversation_alive"
+                ] = True
+
                 return semantic
 
-            # 🔥 unresolved image continuation
+            # 🔥 lightweight continuation
             if (
                 execution_pressure >= 0.45
                 or len(t) <= 50
@@ -136,7 +232,7 @@ def detect_goal(
                                 "confidence",
                                 0.5
                             ),
-                            0.85
+                            0.82
                         ),
 
                     "continuation":
@@ -146,14 +242,44 @@ def detect_goal(
                         "image",
 
                     "goal_stage":
-                        "execution",
+                        "continuation",
 
                     "response_mode":
-                        "execute",
+                        "guide",
 
                     "should_execute":
+                        False,
+
+                    "goal_completed":
+                        False,
+
+                    "conversation_alive":
+                        True,
+
+                    "unresolved_intent":
                         True
                 })
+
+                # 🔥 only explicit edit escalates
+                explicit_edit_words = [
+                    "измени",
+                    "убери",
+                    "добавь",
+                    "замени"
+                ]
+
+                if any(
+                    w in t
+                    for w in explicit_edit_words
+                ):
+
+                    semantic[
+                        "response_mode"
+                    ] = "execute"
+
+                    semantic[
+                        "should_execute"
+                    ] = True
 
                 return semantic
 
@@ -174,6 +300,18 @@ def detect_goal(
                 semantic[
                     "continuation_target"
                 ] = "math"
+
+                semantic[
+                    "goal_completed"
+                ] = False
+
+                semantic[
+                    "unresolved_intent"
+                ] = True
+
+                semantic[
+                    "conversation_alive"
+                ] = True
 
                 return semantic
 
@@ -199,7 +337,7 @@ def detect_goal(
                                 "confidence",
                                 0.5
                             ),
-                            0.85
+                            0.82
                         ),
 
                     "continuation":
@@ -209,14 +347,44 @@ def detect_goal(
                         "math",
 
                     "goal_stage":
-                        "execution",
+                        "continuation",
 
                     "response_mode":
-                        "execute",
+                        "guide",
 
                     "should_execute":
+                        False,
+
+                    "goal_completed":
+                        False,
+
+                    "conversation_alive":
+                        True,
+
+                    "unresolved_intent":
                         True
                 })
+
+                # 🔥 explicit math execution only
+                explicit_math_words = [
+                    "реши",
+                    "посчитай",
+                    "построй",
+                    "вычисли"
+                ]
+
+                if any(
+                    w in t
+                    for w in explicit_math_words
+                ):
+
+                    semantic[
+                        "response_mode"
+                    ] = "execute"
+
+                    semantic[
+                        "should_execute"
+                    ] = True
 
                 return semantic
 
@@ -231,21 +399,39 @@ def detect_goal(
                 "conversation_value",
                 1.0
             ),
-            0.4
+            0.45
         )
 
-        if (
-            semantic.get(
-                "execution_pressure",
-                0.0
-            ) >= 0.45
-        ):
+        # 🔥 fatigue больше НЕ форсит execution
+        semantic["response_economy"] = (
+            "minimal"
+        )
 
-            semantic["response_mode"] = (
-                "execute"
-            )
+        semantic["preserve_flow"] = True
 
-            semantic["should_execute"] = True
+    # =================================================
+    # 🔥 GOAL STABILITY
+    # =================================================
+
+    if dialog_state == "exploration":
+
+        semantic["goal_completed"] = False
+
+        semantic["conversation_alive"] = True
+
+        semantic["unresolved_intent"] = True
+
+    # =================================================
+    # 🔥 FINAL SAFETY
+    # =================================================
+
+    if semantic.get(
+        "capability_should_wait"
+    ):
+
+        semantic["should_execute"] = False
+
+        semantic["response_mode"] = "guide"
 
     # =================================================
     # 🔥 DEFAULT
