@@ -26,7 +26,7 @@ def analyze_cognition(
 
     # =================================================
     # 🧠 VISUAL MEMORY BRAIN
-    # =================================================
+    # =====================================================
 
     visual_memory = build_visual_memory_response(
         text
@@ -34,7 +34,7 @@ def analyze_cognition(
 
     # =================================================
     # 🧠 APRIL PERSONALITY STATE
-    # =================================================
+    # =====================================================
 
     personality_state = {
 
@@ -44,7 +44,7 @@ def analyze_cognition(
 
         "prefers_understanding": True,
 
-        "prefers_execution_over_talking": True,
+        "prefers_execution_over_talking": False,
 
         "avoids_forced_generation": True,
 
@@ -66,18 +66,51 @@ def analyze_cognition(
 
         "avoids_trigger_behavior": True,
 
+        "tracks_dialog_quality": True,
+
+        "tracks_response_usefulness": True,
+
+        "tracks_unresolved_intent": True,
+
+        "tracks_post_action_state": True,
+
         "assistant_identity": "April"
     }
 
     # =================================================
-    # 🔥 BASE
+    # 🔥 CAPABILITY MAP
+    # =====================================================
+
+    capability_map = {
+
+        "image_generation": True,
+        "image_editing": True,
+        "visual_guidance": True,
+        "math_reasoning": True,
+        "code_generation": True,
+        "dialog_guidance": True,
+        "semantic_analysis": True,
+        "trajectory_support": True,
+        "psychological_support": True,
+        "screenshot_understanding": True,
+
+        # 🔥 awareness
+        "capabilities_are_tools": True,
+        "capabilities_are_not_goals": True,
+        "capabilities_must_help_user": True,
+        "capabilities_require_context": True,
+        "capabilities_require_reasoning": True
+    }
+
     # =================================================
+    # 🔥 BASE
+    # =====================================================
 
     cognition = {
 
         # =================================================
         # USER INTENTION FIELD
-        # =================================================
+        # =====================================================
 
         "wants_action": 0.0,
         "wants_dialog": 0.0,
@@ -89,7 +122,7 @@ def analyze_cognition(
 
         # =================================================
         # USER STATE
-        # =================================================
+        # =====================================================
 
         "is_confused": 0.0,
         "is_waiting": 0.0,
@@ -98,7 +131,7 @@ def analyze_cognition(
 
         # =================================================
         # EXECUTION
-        # =================================================
+        # =====================================================
 
         "execution_pressure": 0.0,
         "dialog_fatigue": 0.0,
@@ -106,7 +139,7 @@ def analyze_cognition(
 
         # =================================================
         # RESPONSE STRATEGY
-        # =================================================
+        # =====================================================
 
         "reduce_talking": False,
         "prefer_execution": False,
@@ -116,7 +149,7 @@ def analyze_cognition(
 
         # =================================================
         # RESPONSE ORCHESTRATION
-        # =================================================
+        # =====================================================
 
         "response_depth": "medium",
         "needs_guidance": False,
@@ -128,7 +161,7 @@ def analyze_cognition(
 
         # =================================================
         # DIRECTION HYPOTHESIS
-        # =================================================
+        # =====================================================
 
         "direction_hypothesis": {
             "enabled": True,
@@ -139,16 +172,23 @@ def analyze_cognition(
 
         # =================================================
         # TRAJECTORY
-        # =================================================
+        # =====================================================
 
         "goal_completed": False,
         "needs_continuation": False,
         "trajectory_locked": False,
         "trajectory_confidence": 0.0,
 
+        "dialogue_still_alive": True,
+        "unresolved_intent": True,
+
+        "needs_post_action_reflection": True,
+        "should_evaluate_usefulness": True,
+        "should_evaluate_dialog_quality": True,
+
         # =================================================
         # SATISFACTION MODEL
-        # =================================================
+        # =====================================================
 
         "user_satisfaction_expected": 0.5,
         "risk_of_bolтовня": 0.0,
@@ -156,29 +196,42 @@ def analyze_cognition(
 
         # =================================================
         # CAPABILITY
-        # =================================================
+        # =====================================================
 
         "search_capabilities": True,
         "needs_room_execution": False,
         "capability_routing": None,
 
+        "capability_map":
+            capability_map,
+
+        "understands_own_capabilities": True,
+
+        "capabilities_should_help": True,
+
+        "capabilities_are_not_reactions": True,
+
+        "capabilities_require_meaning": True,
+
+        "capabilities_follow_dialogue": True,
+
         # =================================================
         # VISUAL SUPPORT
-        # =================================================
+        # =====================================================
 
         "should_offer_visual_support": False,
         "visual_support_priority": 0.0,
 
         # =================================================
         # EXECUTION BEHAVIOR
-        # =================================================
+        # =====================================================
 
         "execution_urgency": 0.0,
         "execution_confidence": 0.0,
 
         # =================================================
         # 🧠 PSYCHOLOGY LAYER
-        # =================================================
+        # =====================================================
 
         "user_leads_direction": False,
         "assistant_should_follow": False,
@@ -202,7 +255,7 @@ def analyze_cognition(
 
         # =================================================
         # 🧠 PERSONALITY
-        # =================================================
+        # =====================================================
 
         "personality_active": True,
 
@@ -233,9 +286,15 @@ def analyze_cognition(
 
         "should_preserve_user_intent": True,
 
+        "should_preserve_dialog_meaning": True,
+
+        "should_preserve_psychology": True,
+
+        "should_preserve_trajectory": True,
+
         # =================================================
         # 🧠 VISUAL MEMORY STATE
-        # =================================================
+        # =====================================================
 
         "visual_memory": {},
 
@@ -250,7 +309,7 @@ def analyze_cognition(
 
     # =================================================
     # 🧠 VISUAL MEMORY INHERITANCE
-    # =================================================
+    # =====================================================
 
     cognition["visual_memory"] = visual_memory
 
@@ -328,11 +387,18 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 SEMANTIC INHERITANCE
-    # =================================================
+    # =====================================================
 
     cognition["execution_pressure"] += semantic.get(
         "execution_pressure",
         0.0
+    )
+
+    cognition[
+        "unresolved_intent"
+    ] = semantic.get(
+        "unresolved_intent",
+        True
     )
 
     if semantic.get(
@@ -347,7 +413,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 ACTION SIGNALS
-    # =================================================
+    # =====================================================
 
     action_words = [
         "сделай",
@@ -363,13 +429,13 @@ def analyze_cognition(
 
         cognition["wants_action"] += 0.8
         cognition["wants_result"] += 0.8
-        cognition["execution_pressure"] += 0.7
+        cognition["execution_pressure"] += 0.6
         cognition["result_pressure"] += 0.7
-        cognition["execution_urgency"] += 0.6
+        cognition["execution_urgency"] += 0.5
 
     # =================================================
     # 🔥 VISUAL SIGNALS
-    # =================================================
+    # =====================================================
 
     visual_words = [
         "картинка",
@@ -399,7 +465,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 DIALOG SIGNALS
-    # =================================================
+    # =====================================================
 
     dialog_words = [
         "объясни",
@@ -418,7 +484,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 HELP SIGNALS
-    # =================================================
+    # =====================================================
 
     help_words = [
         "помоги",
@@ -446,7 +512,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 CONFUSION SIGNALS
-    # =================================================
+    # =====================================================
 
     confusion_words = [
         "не понимаю",
@@ -474,7 +540,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 FRUSTRATION SIGNALS
-    # =================================================
+    # =====================================================
 
     frustration_words = [
         "уже",
@@ -489,7 +555,7 @@ def analyze_cognition(
 
         cognition[
             "execution_pressure"
-        ] += 0.9
+        ] += 0.7
 
         cognition[
             "dialog_fatigue"
@@ -501,7 +567,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 USER LEADERSHIP DETECTION
-    # =================================================
+    # =====================================================
 
     leadership_words = [
         "вот",
@@ -546,7 +612,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 EXPLORATION MODE
-    # =================================================
+    # =====================================================
 
     exploration_words = [
         "посмотрим",
@@ -586,7 +652,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 LIGHTWEIGHT VISUAL GUIDANCE
-    # =================================================
+    # =====================================================
 
     if (
         cognition[
@@ -607,7 +673,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 DIALOG FATIGUE
-    # =================================================
+    # =====================================================
 
     if len(dialog) >= 10:
 
@@ -623,7 +689,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 RESPONSE ECONOMY
-    # =================================================
+    # =====================================================
 
     if cognition[
         "dialog_fatigue"
@@ -647,11 +713,16 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 EXECUTION MODE
-    # =================================================
+    # =====================================================
 
-    if cognition[
-        "execution_pressure"
-    ] >= 0.7:
+    if (
+        cognition[
+            "execution_pressure"
+        ] >= 0.72
+        and not cognition.get(
+            "exploration_mode"
+        )
+    ):
 
         cognition[
             "prefer_execution"
@@ -667,7 +738,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 DETAILED MODE
-    # =================================================
+    # =====================================================
 
     if cognition[
         "prefer_detailed_answer"
@@ -679,7 +750,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 ACTIVE FLOW
-    # =================================================
+    # =====================================================
 
     if active_flow:
 
@@ -703,9 +774,13 @@ def analyze_cognition(
             "protects_user_trajectory"
         ] = True
 
+        cognition[
+            "dialogue_still_alive"
+        ] = True
+
     # =================================================
     # 🔥 REASONING INHERITANCE
-    # =================================================
+    # =====================================================
 
     if reasoning:
 
@@ -729,13 +804,45 @@ def analyze_cognition(
             "user_waiting_action"
         ):
 
-            cognition[
-                "prefer_execution"
-            ] = True
+            if not cognition.get(
+                "exploration_mode"
+            ):
+
+                cognition[
+                    "prefer_execution"
+                ] = True
+
+    # =================================================
+    # 🔥 INTERNAL DIALOG ANALYSIS
+    # =====================================================
+
+    cognition[
+        "should_analyze_dialog_state"
+    ] = True
+
+    cognition[
+        "should_check_if_helpful"
+    ] = True
+
+    cognition[
+        "should_check_if_user_understood"
+    ] = True
+
+    cognition[
+        "should_check_if_goal_finished"
+    ] = True
+
+    cognition[
+        "should_continue_reasoning"
+    ] = True
+
+    cognition[
+        "should_track_meaning"
+    ] = True
 
     # =================================================
     # 🔥 DIRECTION HYPOTHESIS
-    # =================================================
+    # =====================================================
 
     hypothesis = cognition[
         "direction_hypothesis"
@@ -751,7 +858,7 @@ def analyze_cognition(
 
         hypothesis[
             "confidence"
-        ] = 0.85
+        ] = 0.82
 
         hypothesis[
             "suggest_path"
@@ -783,7 +890,7 @@ def analyze_cognition(
 
         hypothesis[
             "confidence"
-        ] = 0.85
+        ] = 0.82
 
         hypothesis[
             "suggest_path"
@@ -803,7 +910,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 EXPECTATION MISMATCH
-    # =================================================
+    # =====================================================
 
     if (
         cognition[
@@ -820,7 +927,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 PROACTIVE GUIDANCE
-    # =================================================
+    # =====================================================
 
     if (
         cognition[
@@ -841,7 +948,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 CLARIFICATION LOGIC
-    # =================================================
+    # =====================================================
 
     if (
         semantic.get(
@@ -856,7 +963,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 EMOTIONAL TRAJECTORY
-    # =================================================
+    # =====================================================
 
     if cognition[
         "is_frustrated"
@@ -884,7 +991,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 ASSISTANT RESTRAINT
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "user_leads_direction"
@@ -904,7 +1011,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 GENERATION CONTROL
-    # =================================================
+    # =====================================================
 
     if (
         cognition[
@@ -918,7 +1025,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 PSYCHOLOGICAL BALANCE
-    # =================================================
+    # =====================================================
 
     if (
         cognition[
@@ -935,7 +1042,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 VISUAL REFERENCE PRIORITY
-    # =================================================
+    # =====================================================
 
     if (
         cognition[
@@ -952,7 +1059,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 HUMAN TRAJECTORY FEELING
-    # =================================================
+    # =====================================================
 
     if cognition[
         "exploration_mode"
@@ -972,7 +1079,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 UNDERSTANDING USER GOAL
-    # =================================================
+    # =====================================================
 
     if (
         cognition["wants_action"] >= 0.5
@@ -986,7 +1093,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 APRIL PRESENCE STABILIZATION
-    # =================================================
+    # =====================================================
 
     if cognition[
         "dialog_fatigue"
@@ -1006,7 +1113,7 @@ def analyze_cognition(
 
     # =================================================
     # 🔥 FINAL NORMALIZATION
-    # =================================================
+    # =====================================================
 
     for key, value in cognition.items():
 
