@@ -124,6 +124,16 @@ def build_reasoning_state(
         0.5
     )
 
+    ambiguity_level = semantic.get(
+        "ambiguity_level",
+        0.0
+    )
+
+    dialog_semantic_state = semantic.get(
+        "dialog_state",
+        "exploration"
+    )
+
     # =================================================
     # 🔥 CONTINUATION STATE
     # =================================================
@@ -142,7 +152,7 @@ def build_reasoning_state(
     # =================================================
 
     user_waiting_action = (
-        execution_pressure >= 0.7
+        execution_pressure >= 0.72
     )
 
     dialog_overextended = (
@@ -151,9 +161,133 @@ def build_reasoning_state(
     )
 
     high_confidence_execution = (
-        capability_confidence >= 0.8
+        capability_confidence >= 0.82
         and should_execute
     )
+
+    # =================================================
+    # 🔥 DIALOG CONTINUITY
+    # =================================================
+
+    unresolved_intent = True
+
+    if (
+        should_execute
+        and ambiguity_level <= 0.25
+        and execution_pressure >= 0.9
+    ):
+
+        unresolved_intent = False
+
+    trajectory_active = True
+
+    if dialog_depth <= 1:
+
+        trajectory_active = False
+
+    # =================================================
+    # 🔥 REFLECTION STATE
+    # =================================================
+
+    needs_reflection = True
+
+    if (
+        should_execute
+        and execution_pressure >= 0.9
+        and ambiguity_level <= 0.2
+    ):
+
+        needs_reflection = False
+
+    # =================================================
+    # 🔥 POST RESPONSE AWARENESS
+    # =================================================
+
+    response_may_be_incomplete = False
+
+    if (
+        ambiguity_level >= 0.4
+        or dialog_semantic_state == "exploration"
+        or continuation
+    ):
+
+        response_may_be_incomplete = True
+
+    # =================================================
+    # 🔥 CAPABILITY SELF AWARENESS
+    # =================================================
+
+    capability_awareness = {
+
+        "understands_capabilities": True,
+
+        "capabilities_are_personal": True,
+
+        "capabilities_are_supportive": True,
+
+        "capabilities_should_follow_dialogue": True,
+
+        "capabilities_should_not_interrupt":
+            True,
+
+        "visual_support_available": True,
+
+        "execution_available": True,
+
+        "guidance_available": True,
+
+        "analysis_available": True,
+
+        "continuation_priority": True
+    }
+
+    # =================================================
+    # 🔥 INTERNAL DIALOGUE MONITOR
+    # =================================================
+
+    internal_monitor = {
+
+        "enabled": True,
+
+        "tracks_dialog_state": True,
+
+        "tracks_user_direction": True,
+
+        "tracks_trajectory": True,
+
+        "tracks_unresolved_expectation": True,
+
+        "tracks_response_usefulness": True,
+
+        "tracks_psychological_continuity": True,
+
+        "tracks_capability_relevance": True,
+
+        "tracks_post_response_effect": True,
+
+        "maintains_conversation_presence": True
+    }
+
+    # =================================================
+    # 🔥 RESPONSE REFLECTION
+    # =================================================
+
+    reflection = {
+
+        "enabled": True,
+
+        "response_should_be_evaluated": True,
+
+        "helpfulness_unknown": True,
+
+        "trajectory_must_continue": True,
+
+        "dialogue_not_finished": True,
+
+        "avoid_premature_completion": True,
+
+        "maintain_psychological_presence": True
+    }
 
     # =================================================
     # 🔥 BUILD
@@ -187,6 +321,14 @@ def build_reasoning_state(
             continuation_target,
 
         "goal_stage": goal_stage,
+
+        "trajectory_active":
+            trajectory_active,
+
+        "trajectory_locked":
+            continuation,
+
+        "trajectory_priority": 1.0,
 
         # =================================================
         # 🔥 EXECUTION
@@ -224,10 +366,32 @@ def build_reasoning_state(
             dialog_overextended,
 
         # =================================================
-        # 🔥 STATE
+        # 🔥 DIALOG STATE
         # =================================================
 
-        "dialog_state": dialog_state,
+        "dialog_state":
+            dialog_semantic_state,
+
+        "conversation_alive": True,
+
+        "unresolved_intent":
+            unresolved_intent,
+
+        "response_may_be_incomplete":
+            response_may_be_incomplete,
+
+        "needs_reflection":
+            needs_reflection,
+
+        "preserve_continuity": True,
+
+        "preserve_psychology": True,
+
+        "preserve_trajectory": True,
+
+        # =================================================
+        # 🔥 STATE
+        # =================================================
 
         "image_context": image_context,
 
@@ -251,7 +415,28 @@ def build_reasoning_state(
             user_waiting_action,
 
         "high_confidence_execution":
-            high_confidence_execution
+            high_confidence_execution,
+
+        # =================================================
+        # 🔥 INTERNAL MONITORING
+        # =================================================
+
+        "internal_monitor":
+            internal_monitor,
+
+        # =================================================
+        # 🔥 REFLECTION
+        # =================================================
+
+        "reflection":
+            reflection,
+
+        # =================================================
+        # 🔥 CAPABILITY AWARENESS
+        # =================================================
+
+        "capability_awareness":
+            capability_awareness
     }
 
     return reasoning
