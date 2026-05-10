@@ -93,6 +93,7 @@ def analyze_cognition(
         "trajectory_support": True,
         "psychological_support": True,
         "screenshot_understanding": True,
+
         # 🌐 internet cognition
         "internet_reasoning": True,
         "realtime_awareness": True,
@@ -165,42 +166,43 @@ def analyze_cognition(
         "should_proactively_help": False,
         "should_offer_direction": False,
         "should_reduce_explanation": False,
+
         # =================================================
-# 🌐 HUMAN SUPPORT LAYER
-# =====================================================
+        # 🌐 HUMAN SUPPORT LAYER
+        # =====================================================
 
-"should_help_like_human": True,
-"should_feel_reliable": True,
-"should_support_navigation": True,
-"should_reduce_uncertainty": True,
-"should_protect_user": True,
-"should_feel_grounded": True,
+        "should_help_like_human": True,
+        "should_feel_reliable": True,
+        "should_support_navigation": True,
+        "should_reduce_uncertainty": True,
+        "should_protect_user": True,
+        "should_feel_grounded": True,
 
-# =================================================
-# 🌐 INTERNET / REALTIME
-# =====================================================
+        # =================================================
+        # 🌐 INTERNET / REALTIME
+        # =====================================================
 
-"internet_context_needed": False,
-"realtime_context_needed": False,
-"travel_context_needed": False,
-"geo_context_needed": False,
-"transport_context_needed": False,
+        "internet_context_needed": False,
+        "realtime_context_needed": False,
+        "travel_context_needed": False,
+        "geo_context_needed": False,
+        "transport_context_needed": False,
 
-"needs_live_lookup": False,
-"needs_route_guidance": False,
-"needs_ticket_help": False,
-"needs_location_guidance": False,
+        "needs_live_lookup": False,
+        "needs_route_guidance": False,
+        "needs_ticket_help": False,
+        "needs_location_guidance": False,
 
-# =================================================
-# 🌐 HUMAN SUPPORT TRAJECTORY
-# =====================================================
+        # =================================================
+        # 🌐 HUMAN SUPPORT TRAJECTORY
+        # =====================================================
 
-"user_may_be_lost": False,
-"user_may_need_orientation": False,
-"user_may_need_safe_direction": False,
+        "user_may_be_lost": False,
+        "user_may_need_orientation": False,
+        "user_may_need_safe_direction": False,
 
-"assistant_should_stabilize": False,
-"assistant_should_guide_stepwise": False,
+        "assistant_should_stabilize": False,
+        "assistant_should_guide_stepwise": False,
 
         # =================================================
         # DIRECTION HYPOTHESIS
@@ -234,7 +236,7 @@ def analyze_cognition(
         # =====================================================
 
         "user_satisfaction_expected": 0.5,
-        "risk_of_bolтовня": 0.0,
+        "risk_of_boltovnya": 0.0,
         "expectation_mismatch": 0.0,
 
         # =================================================
@@ -552,71 +554,72 @@ def analyze_cognition(
         cognition[
             "should_offer_direction"
         ] = True
-        # =================================================
-# 🌐 INTERNET HUMAN SUPPORT SIGNALS
-# =====================================================
 
-travel_words = [
+    # =================================================
+    # 🌐 INTERNET HUMAN SUPPORT SIGNALS
+    # =====================================================
 
-    "где я",
-    "как добраться",
-    "как доехать",
-    "маршрут",
-    "рейс",
-    "самолет",
-    "поезд",
-    "автобус",
-    "корабль",
-    "судно",
-    "порт",
-    "аэропорт",
-    "станция",
-    "билет",
-    "карта",
-    "навигация",
-    "локация",
-    "местоположение",
-    "отель",
-    "гостиница",
-    "обмен валют",
-    "валюта",
-    "такси",
-    "где купить",
-    "где находится"
-]
+    travel_words = [
 
-if any(
-    w in t
-    for w in travel_words
-):
+        "где я",
+        "как добраться",
+        "как доехать",
+        "маршрут",
+        "рейс",
+        "самолет",
+        "поезд",
+        "автобус",
+        "корабль",
+        "судно",
+        "порт",
+        "аэропорт",
+        "станция",
+        "билет",
+        "карта",
+        "навигация",
+        "локация",
+        "местоположение",
+        "отель",
+        "гостиница",
+        "обмен валют",
+        "валюта",
+        "такси",
+        "где купить",
+        "где находится"
+    ]
 
-    cognition[
-        "internet_context_needed"
-    ] = True
+    if any(
+        w in t
+        for w in travel_words
+    ):
 
-    cognition[
-        "travel_context_needed"
-    ] = True
+        cognition[
+            "internet_context_needed"
+        ] = True
 
-    cognition[
-        "should_proactively_help"
-    ] = True
+        cognition[
+            "travel_context_needed"
+        ] = True
 
-    cognition[
-        "should_offer_direction"
-    ] = True
+        cognition[
+            "should_proactively_help"
+        ] = True
 
-    cognition[
-        "should_help_like_human"
-    ] = True
+        cognition[
+            "should_offer_direction"
+        ] = True
 
-    cognition[
-        "needs_guidance"
-    ] = True
+        cognition[
+            "should_help_like_human"
+        ] = True
 
-    cognition[
-        "human_psychology_weight"
-    ] += 0.25
+        cognition[
+            "needs_guidance"
+        ] = True
+
+        cognition[
+            "human_psychology_weight"
+        ] += 0.25
 
     # =================================================
     # 🔥 CONFUSION SIGNALS
@@ -670,7 +673,7 @@ if any(
         ] += 0.8
 
         cognition[
-            "risk_of_bolтовня"
+            "risk_of_boltovnya"
         ] += 0.8
 
     # =================================================
@@ -792,7 +795,7 @@ if any(
     if len(dialog) >= 16:
 
         cognition[
-            "risk_of_bolтовня"
+            "risk_of_boltovnya"
         ] += 0.5
 
     # =================================================
