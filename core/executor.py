@@ -663,34 +663,6 @@ async def execute(
 
     external_context = ""
 
-    try:
-
-        should_expand = (
-    should_use_external_knowledge(
-
-        text=text,
-
-        semantic=semantic,
-
-        cognition=cognition,
-
-        response_decision=response_decision
-    )
-)
-
-        if should_expand:
-
-
-            if external_context:
-
-                state[
-                    "external_context_active"
-                ] = True
-
-                print(
-                    "🌍 EXTERNAL KNOWLEDGE ENABLED"
-                )
-
     external_result = build_external_context(
 
     text=text,
