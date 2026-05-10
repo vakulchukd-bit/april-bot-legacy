@@ -666,17 +666,17 @@ async def execute(
     try:
 
         should_expand = (
-            should_use_external_knowledge(
+    should_use_external_knowledge(
 
-                text=text,
+        text=text,
 
-                semantic=semantic,
+        semantic=semantic,
 
-                cognition=cognition,
+        cognition=cognition,
 
-                state=state
-            )
-        )
+        response_decision=response_decision
+    )
+)
 
         if should_expand:
 
@@ -697,12 +697,21 @@ async def execute(
                     "🌍 EXTERNAL KNOWLEDGE ENABLED"
                 )
 
-    except Exception as e:
+    external_result = build_external_context(
 
-        print(
-            "EXTERNAL KNOWLEDGE ERROR:",
-            e
-        )
+    text=text,
+
+    semantic=semantic,
+
+    cognition=cognition,
+
+    response_decision=response_decision
+)
+
+external_context = external_result.get(
+    "content",
+    ""
+)
 
     # =================================================
     # 🧠 INTERNAL DIALOG ANALYSIS
