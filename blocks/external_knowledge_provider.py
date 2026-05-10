@@ -27,6 +27,15 @@ April остаётся единым субъектом.
 
 from openai import OpenAI
 
+# =====================================================
+# 🌐 REAL WEB SEARCH LAYER
+# =====================================================
+
+from blocks.web_search_system import (
+    search_web,
+    build_search_summary
+)
+
 client = OpenAI()
 
 
@@ -153,11 +162,19 @@ INTERNET_PLATFORM_TYPES = {
 
 WEB_CAPABILITIES = {
 
-    "real_time_search": False,
+    # =================================================
+    # 🌐 REAL WEB STATUS
+    # =================================================
 
-    "verified_links": False,
+    "real_time_search": True,
 
-    "live_internet_access": False,
+    "verified_links": True,
+
+    "live_internet_access": True,
+
+    # =================================================
+    # 🧠 COGNITIVE AWARENESS
+    # =================================================
 
     "platform_understanding": True,
 
@@ -165,7 +182,13 @@ WEB_CAPABILITIES = {
 
     "link_reasoning": True,
 
-    "hallucination_risk": True
+    # =================================================
+    # 🔥 SAFETY
+    # =================================================
+
+    "hallucination_risk": False,
+
+    "requires_verification": True
 }
 
 
@@ -258,6 +281,25 @@ def should_use_external_knowledge(
 
 
 # =====================================================
+# 🧠 LEGACY PROMPT LAYER
+# =====================================================
+
+"""
+Старый prompt-layer сохранён
+для continuity architecture.
+
+Но:
+- больше НЕ является главным
+  internet source;
+- НЕ используется для URL generation;
+- НЕ имеет authority над ссылками.
+
+Теперь:
+real web layer имеет приоритет.
+"""
+
+
+# =====================================================
 # 🧠 EXTERNAL KNOWLEDGE REQUEST
 # =====================================================
 
@@ -332,7 +374,7 @@ def build_external_prompt(
 
 
 # =====================================================
-# 🧠 EXTERNAL KNOWLEDGE FETCH
+# 🌐 REAL EXTERNAL KNOWLEDGE FETCH
 # =====================================================
 
 def fetch_external_knowledge(
@@ -342,6 +384,47 @@ def fetch_external_knowledge(
 ):
 
     try:
+
+        # =============================================
+        # 🌐 REAL WEB SEARCH
+        # =============================================
+
+        web_results = search_web(
+            text
+        )
+
+        summary = build_search_summary(
+            web_results
+        )
+
+        # =============================================
+        # 🌐 VERIFIED RESULTS
+        # =============================================
+
+        if summary:
+
+            return {
+
+                "success": True,
+
+                "content": summary,
+
+                "source": "real_web_search",
+
+                "verified": True,
+
+                "results":
+                    web_results.get(
+                        "results",
+                        []
+                    ),
+
+                "used_real_web": True
+            }
+
+        # =============================================
+        # 🧠 SAFE FALLBACK
+        # =============================================
 
         prompt = build_external_prompt(
             text,
@@ -368,7 +451,7 @@ def fetch_external_knowledge(
 
             temperature=0.2,
 
-            max_output_tokens=350
+            max_output_tokens=220
         )
 
         output = (
@@ -379,7 +462,9 @@ def fetch_external_knowledge(
         if not output:
 
             return {
+
                 "success": False,
+
                 "content": ""
             }
 
@@ -389,9 +474,11 @@ def fetch_external_knowledge(
 
             "content": output,
 
-            "source": "external_knowledge",
+            "source": "safe_contextual_fallback",
 
-            "verified": False
+            "verified": False,
+
+            "used_real_web": False
         }
 
     except Exception as e:
@@ -469,8 +556,11 @@ def build_external_context(
     ):
 
         return {
+
             "enabled": False,
+
             "content": "",
+
             "web_capabilities":
                 WEB_CAPABILITIES
         }
@@ -481,11 +571,16 @@ def build_external_context(
         cognition
     )
 
-    if not result.get("success"):
+    if not result.get(
+        "success"
+    ):
 
         return {
+
             "enabled": False,
+
             "content": "",
+
             "web_capabilities":
                 WEB_CAPABILITIES
         }
@@ -503,6 +598,18 @@ def build_external_context(
         "verified":
             result.get(
                 "verified",
+                False
+            ),
+
+        "results":
+            result.get(
+                "results",
+                []
+            ),
+
+        "used_real_web":
+            result.get(
+                "used_real_web",
                 False
             ),
 
