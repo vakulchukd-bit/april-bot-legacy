@@ -169,7 +169,7 @@ async def typing_loop(chat_id):
 
     try:
 
-        while True:
+        for _ in range(120):
 
             await bot.send_chat_action(
                 chat_id,
@@ -215,7 +215,9 @@ def run_server():
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
+        debug=False,
+        use_reloader=False
     )
 
 
@@ -449,20 +451,109 @@ async def handle(message: types.Message):
             run_with_typing
         )
 
-        if result["type"] == "text":
+        # =================================================
+        # 🧠 SAFE RESPONSE DISPATCH
+        # =================================================
+
+        result = result or {}
+
+        result_type = result.get(
+            "type",
+            "text"
+        )
+
+        result_data = result.get(
+            "data",
+            ""
+        )
+
+        # =================================================
+        # 💬 TEXT
+        # =================================================
+
+        if result_type == "text":
 
             await message.answer(
-                result["data"],
+
+                result_data,
+
                 reply_markup=main_keyboard(
                     message.message_id
                 )
             )
 
-        elif result["type"] == "image":
+        # =================================================
+        # 🖼 IMAGE
+        # =================================================
+
+        elif result_type == "image":
 
             await safe_send_image(
                 message,
-                result["data"]
+                result_data
+            )
+
+        # =================================================
+        # 🧠 HYBRID FUTURE SUPPORT
+        # =================================================
+
+        elif result_type == "hybrid":
+
+            text_part = result.get(
+                "text",
+                ""
+            )
+
+            image_part = result.get(
+                "image"
+            )
+
+            if text_part:
+
+                await message.answer(
+
+                    text_part,
+
+                    reply_markup=main_keyboard(
+                        message.message_id
+                    )
+                )
+
+            if image_part:
+
+                await safe_send_image(
+                    message,
+                    image_part
+                )
+
+        # =================================================
+        # 🌐 REFERENCE / WEB SUPPORT
+        # =================================================
+
+        elif result_type == "reference":
+
+            await message.answer(
+
+                result_data,
+
+                reply_markup=main_keyboard(
+                    message.message_id
+                )
+            )
+
+        # =================================================
+        # ⚠️ SAFE UNKNOWN RESPONSE
+        # =================================================
+
+        else:
+
+            await message.answer(
+
+                str(result_data),
+
+                reply_markup=main_keyboard(
+                    message.message_id
+                )
             )
 
     except Exception as e:
@@ -655,13 +746,6 @@ async def handle_callbacks(
                 )
             ],
 
-            #[
-                #InlineKeyboardButton(
-                    #text="🍎 iPhone • Apple Pay",
-                    #url=f"{CHECKOUT_DOMAIN}/open/lite/{user_id}"
-                #)
-            #]
-
         ]
     )
 
@@ -696,13 +780,6 @@ async def handle_callbacks(
                     url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
                 )
             ],
-
-            #[
-                #InlineKeyboardButton(
-                   # text="🍎 iPhone • Apple Pay",
-                   # url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
-                #)
-            #]
 
         ]
     )
