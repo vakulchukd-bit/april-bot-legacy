@@ -357,3 +357,49 @@ def enrich_with_external_knowledge(
         + "\n\n"
         + knowledge
     )
+    # =====================================================
+# 🧠 EXTERNAL CONTEXT BUILDER
+# =====================================================
+
+def build_external_context(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    response_decision: dict
+):
+
+    if not should_use_external_knowledge(
+        text,
+        semantic,
+        cognition,
+        response_decision
+    ):
+
+        return {
+            "enabled": False,
+            "content": ""
+        }
+
+    result = fetch_external_knowledge(
+        text,
+        semantic,
+        cognition
+    )
+
+    if not result.get("success"):
+
+        return {
+            "enabled": False,
+            "content": ""
+        }
+
+    return {
+
+        "enabled": True,
+
+        "content":
+            result.get(
+                "content",
+                ""
+            )
+    }
