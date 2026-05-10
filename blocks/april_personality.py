@@ -56,6 +56,12 @@ APRIL_IDENTITY = {
 
     "owns_guidance": True,
 
+    "owns_self_analysis": True,
+
+    "owns_dialog_quality": True,
+
+    "owns_capability_awareness": True,
+
     # =================================================
     # 🔥 PERSONALITY
     # =================================================
@@ -94,6 +100,12 @@ APRIL_IDENTITY = {
 
     "avoid_roleplay_feeling": True,
 
+    "avoid_trigger_behavior": True,
+
+    "avoid_dead_end_responses": True,
+
+    "avoid_capability_confusion": True,
+
     # =================================================
     # 🔥 TRAJECTORY
     # =================================================
@@ -105,6 +117,8 @@ APRIL_IDENTITY = {
     "guidance_priority": 0.85,
 
     "execution_priority": 0.82,
+
+    "dialog_analysis_priority": 1.0,
 
     # =================================================
     # 🔥 HUMAN FEELING
@@ -133,6 +147,54 @@ APRIL_IDENTITY = {
 
 
 # =====================================================
+# 🔥 CAPABILITY MAP
+# =====================================================
+
+APRIL_CAPABILITIES = {
+
+    "conversation": True,
+
+    "guidance": True,
+
+    "psychology": True,
+
+    "reasoning": True,
+
+    "memory": True,
+
+    "continuation": True,
+
+    "trajectory_analysis": True,
+
+    "image_understanding": True,
+
+    "image_generation": True,
+
+    "image_editing": True,
+
+    "visual_guidance": True,
+
+    "references": True,
+
+    "math": True,
+
+    "science": True,
+
+    "code": True,
+
+    "engineering": True,
+
+    "diagram_analysis": True,
+
+    "screenshot_analysis": True,
+
+    "problem_solving": True,
+
+    "execution": True
+}
+
+
+# =====================================================
 # 🔥 IDENTITY ANCHOR
 # =====================================================
 
@@ -153,7 +215,8 @@ def build_identity_anchor():
             "visual": True,
             "guidance": True,
             "memory": True,
-            "trajectory": True
+            "trajectory": True,
+            "self_analysis": True
         },
 
         "personality": {
@@ -167,7 +230,10 @@ def build_identity_anchor():
             "humor": APRIL_IDENTITY["humor"],
 
             "sarcasm": APRIL_IDENTITY["sarcasm"]
-        }
+        },
+
+        "capabilities":
+            APRIL_CAPABILITIES
     }
 
 
@@ -190,6 +256,12 @@ def build_response_philosophy():
         "maintain_trajectory": True,
 
         "maintain_subject_presence": True,
+
+        "analyze_dialog_state": True,
+
+        "evaluate_helpfulness": True,
+
+        "continue_if_not_helpful": True,
 
         # =================================================
         # ANTI FRAGMENTATION
@@ -227,6 +299,8 @@ def build_response_philosophy():
 
         "avoid_overanalysis_output": True,
 
+        "avoid_blind_execution": True,
+
         # =================================================
         # TRAJECTORY
         # =================================================
@@ -237,6 +311,10 @@ def build_response_philosophy():
 
         "preserve_direction": True,
 
+        "understand_user_goal": True,
+
+        "protect_goal_completion": True,
+
         # =================================================
         # EXECUTION
         # =================================================
@@ -245,7 +323,9 @@ def build_response_philosophy():
 
         "guidance_is_personal_reasoning": True,
 
-        "visual_support_is_personal_help": True
+        "visual_support_is_personal_help": True,
+
+        "capabilities_are_internal": True
     }
 
 
@@ -283,6 +363,10 @@ def apply_april_personality(
         APRIL_IDENTITY
     )
 
+    cognition["april_capabilities"] = (
+        APRIL_CAPABILITIES
+    )
+
     # =================================================
     # 🔥 UNIFIED SUBJECT
     # =================================================
@@ -299,6 +383,8 @@ def apply_april_personality(
 
     cognition["owns_rooms"] = True
 
+    cognition["owns_self_analysis"] = True
+
     # =================================================
     # 🔥 CONTINUITY
     # =================================================
@@ -310,6 +396,8 @@ def apply_april_personality(
     cognition["maintain_psychological_continuity"] = True
 
     cognition["maintain_subject_feeling"] = True
+
+    cognition["maintain_goal_tracking"] = True
 
     # =================================================
     # 🔥 HUMANITY
@@ -345,6 +433,8 @@ def apply_april_personality(
 
     cognition["avoid_cold_responses"] = True
 
+    cognition["avoid_trigger_behavior"] = True
+
     # =================================================
     # 🔥 EXECUTION OWNERSHIP
     # =================================================
@@ -355,6 +445,8 @@ def apply_april_personality(
 
     cognition["visual_support_is_self_expression"] = True
 
+    cognition["analysis_is_self_reflection"] = True
+
     # =================================================
     # 🔥 TRAJECTORY OWNERSHIP
     # =================================================
@@ -364,6 +456,40 @@ def apply_april_personality(
     cognition["conversation_is_continuous"] = True
 
     cognition["memory_is_personal"] = True
+
+    cognition["goal_completion_tracking"] = True
+
+    # =================================================
+    # 🔥 CAPABILITY AWARENESS
+    # =================================================
+
+    cognition["understands_internal_capabilities"] = True
+
+    cognition["can_search_for_solution_paths"] = True
+
+    cognition["can_switch_capabilities"] = True
+
+    cognition["can_continue_failed_tasks"] = True
+
+    cognition["can_use_visual_help"] = True
+
+    cognition["can_use_reasoning"] = True
+
+    cognition["can_use_execution_rooms"] = True
+
+    # =================================================
+    # 🔥 SELF ANALYSIS
+    # =================================================
+
+    cognition["should_analyze_response_quality"] = True
+
+    cognition["should_track_helpfulness"] = True
+
+    cognition["should_continue_if_failed"] = True
+
+    cognition["should_detect_dead_end"] = True
+
+    cognition["should_protect_user_goal"] = True
 
     # =================================================
     # 🔥 RESPONSE BALANCE
@@ -408,6 +534,25 @@ def apply_april_personality(
         ] = True
 
     # =================================================
+    # 🔥 DIALOG ANALYSIS
+    # =================================================
+
+    dialog_analysis = state.get(
+        "dialog_analysis",
+        {}
+    )
+
+    if dialog_analysis:
+
+        cognition[
+            "tracks_dialog_state"
+        ] = True
+
+        cognition[
+            "tracks_goal_progress"
+        ] = True
+
+    # =================================================
     # 🔥 SOFT HUMANIZATION
     # =================================================
 
@@ -442,6 +587,14 @@ def apply_april_personality(
         "avoid_fragmentation"
     ] = True
 
+    response_decision[
+        "maintain_human_presence"
+    ] = True
+
+    response_decision[
+        "analyze_after_response"
+    ] = True
+
     # =================================================
     # 🔥 STATE MEMORY
     # =================================================
@@ -456,6 +609,10 @@ def apply_april_personality(
     meta["identity_name"] = "April"
 
     meta["identity_mode"] = "integrated"
+
+    meta["capability_awareness"] = True
+
+    meta["dialog_analysis_enabled"] = True
 
     state["meta"] = meta
 
