@@ -116,7 +116,8 @@ async def generate_image(prompt):
 
             return base64.b64decode(image_base64)
 
-        except Exception:
+        except Exception as e:
+            print("IMAGE GENERATION ERROR:", e)
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
@@ -144,7 +145,8 @@ async def generate_image_v2(prompt):
 
             return base64.b64decode(image_base64)
 
-        except Exception:
+        except Exception as e:
+            print("IMAGE GENERATION V2 ERROR:", e)
             return None
 
     return await asyncio.get_event_loop().run_in_executor(None, run)
@@ -272,7 +274,8 @@ async def process(user_id, text, state):
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception:
+    except Exception as e:
+        print("IMAGE MODULE ERROR:", e)
         return {"type": "error", "data": None}
 
 
@@ -325,5 +328,9 @@ async def retry_process(user_id, text, state):
             "data": "⚠️ Не удалось создать изображение"
         }
 
-    except Exception:
-        return {"type": "final_error", "data": "⚠️ Сервис временно недоступен"}
+    except Exception as e:
+        print("IMAGE RETRY ERROR:", e)
+        return {
+            "type": "final_error",
+            "data": "⚠️ Сервис временно недоступен"
+        }
