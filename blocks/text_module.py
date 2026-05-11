@@ -1006,7 +1006,9 @@ async def process(
                 + str(e)
             )
 
-    reply = await run()
+    reply = await asyncio.to_thread(
+    lambda: asyncio.run(run())
+)
 
     if "```" in reply:
 
