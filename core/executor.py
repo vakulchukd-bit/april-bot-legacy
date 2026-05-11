@@ -2,6 +2,28 @@
 # 🧠 APRIL EXECUTOR
 # =====================================================
 
+"""
+APRIL AUTHORITY PRIORITY
+
+Executor не является
+финальной властью.
+
+Final authority:
+принадлежит April.
+
+Если April определила:
+- capability path,
+- execution route,
+- visual obligation,
+- science,
+- web,
+- image,
+- continuation,
+
+executor обязан
+приоритезировать решение April
+над fallback routing.
+"""
 from blocks.intent_resolver import resolve_input
 
 from blocks.response_mode import detect_response_mode
