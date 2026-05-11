@@ -1164,22 +1164,6 @@ async def execute(
                 # 🔥 APRIL AUTHORITY REVIEW
                 # =============================================
 
-                authority_confidence = (
-                    evaluate_intention_confidence(
-
-                        text=text,
-
-                        result=result,
-
-                        semantic=semantic,
-
-                        cognition=cognition
-                    )
-                )
-
-                state[
-                    "authority_confidence"
-                ] = authority_confidence
 
                 override_required = (
                      should_override(
