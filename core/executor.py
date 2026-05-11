@@ -1174,8 +1174,7 @@ async def execute(
 
                          cognition=cognition,
 
-                         response_decision=
-                             response_decision
+                         state=state
                     )
                 )
 
