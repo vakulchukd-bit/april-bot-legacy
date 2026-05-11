@@ -1160,6 +1160,48 @@ async def execute(
                         cognition
                     )
                 )
+                # =============================================
+                # 🔥 APRIL AUTHORITY REVIEW
+                # =============================================
+
+                authority_confidence = (
+                    evaluate_intention_confidence(
+
+                        text=text,
+
+                        result=result,
+
+                        semantic=semantic,
+
+                        cognition=cognition
+                    )
+                )
+
+                state[
+                    "authority_confidence"
+                ] = authority_confidence
+
+                override_required = (
+                    should_override(
+
+                        confidence=
+                            authority_confidence,
+
+                        result=result,
+
+                        semantic=semantic,
+
+                        cognition=cognition
+                    )
+                )
+
+                if override_required:
+
+                    print(
+                        "🧠 APRIL AUTHORITY OVERRIDE"
+                    )
+
+                    continue
 
                 state[
                     "last_response_quality"
