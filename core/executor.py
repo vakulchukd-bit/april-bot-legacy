@@ -707,6 +707,24 @@ async def execute(
     # 🧠 RESPONSE DECISION
     # =================================================
 
+    forced_room = response_decision.get(
+        "forced_room"
+    )
+
+    if forced_room:
+
+        semantic["room"] = forced_room
+
+        semantic["should_execute"] = True
+
+        semantic["best_capability"] = (
+            forced_room
+        )
+
+        print(
+            "🔥 APRIL FORCED ROOM:",
+            forced_room
+        )
     final_action = response_decision.get(
         "final_action",
         "talk"
