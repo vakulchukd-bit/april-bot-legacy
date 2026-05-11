@@ -188,6 +188,46 @@ async def process(user_id, text, state):
     try:
         prompt = clean_prompt(text)
         prompt = extract_image_prompt(prompt)
+        # ==========================================
+        # 🔥 SAFE IMAGE PROMPT
+        # ==========================================
+
+        prompt = prompt.replace("\n", " ")
+
+        banned = [
+
+            "april",
+            "personality",
+            "психология",
+            "характер",
+            "эмоции",
+            "диалог",
+            "roleplay",
+            "system",
+            "assistant",
+            "user",
+            "conversation",
+            "memory",
+            "context"
+        ]
+
+        cleaned = []
+
+        for word in prompt.split():
+
+            low = word.lower()
+
+            if any(
+                b in low
+                for b in banned
+            ):
+                continue
+
+            cleaned.append(word)
+
+        prompt = " ".join(cleaned)
+
+        prompt = prompt[:400].strip()
 
         # 🔥 PATCH: добавили контекст (НЕ ломает старую логику)
         if state.get("image_context", {}).get("hint"):
