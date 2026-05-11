@@ -54,8 +54,6 @@ from blocks.april_authority import (
 
     build_authority_state,
 
-    evaluate_intention_confidence,
-
     should_override
 )
 
