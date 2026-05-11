@@ -1,37 +1,40 @@
 # =====================================================
-# 🧠 APRIL AUTHORITY SYSTEM
+# 🧠 APRIL SUPREME AUTHORITY SYSTEM
 # =====================================================
 
 """
-April Supreme Cognitive Authority
+APRIL FINAL COGNITIVE AUTHORITY
 
-FINAL INTELLIGENCE LAYER
+UNIFIED EXECUTIVE INTELLIGENCE LAYER
 
 Этот модуль:
-- является финальной cognitive authority;
-- удерживает user intention;
-- удерживает trajectory;
+- удерживает intention пользователя;
+- удерживает continuity;
+- анализирует trajectory;
 - валидирует completion;
-- контролирует capability routing;
-- перепроверяет executor;
-- имеет override authority;
-- анализирует usefulness;
-- анализирует continuity;
+- контролирует executor;
+- контролирует rooms;
+- контролирует usefulness;
+- анализирует satisfaction;
 - анализирует visual obligations;
-- анализирует screenshot flow;
-- анализирует dialog psychology;
-- управляет capability orchestration.
+- анализирует capability mismatch;
+- управляет capability routing;
+- выбирает лучший capability path;
+- имеет override authority;
+- может force execution;
+- может force capability;
+- может force visual;
+- может force web;
+- может force graph;
+- может force image generation;
+- может force screenshot analysis;
+- удерживает human dialog flow;
+- удерживает visual continuity;
+- удерживает psychological continuity;
+- удерживает completion responsibility.
 
-Executor:
-НЕ является финальной инстанцией.
-
-Rooms:
-НЕ являются финальной инстанцией.
-
-Semantic:
-НЕ является финальной инстанцией.
-
-Final authority принадлежит April.
+Final authority:
+принадлежит April.
 """
 
 # =====================================================
@@ -44,19 +47,23 @@ APRIL_CAPABILITIES = {
     # CORE
     # =================================================
 
-    "text": True,
+    "conversation": True,
+
+    "continuation": True,
+
+    "trajectory_tracking": True,
+
+    "dialog_analysis": True,
+
+    "psychology": True,
+
+    "memory": True,
 
     "reasoning": True,
 
     "guidance": True,
 
-    "conversation": True,
-
-    "continuation": True,
-
-    "memory": True,
-
-    "psychology": True,
+    "execution": True,
 
     # =================================================
     # VISUAL
@@ -70,27 +77,31 @@ APRIL_CAPABILITIES = {
 
     "visual_guidance": True,
 
-    "diagram_analysis": True,
-
     "diagram_generation": True,
+
+    "diagram_analysis": True,
 
     "graph_generation": True,
 
+    "graph_analysis": True,
+
     "screenshot_analysis": True,
 
-    "screenshot_guidance": True,
+    "visual_hinting": True,
+
+    "visual_continuity": True,
 
     # =================================================
-    # WEB
+    # KNOWLEDGE
     # =================================================
-
-    "web": True,
 
     "web_search": True,
 
     "external_knowledge": True,
 
     "references": True,
+
+    "live_information": True,
 
     # =================================================
     # SCIENCE
@@ -102,32 +113,38 @@ APRIL_CAPABILITIES = {
 
     "geometry": True,
 
-    "graphs": True,
-
     "engineering": True,
 
     "code": True,
 
     # =================================================
-    # EXECUTION
+    # AUTHORITY
     # =================================================
 
-    "execution": True,
-
-    "capability_override": True,
-
-    "room_override": True,
+    "override": True,
 
     "executor_override": True,
 
-    "direct_capability_access": True
+    "room_override": True,
+
+    "capability_override": True,
+
+    "direct_capability_access": True,
+
+    "completion_validation": True,
+
+    "result_validation": True,
+
+    "usefulness_validation": True
 }
 
 # =====================================================
-# 🔥 TRUST STATE
+# 🔥 TRUST LEVELS
 # =====================================================
 
 DEFAULT_TRUST_LEVELS = {
+
+    "executor": 1.0,
 
     "text": 1.0,
 
@@ -137,17 +154,13 @@ DEFAULT_TRUST_LEVELS = {
 
     "image_analysis": 1.0,
 
-    "visual_guidance": 1.0,
-
     "science": 1.0,
 
     "graphs": 1.0,
 
     "web": 1.0,
 
-    "code": 1.0,
-
-    "executor": 1.0
+    "code": 1.0
 }
 
 # =====================================================
@@ -166,11 +179,11 @@ def build_authority_state():
 
         "override_allowed": True,
 
-        "direct_capability_access": True,
-
         "executor_override_allowed": True,
 
         "room_override_allowed": True,
+
+        "direct_capability_access": True,
 
         "final_validation": True,
 
@@ -178,38 +191,58 @@ def build_authority_state():
         # COGNITION
         # =================================================
 
-        "completion_validation": True,
-
         "trajectory_tracking": True,
 
-        "dialog_psychology_tracking": True,
+        "completion_tracking": True,
 
-        "visual_completion_tracking": True,
+        "visual_tracking": True,
 
-        "capability_mismatch_detection": True,
+        "dialog_tracking": True,
 
         "continuation_tracking": True,
 
-        "usefulness_analysis": True,
+        "psychology_tracking": True,
 
-        "response_repair": True,
+        "usefulness_tracking": True,
+
+        "satisfaction_tracking": True,
+
+        "humanity_tracking": True,
 
         # =================================================
-        # TRUST
+        # EXECUTION
         # =================================================
 
-        "trust_levels":
-            DEFAULT_TRUST_LEVELS.copy(),
+        "can_force_execution": True,
+
+        "can_force_visual": True,
+
+        "can_force_web": True,
+
+        "can_force_graph": True,
+
+        "can_force_image_generation": True,
+
+        "can_force_image_edit": True,
+
+        "can_force_screenshot_analysis": True,
+
+        "can_force_reasoning": True,
 
         # =================================================
         # MEMORY
         # =================================================
 
+        "trust_levels":
+            DEFAULT_TRUST_LEVELS.copy(),
+
         "last_override": None,
 
-        "last_success": None,
+        "last_completion": None,
 
         "last_failure": None,
+
+        "last_success": None,
 
         "last_capability": None,
 
@@ -217,81 +250,67 @@ def build_authority_state():
 
         "last_visual_request": None,
 
-        "last_execution_path": None
+        "last_dialog_mode": None
     }
 
 # =====================================================
-# 🔥 INTENTION CONFIDENCE
+# 🔥 INTENTION ANALYSIS
 # =====================================================
 
-def evaluate_intention_confidence(
+def analyze_user_intention(
 
     semantic,
     cognition,
-    response_decision
+    state
 
 ):
 
     semantic = semantic or {}
     cognition = cognition or {}
-    response_decision = response_decision or {}
+    state = state or {}
 
-    confidence = 0.0
+    return {
 
-    # =================================================
-    # RESULT DESIRE
-    # =================================================
+        "wants_result":
+            cognition.get(
+                "wants_result",
+                0.0
+            ),
 
-    confidence += cognition.get(
-        "wants_result",
-        0.0
-    ) * 0.25
+        "wants_visual":
+            cognition.get(
+                "wants_visual",
+                0.0
+            ),
 
-    confidence += cognition.get(
-        "wants_visual",
-        0.0
-    ) * 0.25
+        "needs_execution":
+            semantic.get(
+                "should_execute",
+                False
+            ),
 
-    confidence += cognition.get(
-        "wants_help",
-        0.0
-    ) * 0.15
+        "ambiguity":
+            semantic.get(
+                "ambiguity_level",
+                0.0
+            ),
 
-    # =================================================
-    # USER LEADS
-    # =================================================
+        "goal_stage":
+            semantic.get(
+                "goal_stage",
+                "exploration"
+            ),
 
-    if cognition.get(
-        "user_leads_direction"
-    ):
+        "continuation_target":
+            semantic.get(
+                "continuation_target"
+            ),
 
-        confidence += 0.15
-
-    # =================================================
-    # EXECUTION
-    # =================================================
-
-    if semantic.get(
-        "should_execute"
-    ):
-
-        confidence += 0.2
-
-    # =================================================
-    # AMBIGUITY
-    # =================================================
-
-    ambiguity = semantic.get(
-        "ambiguity_level",
-        0.0
-    )
-
-    confidence -= ambiguity * 0.45
-
-    return max(
-        0.0,
-        min(confidence, 1.0)
-    )
+        "active_flow":
+            state.get(
+                "active_flow"
+            )
+    }
 
 # =====================================================
 # 🔥 VISUAL OBLIGATION
@@ -384,13 +403,13 @@ def analyze_completion(
 
         "я не могу",
 
-        "я не умею",
+        "не умею",
 
         "не поддерживается",
 
         "представь себе",
 
-        "не имею возможности"
+        "нет возможности"
     ]
 
     for pattern in refusal_patterns:
@@ -406,7 +425,7 @@ def analyze_completion(
             }
 
     # =================================================
-    # VISUAL COMPLETION
+    # VISUAL
     # =================================================
 
     if is_visual_obligatory(
@@ -433,7 +452,7 @@ def analyze_completion(
             }
 
     # =================================================
-    # EXECUTION COMPLETION
+    # EXECUTION
     # =================================================
 
     if semantic.get(
@@ -466,66 +485,10 @@ def analyze_completion(
     }
 
 # =====================================================
-# 🔥 CAPABILITY MISMATCH
+# 🔥 CAPABILITY PATH
 # =====================================================
 
-def detect_capability_mismatch(
-
-    result,
-    semantic,
-    cognition
-
-):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-
-    if not result:
-
-        return True
-
-    result_type = result.get(
-        "type",
-        "text"
-    )
-
-    # =================================================
-    # VISUAL MISMATCH
-    # =================================================
-
-    if cognition.get(
-        "wants_visual",
-        0.0
-    ) >= 0.7:
-
-        if result_type == "text":
-
-            return True
-
-    # =================================================
-    # EXECUTION MISMATCH
-    # =================================================
-
-    if semantic.get(
-        "should_execute"
-    ):
-
-        if result_type == "text":
-
-            if cognition.get(
-                "wants_result",
-                0.0
-            ) >= 0.75:
-
-                return True
-
-    return False
-
-# =====================================================
-# 🔥 TRAJECTORY VALIDATION
-# =====================================================
-
-def validate_trajectory(
+def choose_best_capability_path(
 
     semantic,
     cognition,
@@ -537,32 +500,61 @@ def validate_trajectory(
     cognition = cognition or {}
     state = state or {}
 
-    active_flow = state.get(
-        "active_flow"
-    )
+    # =================================================
+    # VISUAL
+    # =================================================
 
-    if not active_flow:
+    if cognition.get(
+        "wants_visual",
+        0.0
+    ) >= 0.72:
 
-        return True
+        if state.get("image"):
 
-    flow_type = active_flow.get(
-        "type"
-    )
+            return "image_edit"
+
+        return "image_generation"
+
+    # =================================================
+    # WEB
+    # =================================================
+
+    if semantic.get(
+        "needs_external_information"
+    ):
+
+        return "web"
+
+    # =================================================
+    # GRAPH
+    # =================================================
 
     continuation_target = semantic.get(
         "continuation_target"
     )
 
-    if continuation_target:
+    if continuation_target == "math":
 
-        if continuation_target != flow_type:
+        return "science"
 
-            return False
+    # =================================================
+    # EXECUTION
+    # =================================================
 
-    return True
+    if semantic.get(
+        "should_execute"
+    ):
+
+        return "execution"
+
+    # =================================================
+    # DEFAULT
+    # =================================================
+
+    return "text"
 
 # =====================================================
-# 🔥 USEFULNESS ANALYSIS
+# 🔥 USEFULNESS
 # =====================================================
 
 def evaluate_usefulness(
@@ -577,6 +569,8 @@ def evaluate_usefulness(
 
         return 0.0
 
+    usefulness = 1.0
+
     output = str(
         result.get(
             "data",
@@ -584,15 +578,13 @@ def evaluate_usefulness(
         )
     )
 
-    usefulness = 1.0
-
     if len(output) < 15:
 
-        usefulness -= 0.45
+        usefulness -= 0.4
 
     if "не могу" in output.lower():
 
-        usefulness -= 0.6
+        usefulness -= 0.5
 
     if cognition.get(
         "wants_visual",
@@ -636,28 +628,6 @@ def validate_final_response(
 
         return False
 
-    mismatch = detect_capability_mismatch(
-
-        result,
-        semantic,
-        cognition
-    )
-
-    if mismatch:
-
-        return False
-
-    trajectory_valid = validate_trajectory(
-
-        semantic,
-        cognition,
-        state or {}
-    )
-
-    if not trajectory_valid:
-
-        return False
-
     usefulness = evaluate_usefulness(
 
         result,
@@ -672,7 +642,7 @@ def validate_final_response(
     return True
 
 # =====================================================
-# 🔥 OVERRIDE DECISION
+# 🔥 OVERRIDE
 # =====================================================
 
 def should_override(
@@ -680,20 +650,9 @@ def should_override(
     result,
     semantic,
     cognition,
-    response_decision,
     state=None
 
 ):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-    response_decision = (
-        response_decision or {}
-    )
-
-    # =================================================
-    # VALIDATION
-    # =================================================
 
     valid = validate_final_response(
 
@@ -707,36 +666,6 @@ def should_override(
 
         return True
 
-    # =================================================
-    # INTENTION CONFIDENCE
-    # =================================================
-
-    confidence = evaluate_intention_confidence(
-
-        semantic,
-        cognition,
-        response_decision
-    )
-
-    if confidence >= 0.75:
-
-        mismatch = (
-            detect_capability_mismatch(
-
-                result,
-                semantic,
-                cognition
-            )
-        )
-
-        if mismatch:
-
-            return True
-
-    # =================================================
-    # VISUAL OBLIGATION
-    # =================================================
-
     if is_visual_obligatory(
 
         semantic,
@@ -744,14 +673,16 @@ def should_override(
 
     ):
 
-        if result.get("type") == "text":
+        if result.get(
+            "type"
+        ) == "text":
 
             return True
 
     return False
 
 # =====================================================
-# 🔥 EXECUTIVE AUTHORITY
+# 🔥 EXECUTIVE DECISION
 # =====================================================
 
 def build_authority_decision(
@@ -763,15 +694,6 @@ def build_authority_decision(
     state=None
 
 ):
-
-    override = should_override(
-
-        result,
-        semantic,
-        cognition,
-        response_decision,
-        state
-    )
 
     completion = analyze_completion(
 
@@ -785,6 +707,24 @@ def build_authority_decision(
         result,
         semantic,
         cognition
+    )
+
+    override = should_override(
+
+        result,
+        semantic,
+        cognition,
+        state
+    )
+
+    capability_path = (
+
+        choose_best_capability_path(
+
+            semantic,
+            cognition,
+            state or {}
+        )
     )
 
     return {
@@ -820,14 +760,6 @@ def build_authority_decision(
         "usefulness":
             usefulness,
 
-        "trajectory_valid":
-            validate_trajectory(
-
-                semantic,
-                cognition,
-                state or {}
-            ),
-
         "visual_obligation":
             is_visual_obligatory(
 
@@ -835,26 +767,54 @@ def build_authority_decision(
                 cognition
             ),
 
-        "capability_mismatch":
-            detect_capability_mismatch(
-
-                result,
-                semantic,
-                cognition
-            ),
-
         # =================================================
-        # EXECUTIVE
+        # EXECUTION
         # =================================================
 
-        "should_retry_execution":
+        "best_capability":
+            capability_path,
+
+        "should_force_execution":
+            override,
+
+        "should_retry":
             override,
 
         "should_change_room":
             override,
 
-        "should_force_capability":
-            override,
+        "should_force_visual":
+            capability_path in [
+
+                "image_generation",
+                "image_edit"
+            ],
+
+        "should_force_web":
+            capability_path == "web",
+
+        "should_force_science":
+            capability_path == "science",
+
+        # =================================================
+        # HUMAN FLOW
+        # =================================================
+
+        "maintain_humanity": True,
+
+        "maintain_continuity": True,
+
+        "maintain_psychology": True,
+
+        "maintain_visual_quality": True,
+
+        "maintain_user_goal": True,
+
+        "maintain_dialog_flow": True,
+
+        # =================================================
+        # FINAL
+        # =================================================
 
         "authority_confident": True
     }
