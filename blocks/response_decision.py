@@ -138,6 +138,60 @@ def build_response_decision(
 
         "response_requires_psychology_check": True
     }
+    # =====================================================
+    # 🔥 APRIL MASTER AUTHORITY
+    # =====================================================
+
+    result["visual_obligation"] = False
+
+    result["forced_room"] = None
+
+    result["forced_action"] = None
+
+
+    # =====================================================
+    # 🔥 APRIL GLOBAL DECISION
+    # =====================================================
+
+    if (
+
+        cognition.get(
+            "prefer_visual"
+        )
+
+        or cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.45
+
+        or cognition.get(
+            "visual_imagination",
+            0.0
+        ) >= 0.45
+
+        or cognition.get(
+            "wants_result",
+            0.0
+        ) >= 0.72
+    ):
+
+        result["final_action"] = (
+            "generate"
+        )
+
+        result["forced_action"] = (
+            "generate"
+        )
+
+        result["forced_room"] = (
+            "image_generate"
+        )
+
+        result["visual_obligation"] = True
+
+        result["should_generate"] = True
+
+        result["generation_allowed"] = True
 
     # =====================================================
     # 🔥 EXECUTION PRESSURE
