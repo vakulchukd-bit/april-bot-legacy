@@ -25,6 +25,24 @@ import re
 
 
 # =====================================================
+# 🔥 SAFE FORMAT PATCH
+# =====================================================
+
+FORMAT_PATCH_LOG = []
+
+def safe_format_log(msg):
+
+    try:
+
+        print("FORMAT PATCH:", msg)
+
+        FORMAT_PATCH_LOG.append(msg)
+
+    except:
+        pass
+
+
+# =====================================================
 # 🔥 EMOJI MAP
 # =====================================================
 
@@ -233,6 +251,78 @@ def extract_urls(
 
 
 # =====================================================
+# 🔥 CRITICAL CONTENT DETECTION
+# =====================================================
+
+def is_code_content(text: str):
+
+    if not text:
+        return False
+
+    checks = [
+
+        "```",
+        "<!DOCTYPE html>",
+        "<html",
+        "def ",
+        "import ",
+        "class "
+    ]
+
+    return any(
+        x in text
+        for x in checks
+    )
+
+
+def is_realtime_content(text: str):
+
+    if not text:
+        return False
+
+    t = text.lower()
+
+    realtime_words = [
+
+        "live",
+        "realtime",
+        "tracking",
+        "маршрут",
+        "координаты",
+        "где находится",
+        "рейс",
+        "судно",
+        "самолет",
+        "поезд",
+        "карта"
+    ]
+
+    return any(
+        x in t
+        for x in realtime_words
+    )
+
+
+def already_formatted(text: str):
+
+    if not text:
+        return False
+
+    checks = [
+
+        "━━━",
+        "▶️ YouTube:",
+        "📨 Telegram:",
+        "💻 GitHub:"
+    ]
+
+    return any(
+        x in text
+        for x in checks
+    )
+
+
+# =====================================================
 # 🧠 KEYWORD EMOJI DETECTION
 # =====================================================
 
@@ -301,6 +391,9 @@ def beautify_links(text: str):
 
     text = text or ""
 
+    if already_formatted(text):
+        return text
+
     urls = extract_urls(
         text
     )
@@ -309,6 +402,9 @@ def beautify_links(text: str):
         return text
 
     for url in urls:
+
+        if "\n" + url in text:
+            continue
 
         card = build_link_card(
             url
@@ -434,6 +530,36 @@ def build_smart_presentation(
     text = (text or "").strip()
 
     if not text:
+        return text
+
+    # =================================================
+    # 🔥 SAFE CRITICAL CONTENT
+    # =====================================================
+
+    if is_code_content(text):
+
+        safe_format_log(
+            "CODE CONTENT SKIPPED"
+        )
+
+        return text
+
+    if is_realtime_content(text):
+
+        safe_format_log(
+            "REALTIME CONTENT LIGHT MODE"
+        )
+
+        return apply_light_formatting(
+            text
+        )
+
+    if already_formatted(text):
+
+        safe_format_log(
+            "DOUBLE FORMAT BLOCKED"
+        )
+
         return text
 
     # =================================================
