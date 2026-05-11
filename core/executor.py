@@ -1,3 +1,7 @@
+# =====================================================
+# 🧠 APRIL EXECUTOR
+# =====================================================
+
 from blocks.intent_resolver import resolve_input
 
 from blocks.response_mode import detect_response_mode
@@ -48,13 +52,17 @@ from blocks.response_decision import (
 )
 
 # =====================================================
-# 🔥 NEW MODULES
+# 🔥 EXTERNAL KNOWLEDGE
 # =====================================================
 
 from blocks.external_knowledge_provider import (
     should_use_external_knowledge,
     build_external_context
 )
+
+# =====================================================
+# 🔥 PRESENTATION
+# =====================================================
 
 from blocks.presentation_formatter import (
     format_response_presentation
@@ -90,8 +98,13 @@ from blocks.interpretation_layer import (
     interpret_request
 )
 
+import traceback
 import re
 
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
 
 PATCH_LOG = []
 
@@ -104,9 +117,9 @@ def safe_patch_log(msg):
 
         PATCH_LOG.append(msg)
 
-    except:
+    except Exception as e:
 
-        pass
+        print("PATCH LOG ERROR:", e)
 
 
 def patch_executor_start(
@@ -212,7 +225,7 @@ def evaluate_response_quality(
 
 
 # =====================================================
-# 🧠 EXECUTION ERROR REFLECTION
+# 🧠 EXECUTION FAILURE ANALYSIS
 # =====================================================
 
 def analyze_execution_failure(
@@ -344,10 +357,6 @@ def build_capability_awareness():
             "text"
         ],
 
-        # =================================================
-        # 🔥 NEW
-        # =================================================
-
         "external_knowledge": [
             "text"
         ]
@@ -355,7 +364,7 @@ def build_capability_awareness():
 
 
 # =====================================================
-# 🔥 SAFE TASK DETECTION
+# 🔥 TASK DETECTION
 # =====================================================
 
 def detect_task_type(
@@ -514,7 +523,7 @@ def detect_output_mode(
 
 
 # =====================================================
-# 🔥 MEMORY
+# 🔥 MEMORY EXTRACTION
 # =====================================================
 
 def extract_and_store_semantics(
@@ -554,7 +563,7 @@ def extract_and_store_semantics(
 
 
 # =====================================================
-# 🚀 EXECUTE
+# 🚀 EXECUTOR
 # =====================================================
 
 async def execute(
@@ -567,11 +576,18 @@ async def execute(
 
     print("🔥 EXECUTOR RUNNING")
 
+    patch_executor_start(
+        user_id,
+        text
+    )
+
     state = get_state(user_id)
 
     mode = get_mode(user_id)
 
-    t = text.lower().strip()
+    print("🧠 ROOMS LOADED:",
+        [r.name for r in ROOMS]
+    )
 
     capability_awareness = (
         build_capability_awareness()
@@ -658,26 +674,81 @@ async def execute(
     )
 
     # =================================================
-    # 🔥 EXTERNAL KNOWLEDGE DECISION
+    # 🧠 RESPONSE DECISION
     # =================================================
+
+    final_action = response_decision.get(
+        "final_action",
+        "talk"
+    )
+
+    if final_action == "guide":
+
+        semantic["should_execute"] = False
+
+        semantic["response_mode"] = "guide"
+
+        semantic["goal_stage"] = (
+            "exploration"
+        )
+
+    elif final_action == "execute":
+
+        semantic["should_execute"] = True
+
+        semantic["response_mode"] = (
+            "execute"
+        )
+
+    elif final_action == "reference":
+
+        semantic["should_execute"] = False
+
+        semantic["response_mode"] = (
+            "visual_guidance"
+        )
+
+    # =================================================
+    # 🌐 EXTERNAL KNOWLEDGE
+    # =====================================================
 
     external_context = ""
 
-    external_result = build_external_context(
+    try:
 
-        text=text,
+        external_result = build_external_context(
 
-        semantic=semantic,
+            text=text,
 
-        cognition=cognition,
+            semantic=semantic,
 
-        response_decision=response_decision
-    )
+            cognition=cognition,
 
-    external_context = external_result.get(
-        "content",
-        ""
-    )
+            response_decision=response_decision
+        )
+
+        external_context = external_result.get(
+            "content",
+            ""
+        )
+
+        print(
+            "🌍 EXTERNAL CONTEXT ENABLED:",
+            bool(external_context)
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ EXTERNAL CONTEXT ERROR:",
+            e
+        )
+
+        traceback.print_exc()
+
+        external_result = {}
+
+        external_context = ""
 
     # =================================================
     # 🧠 INTERNAL DIALOG ANALYSIS
@@ -717,7 +788,7 @@ async def execute(
     }
 
     # =================================================
-    # 🧠 STATE BRAIN
+    # 🧠 STATE
     # =================================================
 
     state["semantic"] = semantic
@@ -867,48 +938,9 @@ async def execute(
         "capability_awareness":
             capability_awareness,
 
-        # =================================================
-        # 🔥 NEW
-        # =================================================
-
         "external_context":
             external_context
     }
-
-    # =================================================
-    # 🧠 RESPONSE DECISION
-    # =================================================
-
-    final_action = response_decision.get(
-        "final_action",
-        "talk"
-    )
-
-    if final_action == "guide":
-
-        semantic["should_execute"] = False
-
-        semantic["response_mode"] = "guide"
-
-        semantic["goal_stage"] = (
-            "exploration"
-        )
-
-    elif final_action == "execute":
-
-        semantic["should_execute"] = True
-
-        semantic["response_mode"] = (
-            "execute"
-        )
-
-    elif final_action == "reference":
-
-        semantic["should_execute"] = False
-
-        semantic["response_mode"] = (
-            "visual_guidance"
-        )
 
     # =================================================
     # 🧠 ROOM SELECTION
@@ -923,6 +955,12 @@ async def execute(
             score = room.evaluate(
                 text,
                 context
+            )
+
+            print(
+                "🧠 ROOM SCORE:",
+                room.name,
+                score
             )
 
             if semantic.get(
@@ -988,10 +1026,6 @@ async def execute(
 
                     score += 1.2
 
-            # =================================================
-            # 🔥 EXTERNAL KNOWLEDGE SAFETY
-            # =================================================
-
             if external_context:
 
                 if room.name == "text":
@@ -1014,10 +1048,12 @@ async def execute(
         except Exception as e:
 
             print(
-                f"ROOM EVALUATE ERROR "
+                f"❌ ROOM EVALUATE ERROR "
                 f"[{room.name}]",
                 e
             )
+
+            traceback.print_exc()
 
     scored_rooms.sort(
 
@@ -1131,10 +1167,6 @@ async def execute(
 
                     continue
 
-                # =================================================
-                # 🔥 PRESENTATION FORMATTER
-                # =================================================
-
                 if result.get("data"):
 
                     result["data"] = (
@@ -1191,9 +1223,11 @@ async def execute(
         except Exception as e:
 
             print(
-                f"ROOM ERROR [{room.name}]",
+                f"❌ ROOM ERROR [{room.name}]",
                 e
             )
+
+            traceback.print_exc()
 
             failure = (
                 analyze_execution_failure(
@@ -1316,10 +1350,6 @@ async def execute(
         state
     )
 
-    # =================================================
-    # 🔥 EXTERNAL CONTEXT ENRICH
-    # =================================================
-
     if external_context:
 
         context_text += (
@@ -1328,6 +1358,8 @@ async def execute(
             "🌍 Дополнительный контекст:\n"
             f"{external_context}"
         )
+
+    print("💬 TEXT FALLBACK ACTIVATED")
 
     fallback_result = await run_with_typing(
 
@@ -1352,10 +1384,6 @@ async def execute(
             "content"
         )
     ):
-
-        # =================================================
-        # 🔥 PRESENTATION FORMATTER
-        # =================================================
 
         fallback_result["content"] = (
             format_response_presentation(
