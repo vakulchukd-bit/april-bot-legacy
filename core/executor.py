@@ -50,6 +50,14 @@ from blocks.visual_reference_system import (
 from blocks.response_decision import (
     build_response_decision
 )
+from blocks.april_authority import (
+
+    build_authority_state,
+
+    evaluate_intention_confidence,
+
+    should_override
+)
 
 # =====================================================
 # 🔥 EXTERNAL KNOWLEDGE
