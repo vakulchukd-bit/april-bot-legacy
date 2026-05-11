@@ -84,6 +84,16 @@ def analyze(
         "response_requires_reflection": True,
 
         # =================================================
+        # 🧠 CURRENT MESSAGE DOMINANCE
+        # =====================================================
+
+        "current_message_mode": "continue",
+
+        "current_message_priority": 0.5,
+
+        "current_request_overrides_flow": False,
+
+        # =================================================
         # 🧠 BEHAVIOR FORMULAS
         # =====================================================
 
@@ -167,6 +177,62 @@ def analyze(
         result["confidence"] = 0.82
 
     # =====================================================
+    # 🔥 CURRENT MESSAGE ANALYSIS
+    # =====================================================
+
+    execution_words = [
+
+        "создай",
+        "сгенерируй",
+        "нарисуй",
+        "сделай",
+        "построй",
+        "покажи",
+        "отправь"
+    ]
+
+    return_words = [
+
+        "вернёмся",
+        "продолжим",
+        "дальше",
+        "снова"
+    ]
+
+    exploration_words = [
+
+        "как думаешь",
+        "идея",
+        "вариант",
+        "может",
+        "примерно"
+    ]
+
+    if any(w in t for w in execution_words):
+
+        result["current_message_mode"] = (
+            "execute_now"
+        )
+
+        result["current_message_priority"] = 0.92
+
+    elif any(w in t for w in return_words):
+
+        result["current_message_mode"] = (
+            "return"
+        )
+
+        result["current_message_priority"] = 0.75
+
+    elif any(w in t for w in exploration_words):
+
+        result["current_message_mode"] = (
+            "exploration"
+        )
+
+        result["current_message_priority"] = 0.45
+
+    # =====================================================
     # 🔥 ACTIVE FLOW
     # =====================================================
 
@@ -186,6 +252,27 @@ def analyze(
         result["trajectory_strength"] += 0.25
 
         result["dialog_state"] = "continuation"
+
+        # =================================================
+        # 🔥 FLOW OVERRIDE LOGIC
+        # =====================================================
+
+        if (
+            result["current_message_mode"]
+            == "execute_now"
+        ):
+
+            if flow_type != "image":
+
+                result[
+                    "current_request_overrides_flow"
+                ] = True
+
+                result["continuation"] = False
+
+                result["trajectory_strength"] *= 0.4
+
+                result["dialog_state"] = "execution"
 
     # =====================================================
     # 🔥 IMAGE CONTEXT
