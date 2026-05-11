@@ -623,6 +623,29 @@ def apply_april_personality(
     meta["dialog_analysis_enabled"] = True
 
     state["meta"] = meta
+    # =================================================
+    # 🔥 APRIL AUTHORITY
+    # =================================================
+
+    cognition["authority_state"] = (
+        build_authority_state()
+    )
+
+    cognition[
+        "april_final_authority"
+    ] = True
+
+    cognition[
+        "april_override_allowed"
+    ] = True
+
+    cognition[
+        "april_direct_capability_access"
+    ] = True
+
+    cognition[
+        "april_validates_final_response"
+    ] = True
 
     # =================================================
     # 🔥 FINAL
