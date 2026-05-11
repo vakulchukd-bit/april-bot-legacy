@@ -1032,7 +1032,7 @@ async def execute(
                     "best_capability"
                 ):
 
-                    score += 1.2
+                    score += 5.0
 
             if external_context:
 
