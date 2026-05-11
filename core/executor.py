@@ -54,7 +54,9 @@ from blocks.april_authority import (
 
     build_authority_state,
 
-    should_override
+    should_override,
+
+    build_authority_decision
 )
 
 # =====================================================
