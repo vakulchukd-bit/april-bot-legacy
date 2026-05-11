@@ -136,28 +136,69 @@ class ImageGenerateRoom(Room):
                 return True
 
         # =================================================
-        # 🔥 VISUAL ESCALATION
+        # 🔥 APRIL VISUAL AUTHORITY
         # =================================================
 
         if cognition.get(
             "prefer_visual"
         ):
 
-            visual_words = [
-                "пример",
-                "покажи",
-                "визуально",
-                "как выглядит",
-                "референс"
-            ]
+            return True
 
-            t = text.lower()
+        if cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.55:
 
-            if any(
-                w in t
-                for w in visual_words
-            ):
-                return True
+            return True
+
+        if cognition.get(
+            "wants_result",
+            0.0
+        ) >= 0.72:
+
+            return True
+
+        if semantic.get(
+            "visual_obligation"
+        ):
+
+            return True
+
+        # =================================================
+        # 🔥 DIALOG IMAGE UNDERSTANDING
+        # =================================================
+
+        t = text.lower()
+
+        visual_context_words = [
+
+            "самолет",
+            "самолёт",
+            "корабль",
+            "море",
+            "небо",
+            "космос",
+            "машина",
+            "человек",
+            "девушка",
+            "город",
+            "лес",
+            "кот",
+            "собака",
+            "картинка",
+            "изображение",
+            "нарисуй",
+            "создай",
+            "сделай"
+        ]
+
+        if any(
+            w in t
+            for w in visual_context_words
+        ):
+
+            return True
 
         return False
 
@@ -173,11 +214,29 @@ class ImageGenerateRoom(Room):
             {}
         )
 
+        semantic = context.get(
+            "semantic",
+            {}
+        )
+
         if cognition.get(
             "prefer_visual"
         ):
 
             score += 0.3
+
+        if cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.55:
+
+            score += 0.5
+
+        if semantic.get(
+            "visual_obligation"
+        ):
+
+            score += 1.0
 
         return score
 
@@ -236,7 +295,9 @@ class ImageGenerateRoom(Room):
                     "подходит",
                     "ещё",
                     "продолжай",
-                    "сделай"
+                    "сделай",
+                    "создай",
+                    "жду"
                 ]
 
                 if any(
@@ -257,7 +318,7 @@ class ImageGenerateRoom(Room):
                     text = last_prompt
 
         # =================================================
-        # 🔥 COGNITIVE EXECUTION
+        # 🔥 APRIL EXECUTION AUTHORITY
         # =================================================
 
         should_execute = False
@@ -275,9 +336,28 @@ class ImageGenerateRoom(Room):
             should_execute = True
 
         if cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.55:
+
+            should_execute = True
+
+        if cognition.get(
             "wants_result",
             0.0
         ) >= 0.7:
+
+            should_execute = True
+
+        if semantic.get(
+            "visual_obligation"
+        ):
+
+            should_execute = True
+
+        if reasoning.get(
+            "continuation_target"
+        ) == "image":
 
             should_execute = True
 
@@ -461,29 +541,17 @@ class TextRoom(Room):
             {}
         )
 
-        # =================================================
-        # 🔥 EXECUTION SUPPRESSION
-        # =================================================
-
         if cognition.get(
             "prefer_execution"
         ):
 
             score -= 0.08
 
-        # =================================================
-        # 🔥 VISUAL SUPPRESSION
-        # =================================================
-
         if cognition.get(
             "prefer_visual"
         ):
 
             score -= 0.05
-
-        # =================================================
-        # 🔥 DIALOG FATIGUE
-        # =================================================
 
         if cognition.get(
             "dialog_fatigue",
@@ -505,47 +573,15 @@ class TextRoom(Room):
             {}
         )
 
-        semantic = context.get(
-            "semantic",
-            {}
-        )
-
-        reasoning = context.get(
-            "reasoning",
-            {}
-        )
-
-        # =================================================
-        # 🔥 VISUAL REDIRECT
-        # =================================================
-
         if (
             cognition.get("prefer_visual")
             and cognition.get("wants_result", 0.0) >= 0.6
         ):
 
-            visual_words = [
-                "пример",
-                "покажи",
-                "визуально",
-                "референс"
-            ]
-
-            t = text.lower()
-
-            if any(
-                w in t
-                for w in visual_words
-            ):
-
-                return {
-                    "type": "image_task",
-                    "prompt": text
-                }
-
-        # =================================================
-        # 🔥 RESPONSE ECONOMY
-        # =================================================
+            return {
+                "type": "image_task",
+                "prompt": text
+            }
 
         text_input = text
 
@@ -557,25 +593,6 @@ class TextRoom(Room):
                 "Ответь коротко и по делу.\n\n"
                 + text
             )
-
-        # =================================================
-        # 🔥 EXECUTION SUPPRESSION
-        # =================================================
-
-        if cognition.get(
-            "prefer_execution"
-        ):
-
-            if cognition.get(
-                "wants_result",
-                0.0
-            ) >= 0.7:
-
-                return {
-                    "type": "text",
-                    "data":
-                        "⚡ Перехожу к выполнению"
-                }
 
         result = await run(
             context["chat_id"],
@@ -603,13 +620,8 @@ class TextRoom(Room):
 
 ROOMS = [
 
-    # 🔥 IMAGE FIRST
     ImageEditRoom(),
     ImageGenerateRoom(),
-
-    # 🔥 SCIENCE
     SafeScienceRoom(),
-
-    # 🔥 LAST FALLBACK
     TextRoom(),
 ]
