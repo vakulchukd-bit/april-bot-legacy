@@ -1182,16 +1182,16 @@ async def execute(
                 ] = authority_confidence
 
                 override_required = (
-                    should_override(
+                     should_override(
 
-                        confidence=
-                            authority_confidence,
+                         result=result,
 
-                        result=result,
+                         semantic=semantic,
 
-                        semantic=semantic,
+                         cognition=cognition,
 
-                        cognition=cognition
+                         response_decision=
+                             response_decision
                     )
                 )
 
