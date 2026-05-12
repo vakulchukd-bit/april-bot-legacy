@@ -1268,7 +1268,10 @@ async def execute(
 
                     continue
 
-                if result.get("data"):
+                if (
+                    result.get("type") == "text"
+                    and result.get("data")
+                 ):
 
                     result["data"] = (
                         format_response_presentation(
