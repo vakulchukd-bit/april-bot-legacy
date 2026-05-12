@@ -326,7 +326,7 @@ def is_visual_obligatory(
     semantic = semantic or {}
     cognition = cognition or {}
     continuation_target = semantic.get(
-    "continuation_target"
+        "continuation_target"
 )
 
 if continuation_target == "math":
