@@ -4,7 +4,27 @@ def build_reasoning_state(
     semantic: dict = None
 ):
 
+    """
+    DeepHub Reasoning State
+
+    Главная задача:
+    reasoning больше НЕ должен
+    заново пересчитывать весь диалог.
+
+    Теперь reasoning:
+    - читает scene_state;
+    - удерживает continuity;
+    - стабилизирует trajectory;
+    - уменьшает overthinking;
+    - уменьшает reflection loops;
+    - уменьшает dialog dependence.
+    """
+
     semantic = semantic or {}
+
+    # =================================================
+    # 🔥 STATE
+    # =================================================
 
     dialog = state.get(
         "dialog",
@@ -18,6 +38,11 @@ def build_reasoning_state(
 
     active_flow = state.get(
         "active_flow"
+    )
+
+    scene_state = state.get(
+        "scene_state",
+        {}
     )
 
     dialog_state = state.get(
@@ -38,12 +63,43 @@ def build_reasoning_state(
     )
 
     # =================================================
+    # 🔥 SCENE
+    # =================================================
+
+    scene_goal = scene_state.get(
+        "goal"
+    )
+
+    scene_trajectory = scene_state.get(
+        "trajectory"
+    )
+
+    scene_continuity = scene_state.get(
+        "continuity",
+        True
+    )
+
+    scene_direction = scene_state.get(
+        "confirmed_direction"
+    )
+
+    visual_mode = scene_state.get(
+        "visual_mode",
+        False
+    )
+
+    execution_mode = scene_state.get(
+        "execution_mode",
+        False
+    )
+
+    # =================================================
     # 🔥 LAST USER
     # =================================================
 
     last_user = None
 
-    for msg in reversed(dialog):
+    for msg in reversed(dialog[-8:]):
 
         if msg.get("role") == "user":
 
@@ -55,6 +111,7 @@ def build_reasoning_state(
             if content != text:
 
                 last_user = content
+
                 break
 
     # =================================================
@@ -63,7 +120,7 @@ def build_reasoning_state(
 
     last_assistant = None
 
-    for msg in reversed(dialog):
+    for msg in reversed(dialog[-6:]):
 
         if msg.get("role") == "assistant":
 
@@ -81,7 +138,7 @@ def build_reasoning_state(
     dialog_depth = len(dialog)
 
     # =================================================
-    # 🔥 EXECUTION STATE
+    # 🔥 EXECUTION
     # =================================================
 
     execution_pressure = semantic.get(
@@ -135,7 +192,7 @@ def build_reasoning_state(
     )
 
     # =================================================
-    # 🔥 CONTINUATION STATE
+    # 🔥 CONTINUATION
     # =================================================
 
     continuation = semantic.get(
@@ -148,7 +205,7 @@ def build_reasoning_state(
     )
 
     # =================================================
-    # 🔥 COGNITIVE FLAGS
+    # 🔥 STABILIZED FLAGS
     # =================================================
 
     user_waiting_action = (
@@ -156,65 +213,103 @@ def build_reasoning_state(
     )
 
     dialog_overextended = (
-        dialog_depth >= 10
-        and conversation_value <= 0.5
+
+        dialog_depth >= 12
+
+        and conversation_value <= 0.45
     )
 
     high_confidence_execution = (
+
         capability_confidence >= 0.82
+
         and should_execute
     )
 
     # =================================================
-    # 🔥 DIALOG CONTINUITY
+    # 🔥 TRAJECTORY
+    # =================================================
+
+    trajectory_active = False
+
+    if (
+        active_flow
+        or scene_trajectory
+    ):
+
+        trajectory_active = True
+
+    trajectory_locked = False
+
+    if (
+        continuation
+        or scene_continuity
+    ):
+
+        trajectory_locked = True
+
+    # =================================================
+    # 🔥 UNRESOLVED INTENT
     # =================================================
 
     unresolved_intent = True
 
     if (
+
         should_execute
+
         and ambiguity_level <= 0.25
-        and execution_pressure >= 0.9
+
+        and execution_pressure >= 0.85
     ):
 
         unresolved_intent = False
 
-    trajectory_active = True
-
-    if dialog_depth <= 1:
-
-        trajectory_active = False
-
     # =================================================
-    # 🔥 REFLECTION STATE
+    # 🔥 REFLECTION CONTROL
     # =================================================
 
     needs_reflection = True
 
+    # =================================================
+    # 🔥 DEEPHUB FIX
+    # =================================================
+    # меньше повторного self-analysis
+    # меньше loops
+    # меньше перегрева cognition
+
     if (
+
         should_execute
-        and execution_pressure >= 0.9
-        and ambiguity_level <= 0.2
+
+        and execution_pressure >= 0.82
+
+        and ambiguity_level <= 0.3
     ):
 
         needs_reflection = False
 
+    if scene_trajectory:
+
+        needs_reflection = False
+
     # =================================================
-    # 🔥 POST RESPONSE AWARENESS
+    # 🔥 RESPONSE COMPLETENESS
     # =================================================
 
     response_may_be_incomplete = False
 
     if (
-        ambiguity_level >= 0.4
-        or dialog_semantic_state == "exploration"
+
+        ambiguity_level >= 0.45
+
         or continuation
     ):
 
         response_may_be_incomplete = True
 
     # =================================================
-    # 🔥 CAPABILITY SELF AWARENESS
+    # 🔥 CAPABILITY AWARENESS
     # =================================================
 
     capability_awareness = {
@@ -225,9 +320,9 @@ def build_reasoning_state(
 
         "capabilities_are_supportive": True,
 
-        "capabilities_should_follow_dialogue": True,
+        "capabilities_follow_scene": True,
 
-        "capabilities_should_not_interrupt":
+        "capabilities_follow_trajectory":
             True,
 
         "visual_support_available": True,
@@ -238,16 +333,28 @@ def build_reasoning_state(
 
         "analysis_available": True,
 
-        "continuation_priority": True
+        "continuation_priority": True,
+
+        # =================================================
+        # 🔥 DEEPHUB
+        # =================================================
+
+        "scene_is_primary": True,
+
+        "dialog_is_secondary": True,
+
+        "avoid_duplicate_analysis": True
     }
 
     # =================================================
-    # 🔥 INTERNAL DIALOGUE MONITOR
+    # 🔥 INTERNAL MONITOR
     # =================================================
 
     internal_monitor = {
 
         "enabled": True,
+
+        "tracks_scene": True,
 
         "tracks_dialog_state": True,
 
@@ -255,38 +362,67 @@ def build_reasoning_state(
 
         "tracks_trajectory": True,
 
-        "tracks_unresolved_expectation": True,
+        "tracks_continuity": True,
 
-        "tracks_response_usefulness": True,
+        "tracks_unresolved_expectation":
+            True,
 
-        "tracks_psychological_continuity": True,
+        "tracks_response_usefulness":
+            True,
 
-        "tracks_capability_relevance": True,
+        "tracks_psychological_continuity":
+            True,
 
-        "tracks_post_response_effect": True,
+        "tracks_capability_relevance":
+            True,
 
-        "maintains_conversation_presence": True
+        "maintains_conversation_presence":
+            True,
+
+        # =================================================
+        # 🔥 DEEPHUB
+        # =================================================
+
+        "avoid_overthinking": True,
+
+        "avoid_recursive_analysis": True,
+
+        "avoid_rebuilding_context": True
     }
 
     # =================================================
-    # 🔥 RESPONSE REFLECTION
+    # 🔥 REFLECTION
     # =================================================
 
     reflection = {
 
-        "enabled": True,
+        "enabled": needs_reflection,
 
-        "response_should_be_evaluated": True,
+        "response_should_be_evaluated":
+            needs_reflection,
 
-        "helpfulness_unknown": True,
+        "helpfulness_unknown":
+            needs_reflection,
 
-        "trajectory_must_continue": True,
+        "trajectory_must_continue":
+            trajectory_active,
 
-        "dialogue_not_finished": True,
+        "dialogue_not_finished":
+            trajectory_active,
 
-        "avoid_premature_completion": True,
+        "avoid_premature_completion":
+            True,
 
-        "maintain_psychological_presence": True
+        "maintain_psychological_presence":
+            True,
+
+        # =================================================
+        # 🔥 DEEPHUB
+        # =================================================
+
+        "avoid_overreflection": True,
+
+        "avoid_analysis_loops": True
     }
 
     # =================================================
@@ -310,6 +446,23 @@ def build_reasoning_state(
         "semantic": semantic,
 
         # =================================================
+        # 🔥 SCENE
+        # =================================================
+
+        "scene_state": scene_state,
+
+        "scene_goal": scene_goal,
+
+        "scene_trajectory":
+            scene_trajectory,
+
+        "scene_direction":
+            scene_direction,
+
+        "scene_continuity":
+            scene_continuity,
+
+        # =================================================
         # 🔥 FLOW
         # =================================================
 
@@ -326,7 +479,7 @@ def build_reasoning_state(
             trajectory_active,
 
         "trajectory_locked":
-            continuation,
+            trajectory_locked,
 
         "trajectory_priority": 1.0,
 
@@ -350,7 +503,7 @@ def build_reasoning_state(
             capability_confidence,
 
         # =================================================
-        # 🔥 DIALOG QUALITY
+        # 🔥 QUALITY
         # =================================================
 
         "conversation_value":
@@ -366,7 +519,7 @@ def build_reasoning_state(
             dialog_overextended,
 
         # =================================================
-        # 🔥 DIALOG STATE
+        # 🔥 STATE
         # =================================================
 
         "dialog_state":
@@ -390,7 +543,7 @@ def build_reasoning_state(
         "preserve_trajectory": True,
 
         # =================================================
-        # 🔥 STATE
+        # 🔥 MEMORY
         # =================================================
 
         "image_context": image_context,
@@ -399,16 +552,13 @@ def build_reasoning_state(
 
         "last_code": last_code,
 
-        # =================================================
-        # 🔥 MEMORY
-        # =================================================
-
         "last_user": last_user,
 
-        "last_assistant": last_assistant,
+        "last_assistant":
+            last_assistant,
 
         # =================================================
-        # 🔥 COGNITIVE FLAGS
+        # 🔥 FLAGS
         # =================================================
 
         "user_waiting_action":
@@ -417,23 +567,21 @@ def build_reasoning_state(
         "high_confidence_execution":
             high_confidence_execution,
 
+        "visual_mode":
+            visual_mode,
+
+        "execution_mode":
+            execution_mode,
+
         # =================================================
-        # 🔥 INTERNAL MONITORING
+        # 🔥 INTERNAL
         # =================================================
 
         "internal_monitor":
             internal_monitor,
 
-        # =================================================
-        # 🔥 REFLECTION
-        # =================================================
-
         "reflection":
             reflection,
-
-        # =================================================
-        # 🔥 CAPABILITY AWARENESS
-        # =================================================
 
         "capability_awareness":
             capability_awareness
