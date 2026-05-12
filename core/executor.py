@@ -1253,7 +1253,6 @@ async def execute(
 
         continue
 
-    continue
 
                 state[
                     "last_response_quality"
