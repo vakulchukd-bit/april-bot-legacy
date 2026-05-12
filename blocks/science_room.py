@@ -101,75 +101,90 @@ class ScienceRoom:
 
     name = "science"
 
+    # ==========================================
+    # 🔥 STRICT SCIENCE ROUTING
+    # ==========================================
+
     def can_handle(self, text, context):
 
         t = text.lower()
 
         state = context.get("state", {})
 
-        # 🔥 КОНТЕКСТНЫЙ ТРИГГЕР
+        # ======================================
+        # 🔥 CONTEXT GRAPH CONTINUATION
+        # ======================================
+
         if state.get("last_math"):
 
             if any(
                 w in t
                 for w in [
                     "покажи",
-                    "сделай",
-                    "давай",
+                    "график",
                     "построй",
-                    "это",
-                    "теперь"
+                    "реши",
+                    "вычисли"
                 ]
             ):
                 return True
 
-        if "график" in t or "построй" in t:
+        # ======================================
+        # 🔥 STRICT GRAPH DETECTION
+        # ======================================
+
+        if "график" in t:
             return True
 
         if "y=" in t or "y =" in t:
             return True
 
-        if "=" in t or "реши" in t:
+        # ======================================
+        # 🔥 STRICT MATH WORDS
+        # ======================================
+
+        math_words = [
+
+            "уравнение",
+            "реши",
+            "вычисли",
+            "математика",
+            "функция",
+            "sin(",
+            "cos(",
+            "tan(",
+            "log("
+        ]
+
+        if any(w in t for w in math_words):
             return True
 
-        if any(
-            w in t
-            for w in [
-                "приведи",
-                "вырази",
-                "найди",
-                "доведи",
-                "вычисли",
-                "переменн",
-                "значение",
-                "уравнен",
-                "выражен"
-            ]
-        ):
-            return True
+        # ======================================
+        # 🔥 STRICT EQUATION CHECK
+        # ======================================
 
-        if any(
-            fn in t
-            for fn in [
-                "sin",
-                "cos",
-                "tan",
-                "log"
-            ]
-        ):
-            return True
+        equation_pattern = re.search(
 
-        if "x" in t:
+            r'[0-9]+\s*[\+\-\*/=]\s*[0-9x]+',
+
+            t
+        )
+
+        if equation_pattern:
             return True
 
         return False
+
+    # ==========================================
+    # 🔥 STRICT EVALUATION
+    # ==========================================
 
     def evaluate(self, text, context):
 
         if context.get("task_type") == "math":
             return 10.0
 
-        return 1.0
+        return 0.0
 
     def split_into_tasks(self, text):
 
@@ -231,6 +246,8 @@ class ScienceRoom:
         context,
         run_with_typing
     ):
+
+        patch_science_enter(text)
 
         plan = get_user_plan(user_id)
 
@@ -460,16 +477,14 @@ class ScienceRoom:
                 "data": "\n\n".join(results)
             }
 
-        fail = state.get("fail_count", 0) + 1
-
-        state["fail_count"] = fail
+        state["fail_count"] = 0
 
         return {
 
             "type": "text",
 
             "data":
-                "Не до конца понял, уточни чуть подробнее 🙂"
+                "⚠️ ScienceRoom: задача не относится к математике или графикам"
         }
 
     def extract_function(self, text):
