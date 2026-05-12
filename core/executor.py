@@ -1055,6 +1055,15 @@ async def execute(
 
                     score += 1.5
 
+                if room.name in [
+
+                    "image_generate",
+                    "graph",
+                    "diagram"
+                ]:
+
+                    score += 2.5
+
             if continuation_target == "image":
 
                 if room.name in [
