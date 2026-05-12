@@ -1189,6 +1189,62 @@ def analyze_cognition(
         ] = True
 
     # =================================================
+    # 🔥 EXECUTION CONFIDENCE RESTORE
+    # =====================================================
+
+    if (
+        cognition.get(
+            "understands_user_goal"
+        )
+        and not cognition.get(
+            "needs_clarification"
+        )
+    ):
+
+        cognition[
+            "prefer_execution"
+        ] = True
+
+        cognition[
+            "assistant_should_follow"
+        ] = True
+
+        cognition[
+            "should_offer_direction"
+        ] = False
+
+        cognition[
+            "execution_confidence"
+        ] = max(
+            cognition.get(
+                "execution_confidence",
+                0.0
+            ),
+            0.82
+        )
+
+        cognition[
+            "assistant_restraint"
+        ] = min(
+            cognition.get(
+                "assistant_restraint",
+                0.0
+            ),
+            0.25
+        )
+
+        _decrease(
+            cognition,
+            "internal_noise",
+            0.2
+        )
+
+        _decrease(
+            cognition,
+            "signal_overload",
+            0.15
+        )
+    # =================================================
     # 🔥 CLARIFICATION
     # =====================================================
 
