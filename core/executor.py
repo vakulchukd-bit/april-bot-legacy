@@ -1347,27 +1347,7 @@ async def execute(
 
             state[
                 "last_execution_failure"
-            ] = failure
 
-            if failure.get(
-                "retry_possible"
-            ):
-
-                print(
-                    "🧠 EXECUTION RETRY POSSIBLE"
-                )
-
-                continue
-
-            if failure.get(
-                "should_change_room"
-            ):
-
-                print(
-                    "🧠 TRYING DIFFERENT ROOM"
-                )
-
-                continue
 
     # =================================================
     # 🧠 POST RESPONSE ANALYSIS
