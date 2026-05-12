@@ -211,9 +211,33 @@ def detect_platform_label(
 # 🌐 LINK CARD FORMATTER
 # =====================================================
 
-def build_link_card(
-    url: str
+lower = url.lower()
+
+if "desmos.com" in lower:
+    return "📈 Открыть график"
+
+if (
+    "youtube.com" in lower
+    or "youtu.be" in lower
 ):
+    return "▶️ Смотреть видео"
+
+if "github.com" in lower:
+    return "💻 Открыть GitHub"
+
+if "wikipedia.org" in lower:
+    return "📚 Читать статью"
+
+if "reddit.com" in lower:
+    return "👽 Открыть обсуждение"
+
+if "instagram.com" in lower:
+    return "📸 Открыть Instagram"
+
+if "t.me" in lower:
+    return "📨 Открыть Telegram"
+
+return "🔗 Открыть ссылку"
 
     url = (url or "").strip()
 
