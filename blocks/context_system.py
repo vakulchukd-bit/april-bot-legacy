@@ -1,13 +1,37 @@
 # blocks/context_system.py
 
 # =====================================================
-# 🧠 TRAJECTORY MEMORY SYSTEM
+# 🧠 APRIL DEEPHUB CONTEXT SYSTEM
+# =====================================================
+
+"""
+DeepHub Context Architecture
+
+Главная идея:
+context больше НЕ строится
+через тупое накопление dialog/history.
+
+Теперь главный источник:
+scene_state.
+
+Это:
+- уменьшает шум;
+- уменьшает повторный анализ;
+- удерживает trajectory;
+- стабилизирует continuity;
+- снижает fragmentation;
+- уменьшает cognitive reload.
+"""
+
+
+# =====================================================
+# 🔥 TOPIC SHIFT
 # =====================================================
 
 def detect_topic_shift(
     text,
     active_flow,
-    state
+    scene_state
 ):
 
     text = (text or "").lower()
@@ -29,12 +53,13 @@ def detect_topic_shift(
     if flow_type == "math":
 
         unrelated = [
+
             "кафе",
-            "дизайн",
-            "сайт",
             "одежда",
             "фото",
-            "кофе"
+            "кофе",
+            "дизайн",
+            "ресторан"
         ]
 
         if any(
@@ -51,11 +76,12 @@ def detect_topic_shift(
     if flow_type == "image":
 
         unrelated = [
-            "код",
+
             "python",
+            "сервер",
+            "код",
             "ошибка",
-            "уравнение",
-            "сервер"
+            "уравнение"
         ]
 
         if any(
@@ -69,7 +95,7 @@ def detect_topic_shift(
 
 
 # =====================================================
-# 🔥 PASSIVE MEMORY ARCHIVE
+# 🔥 PASSIVE MEMORY
 # =====================================================
 
 def archive_completed_flow(
@@ -106,164 +132,124 @@ def archive_completed_flow(
             compressed
         )
 
-    if len(memory) > 12:
+    if len(memory) > 10:
 
-        memory = memory[-12:]
+        memory = memory[-10:]
 
     state["passive_memory"] = memory
 
 
 # =====================================================
-# 🔥 CONTEXT BUILD
+# 🔥 SCENE BLOCK
 # =====================================================
 
-def build_context_text(
-    user_id,
-    text,
-    state
+def build_scene_block(
+    scene_state
 ):
 
-    """
-    🧠 SEMANTIC CONTEXT SYSTEM
+    if not scene_state:
+        return ""
 
-    Не просто хранит диалог,
-    а удерживает trajectory,
-    intent,
-    expectations,
-    visual direction
-    и execution pressure.
-    """
+    lines = []
 
-    text = (text or "").strip()
-
-    t = text.lower()
-
-    # =====================================================
-    # 🔥 SYSTEM BASE
-    # =====================================================
-
-    base = """
-
-Ты — April.
-
-Главная задача:
-понимать намерение пользователя,
-удерживать trajectory,
-не уходить в болтологию,
-вести пользователя к результату.
-
-Приоритет:
-1. результат
-2. понимание
-3. guidance
-4. краткость
-5. естественность
-
-Если пользователь ожидает:
-- визуализацию → предлагай visual path
-- пример → давай пример
-- действие → выполняй
-- guidance → направляй
-
-Не растягивай ответы без необходимости.
-Не повторяйся.
-Не теряй trajectory.
-"""
-
-    # =====================================================
-    # 🔥 DIALOG
-    # =====================================================
-
-    dialog = state.get(
-        "dialog",
-        []
+    trajectory = scene_state.get(
+        "trajectory"
     )
 
-    # =====================================================
-    # 🔥 MEMORY SUMMARY
-    # =====================================================
-
-    summary = state.get(
-        "memory_summary",
-        ""
+    goal = scene_state.get(
+        "goal"
     )
 
-    # =====================================================
-    # 🔥 ACTIVE FLOW
-    # =====================================================
-
-    active_flow = state.get(
-        "active_flow"
+    user_intent = scene_state.get(
+        "user_intent"
     )
 
-    # =====================================================
-    # 🔥 PASSIVE MEMORY
-    # =====================================================
-
-    passive_memory = state.get(
-        "passive_memory",
-        []
+    confirmed_direction = scene_state.get(
+        "confirmed_direction"
     )
 
-    # =====================================================
-    # 🔥 IMAGE CONTEXT
-    # =====================================================
-
-    image_context = state.get(
-        "image_context"
+    visual_mode = scene_state.get(
+        "visual_mode"
     )
 
-    # =====================================================
-    # 🔥 LAST MATH
-    # =====================================================
-
-    last_math = state.get(
-        "last_math"
+    execution_mode = scene_state.get(
+        "execution_mode"
     )
 
-    # =====================================================
-    # 🔥 TOPIC SHIFT DETECTION
-    # =====================================================
+    if trajectory:
 
-    topic_shift = detect_topic_shift(
-        text,
-        active_flow,
-        state
-    )
-
-    # =====================================================
-    # 🔥 FLOW RELEASE
-    # =====================================================
-
-    if topic_shift:
-
-        archive_completed_flow(
-            state,
-            active_flow
+        lines.append(
+            f"Trajectory: {trajectory}"
         )
 
-        state["active_flow"] = None
+    if goal:
 
-        active_flow = None
+        lines.append(
+            f"Goal: {goal[:300]}"
+        )
 
-    # =====================================================
-    # 🔥 RELEVANCE FILTERING
-    # =====================================================
+    if user_intent:
 
-    relevant_dialog = []
+        lines.append(
+            f"Intent: {user_intent}"
+        )
+
+    if confirmed_direction:
+
+        lines.append(
+            f"Direction: {confirmed_direction}"
+        )
+
+    if visual_mode:
+
+        lines.append(
+            "Visual continuity active"
+        )
+
+    if execution_mode:
+
+        lines.append(
+            "Execution mode active"
+        )
+
+    if not lines:
+        return ""
+
+    return (
+        "\nSCENE STATE:\n"
+        + "\n".join(lines)
+    )
+
+
+# =====================================================
+# 🔥 RELEVANT DIALOG
+# =====================================================
+
+def build_relevant_dialog(
+    dialog,
+    text,
+    active_flow
+):
+
+    text = (
+        text or ""
+    ).lower()
 
     keywords = []
 
-    for word in t.split():
+    for word in text.split():
 
         if len(word) >= 4:
+
             keywords.append(word)
 
-    # =====================================================
-    # 🔥 LAST IMPORTANT MESSAGES
-    # =====================================================
+    relevant = []
 
-    for msg in reversed(dialog[-14:]):
+    # =================================================
+    # 🔥 LAST IMPORTANT
+    # =================================================
+
+    for msg in reversed(dialog[-8:]):
 
         content = (
             msg.get("content")
@@ -278,64 +264,30 @@ def build_context_text(
         if not content:
             continue
 
-        priority = 0
-
         lowered = content.lower()
 
+        priority = 0
+
         # =================================================
-        # 🔥 KEYWORD MATCH
+        # 🔥 RECENT
+        # =================================================
+
+        if msg in dialog[-3:]:
+
+            priority += 3
+
+        # =================================================
+        # 🔥 KEYWORDS
         # =================================================
 
         for kw in keywords:
 
             if kw in lowered:
+
                 priority += 2
 
         # =================================================
-        # 🔥 EXECUTION SIGNALS
-        # =================================================
-
-        execution_words = [
-            "создай",
-            "сделай",
-            "нарисуй",
-            "сгенерируй",
-            "покажи"
-        ]
-
-        if any(
-            w in lowered
-            for w in execution_words
-        ):
-            priority += 2
-
-        # =================================================
-        # 🔥 VISUAL SIGNALS
-        # =================================================
-
-        visual_words = [
-            "пример",
-            "картинка",
-            "визуально",
-            "схема",
-            "референс"
-        ]
-
-        if any(
-            w in lowered
-            for w in visual_words
-        ):
-            priority += 2
-
-        # =================================================
-        # 🔥 RECENT PRIORITY
-        # =================================================
-
-        if msg in dialog[-4:]:
-            priority += 2
-
-        # =================================================
-        # 🔥 FLOW PRIORITY
+        # 🔥 FLOW MATCH
         # =================================================
 
         if active_flow:
@@ -347,6 +299,7 @@ def build_context_text(
             if flow_type:
 
                 if flow_type in lowered:
+
                     priority += 3
 
         # =================================================
@@ -355,90 +308,155 @@ def build_context_text(
 
         if priority >= 2:
 
-            relevant_dialog.append(
-                f"{role}: {content[:300]}"
+            relevant.append(
+                f"{role}: {content[:220]}"
             )
 
-    # =====================================================
-    # 🔥 DIALOG COMPRESSION
-    # =====================================================
-
-    relevant_dialog = list(
-        reversed(relevant_dialog[-8:])
+    relevant = list(
+        reversed(relevant[-5:])
     )
 
-    compressed_dialog = "\n".join(
-        relevant_dialog
+    return "\n".join(relevant)
+
+
+# =====================================================
+# 🔥 CONTEXT BUILD
+# =====================================================
+
+def build_context_text(
+    user_id,
+    text,
+    state
+):
+
+    text = (
+        text or ""
+    ).strip()
+
+    # =================================================
+    # 🔥 CORE
+    # =================================================
+
+    base = """
+
+Ты — April.
+
+Главное:
+- удерживать trajectory;
+- понимать намерение;
+- помогать;
+- сохранять continuity;
+- избегать болтологии;
+- двигаться к результату.
+
+Не повторяйся.
+Не анализируй одно и то же повторно.
+Не ломай continuity сцены.
+"""
+
+    # =================================================
+    # 🔥 STATE
+    # =================================================
+
+    dialog = state.get(
+        "dialog",
+        []
     )
 
-    # =====================================================
-    # 🔥 TRAJECTORY
-    # =====================================================
+    summary = state.get(
+        "memory_summary",
+        ""
+    )
 
-    trajectory = ""
+    active_flow = state.get(
+        "active_flow"
+    )
 
-    if active_flow:
+    passive_memory = state.get(
+        "passive_memory",
+        []
+    )
 
-        flow_type = active_flow.get(
-            "type"
+    image_context = state.get(
+        "image_context"
+    )
+
+    last_math = state.get(
+        "last_math"
+    )
+
+    scene_state = state.get(
+        "scene_state",
+        {}
+    )
+
+    # =================================================
+    # 🔥 TOPIC SHIFT
+    # =================================================
+
+    topic_shift = detect_topic_shift(
+
+        text,
+
+        active_flow,
+
+        scene_state
+    )
+
+    if topic_shift:
+
+        archive_completed_flow(
+
+            state,
+
+            active_flow
         )
 
-        trajectory += (
-            f"\nАктивный trajectory: "
-            f"{flow_type}"
-        )
+        state["active_flow"] = None
 
-        original = active_flow.get(
-            "original"
-        )
+        active_flow = None
 
-        if original:
+    # =================================================
+    # 🔥 SCENE
+    # =================================================
 
-            trajectory += (
-                f"\nИсходная задача: "
-                f"{original[:300]}"
-            )
+    scene_block = build_scene_block(
+        scene_state
+    )
 
-    else:
-
-        trajectory += (
-            "\nТекущий trajectory "
-            "не зафиксирован."
-        )
-
-    # =====================================================
-    # 🔥 SUMMARY
-    # =====================================================
+    # =================================================
+    # 🔥 MEMORY SUMMARY
+    # =================================================
 
     summary_block = ""
 
     if summary:
 
         summary_block = (
-            "\nСжатая память:\n"
+            "\nMemory summary:\n"
             + summary[-500:]
         )
 
-    # =====================================================
-    # 🔥 PASSIVE MEMORY BLOCK
-    # =====================================================
+    # =================================================
+    # 🔥 PASSIVE MEMORY
+    # =================================================
 
     passive_block = ""
 
     if passive_memory:
 
         compressed = "\n".join(
-            passive_memory[-5:]
+            passive_memory[-4:]
         )
 
         passive_block = (
-            "\nАрхив trajectory:\n"
+            "\nArchived trajectories:\n"
             + compressed
         )
 
-    # =====================================================
-    # 🔥 IMAGE MEMORY
-    # =====================================================
+    # =================================================
+    # 🔥 IMAGE CONTEXT
+    # =================================================
 
     image_block = ""
 
@@ -458,13 +476,13 @@ def build_context_text(
         if hint:
 
             image_block = (
-                "\nПоследний visual context:\n"
-                + hint[:200]
+                "\nVisual context:\n"
+                + hint[:180]
             )
 
-    # =====================================================
-    # 🔥 MATH MEMORY
-    # =====================================================
+    # =================================================
+    # 🔥 LAST MATH
+    # =================================================
 
     math_block = ""
 
@@ -477,44 +495,49 @@ def build_context_text(
         if expr:
 
             math_block = (
-                "\nПоследняя math задача:\n"
+                "\nMath context:\n"
                 + expr[:120]
             )
 
-    # =====================================================
-    # 🔥 CURRENT USER REQUEST
-    # =====================================================
+    # =================================================
+    # 🔥 RELEVANT DIALOG
+    # =================================================
+
+    relevant_dialog = build_relevant_dialog(
+
+        dialog,
+
+        text,
+
+        active_flow
+    )
+
+    # =================================================
+    # 🔥 CURRENT REQUEST
+    # =================================================
 
     current_request = f"""
 
-Текущий запрос пользователя:
+Current user request:
 {text}
 
 Важно:
-если пользователь продолжает тему —
-НЕ теряй trajectory.
+если trajectory продолжается —
+сохраняй continuity.
 
-Если тема сменилась —
-не тащи старый flow насильно.
-
-Если пользователь ожидает:
-- пример → покажи пример
-- visual path → предложи visual guidance
-- результат → не затягивай
-- guidance → направляй
-
-Не уходи в длинную болтологию.
+Если trajectory завершён —
+не тащи старую сцену.
 """
 
-    # =====================================================
-    # 🔥 FINAL BUILD
-    # =====================================================
+    # =================================================
+    # 🔥 FINAL
+    # =================================================
 
     full = f"""
 
 {base}
 
-{trajectory}
+{scene_block}
 
 {summary_block}
 
@@ -524,8 +547,8 @@ def build_context_text(
 
 {math_block}
 
-Релевантный диалог:
-{compressed_dialog}
+Relevant dialog:
+{relevant_dialog}
 
 {current_request}
 
@@ -545,8 +568,10 @@ def update_memory_summary(
 ):
 
     """
-    Храним trajectory,
-    а не мусор диалога.
+    DeepHub memory philosophy:
+
+    хранить trajectory,
+    а не мусор history.
     """
 
     old = state.get(
@@ -562,23 +587,24 @@ def update_memory_summary(
         bot_reply or ""
     ).strip()
 
-    # =====================================================
+    # =================================================
     # 🔥 CLEANUP
-    # =====================================================
+    # =================================================
 
     user_text = user_text[:140]
 
     bot_reply = bot_reply[:180]
 
-    # =====================================================
-    # 🔥 LOW VALUE FILTER
-    # =====================================================
+    # =================================================
+    # 🔥 LOW VALUE
+    # =================================================
 
     ignored = [
+
         "ок",
         "ага",
-        "да",
         "понял",
+        "да",
         "хорошо"
     ]
 
@@ -589,18 +615,18 @@ def update_memory_summary(
 
         return
 
-    # =====================================================
-    # 🔥 BUILD CHUNK
-    # =====================================================
+    # =================================================
+    # 🔥 BUILD
+    # =================================================
 
     chunk = (
         f"{user_text} → "
         f"{bot_reply}"
     )
 
-    # =====================================================
-    # 🔥 DUPLICATE AVOIDANCE
-    # =====================================================
+    # =================================================
+    # 🔥 DUPLICATES
+    # =================================================
 
     if chunk in old:
         return
@@ -611,12 +637,12 @@ def update_memory_summary(
         + chunk
     ).strip()
 
-    # =====================================================
-    # 🔥 MEMORY LIMIT
-    # =====================================================
+    # =================================================
+    # 🔥 LIMIT
+    # =================================================
 
-    if len(combined) > 1400:
+    if len(combined) > 1200:
 
-        combined = combined[-1400:]
+        combined = combined[-1200:]
 
     state["memory_summary"] = combined
