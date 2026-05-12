@@ -423,6 +423,9 @@ def beautify_links(text: str):
         return text
 
     for url in urls:
+        # не ломаем markdown ссылки
+        if f"]({url})" in text:
+            continue
 
         if "\n" + url in text:
             continue
