@@ -1063,6 +1063,9 @@ async def execute(
                 ]:
 
                     score += 2.5
+                    active_flow = get_active_flow(
+                        user_id
+            )
 
             if continuation_target == "image":
 
@@ -1073,8 +1076,7 @@ async def execute(
                 ]:
 
                     score += 1.5
-                    active_flow = get_active_flow(
-                user_id
+                    
             )
 
             if (
