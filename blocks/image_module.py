@@ -87,6 +87,20 @@ def extract_image_prompt(text: str):
         t = t.replace(b, "")
 
     t = t.strip()
+    separators = [
+        ".",
+        ",",
+        ":",
+        ";",
+        "\n"
+    ]
+
+    for sep in separators:
+
+        if sep in t:
+            t = t.split(sep)[0]
+
+    t = t.strip()
 
     if len(t) > 300:
         t = t[:300]
