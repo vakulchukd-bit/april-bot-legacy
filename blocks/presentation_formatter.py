@@ -207,51 +207,46 @@ def detect_platform_label(
     return "🔗 Website"
 
 
-# =====================================================
+## =====================================================
 # 🌐 LINK CARD FORMATTER
 # =====================================================
 
-lower = url.lower()
-
-if "desmos.com" in lower:
-    return "📈 Открыть график"
-
-if (
-    "youtube.com" in lower
-    or "youtu.be" in lower
+def build_link_card(
+    url: str
 ):
-    return "▶️ Смотреть видео"
-
-if "github.com" in lower:
-    return "💻 Открыть GitHub"
-
-if "wikipedia.org" in lower:
-    return "📚 Читать статью"
-
-if "reddit.com" in lower:
-    return "👽 Открыть обсуждение"
-
-if "instagram.com" in lower:
-    return "📸 Открыть Instagram"
-
-if "t.me" in lower:
-    return "📨 Открыть Telegram"
-
-return "🔗 Открыть ссылку"
 
     url = (url or "").strip()
 
     if not url:
         return ""
 
-    label = detect_platform_label(
-        url
-    )
+    lower = url.lower()
 
-    return (
-        f"{label}:\n"
-        f"{url}"
-    )
+    if "desmos.com" in lower:
+        return "📈 Открыть график"
+
+    if (
+        "youtube.com" in lower
+        or "youtu.be" in lower
+    ):
+        return "▶️ Смотреть видео"
+
+    if "github.com" in lower:
+        return "💻 Открыть GitHub"
+
+    if "wikipedia.org" in lower:
+        return "📚 Читать статью"
+
+    if "reddit.com" in lower:
+        return "👽 Открыть обсуждение"
+
+    if "instagram.com" in lower:
+        return "📸 Открыть Instagram"
+
+    if "t.me" in lower:
+        return "📨 Открыть Telegram"
+
+    return "🔗 Открыть ссылку"
 
 
 # =====================================================
