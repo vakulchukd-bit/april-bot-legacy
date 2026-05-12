@@ -1077,7 +1077,6 @@ async def execute(
 
                     score += 1.5
                     
-            )
 
             if (
                 active_flow
