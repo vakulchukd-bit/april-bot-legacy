@@ -1064,6 +1064,23 @@ async def execute(
                 ]:
 
                     score += 1.5
+                    active_flow = get_active_flow(
+                user_id
+            )
+
+            if (
+                active_flow
+                and active_flow.get("type") == "image"
+                and state.get("last_image")
+            ):
+
+                if room.name == "image_edit":
+
+                    score += 3.0
+
+                if room.name == "text":
+
+                    score -= 0.8
 
             if semantic.get(
                 "best_capability"
