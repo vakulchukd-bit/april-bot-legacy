@@ -255,6 +255,8 @@ def extract_urls(
 # =====================================================
 
 def is_code_content(text: str):
+    if not isinstance(text, str):
+        return False
 
     if not text:
         return False
