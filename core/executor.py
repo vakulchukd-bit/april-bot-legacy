@@ -813,6 +813,30 @@ def stabilize_room_score(
 
 
 # =====================================================
+# ⚡ ENERGY SUPPORT SYSTEM
+# =====================================================
+
+# 🔥 DeepHub stabilization:
+# Energy помогает Executor
+# при начале перегруза.
+#
+# Energy:
+# - НЕ authority;
+# - НЕ orchestration;
+# - НЕ принимает trajectory decisions.
+#
+# Energy только:
+# - detects overload;
+# - stabilizes executor;
+# - reduces pressure;
+# - helps execution continuity.
+#
+# Executor remains main coordinator.
+
+energy_support_active = False
+
+
+# =====================================================
 # 🔥 EXECUTOR CONTEXT
 # =====================================================
 
@@ -829,6 +853,7 @@ def build_executor_context(
     visual_reference,
     response_decision,
     external_context,
+    energy_support,
     text
 ):
 
@@ -856,6 +881,9 @@ def build_executor_context(
         "task_type": task_type,
 
         "energy": energy,
+
+        "energy_support":
+            energy_support,
 
         "output_mode":
             detect_output_mode(text),
@@ -989,6 +1017,30 @@ async def execute(
         semantic=semantic,
 
         reasoning=reasoning
+    )
+
+    # =================================================
+    # ⚡ ENERGY SUPPORT SYSTEM
+    # =====================================================
+
+    execution_pressure = semantic.get(
+        "execution_pressure",
+        0.0
+    )
+
+    signal_overload = cognition.get(
+        "signal_overload",
+        0.0
+    )
+
+    internal_noise = cognition.get(
+        "internal_noise",
+        0.0
+    )
+
+    dialog_fatigue = cognition.get(
+        "dialog_fatigue",
+        0.0
     )
 
     # =================================================
@@ -1202,6 +1254,75 @@ async def execute(
     )
 
     # =================================================
+    # ⚡ EARLY OVERLOAD DETECTION
+    # =====================================================
+
+    if energy == "HIGH":
+
+        energy_support_active = True
+
+    if execution_pressure >= 0.72:
+
+        energy_support_active = True
+
+    if signal_overload >= 0.65:
+
+        energy_support_active = True
+
+    if internal_noise >= 0.65:
+
+        energy_support_active = True
+
+    if dialog_fatigue >= 0.75:
+
+        energy_support_active = True
+
+    # =================================================
+    # ⚡ ENERGY SUPPORT CONTEXT
+    # =====================================================
+
+    if energy_support_active:
+
+        print(
+            "⚡ ENERGY SUPPORT ACTIVATED"
+        )
+
+        state[
+            "energy_support_active"
+        ] = True
+
+        context_energy_support = {
+
+            "enabled": True,
+
+            "execution_pressure":
+                execution_pressure,
+
+            "signal_overload":
+                signal_overload,
+
+            "internal_noise":
+                internal_noise,
+
+            "dialog_fatigue":
+                dialog_fatigue,
+
+            "stabilization_mode":
+                "support"
+        }
+
+    else:
+
+        state[
+            "energy_support_active"
+        ] = False
+
+        context_energy_support = {
+
+            "enabled": False
+        }
+
+    # =================================================
     # 🧠 CONTEXT
     # =====================================================
 
@@ -1228,6 +1349,8 @@ async def execute(
         response_decision=response_decision,
 
         external_context=external_context,
+
+        energy_support=context_energy_support,
 
         text=text
     )
