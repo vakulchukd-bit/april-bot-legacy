@@ -849,6 +849,9 @@ async def execute(
     state["response_decision"] = (
         response_decision
     )
+    active_flow = get_active_flow(
+        user_id
+    )
 
     # =================================================
     # 🔒 IMAGE LOCK
@@ -1063,9 +1066,7 @@ async def execute(
                 ]:
 
                     score += 2.5
-                    active_flow = get_active_flow(
-                        user_id
-            )
+                    
 
             if continuation_target == "image":
 
