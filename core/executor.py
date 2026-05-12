@@ -1220,11 +1220,40 @@ async def execute(
 
                 if override_required:
 
-                    print(
-                        "🧠 APRIL AUTHORITY OVERRIDE"
-                    )
+    print(
+        "🧠 APRIL AUTHORITY OVERRIDE"
+    )
 
-                    continue
+    authority = build_authority_decision(
+
+        result=result,
+
+        semantic=semantic,
+
+        cognition=cognition,
+
+        response_decision=response_decision,
+
+        state=state
+    )
+
+    forced_capability = authority.get(
+        "best_capability"
+    )
+
+    if forced_capability in [
+
+        "image_generation",
+        "image_edit"
+    ]:
+
+        print(
+            "🔥 AUTHORITY FORCED VISUAL RETRY"
+        )
+
+        continue
+
+    continue
 
                 state[
                     "last_response_quality"
