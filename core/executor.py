@@ -24,6 +24,7 @@ executor обязан
 приоритезировать решение April
 над fallback routing.
 """
+
 from blocks.intent_resolver import resolve_input
 
 from blocks.response_mode import detect_response_mode
@@ -72,12 +73,10 @@ from blocks.visual_reference_system import (
 from blocks.response_decision import (
     build_response_decision
 )
+
 from blocks.april_authority import (
-
     build_authority_state,
-
     should_override,
-
     build_authority_decision
 )
 
@@ -615,7 +614,8 @@ async def execute(
 
     mode = get_mode(user_id)
 
-    print("🧠 ROOMS LOADED:",
+    print(
+        "🧠 ROOMS LOADED:",
         [r.name for r in ROOMS]
     )
 
@@ -725,6 +725,7 @@ async def execute(
             "🔥 APRIL FORCED ROOM:",
             forced_room
         )
+
     final_action = response_decision.get(
         "final_action",
         "talk"
@@ -758,7 +759,7 @@ async def execute(
 
     # =================================================
     # 🌐 EXTERNAL KNOWLEDGE
-    # =====================================================
+    # =================================================
 
     external_context = ""
 
@@ -1200,28 +1201,28 @@ async def execute(
                         cognition
                     )
                 )
+
                 # =============================================
                 # 🔥 APRIL AUTHORITY REVIEW
                 # =============================================
 
-
                 override_required = (
-                     should_override(
+                    should_override(
 
-                         result=result,
+                        result=result,
 
-                         semantic=semantic,
+                        semantic=semantic,
 
-                         cognition=cognition,
+                        cognition=cognition,
 
-                         state=state
+                        state=state
                     )
                 )
 
                 if override_required:
 
                     print(
-                         "🧠 APRIL AUTHORITY OVERRIDE"
+                        "🧠 APRIL AUTHORITY OVERRIDE"
                     )
 
                     authority = build_authority_decision(
@@ -1232,27 +1233,26 @@ async def execute(
 
                         cognition=cognition,
 
-                    response_decision=response_decision,
+                        response_decision=response_decision,
 
-                    state=state
-                   )
+                        state=state
+                    )
 
                     forced_capability = authority.get(
-                    "best_capability"
-                 )
+                        "best_capability"
+                    )
 
-               if forced_capability in [
+                    if forced_capability in [
 
-                  "image_generation",
-                  "image_edit"
-                ]:
+                        "image_generation",
+                        "image_edit"
+                    ]:
 
-                 print(
-                 "🔥 AUTHORITY FORCED VISUAL RETRY"
-                )
+                        print(
+                            "🔥 AUTHORITY FORCED VISUAL RETRY"
+                        )
 
-                     continue
-
+                        continue
 
                 state[
                     "last_response_quality"
@@ -1347,7 +1347,7 @@ async def execute(
 
             state[
                 "last_execution_failure"
-
+            ] = failure
 
     # =================================================
     # 🧠 POST RESPONSE ANALYSIS
