@@ -330,20 +330,30 @@ def build_response_decision(
 
     if (
 
-        cognition.get(
-            "prefer_visual"
+        not cognition.get(
+            "internet_context_needed"
         )
 
-        or cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.45
+        and not cognition.get(
+            "web_support_required"
+        )
 
-        or cognition.get(
-            "visual_imagination",
-            0.0
-        ) >= 0.45
+        and (
 
+            cognition.get(
+                "prefer_visual"
+            )
+
+            or cognition.get(
+                "wants_visual",
+                0.0
+            ) >= 0.45
+
+            or cognition.get(
+                "visual_imagination",
+                0.0
+            ) >= 0.45
+        )
     ):
 
         result["final_action"] = (
@@ -363,7 +373,6 @@ def build_response_decision(
         result["should_generate"] = True
 
         result["generation_allowed"] = True
-
     # =====================================================
     # 🔥 UNDERSTANDING USER
     # =====================================================
