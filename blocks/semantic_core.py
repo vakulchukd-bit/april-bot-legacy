@@ -504,6 +504,80 @@ def analyze(
         result["example_expectation"] += 0.5
 
     # =====================================================
+    # 🔥 CAPABILITY UNDERSTANDING LAYER
+    # =====================================================
+
+    capability_signals = 0.0
+
+    informational_signals = [
+
+        "информация",
+        "данные",
+        "что известно",
+        "что происходит",
+        "расскажи",
+        "объясни",
+        "покажи",
+        "помоги понять",
+        "можешь помочь",
+        "что можешь сказать"
+    ]
+
+    execution_signals = [
+
+        "создай",
+        "сгенерируй",
+        "нарисуй",
+        "построй",
+        "выполни"
+    ]
+
+    continuation_signals = [
+
+        "дальше",
+        "продолжим",
+        "вернемся",
+        "теперь",
+        "еще"
+    ]
+
+    if any(w in t for w in informational_signals):
+
+        capability_signals += 0.25
+
+        result["conversation_alive"] = True
+
+        result["unresolved_intent"] = True
+
+        result["response_requires_reflection"] = True
+
+        result["capability_is_supportive"] = True
+
+        result["capability_must_follow_dialogue"] = True
+
+        result["assistant_initiative"] += 0.15
+
+    if any(w in t for w in execution_signals):
+
+        capability_signals += 0.45
+
+        result["execution_readiness"] += 0.35
+
+    if any(w in t for w in continuation_signals):
+
+        capability_signals += 0.15
+
+        result["trajectory_strength"] += 0.15
+
+        result["dialog_continuity"] = True
+
+    result["capability_route_confidence"] = min(
+        1.0,
+        result["capability_route_confidence"]
+        + capability_signals
+    )
+
+    # =====================================================
     # 🔥 EXECUTION PRESSURE
     # =====================================================
 
@@ -523,19 +597,6 @@ def analyze(
         pressure += 0.4
 
         result["execution_readiness"] += 0.4
-
-    # 🔥 "покажи" больше НЕ является execution trigger
-    if "покажи" in t:
-
-        result["example_expectation"] += 0.3
-
-        result["visual_expectation"] += 0.2
-
-        result["capability_is_guidance"] = True
-
-        result["capability_should_wait"] = True
-
-        result["ambiguity_level"] += 0.2
 
     if (
         result["continuation"]
