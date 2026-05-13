@@ -260,6 +260,82 @@ def detect_realtime_need(
 
 
 # =====================================================
+# 🧠 EXECUTION SUPPORT ANALYSIS
+# =====================================================
+
+def should_support_execution(
+    text: str,
+    semantic: dict,
+    cognition: dict
+):
+
+    text = (
+        text or ""
+    ).lower()
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+
+    # =================================================
+    # 🌐 REALTIME ALWAYS ALLOWED
+    # =====================================================
+
+    if detect_realtime_need(
+        text,
+        semantic
+    ):
+        return True
+
+    # =================================================
+    # 🧠 VISUAL SUPPORT
+    # =====================================================
+
+    if semantic.get(
+        "visual_expectation",
+        0.0
+    ) >= 0.65:
+
+        return True
+
+    # =================================================
+    # 🧠 TRAJECTORY SUPPORT
+    # =====================================================
+
+    if semantic.get(
+        "continuation"
+    ):
+
+        if semantic.get(
+            "trajectory_strength",
+            0.0
+        ) >= 0.6:
+
+            return True
+
+    # =================================================
+    # 🧠 GUIDANCE SUPPORT
+    # =====================================================
+
+    if cognition.get(
+        "needs_guidance"
+    ):
+
+        return True
+
+    # =================================================
+    # 🧠 EXPLORATION SUPPORT
+    # =====================================================
+
+    if cognition.get(
+        "exploration_mode"
+    ):
+
+        return True
+
+    return False
+
+
+# =====================================================
 # 🧠 WEB ESCALATION DETECTION
 # =====================================================
 
@@ -277,26 +353,40 @@ def should_use_external_knowledge(
     response_decision = response_decision or {}
 
     # =================================================
-    # 🔥 EXECUTION PRIORITY PROTECTION
-    # =================================================
+    # 🔥 EXECUTION SUPPORT MODE
+    # =====================================================
 
     if semantic.get(
         "should_execute"
     ):
-        return False
+
+        if should_support_execution(
+            text,
+            semantic,
+            cognition
+        ):
+
+            return True
 
     # =================================================
-    # 🔥 VISUAL GENERATION PROTECTION
-    # =================================================
+    # 🔥 VISUAL GENERATION SUPPORT
+    # =====================================================
 
     if response_decision.get(
         "should_generate"
     ):
-        return False
+
+        if should_support_execution(
+            text,
+            semantic,
+            cognition
+        ):
+
+            return True
 
     # =================================================
-    # 🔥 ROOM PRIORITY
-    # =================================================
+    # 🔥 ROOM SUPPORT MODE
+    # =====================================================
 
     room = semantic.get(
         "room"
@@ -307,11 +397,18 @@ def should_use_external_knowledge(
         "image_generate",
         "image_edit"
     ]:
-        return False
+
+        if should_support_execution(
+            text,
+            semantic,
+            cognition
+        ):
+
+            return True
 
     # =================================================
     # 🌐 REALTIME NEED
-    # =================================================
+    # =====================================================
 
     if detect_realtime_need(
         text,
@@ -321,8 +418,8 @@ def should_use_external_knowledge(
         return True
 
     # =================================================
-    # 🔥 USER EXPLORATION
-    # =================================================
+    # 🧠 USER EXPLORATION
+    # =====================================================
 
     if cognition.get(
         "exploration_mode"
@@ -336,8 +433,8 @@ def should_use_external_knowledge(
             return True
 
     # =================================================
-    # 🔥 KNOWLEDGE TOPICS
-    # =================================================
+    # 🧠 KNOWLEDGE TOPICS
+    # =====================================================
 
     for topic in WEB_KNOWLEDGE_TOPICS:
 
@@ -345,8 +442,8 @@ def should_use_external_knowledge(
             return True
 
     # =================================================
-    # 🔥 HIGH AMBIGUITY
-    # =================================================
+    # 🧠 HIGH AMBIGUITY
+    # =====================================================
 
     if semantic.get(
         "ambiguity_level",
@@ -609,7 +706,7 @@ def enrich_with_external_knowledge(
 
     # =================================================
     # 🌐 LIVE CONTEXT LABEL
-    # =================================================
+    # =====================================================
 
     if knowledge_result.get(
         "live_intent"
@@ -622,7 +719,7 @@ def enrich_with_external_knowledge(
 
     # =================================================
     # 🔥 SAFE MERGE
-    # =================================================
+    # =====================================================
 
     if not base_response:
         return knowledge
