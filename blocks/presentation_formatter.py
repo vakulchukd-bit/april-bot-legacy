@@ -1,3 +1,5 @@
+# blocks/presentation_formatter.py
+
 # =====================================================
 # 🧠 APRIL PRESENTATION FORMATTER
 # =====================================================
@@ -6,12 +8,14 @@
 Presentation layer April.
 
 Этот модуль:
+
 - НЕ меняет personality;
 - НЕ отвечает вместо April;
 - НЕ ломает trajectory;
 - НЕ превращает ответы в UI-кашу.
 
 Он:
+
 - улучшает readability;
 - делает ответы визуально приятнее;
 - добавляет лёгкую структуру;
@@ -23,21 +27,17 @@ Presentation layer April.
 
 import re
 
-
 # =====================================================
 # 🔥 SAFE FORMAT PATCH
 # =====================================================
 
 FORMAT_PATCH_LOG = []
 
+
 def safe_format_log(msg):
-
     try:
-
         print("FORMAT PATCH:", msg)
-
         FORMAT_PATCH_LOG.append(msg)
-
     except:
         pass
 
@@ -47,7 +47,6 @@ def safe_format_log(msg):
 # =====================================================
 
 EMOJI_MAP = {
-
     "travel": "🌍",
     "city": "🏙️",
     "nature": "🌿",
@@ -67,7 +66,7 @@ EMOJI_MAP = {
 
     # =================================================
     # 🌐 INTERNET
-    # =====================================================
+    # =================================================
 
     "youtube": "▶️",
     "telegram": "📨",
@@ -84,13 +83,11 @@ EMOJI_MAP = {
     "website": "🔗"
 }
 
-
 # =====================================================
 # 🧠 PLATFORM LABELS
 # =====================================================
 
 PLATFORM_LABELS = [
-
     (
         r"https?://(www\.)?youtube\.com/[^\s]+",
         "▶️ YouTube"
@@ -157,14 +154,12 @@ PLATFORM_LABELS = [
     )
 ]
 
-
 # =====================================================
 # 🌐 PLATFORM DETECTION
 # =====================================================
 
-def detect_platform_label(
-    url: str
-):
+
+def detect_platform_label(url: str):
 
     url = (url or "").lower()
 
@@ -207,13 +202,11 @@ def detect_platform_label(
     return "🔗 Website"
 
 
-## =====================================================
+# =====================================================
 # 🌐 LINK CARD FORMATTER
 # =====================================================
 
-def build_link_card(
-    url: str
-):
+def build_link_card(url: str):
 
     url = (url or "").strip()
 
@@ -225,10 +218,7 @@ def build_link_card(
     if "desmos.com" in lower:
         return "📈 Открыть график"
 
-    if (
-        "youtube.com" in lower
-        or "youtu.be" in lower
-    ):
+    if "youtube.com" in lower or "youtu.be" in lower:
         return "▶️ Смотреть видео"
 
     if "github.com" in lower:
@@ -253,15 +243,11 @@ def build_link_card(
 # 🌐 EXTRACT URLS
 # =====================================================
 
-def extract_urls(
-    text: str
-):
+def extract_urls(text: str):
 
     text = text or ""
 
-    pattern = (
-        r"https?://[^\s]+"
-    )
+    pattern = r"https?://[^\s]+"
 
     return re.findall(
         pattern,
@@ -274,6 +260,7 @@ def extract_urls(
 # =====================================================
 
 def is_code_content(text: str):
+
     if not isinstance(text, str):
         return False
 
@@ -281,7 +268,6 @@ def is_code_content(text: str):
         return False
 
     checks = [
-
         "```",
         "<!DOCTYPE html>",
         "<html",
@@ -304,7 +290,6 @@ def is_realtime_content(text: str):
     t = text.lower()
 
     realtime_words = [
-
         "live",
         "realtime",
         "tracking",
@@ -330,7 +315,6 @@ def already_formatted(text: str):
         return False
 
     checks = [
-
         "━━━",
         "▶️ YouTube:",
         "📨 Telegram:",
@@ -352,7 +336,6 @@ def detect_primary_emoji(text: str):
     t = (text or "").lower()
 
     checks = [
-
         (
             ["город", "страна", "улица"],
             EMOJI_MAP["city"]
@@ -415,24 +398,20 @@ def beautify_links(text: str):
     if already_formatted(text):
         return text
 
-    urls = extract_urls(
-        text
-    )
+    urls = extract_urls(text)
 
     if not urls:
         return text
 
     for url in urls:
-        # не ломаем markdown ссылки
+
         if f"]({url})" in text:
             continue
 
         if "\n" + url in text:
             continue
 
-        card = build_link_card(
-            url
-        )
+        card = build_link_card(url)
 
         text = text.replace(
             url,
@@ -460,7 +439,6 @@ def split_into_sections(text: str):
         cleaned = block.strip()
 
         if cleaned:
-
             parts.append(cleaned)
 
     return parts
@@ -470,13 +448,9 @@ def split_into_sections(text: str):
 # 🧠 LIGHT FORMAT
 # =====================================================
 
-def apply_light_formatting(
-    text: str
-):
+def apply_light_formatting(text: str):
 
-    sections = split_into_sections(
-        text
-    )
+    sections = split_into_sections(text)
 
     if not sections:
         return text
@@ -484,10 +458,7 @@ def apply_light_formatting(
     result = []
 
     for section in sections:
-
-        result.append(
-            section.strip()
-        )
+        result.append(section.strip())
 
     return "\n\n".join(result)
 
@@ -496,33 +467,23 @@ def apply_light_formatting(
 # 🧠 VISUAL ENRICHMENT
 # =====================================================
 
-def apply_visual_enrichment(
-    text: str
-):
+def apply_visual_enrichment(text: str):
 
     text = (text or "").strip()
 
     if not text:
         return text
 
-    emoji = detect_primary_emoji(
-        text
-    )
+    emoji = detect_primary_emoji(text)
 
-    return (
-        f"{emoji} "
-        + text
-    )
+    return f"{emoji} {text}"
 
 
 # =====================================================
 # 🧠 MINI CARD FORMAT
 # =====================================================
 
-def build_mini_card(
-    title: str,
-    content: str
-):
+def build_mini_card(title: str, content: str):
 
     title = (title or "").strip()
     content = (content or "").strip()
@@ -556,10 +517,6 @@ def build_smart_presentation(
     if not text:
         return text
 
-    # =================================================
-    # 🔥 SAFE CRITICAL CONTENT
-    # =====================================================
-
     if is_code_content(text):
 
         safe_format_log(
@@ -574,9 +531,7 @@ def build_smart_presentation(
             "REALTIME CONTENT LIGHT MODE"
         )
 
-        return apply_light_formatting(
-            text
-        )
+        return apply_light_formatting(text)
 
     if already_formatted(text):
 
@@ -586,77 +541,133 @@ def build_smart_presentation(
 
         return text
 
-    # =================================================
-    # 🌐 SAFE LINK BEAUTIFICATION
-    # =====================================================
+    text = beautify_links(text)
 
-    text = beautify_links(
+    if cognition.get("reduce_talking"):
+        return apply_visual_enrichment(text)
+
+    if semantic.get("goal_stage") == "execution":
+        return apply_visual_enrichment(
+            apply_light_formatting(text)
+        )
+
+    if cognition.get("exploration_mode"):
+        return apply_visual_enrichment(
+            apply_light_formatting(text)
+        )
+
+    if response_decision.get("should_offer_reference"):
+        return apply_visual_enrichment(
+            apply_light_formatting(text)
+        )
+
+    return apply_visual_enrichment(
+        apply_light_formatting(text)
+    )
+
+
+# =====================================================
+# 🧠 APRIL FINAL VOICE ALIGNMENT
+# =====================================================
+
+def apply_april_final_voice(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    response_decision: dict
+):
+
+    text = (text or "").strip()
+
+    if not text:
+        return text
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+
+    emotional_mode = any([
+        cognition.get("emotional_mode"),
+        cognition.get("reflection_mode"),
+        cognition.get("relationship_mode"),
+        cognition.get("support_mode"),
+        cognition.get("conversation_mode")
+    ])
+
+    robotic_lines = [
+        "ничего подтверждённого найти не удалось",
+        "подтверждённой информации не найдено",
+        "информация не подтверждена",
+        "не удалось подтвердить",
+        "данные отсутствуют",
+        "достоверной информации нет"
+    ]
+
+    if emotional_mode:
+
+        cleaned_lines = []
+
+        for line in text.split("\n"):
+
+            line_lower = line.lower().strip()
+
+            blocked = False
+
+            for robotic in robotic_lines:
+
+                if robotic in line_lower:
+
+                    blocked = True
+
+                    safe_format_log(
+                        f"APRIL VOICE REMOVED: {line}"
+                    )
+
+                    break
+
+            if not blocked:
+                cleaned_lines.append(line)
+
+        text = "\n".join(
+            cleaned_lines
+        ).strip()
+
+    replacements = {
+        "⚠️": "✨",
+        "ошибка": "небольшая проблема",
+        "невозможно": "пока не получается",
+        "не удалось": "не получилось"
+    }
+
+    for old, new in replacements.items():
+
+        text = text.replace(
+            old,
+            new
+        )
+
+    duplicate_system_phrases = [
+        "⚠️ ⚠️",
+        "✨ ✨",
+        "не получилось не получилось"
+    ]
+
+    for phrase in duplicate_system_phrases:
+
+        while phrase in text:
+
+            text = text.replace(
+                phrase,
+                phrase.split()[0]
+            )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
         text
     )
 
-    # =================================================
-    # 🔥 REDUCE TALKING MODE
-    # =====================================================
-
-    if cognition.get(
-        "reduce_talking"
-    ):
-
-        return apply_visual_enrichment(
-            text
-        )
-
-    # =================================================
-    # 🔥 EXECUTION MODE
-    # =====================================================
-
-    if semantic.get(
-        "goal_stage"
-    ) == "execution":
-
-        return apply_visual_enrichment(
-            apply_light_formatting(
-                text
-            )
-        )
-
-    # =================================================
-    # 🔥 EXPLORATION MODE
-    # =====================================================
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        return apply_visual_enrichment(
-            apply_light_formatting(
-                text
-            )
-        )
-
-    # =================================================
-    # 🔥 VISUAL GUIDANCE
-    # =====================================================
-
-    if response_decision.get(
-        "should_offer_reference"
-    ):
-
-        return apply_visual_enrichment(
-            apply_light_formatting(
-                text
-            )
-        )
-
-    # =================================================
-    # 🔥 DEFAULT
-    # =====================================================
-
-    return apply_visual_enrichment(
-        apply_light_formatting(
-            text
-        )
-    )
+    return text.strip()
 
 
 # =====================================================
@@ -675,6 +686,13 @@ def beautify_response(
 
     formatted = build_smart_presentation(
         text,
+        semantic,
+        cognition,
+        response_decision
+    )
+
+    formatted = apply_april_final_voice(
+        formatted,
         semantic,
         cognition,
         response_decision
