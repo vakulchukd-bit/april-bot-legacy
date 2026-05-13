@@ -40,6 +40,26 @@ def build_response_decision(
         "should_continue_trajectory": False,
 
         # =================================================
+        # 🧠 SCENE COMPLETION
+        # =================================================
+
+        "scene_completion_required": False,
+
+        "scene_practical_goal_alive": False,
+
+        "scene_has_multiple_meanings": False,
+
+        "scene_needs_enrichment": False,
+
+        "scene_completion_confidence": 0.0,
+
+        "should_expand_reasoning": False,
+
+        "should_preserve_scene_layers": True,
+
+        "should_allow_tool_enrichment": False,
+
+        # =================================================
         # DIALOG CONTROL
         # =================================================
 
@@ -138,6 +158,7 @@ def build_response_decision(
 
         "response_requires_psychology_check": True
     }
+
     # =====================================================
     # 🔥 APRIL MASTER AUTHORITY
     # =====================================================
@@ -147,51 +168,6 @@ def build_response_decision(
     result["forced_room"] = None
 
     result["forced_action"] = None
-
-
-    # =====================================================
-    # 🔥 APRIL GLOBAL DECISION
-    # =====================================================
-
-    if (
-
-        cognition.get(
-            "prefer_visual"
-        )
-
-        or cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.45
-
-        or cognition.get(
-            "visual_imagination",
-            0.0
-        ) >= 0.45
-
-        or cognition.get(
-            "wants_result",
-            0.0
-        ) >= 0.72
-    ):
-
-        result["final_action"] = (
-            "generate"
-        )
-
-        result["forced_action"] = (
-            "generate"
-        )
-
-        result["forced_room"] = (
-            "image_generate"
-        )
-
-        result["visual_obligation"] = True
-
-        result["should_generate"] = True
-
-        result["generation_allowed"] = True
 
     # =====================================================
     # 🔥 EXECUTION PRESSURE
@@ -209,6 +185,16 @@ def build_response_decision(
 
     wants_visual = cognition.get(
         "wants_visual",
+        0.0
+    )
+
+    wants_dialog = cognition.get(
+        "wants_dialog",
+        0.0
+    )
+
+    wants_help = cognition.get(
+        "wants_help",
         0.0
     )
 
@@ -238,6 +224,148 @@ def build_response_decision(
     )
 
     # =====================================================
+    # 🧠 SCENE COMPLETION ANALYSIS
+    # =====================================================
+
+    practical_goal_alive = False
+
+    if (
+        wants_result >= 0.45
+        or wants_help >= 0.45
+        or execution_pressure >= 0.45
+        or cognition.get(
+            "internet_context_needed"
+        )
+    ):
+
+        practical_goal_alive = True
+
+    result[
+        "scene_practical_goal_alive"
+    ] = practical_goal_alive
+
+    multiple_meanings = 0
+
+    if wants_dialog >= 0.4:
+        multiple_meanings += 1
+
+    if wants_result >= 0.4:
+        multiple_meanings += 1
+
+    if wants_visual >= 0.4:
+        multiple_meanings += 1
+
+    if wants_help >= 0.4:
+        multiple_meanings += 1
+
+    if multiple_meanings >= 2:
+
+        result[
+            "scene_has_multiple_meanings"
+        ] = True
+
+    # =====================================================
+    # 🧠 SCENE CONTINUITY PROTECTION
+    # =====================================================
+
+    if (
+
+        result[
+            "scene_has_multiple_meanings"
+        ]
+
+        or practical_goal_alive
+
+        or unresolved_intent
+    ):
+
+        result[
+            "scene_completion_required"
+        ] = True
+
+        result[
+            "dialogue_still_alive"
+        ] = True
+
+        result[
+            "goal_completed"
+        ] = False
+
+    # =====================================================
+    # 🧠 ENRICHMENT POSSIBILITY
+    # =====================================================
+
+    if (
+
+        practical_goal_alive
+
+        and not cognition.get(
+            "exploration_mode"
+        )
+
+        and ambiguity < 0.7
+    ):
+
+        result[
+            "scene_needs_enrichment"
+        ] = True
+
+        result[
+            "should_allow_tool_enrichment"
+        ] = True
+
+    # =====================================================
+    # 🔥 APRIL GLOBAL DECISION
+    # =====================================================
+
+    if (
+
+        cognition.get(
+            "prefer_visual"
+        )
+
+        or cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.45
+
+        or cognition.get(
+            "visual_imagination",
+            0.0
+        ) >= 0.45
+
+        or (
+            cognition.get(
+                "wants_result",
+                0.0
+            ) >= 0.72
+
+            and cognition.get(
+                "wants_visual",
+                0.0
+            ) >= 0.4
+        )
+    ):
+
+        result["final_action"] = (
+            "generate"
+        )
+
+        result["forced_action"] = (
+            "generate"
+        )
+
+        result["forced_room"] = (
+            "image_generate"
+        )
+
+        result["visual_obligation"] = True
+
+        result["should_generate"] = True
+
+        result["generation_allowed"] = True
+
+    # =====================================================
     # 🔥 UNDERSTANDING USER
     # =====================================================
 
@@ -264,6 +392,10 @@ def build_response_decision(
         ) >= 0.5
         or cognition.get(
             "wants_visual",
+            0.0
+        ) >= 0.5
+        or cognition.get(
+            "wants_result",
             0.0
         ) >= 0.5
     ):
@@ -550,6 +682,29 @@ def build_response_decision(
         ] = True
 
     # =====================================================
+    # 🧠 SCENE COMPLETION PRESSURE
+    # =====================================================
+
+    if (
+
+        result[
+            "scene_completion_required"
+        ]
+
+        and result[
+            "understands_user_goal"
+        ]
+    ):
+
+        result[
+            "scene_completion_confidence"
+        ] = 0.82
+
+        result[
+            "should_expand_reasoning"
+        ] = True
+
+    # =====================================================
     # 🔥 POST ACTION ANALYSIS
     # =====================================================
 
@@ -644,6 +799,37 @@ def build_response_decision(
         result[
             "final_action"
         ] = "talk"
+
+    # =====================================================
+    # 🧠 PREMATURE SCENE CLOSURE PROTECTION
+    # =====================================================
+
+    if (
+
+        result[
+            "final_action"
+        ] == "talk"
+
+        and result[
+            "scene_practical_goal_alive"
+        ]
+
+        and result[
+            "should_allow_tool_enrichment"
+        ]
+    ):
+
+        result[
+            "dialogue_still_alive"
+        ] = True
+
+        result[
+            "goal_completed"
+        ] = False
+
+        result[
+            "should_expand_reasoning"
+        ] = True
 
     # =====================================================
     # 🔥 RESPONSE STYLE CONTROL
