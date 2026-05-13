@@ -194,6 +194,7 @@ async def run_with_activity(
     coro,
     activity_type="typing"
 ):
+    await asyncio.sleep(0)
 
     task = asyncio.create_task(
 
