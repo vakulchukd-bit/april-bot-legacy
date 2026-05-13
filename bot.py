@@ -83,6 +83,7 @@ from blocks.menu_system import (
 from blocks.image_module import (
     process as image_generate
 )
+
 from architecture.build_map import (
     scan_project,
     save_snapshot
@@ -148,7 +149,6 @@ from blocks.tariffs_config import (
 
 tz = pytz.timezone("Europe/Kyiv")
 
-
 # =========================================================
 # ⏰ TIME QUESTIONS
 # =========================================================
@@ -163,7 +163,6 @@ def is_time_question(text: str):
         "какая дата",
         "какой сегодня день"
     ])
-
 
 # =========================================================
 # ⌨️ ACTIVITY LOOP
@@ -188,7 +187,6 @@ async def activity_loop(
     except:
         pass
 
-
 # =========================================================
 # ⚡ RUN WITH ACTIVITY
 # =========================================================
@@ -198,6 +196,7 @@ async def run_with_activity(
     coro,
     activity_type="typing"
 ):
+
     await asyncio.sleep(0)
 
     task = asyncio.create_task(
@@ -220,13 +219,11 @@ async def run_with_activity(
 
         task.cancel()
 
-
 # =========================================================
 # 🌐 SIMPLE SERVER
 # =========================================================
 
 from checkout_server import app
-
 
 def run_server():
 
@@ -240,7 +237,6 @@ def run_server():
         debug=False,
         use_reloader=False
     )
-
 
 # =========================================================
 # 🖼 SAFE IMAGE SEND
@@ -281,7 +277,6 @@ async def safe_send_image(message, data):
                 message.message_id
             )
         )
-
 
 # =========================================================
 # 💬 MESSAGE HANDLER
@@ -629,7 +624,6 @@ async def handle(message: types.Message):
             "global_handler"
         )
 
-
 # =========================================================
 # 🔘 CALLBACKS
 # =========================================================
@@ -704,10 +698,9 @@ async def handle_callbacks(
 
         return
 
-    
-# =====================================================
-# 👑 ADMIN
-# =====================================================
+    # =====================================================
+    # 👑 ADMIN
+    # =====================================================
 
     if user_id == ADMIN_ID:
 
@@ -794,29 +787,29 @@ async def handle_callbacks(
     if data in ["buy_lite", "lite", "go_lite"]:
 
         keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
+            inline_keyboard=[
 
-            [
-                InlineKeyboardButton(
-                    text="💳 Карта / PayPal",
-                    url=f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
-                )
-            ],
+                [
+                    InlineKeyboardButton(
+                        text="💳 Карта / PayPal",
+                        url=f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
+                    )
+                ],
 
-            [
-                InlineKeyboardButton(
-                    text="🤖 Android • Google Pay",
-                    url=f"{CHECKOUT_DOMAIN}/open/lite/{user_id}"
-                )
-            ],
+                [
+                    InlineKeyboardButton(
+                        text="🤖 Android • Google Pay",
+                        url=f"{CHECKOUT_DOMAIN}/open/lite/{user_id}"
+                    )
+                ],
 
-        ]
-    )
+            ]
+        )
 
         await callback.message.answer(
-        "⚡ Lite Пакет",
-        reply_markup=keyboard
-    )
+            "⚡ Lite Пакет",
+            reply_markup=keyboard
+        )
 
         await callback.answer()
 
@@ -829,29 +822,29 @@ async def handle_callbacks(
     if data in ["buy_premium", "premium", "go_premium"]:
 
         keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
+            inline_keyboard=[
 
-            [
-                InlineKeyboardButton(
-                    text="💳 Карта / PayPal",
-                    url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-                )
-            ],
+                [
+                    InlineKeyboardButton(
+                        text="💳 Карта / PayPal",
+                        url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
+                    )
+                ],
 
-            [
-                InlineKeyboardButton(
-                    text="🤖 Android • Google Pay",
-                    url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
-                )
-            ],
+                [
+                    InlineKeyboardButton(
+                        text="🤖 Android • Google Pay",
+                        url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
+                    )
+                ],
 
-        ]
-    )
+            ]
+        )
 
         await callback.message.answer(
-        "👑 Premium Пакет",
-        reply_markup=keyboard
-    )
+            "👑 Premium Пакет",
+            reply_markup=keyboard
+        )
 
         await callback.answer()
 
@@ -973,7 +966,8 @@ async def handle_callbacks(
         return
 
     await callback.answer()
-    # =========================================================
+
+# =========================================================
 # 🧠 APRIL MAP AUTO UPDATE
 # =========================================================
 
@@ -994,7 +988,6 @@ except Exception as e:
         e
     )
 
-
 # =========================================================
 # 🚀 MAIN
 # =========================================================
@@ -1008,7 +1001,6 @@ async def main():
     )
 
     await dp.start_polling(bot)
-
 
 # =========================================================
 # ▶️ START
