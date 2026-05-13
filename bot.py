@@ -88,6 +88,7 @@ from architecture.build_map import (
     scan_project,
     save_snapshot
 )
+import json
 
 # =========================================================
 # 🔥 PAYPAL
@@ -290,6 +291,33 @@ async def handle(message: types.Message):
     ensure_user_db(user_id)
 
     text = message.text or message.caption or ""
+    # =====================================================
+    # 🧠 MAP EXPORT
+    # =====================================================
+
+    if text.strip().lower() == "/map":
+
+        snapshot = scan_project()
+
+        pretty = json.dumps(
+            snapshot,
+            indent=2,
+            ensure_ascii=False
+        )
+
+        if len(pretty) > 4000:
+
+            pretty = (
+                pretty[:4000]
+                + "\n\n...[TRUNCATED]"
+            )
+
+        await message.answer(
+            f"🧠 APRIL MAP\n\n<pre>{pretty}</pre>",
+            parse_mode="HTML"
+        )
+
+        return
 
     # =====================================================
     # 🎤 VOICE
