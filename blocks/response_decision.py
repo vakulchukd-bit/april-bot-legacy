@@ -334,17 +334,7 @@ def build_response_decision(
             0.0
         ) >= 0.45
 
-        or (
-            cognition.get(
-                "wants_result",
-                0.0
-            ) >= 0.72
-
-            and cognition.get(
-                "wants_visual",
-                0.0
-            ) >= 0.4
-        )
+        
     ):
 
         result["final_action"] = (
