@@ -803,7 +803,7 @@ def stabilize_room_score(
 
     # =================================================
     # 🔥 SCORE NORMALIZATION
-    # =================================================
+    # =====================================================
 
     return clamp(
         score,
@@ -815,23 +815,6 @@ def stabilize_room_score(
 # =====================================================
 # ⚡ ENERGY SUPPORT SYSTEM
 # =====================================================
-
-# 🔥 DeepHub stabilization:
-# Energy помогает Executor
-# при начале перегруза.
-#
-# Energy:
-# - НЕ authority;
-# - НЕ orchestration;
-# - НЕ принимает trajectory decisions.
-#
-# Energy только:
-# - detects overload;
-# - stabilizes executor;
-# - reduces pressure;
-# - helps execution continuity.
-#
-# Executor remains main coordinator.
 
 energy_support_active = False
 
@@ -856,13 +839,6 @@ def build_executor_context(
     energy_support,
     text
 ):
-
-    """
-    Executor context теперь:
-    scene-bound;
-    orchestration-safe;
-    calmer.
-    """
 
     scene_state = safe_get_scene_state(
         state
@@ -957,10 +933,6 @@ async def execute(
         user_id
     )
 
-    # =================================================
-    # 🧠 SEMANTIC
-    # =====================================================
-
     semantic = semantic_analyze(
 
         text=text,
@@ -991,10 +963,6 @@ async def execute(
         semantic=semantic
     )
 
-    # =================================================
-    # 🧠 REASONING
-    # =====================================================
-
     reasoning = build_reasoning_state(
 
         text=text,
@@ -1003,10 +971,6 @@ async def execute(
 
         semantic=semantic
     )
-
-    # =================================================
-    # 🧠 COGNITION
-    # =====================================================
 
     cognition = analyze_cognition(
 
@@ -1018,10 +982,6 @@ async def execute(
 
         reasoning=reasoning
     )
-
-    # =================================================
-    # ⚡ ENERGY SUPPORT SYSTEM
-    # =====================================================
 
     execution_pressure = semantic.get(
         "execution_pressure",
@@ -1043,10 +1003,6 @@ async def execute(
         0.0
     )
 
-    # =================================================
-    # 🧠 VISUAL
-    # =====================================================
-
     visual_reference = (
 
         build_visual_reference(
@@ -1061,10 +1017,6 @@ async def execute(
         )
     )
 
-    # =================================================
-    # 🧠 RESPONSE DECISION
-    # =====================================================
-
     response_decision = (
 
         build_response_decision(
@@ -1078,10 +1030,6 @@ async def execute(
             state=state
         )
     )
-
-    # =================================================
-    # 🔥 EXTERNAL CONTEXT
-    # =====================================================
 
     external_context = ""
 
@@ -1112,10 +1060,6 @@ async def execute(
 
         traceback.print_exc()
 
-    # =================================================
-    # 🧠 DIALOG ANALYSIS
-    # =====================================================
-
     state["dialog_analysis"] = {
 
         "trajectory_active":
@@ -1139,10 +1083,6 @@ async def execute(
             )
     }
 
-    # =================================================
-    # 🧠 STATE SAVE
-    # =====================================================
-
     state["semantic"] = semantic
     state["reasoning"] = reasoning
     state["cognition"] = cognition
@@ -1152,10 +1092,6 @@ async def execute(
     state["response_decision"] = (
         response_decision
     )
-
-    # =================================================
-    # 🔒 IMAGE LOCK
-    # =====================================================
 
     if state.get(
         "image_lock"
@@ -1168,10 +1104,6 @@ async def execute(
             "data":
                 "⏳ Изображение ещё обрабатывается"
         }
-
-    # =================================================
-    # 💬 SAVE USER
-    # =====================================================
 
     add_dialog(
 
@@ -1189,10 +1121,6 @@ async def execute(
         text
     )
 
-    # =================================================
-    # 🔥 TASK TYPE
-    # =====================================================
-
     semantic_intent = semantic.get(
         "intent"
     )
@@ -1207,13 +1135,63 @@ async def execute(
             text
         )
 
-    # =================================================
+    # =====================================================
     # 🔥 ACTIVE FLOW
     # =====================================================
 
     active_flow = get_active_flow(
         user_id
     )
+
+    # =====================================================
+    # 🔥 DEEPHUB FLOW STABILIZATION
+    # =====================================================
+
+    semantic_entity = semantic.get(
+        "entity",
+        {}
+    )
+
+    semantic_goal = semantic.get(
+        "goal"
+    )
+
+    goal_stage = semantic.get(
+        "goal_stage",
+        "exploration"
+    )
+
+    flow_payload = {
+
+        "type": task_type,
+
+        "entity": semantic_entity,
+
+        "goal": semantic_goal,
+
+        "trajectory": goal_stage,
+
+        "original": text,
+
+        "timestamp":
+            datetime.now().isoformat(),
+
+        "dialog_continuity":
+            semantic.get(
+                "dialog_continuity",
+                True
+            ),
+
+        "conversation_alive":
+            semantic.get(
+                "conversation_alive",
+                True
+            )
+    }
+
+    # =====================================================
+    # 🔥 FLOW CREATION
+    # =====================================================
 
     if not active_flow:
 
@@ -1223,10 +1201,7 @@ async def execute(
 
                 user_id,
 
-                {
-                    "type": "math",
-                    "original": text
-                }
+                flow_payload
             )
 
         elif task_type in [
@@ -1240,22 +1215,92 @@ async def execute(
 
                 user_id,
 
-                {
-                    "type": "image"
-                }
+                flow_payload
             )
 
-    # =================================================
-    # ⚡ ENERGY
     # =====================================================
+    # 🔥 FLOW ENRICHMENT
+    # =====================================================
+
+    else:
+
+        active_entity = active_flow.get(
+            "entity",
+            {}
+        )
+
+        current_weight = semantic_entity.get(
+            "weight",
+            0.0
+        )
+
+        previous_weight = active_entity.get(
+            "weight",
+            0.0
+        )
+
+        # =================================================
+        # 🔥 STRONGER ENTITY UPDATE
+        # =====================================================
+
+        if current_weight >= previous_weight:
+
+            active_flow["entity"] = (
+                semantic_entity
+            )
+
+        # =================================================
+        # 🔥 TRAJECTORY UPDATE
+        # =====================================================
+
+        active_flow["trajectory"] = (
+            goal_stage
+        )
+
+        # =================================================
+        # 🔥 LAST USER MESSAGE
+        # =====================================================
+
+        active_flow["last_message"] = (
+            text
+        )
+
+        active_flow["updated_at"] = (
+            datetime.now().isoformat()
+        )
+
+        # =================================================
+        # 🔥 CONTINUITY FLAGS
+        # =====================================================
+
+        active_flow[
+            "dialog_continuity"
+        ] = semantic.get(
+            "dialog_continuity",
+            True
+        )
+
+        active_flow[
+            "conversation_alive"
+        ] = semantic.get(
+            "conversation_alive",
+            True
+        )
+
+        # =================================================
+        # 🔥 SAVE UPDATED FLOW
+        # =====================================================
+
+        set_active_flow(
+
+            user_id,
+
+            active_flow
+        )
 
     energy = get_energy(
         user_id
     )
-
-    # =================================================
-    # ⚡ EARLY OVERLOAD DETECTION
-    # =====================================================
 
     if energy == "HIGH":
 
@@ -1276,10 +1321,6 @@ async def execute(
     if dialog_fatigue >= 0.75:
 
         energy_support_active = True
-
-    # =================================================
-    # ⚡ ENERGY SUPPORT CONTEXT
-    # =====================================================
 
     if energy_support_active:
 
@@ -1322,10 +1363,6 @@ async def execute(
             "enabled": False
         }
 
-    # =================================================
-    # 🧠 CONTEXT
-    # =====================================================
-
     context = build_executor_context(
 
         chat_id=chat_id,
@@ -1354,10 +1391,6 @@ async def execute(
 
         text=text
     )
-
-    # =================================================
-    # 🧠 ROOM SCORING
-    # =====================================================
 
     scored_rooms = []
 
@@ -1406,20 +1439,12 @@ async def execute(
 
             traceback.print_exc()
 
-    # =================================================
-    # 🔥 SORT
-    # =====================================================
-
     scored_rooms.sort(
 
         key=lambda x: x[0],
 
         reverse=True
     )
-
-    # =================================================
-    # 🚀 EXECUTION
-    # =====================================================
 
     best_result = None
 
@@ -1530,6 +1555,55 @@ async def execute(
                     )
                 )
 
+                # =================================================
+                # 🔥 SCENE RELEVANCE VALIDATION
+                # =====================================================
+
+                current_flow = get_active_flow(
+                    user_id
+                )
+
+                scene_valid = True
+
+                if current_flow:
+
+                    current_trajectory = current_flow.get(
+                        "trajectory"
+                    )
+
+                    result_type = result.get(
+                        "type",
+                        "text"
+                    )
+
+                    # =============================================
+                    # 🔥 STALE VISUAL PROTECTION
+                    # =============================================
+
+                    if result_type in [
+
+                        "image",
+                        "image_task",
+                        "diagram",
+                        "graph"
+                    ]:
+
+                        if current_trajectory != goal_stage:
+
+                            scene_valid = False
+
+                            print(
+                                "⚠️ STALE VISUAL TASK BLOCKED"
+                            )
+
+                # =================================================
+                # 🔥 RESULT ACCEPT
+                # =====================================================
+
+                if not scene_valid:
+
+                    continue
+
                 best_result = result
 
                 break
@@ -1563,17 +1637,9 @@ async def execute(
                 "last_execution_failure"
             ] = failure
 
-    # =================================================
-    # 🧠 RESULT
-    # =====================================================
-
     if best_result:
 
         return best_result
-
-    # =================================================
-    # 💬 FALLBACK
-    # =====================================================
 
     context_text = build_context_text(
 
