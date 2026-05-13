@@ -910,7 +910,7 @@ async def execute(
     user_id,
     text,
     chat_id,
-    run_with_typing,
+    run_with_activity,
     callback_data=None
 ):
 
@@ -1472,7 +1472,7 @@ async def execute(
 
                 context,
 
-                run_with_typing
+                run_with_activity
             )
 
             if (
@@ -1663,7 +1663,7 @@ async def execute(
         "💬 TEXT FALLBACK ACTIVATED"
     )
 
-    fallback_result = await run_with_typing(
+    fallback_result = await run_with_activity(
 
         chat_id,
 
