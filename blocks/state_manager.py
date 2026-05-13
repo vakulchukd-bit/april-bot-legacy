@@ -47,6 +47,18 @@ def build_default_scene():
         "status": "active",
 
         # =================================================
+        # 🔥 PRIMARY CONTINUITY
+        # =================================================
+
+        "primary_anchor": None,
+
+        "anchor_type": None,
+
+        "anchor_priority": 0.0,
+
+        "anchor_updated_at": None,
+
+        # =================================================
         # 🔥 USER
         # =================================================
 
@@ -441,6 +453,25 @@ def compress_dialog_to_summary(
 
     protected_context = []
 
+    # =================================================
+    # 🔥 PRIMARY ANCHOR PROTECTION
+    # =================================================
+
+    primary_anchor = scene.get(
+        "primary_anchor"
+    )
+
+    anchor_type = scene.get(
+        "anchor_type"
+    )
+
+    if primary_anchor:
+
+        protected_context.append(
+
+            f"ANCHOR:{anchor_type}:{primary_anchor}"
+        )
+
     if scene.get("goal"):
 
         protected_context.append(
@@ -658,6 +689,41 @@ def set_active_flow(
         scene["goal"] = (
             flow.get("original")
         )
+
+        # =================================================
+        # 🔥 PRIMARY ANCHOR SYNC
+        # =================================================
+
+        primary_anchor = flow.get(
+            "primary_anchor"
+        )
+
+        anchor_type = flow.get(
+            "anchor_type"
+        )
+
+        if primary_anchor:
+
+            scene["primary_anchor"] = (
+                primary_anchor
+            )
+
+            scene["anchor_type"] = (
+                anchor_type
+            )
+
+            scene["anchor_priority"] = (
+                flow.get(
+                    "anchor_priority",
+                    1.0
+                )
+            )
+
+            scene["anchor_updated_at"] = (
+                flow.get(
+                    "timestamp"
+                )
+            )
 
         scene["continuity"] = True
 
