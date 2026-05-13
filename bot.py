@@ -83,6 +83,10 @@ from blocks.menu_system import (
 from blocks.image_module import (
     process as image_generate
 )
+from architecture.build_map import (
+    scan_project,
+    save_snapshot
+)
 
 # =========================================================
 # 🔥 PAYPAL
@@ -969,6 +973,26 @@ async def handle_callbacks(
         return
 
     await callback.answer()
+    # =========================================================
+# 🧠 APRIL MAP AUTO UPDATE
+# =========================================================
+
+try:
+
+    snapshot = scan_project()
+
+    save_snapshot(snapshot)
+
+    print(
+        "🧠 APRIL MAP AUTO-UPDATED"
+    )
+
+except Exception as e:
+
+    print(
+        "MAP ERROR:",
+        e
+    )
 
 
 # =========================================================
