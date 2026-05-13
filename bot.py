@@ -162,10 +162,13 @@ def is_time_question(text: str):
 
 
 # =========================================================
-# ⌨️ TYPING LOOP
+# ⌨️ ACTIVITY LOOP
 # =========================================================
 
-async def typing_loop(chat_id):
+async def activity_loop(
+    chat_id,
+    activity_type="typing"
+):
 
     try:
 
@@ -173,7 +176,7 @@ async def typing_loop(chat_id):
 
             await bot.send_chat_action(
                 chat_id,
-                "typing"
+                activity_type
             )
 
             await asyncio.sleep(2)
@@ -182,10 +185,22 @@ async def typing_loop(chat_id):
         pass
 
 
-async def run_with_typing(chat_id, coro):
+# =========================================================
+# ⚡ RUN WITH ACTIVITY
+# =========================================================
+
+async def run_with_activity(
+    chat_id,
+    coro,
+    activity_type="typing"
+):
 
     task = asyncio.create_task(
-        typing_loop(chat_id)
+
+        activity_loop(
+            chat_id,
+            activity_type
+        )
     )
 
     try:
@@ -197,6 +212,7 @@ async def run_with_typing(chat_id, coro):
         return result
 
     finally:
+
         task.cancel()
 
 
@@ -229,6 +245,11 @@ async def safe_send_image(message, data):
 
     try:
 
+        await bot.send_chat_action(
+            message.chat.id,
+            "upload_photo"
+        )
+
         await message.answer_photo(
             BufferedInputFile(
                 data,
@@ -243,6 +264,11 @@ async def safe_send_image(message, data):
 
         bio = BytesIO(data)
         bio.name = "image.png"
+
+        await bot.send_chat_action(
+            message.chat.id,
+            "upload_document"
+        )
 
         await message.answer_document(
             bio,
@@ -439,16 +465,49 @@ async def handle(message: types.Message):
         return
 
     # =====================================================
+    # 🧠 EXECUTOR ACTIVITY DETECTION
+    # =====================================================
+
+    activity_type = "typing"
+
+    image_words = [
+
+        "нарисуй",
+        "создай изображение",
+        "сгенерируй",
+        "картинку",
+        "изображение",
+        "арт",
+        "фото"
+    ]
+
+    text_lower = text.lower()
+
+    if any(
+        word in text_lower
+        for word in image_words
+    ):
+
+        activity_type = "upload_photo"
+
+    # =====================================================
     # 🧠 EXECUTOR
     # =====================================================
 
     try:
 
-        result = await execute(
-            user_id,
-            text,
+        result = await run_with_activity(
+
             message.chat.id,
-            run_with_typing
+
+            execute(
+                user_id,
+                text,
+                message.chat.id,
+                run_with_activity
+            ),
+
+            activity_type=activity_type
         )
 
         # =================================================
