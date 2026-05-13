@@ -156,7 +156,17 @@ def build_response_decision(
 
         "response_requires_context_check": True,
 
-        "response_requires_psychology_check": True
+        "response_requires_psychology_check": True,
+
+        # =================================================
+        # 🔥 DEEPHUB STABILIZATION
+        # =================================================
+
+        "high_ambiguity_detected": False,
+
+        "response_requires_clarification": False,
+
+        "exploration_generation_mix": False
     }
 
     # =====================================================
@@ -334,7 +344,6 @@ def build_response_decision(
             0.0
         ) >= 0.45
 
-        
     ):
 
         result["final_action"] = (
@@ -546,6 +555,13 @@ def build_response_decision(
             "avoid_heavy_generation"
         ] = True
 
+        # 🔥 DeepHub stabilization:
+        # exploration больше НЕ запрещает generation
+
+        result[
+            "exploration_generation_mix"
+        ] = True
+
     # =====================================================
     # 🔥 EXECUTION AUTHORITY
     # =====================================================
@@ -645,15 +661,15 @@ def build_response_decision(
         "should_wait_for_user"
     ]:
 
-        should_generate = False
+        # 🔥 DeepHub:
+        # ожидание пользователя больше
+        # НЕ убивает generation pipeline
+
+        result[
+            "response_requires_clarification"
+        ] = True
 
     if assistant_restraint >= 0.7:
-
-        should_generate = False
-
-    if cognition.get(
-        "exploration_mode"
-    ):
 
         should_generate = False
 
@@ -720,10 +736,6 @@ def build_response_decision(
     # 🔥 RESPONSE PRIORITY SYSTEM
     # =====================================================
 
-    # =================================================
-    # 1. WAIT
-    # =====================================================
-
     if result[
         "should_wait_for_user"
     ]:
@@ -731,10 +743,6 @@ def build_response_decision(
         result[
             "final_action"
         ] = "wait"
-
-    # =================================================
-    # 2. REFERENCE
-    # =====================================================
 
     elif result[
         "should_offer_reference"
@@ -744,10 +752,6 @@ def build_response_decision(
             "final_action"
         ] = "reference"
 
-    # =================================================
-    # 3. GENERATE
-    # =====================================================
-
     elif result[
         "should_generate"
     ]:
@@ -755,10 +759,6 @@ def build_response_decision(
         result[
             "final_action"
         ] = "generate"
-
-    # =================================================
-    # 4. EXECUTE
-    # =====================================================
 
     elif result[
         "should_execute"
@@ -768,10 +768,6 @@ def build_response_decision(
             "final_action"
         ] = "execute"
 
-    # =================================================
-    # 5. GUIDE
-    # =====================================================
-
     elif result[
         "should_guide"
     ]:
@@ -779,10 +775,6 @@ def build_response_decision(
         result[
             "final_action"
         ] = "guide"
-
-    # =================================================
-    # 6. TALK
-    # =====================================================
 
     else:
 
@@ -897,14 +889,6 @@ def build_response_decision(
     # =====================================================
 
     if result[
-        "should_wait_for_user"
-    ]:
-
-        result[
-            "should_generate"
-        ] = False
-
-    if result[
         "avoid_heavy_generation"
     ]:
 
@@ -913,8 +897,8 @@ def build_response_decision(
         ):
 
             result[
-                "should_generate"
-            ] = False
+                "exploration_generation_mix"
+            ] = True
 
     # =====================================================
     # 🔥 CAPABILITY SAFETY
@@ -928,20 +912,19 @@ def build_response_decision(
         and ambiguity >= 0.45
     ):
 
-        result[
-            "final_action"
-        ] = "guide"
+        # 🔥 DeepHub stabilization:
+        # ambiguity больше НЕ ломает execution
 
         result[
-            "response_mode"
-        ] = "human_guidance"
+            "high_ambiguity_detected"
+        ] = True
 
         result[
-            "should_generate"
-        ] = False
+            "response_requires_clarification"
+        ] = True
 
         result[
-            "should_execute"
-        ] = False
+            "scene_completion_confidence"
+        ] *= 0.82
 
     return result
