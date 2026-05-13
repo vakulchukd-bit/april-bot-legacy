@@ -9,14 +9,15 @@ import json
 # 🧠 ROOT
 # =====================================================
 
-ROOT_DIR = "."
+ROOT_DIR = os.getcwd()
 
 # =====================================================
 # 🧠 OUTPUT
 # =====================================================
 
-OUTPUT_FILE = (
-    "architecture/"
+OUTPUT_FILE = os.path.join(
+    ROOT_DIR,
+    "architecture",
     "architecture_snapshot.json"
 )
 
@@ -86,8 +87,13 @@ def scan_project():
                 ].append(file)
 
             if (
-                root.startswith("./core")
-                or root == "core"
+                root.startswith(
+                    os.path.join(
+                        ROOT_DIR,
+                        "core"
+                    )
+                )
+                or root.endswith("core")
             ):
 
                 result[
