@@ -100,6 +100,15 @@ def scan_project():
                     "core"
                 ].append(file)
 
+    print(
+        "🧠 MAP DATA:",
+        json.dumps(
+            result,
+            indent=2,
+            ensure_ascii=False
+        )
+    )
+
     return result
 
 # =====================================================
