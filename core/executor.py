@@ -1415,6 +1415,42 @@ async def execute(
 
                 cognition=cognition
             )
+            # =============================================
+            # 🌐 APRIL CONTEXT GUIDANCE
+            # =============================================
+
+            web_confidence = cognition.get(
+                "web_support_confidence",
+                0.0
+            )
+
+            internet_needed = cognition.get(
+                "internet_context_needed",
+                False
+            )
+
+            if (
+
+                internet_needed
+                and web_confidence >= 0.45
+
+            ):
+
+                if room.name == "text":
+
+                    score += (
+                        web_confidence * 1.2
+                    )
+
+                elif room.name in [
+
+                    "image_generate",
+                    "image_edit"
+                ]:
+
+                    score -= (
+                        web_confidence * 0.35
+                    )
 
             if score <= 0:
 
