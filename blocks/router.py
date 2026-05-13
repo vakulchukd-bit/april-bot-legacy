@@ -165,6 +165,22 @@ def user_in_exploration(
 
 
 # =====================================================
+# 🧠 SAFE ROUTER SUGGESTION
+# =====================================================
+
+def set_router_hint(
+    semantic,
+    hint
+):
+
+    semantic[
+        "router_suggestion"
+    ] = hint
+
+    return hint
+
+
+# =====================================================
 # 🧠 MAIN ROUTER
 # =====================================================
 
@@ -229,6 +245,18 @@ async def route_request(
         )
 
         # =================================================
+        # 🧠 DEFAULT SAFE STATE
+        # =================================================
+
+        semantic[
+            "router_is_soft"
+        ] = True
+
+        semantic[
+            "router_authority"
+        ] = "weak_hint"
+
+        # =================================================
         # 🧠 REASONING AUTHORITY
         # =================================================
 
@@ -238,7 +266,10 @@ async def route_request(
 
         if continuation_target == "math":
 
-            return "science"
+            return set_router_hint(
+                semantic,
+                "science"
+            )
 
         # =================================================
         # 🧠 IMAGE CONTINUATION
@@ -246,43 +277,36 @@ async def route_request(
 
         if continuation_target == "image":
 
-            # =============================================
-            # 🔥 exploration suppression
-            # =============================================
-
-            if user_in_exploration(
-                cognition,
-                response_decision
-            ):
-
-                return "text"
-
-            # =============================================
-            # 🔥 soft continuation
-            # =============================================
+            semantic[
+                "image_continuation_detected"
+            ] = True
 
             if is_soft_continuation(
                 text
             ):
 
-                if response_decision.get(
-                    "should_wait_for_user"
-                ):
+                semantic[
+                    "soft_visual_continuation"
+                ] = True
 
-                    return "text"
-
-                return "image_edit"
-
-            # =============================================
-            # 🔥 execution continuation
-            # =============================================
+                set_router_hint(
+                    semantic,
+                    "image_edit"
+                )
 
             if user_waiting_execution(
                 semantic,
                 cognition
             ):
 
-                return "image_edit"
+                semantic[
+                    "visual_execution_expected"
+                ] = True
+
+                set_router_hint(
+                    semantic,
+                    "image_edit"
+                )
 
         # =================================================
         # 🧠 USER LEADS DIRECTION
@@ -292,15 +316,17 @@ async def route_request(
             "user_leads_direction"
         ):
 
-            # =============================================
-            # 🔥 DO NOT FORCE GENERATION
-            # =============================================
+            semantic[
+                "user_guided_scene"
+            ] = True
 
             if cognition.get(
                 "prefer_reference_over_generation"
             ):
 
-                return "text"
+                semantic[
+                    "reference_priority"
+                ] = True
 
         # =================================================
         # 🧠 VISUAL REFERENCE MODE
@@ -310,7 +336,9 @@ async def route_request(
             "should_offer_reference"
         ):
 
-            return "text"
+            semantic[
+                "reference_mode"
+            ] = True
 
         # =================================================
         # 🧠 EXPLORATION MODE
@@ -320,7 +348,9 @@ async def route_request(
             "exploration_mode"
         ):
 
-            return "text"
+            semantic[
+                "exploration_active"
+            ] = True
 
         # =================================================
         # 🧠 VISUAL LIGHTWEIGHT MODE
@@ -330,7 +360,9 @@ async def route_request(
             "lightweight_mode"
         ):
 
-            return "text"
+            semantic[
+                "lightweight_visual_mode"
+            ] = True
 
         # =================================================
         # 🧠 HARD EXECUTION
@@ -346,7 +378,10 @@ async def route_request(
 
             if room:
 
-                return room
+                return set_router_hint(
+                    semantic,
+                    room
+                )
 
         # =================================================
         # 🧠 VISUAL EXECUTION
@@ -362,11 +397,14 @@ async def route_request(
             ) >= 0.7
         ):
 
-            if not cognition.get(
-                "generation_should_wait"
-            ):
+            semantic[
+                "visual_execution_mode"
+            ] = True
 
-                return "image_generate"
+            set_router_hint(
+                semantic,
+                "image_generate"
+            )
 
         # =================================================
         # 🧠 SCIENCE AUTHORITY
@@ -376,7 +414,10 @@ async def route_request(
             "room"
         ) == "science":
 
-            return "science"
+            return set_router_hint(
+                semantic,
+                "science"
+            )
 
         # =================================================
         # 🧠 META IMAGE MEMORY
@@ -389,17 +430,22 @@ async def route_request(
             ) == "image"
         ):
 
+            semantic[
+                "image_memory_active"
+            ] = True
+
             if is_soft_continuation(
                 text
             ):
 
-                if cognition.get(
-                    "generation_should_wait"
-                ):
+                semantic[
+                    "image_memory_continuation"
+                ] = True
 
-                    return "text"
-
-                return "image_edit"
+                set_router_hint(
+                    semantic,
+                    "image_edit"
+                )
 
         # =================================================
         # 🧠 LOCAL DETECTION
@@ -411,20 +457,14 @@ async def route_request(
 
         if local:
 
-            # =============================================
-            # 🔥 restraint suppression
-            # =============================================
+            semantic[
+                "local_detection_used"
+            ] = True
 
-            if (
-                local == "image_generate"
-                and cognition.get(
-                    "generation_should_wait"
-                )
-            ):
-
-                return "text"
-
-            return local
+            return set_router_hint(
+                semantic,
+                local
+            )
 
         # =================================================
         # 🧠 SHORT TEXTS
@@ -432,7 +472,14 @@ async def route_request(
 
         if len(t) <= 12:
 
-            return "text"
+            semantic[
+                "short_input_detected"
+            ] = True
+
+            return semantic.get(
+                "router_suggestion",
+                "text"
+            )
 
         # =================================================
         # 🧠 AI FALLBACK
@@ -453,13 +500,14 @@ async def route_request(
 
         if intent == "generate_image":
 
-            if cognition.get(
-                "generation_should_wait"
-            ):
+            semantic[
+                "ai_image_generation"
+            ] = True
 
-                return "text"
-
-            return "image_generate"
+            return set_router_hint(
+                semantic,
+                "image_generate"
+            )
 
         # =================================================
         # 🧠 AI IMAGE EDIT
@@ -471,7 +519,14 @@ async def route_request(
                 "image_context"
             ):
 
-                return "image_edit"
+                semantic[
+                    "ai_image_edit"
+                ] = True
+
+                return set_router_hint(
+                    semantic,
+                    "image_edit"
+                )
 
         # =================================================
         # 🧠 AI IMAGE ANALYZE
@@ -483,13 +538,23 @@ async def route_request(
                 "image_context"
             ):
 
-                return "image_edit"
+                semantic[
+                    "ai_image_analysis"
+                ] = True
+
+                return set_router_hint(
+                    semantic,
+                    "image_edit"
+                )
 
         # =================================================
         # 🧠 DEFAULT
         # =================================================
 
-        return "text"
+        return semantic.get(
+            "router_suggestion",
+            "text"
+        )
 
     except Exception as e:
 
