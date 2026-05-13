@@ -185,7 +185,17 @@ TRAVEL_WORDS = [
     "валюта",
     "такси",
     "где купить",
-    "где находится"
+    "где находится",
+
+    # 🔥 WEB / REALTIME
+    "погода",
+    "температура",
+    "weather",
+    "курс валют",
+    "новости",
+    "сейчас в",
+    "что происходит",
+    "какая погода"
 ]
 
 # =====================================================
@@ -195,10 +205,6 @@ TRAVEL_WORDS = [
 def stabilize_cognition_state(
     cognition: dict
 ):
-
-    # =================================================
-    # CORE STABILITY
-    # =================================================
 
     stability = cognition.get(
         "scene_stability",
@@ -230,10 +236,6 @@ def stabilize_cognition_state(
         0.0
     )
 
-    # =================================================
-    # FLOW STABILIZATION
-    # =================================================
-
     if active_flow_strength >= 0.5:
 
         stability += 0.25
@@ -241,10 +243,6 @@ def stabilize_cognition_state(
         noise -= 0.2
 
         overload -= 0.15
-
-    # =================================================
-    # FATIGUE CONTROL
-    # =================================================
 
     if fatigue >= 0.7:
 
@@ -254,10 +252,6 @@ def stabilize_cognition_state(
             "reduce_talking"
         ] = True
 
-    # =================================================
-    # FRUSTRATION CONTROL
-    # =================================================
-
     if frustration >= 0.7:
 
         cognition[
@@ -265,10 +259,6 @@ def stabilize_cognition_state(
         ] = True
 
         noise += 0.1
-
-    # =================================================
-    # EXPLORATION CONTROL
-    # =================================================
 
     if cognition.get(
         "exploration_mode"
@@ -281,10 +271,6 @@ def stabilize_cognition_state(
         cognition[
             "generation_should_wait"
         ] = True
-
-    # =================================================
-    # NORMALIZATION
-    # =================================================
 
     cognition[
         "scene_stability"
@@ -518,10 +504,6 @@ def analyze_cognition(
         "active_flow"
     )
 
-    # =================================================
-    # 🧠 VISUAL MEMORY
-    # =================================================
-
     visual_memory = build_visual_memory_response(
         text
     )
@@ -531,54 +513,28 @@ def analyze_cognition(
         visual_memory
     )
 
-    # =================================================
-    # 🧠 PERSONALITY
-    # =================================================
-
     personality_state = {
 
         "is_present": True,
-
         "protects_trajectory": True,
-
         "prefers_understanding": True,
-
         "prefers_execution_over_talking": False,
-
         "avoids_forced_generation": True,
-
         "follows_user_direction": True,
-
         "tracks_psychology": True,
-
         "tracks_emotional_shift": True,
-
         "tracks_dialog_energy": True,
-
         "maintains_continuity": True,
-
         "supports_exploration": True,
-
         "supports_execution": True,
-
         "uses_restraint": True,
-
         "avoids_trigger_behavior": True,
-
         "tracks_dialog_quality": True,
-
         "tracks_response_usefulness": True,
-
         "tracks_unresolved_intent": True,
-
         "tracks_post_action_state": True,
-
         "assistant_identity": "April"
     }
-
-    # =================================================
-    # 🔥 CAPABILITIES
-    # =====================================================
 
     capability_map = {
 
@@ -607,15 +563,7 @@ def analyze_cognition(
         "capabilities_require_reasoning": True
     }
 
-    # =================================================
-    # 🔥 BASE COGNITION
-    # =====================================================
-
     cognition = {
-
-        # =================================================
-        # USER INTENTION
-        # =================================================
 
         "wants_action": 0.0,
         "wants_dialog": 0.0,
@@ -625,35 +573,19 @@ def analyze_cognition(
         "wants_precision": 0.0,
         "wants_speed": 0.0,
 
-        # =================================================
-        # USER STATE
-        # =================================================
-
         "is_confused": 0.0,
         "is_waiting": 0.0,
         "is_frustrated": 0.0,
         "is_uncertain": 0.0,
 
-        # =================================================
-        # EXECUTION
-        # =================================================
-
         "execution_pressure": 0.0,
         "dialog_fatigue": 0.0,
         "result_pressure": 0.0,
-
-        # =================================================
-        # STABILITY
-        # =================================================
 
         "scene_stability": 0.7,
         "internal_noise": 0.15,
         "signal_overload": 0.1,
         "active_flow_strength": 0.0,
-
-        # =================================================
-        # RESPONSE
-        # =================================================
 
         "reduce_talking": False,
         "prefer_execution": False,
@@ -663,10 +595,6 @@ def analyze_cognition(
 
         "response_depth": "medium",
 
-        # =================================================
-        # SUPPORT
-        # =================================================
-
         "needs_guidance": False,
         "needs_examples": False,
         "needs_clarification": False,
@@ -675,10 +603,6 @@ def analyze_cognition(
         "should_proactively_help": False,
         "should_reduce_explanation": False,
 
-        # =================================================
-        # CONTINUITY
-        # =================================================
-
         "goal_completed": False,
         "needs_continuation": False,
         "trajectory_locked": False,
@@ -686,10 +610,6 @@ def analyze_cognition(
 
         "dialogue_still_alive": True,
         "unresolved_intent": True,
-
-        # =================================================
-        # VISUAL
-        # =================================================
 
         "visual_memory": visual_memory,
         "visual_mode": visual_mode,
@@ -714,10 +634,6 @@ def analyze_cognition(
                 "atmosphere"
             ),
 
-        # =================================================
-        # PERSONALITY
-        # =================================================
-
         "personality_active": True,
 
         "personality_state":
@@ -727,10 +643,6 @@ def analyze_cognition(
 
         "assistant_restraint": 0.0,
 
-        # =================================================
-        # HUMAN SUPPORT
-        # =================================================
-
         "human_psychology_weight": 0.5,
 
         "should_help_like_human": True,
@@ -738,36 +650,32 @@ def analyze_cognition(
         "should_feel_grounded": True,
         "should_protect_user": True,
 
-        # =================================================
-        # EXECUTION CONFIDENCE
-        # =================================================
-
         "execution_urgency": 0.0,
         "execution_confidence": 0.0,
-
-        # =================================================
-        # EXPLORATION
-        # =================================================
 
         "exploration_mode": False,
         "inspiration_mode": False,
 
-        # =================================================
-        # GENERATION CONTROL
-        # =================================================
-
         "generation_should_wait": False,
 
         # =================================================
-        # INTERNET
+        # 🌐 INTERNET / WEB
         # =================================================
 
         "internet_context_needed": False,
         "travel_context_needed": False,
 
-        # =================================================
-        # FLAGS
-        # =================================================
+        "web_support_allowed": True,
+        "web_support_preferred": False,
+        "web_support_required": False,
+        "web_support_used": False,
+        "web_support_confidence": 0.0,
+
+        "internet_answer_possible": False,
+        "internet_answer_missing": False,
+
+        "web_support_as_fallback": True,
+        "web_support_should_not_dominate": True,
 
         "understands_user_direction": False,
         "understands_user_goal": False,
@@ -777,18 +685,10 @@ def analyze_cognition(
         "assistant_should_follow": False,
         "assistant_should_slow_down": False,
 
-        # =================================================
-        # CAPABILITIES
-        # =================================================
-
         "search_capabilities": True,
 
         "capability_map":
             capability_map,
-
-        # =================================================
-        # DIRECTION HYPOTHESIS
-        # =================================================
 
         "direction_hypothesis": {
 
@@ -801,10 +701,6 @@ def analyze_cognition(
             "suggest_path": False
         }
     }
-
-    # =================================================
-    # 🔥 SEMANTIC INHERITANCE
-    # =====================================================
 
     _increase(
         cognition,
@@ -1049,7 +945,7 @@ def analyze_cognition(
         )
 
     # =================================================
-    # 🔥 TRAVEL MODE
+    # 🌐 WEB / REALTIME SUPPORT
     # =====================================================
 
     if _contains_any(
@@ -1064,6 +960,18 @@ def analyze_cognition(
         cognition[
             "travel_context_needed"
         ] = True
+
+        cognition[
+            "web_support_preferred"
+        ] = True
+
+        cognition[
+            "internet_answer_possible"
+        ] = True
+
+        cognition[
+            "web_support_confidence"
+        ] = 0.72
 
         cognition[
             "needs_guidance"
@@ -1092,10 +1000,6 @@ def analyze_cognition(
             "signal_overload",
             0.4
         )
-
-    # =================================================
-    # 🔥 ACTIVE FLOW
-    # =====================================================
 
     cognition = stabilize_trajectory(
         cognition,
@@ -1166,6 +1070,59 @@ def analyze_cognition(
         )
 
     # =================================================
+    # 🔥 WEB FALLBACK STABILIZATION
+    # =====================================================
+
+    if (
+
+        cognition.get(
+            "internet_context_needed"
+        )
+
+        and not cognition.get(
+            "prefer_visual"
+        )
+
+        and not cognition.get(
+            "exploration_mode"
+        )
+    ):
+
+        cognition[
+            "web_support_required"
+        ] = True
+
+        cognition[
+            "internet_answer_possible"
+        ] = True
+
+        cognition[
+            "generation_should_wait"
+        ] = True
+
+        cognition[
+            "prefer_execution"
+        ] = False
+
+        _decrease(
+            cognition,
+            "execution_pressure",
+            0.15
+        )
+
+        _decrease(
+            cognition,
+            "wants_visual",
+            0.25
+        )
+
+        _decrease(
+            cognition,
+            "signal_overload",
+            0.1
+        )
+
+    # =================================================
     # 🔥 UNDERSTANDING GOAL
     # =====================================================
 
@@ -1182,6 +1139,10 @@ def analyze_cognition(
         or cognition[
             "wants_visual"
         ] >= 0.5
+
+        or cognition[
+            "internet_context_needed"
+        ]
     ):
 
         cognition[
@@ -1244,6 +1205,7 @@ def analyze_cognition(
             "signal_overload",
             0.15
         )
+
     # =================================================
     # 🔥 CLARIFICATION
     # =====================================================
@@ -1257,17 +1219,9 @@ def analyze_cognition(
             "needs_clarification"
         ] = True
 
-    # =================================================
-    # 🔥 RESPONSE ECONOMY
-    # =====================================================
-
     cognition = apply_response_economy(
         cognition
     )
-
-    # =================================================
-    # 🔥 STABILIZATION
-    # =====================================================
 
     cognition = stabilize_cognition_state(
         cognition
@@ -1282,6 +1236,22 @@ def analyze_cognition(
     ]
 
     if cognition[
+        "internet_context_needed"
+    ]:
+
+        hypothesis[
+            "direction"
+        ] = "web_support"
+
+        hypothesis[
+            "confidence"
+        ] = 0.82
+
+        hypothesis[
+            "suggest_path"
+        ] = True
+
+    elif cognition[
         "wants_visual"
     ] >= 0.5:
 
