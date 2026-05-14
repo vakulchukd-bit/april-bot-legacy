@@ -303,9 +303,42 @@ async def handle(message: types.Message):
 
         snapshot = scan_project()
 
+        snapshot["emaps"] = {
+
+            "active_systems": list(
+                EMAPS.get(
+                    "active_systems",
+                    []
+                )
+            ),
+
+            "active_rooms": list(
+                EMAPS.get(
+                    "active_rooms",
+                    []
+                )
+            ),
+
+            "routing_chains":
+                EMAPS.get(
+                    "routing_chains",
+                    []
+                ),
+
+            "task_types": list(
+                EMAPS.get(
+                    "task_types",
+                    []
+                )
+            )
+        }
+
         pretty = json.dumps(
+
             snapshot,
+
             indent=2,
+
             ensure_ascii=False
         )
 
@@ -317,12 +350,14 @@ async def handle(message: types.Message):
             )
 
         await message.answer(
-            f"🧠 APRIL MAP\n\n<pre>{pretty}</pre>",
+
+            f"🧠 APRIL MAP\n\n"
+            f"<pre>{pretty}</pre>",
+
             parse_mode="HTML"
         )
 
         return
-
     # =====================================================
     # 🎤 VOICE
     # =====================================================
