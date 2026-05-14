@@ -30,7 +30,13 @@ IGNORE_FOLDERS = {
     "__pycache__",
     ".git",
     "venv",
-    "env"
+    "env",
+
+    ".venv",
+    "site-packages",
+    ".idea",
+    ".vscode",
+    "node_modules"
 }
 
 # =====================================================
