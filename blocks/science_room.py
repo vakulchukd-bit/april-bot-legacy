@@ -181,10 +181,127 @@ class ScienceRoom:
 
     def evaluate(self, text, context):
 
-        if context.get("task_type") == "math":
-            return 10.0
+        try:
 
-        return 0.0
+            score = 0.0
+
+            t = text.lower()
+
+            state = context.get(
+                "state",
+                {}
+            )
+
+            active_flow = context.get(
+                "semantic",
+                {}
+            )
+
+            # ======================================
+            # 🔥 DIRECT MATH TASK
+            # ======================================
+
+            if context.get(
+                "task_type"
+            ) == "math":
+
+                score += 10.0
+
+            # ======================================
+            # 🔥 LAST MATH CONTINUITY
+            # ======================================
+
+            last_math = state.get(
+                "last_math"
+            )
+
+            if last_math:
+
+                score += 4.0
+
+            # ======================================
+            # 🔥 GRAPH CONTINUATION
+            # ======================================
+
+            graph_words = [
+
+                "график",
+                "построй",
+                "покажи",
+                "функция",
+                "координаты",
+                "это",
+                "его",
+                "её",
+                "сделай плавнее",
+                "сделай круче"
+            ]
+
+            if any(
+                w in t
+                for w in graph_words
+            ):
+
+                score += 5.0
+
+            # ======================================
+            # 🔥 MATH EXPRESSIONS
+            # ======================================
+
+            math_words = [
+
+                "sin",
+                "cos",
+                "tan",
+                "log",
+                "y=",
+                "x="
+            ]
+
+            if any(
+                w in t
+                for w in math_words
+            ):
+
+                score += 4.0
+
+            # ======================================
+            # 🔥 ACTIVE FLOW BOOST
+            # ======================================
+
+            if isinstance(
+                active_flow,
+                dict
+            ):
+
+                goal = active_flow.get(
+                    "goal",
+                    ""
+                )
+
+                if isinstance(goal, str):
+
+                    if "math" in goal.lower():
+
+                        score += 3.0
+
+            # ======================================
+            # 🔥 SAFE NORMALIZATION
+            # ======================================
+
+            return min(
+                score,
+                25.0
+            )
+
+        except Exception as e:
+
+            print(
+                "SCIENCE EVALUATE ERROR:",
+                e
+            )
+
+            return 0.0
 
     def split_into_tasks(self, text):
 
