@@ -33,8 +33,12 @@ from storage import (
     save_payment
 )
 
-from core.executor import execute
+from core.executor import (
 
+    execute,
+
+    EMAPS
+)
 from blocks.ui import (
     main_keyboard,
     buy_keyboard,
