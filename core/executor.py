@@ -224,6 +224,121 @@ def safe_patch_log(msg):
 
 
 # =====================================================
+# 🧠 EMAPS METADATA
+# =====================================================
+
+EMAPS = {
+
+    "active_systems": set(),
+
+    "active_rooms": set(),
+
+    "routing_chains": [],
+
+    "task_types": set(),
+
+    "files_roles": {},
+
+    "last_execution": {}
+}
+
+
+def emaps_track_system(name):
+
+    try:
+
+        if name:
+
+            EMAPS[
+                "active_systems"
+            ].add(name)
+
+    except Exception as e:
+
+        print(
+            "EMAPS SYSTEM ERROR:",
+            e
+        )
+
+
+def emaps_track_room(name):
+
+    try:
+
+        if name:
+
+            EMAPS[
+                "active_rooms"
+            ].add(name)
+
+    except Exception as e:
+
+        print(
+            "EMAPS ROOM ERROR:",
+            e
+        )
+
+
+def emaps_track_chain(chain):
+
+    try:
+
+        if chain:
+
+            EMAPS[
+                "routing_chains"
+            ].append(chain)
+
+            EMAPS[
+                "routing_chains"
+            ] = EMAPS[
+                "routing_chains"
+            ][-30:]
+
+    except Exception as e:
+
+        print(
+            "EMAPS CHAIN ERROR:",
+            e
+        )
+
+
+def emaps_track_task(task_type):
+
+    try:
+
+        if task_type:
+
+            EMAPS[
+                "task_types"
+            ].add(task_type)
+
+    except Exception as e:
+
+        print(
+            "EMAPS TASK ERROR:",
+            e
+        )
+
+
+def emaps_set_role(
+    file_name,
+    role
+):
+
+    try:
+
+        EMAPS[
+            "files_roles"
+        ][file_name] = role
+
+    except Exception as e:
+
+        print(
+            "EMAPS ROLE ERROR:",
+            e
+        )
+# =====================================================
 # 🔥 HELPERS
 # =====================================================
 
@@ -953,6 +1068,33 @@ async def execute(
             {}
         )
     )
+    # =====================================================
+    # 🧠 EMAPS SYSTEM TRACKING
+    # =====================================================
+
+    emaps_track_system(
+        "semantic_core"
+    )
+
+    emaps_track_system(
+        "cognitive_core"
+    )
+
+    emaps_track_system(
+        "response_decision"
+    )
+
+    emaps_track_system(
+        "context_system"
+    )
+
+    emaps_track_system(
+        "presentation_formatter"
+    )
+
+    emaps_track_system(
+        "executor"
+    )
 
     semantic = detect_goal(
 
@@ -1135,6 +1277,13 @@ async def execute(
             text
         )
 
+    # =====================================================
+    # 🧠 EMAPS TRACK TASK
+    # =====================================================
+
+    emaps_track_task(
+        task_type
+    )
     # =====================================================
     # 🔥 ACTIVE FLOW
     # =====================================================
@@ -1499,6 +1648,13 @@ async def execute(
 
                 f"score={score}"
             )
+            # =================================================
+            # 🧠 EMAPS ROOM TRACKING
+            # =================================================
+
+            emaps_track_room(
+                room.name
+            )
 
             result = await room.handle(
 
@@ -1639,6 +1795,21 @@ async def execute(
                 if not scene_valid:
 
                     continue
+                # =============================================
+                # 🧠 EMAPS ROUTING CHAIN
+                # =============================================
+
+                emaps_track_chain({
+
+                    "room": room.name,
+
+                    "task_type": task_type,
+
+                    "result_type": result.get(
+                        "type",
+                        "unknown"
+                    )
+                })
 
                 best_result = result
 
