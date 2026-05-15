@@ -9,6 +9,7 @@ from flask import (
     render_template_string,
     redirect
 )
+from flask_cors import CORS
 
 from blocks.paypal_module import (
     get_access_token,
@@ -64,6 +65,7 @@ client = OpenAI(
 # =========================================================
 
 app = Flask(__name__)
+CORS(app)
 
 # =========================================================
 # 🎨 SUCCESS HTML
