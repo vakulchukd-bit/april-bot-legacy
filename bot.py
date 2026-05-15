@@ -229,6 +229,8 @@ async def run_with_activity(
 # =========================================================
 
 from checkout_server import app
+from flask import request, jsonify
+import tempfile
 
 def run_server():
 
@@ -242,6 +244,49 @@ def run_server():
         debug=False,
         use_reloader=False
     )
+# =========================================================
+# 🎤 WEB VOICE ENDPOINT
+# =========================================================
+
+@app.route("/voice", methods=["POST"])
+def web_voice():
+
+    try:
+
+        audio = request.files.get("audio")
+
+        if not audio:
+            return jsonify({
+                "error": "No audio"
+            }), 400
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".webm",
+            delete=False
+        ) as temp:
+
+            audio.save(temp.name)
+
+            with open(temp.name, "rb") as f:
+
+                transcript = client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=f
+                )
+
+        text = transcript.text.strip()
+
+        return jsonify({
+            "success": True,
+            "text": text
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 # =========================================================
 # 🖼 SAFE IMAGE SEND
