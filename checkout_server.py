@@ -23,6 +23,8 @@ from storage import (
 
 import requests
 
+from openai import OpenAI
+
 print("🔥🔥🔥 REAL CHECKOUT SERVER STARTED 🔥🔥🔥")
 
 # =========================================================
@@ -48,6 +50,14 @@ BOT_USERNAME = os.getenv(
 )
 
 BASE_URL = "https://api-m.paypal.com"
+
+OPENAI_API_KEY = os.getenv(
+    "OPENAI_API_KEY"
+)
+
+client = OpenAI(
+    api_key=OPENAI_API_KEY
+)
 
 # =========================================================
 # 🔥 FLASK
@@ -404,6 +414,44 @@ def paypal_webhook():
         }
 
 # =========================================================
+# 🎙️ VOICE TRANSCRIPTION
+# =========================================================
+
+@app.route("/voice", methods=["POST"])
+def voice_transcription():
+
+    try:
+
+        if "audio" not in request.files:
+
+            return jsonify({
+                "error": "NO AUDIO"
+            }), 400
+
+        audio_file = request.files["audio"]
+
+        transcription = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=(
+                "voice.webm",
+                audio_file.stream,
+                "audio/webm"
+            )
+        )
+
+        return jsonify({
+            "text": transcription.text
+        })
+
+    except Exception as e:
+
+        print("VOICE ERROR:", e)
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+# =========================================================
 # 🟢 HEALTH
 # =========================================================
 
@@ -475,8 +523,6 @@ body{{
 
 </style>
 
-
-
 </head>
 
 <body>
@@ -503,6 +549,7 @@ body{{
 </body>
 </html>
 """
+
 # =========================================================
 # 🚀 START
 # =========================================================
