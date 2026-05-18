@@ -236,8 +236,7 @@ import tempfile
 # =========================================================
 
 @app.route("/chat", methods=["POST"])
-def web_chat():
-
+def april_web_chat():
     try:
 
         data = request.json or {}
