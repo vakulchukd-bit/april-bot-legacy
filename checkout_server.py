@@ -26,6 +26,25 @@ import requests
 
 from openai import OpenAI
 import asyncio
+from core.executor import execute
+
+async def process_web_message(
+    user_id,
+    text
+):
+
+    result = await execute(
+
+        user_id=user_id,
+
+        text=text,
+
+        chat_id=user_id,
+
+        run_with_activity=lambda *args, **kwargs: None
+    )
+
+    return result
 
 
 print("🔥🔥🔥 REAL CHECKOUT SERVER STARTED 🔥🔥🔥")
