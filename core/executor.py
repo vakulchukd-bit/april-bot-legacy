@@ -338,6 +338,8 @@ def emaps_set_role(
             "EMAPS ROLE ERROR:",
             e
         )
+
+
 # =====================================================
 # 🔥 HELPERS
 # =====================================================
@@ -848,10 +850,6 @@ def stabilize_room_score(
         "stable"
     )
 
-    # =================================================
-    # 🔥 EXECUTION MODE
-    # =================================================
-
     if cognition.get(
         "prefer_execution"
     ):
@@ -859,10 +857,6 @@ def stabilize_room_score(
         if room.name == "text":
 
             score -= 0.5
-
-    # =================================================
-    # 🔥 VISUAL MODE
-    # =================================================
 
     if cognition.get(
         "prefer_visual"
@@ -876,10 +870,6 @@ def stabilize_room_score(
 
             score += 0.6
 
-    # =================================================
-    # 🔥 SCENE PRIORITY
-    # =================================================
-
     best_capability = semantic.get(
         "best_capability"
     )
@@ -889,10 +879,6 @@ def stabilize_room_score(
         if room.name == best_capability:
 
             score += 2.0
-
-    # =================================================
-    # 🔥 TRAJECTORY ALIGNMENT
-    # =================================================
 
     continuation_target = semantic.get(
         "continuation_target"
@@ -915,10 +901,6 @@ def stabilize_room_score(
             ]:
 
                 score += 1.2
-
-    # =================================================
-    # 🔥 SCORE NORMALIZATION
-    # =====================================================
 
     return clamp(
         score,
@@ -1069,9 +1051,6 @@ async def execute(
             {}
         )
     )
-    # =====================================================
-    # 🧠 EMAPS SYSTEM TRACKING
-    # =====================================================
 
     emaps_track_system(
         "semantic_core"
@@ -1114,6 +1093,7 @@ async def execute(
 
         semantic=semantic
     )
+
     print("DEBUG: REASONING OK")
 
     cognition = analyze_cognition(
@@ -1126,6 +1106,7 @@ async def execute(
 
         reasoning=reasoning
     )
+
     print("DEBUG: COGNITION OK")
 
     execution_pressure = semantic.get(
@@ -1161,6 +1142,7 @@ async def execute(
             state=state
         )
     )
+
     print("DEBUG: VISUAL OK")
 
     response_decision = (
@@ -1176,6 +1158,7 @@ async def execute(
             state=state
         )
     )
+
     print("DEBUG: RESPONSE DECISION OK")
 
     external_context = ""
@@ -1257,25 +1240,15 @@ async def execute(
             text
         )
 
-    # =====================================================
-    # 🧠 EMAPS TRACK TASK
-    # =====================================================
-
     emaps_track_task(
         task_type
     )
-    # =====================================================
-    # 🔥 ACTIVE FLOW
-    # =====================================================
 
     active_flow = get_active_flow(
         user_id
     )
-    print("DEBUG: ACTIVE FLOW OK")
 
-    # =====================================================
-    # 🔥 DEEPHUB FLOW STABILIZATION
-    # =====================================================
+    print("DEBUG: ACTIVE FLOW OK")
 
     semantic_entity = semantic.get(
         "entity",
@@ -1319,10 +1292,6 @@ async def execute(
             )
     }
 
-    # =====================================================
-    # 🔥 FLOW CREATION
-    # =====================================================
-
     if not active_flow:
 
         if task_type == "math":
@@ -1348,10 +1317,6 @@ async def execute(
                 flow_payload
             )
 
-    # =====================================================
-    # 🔥 FLOW ENRICHMENT
-    # =====================================================
-
     else:
 
         active_entity = active_flow.get(
@@ -1369,27 +1334,15 @@ async def execute(
             0.0
         )
 
-        # =================================================
-        # 🔥 STRONGER ENTITY UPDATE
-        # =====================================================
-
         if current_weight >= previous_weight:
 
             active_flow["entity"] = (
                 semantic_entity
             )
 
-        # =================================================
-        # 🔥 TRAJECTORY UPDATE
-        # =====================================================
-
         active_flow["trajectory"] = (
             goal_stage
         )
-
-        # =================================================
-        # 🔥 LAST USER MESSAGE
-        # =====================================================
 
         active_flow["last_message"] = (
             text
@@ -1398,10 +1351,6 @@ async def execute(
         active_flow["updated_at"] = (
             datetime.now().isoformat()
         )
-
-        # =================================================
-        # 🔥 CONTINUITY FLAGS
-        # =====================================================
 
         active_flow[
             "dialog_continuity"
@@ -1417,10 +1366,6 @@ async def execute(
             True
         )
 
-        # =================================================
-        # 🔥 SAVE UPDATED FLOW
-        # =====================================================
-
         set_active_flow(
 
             user_id,
@@ -1431,29 +1376,32 @@ async def execute(
     energy = get_energy(
         user_id
     )
+
     print("DEBUG: ENERGY OK")
+
+    local_energy_support_active = False
 
     if energy == "HIGH":
 
-        energy_support_active = True
+        local_energy_support_active = True
 
     if execution_pressure >= 0.72:
 
-        energy_support_active = True
+        local_energy_support_active = True
 
     if signal_overload >= 0.65:
 
-        energy_support_active = True
+        local_energy_support_active = True
 
     if internal_noise >= 0.65:
 
-        energy_support_active = True
+        local_energy_support_active = True
 
     if dialog_fatigue >= 0.75:
 
-        energy_support_active = True
+        local_energy_support_active = True
 
-    if energy_support_active:
+    if local_energy_support_active:
 
         print(
             "⚡ ENERGY SUPPORT ACTIVATED"
@@ -1493,6 +1441,7 @@ async def execute(
 
             "enabled": False
         }
+
     print("CONTEXT BUILD START")
 
     context = build_executor_context(
@@ -1523,12 +1472,15 @@ async def execute(
 
         text=text
     )
+
     print("DEBUG: EXECUTOR CONTEXT OK")
 
     scored_rooms = []
+
     print("ROOM LOOP START")
 
     for room in ROOMS:
+
         print("ROOM EVALUATE:", room.name)
 
         try:
@@ -1550,9 +1502,6 @@ async def execute(
 
                 cognition=cognition
             )
-            # =============================================
-            # 🌐 APRIL CONTEXT GUIDANCE
-            # =============================================
 
             web_confidence = cognition.get(
                 "web_support_confidence",
@@ -1634,13 +1583,11 @@ async def execute(
 
                 f"score={score}"
             )
-            # =================================================
-            # 🧠 EMAPS ROOM TRACKING
-            # =================================================
 
             emaps_track_room(
                 room.name
             )
+
             print("ROOM HANDLE START:", room.name)
 
             result = await room.handle(
@@ -1653,6 +1600,7 @@ async def execute(
 
                 run_with_activity
             )
+
             print("ROOM HANDLE RESULT:", room.name, result)
 
             if (
@@ -1735,10 +1683,6 @@ async def execute(
                     )
                 )
 
-                # =================================================
-                # 🔥 SCENE RELEVANCE VALIDATION
-                # =====================================================
-
                 current_flow = get_active_flow(
                     user_id
                 )
@@ -1756,10 +1700,6 @@ async def execute(
                         "text"
                     )
 
-                    # =============================================
-                    # 🔥 STALE VISUAL PROTECTION
-                    # =============================================
-
                     if result_type in [
 
                         "image",
@@ -1776,16 +1716,9 @@ async def execute(
                                 "⚠️ STALE VISUAL TASK BLOCKED"
                             )
 
-                # =================================================
-                # 🔥 RESULT ACCEPT
-                # =====================================================
-
                 if not scene_valid:
 
                     continue
-                # =============================================
-                # 🧠 EMAPS ROUTING CHAIN
-                # =============================================
 
                 emaps_track_chain({
 
@@ -1837,6 +1770,7 @@ async def execute(
         print("EXECUTE RESULT:", best_result)
 
         return best_result
+
     context_text = build_context_text(
 
         user_id,
@@ -1929,17 +1863,8 @@ async def execute(
 
             "text"
         )
+
         print("FALLBACK RESULT:", fallback_result)
-
-        return {
-
-           "type": "text",
-
-           "data":
-               fallback_result[
-                   "content"
-               ]
-        }
 
         return {
 
@@ -1950,7 +1875,8 @@ async def execute(
                     "content"
                 ]
         }
-        print("EXECUTOR FINAL FAIL")
+
+    print("EXECUTOR FINAL FAIL")
 
     return {
 
