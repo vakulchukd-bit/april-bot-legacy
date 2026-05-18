@@ -1030,6 +1030,7 @@ async def execute(
 ):
 
     print("🔥 EXECUTOR RUNNING")
+    print("EXECUTE INPUT:", user_id, text)
 
     patch_executor_start(
         user_id,
@@ -1846,8 +1847,9 @@ async def execute(
 
     if best_result:
 
-        return best_result
+        print("EXECUTE RESULT:", best_result)
 
+        return best_result
     context_text = build_context_text(
 
         user_id,
@@ -1940,6 +1942,17 @@ async def execute(
 
             "text"
         )
+        print("FALLBACK RESULT:", fallback_result)
+
+        return {
+
+           "type": "text",
+
+           "data":
+               fallback_result[
+                   "content"
+               ]
+        }
 
         return {
 
@@ -1950,6 +1963,7 @@ async def execute(
                     "content"
                 ]
         }
+        print("EXECUTOR FINAL FAIL")
 
     return {
 
