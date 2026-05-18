@@ -327,6 +327,38 @@ async def safe_send_image(message, data):
                 message.message_id
             )
         )
+# =========================================================
+# 🌐 WEB MESSAGE PROCESSOR
+# =========================================================
+
+async def process_web_message(
+    user_id,
+    text
+):
+
+    result = await execute(
+        user_id,
+        text,
+        0,
+        run_with_activity
+    )
+
+    result = result or {}
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    result_data = result.get(
+        "data",
+        ""
+    )
+
+    return {
+        "type": result_type,
+        "data": result_data
+    }
 
 # =========================================================
 # 💬 MESSAGE HANDLER
