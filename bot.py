@@ -241,8 +241,8 @@ def april_web_chat():
 
         data = request.json or {}
 
-        user_id = int(
-            data.get("user_id", 1)
+        user_id = str(
+            data.get("user_id", "web_user")
         )
 
         text = (
