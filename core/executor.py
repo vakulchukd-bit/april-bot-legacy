@@ -1656,6 +1656,7 @@ async def execute(
             emaps_track_room(
                 room.name
             )
+            print("ROOM HANDLE START:", room.name)
 
             result = await room.handle(
 
@@ -1667,6 +1668,7 @@ async def execute(
 
                 run_with_activity
             )
+            print("ROOM HANDLE RESULT:", room.name, result)
 
             if (
 
