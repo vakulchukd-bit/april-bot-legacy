@@ -1271,6 +1271,7 @@ async def execute(
     active_flow = get_active_flow(
         user_id
     )
+    print("DEBUG: ACTIVE FLOW OK")
 
     # =====================================================
     # 🔥 DEEPHUB FLOW STABILIZATION
@@ -1430,6 +1431,7 @@ async def execute(
     energy = get_energy(
         user_id
     )
+    print("DEBUG: ENERGY OK")
 
     if energy == "HIGH":
 
@@ -1521,6 +1523,7 @@ async def execute(
 
         text=text
     )
+    print("DEBUG: EXECUTOR CONTEXT OK")
 
     scored_rooms = []
     print("ROOM LOOP START")
