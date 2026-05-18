@@ -25,6 +25,9 @@ from storage import (
 import requests
 
 from openai import OpenAI
+import asyncio
+
+from bot import process_web_message
 
 print("🔥🔥🔥 REAL CHECKOUT SERVER STARTED 🔥🔥🔥")
 
@@ -451,6 +454,73 @@ def voice_transcription():
 
         return jsonify({
             "error": str(e)
+        }), 500
+# =========================================================
+# 💬 WEB CHAT API
+# =========================================================
+
+@app.route("/chat", methods=["POST"])
+def web_chat():
+
+    try:
+
+        data = request.json or {}
+
+        user_id = data.get(
+            "user_id",
+            "web_user"
+        )
+
+        text = data.get(
+            "message",
+            ""
+        ).strip()
+
+        if not text:
+
+            return jsonify({
+                "success": False,
+                "error": "EMPTY MESSAGE"
+            }), 400
+
+        result = asyncio.run(
+
+            process_web_message(
+                user_id,
+                text
+            )
+        )
+
+        return jsonify({
+
+            "success": True,
+
+            "response":
+                result.get(
+                    "data",
+                    ""
+                ),
+
+            "type":
+                result.get(
+                    "type",
+                    "text"
+                )
+        })
+
+    except Exception as e:
+
+        print(
+            "WEB CHAT ERROR:",
+            e
+        )
+
+        return jsonify({
+
+            "success": False,
+
+            "error": str(e)
+
         }), 500
 
 # =========================================================
