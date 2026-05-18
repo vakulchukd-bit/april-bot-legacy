@@ -192,6 +192,7 @@ async def activity_loop(
     except:
         pass
 
+
 # =========================================================
 # ⚡ RUN WITH ACTIVITY
 # =========================================================
@@ -201,6 +202,24 @@ async def run_with_activity(
     coro,
     activity_type="typing"
 ):
+
+    # ============================================
+    # 🌐 WEB SAFE MODE
+    # ============================================
+
+    if not chat_id:
+
+        try:
+
+            return await coro
+
+        except Exception as e:
+
+            print("WEB ACTIVITY ERROR:", e)
+
+            traceback.print_exc()
+
+            raise e
 
     await asyncio.sleep(0)
 
@@ -223,7 +242,6 @@ async def run_with_activity(
     finally:
 
         task.cancel()
-
 # =========================================================
 # 🌐 SIMPLE SERVER
 # =========================================================
