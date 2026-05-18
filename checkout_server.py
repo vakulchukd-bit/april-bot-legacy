@@ -27,7 +27,6 @@ import requests
 from openai import OpenAI
 import asyncio
 
-from bot import process_web_message
 
 print("🔥🔥🔥 REAL CHECKOUT SERVER STARTED 🔥🔥🔥")
 
