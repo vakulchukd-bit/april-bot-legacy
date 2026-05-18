@@ -1176,32 +1176,7 @@ async def execute(
 
     external_context = ""
 
-    try:
-
-        external_result = build_external_context(
-
-            text=text,
-
-            semantic=semantic,
-
-            cognition=cognition,
-
-            response_decision=response_decision
-        )
-
-        external_context = external_result.get(
-            "content",
-            ""
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ EXTERNAL CONTEXT ERROR:",
-            e
-        )
-
-        traceback.print_exc()
+    print("EXTERNAL CONTEXT DISABLED")
 
     state["dialog_analysis"] = {
 
