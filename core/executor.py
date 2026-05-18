@@ -1487,6 +1487,7 @@ async def execute(
 
             "enabled": False
         }
+    print("CONTEXT BUILD START")
 
     context = build_executor_context(
 
@@ -1518,8 +1519,10 @@ async def execute(
     )
 
     scored_rooms = []
+    print("ROOM LOOP START")
 
     for room in ROOMS:
+        print("ROOM EVALUATE:", room.name)
 
         try:
 
