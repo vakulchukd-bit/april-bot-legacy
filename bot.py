@@ -231,6 +231,88 @@ async def run_with_activity(
 from checkout_server import app
 from flask import request, jsonify
 import tempfile
+# =========================================================
+# 🌐 WEB CHAT ENDPOINT
+# =========================================================
+
+@app.route("/chat", methods=["POST"])
+def web_chat():
+
+    try:
+
+        data = request.json or {}
+
+        user_id = int(
+            data.get("user_id", 1)
+        )
+
+        text = (
+            data.get("text", "")
+            .strip()
+        )
+
+        if not text:
+
+            return jsonify({
+                "success": False,
+                "error": "EMPTY_TEXT"
+            }), 400
+
+        async def process():
+
+            result = await execute(
+
+                user_id,
+                text,
+                0,
+                run_with_activity
+            )
+
+            result = result or {}
+
+            return {
+                "type":
+                    result.get(
+                        "type",
+                        "text"
+                    ),
+
+                "data":
+                    result.get(
+                        "data",
+                        ""
+                    )
+            }
+
+        final_result = asyncio.run(
+            process()
+        )
+
+        return jsonify({
+
+            "success": True,
+
+            "response":
+                final_result.get(
+                    "data",
+                    ""
+                ),
+
+            "type":
+                final_result.get(
+                    "type",
+                    "text"
+                )
+        })
+
+    except Exception as e:
+
+        return jsonify({
+
+            "success": False,
+
+            "error": str(e)
+        }), 500
 
 def run_server():
 
