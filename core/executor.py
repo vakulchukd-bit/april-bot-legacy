@@ -1114,6 +1114,7 @@ async def execute(
 
         semantic=semantic
     )
+    print("DEBUG: REASONING OK")
 
     cognition = analyze_cognition(
 
@@ -1125,6 +1126,7 @@ async def execute(
 
         reasoning=reasoning
     )
+    print("DEBUG: COGNITION OK")
 
     execution_pressure = semantic.get(
         "execution_pressure",
@@ -1159,6 +1161,7 @@ async def execute(
             state=state
         )
     )
+    print("DEBUG: VISUAL OK")
 
     response_decision = (
 
@@ -1173,6 +1176,7 @@ async def execute(
             state=state
         )
     )
+    print("DEBUG: RESPONSE DECISION OK")
 
     external_context = ""
 
