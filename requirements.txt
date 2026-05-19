@@ -11,3 +11,4 @@ psycopg2-binary
 flask
 beautifulsoup4
 flask-cors
+google-genai
