@@ -386,6 +386,76 @@ def web_voice():
             "success": False,
             "error": str(e)
         }), 500
+# =========================================================
+# 🌐 WEB IMAGE ENDPOINT
+# =========================================================
+
+@app.route("/image", methods=["POST"])
+def web_image():
+
+    try:
+
+        image = request.files.get("image")
+
+        if not image:
+
+            return jsonify({
+                "success": False,
+                "error": "NO_IMAGE"
+            }), 400
+
+        text = request.form.get(
+            "text",
+            ""
+        )
+
+        user_id = request.form.get(
+            "user_id",
+            "web_user"
+        )
+
+        temp_path = tempfile.mktemp(
+            suffix=".jpg"
+        )
+
+        image.save(temp_path)
+
+        async def process():
+
+            from blocks.image_system import analyze_image
+
+            state = get_state(user_id)
+
+            result = await analyze_image(
+                temp_path,
+                state
+            )
+
+            return result
+
+        result = asyncio.run(
+            process()
+        )
+
+        return jsonify({
+
+            "success": True,
+
+            "response":
+                result or
+                "Изображение обработано."
+        })
+
+    except Exception as e:
+
+        print("IMAGE ENDPOINT ERROR:", e)
+
+        return jsonify({
+
+            "success": False,
+
+            "error": str(e)
+        }), 500
 
 # =========================================================
 # 🖼 SAFE IMAGE SEND
