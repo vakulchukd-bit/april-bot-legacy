@@ -1044,6 +1044,15 @@ def build_context_text(
     image_block = build_image_block(
         image_context
     )
+    # =================================================
+    # 🔥 VISUAL SCENE
+    # =====================================================
+
+    visual_scene_block = (
+        build_visual_scene_block(
+            active_visual_scene
+        )
+    )
 
     # =================================================
     # 🔥 MATH
