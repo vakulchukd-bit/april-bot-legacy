@@ -752,6 +752,66 @@ def build_math_block(
             MAX_MATH_EXPR
         )
     )
+# =====================================================
+# 🔥 VISUAL SCENE BLOCK
+# =====================================================
+
+def build_visual_scene_block(
+    active_visual_scene
+):
+
+    if (
+        not active_visual_scene
+        or not isinstance(
+            active_visual_scene,
+            dict
+        )
+    ):
+
+        return ""
+
+    scene_type = active_visual_scene.get(
+        "scene_type",
+        "unknown"
+    )
+
+    summary = active_visual_scene.get(
+        "summary",
+        ""
+    )
+
+    objects = active_visual_scene.get(
+        "objects",
+        []
+    )
+
+    lines = [
+
+        "\nVisual scene continuity:",
+
+        f"Scene type: {scene_type}"
+    ]
+
+    if objects:
+
+        lines.append(
+
+            "Objects: "
+            + ", ".join(objects)
+        )
+
+    if summary:
+
+        lines.append(
+
+            "Summary: "
+            + safe_slice(
+                summary,
+                300
+            )
+        )
+
+    return "\n".join(lines)
 
 
 def build_current_request(
