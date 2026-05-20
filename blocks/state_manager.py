@@ -131,6 +131,13 @@ def build_default_state():
         "image_context": None,
 
         "image_memory": [],
+        # =================================================
+        # 🔥 VISUAL SCENE MEMORY
+        # =================================================
+
+        "active_visual_scene": None,
+
+        "visual_scene_history": [],
 
         # =================================================
         # 🔥 FLOW
