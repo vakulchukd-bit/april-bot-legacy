@@ -954,6 +954,13 @@ def build_context_text(
     image_context = state.get(
         "image_context"
     )
+    # =================================================
+    # 🔥 ACTIVE VISUAL SCENE
+    # =================================================
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
 
     last_math = state.get(
         "last_math"
