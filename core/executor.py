@@ -1142,6 +1142,15 @@ async def execute(
             state=state
         )
     )
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    if active_visual_scene:
+
+        semantic[
+            "active_visual_scene"
+        ] = active_visual_scene
 
     print("DEBUG: VISUAL OK")
 
