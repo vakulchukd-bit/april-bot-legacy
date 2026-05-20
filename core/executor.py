@@ -1051,6 +1051,46 @@ async def execute(
             {}
         )
     )
+    # =================================================
+    # 🔥 VISUAL CONTINUITY BRIDGE
+    # =================================================
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    if active_visual_scene:
+
+        lower_text = text.lower()
+
+        visual_words = [
+
+            "картин",
+            "фото",
+            "меню",
+            "бокал",
+            "бургер",
+            "кревет",
+            "слева",
+            "справа",
+            "на фото",
+            "на картинке",
+            "там",
+            "там было"
+        ]
+
+        if any(
+            x in lower_text
+            for x in visual_words
+        ):
+
+            semantic[
+                "visual_continuity"
+            ] = True
+
+            semantic[
+                "active_visual_scene"
+            ] = active_visual_scene
 
     emaps_track_system(
         "semantic_core"
