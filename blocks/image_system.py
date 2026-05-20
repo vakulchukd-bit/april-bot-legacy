@@ -5,6 +5,12 @@ import os
 from blocks.gemini_vision import (
     analyze_image_gemini
 )
+
+
+# =================================================
+# 🔥 VISUAL SCENE BUILDER
+# =================================================
+
 def build_visual_scene(
     analysis_text: str
 ):
@@ -16,6 +22,10 @@ def build_visual_scene(
     lower = text.lower()
 
     scene_type = "unknown"
+
+    # =================================================
+    # 🔥 SCENE TYPE DETECTION
+    # =================================================
 
     if any(
         x in lower
@@ -53,6 +63,10 @@ def build_visual_scene(
 
         scene_type = "street"
 
+    # =================================================
+    # 🔥 OBJECT DETECTION
+    # =================================================
+
     objects = []
 
     object_words = [
@@ -73,7 +87,15 @@ def build_visual_scene(
 
             objects.append(word)
 
+    # =================================================
+    # 🔥 SUMMARY
+    # =================================================
+
     summary = text[:400]
+
+    # =================================================
+    # 🔥 RESULT
+    # =================================================
 
     return {
 
@@ -88,6 +110,10 @@ def build_visual_scene(
         "raw_analysis": text
     }
 
+
+# =================================================
+# 🔥 MAIN ANALYZE IMAGE
+# =================================================
 
 async def analyze_image(
     path: str,
@@ -125,6 +151,11 @@ async def analyze_image(
         result = await analyze_image_gemini(
             path
         )
+
+        # =================================================
+        # 🔥 BUILD VISUAL SCENE
+        # =================================================
+
         visual_scene = build_visual_scene(
             result
         )
@@ -134,6 +165,10 @@ async def analyze_image(
         # =================================================
 
         if state is not None:
+
+            # ==========================================
+            # 🔥 RAW ANALYSIS
+            # ==========================================
 
             state["image_analysis"] = result
 
@@ -167,3 +202,16 @@ async def analyze_image(
             state[
                 "visual_scene_history"
             ] = history
+
+        # =================================================
+        # 🔥 RETURN RESULT
+        # =================================================
+
+        return result
+
+    except Exception as e:
+
+        return (
+            f"Ошибка анализа изображения: "
+            f"{str(e)}"
+        )
