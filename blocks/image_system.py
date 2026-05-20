@@ -125,6 +125,9 @@ async def analyze_image(
         result = await analyze_image_gemini(
             path
         )
+        visual_scene = build_visual_scene(
+            result
+        )
 
         # =================================================
         # 🧠 SAVE CACHE
@@ -136,11 +139,31 @@ async def analyze_image(
 
             state["image_analysis_path"] = path
 
-        return result
+            # ==========================================
+            # 🔥 ACTIVE VISUAL SCENE
+            # ==========================================
 
-    except Exception as e:
+            state["active_visual_scene"] = (
+                visual_scene
+            )
 
-        return (
-            f"Ошибка анализа изображения: "
-            f"{str(e)}"
-        )
+            # ==========================================
+            # 🔥 VISUAL SCENE HISTORY
+            # ==========================================
+
+            history = state.get(
+                "visual_scene_history",
+                []
+            )
+
+            history.append(
+                visual_scene
+            )
+
+            if len(history) > 5:
+
+                history = history[-5:]
+
+            state[
+                "visual_scene_history"
+            ] = history
