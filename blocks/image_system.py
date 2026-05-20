@@ -136,11 +136,33 @@ async def analyze_image(
                 "image_analysis_path"
             )
 
+            # =============================================
+            # 🔥 ACTIVE VISUAL SCENE
+            # =============================================
+
+            active_visual_scene = state.get(
+                "active_visual_scene"
+            )
+
+            # =============================================
+            # 🔥 CACHE RESTORE
+            # =============================================
+
             if cached and cached_path == path:
 
                 print(
                     "🧠 USING CACHED IMAGE ANALYSIS"
                 )
+
+                if active_visual_scene:
+
+                    print(
+                        "🧠 VISUAL SCENE RESTORED"
+                    )
+
+                    state[
+                        "active_visual_scene"
+                    ] = active_visual_scene
 
                 return cached
 
