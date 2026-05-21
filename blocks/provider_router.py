@@ -194,6 +194,10 @@ async def generate_text(
 
         try:
 
+            provider_log(
+                "🧠 GEMINI TEXT START"
+            )
+
             final_prompt = (
                 build_gemini_prompt(
                     messages
@@ -218,6 +222,10 @@ async def generate_text(
             )
 
             if text:
+
+                provider_log(
+                    "🧠 GEMINI TEXT SUCCESS"
+                )
 
                 mark_gemini_success()
 
@@ -256,6 +264,10 @@ async def generate_text(
             )
         )
 
+        provider_log(
+            "🧠 OPENAI TEXT SUCCESS"
+        )
+
         return response.output_text
 
     except Exception as e:
@@ -287,11 +299,25 @@ async def transcribe_voice(
 
         try:
 
-            uploaded = (
+            provider_log(
+                "🧠 GEMINI VOICE START"
+            )
 
-                gemini_client.files.upload(
-                    file=file_path
-                )
+            provider_log(
+                "🧠 GEMINI AUDIO PATH:",
+                file_path
+            )
+
+            uploaded = gemini_client.files.upload(
+                file=file_path
+            )
+
+            provider_log(
+                "🧠 GEMINI AUDIO UPLOADED"
+            )
+
+            provider_log(
+                "🧠 GEMINI START TRANSCRIBE"
             )
 
             response = (
@@ -318,6 +344,11 @@ async def transcribe_voice(
                 response.text.strip()
                 if response.text
                 else ""
+            )
+
+            provider_log(
+                "🧠 GEMINI TRANSCRIBE RESPONSE:",
+                text[:120] if text else "EMPTY"
             )
 
             if text:
@@ -357,6 +388,10 @@ async def transcribe_voice(
                 )
             )
 
+        provider_log(
+            "🧠 OPENAI VOICE SUCCESS"
+        )
+
         return transcript.text.strip()
 
     except Exception as e:
@@ -386,11 +421,21 @@ async def analyze_image_with_fallback(
 
         try:
 
-            uploaded = (
+            provider_log(
+                "🧠 GEMINI IMAGE START"
+            )
 
-                gemini_client.files.upload(
-                    file=path
-                )
+            provider_log(
+                "🧠 GEMINI IMAGE PATH:",
+                path
+            )
+
+            uploaded = gemini_client.files.upload(
+                file=path
+            )
+
+            provider_log(
+                "🧠 GEMINI IMAGE UPLOADED"
             )
 
             response = (
@@ -413,6 +458,11 @@ async def analyze_image_with_fallback(
                 else ""
             )
 
+            provider_log(
+                "🧠 GEMINI IMAGE RESPONSE:",
+                text[:120] if text else "EMPTY"
+            )
+
             if text:
 
                 mark_gemini_success()
@@ -430,7 +480,7 @@ async def analyze_image_with_fallback(
 
     # =================================================
     # 🔥 OPENAI EMERGENCY FALLBACK
-    # =================================================
+    # =====================================================
 
     try:
 
