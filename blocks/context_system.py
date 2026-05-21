@@ -1111,6 +1111,8 @@ def build_context_text(
 
 {image_block}
 
+{visual_scene_block}
+
 {math_block}
 
 Relevant dialog:
