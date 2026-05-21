@@ -33,32 +33,61 @@ provider_state = {
 
     "gemini_available": True,
 
-    "last_gemini_failure": 0
+    "last_gemini_failure": 0,
+
+    "last_health_check": 0,
+
+    "recovery_cooldown": 45
 }
 
 
 # =====================================================
-# 🔥 HEALTH CHECK
+# 🔥 SAFE LOG
+# =====================================================
+
+def provider_log(*args):
+
+    try:
+
+        print(*args)
+
+    except:
+        pass
+
+
+# =====================================================
+# 🔥 GEMINI RESTORE CHECK
 # =====================================================
 
 def should_restore_gemini():
 
     if provider_state["gemini_available"]:
+
         return True
 
-    cooldown = 45
+    now = time.time()
+
+    cooldown = provider_state[
+        "recovery_cooldown"
+    ]
 
     last_failure = provider_state[
         "last_gemini_failure"
     ]
 
-    now = time.time()
-
     if now - last_failure >= cooldown:
+
+        provider_log(
+            "🧠 GEMINI RECOVERY WINDOW OPEN"
+        )
 
         provider_state[
             "gemini_available"
         ] = True
+
+        provider_state[
+            "last_health_check"
+        ] = now
 
         return True
 
@@ -66,10 +95,14 @@ def should_restore_gemini():
 
 
 # =====================================================
-# 🔥 MARK FAILURE
+# 🔥 GEMINI FAILURE
 # =====================================================
 
 def mark_gemini_failure():
+
+    provider_log(
+        "🔥 GEMINI MARKED UNAVAILABLE"
+    )
 
     provider_state[
         "gemini_available"
@@ -78,6 +111,67 @@ def mark_gemini_failure():
     provider_state[
         "last_gemini_failure"
     ] = time.time()
+
+
+# =====================================================
+# 🔥 GEMINI SUCCESS
+# =====================================================
+
+def mark_gemini_success():
+
+    provider_state[
+        "gemini_available"
+    ] = True
+
+    provider_state[
+        "last_health_check"
+    ] = time.time()
+
+
+# =====================================================
+# 🔥 BUILD GEMINI PROMPT
+# =====================================================
+
+def build_gemini_prompt(
+    messages
+):
+
+    system_prompt = ""
+
+    conversation = []
+
+    for msg in messages:
+
+        role = msg.get(
+            "role",
+            "user"
+        )
+
+        content = msg.get(
+            "content",
+            ""
+        )
+
+        if role == "system":
+
+            system_prompt += (
+                content + "\n"
+            )
+
+        else:
+
+            conversation.append(
+
+                f"{role.upper()}: "
+                f"{content}"
+            )
+
+    return (
+
+        system_prompt
+        + "\n\n"
+        + "\n".join(conversation)
+    )
 
 
 # =====================================================
@@ -100,42 +194,14 @@ async def generate_text(
 
         try:
 
-            system_prompt = ""
-
-            conversation = []
-
-            for msg in messages:
-
-                role = msg.get(
-                    "role",
-                    "user"
-                )
-
-                content = msg.get(
-                    "content",
-                    ""
-                )
-
-                if role == "system":
-
-                    system_prompt += (
-                        content + "\n"
-                    )
-
-                else:
-
-                    conversation.append(
-                        f"{role.upper()}: {content}"
-                    )
-
             final_prompt = (
-
-                system_prompt
-                + "\n\n"
-                + "\n".join(conversation)
+                build_gemini_prompt(
+                    messages
+                )
             )
 
             response = (
+
                 gemini_client.models.generate_content(
 
                     model=model,
@@ -145,6 +211,7 @@ async def generate_text(
             )
 
             text = (
+
                 response.text.strip()
                 if response.text
                 else ""
@@ -152,11 +219,13 @@ async def generate_text(
 
             if text:
 
+                mark_gemini_success()
+
                 return text
 
         except Exception as e:
 
-            print(
+            provider_log(
                 "🔥 GEMINI TEXT ERROR:",
                 e
             )
@@ -169,7 +238,12 @@ async def generate_text(
 
     try:
 
+        provider_log(
+            "⚠️ USING OPENAI FALLBACK"
+        )
+
         response = (
+
             openai_client.responses.create(
 
                 model="gpt-4o-mini",
@@ -186,8 +260,8 @@ async def generate_text(
 
     except Exception as e:
 
-        print(
-            "🔥 OPENAI FALLBACK ERROR:",
+        provider_log(
+            "🔥 OPENAI TEXT ERROR:",
             e
         )
 
@@ -214,12 +288,14 @@ async def transcribe_voice(
         try:
 
             uploaded = (
+
                 gemini_client.files.upload(
                     file=file_path
                 )
             )
 
             response = (
+
                 gemini_client.models.generate_content(
 
                     model="gemini-2.5-flash",
@@ -230,13 +306,15 @@ async def transcribe_voice(
 
                         (
                             "Сделай точную "
-                            "транскрипцию аудио."
+                            "транскрипцию аудио. "
+                            "Без комментариев."
                         )
                     ]
                 )
             )
 
             text = (
+
                 response.text.strip()
                 if response.text
                 else ""
@@ -244,11 +322,13 @@ async def transcribe_voice(
 
             if text:
 
+                mark_gemini_success()
+
                 return text
 
         except Exception as e:
 
-            print(
+            provider_log(
                 "🔥 GEMINI VOICE ERROR:",
                 e
             )
@@ -261,9 +341,14 @@ async def transcribe_voice(
 
     try:
 
+        provider_log(
+            "⚠️ OPENAI VOICE FALLBACK"
+        )
+
         with open(file_path, "rb") as f:
 
             transcript = (
+
                 openai_client.audio.transcriptions.create(
 
                     model="gpt-4o-mini-transcribe",
@@ -276,7 +361,7 @@ async def transcribe_voice(
 
     except Exception as e:
 
-        print(
+        provider_log(
             "🔥 OPENAI VOICE ERROR:",
             e
         )
@@ -302,12 +387,14 @@ async def analyze_image_with_fallback(
         try:
 
             uploaded = (
+
                 gemini_client.files.upload(
                     file=path
                 )
             )
 
             response = (
+
                 gemini_client.models.generate_content(
 
                     model="gemini-2.5-flash",
@@ -320,6 +407,7 @@ async def analyze_image_with_fallback(
             )
 
             text = (
+
                 response.text.strip()
                 if response.text
                 else ""
@@ -327,11 +415,13 @@ async def analyze_image_with_fallback(
 
             if text:
 
+                mark_gemini_success()
+
                 return text
 
         except Exception as e:
 
-            print(
+            provider_log(
                 "🔥 GEMINI IMAGE ERROR:",
                 e
             )
@@ -339,10 +429,28 @@ async def analyze_image_with_fallback(
             mark_gemini_failure()
 
     # =================================================
-    # 🔥 OPENAI FALLBACK
+    # 🔥 OPENAI EMERGENCY FALLBACK
     # =================================================
 
-    return (
-        "⚠️ Visual fallback currently "
-        "limited."
-    )
+    try:
+
+        provider_log(
+            "⚠️ OPENAI IMAGE FALLBACK"
+        )
+
+        return (
+            "⚠️ Visual fallback "
+            "временно активирован."
+        )
+
+    except Exception as e:
+
+        provider_log(
+            "🔥 OPENAI IMAGE ERROR:",
+            e
+        )
+
+        return (
+            "⚠️ Visual-space "
+            "временно перегружен."
+        )
