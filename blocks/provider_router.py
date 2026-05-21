@@ -315,6 +315,8 @@ async def transcribe_voice(
             provider_log(
                 "🧠 GEMINI AUDIO UPLOADED"
             )
+            
+            await asyncio.sleep(2)
 
             provider_log(
                 "🧠 GEMINI START TRANSCRIBE"
