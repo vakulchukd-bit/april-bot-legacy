@@ -561,6 +561,67 @@ def build_cognitive_state(
             "Память: "
             + summary[-250:]
         )
+    # =================================================
+    # 🔥 VISUAL SCENE AUTHORITY
+    # =================================================
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    if active_visual_scene:
+
+        scene_type = active_visual_scene.get(
+            "scene_type",
+            "unknown"
+        )
+
+        scene_summary = active_visual_scene.get(
+            "summary",
+            ""
+        )
+
+        scene_objects = active_visual_scene.get(
+            "objects",
+            []
+        )
+
+        visual_lines = [
+
+            "Активная visual scene:",
+
+            f"Scene type: {scene_type}"
+        ]
+
+        if scene_objects:
+
+            visual_lines.append(
+
+                "Objects: "
+                + ", ".join(scene_objects)
+            )
+
+        if scene_summary:
+
+            visual_lines.append(
+
+                "Scene summary: "
+                + scene_summary[:400]
+            )
+
+        visual_lines.append(
+
+            "Если пользователь задаёт "
+            "короткие вопросы "
+            "про изображение — "
+            "считай что он "
+            "продолжает обсуждать "
+            "эту visual scene."
+        )
+
+        blocks.append(
+            "\n".join(visual_lines)
+        )
 
     # =================================================
     # 🔥 FINAL
