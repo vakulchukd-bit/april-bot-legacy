@@ -35,10 +35,11 @@ import re
 import traceback
 import time
 
-from openai import OpenAI
-
 from storage import get_user_plan
 from blocks.ai_config import TEXT_MODEL
+from blocks.provider_router import (
+    generate_text
+)
 
 # =====================================================
 # 🧠 EXTERNAL KNOWLEDGE
@@ -60,8 +61,6 @@ from blocks.external_knowledge_provider import (
 from blocks.presentation_formatter import (
     beautify_response
 )
-
-client = OpenAI()
 
 # =====================================================
 # 🧠 SYSTEM PROMPT
@@ -909,11 +908,9 @@ async def process(
                 energy
             )
 
-            r = client.responses.create(
+            output = await generate_text(
 
-                model=TEXT_MODEL,
-
-                input=messages,
+                messages=messages,
 
                 temperature=config[
                     "temperature"
@@ -921,10 +918,10 @@ async def process(
 
                 max_output_tokens=config[
                     "max_output_tokens"
-                ]
-            )
+                ],
 
-            output = r.output_text
+                model="gemini-2.5-flash"
+            )
 
             # =========================================
             # 🧠 EXTERNAL KNOWLEDGE
