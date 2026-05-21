@@ -316,7 +316,7 @@ async def transcribe_voice(
                 "🧠 GEMINI AUDIO UPLOADED"
             )
             
-            for _ in range(20):
+            for _ in range(60):
 
                 uploaded = gemini_client.files.get(
                     name=uploaded.name
