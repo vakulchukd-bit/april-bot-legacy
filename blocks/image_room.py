@@ -125,8 +125,17 @@ class ImageRoom:
             "что изображено"
         ]):
             path = ctx.get("path")
+
             if path:
-                result = await analyze_image(user_id, path, text)
+
+                # ==========================================
+                # 🔥 FIXED VISUAL CONTINUITY
+                # ==========================================
+
+                result = await analyze_image(
+                    path,
+                    state
+                )
 
                 return result
 
