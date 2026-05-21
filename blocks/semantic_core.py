@@ -291,6 +291,114 @@ def analyze(
 
             # 🔥 image context НЕ должен ломать trajectory
             result["trajectory_strength"] += 0.1
+    # =====================================================
+    # 🔥 VISUAL SCENE CONTINUITY
+    # =====================================================
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    if active_visual_scene:
+
+        visual_objects = active_visual_scene.get(
+            "objects",
+            []
+        )
+
+        visual_summary = active_visual_scene.get(
+            "summary",
+            ""
+        ).lower()
+
+        short_followup = (
+            len(t) <= 80
+        )
+
+        visual_reference_words = [
+
+            "это",
+            "этот",
+            "эта",
+            "цвет",
+            "сторона",
+            "объект",
+            "кубик",
+            "картинка",
+            "фото",
+            "изображение"
+        ]
+
+        reference_match = any(
+            w in t
+            for w in visual_reference_words
+        )
+
+        object_match = any(
+            obj.lower() in t
+            for obj in visual_objects
+        )
+
+        summary_match = any(
+            word in visual_summary
+            for word in t.split()
+            if len(word) >= 4
+        )
+
+        visual_continuation_confidence = 0.0
+
+        if short_followup:
+            visual_continuation_confidence += 0.25
+
+        if reference_match:
+            visual_continuation_confidence += 0.35
+
+        if object_match:
+            visual_continuation_confidence += 0.35
+
+        if summary_match:
+            visual_continuation_confidence += 0.2
+
+        if (
+            visual_continuation_confidence
+            >= 0.45
+        ):
+
+            result["continuation"] = True
+
+            result["continuation_target"] = (
+                "visual_scene"
+            )
+
+            result["entity"] = {
+                "type": "image",
+                "weight": 0.92
+            }
+
+            result["trajectory_strength"] += 0.45
+
+            result["dialog_state"] = (
+                "visual_continuation"
+            )
+
+            result["visual_routing"] = True
+
+            result["expected_output_type"] = (
+                "visual"
+            )
+
+            result["attention_weight"] += 0.25
+
+            result["capability_confidence"] = max(
+                result["capability_confidence"],
+                0.88
+            )
+
+            result["preserve_flow"] = True
+
+            print(
+                "🧠 VISUAL CONTINUITY DETECTED"
+            )
 
     # =====================================================
     # 🔥 LAST MATH
