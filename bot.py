@@ -369,14 +369,11 @@ def web_voice():
 
             audio.save(temp.name)
 
-            with open(temp.name, "rb") as f:
-
-                transcript = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=f
+            text = asyncio.run(
+                transcribe_voice(
+                    temp.name
                 )
-
-        text = transcript.text.strip()
+            )
 
         return jsonify({
             "success": True,
