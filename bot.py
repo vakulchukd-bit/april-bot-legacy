@@ -109,6 +109,9 @@ from blocks.subscription_module import (
 )
 
 from io import BytesIO
+from blocks.provider_router import (
+    transcribe_voice
+)
 
 # =========================================================
 # 🔥 TOKENS
@@ -621,16 +624,9 @@ async def handle(message: types.Message):
             destination=path
         )
 
-        def run():
-
-            with open(path, "rb") as f:
-
-                t = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=f
-                )
-
-            return t.text
+        text = await transcribe_voice(
+            path
+        )
 
         text = await asyncio.to_thread(run)
 
