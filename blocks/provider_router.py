@@ -333,11 +333,11 @@ async def transcribe_voice(
 
                 await asyncio.sleep(1)
                 
-                if file_info.state.name != "ACTIVE":
+                if uploaded.state.name != "ACTIVE":
 
-                    raise Exception(
-                         "GEMINI FILE NOT ACTIVE"
-                    )
+                raise Exception(
+                    "GEMINI FILE NOT ACTIVE"
+                )
 
             provider_log(
                 "🧠 GEMINI START TRANSCRIBE"
