@@ -335,9 +335,9 @@ async def transcribe_voice(
                 
                 if uploaded.state.name != "ACTIVE":
 
-                raise Exception(
-                    "GEMINI FILE NOT ACTIVE"
-                )
+                    raise Exception(
+                        "GEMINI FILE NOT ACTIVE"
+                    )
 
             provider_log(
                 "🧠 GEMINI START TRANSCRIBE"
