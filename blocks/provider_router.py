@@ -316,7 +316,22 @@ async def transcribe_voice(
                 "🧠 GEMINI AUDIO UPLOADED"
             )
             
-            await asyncio.sleep(6)
+            for _ in range(20):
+
+                uploaded = gemini_client.files.get(
+                    name=uploaded.name
+                )
+
+                provider_log(
+                    "🧠 GEMINI FILE STATE:",
+                    uploaded.state.name
+                )
+
+                if uploaded.state.name == "ACTIVE":
+
+                    break
+
+                await asyncio.sleep(1)
 
             provider_log(
                 "🧠 GEMINI START TRANSCRIBE"
