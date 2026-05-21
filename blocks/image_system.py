@@ -123,6 +123,17 @@ async def analyze_image(
     try:
 
         # =================================================
+        # 🔥 START LOG
+        # =================================================
+
+        print("🧠 ANALYZE IMAGE START")
+        print("🧠 IMAGE PATH:", path)
+        print(
+            "🧠 STATE EXISTS:",
+            state is not None
+        )
+
+        # =================================================
         # 🧠 CACHE
         # =================================================
 
@@ -136,6 +147,16 @@ async def analyze_image(
                 "image_analysis_path"
             )
 
+            print(
+                "🧠 CACHED EXISTS:",
+                cached is not None
+            )
+
+            print(
+                "🧠 CACHED PATH:",
+                cached_path
+            )
+
             # =============================================
             # 🔥 ACTIVE VISUAL SCENE
             # =============================================
@@ -144,11 +165,20 @@ async def analyze_image(
                 "active_visual_scene"
             )
 
+            print(
+                "🧠 ACTIVE VISUAL SCENE EXISTS:",
+                active_visual_scene is not None
+            )
+
             # =============================================
             # 🔥 CACHE RESTORE
             # =============================================
 
             if cached and cached_path == path:
+
+                print(
+                    "🧠 CACHE HIT"
+                )
 
                 print(
                     "🧠 USING CACHED IMAGE ANALYSIS"
@@ -164,14 +194,37 @@ async def analyze_image(
                         "active_visual_scene"
                     ] = active_visual_scene
 
+                print(
+                    "🧠 ANALYZE IMAGE COMPLETE (CACHE)"
+                )
+
                 return cached
+
+            else:
+
+                print(
+                    "🧠 CACHE MISS"
+                )
 
         # =================================================
         # 🔥 GEMINI ANALYSIS
         # =================================================
 
+        print(
+            "🧠 GEMINI IMAGE ANALYSIS START"
+        )
+
         result = await analyze_image_gemini(
             path
+        )
+
+        print(
+            "🧠 GEMINI IMAGE ANALYSIS COMPLETE"
+        )
+
+        print(
+            "🧠 ANALYSIS LENGTH:",
+            len(str(result))
         )
 
         # =================================================
@@ -180,6 +233,24 @@ async def analyze_image(
 
         visual_scene = build_visual_scene(
             result
+        )
+
+        print(
+            "🧠 VISUAL SCENE CREATED"
+        )
+
+        print(
+            "🧠 SCENE TYPE:",
+            visual_scene.get(
+                "scene_type"
+            )
+        )
+
+        print(
+            "🧠 SCENE OBJECTS:",
+            visual_scene.get(
+                "objects"
+            )
         )
 
         # =================================================
@@ -196,12 +267,20 @@ async def analyze_image(
 
             state["image_analysis_path"] = path
 
+            print(
+                "🧠 IMAGE CACHE SAVED"
+            )
+
             # ==========================================
             # 🔥 ACTIVE VISUAL SCENE
             # ==========================================
 
             state["active_visual_scene"] = (
                 visual_scene
+            )
+
+            print(
+                "🧠 ACTIVE VISUAL SCENE SAVED"
             )
 
             # ==========================================
@@ -225,6 +304,25 @@ async def analyze_image(
                 "visual_scene_history"
             ] = history
 
+            print(
+                "🧠 VISUAL SCENE HISTORY SIZE:",
+                len(history)
+            )
+
+        else:
+
+            print(
+                "⚠️ STATE IS NONE"
+            )
+
+        # =================================================
+        # 🔥 COMPLETE
+        # =================================================
+
+        print(
+            "🧠 ANALYZE IMAGE COMPLETE"
+        )
+
         # =================================================
         # 🔥 RETURN RESULT
         # =================================================
@@ -232,6 +330,11 @@ async def analyze_image(
         return result
 
     except Exception as e:
+
+        print(
+            "🔥 IMAGE SYSTEM ERROR:",
+            str(e)
+        )
 
         return (
             f"Ошибка анализа изображения: "
