@@ -1,10 +1,105 @@
 print("🔥 MAIN IMAGE SYSTEM WORKING")
 
 import os
+import re
 
 from blocks.gemini_vision import (
     analyze_image_gemini
 )
+
+
+# =================================================
+# 🔥 VISUAL HELPERS
+# =================================================
+
+def normalize_visual_text(
+    text
+):
+
+    return str(
+        text or ""
+    ).lower().strip()
+
+
+def extract_visual_objects(
+    text
+):
+
+    lower = normalize_visual_text(
+        text
+    )
+
+    detected = []
+
+    object_map = {
+
+        "кубик": [
+            "кубик",
+            "rubik",
+            "cube"
+        ],
+
+        "машина": [
+            "машина",
+            "car",
+            "vehicle",
+            "автомобиль"
+        ],
+
+        "рука": [
+            "рука",
+            "hand",
+            "finger",
+            "палец"
+        ],
+
+        "бургер": [
+            "burger",
+            "бургер"
+        ],
+
+        "креветки": [
+            "shrimp",
+            "кревет"
+        ],
+
+        "бокал": [
+            "glass",
+            "cocktail",
+            "бокал"
+        ],
+
+        "меню": [
+            "menu",
+            "меню"
+        ],
+
+        "чек": [
+            "receipt",
+            "чек"
+        ],
+
+        "улица": [
+            "street",
+            "road",
+            "улица"
+        ]
+    }
+
+    for object_name, triggers in object_map.items():
+
+        if any(
+            trigger in lower
+            for trigger in triggers
+        ):
+
+            detected.append(
+                object_name
+            )
+
+    return list(
+        set(detected)
+    )
 
 
 # =================================================
@@ -22,6 +117,10 @@ def build_visual_scene(
     lower = text.lower()
 
     scene_type = "unknown"
+
+    print(
+        "🧠 BUILD VISUAL SCENE START"
+    )
 
     # =================================================
     # 🔥 SCENE TYPE DETECTION
@@ -63,35 +162,96 @@ def build_visual_scene(
 
         scene_type = "street"
 
+    elif any(
+        x in lower
+        for x in [
+            "машина",
+            "car",
+            "vehicle"
+        ]
+    ):
+
+        scene_type = "car_scene"
+
+    elif any(
+        x in lower
+        for x in [
+            "кубик",
+            "rubik",
+            "cube"
+        ]
+    ):
+
+        scene_type = "object_focus"
+
     # =================================================
     # 🔥 OBJECT DETECTION
     # =================================================
 
-    objects = []
+    objects = extract_visual_objects(
+        text
+    )
 
-    object_words = [
+    # =================================================
+    # 🔥 COLORS
+    # =================================================
 
-        "burger",
-        "shrimp",
-        "glass",
-        "cocktail",
-        "чек",
-        "кревет",
-        "бургер",
-        "бокал"
+    colors = []
+
+    color_words = [
+
+        "красный",
+        "red",
+
+        "синий",
+        "blue",
+
+        "зелёный",
+        "green",
+
+        "желтый",
+        "yellow",
+
+        "белый",
+        "white",
+
+        "оранжевый",
+        "orange"
     ]
 
-    for word in object_words:
+    for color in color_words:
 
-        if word in lower:
+        if color in lower:
 
-            objects.append(word)
+            colors.append(
+                color
+            )
 
     # =================================================
     # 🔥 SUMMARY
     # =================================================
 
     summary = text[:400]
+
+    # =================================================
+    # 🔥 LOGGING
+    # =================================================
+
+    print(
+        f"🧠 SCENE TYPE DETECTED: {scene_type}"
+    )
+
+    print(
+        f"🧠 OBJECTS DETECTED: {objects}"
+    )
+
+    print(
+        f"🧠 COLORS DETECTED: {colors}"
+    )
+
+    print(
+        f"🧠 SUMMARY LENGTH: {len(summary)}"
+    )
 
     # =================================================
     # 🔥 RESULT
@@ -103,8 +263,10 @@ def build_visual_scene(
 
         "summary": summary,
 
-        "objects": list(
-            set(objects)
+        "objects": objects,
+
+        "colors": list(
+            set(colors)
         ),
 
         "raw_analysis": text
@@ -122,15 +284,12 @@ async def analyze_image(
 
     try:
 
-        # =================================================
-        # 🔥 START LOG
-        # =================================================
-
-        print("🧠 ANALYZE IMAGE START")
-        print("🧠 IMAGE PATH:", path)
         print(
-            "🧠 STATE EXISTS:",
-            state is not None
+            "🧠 ANALYZE IMAGE START"
+        )
+
+        print(
+            f"🧠 IMAGE PATH: {path}"
         )
 
         # =================================================
@@ -147,38 +306,11 @@ async def analyze_image(
                 "image_analysis_path"
             )
 
-            print(
-                "🧠 CACHED EXISTS:",
-                cached is not None
-            )
-
-            print(
-                "🧠 CACHED PATH:",
-                cached_path
-            )
-
-            # =============================================
-            # 🔥 ACTIVE VISUAL SCENE
-            # =============================================
-
             active_visual_scene = state.get(
                 "active_visual_scene"
             )
 
-            print(
-                "🧠 ACTIVE VISUAL SCENE EXISTS:",
-                active_visual_scene is not None
-            )
-
-            # =============================================
-            # 🔥 CACHE RESTORE
-            # =============================================
-
             if cached and cached_path == path:
-
-                print(
-                    "🧠 CACHE HIT"
-                )
 
                 print(
                     "🧠 USING CACHED IMAGE ANALYSIS"
@@ -190,21 +322,16 @@ async def analyze_image(
                         "🧠 VISUAL SCENE RESTORED"
                     )
 
+                    print(
+                        f"🧠 RESTORED OBJECTS: "
+                        f"{active_visual_scene.get('objects')}"
+                    )
+
                     state[
                         "active_visual_scene"
                     ] = active_visual_scene
 
-                print(
-                    "🧠 ANALYZE IMAGE COMPLETE (CACHE)"
-                )
-
                 return cached
-
-            else:
-
-                print(
-                    "🧠 CACHE MISS"
-                )
 
         # =================================================
         # 🔥 GEMINI ANALYSIS
@@ -223,8 +350,7 @@ async def analyze_image(
         )
 
         print(
-            "🧠 ANALYSIS LENGTH:",
-            len(str(result))
+            f"🧠 ANALYSIS LENGTH: {len(result)}"
         )
 
         # =================================================
@@ -240,17 +366,18 @@ async def analyze_image(
         )
 
         print(
-            "🧠 SCENE TYPE:",
-            visual_scene.get(
-                "scene_type"
-            )
+            f"🧠 FINAL SCENE TYPE: "
+            f"{visual_scene.get('scene_type')}"
         )
 
         print(
-            "🧠 SCENE OBJECTS:",
-            visual_scene.get(
-                "objects"
-            )
+            f"🧠 FINAL OBJECTS: "
+            f"{visual_scene.get('objects')}"
+        )
+
+        print(
+            f"🧠 FINAL COLORS: "
+            f"{visual_scene.get('colors')}"
         )
 
         # =================================================
@@ -259,33 +386,13 @@ async def analyze_image(
 
         if state is not None:
 
-            # ==========================================
-            # 🔥 RAW ANALYSIS
-            # ==========================================
-
             state["image_analysis"] = result
 
             state["image_analysis_path"] = path
 
-            print(
-                "🧠 IMAGE CACHE SAVED"
-            )
-
-            # ==========================================
-            # 🔥 ACTIVE VISUAL SCENE
-            # ==========================================
-
             state["active_visual_scene"] = (
                 visual_scene
             )
-
-            print(
-                "🧠 ACTIVE VISUAL SCENE SAVED"
-            )
-
-            # ==========================================
-            # 🔥 VISUAL SCENE HISTORY
-            # ==========================================
 
             history = state.get(
                 "visual_scene_history",
@@ -305,14 +412,16 @@ async def analyze_image(
             ] = history
 
             print(
-                "🧠 VISUAL SCENE HISTORY SIZE:",
-                len(history)
+                "🧠 IMAGE CACHE SAVED"
             )
 
-        else:
+            print(
+                "🧠 ACTIVE VISUAL SCENE SAVED"
+            )
 
             print(
-                "⚠️ STATE IS NONE"
+                f"🧠 VISUAL SCENE HISTORY SIZE: "
+                f"{len(history)}"
             )
 
         # =================================================
@@ -323,17 +432,12 @@ async def analyze_image(
             "🧠 ANALYZE IMAGE COMPLETE"
         )
 
-        # =================================================
-        # 🔥 RETURN RESULT
-        # =================================================
-
         return result
 
     except Exception as e:
 
         print(
-            "🔥 IMAGE SYSTEM ERROR:",
-            str(e)
+            f"🔥 IMAGE SYSTEM ERROR: {str(e)}"
         )
 
         return (
