@@ -291,112 +291,15 @@ async def transcribe_voice(
     file_path
 ):
 
-    # =================================================
-    # 🔥 GEMINI PRIMARY
-    # =================================================
-
-    if should_restore_gemini():
-
-        try:
-
-            provider_log(
-                "🧠 GEMINI VOICE START"
-            )
-
-            provider_log(
-                "🧠 GEMINI AUDIO PATH:",
-                file_path
-            )
-
-            uploaded = gemini_client.files.upload(
-                file=file_path
-            )
-
-            provider_log(
-                "🧠 GEMINI AUDIO UPLOADED"
-            )
-
-            for _ in range(60):
-
-                uploaded = gemini_client.files.get(
-                    name=uploaded.name
-                )
-
-                provider_log(
-                    "🧠 GEMINI FILE STATE:",
-                    uploaded.state.name
-                )
-
-                if uploaded.state.name == "ACTIVE":
-
-                    break
-
-                await asyncio.sleep(1)
-
-            if uploaded.state.name != "ACTIVE":
-
-                raise Exception(
-                    "GEMINI FILE NOT ACTIVE"
-                )
-
-            provider_log(
-                "🧠 GEMINI START TRANSCRIBE"
-            )
-
-            response = (
-
-                gemini_client.models.generate_content(
-
-                    model="gemini-2.5-flash",
-
-                    contents=[
-
-                        uploaded,
-
-                        (
-                            "Сделай точную "
-                            "транскрипцию аудио. "
-                            "Без комментариев."
-                        )
-                    ]
-                )
-            )
-
-            text = (
-
-                response.text.strip()
-                if response.text
-                else ""
-            )
-
-            provider_log(
-                "🧠 GEMINI TRANSCRIBE RESPONSE:",
-                text[:120] if text else "EMPTY"
-            )
-
-            if text:
-
-                mark_gemini_success()
-
-                return text
-
-        except Exception as e:
-
-            provider_log(
-                "🔥 GEMINI VOICE ERROR:",
-                e
-            )
-
-            mark_gemini_failure()
-
-    # =================================================
-    # 🔥 OPENAI FALLBACK
-    # =================================================
-
     try:
 
         provider_log(
-            "⚠️ OPENAI VOICE FALLBACK"
+            "🧠 OPENAI VOICE START"
+        )
+
+        provider_log(
+            "🧠 OPENAI AUDIO PATH:",
+            file_path
         )
 
         with open(file_path, "rb") as f:
@@ -411,11 +314,27 @@ async def transcribe_voice(
                 )
             )
 
-        provider_log(
-            "🧠 OPENAI VOICE SUCCESS"
+        text = (
+
+            transcript.text.strip()
+            if transcript.text
+            else ""
         )
 
-        return transcript.text.strip()
+        provider_log(
+            "🧠 OPENAI VOICE RESPONSE:",
+            text[:120] if text else "EMPTY"
+        )
+
+        if text:
+
+            provider_log(
+                "🧠 OPENAI VOICE SUCCESS"
+            )
+
+            return text
+
+        return ""
 
     except Exception as e:
 
