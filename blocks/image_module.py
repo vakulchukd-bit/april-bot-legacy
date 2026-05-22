@@ -87,6 +87,7 @@ def extract_image_prompt(text: str):
         t = t.replace(b, "")
 
     t = t.strip()
+
     separators = [
         ".",
         ",",
@@ -110,76 +111,79 @@ def extract_image_prompt(text: str):
 
 # ===== V1 (РЕЗЕРВ) =====
 async def generate_image(prompt):
+
     def run():
+
         try:
-            response = client.images.generate(
-                model="gpt-image-1",
-                prompt=prompt
+
+            print(
+                "🛑 OPENAI IMAGE DISABLED (V1)"
             )
 
-            if not response or not response.data:
-                return None
-
-            if not hasattr(response.data[0], "b64_json"):
-                return None
-
-            image_base64 = response.data[0].b64_json
-
-            if not image_base64:
-                return None
-
-            return base64.b64decode(image_base64)
-
-        except Exception as e:
-            print("IMAGE GENERATION ERROR:", e)
             return None
 
-    return await asyncio.get_event_loop().run_in_executor(None, run)
+        except Exception as e:
+
+            print(
+                "IMAGE GENERATION ERROR:",
+                e
+            )
+
+            return None
+
+    return await asyncio.get_event_loop().run_in_executor(
+        None,
+        run
+    )
 
 
 # ===== V2 (ОСНОВНОЙ) =====
 async def generate_image_v2(prompt):
+
     def run():
+
         try:
-            response = client.images.generate(
-                model="gpt-image-1",
-                prompt=prompt
+
+            print(
+                "🛑 OPENAI IMAGE DISABLED (V2)"
             )
 
-            if not response or not response.data:
-                return None
-
-            if not hasattr(response.data[0], "b64_json"):
-                return None
-
-            image_base64 = response.data[0].b64_json
-
-            if not image_base64:
-                return None
-
-            return base64.b64decode(image_base64)
-
-        except Exception as e:
-            print("IMAGE GENERATION V2 ERROR:", e)
             return None
 
-    return await asyncio.get_event_loop().run_in_executor(None, run)
+        except Exception as e:
+
+            print(
+                "IMAGE GENERATION V2 ERROR:",
+                e
+            )
+
+            return None
+
+    return await asyncio.get_event_loop().run_in_executor(
+        None,
+        run
+    )
 
 
 # ===== ИНКРЕМЕНТ =====
 def increment_images(user_id):
+
     conn = get_conn()
+
     if not conn:
         return
 
     uid = str(user_id)
 
     with conn:
+
         with conn.cursor() as cur:
+
             cur.execute(
                 "SELECT images_today, last_reset FROM users WHERE user_id = %s",
                 (uid,)
             )
+
             user = cur.fetchone()
 
             if not user:
@@ -190,18 +194,28 @@ def increment_images(user_id):
             if user["last_reset"] != today():
                 images = 0
 
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE users
                 SET images_today = %s, last_reset = %s
                 WHERE user_id = %s
-            """, (images + 1, today(), uid))
+                """,
+                (
+                    images + 1,
+                    today(),
+                    uid
+                )
+            )
 
 
 # ===== PROCESS =====
 async def process(user_id, text, state):
+
     try:
+
         prompt = clean_prompt(text)
         prompt = extract_image_prompt(prompt)
+
         # ==========================================
         # 🔥 SAFE IMAGE PROMPT
         # ==========================================
@@ -245,9 +259,15 @@ async def process(user_id, text, state):
 
         # 🔥 PATCH: добавили контекст (НЕ ломает старую логику)
         if state.get("image_context", {}).get("hint"):
-            prompt = state["image_context"]["hint"] + ", " + prompt
+
+            prompt = (
+                state["image_context"]["hint"]
+                + ", "
+                + prompt
+            )
 
         if not prompt:
+
             return {
                 "type": "error",
                 "data": "❌ Пустой запрос для генерации"
@@ -257,71 +277,108 @@ async def process(user_id, text, state):
         plan = get_user_plan(user_id)
 
         if not is_admin and plan == "free":
-            limit = 1
-            limits = get_limits(user_id, img_limit=limit)
 
-            if limits["images_used"] >= limits["images_limit"]:
+            limit = 1
+
+            limits = get_limits(
+                user_id,
+                img_limit=limit
+            )
+
+            if (
+                limits["images_used"]
+                >= limits["images_limit"]
+            ):
+
                 return {
                     "type": "text",
                     "data": "Сегодня лимит на создание изображений исчерпан 🙂"
                 }
 
         # ===============================
-        # 🔥 ВАЖНО: НЕ ТРОГАЕМ ТВОЮ ЛОГИКУ
+        # 🔥 SAFE TEST MODE
         # ===============================
+
+        print(
+            "🛑 IMAGE GENERATION DISABLED FOR GEMINI TEST MODE"
+        )
 
         img = await generate_image_v2(prompt)
 
         if img:
+
             state["image_current"] = img
 
-            set_last_entity(user_id, {
-                "type": "image",
-                "data": img,
-                "source": "v2"
-            })
+            set_last_entity(
+                user_id,
+                {
+                    "type": "image",
+                    "data": img,
+                    "source": "v2"
+                }
+            )
 
-            print("🖼 IMAGE SAVED TO META (V2)")
+            print(
+                "🖼 IMAGE SAVED TO META (V2)"
+            )
 
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
-            save_to_memory(state, {
-                "type": "generated",
-                "source": "v2",
-                "prompt": prompt,
-                "hint": prompt,
-                "path": None
-            })
+            save_to_memory(
+                state,
+                {
+                    "type": "generated",
+                    "source": "v2",
+                    "prompt": prompt,
+                    "hint": prompt,
+                    "path": None
+                }
+            )
 
-            return {"type": "image", "data": img}
+            return {
+                "type": "image",
+                "data": img
+            }
 
         # 🔥 fallback остаётся КАК БЫЛО
         img = await generate_image(prompt)
 
         if img:
+
             state["image_current"] = img
 
-            set_last_entity(user_id, {
-                "type": "image",
-                "data": img,
-                "source": "v1"
-            })
+            set_last_entity(
+                user_id,
+                {
+                    "type": "image",
+                    "data": img,
+                    "source": "v1"
+                }
+            )
 
-            print("🖼 IMAGE SAVED TO META (V1)")
+            print(
+                "🖼 IMAGE SAVED TO META (V1)"
+            )
 
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
-            save_to_memory(state, {
-                "type": "generated",
-                "source": "v1",
-                "prompt": prompt,
-                "hint": prompt,
-                "path": None
-            })
+            save_to_memory(
+                state,
+                {
+                    "type": "generated",
+                    "source": "v1",
+                    "prompt": prompt,
+                    "hint": prompt,
+                    "path": None
+                }
+            )
 
-            return {"type": "image", "data": img}
+            return {
+                "type": "image",
+                "data": img
+            }
 
         return {
             "type": "final_error",
@@ -329,17 +386,28 @@ async def process(user_id, text, state):
         }
 
     except Exception as e:
-        print("IMAGE MODULE ERROR:", e)
-        return {"type": "error", "data": None}
+
+        print(
+            "IMAGE MODULE ERROR:",
+            e
+        )
+
+        return {
+            "type": "error",
+            "data": None
+        }
 
 
 # ===== RETRY =====
 async def retry_process(user_id, text, state):
+
     try:
+
         prompt = clean_prompt(text)
         prompt = extract_image_prompt(prompt)
 
         if not prompt:
+
             return {
                 "type": "final_error",
                 "data": "❌ Пустой запрос"
@@ -353,29 +421,42 @@ async def retry_process(user_id, text, state):
             img = await generate_image(prompt)
 
         if img:
+
             state["image_current"] = img
 
-            set_last_entity(user_id, {
-                "type": "image",
-                "data": img,
-                "source": "retry"
-            })
+            set_last_entity(
+                user_id,
+                {
+                    "type": "image",
+                    "data": img,
+                    "source": "retry"
+                }
+            )
 
-            print("🖼 IMAGE SAVED TO META (RETRY)")
+            print(
+                "🖼 IMAGE SAVED TO META (RETRY)"
+            )
 
             plan = get_user_plan(user_id)
+
             if not is_admin and plan == "free":
                 increment_images(user_id)
 
-            save_to_memory(state, {
-                "type": "generated",
-                "source": "retry",
-                "prompt": prompt,
-                "hint": prompt,
-                "path": None
-            })
+            save_to_memory(
+                state,
+                {
+                    "type": "generated",
+                    "source": "retry",
+                    "prompt": prompt,
+                    "hint": prompt,
+                    "path": None
+                }
+            )
 
-            return {"type": "image", "data": img}
+            return {
+                "type": "image",
+                "data": img
+            }
 
         return {
             "type": "final_error",
@@ -383,7 +464,12 @@ async def retry_process(user_id, text, state):
         }
 
     except Exception as e:
-        print("IMAGE RETRY ERROR:", e)
+
+        print(
+            "IMAGE RETRY ERROR:",
+            e
+        )
+
         return {
             "type": "final_error",
             "data": "⚠️ Сервис временно недоступен"
