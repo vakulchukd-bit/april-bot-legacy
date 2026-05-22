@@ -1733,6 +1733,48 @@ async def execute(
                     result.get("data", "")
                 )
 
+                # ================================
+                # 🔥 SCENE OBJECT MEMORY
+                # ================================
+
+                result_type = result.get(
+                    "type",
+                    "text"
+                )
+
+                if result_type in [
+
+                    "graph",
+                    "formula",
+                    "image",
+                    "gallery",
+                    "diagram"
+
+                ]:
+
+                    state[
+                        "last_scene_object"
+                    ] = {
+
+                        "type": result_type,
+
+                        "content": result.get(
+                            "data"
+                        ),
+
+                        "created_at":
+                            datetime.now().isoformat(),
+
+                        "goal_stage":
+                            goal_stage,
+
+                        "visual_continuity":
+                            semantic.get(
+                                "visual_continuity",
+                                False
+                            )
+                    }
+
                 add_dialog(
 
                     user_id,
