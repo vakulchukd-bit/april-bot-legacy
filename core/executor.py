@@ -1684,21 +1684,50 @@ async def execute(
                     and result.get("data")
                 ):
 
-                    result["data"] = (
-
-                        format_response_presentation(
-
-                            text=result["data"],
-
-                            user_text=text,
-
-                            semantic=semantic,
-
-                            cognition=cognition,
-
-                            visual_reference=visual_reference
-                        )
+                    output_data = str(
+                        result["data"]
                     )
+
+                    # =============================================
+                    # 🔥 SCENE OBJECT DETECTION
+                    # =============================================
+
+                    scene_object_detected = any(
+
+                        x in output_data
+
+                        for x in [
+
+                            "[[formula]]",
+                            "[[graph]]",
+                            "[[diagram]]",
+                            "[[scene]]"
+                        ]
+                    )
+
+                    # =============================================
+                    # 🔥 TELEGRAM LEGACY FORMATTER
+                    # =============================================
+
+                    if not scene_object_detected:
+
+                        output_data = (
+
+                            format_response_presentation(
+
+                                text=output_data,
+
+                                user_text=text,
+
+                                semantic=semantic,
+
+                                cognition=cognition,
+
+                                visual_reference=visual_reference
+                            )
+                        )
+
+                    result["data"] = output_data
 
                 output_text = str(
                     result.get("data", "")
