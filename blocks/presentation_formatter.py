@@ -43,6 +43,63 @@ def safe_format_log(msg):
 
 
 # =====================================================
+# 🔥 WEB / UI DETECTION
+# =====================================================
+
+def is_web_render_context(user_text: str):
+
+    t = (user_text or "").lower()
+
+    web_words = [
+
+        "график",
+        "diagram",
+        "диаграм",
+        "chart",
+        "canvas",
+        "render",
+        "ui",
+        "интерфейс",
+        "картин",
+        "image",
+        "визуал",
+        "нарисуй",
+        "сгенерируй",
+        "plot",
+        "desmos"
+    ]
+
+    return any(
+        x in t
+        for x in web_words
+    )
+
+
+def looks_like_visual_payload(text: str):
+
+    t = (text or "").lower()
+
+    checks = [
+
+        "```html",
+        "<svg",
+        "<canvas",
+        "desmos.com",
+        "\"type\": \"graph\"",
+        "\"type\":\"graph\"",
+        "\"graph\":",
+        "\"diagram\":",
+        "\"image_url\":",
+        "data:image"
+    ]
+
+    return any(
+        x in t
+        for x in checks
+    )
+
+
+# =====================================================
 # 🔥 EMOJI MAP
 # =====================================================
 
@@ -505,7 +562,8 @@ def build_smart_presentation(
     text: str,
     semantic: dict,
     cognition: dict,
-    response_decision: dict
+    response_decision: dict,
+    user_text: str = ""
 ):
 
     semantic = semantic or {}
@@ -516,6 +574,20 @@ def build_smart_presentation(
 
     if not text:
         return text
+
+    # =================================================
+    # 🔥 WEB VISUAL PROTECTION
+    # =================================================
+
+    if is_web_render_context(user_text):
+
+        if looks_like_visual_payload(text):
+
+            safe_format_log(
+                "WEB VISUAL PAYLOAD BYPASS"
+            )
+
+            return text
 
     if is_code_content(text):
 
@@ -678,7 +750,8 @@ def beautify_response(
     text: str,
     semantic: dict,
     cognition: dict,
-    response_decision: dict
+    response_decision: dict,
+    user_text: str = ""
 ):
 
     if not text:
@@ -688,7 +761,8 @@ def beautify_response(
         text,
         semantic,
         cognition,
-        response_decision
+        response_decision,
+        user_text
     )
 
     formatted = apply_april_final_voice(
@@ -729,5 +803,6 @@ def format_response_presentation(
         final_text,
         semantic,
         cognition,
-        response_decision
+        response_decision,
+        user_text
     )
