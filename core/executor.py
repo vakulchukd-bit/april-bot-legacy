@@ -1918,11 +1918,28 @@ async def execute(
                 "last_execution_failure"
             ] = failure
 
-    if best_result:
+    if scene_results:
 
-        print("EXECUTE RESULT:", best_result)
+    if len(scene_results) == 1:
 
-        return best_result
+        print(
+            "EXECUTE RESULT:",
+            scene_results[0]
+        )
+
+        return scene_results[0]
+
+    print(
+        "EXECUTE SCENE:",
+        scene_results
+    )
+
+    return {
+
+        "type": "scene",
+
+        "blocks": scene_results
+    }
 
     context_text = build_context_text(
 
