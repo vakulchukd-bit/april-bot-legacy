@@ -1679,7 +1679,29 @@ async def execute(
 
                     continue
 
-                if (
+                VISUAL_TYPES = [
+
+                    "graph",
+                    "formula",
+                    "image",
+                    "gallery",
+                    "diagram",
+                    "link"
+                ]
+
+                result_type = result.get(
+                    "type",
+                    "text"
+                )
+
+                if result_type in VISUAL_TYPES:
+
+                    print(
+                        "🧠 VISUAL OBJECT BYPASS FORMATTER"
+                    )
+
+                elif (
+
                     result.get("type") == "text"
                     and result.get("data")
                 ):
