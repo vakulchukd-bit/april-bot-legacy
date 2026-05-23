@@ -1877,6 +1877,19 @@ async def execute(
 
                 best_result = result
 
+                scene_results.append({
+
+                    "type": result.get(
+                        "type",
+                        "text"
+                    ),
+
+                    "content": result.get(
+                        "data",
+                        ""
+                    )
+                })
+
                 if result.get("type") not in [
 
                     "graph",
