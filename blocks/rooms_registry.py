@@ -139,63 +139,24 @@ class ImageGenerateRoom(Room):
         # 🔥 APRIL VISUAL AUTHORITY
         # =================================================
 
-        if cognition.get(
-            "prefer_visual"
-        ):
-
-            return True
-
-        if cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.55:
-
-            return True
-
-        if cognition.get(
-            "wants_result",
-            0.0
-        ) >= 0.72:
-
-            return True
-
-        if semantic.get(
-            "visual_obligation"
-        ):
-
-            return True
-
         # =================================================
-        # 🔥 DIALOG IMAGE UNDERSTANDING
+        # 🔥 EXPLICIT IMAGE GENERATION ONLY
         # =================================================
 
-        t = text.lower()
+        explicit_generation_words = [
 
-        visual_context_words = [
-
-            "самолет",
-            "самолёт",
-            "корабль",
-            "море",
-            "небо",
-            "космос",
-            "машина",
-            "человек",
-            "девушка",
-            "город",
-            "лес",
-            "кот",
-            "собака",
-            "картинка",
-            "изображение",
             "нарисуй",
-            "создай",
-            "сделай"
+            "создай изображение",
+            "сгенерируй изображение",
+            "сделай арт",
+            "создай арт",
+            "draw",
+            "generate image"
         ]
 
         if any(
-            w in t
-            for w in visual_context_words
+            w in text.lower()
+            for w in explicit_generation_words
         ):
 
             return True
