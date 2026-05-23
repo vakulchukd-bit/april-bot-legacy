@@ -936,6 +936,21 @@ async def handle(message: types.Message):
             )
 
         # =================================================
+        # 📈 GRAPH
+        # =================================================
+
+        elif result_type == "graph":
+
+            await message.answer(
+
+                f"[[graph:{result_data}]]",
+
+                reply_markup=main_keyboard(
+                    message.message_id
+                )
+            )
+
+        # =================================================
         # 🧠 HYBRID FUTURE SUPPORT
         # =================================================
 
