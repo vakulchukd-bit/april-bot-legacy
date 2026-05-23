@@ -640,6 +640,78 @@ def build_response_decision(
         ] = True
 
     # =====================================================
+    # 🔥 ACTION LOCK SYSTEM
+    # =====================================================
+
+    executable_artifact = semantic.get(
+        "expected_artifact"
+    )
+
+    executable_confidence = semantic.get(
+        "execution_confidence",
+        0.0
+    )
+
+    ambiguity_level = semantic.get(
+        "ambiguity_level",
+        1.0
+    )
+
+    if (
+
+        executable_artifact in [
+
+            "graph",
+            "image",
+            "diagram",
+            "link",
+            "map",
+            "file",
+            "formula"
+        ]
+
+        and executable_confidence >= 0.72
+
+        and ambiguity_level <= 0.35
+    ):
+
+        result[
+            "should_execute"
+        ] = True
+
+        result[
+            "execution_allowed"
+        ] = True
+
+        result[
+            "final_action"
+        ] = "execute"
+
+        result[
+            "forced_action"
+        ] = "execute"
+
+        result[
+            "dialogue_still_alive"
+        ] = True
+
+        result[
+            "goal_completed"
+        ] = False
+
+        result[
+            "avoid_forced_generation"
+        ] = False
+
+        result[
+            "response_requires_clarification"
+        ] = False
+
+        result[
+            "high_ambiguity_detected"
+        ] = False
+
+    # =====================================================
     # 🔥 GENERATION CONTROL
     # =====================================================
 
