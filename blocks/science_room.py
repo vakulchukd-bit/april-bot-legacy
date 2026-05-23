@@ -310,14 +310,14 @@ class ScienceRoom:
 
             return {
 
-                "type": "graph",
+                "type": "function",
 
-                "graph": expr,
+                "function": expr,
 
-                "data": expr,
+                "range": [-10, 10],
 
                 "meta": {
-                    "source": "frontend_graph_renderer"
+                    "source": "frontend_function_renderer"
                 }
             }
 
