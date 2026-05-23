@@ -1934,12 +1934,12 @@ async def execute(
             scene_results
         )
 
-            return {
+        return {
 
                     "type": "scene",
 
                     "blocks": scene_results
-                   }
+        }
 
     context_text = build_context_text(
 
