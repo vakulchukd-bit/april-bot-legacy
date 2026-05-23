@@ -1920,26 +1920,26 @@ async def execute(
 
     if scene_results:
 
-    if len(scene_results) == 1:
+        if len(scene_results) == 1:
+
+            print(
+                "EXECUTE RESULT:",
+                scene_results[0]
+            )
+
+            return scene_results[0]
 
         print(
-            "EXECUTE RESULT:",
-            scene_results[0]
+            "EXECUTE SCENE:",
+            scene_results
         )
 
-        return scene_results[0]
+            return {
 
-    print(
-        "EXECUTE SCENE:",
-        scene_results
-    )
+                    "type": "scene",
 
-    return {
-
-        "type": "scene",
-
-        "blocks": scene_results
-    }
+                    "blocks": scene_results
+                   }
 
     context_text = build_context_text(
 
