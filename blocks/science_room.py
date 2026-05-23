@@ -306,37 +306,19 @@ class ScienceRoom:
                     )
                 }
 
-            path = self.build_graph(expr)
-
-            if path:
-
-                state["fail_count"] = 0
-
-                try:
-
-                    with open(path, "rb") as f:
-
-                        return {
-
-                            "type": "image",
-
-                            "data": f.read(),
-
-                            "meta": {
-                                "source": "math_graph"
-                            }
-                        }
-
-                except Exception as e:
-
-                    print("🔥 GRAPH ERROR:", e)
+            state["fail_count"] = 0
 
             return {
 
-                "type": "text",
+                "type": "graph",
 
-                "data":
-                    "❌ Не удалось построить график"
+                "graph": expr,
+
+                "data": expr,
+
+                "meta": {
+                    "source": "frontend_graph_renderer"
+                }
             }
 
         # ===== старая логика =====
