@@ -1616,6 +1616,7 @@ async def execute(
     )
 
     best_result = None
+    scene_results = []
 
     for score, room in scored_rooms:
 
@@ -1876,7 +1877,17 @@ async def execute(
 
                 best_result = result
 
-                break
+                if result.get("type") not in [
+
+                    "graph",
+                    "formula",
+                    "diagram",
+                    "gallery",
+                    "image"
+
+                ]:
+
+                    break
 
         except Exception as e:
 
