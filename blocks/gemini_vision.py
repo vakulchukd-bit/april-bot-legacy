@@ -1,9 +1,27 @@
 import os
+import time
 
 from google import genai
 from google.genai import errors as gemini_errors
 
 from openai import OpenAI
+
+# =====================================================
+# 🔥 SHARED PROVIDER STATE
+# =====================================================
+
+from blocks.provider_router import (
+
+    provider_state,
+
+    should_restore_gemini,
+
+    mark_gemini_failure,
+
+    mark_gemini_success,
+
+    provider_log
+)
 
 
 # =====================================================
@@ -20,7 +38,7 @@ openai_client = OpenAI(
 
 
 # =====================================================
-# 🔥 PROVIDER STATE
+# 🔥 VISUAL PROVIDER MODE
 # =====================================================
 
 ACTIVE_PROVIDER = "gemini"
@@ -36,7 +54,7 @@ def set_provider(name: str):
 
     ACTIVE_PROVIDER = name
 
-    print(
+    provider_log(
         f"🧠 ACTIVE VISUAL PROVIDER: "
         f"{ACTIVE_PROVIDER}"
     )
@@ -48,25 +66,16 @@ def get_provider():
 
 
 # =====================================================
-# 🔥 GEMINI HEALTHCHECK
+# 🔥 SAFE GEMINI RECOVERY
 # =====================================================
 
-async def gemini_available():
+def can_try_gemini():
 
-    try:
+    if ACTIVE_PROVIDER == "gemini":
 
-        gemini_client.models.generate_content(
+        return should_restore_gemini()
 
-            model="gemini-2.5-flash",
-
-            contents="ping"
-        )
-
-        return True
-
-    except Exception:
-
-        return False
+    return False
 
 
 # =====================================================
@@ -95,7 +104,7 @@ def shape_april_visual_response(
     )
 
     # =========================================
-    # 🔥 УБИРАЕМ СЛИШКОМ ДЛИННЫЕ ПРОСТЫНИ
+    # 🔥 LIMIT RESPONSE SIZE
     # =========================================
 
     if len(cleaned) > 420:
@@ -131,8 +140,16 @@ async def analyze_with_gemini(
     path: str
 ) -> str:
 
+    provider_log(
+        "🧠 GEMINI VISUAL START"
+    )
+
     uploaded_file = gemini_client.files.upload(
         file=path
+    )
+
+    provider_log(
+        "🧠 GEMINI FILE UPLOADED"
     )
 
     response = gemini_client.models.generate_content(
@@ -182,6 +199,12 @@ async def analyze_with_gemini(
         )
     )
 
+    mark_gemini_success()
+
+    provider_log(
+        "🧠 GEMINI VISUAL SUCCESS"
+    )
+
     return shape_april_visual_response(
         raw_text
     )
@@ -195,39 +218,45 @@ async def analyze_with_openai(
     path: str
 ) -> str:
 
+    provider_log(
+        "⚠️ OPENAI VISUAL FALLBACK"
+    )
+
     with open(path, "rb") as image_file:
 
-        response = openai_client.responses.create(
+        image_bytes = image_file.read()
 
-            model="gpt-4.1-mini",
+    response = openai_client.responses.create(
 
-            input=[
+        model="gpt-4.1-mini",
 
-                {
-                    "role": "user",
+        input=[
 
-                    "content": [
+            {
+                "role": "user",
 
-                        {
-                            "type": "input_text",
+                "content": [
 
-                            "text": (
-                                "Кратко и спокойно "
-                                "объясни изображение. "
-                                "Без robotic AI тона."
-                            )
-                        },
+                    {
+                        "type": "input_text",
 
-                        {
-                            "type": "input_image",
+                        "text": (
+                            "Кратко и спокойно "
+                            "объясни изображение. "
+                            "Без robotic AI тона. "
+                            "Выдели только главное."
+                        )
+                    },
 
-                            "image_data":
-                                image_file.read()
-                        }
-                    ]
-                }
-            ]
-        )
+                    {
+                        "type": "input_image",
+
+                        "image_data": image_bytes
+                    }
+                ]
+            }
+        ]
+    )
 
     raw_text = getattr(
         response,
@@ -241,13 +270,17 @@ async def analyze_with_openai(
             "Изображение обработано."
         )
 
+    provider_log(
+        "🧠 OPENAI VISUAL SUCCESS"
+    )
+
     return shape_april_visual_response(
         raw_text
     )
 
 
 # =====================================================
-# 🔥 MAIN GEMINI SYSTEM
+# 🔥 MAIN VISUAL SYSTEM
 # =====================================================
 
 async def analyze_image_gemini(
@@ -259,10 +292,10 @@ async def analyze_image_gemini(
     try:
 
         # =============================================
-        # 🔥 PRIMARY PROVIDER
+        # 🔥 GEMINI PRIMARY
         # =============================================
 
-        if ACTIVE_PROVIDER == "gemini":
+        if can_try_gemini():
 
             try:
 
@@ -274,14 +307,12 @@ async def analyze_image_gemini(
 
             except Exception as gemini_error:
 
-                print(
-                    "⚠️ GEMINI FAILED:",
+                provider_log(
+                    "🔥 GEMINI VISUAL ERROR:",
                     gemini_error
                 )
 
-                print(
-                    "🔁 SWITCHING TO OPENAI FALLBACK"
-                )
+                mark_gemini_failure()
 
                 set_provider("openai")
 
@@ -294,29 +325,34 @@ async def analyze_image_gemini(
         )
 
         # =============================================
-        # 🔥 GEMINI RECOVERY CHECK
+        # 🔥 GEMINI RECOVERY WINDOW
         # =============================================
 
-        try:
+        now = time.time()
 
-            recovered = await gemini_available()
+        last_failure = provider_state.get(
+            "last_gemini_failure",
+            0
+        )
 
-            if recovered:
+        cooldown = provider_state.get(
+            "recovery_cooldown",
+            45
+        )
 
-                print(
-                    "✅ GEMINI RESTORED"
-                )
+        if now - last_failure >= cooldown:
 
-                set_provider("gemini")
+            provider_log(
+                "🧠 GEMINI RECOVERY READY"
+            )
 
-        except Exception:
-            pass
+            set_provider("gemini")
 
         return result
 
     except Exception as e:
 
-        print(
+        provider_log(
             "🔥 VISUAL SYSTEM ERROR:",
             e
         )
