@@ -3,6 +3,40 @@
 from blocks.interpretation_layer import interpret_request
 
 
+# =====================================================
+# 🔥 HELPERS
+# =====================================================
+
+def clamp(
+    value,
+    minimum=0.0,
+    maximum=1.0
+):
+
+    if value < minimum:
+        return minimum
+
+    if value > maximum:
+        return maximum
+
+    return value
+
+
+def contains_any(
+    text,
+    words
+):
+
+    return any(
+        w in text
+        for w in words
+    )
+
+
+# =====================================================
+# 🔥 ANALYZE
+# =====================================================
+
 def analyze(
     text: str,
     state: dict = None,
@@ -173,7 +207,41 @@ def analyze(
 
         "capability_requires_permission": True,
 
-        "capability_must_follow_dialogue": True
+        "capability_must_follow_dialogue": True,
+
+        # =================================================
+        # 🔥 WEB-FIRST STABILIZATION
+        # =====================================================
+
+        "prefer_web_context": False,
+
+        "internet_context_needed": False,
+
+        "travel_context": False,
+
+        "geo_context": False,
+
+        "realtime_context": False,
+
+        # =================================================
+        # 🔥 VISUAL CONTINUITY
+        # =====================================================
+
+        "visual_continuity": False,
+
+        "active_visual_scene_detected": False,
+
+        "scene_reference_detected": False,
+
+        # =================================================
+        # 🔥 PROVIDER-AWARE
+        # =====================================================
+
+        "prefer_local_rendering": False,
+
+        "avoid_image_generation_fallback": True,
+
+        "provider_safe_mode": True
     }
 
     # =====================================================
@@ -228,7 +296,10 @@ def analyze(
         "примерно"
     ]
 
-    if any(w in t for w in execution_words):
+    if contains_any(
+        t,
+        execution_words
+    ):
 
         result["current_message_mode"] = (
             "execute_now"
@@ -236,7 +307,10 @@ def analyze(
 
         result["current_message_priority"] = 0.92
 
-    elif any(w in t for w in return_words):
+    elif contains_any(
+        t,
+        return_words
+    ):
 
         result["current_message_mode"] = (
             "return"
@@ -244,7 +318,10 @@ def analyze(
 
         result["current_message_priority"] = 0.75
 
-    elif any(w in t for w in exploration_words):
+    elif contains_any(
+        t,
+        exploration_words
+    ):
 
         result["current_message_mode"] = (
             "exploration"
@@ -278,7 +355,12 @@ def analyze(
             == "execute_now"
         ):
 
-            if flow_type != "image":
+            if flow_type not in [
+
+                "image",
+                "image_generate",
+                "image_edit"
+            ]:
 
                 result[
                     "current_request_overrides_flow"
@@ -317,6 +399,10 @@ def analyze(
 
     if active_visual_scene:
 
+        result[
+            "active_visual_scene_detected"
+        ] = True
+
         visual_objects = active_visual_scene.get(
             "objects",
             []
@@ -328,7 +414,7 @@ def analyze(
         ).lower()
 
         short_followup = (
-            len(t) <= 80
+            len(t) <= 120
         )
 
         visual_reference_words = [
@@ -342,7 +428,13 @@ def analyze(
             "кубик",
             "картинка",
             "фото",
-            "изображение"
+            "изображение",
+            "меню",
+            "бокал",
+            "бургер",
+            "креветки",
+            "улица",
+            "машина"
         ]
 
         reference_match = any(
@@ -412,6 +504,12 @@ def analyze(
 
             result["preserve_flow"] = True
 
+            result["visual_continuity"] = True
+
+            result[
+                "scene_reference_detected"
+            ] = True
+
             print(
                 "🧠 VISUAL CONTINUITY DETECTED"
             )
@@ -424,11 +522,14 @@ def analyze(
 
     if last_math:
 
-        if any(w in t for w in [
-            "график",
-            "это",
-            "теперь"
-        ]):
+        if contains_any(
+            t,
+            [
+                "график",
+                "это",
+                "теперь"
+            ]
+        ):
 
             result["entity"] = {
                 "type": "math",
@@ -490,7 +591,10 @@ def analyze(
         "атмосфера"
     ]
 
-    if any(w in t for w in exploration_words):
+    if contains_any(
+        t,
+        exploration_words
+    ):
 
         result["dialog_state"] = "exploration"
 
@@ -526,7 +630,10 @@ def analyze(
         "вариант"
     ]
 
-    if any(w in t for w in visual_words):
+    if contains_any(
+        t,
+        visual_words
+    ):
 
         result["visual_expectation"] += 0.55
 
@@ -539,6 +646,54 @@ def analyze(
         result["expected_output_type"] = "visual"
 
         result["attention_weight"] += 0.15
+
+    # =====================================================
+    # 🔥 WEB / REALTIME DETECTION
+    # =====================================================
+
+    web_words = [
+
+        "погода",
+        "курс валют",
+        "новости",
+        "что происходит",
+        "сейчас",
+        "где находится",
+        "маршрут",
+        "как доехать",
+        "карта",
+        "рейс",
+        "поезд",
+        "автобус",
+        "такси",
+        "отель",
+        "локация"
+    ]
+
+    if contains_any(
+        t,
+        web_words
+    ):
+
+        result[
+            "internet_context_needed"
+        ] = True
+
+        result[
+            "prefer_web_context"
+        ] = True
+
+        result[
+            "realtime_context"
+        ] = True
+
+        result[
+            "capability_should_wait"
+        ] = True
+
+        result[
+            "response_mode"
+        ] = "guidance"
 
     # =====================================================
     # 🔥 RENDERER-FIRST DETECTION
@@ -595,119 +750,193 @@ def analyze(
         "сделай арт"
     ]
 
-    if any(
-        w in t
-        for w in explicit_generation_words
+    if contains_any(
+        t,
+        explicit_generation_words
     ):
 
-        result["explicit_image_generation_only"] = True
+        result[
+            "explicit_image_generation_only"
+        ] = True
 
-        result["visual_generation_needed"] = True
+        result[
+            "visual_generation_needed"
+        ] = True
 
         result["room"] = "image_generate"
 
-        result["expected_output_type"] = "image"
+        result[
+            "expected_output_type"
+        ] = "image"
 
-        result["best_capability"] = "image_generate"
+        result[
+            "best_capability"
+        ] = "image_generate"
 
-        result["renderer_priority"] = 0.0
+        result[
+            "renderer_priority"
+        ] = 0.0
 
-    elif any(
-        w in t
-        for w in renderer_graph_words
+    elif contains_any(
+        t,
+        renderer_graph_words
     ):
 
         result["render_intent"] = True
 
         result["render_type"] = "graph"
 
-        result["renderer_expected_output"] = "graph"
+        result[
+            "renderer_expected_output"
+        ] = "graph"
 
-        result["renderer_scene_object"] = True
+        result[
+            "renderer_scene_object"
+        ] = True
 
         result["prefer_renderer"] = True
 
-        result["renderer_priority"] = 0.95
+        result[
+            "prefer_local_rendering"
+        ] = True
 
-        result["visual_generation_needed"] = False
+        result[
+            "renderer_priority"
+        ] = 0.95
+
+        result[
+            "visual_generation_needed"
+        ] = False
 
         result["room"] = "science"
 
-        result["expected_output_type"] = "graph"
+        result[
+            "expected_output_type"
+        ] = "graph"
 
-        result["best_capability"] = "science"
+        result[
+            "best_capability"
+        ] = "science"
 
-        result["capability_confidence"] = max(
-            result["capability_confidence"],
+        result[
+            "capability_confidence"
+        ] = max(
+            result[
+                "capability_confidence"
+            ],
             0.92
         )
 
-    elif any(
-        w in t
-        for w in renderer_formula_words
+    elif contains_any(
+        t,
+        renderer_formula_words
     ):
 
         result["render_intent"] = True
 
         result["render_type"] = "formula"
 
-        result["renderer_expected_output"] = "formula"
+        result[
+            "renderer_expected_output"
+        ] = "formula"
 
-        result["renderer_scene_object"] = True
+        result[
+            "renderer_scene_object"
+        ] = True
 
         result["prefer_renderer"] = True
 
-        result["renderer_priority"] = 0.88
+        result[
+            "prefer_local_rendering"
+        ] = True
 
-        result["visual_generation_needed"] = False
+        result[
+            "renderer_priority"
+        ] = 0.88
+
+        result[
+            "visual_generation_needed"
+        ] = False
 
         result["room"] = "science"
 
-        result["expected_output_type"] = "formula"
+        result[
+            "expected_output_type"
+        ] = "formula"
 
-        result["best_capability"] = "science"
+        result[
+            "best_capability"
+        ] = "science"
 
-    elif any(
-        w in t
-        for w in renderer_table_words
+    elif contains_any(
+        t,
+        renderer_table_words
     ):
 
         result["render_intent"] = True
 
         result["render_type"] = "table"
 
-        result["renderer_expected_output"] = "table"
+        result[
+            "renderer_expected_output"
+        ] = "table"
 
-        result["renderer_scene_object"] = True
+        result[
+            "renderer_scene_object"
+        ] = True
 
         result["prefer_renderer"] = True
 
-        result["renderer_priority"] = 0.82
+        result[
+            "prefer_local_rendering"
+        ] = True
 
-        result["visual_generation_needed"] = False
+        result[
+            "renderer_priority"
+        ] = 0.82
 
-        result["expected_output_type"] = "table"
+        result[
+            "visual_generation_needed"
+        ] = False
 
-    elif any(
-        w in t
-        for w in renderer_diagram_words
+        result[
+            "expected_output_type"
+        ] = "table"
+
+    elif contains_any(
+        t,
+        renderer_diagram_words
     ):
 
         result["render_intent"] = True
 
         result["render_type"] = "diagram"
 
-        result["renderer_expected_output"] = "diagram"
+        result[
+            "renderer_expected_output"
+        ] = "diagram"
 
-        result["renderer_scene_object"] = True
+        result[
+            "renderer_scene_object"
+        ] = True
 
         result["prefer_renderer"] = True
 
-        result["renderer_priority"] = 0.84
+        result[
+            "prefer_local_rendering"
+        ] = True
 
-        result["visual_generation_needed"] = False
+        result[
+            "renderer_priority"
+        ] = 0.84
 
-        result["expected_output_type"] = "diagram"
+        result[
+            "visual_generation_needed"
+        ] = False
+
+        result[
+            "expected_output_type"
+        ] = "diagram"
 
     # =====================================================
     # 🔥 DEMO / GUIDED VISUALS
@@ -720,19 +949,34 @@ def analyze(
         "можно пример"
     ]
 
-    if any(w in t for w in demo_words):
+    if contains_any(
+        t,
+        demo_words
+    ):
 
-        result["visual_demo_request"] = True
+        result[
+            "visual_demo_request"
+        ] = True
 
-        result["visual_expectation"] += 0.2
+        result[
+            "visual_expectation"
+        ] += 0.2
 
-        result["example_expectation"] += 0.3
+        result[
+            "example_expectation"
+        ] += 0.3
 
-        result["assistant_initiative"] += 0.2
+        result[
+            "assistant_initiative"
+        ] += 0.2
 
-        result["visual_lightweight_mode"] = True
+        result[
+            "visual_lightweight_mode"
+        ] = True
 
-        result["capability_is_guidance"] = True
+        result[
+            "capability_is_guidance"
+        ] = True
 
     # =====================================================
     # 🔥 LIGHTWEIGHT VISUAL MODE
@@ -746,13 +990,22 @@ def analyze(
         "концепт"
     ]
 
-    if any(w in t for w in lightweight_words):
+    if contains_any(
+        t,
+        lightweight_words
+    ):
 
-        result["visual_lightweight_mode"] = True
+        result[
+            "visual_lightweight_mode"
+        ] = True
 
-        result["library_visual_candidate"] = True
+        result[
+            "library_visual_candidate"
+        ] = True
 
-        result["capability_should_wait"] = True
+        result[
+            "capability_should_wait"
+        ] = True
 
     # =====================================================
     # 🔥 GENERATION CONTROL
@@ -765,19 +1018,32 @@ def analyze(
         "сделай изображение"
     ]
 
-    if any(w in t for w in generation_words):
+    if contains_any(
+        t,
+        generation_words
+    ):
 
-        result["visual_generation_needed"] = True
+        result[
+            "visual_generation_needed"
+        ] = True
 
-        result["execution_readiness"] += 0.35
+        result[
+            "execution_readiness"
+        ] += 0.35
 
     else:
 
-        if result["visual_demo_request"]:
+        if result[
+            "visual_demo_request"
+        ]:
 
-            result["visual_generation_needed"] = False
+            result[
+                "visual_generation_needed"
+            ] = False
 
-            result["visual_lightweight_mode"] = True
+            result[
+                "visual_lightweight_mode"
+            ] = True
 
     # =====================================================
     # 🔥 EXPECTATION SIGNALS
@@ -790,11 +1056,18 @@ def analyze(
         "идея"
     ]
 
-    if any(w in t for w in example_words):
+    if contains_any(
+        t,
+        example_words
+    ):
 
-        result["should_offer_examples"] = True
+        result[
+            "should_offer_examples"
+        ] = True
 
-        result["example_expectation"] += 0.5
+        result[
+            "example_expectation"
+        ] += 0.5
 
     # =====================================================
     # 🔥 EXECUTION PRESSURE
@@ -811,11 +1084,16 @@ def analyze(
         "построй"
     ]
 
-    if any(w in t for w in execution_words):
+    if contains_any(
+        t,
+        execution_words
+    ):
 
         pressure += 0.4
 
-        result["execution_readiness"] += 0.4
+        result[
+            "execution_readiness"
+        ] += 0.4
 
     if (
         result["continuation"]
@@ -824,15 +1102,16 @@ def analyze(
 
         pressure += 0.15
 
-        result["trajectory_strength"] += 0.2
+        result[
+            "trajectory_strength"
+        ] += 0.2
 
     if flow_type:
 
         pressure += 0.08
 
-    result["execution_pressure"] = min(
-        pressure,
-        1.0
+    result["execution_pressure"] = clamp(
+        pressure
     )
 
     # =====================================================
@@ -879,24 +1158,52 @@ def analyze(
 
     if result.get("render_intent"):
 
-        result["visual_generation_needed"] = False
+        result[
+            "visual_generation_needed"
+        ] = False
 
-        result["should_offer_visual"] = False
+        result[
+            "should_offer_visual"
+        ] = False
 
         result["prefer_renderer"] = True
 
-        result["capability_should_wait"] = False
+        result[
+            "capability_should_wait"
+        ] = False
 
         result["should_execute"] = True
 
         result["response_mode"] = "execute"
 
-        result["execution_readiness"] = max(
-            result["execution_readiness"],
+        result[
+            "execution_readiness"
+        ] = max(
+            result[
+                "execution_readiness"
+            ],
             0.9
         )
 
-        result["ambiguity_level"] *= 0.5
+        result[
+            "ambiguity_level"
+        ] *= 0.5
+
+    # =====================================================
+    # 🔥 PROVIDER SAFETY
+    # =====================================================
+
+    if result.get(
+        "prefer_renderer"
+    ):
+
+        result[
+            "avoid_image_generation_fallback"
+        ] = True
+
+        result[
+            "visual_generation_needed"
+        ] = False
 
     # =====================================================
     # 🔥 RESPONSE ECONOMY
@@ -926,6 +1233,36 @@ def analyze(
 
         result["unresolved_intent"] = True
 
-        result["response_requires_reflection"] = True
+        result[
+            "response_requires_reflection"
+        ] = True
+
+    # =====================================================
+    # 🔥 FINAL NORMALIZATION
+    # =====================================================
+
+    float_keys = [
+
+        "confidence",
+        "trajectory_strength",
+        "visual_expectation",
+        "example_expectation",
+        "execution_readiness",
+        "guidance_need",
+        "ambiguity_level",
+        "user_certainty",
+        "assistant_initiative",
+        "execution_pressure",
+        "conversation_value",
+        "capability_confidence",
+        "renderer_priority",
+        "attention_weight"
+    ]
+
+    for key in float_keys:
+
+        result[key] = clamp(
+            result.get(key, 0.0)
+        )
 
     return result
