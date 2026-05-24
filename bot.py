@@ -325,6 +325,31 @@ def april_web_chat():
                     "type",
                     "text"
                 )
+            "blocks":
+                final_result.get(
+                    "blocks",
+                    []
+                ),
+
+            "graph":
+                final_result.get(
+                    "graph"
+                ),
+
+            "formula":
+                final_result.get(
+                    "formula"
+                ),
+
+            "gallery":
+                final_result.get(
+                    "gallery"
+                ),
+
+            "image":
+                final_result.get(
+                    "image"
+                ),
         })
 
     except Exception as e:
