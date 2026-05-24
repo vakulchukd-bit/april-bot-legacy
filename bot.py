@@ -316,6 +316,8 @@ def april_web_chat():
             "response":
 
                 final_result.get("data")
+            
+                or final_result.get("response")
 
                 or final_result.get("content")
 
