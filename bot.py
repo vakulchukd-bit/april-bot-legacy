@@ -313,10 +313,12 @@ def april_web_chat():
             "success": True,
 
             "response":
-                final_result.get(
-                    "data",
-                    ""
-                ),
+
+                final_result.get("data")
+
+                or final_result.get("content")
+
+                or "",
 
             "type":
                 final_result.get(
