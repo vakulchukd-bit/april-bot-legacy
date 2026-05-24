@@ -83,6 +83,10 @@ ACTION_WORDS = [
     "улучши"
 ]
 
+# =====================================================
+# 🔥 APRIL SPACE VISUALS
+# =====================================================
+
 VISUAL_WORDS = [
 
     "картинка",
@@ -94,7 +98,62 @@ VISUAL_WORDS = [
     "пример",
     "референс",
     "атмосфера",
-    "дизайн"
+    "дизайн",
+
+    # 🔥 renderer-space
+    "график",
+    "формула",
+    "таблица",
+    "diagram",
+    "render",
+    "renderer",
+    "scene",
+    "layout",
+    "grid",
+    "canvas",
+    "блок",
+    "пространство",
+    "сцена"
+]
+
+# =====================================================
+# 🔥 LIGHTWEIGHT RENDER WORDS
+# =====================================================
+
+RENDER_WORDS = [
+
+    "график",
+    "формула",
+    "таблица",
+    "схема",
+    "diagram",
+    "layout",
+    "grid",
+    "renderer",
+    "canvas",
+    "scene",
+    "пространство",
+    "блок",
+    "структура",
+    "ui",
+    "интерфейс"
+]
+
+# =====================================================
+# 🔥 HEAVY IMAGE WORDS
+# =====================================================
+
+IMAGE_GENERATION_WORDS = [
+
+    "фотореалистично",
+    "realistic",
+    "cinematic",
+    "ultra detailed",
+    "4k",
+    "portrait",
+    "render art",
+    "artstation",
+    "hyperrealistic"
 ]
 
 DIALOG_WORDS = [
@@ -187,7 +246,6 @@ TRAVEL_WORDS = [
     "где купить",
     "где находится",
 
-    # 🔥 WEB / REALTIME
     "погода",
     "температура",
     "weather",
@@ -197,6 +255,64 @@ TRAVEL_WORDS = [
     "что происходит",
     "какая погода"
 ]
+
+# =====================================================
+# 🔥 RENDER DETECTION
+# =====================================================
+
+def detect_render_intent(
+    text: str
+):
+
+    t = text.lower()
+
+    render_score = 0.0
+
+    image_score = 0.0
+
+    if _contains_any(
+        t,
+        RENDER_WORDS
+    ):
+
+        render_score += 0.85
+
+    if _contains_any(
+        t,
+        IMAGE_GENERATION_WORDS
+    ):
+
+        image_score += 0.8
+
+    if "график" in t:
+        render_score += 0.3
+
+    if "формула" in t:
+        render_score += 0.3
+
+    if "таблица" in t:
+        render_score += 0.25
+
+    if "схема" in t:
+        render_score += 0.25
+
+    return {
+
+        "render_score": _clamp(
+            render_score
+        ),
+
+        "image_score": _clamp(
+            image_score
+        ),
+
+        "prefer_renderer":
+            render_score > image_score,
+
+        "heavy_generation":
+            image_score >= 0.72
+    }
+
 
 # =====================================================
 # 🔥 CENTRAL STABILITY MODEL
@@ -316,7 +432,14 @@ def build_visual_mode(
 
         "emotion": None,
 
-        "atmosphere": None
+        "atmosphere": None,
+
+        # 🔥 renderer-space
+        "renderer_mode": False,
+
+        "scene_mode": False,
+
+        "space_mode": False
     }
 
     atmosphere = visual_memory.get(
@@ -513,6 +636,14 @@ def analyze_cognition(
         visual_memory
     )
 
+    # =================================================
+    # 🔥 APRIL RENDER ANALYSIS
+    # =====================================================
+
+    render_analysis = detect_render_intent(
+        t
+    )
+
     personality_state = {
 
         "is_present": True,
@@ -540,6 +671,15 @@ def analyze_cognition(
 
         "image_generation": True,
         "image_editing": True,
+
+        # 🔥 APRIL SPACE
+        "renderer_space": True,
+        "scene_rendering": True,
+        "graph_rendering": True,
+        "formula_rendering": True,
+        "table_rendering": True,
+        "primitive_scene_objects": True,
+
         "visual_guidance": True,
         "math_reasoning": True,
         "code_generation": True,
@@ -590,6 +730,20 @@ def analyze_cognition(
         "reduce_talking": False,
         "prefer_execution": False,
         "prefer_visual": False,
+
+        # =================================================
+        # 🔥 APRIL SPACE
+        # =====================================================
+
+        "prefer_renderer": False,
+        "prefer_scene_render": False,
+        "prefer_lightweight_render": False,
+        "prefer_heavy_generation": False,
+
+        "renderer_confidence": 0.0,
+
+        "renderer_space_active": False,
+
         "prefer_short_answer": False,
         "prefer_detailed_answer": False,
 
@@ -658,10 +812,6 @@ def analyze_cognition(
 
         "generation_should_wait": False,
 
-        # =================================================
-        # 🌐 INTERNET / WEB
-        # =================================================
-
         "internet_context_needed": False,
         "travel_context_needed": False,
 
@@ -701,6 +851,88 @@ def analyze_cognition(
             "suggest_path": False
         }
     }
+
+    # =================================================
+    # 🔥 RENDERER PRIORITY
+    # =====================================================
+
+    if render_analysis.get(
+        "prefer_renderer"
+    ):
+
+        cognition[
+            "prefer_renderer"
+        ] = True
+
+        cognition[
+            "prefer_scene_render"
+        ] = True
+
+        cognition[
+            "prefer_lightweight_render"
+        ] = True
+
+        cognition[
+            "renderer_space_active"
+        ] = True
+
+        cognition[
+            "renderer_confidence"
+        ] = 0.88
+
+        cognition[
+            "prefer_visual"
+        ] = False
+
+        cognition[
+            "generation_should_wait"
+        ] = True
+
+        cognition[
+            "assistant_restraint"
+        ] = 0.72
+
+        _increase(
+            cognition,
+            "wants_result",
+            0.45
+        )
+
+        _decrease(
+            cognition,
+            "wants_visual",
+            0.35
+        )
+
+        _decrease(
+            cognition,
+            "execution_pressure",
+            0.2
+        )
+
+        print(
+            "🧠 APRIL SPACE: renderer mode active"
+        )
+
+    # =================================================
+    # 🔥 HEAVY GENERATION
+    # =====================================================
+
+    if render_analysis.get(
+        "heavy_generation"
+    ):
+
+        cognition[
+            "prefer_heavy_generation"
+        ] = True
+
+        cognition[
+            "prefer_visual"
+        ] = True
+
+        cognition[
+            "generation_should_wait"
+        ] = False
 
     _increase(
         cognition,
@@ -761,9 +993,14 @@ def analyze_cognition(
     # 🔥 VISUAL SIGNALS
     # =====================================================
 
-    if _contains_any(
-        t,
-        VISUAL_WORDS
+    if (
+        _contains_any(
+            t,
+            VISUAL_WORDS
+        )
+        and not cognition.get(
+            "prefer_renderer"
+        )
     ):
 
         _increase(
@@ -779,6 +1016,67 @@ def analyze_cognition(
         cognition[
             "needs_examples"
         ] = True
+
+    # =================================================
+    # 🔥 RENDERER SIGNALS
+    # =====================================================
+
+    if _contains_any(
+        t,
+        RENDER_WORDS
+    ):
+
+        cognition[
+            "prefer_renderer"
+        ] = True
+
+        cognition[
+            "renderer_space_active"
+        ] = True
+
+        cognition[
+            "prefer_scene_render"
+        ] = True
+
+        cognition[
+            "prefer_lightweight_render"
+        ] = True
+
+        cognition[
+            "generation_should_wait"
+        ] = True
+
+        cognition[
+            "assistant_restraint"
+        ] = max(
+            cognition.get(
+                "assistant_restraint",
+                0.0
+            ),
+            0.7
+        )
+
+        cognition[
+            "renderer_confidence"
+        ] = max(
+            cognition.get(
+                "renderer_confidence",
+                0.0
+            ),
+            0.9
+        )
+
+        _decrease(
+            cognition,
+            "wants_visual",
+            0.4
+        )
+
+        _decrease(
+            cognition,
+            "execution_pressure",
+            0.2
+        )
 
     # =================================================
     # 🔥 DIALOG SIGNALS
@@ -847,10 +1145,6 @@ def analyze_cognition(
 
         cognition[
             "needs_examples"
-        ] = True
-
-        cognition[
-            "prefer_visual"
         ] = True
 
     # =================================================
@@ -1057,6 +1351,9 @@ def analyze_cognition(
         and not cognition[
             "exploration_mode"
         ]
+        and not cognition[
+            "prefer_renderer"
+        ]
     ):
 
         cognition[
@@ -1141,6 +1438,10 @@ def analyze_cognition(
         ] >= 0.5
 
         or cognition[
+            "prefer_renderer"
+        ]
+
+        or cognition[
             "internet_context_needed"
         ]
     ):
@@ -1194,6 +1495,15 @@ def analyze_cognition(
             0.25
         )
 
+        # 🔥 renderer restraint restore
+        if cognition.get(
+            "prefer_renderer"
+        ):
+
+            cognition[
+                "assistant_restraint"
+            ] = 0.72
+
         _decrease(
             cognition,
             "internal_noise",
@@ -1246,6 +1556,22 @@ def analyze_cognition(
         hypothesis[
             "confidence"
         ] = 0.82
+
+        hypothesis[
+            "suggest_path"
+        ] = True
+
+    elif cognition[
+        "prefer_renderer"
+    ]:
+
+        hypothesis[
+            "direction"
+        ] = "renderer_space"
+
+        hypothesis[
+            "confidence"
+        ] = 0.92
 
         hypothesis[
             "suggest_path"
