@@ -14,6 +14,7 @@ Intent system теперь:
 - lightweight signal layer;
 - dialog-aware helper;
 - continuation-safe classifier;
+- renderer-aware router;
 - trajectory-friendly assistant.
 """
 
@@ -110,14 +111,21 @@ def is_continuation(
         "чуть ярче",
         "продолжай",
         "с этого",
-        "поехали"
+        "поехали",
+        "дальше",
+        "теперь",
+        "еще",
+        "в таком стиле",
+        "оставь",
+        "вот это",
+        "ближе к этому"
     ]
 
     if t in continuation_words:
 
         return True
 
-    if len(t) <= 20:
+    if len(t) <= 24:
 
         if contains_any(
             t,
@@ -155,13 +163,9 @@ def is_real_question(
         "какие"
     ]
 
-    # 🔥 continuation НЕ question
-
     if is_continuation(t):
 
         return False
-
-    # 🔥 short exploration НЕ question
 
     if len(t) <= 12:
 
@@ -215,7 +219,7 @@ def is_edit_request(
 
 
 # =====================================================
-# 🧠 GENERATION DETECTION
+# 🧠 HEAVY GENERATION DETECTION
 # =====================================================
 
 def is_generate_request(
@@ -224,23 +228,156 @@ def is_generate_request(
 
     t = normalize(text)
 
-    # =================================================
-    # 🔥 SAFE GENERATION ONLY
-    # =================================================
-
     generate_triggers = [
 
         "создай изображение",
         "сгенерируй изображение",
         "нарисуй картинку",
         "создай картинку",
+        "draw image",
         "generate image",
-        "draw image"
+
+        # 🔥 explicit image only
+
+        "ultra realistic",
+        "4k render",
+        "cinematic render"
     ]
 
     return contains_any(
         t,
         generate_triggers
+    )
+
+
+# =====================================================
+# 🧠 LIGHTWEIGHT VISUAL
+# =====================================================
+
+def is_lightweight_visual_request(
+    text: str
+):
+
+    t = normalize(text)
+
+    lightweight_words = [
+
+        "пример",
+        "референс",
+        "концепт",
+        "идея",
+        "вариант",
+        "атмосфера",
+        "примерно",
+        "визуально",
+        "как выглядит",
+        "схема",
+        "layout",
+        "структура",
+        "расположение"
+    ]
+
+    return contains_any(
+        t,
+        lightweight_words
+    )
+
+
+# =====================================================
+# 🧠 RENDERER DETECTION
+# =====================================================
+
+def is_renderer_request(
+    text: str
+):
+
+    t = normalize(text)
+
+    renderer_words = [
+
+        "график",
+        "таблица",
+        "формула",
+        "diagram",
+        "диаграмма",
+        "схема",
+        "layout",
+        "структура",
+        "grid",
+        "line",
+        "point",
+        "arrow",
+        "renderer",
+        "пространство",
+        "scene",
+        "композиция"
+    ]
+
+    return contains_any(
+        t,
+        renderer_words
+    )
+
+
+# =====================================================
+# 🧠 SPATIAL SCENE DETECTION
+# =====================================================
+
+def is_spatial_request(
+    text: str
+):
+
+    t = normalize(text)
+
+    spatial_words = [
+
+        "слева",
+        "справа",
+        "сверху",
+        "снизу",
+        "по центру",
+        "размести",
+        "поставь",
+        "расположи",
+        "между",
+        "рядом",
+        "пространство",
+        "scene",
+        "layout"
+    ]
+
+    return contains_any(
+        t,
+        spatial_words
+    )
+
+
+# =====================================================
+# 🧠 WEB DETECTION
+# =====================================================
+
+def is_web_request(
+    text: str
+):
+
+    t = normalize(text)
+
+    web_words = [
+
+        "погода",
+        "новости",
+        "курс валют",
+        "что происходит",
+        "где находится",
+        "карта",
+        "маршрут",
+        "рейс",
+        "сейчас в"
+    ]
+
+    return contains_any(
+        t,
+        web_words
     )
 
 
@@ -315,11 +452,16 @@ def detect_intent(
         {}
     )
 
+    active_visual_scene = state.get(
+        "active_visual_scene",
+        {}
+    )
+
     patch_intent_detect(t)
 
     # =================================================
     # 🔥 CONTINUATION PRIORITY
-    # =================================================
+    # =====================================================
 
     if is_continuation(t):
 
@@ -329,9 +471,20 @@ def detect_intent(
 
                 "intent": "continuation",
 
-                "confidence": 0.82,
+                "confidence": 0.88,
 
                 "source": "continuation"
+            }
+
+        if active_visual_scene:
+
+            return {
+
+                "intent": "visual_continuation",
+
+                "confidence": 0.84,
+
+                "source": "visual_scene"
             }
 
         return {
@@ -344,8 +497,23 @@ def detect_intent(
         }
 
     # =================================================
-    # 🔥 LINK
+    # 🔥 WEB
+    # =====================================================
+
+    if is_web_request(t):
+
+        return {
+
+            "intent": "web",
+
+            "confidence": 0.88,
+
+            "source": "web"
+        }
+
     # =================================================
+    # 🔥 LINK
+    # =====================================================
 
     if is_link_request(t):
 
@@ -360,7 +528,7 @@ def detect_intent(
 
     # =================================================
     # 🔥 EDIT
-    # =================================================
+    # =====================================================
 
     if is_edit_request(t):
 
@@ -374,8 +542,53 @@ def detect_intent(
         }
 
     # =================================================
-    # 🔥 GENERATION
+    # 🔥 SPATIAL RENDER
+    # =====================================================
+
+    if is_spatial_request(t):
+
+        return {
+
+            "intent": "spatial",
+
+            "confidence": 0.82,
+
+            "source": "spatial"
+        }
+
     # =================================================
+    # 🔥 RENDERER SPACE
+    # =====================================================
+
+    if is_renderer_request(t):
+
+        return {
+
+            "intent": "render",
+
+            "confidence": 0.86,
+
+            "source": "renderer"
+        }
+
+    # =================================================
+    # 🔥 LIGHTWEIGHT VISUAL
+    # =====================================================
+
+    if is_lightweight_visual_request(t):
+
+        return {
+
+            "intent": "lightweight_visual",
+
+            "confidence": 0.8,
+
+            "source": "lightweight_visual"
+        }
+
+    # =================================================
+    # 🔥 HEAVY GENERATION
+    # =====================================================
 
     if is_generate_request(t):
 
@@ -390,7 +603,7 @@ def detect_intent(
 
     # =================================================
     # 🔥 TEXT REQUEST
-    # =================================================
+    # =====================================================
 
     if is_text_request(t):
 
@@ -405,7 +618,7 @@ def detect_intent(
 
     # =================================================
     # 🔥 QUESTION
-    # =================================================
+    # =====================================================
 
     if is_real_question(t):
 
@@ -420,7 +633,7 @@ def detect_intent(
 
     # =================================================
     # 🔥 ACTIVE FLOW PROTECTION
-    # =================================================
+    # =====================================================
 
     if active_flow:
 
@@ -430,6 +643,8 @@ def detect_intent(
 
         if flow_type in [
 
+            "renderer_space",
+            "visual_scene",
             "image_generate",
             "image_edit",
             "image",
@@ -440,14 +655,14 @@ def detect_intent(
 
                 "intent": "continuation",
 
-                "confidence": 0.68,
+                "confidence": 0.74,
 
                 "source": "trajectory"
             }
 
     # =================================================
     # 🔥 DEFAULT CHAT
-    # =================================================
+    # =====================================================
 
     return {
 
