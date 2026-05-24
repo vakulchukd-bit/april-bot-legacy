@@ -136,6 +136,26 @@ def analyze(
         "visual_generation_needed": False,
 
         # =================================================
+        # 🔥 RENDERER-FIRST SYSTEM
+        # =====================================================
+
+        "render_intent": False,
+
+        "render_type": None,
+
+        "renderer_priority": 0.0,
+
+        "renderer_expected_output": None,
+
+        "renderer_scene_object": False,
+
+        "renderer_lightweight": True,
+
+        "prefer_renderer": False,
+
+        "explicit_image_generation_only": False,
+
+        # =================================================
         # 🔥 CAPABILITY AWARENESS
         # =====================================================
 
@@ -253,10 +273,6 @@ def analyze(
 
         result["dialog_state"] = "continuation"
 
-        # =================================================
-        # 🔥 FLOW OVERRIDE LOGIC
-        # =====================================================
-
         if (
             result["current_message_mode"]
             == "execute_now"
@@ -289,8 +305,8 @@ def analyze(
                 "weight": 0.55
             }
 
-            # 🔥 image context НЕ должен ломать trajectory
             result["trajectory_strength"] += 0.1
+
     # =====================================================
     # 🔥 VISUAL SCENE CONTINUITY
     # =====================================================
@@ -525,6 +541,175 @@ def analyze(
         result["attention_weight"] += 0.15
 
     # =====================================================
+    # 🔥 RENDERER-FIRST DETECTION
+    # =====================================================
+
+    renderer_graph_words = [
+
+        "график",
+        "графика",
+        "функция",
+        "plot",
+        "chart",
+        "y=",
+        "sin(",
+        "cos(",
+        "tan("
+    ]
+
+    renderer_formula_words = [
+
+        "формула",
+        "уравнение",
+        "реши",
+        "математика",
+        "formula"
+    ]
+
+    renderer_table_words = [
+
+        "таблица",
+        "сетка",
+        "grid",
+        "layout"
+    ]
+
+    renderer_diagram_words = [
+
+        "схема",
+        "diagram",
+        "line",
+        "линия",
+        "стрелка"
+    ]
+
+    explicit_generation_words = [
+
+        "создай изображение",
+        "сгенерируй изображение",
+        "нарисуй картинку",
+        "создай картинку",
+        "draw image",
+        "generate image",
+        "создай арт",
+        "сделай арт"
+    ]
+
+    if any(
+        w in t
+        for w in explicit_generation_words
+    ):
+
+        result["explicit_image_generation_only"] = True
+
+        result["visual_generation_needed"] = True
+
+        result["room"] = "image_generate"
+
+        result["expected_output_type"] = "image"
+
+        result["best_capability"] = "image_generate"
+
+        result["renderer_priority"] = 0.0
+
+    elif any(
+        w in t
+        for w in renderer_graph_words
+    ):
+
+        result["render_intent"] = True
+
+        result["render_type"] = "graph"
+
+        result["renderer_expected_output"] = "graph"
+
+        result["renderer_scene_object"] = True
+
+        result["prefer_renderer"] = True
+
+        result["renderer_priority"] = 0.95
+
+        result["visual_generation_needed"] = False
+
+        result["room"] = "science"
+
+        result["expected_output_type"] = "graph"
+
+        result["best_capability"] = "science"
+
+        result["capability_confidence"] = max(
+            result["capability_confidence"],
+            0.92
+        )
+
+    elif any(
+        w in t
+        for w in renderer_formula_words
+    ):
+
+        result["render_intent"] = True
+
+        result["render_type"] = "formula"
+
+        result["renderer_expected_output"] = "formula"
+
+        result["renderer_scene_object"] = True
+
+        result["prefer_renderer"] = True
+
+        result["renderer_priority"] = 0.88
+
+        result["visual_generation_needed"] = False
+
+        result["room"] = "science"
+
+        result["expected_output_type"] = "formula"
+
+        result["best_capability"] = "science"
+
+    elif any(
+        w in t
+        for w in renderer_table_words
+    ):
+
+        result["render_intent"] = True
+
+        result["render_type"] = "table"
+
+        result["renderer_expected_output"] = "table"
+
+        result["renderer_scene_object"] = True
+
+        result["prefer_renderer"] = True
+
+        result["renderer_priority"] = 0.82
+
+        result["visual_generation_needed"] = False
+
+        result["expected_output_type"] = "table"
+
+    elif any(
+        w in t
+        for w in renderer_diagram_words
+    ):
+
+        result["render_intent"] = True
+
+        result["render_type"] = "diagram"
+
+        result["renderer_expected_output"] = "diagram"
+
+        result["renderer_scene_object"] = True
+
+        result["prefer_renderer"] = True
+
+        result["renderer_priority"] = 0.84
+
+        result["visual_generation_needed"] = False
+
+        result["expected_output_type"] = "diagram"
+
+    # =====================================================
     # 🔥 DEMO / GUIDED VISUALS
     # =====================================================
 
@@ -612,80 +797,6 @@ def analyze(
         result["example_expectation"] += 0.5
 
     # =====================================================
-    # 🔥 CAPABILITY UNDERSTANDING LAYER
-    # =====================================================
-
-    capability_signals = 0.0
-
-    informational_signals = [
-
-        "информация",
-        "данные",
-        "что известно",
-        "что происходит",
-        "расскажи",
-        "объясни",
-        "покажи",
-        "помоги понять",
-        "можешь помочь",
-        "что можешь сказать"
-    ]
-
-    execution_signals = [
-
-        "создай",
-        "сгенерируй",
-        "нарисуй",
-        "построй",
-        "выполни"
-    ]
-
-    continuation_signals = [
-
-        "дальше",
-        "продолжим",
-        "вернемся",
-        "теперь",
-        "еще"
-    ]
-
-    if any(w in t for w in informational_signals):
-
-        capability_signals += 0.25
-
-        result["conversation_alive"] = True
-
-        result["unresolved_intent"] = True
-
-        result["response_requires_reflection"] = True
-
-        result["capability_is_supportive"] = True
-
-        result["capability_must_follow_dialogue"] = True
-
-        result["assistant_initiative"] += 0.15
-
-    if any(w in t for w in execution_signals):
-
-        capability_signals += 0.45
-
-        result["execution_readiness"] += 0.35
-
-    if any(w in t for w in continuation_signals):
-
-        capability_signals += 0.15
-
-        result["trajectory_strength"] += 0.15
-
-        result["dialog_continuity"] = True
-
-    result["capability_route_confidence"] = min(
-        1.0,
-        result["capability_route_confidence"]
-        + capability_signals
-    )
-
-    # =====================================================
     # 🔥 EXECUTION PRESSURE
     # =====================================================
 
@@ -719,113 +830,10 @@ def analyze(
 
         pressure += 0.08
 
-    escalation_words = [
-        "уже",
-        "хватит",
-        "просто",
-        "давай"
-    ]
-
-    if any(w in t for w in escalation_words):
-
-        pressure += 0.2
-
-        result["attention_weight"] = 0.9
-
-        result["assistant_initiative"] += 0.3
-
     result["execution_pressure"] = min(
         pressure,
         1.0
     )
-
-    # =====================================================
-    # 🔥 AMBIGUITY
-    # =====================================================
-
-    if len(t.split()) <= 3:
-
-        result["ambiguity_level"] += 0.35
-
-    if (
-        result["visual_expectation"] >= 0.6
-        and result["intent"] == "text"
-    ):
-
-        result["ambiguity_level"] += 0.25
-
-    if result["dialog_state"] == "exploration":
-
-        result["ambiguity_level"] += 0.2
-
-    if result["ambiguity_level"] >= 0.55:
-
-        result["needs_clarification"] = True
-
-    # =====================================================
-    # 🔥 GUIDANCE MODEL
-    # =====================================================
-
-    guidance_words = [
-        "не знаю",
-        "помоги",
-        "подскажи",
-        "как лучше",
-        "что выбрать"
-    ]
-
-    if any(w in t for w in guidance_words):
-
-        result["guidance_need"] += 0.8
-
-        result["should_proactively_help"] = True
-
-        result["assistant_initiative"] += 0.4
-
-        result["dialog_state"] = "guidance"
-
-    # =====================================================
-    # 🔥 CONVERSATION VALUE
-    # =====================================================
-
-    conversation_value = 1.0
-
-    if result["execution_pressure"] >= 0.65:
-
-        conversation_value -= 0.25
-
-    if len(history) >= 8:
-
-        conversation_value -= 0.15
-
-    if result["dialog_state"] == "exploration":
-
-        conversation_value += 0.2
-
-    result["conversation_value"] = max(
-        conversation_value,
-        0.1
-    )
-
-    # =====================================================
-    # 🔥 GOAL STAGE
-    # =====================================================
-
-    if result["dialog_state"] == "exploration":
-
-        result["goal_stage"] = "exploration"
-
-    elif result["guidance_need"] >= 0.7:
-
-        result["goal_stage"] = "guidance"
-
-    elif result["execution_pressure"] >= 0.8:
-
-        result["goal_stage"] = "execution"
-
-    elif result["continuation"]:
-
-        result["goal_stage"] = "continuation"
 
     # =====================================================
     # 🔥 SHOULD EXECUTE
@@ -853,14 +861,42 @@ def analyze(
     # =====================================================
 
     if (
+
         result["visual_expectation"] >= 0.8
         and result["visual_generation_needed"]
+        and result["explicit_image_generation_only"]
         and not result["capability_should_wait"]
+
     ):
 
         result["should_offer_visual"] = True
 
         result["room"] = "image_generate"
+
+    # =====================================================
+    # 🔥 RENDERER PROTECTION
+    # =====================================================
+
+    if result.get("render_intent"):
+
+        result["visual_generation_needed"] = False
+
+        result["should_offer_visual"] = False
+
+        result["prefer_renderer"] = True
+
+        result["capability_should_wait"] = False
+
+        result["should_execute"] = True
+
+        result["response_mode"] = "execute"
+
+        result["execution_readiness"] = max(
+            result["execution_readiness"],
+            0.9
+        )
+
+        result["ambiguity_level"] *= 0.5
 
     # =====================================================
     # 🔥 RESPONSE ECONOMY
@@ -877,44 +913,6 @@ def analyze(
     else:
 
         result["response_economy"] = "balanced"
-
-    # =====================================================
-    # 🔥 AI ESCALATION
-    # =====================================================
-
-    short_triggers = [
-        "да",
-        "ок",
-        "ага",
-        "поехали"
-    ]
-
-    if (
-        len(t) > 120
-        or result["confidence"] < 0.58
-    ):
-
-        result["requires_ai"] = True
-
-        result["complexity"] = "medium"
-
-    if t in short_triggers:
-
-        result["requires_ai"] = False
-
-        result["complexity"] = "low"
-
-    # =====================================================
-    # 🔥 TOPIC SHIFT
-    # =====================================================
-
-    if len(t) > 30:
-
-        if result["entity"]["type"]:
-
-            if result["entity"]["type"] not in t:
-
-                result["topic_shift"] = True
 
     # =====================================================
     # 🔥 FINAL TRAJECTORY STABILIZATION
