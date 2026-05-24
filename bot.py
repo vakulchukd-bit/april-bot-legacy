@@ -324,7 +324,7 @@ def april_web_chat():
                 final_result.get(
                     "type",
                     "text"
-                )
+                ),
             "blocks":
                 final_result.get(
                     "blocks",
