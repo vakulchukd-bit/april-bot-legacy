@@ -221,6 +221,19 @@ async def generate_text(
                 else ""
             )
 
+            if not text:
+
+                provider_log(
+                    "🔥 GEMINI EMPTY RESPONSE"
+                )
+
+                mark_gemini_failure()
+
+                return (
+                    "⚠️ Gemini вернул пустой ответ. "
+                    "Попробуй чуть позже."
+                )
+
             if text:
 
                 provider_log(
