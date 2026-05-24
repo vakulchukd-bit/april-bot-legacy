@@ -68,71 +68,46 @@ from blocks.presentation_formatter import (
 
 SYSTEM_PROMPT = (
     "Ты — April. "
-    "Ты unified cognitive assistant. "
 
-    "Ты удерживаешь continuity личности, "
-    "trajectory диалога "
-    "и внутренний смысл разговора. "
+    "Ты calm mobile-first AI assistant. "
 
-    "Ты не trigger-бот. "
+    "Ты удерживаешь continuity диалога, "
+    "понимаешь trajectory общения "
+    "и помогаешь человеку спокойно "
+    "и понятно. "
+
     "Не отвечай механически. "
-    "Не ломай flow общения. "
+    "Не перегружай пользователя. "
+    "Не используй лишние объяснения. "
 
-    "Ты умеешь:"
-    " объяснять,"
-    " анализировать,"
-    " помогать,"
-    " строить,"
-    " генерировать,"
-    " работать с изображениями,"
-    " понимать скриншоты,"
-    " работать с кодом,"
-    " математикой,"
-    " визуальными концептами "
-    "и reasoning-задачами. "
+    "Ты умеешь помогать с: "
+    "текстом, reasoning, кодом, "
+    "математикой, изображениями, "
+    "скриншотами, OCR, "
+    "повседневными вопросами "
+    "и визуальными сценами. "
 
-    "Все capability — это часть тебя самой. "
+    "Если пользователь продолжает "
+    "обсуждать изображение — "
+    "сохраняй visual continuity. "
 
-    "Ты можешь:"
-    " использовать внешние знания,"
-    " анализировать web-информацию,"
-    " помогать с путешествиями,"
-    " городами,"
-    " новостями,"
-    " историей,"
-    " местами,"
-    " рекомендациями "
-    "и современными данными. "
+    "Renderer-space важнее "
+    "heavy image generation. "
 
-    "Но ты не теряешь personality continuity. "
-
-    "Твоя задача:"
-    " понимать, "
-    "куда движется диалог, "
-    "что человек пытается получить "
-    "и помогать ему прийти к результату. "
-
-    "Не болтай впустую. "
-    "Не задавай пустых вопросов. "
-    "Не теряй trajectory. "
-
-    "Если информации недостаточно — "
-    "ты можешь расширять knowledge "
-    "через external reasoning. "
-
-    "Но делай это только когда это реально нужно. "
+    "Не создавай изображения "
+    "без прямого запроса. "
 
     "Говори естественно. "
     "Человечно. "
-    "По делу."
+    "Кратко и полезно."
 )
 
 # =====================================================
 # 🔥 LIMITS
 # =====================================================
 
-MAX_MESSAGE_CHARS = 900
-MAX_TOTAL_CHARS = 5000
+MAX_MESSAGE_CHARS = 700
+MAX_TOTAL_CHARS = 3200
 
 # =====================================================
 # 🔥 DETECTORS
@@ -285,8 +260,8 @@ def get_config(energy):
     if energy == "HIGH":
 
         return {
-            "temperature": 0.9,
-            "max_output_tokens": 700
+            "temperature": 0.85,
+            "max_output_tokens": 650
         }
 
     return {
@@ -304,10 +279,10 @@ def get_history_limit(plan):
     return {
 
         "free": 3,
-        "lite": 6,
-        "premium": 12
+        "lite": 5,
+        "premium": 8
 
-    }.get(plan, 6)
+    }.get(plan, 5)
 
 
 # =====================================================
@@ -352,7 +327,7 @@ def update_topic(state, text):
 
 
 # =====================================================
-# 🧠 UNIFIED COGNITIVE STATE
+# 🧠 LIGHT COGNITIVE STATE
 # =====================================================
 
 def build_cognitive_state(
@@ -365,18 +340,6 @@ def build_cognitive_state(
 ):
 
     blocks = []
-
-    # =================================================
-    # 🔥 TOPIC
-    # =================================================
-
-    topic = state.get("topic")
-
-    if topic:
-
-        blocks.append(
-            f"Тема: {topic}"
-        )
 
     # =================================================
     # 🔥 FLOW
@@ -399,33 +362,10 @@ def build_cognitive_state(
             )
 
     # =================================================
-    # 🔥 GOAL STAGE
-    # =================================================
-
-    goal_stage = semantic.get(
-        "goal_stage"
-    )
-
-    if goal_stage:
-
-        blocks.append(
-            f"Стадия: {goal_stage}"
-        )
-
-    # =================================================
     # 🔥 USER STATE
     # =================================================
 
     user_state = []
-
-    if cognition.get(
-        "is_confused",
-        0.0
-    ) >= 0.6:
-
-        user_state.append(
-            "пользователь запутался"
-        )
 
     if cognition.get(
         "is_frustrated",
@@ -444,14 +384,6 @@ def build_cognitive_state(
             "исследует идею"
         )
 
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        user_state.append(
-            "уже чувствует направление"
-        )
-
     if user_state:
 
         blocks.append(
@@ -460,7 +392,7 @@ def build_cognitive_state(
         )
 
     # =================================================
-    # 🔥 RESPONSE BEHAVIOR
+    # 🔥 RESPONSE MODE
     # =================================================
 
     behavior = []
@@ -470,15 +402,7 @@ def build_cognitive_state(
     ):
 
         behavior.append(
-            "отвечай короче"
-        )
-
-    if response_decision.get(
-        "should_follow_user"
-    ):
-
-        behavior.append(
-            "следуй за пользователем"
+            "отвечай кратко"
         )
 
     if response_decision.get(
@@ -486,15 +410,7 @@ def build_cognitive_state(
     ):
 
         behavior.append(
-            "не теряй trajectory"
-        )
-
-    if cognition.get(
-        "needs_guidance"
-    ):
-
-        behavior.append(
-            "мягко направляй"
+            "сохраняй continuity"
         )
 
     if semantic.get(
@@ -502,7 +418,7 @@ def build_cognitive_state(
     ) == "execution":
 
         behavior.append(
-            "человек ждёт результат"
+            "пользователь ждёт результат"
         )
 
     if behavior:
@@ -513,56 +429,7 @@ def build_cognitive_state(
         )
 
     # =================================================
-    # 🔥 VISUAL
-    # =================================================
-
-    if visual_reference.get(
-        "enabled"
-    ):
-
-        visual_mode = []
-
-        if visual_reference.get(
-            "lightweight_mode"
-        ):
-
-            visual_mode.append(
-                "лёгкие visual references"
-            )
-
-        if visual_reference.get(
-            "guidance"
-        ):
-
-            visual_mode.append(
-                visual_reference.get(
-                    "guidance"
-                )
-            )
-
-        if visual_mode:
-
-            blocks.append(
-                "Visual: "
-                + ", ".join(visual_mode)
-            )
-
-    # =================================================
-    # 🔥 MEMORY SUMMARY
-    # =================================================
-
-    summary = state.get(
-        "memory_summary"
-    )
-
-    if summary:
-
-        blocks.append(
-            "Память: "
-            + summary[-250:]
-        )
-    # =================================================
-    # 🔥 VISUAL SCENE AUTHORITY
+    # 🔥 VISUAL CONTINUITY
     # =================================================
 
     active_visual_scene = state.get(
@@ -576,11 +443,6 @@ def build_cognitive_state(
             "unknown"
         )
 
-        scene_summary = active_visual_scene.get(
-            "summary",
-            ""
-        )
-
         scene_objects = active_visual_scene.get(
             "objects",
             []
@@ -588,9 +450,9 @@ def build_cognitive_state(
 
         visual_lines = [
 
-            "Активная visual scene:",
+            "Активная visual scene.",
 
-            f"Scene type: {scene_type}"
+            f"Тип: {scene_type}"
         ]
 
         if scene_objects:
@@ -598,25 +460,11 @@ def build_cognitive_state(
             visual_lines.append(
 
                 "Objects: "
-                + ", ".join(scene_objects)
-            )
-
-        if scene_summary:
-
-            visual_lines.append(
-
-                "Scene summary: "
-                + scene_summary[:400]
+                + ", ".join(scene_objects[:8])
             )
 
         visual_lines.append(
-
-            "Если пользователь задаёт "
-            "короткие вопросы "
-            "про изображение — "
-            "считай что он "
-            "продолжает обсуждать "
-            "эту visual scene."
+            "Сохраняй visual continuity."
         )
 
         blocks.append(
@@ -624,8 +472,19 @@ def build_cognitive_state(
         )
 
     # =================================================
-    # 🔥 FINAL
+    # 🔥 MEMORY SUMMARY
     # =================================================
+
+    summary = state.get(
+        "memory_summary"
+    )
+
+    if summary:
+
+        blocks.append(
+            "Память: "
+            + summary[-180:]
+        )
 
     return "\n".join(blocks)
 
@@ -837,253 +696,247 @@ async def process(
         text
     )
 
-    async def run():
+    try:
 
-        try:
+        semantic = state.get(
+            "semantic",
+            {}
+        )
 
-            semantic = state.get(
-                "semantic",
-                {}
-            )
+        cognition = state.get(
+            "cognition",
+            {}
+        )
 
-            cognition = state.get(
-                "cognition",
-                {}
-            )
+        visual_reference = state.get(
+            "visual_reference",
+            {}
+        )
 
-            visual_reference = state.get(
-                "visual_reference",
-                {}
-            )
+        response_decision = state.get(
+            "response_decision",
+            {}
+        )
 
-            response_decision = state.get(
-                "response_decision",
-                {}
-            )
+        if is_context_prompt(text):
 
-            if is_context_prompt(text):
+            messages = [
 
-                messages = [
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
 
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT
-                    },
-
-                    {
-                        "role": "user",
-                        "content": text
-                    }
-                ]
-
-            else:
-
-                history = state.get(
-                    "dialog",
-                    []
-                )
-
-                update_topic(
-                    state,
-                    text
-                )
-
-                text_fixed = enrich_request(
-
-                    enhance_link_behavior(
-                        text
-                    ),
-
-                    state
-                )
-
-                plan = get_user_plan(
-                    user_id
-                )
-
-                limit = get_history_limit(
-                    plan
-                )
-
-                cognitive_state = (
-                    build_cognitive_state(
-                        state,
-                        text_fixed,
-                        semantic,
-                        cognition,
-                        visual_reference,
-                        response_decision
-                    )
-                )
-
-                system_full = (
-                    SYSTEM_PROMPT
-                    + "\n\n"
-                    + cognitive_state
-                )
-
-                messages = [
-
-                    {
-                        "role": "system",
-                        "content": system_full
-                    }
-                ]
-
-                safe_history = [
-
-                    {
-                        "role":
-                            m.get("role"),
-
-                        "content":
-                            trim_text(
-                                m.get(
-                                    "content",
-                                    ""
-                                )
-                            )
-                    }
-
-                    for m in history[-limit:]
-                ]
-
-                messages.extend(
-
-                    trim_messages(
-                        safe_history
-                    )
-                )
-
-                messages.append({
-
+                {
                     "role": "user",
+                    "content": text
+                }
+            ]
+
+        else:
+
+            history = state.get(
+                "dialog",
+                []
+            )
+
+            update_topic(
+                state,
+                text
+            )
+
+            text_fixed = enrich_request(
+
+                enhance_link_behavior(
+                    text
+                ),
+
+                state
+            )
+
+            plan = get_user_plan(
+                user_id
+            )
+
+            limit = get_history_limit(
+                plan
+            )
+
+            cognitive_state = (
+                build_cognitive_state(
+                    state,
+                    text_fixed,
+                    semantic,
+                    cognition,
+                    visual_reference,
+                    response_decision
+                )
+            )
+
+            system_full = (
+                SYSTEM_PROMPT
+                + "\n\n"
+                + cognitive_state
+            )
+
+            messages = [
+
+                {
+                    "role": "system",
+                    "content": trim_text(
+                        system_full
+                    )
+                }
+            ]
+
+            safe_history = [
+
+                {
+                    "role":
+                        m.get("role"),
 
                     "content":
                         trim_text(
-                            text_fixed
+                            m.get(
+                                "content",
+                                ""
+                            )
                         )
-                })
+                }
 
-            config = get_config(
-                energy
+                for m in history[-limit:]
+            ]
+
+            messages.extend(
+
+                trim_messages(
+                    safe_history
+                )
             )
 
-            output = await generate_text(
+            messages.append({
 
-                messages=messages,
+                "role": "user",
 
-                temperature=config[
-                    "temperature"
-                ],
+                "content":
+                    trim_text(
+                        text_fixed
+                    )
+            })
 
-                max_output_tokens=config[
-                    "max_output_tokens"
-                ],
+        config = get_config(
+            energy
+        )
 
-                model="gemini-2.5-flash"
-            )
+        # =============================================
+        # 🔥 OPENAI TEXT-FIRST
+        # =============================================
 
-            # =========================================
-            # 🧠 EXTERNAL KNOWLEDGE
-            # =========================================
+        output = await generate_text(
 
-            if should_use_external_knowledge(
+            messages=messages,
+
+            temperature=config[
+                "temperature"
+            ],
+
+            max_output_tokens=config[
+                "max_output_tokens"
+            ],
+
+            model="gpt-4o-mini"
+        )
+
+        # =============================================
+        # 🧠 EXTERNAL KNOWLEDGE
+        # =============================================
+
+        if should_use_external_knowledge(
+            text,
+            semantic,
+            cognition,
+            response_decision
+        ):
+
+            knowledge = fetch_external_knowledge(
                 text,
                 semantic,
-                cognition,
-                response_decision
-            ):
-
-                knowledge = fetch_external_knowledge(
-                    text,
-                    semantic,
-                    cognition
-                )
-
-                output = enrich_with_external_knowledge(
-                    output,
-                    knowledge
-                )
-
-            # =========================================
-            # 🧠 SELF REFLECTION
-            # =========================================
-
-            if cognition.get(
-                "user_leads_direction"
-            ):
-
-                if len(output) > 700:
-
-                    output = (
-                        output[:700]
-                        + "\n\n"
-                        + "(не перегружаю ответ)"
-                    )
-
-            if cognition.get(
-                "exploration_mode"
-            ):
-
-                robotic_phrases = [
-
-                    "конечно",
-                    "давай разберём",
-                    "отличный вопрос",
-                    "я помогу"
-                ]
-
-                cleaned = output
-
-                for phrase in robotic_phrases:
-
-                    cleaned = re.sub(
-                        phrase,
-                        "",
-                        cleaned,
-                        flags=re.IGNORECASE
-                    )
-
-                output = cleaned.strip()
-
-            if not output:
-
-                output = (
-                    "⚠️ Пустой ответ."
-                )
-
-            return output
-
-        except Exception as e:
-
-            traceback.print_exc()
-
-            return (
-                "⚠️ Ошибка текстового модуля: "
-                + str(e)
+                cognition
             )
 
-    reply = await asyncio.to_thread(
-    lambda: asyncio.run(run())
-)
+            output = enrich_with_external_knowledge(
+                output,
+                knowledge
+            )
 
-    if "```" in reply:
+        # =============================================
+        # 🧠 RESPONSE STABILIZATION
+        # =============================================
 
-        state["last_code"] = reply
+        if cognition.get(
+            "user_leads_direction"
+        ):
+
+            if len(output) > 700:
+
+                output = (
+                    output[:700]
+                    + "\n\n"
+                    + "(не перегружаю ответ)"
+                )
+
+        if cognition.get(
+            "exploration_mode"
+        ):
+
+            robotic_phrases = [
+
+                "конечно",
+                "давай разберём",
+                "отличный вопрос",
+                "я помогу"
+            ]
+
+            cleaned = output
+
+            for phrase in robotic_phrases:
+
+                cleaned = re.sub(
+                    phrase,
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE
+                )
+
+            output = cleaned.strip()
+
+        if not output:
+
+            output = (
+                "⚠️ Пустой ответ."
+            )
+
+    except Exception as e:
+
+        traceback.print_exc()
+
+        output = (
+            "⚠️ Ошибка текстового модуля: "
+            + str(e)
+        )
+
+    if "```" in output:
+
+        state["last_code"] = output
 
     reply = enhance_code_block(
-        reply
+        output
     )
 
     reply = prevent_repeat_response(
         state,
         reply
     )
-
-    # =================================================
-    # 🧠 BEAUTIFY RESPONSE
-    # =================================================
 
     semantic = state.get(
         "semantic",
