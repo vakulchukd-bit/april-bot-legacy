@@ -307,7 +307,7 @@ def april_web_chat():
         final_result = asyncio.run(
             process()
         )
-        print("FINAL RESULT DEBUG:", final_result)
+        print("FINAL RESULT DATA:", final_result.get("data"))
 
         return jsonify({
 
