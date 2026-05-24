@@ -35,6 +35,7 @@ def build_response_decision(
 
         "should_execute": False,
         "should_generate": False,
+        "should_render": False,
         "should_guide": False,
         "should_offer_reference": False,
         "should_continue_trajectory": False,
@@ -73,6 +74,24 @@ def build_response_decision(
 
         "prefer_lightweight_visual": False,
         "avoid_heavy_generation": False,
+
+        # =================================================
+        # 🧠 RENDERER SPACE
+        # =================================================
+
+        "renderer_space_allowed": False,
+
+        "renderer_scene_priority": False,
+
+        "renderer_lightweight_mode": False,
+
+        "renderer_spatial_mode": False,
+
+        "renderer_should_preserve_layout": True,
+
+        "renderer_scene_composition": False,
+
+        "renderer_response_type": None,
 
         # =================================================
         # RESPONSE STRATEGY
@@ -129,6 +148,8 @@ def build_response_decision(
         "execution_allowed": False,
 
         "generation_allowed": False,
+
+        "render_allowed": False,
 
         "guidance_allowed": False,
 
@@ -234,6 +255,38 @@ def build_response_decision(
     )
 
     # =====================================================
+    # 🔥 RENDERER SIGNALS
+    # =====================================================
+
+    renderer_supported = semantic.get(
+        "renderer_supported",
+        False
+    )
+
+    renderer_request = semantic.get(
+        "renderer_request",
+        False
+    )
+
+    lightweight_visual = semantic.get(
+        "visual_lightweight_mode",
+        False
+    )
+
+    visual_generation_needed = semantic.get(
+        "visual_generation_needed",
+        False
+    )
+
+    expected_output_type = semantic.get(
+        "expected_output_type"
+    )
+
+    expected_result = semantic.get(
+        "expected_result"
+    )
+
+    # =====================================================
     # 🧠 SCENE COMPLETION ANALYSIS
     # =====================================================
 
@@ -325,12 +378,110 @@ def build_response_decision(
         ] = True
 
     # =====================================================
+    # 🔥 RENDERER SPACE PRIORITY
+    # =====================================================
+
+    if (
+
+        renderer_supported
+
+        or renderer_request
+
+        or lightweight_visual
+
+        or semantic.get(
+            "visual_routing"
+        )
+    ):
+
+        result[
+            "renderer_space_allowed"
+        ] = True
+
+        result[
+            "renderer_scene_priority"
+        ] = True
+
+        result[
+            "renderer_lightweight_mode"
+        ] = True
+
+        result[
+            "renderer_scene_composition"
+        ] = True
+
+        result[
+            "prefer_lightweight_visual"
+        ] = True
+
+        result[
+            "avoid_heavy_generation"
+        ] = True
+
+    # =====================================================
+    # 🔥 SPATIAL RENDER MODE
+    # =====================================================
+
+    if expected_result in [
+
+        "graph",
+        "formula",
+        "table",
+        "layout",
+        "diagram",
+        "visual"
+    ]:
+
+        result[
+            "renderer_spatial_mode"
+        ] = True
+
+        result[
+            "renderer_response_type"
+        ] = expected_result
+
+    # =====================================================
     # 🔥 APRIL GLOBAL DECISION
     # =====================================================
 
     if (
 
-        not cognition.get(
+        result[
+            "renderer_space_allowed"
+        ]
+
+        and not visual_generation_needed
+    ):
+
+        result[
+            "should_render"
+        ] = True
+
+        result[
+            "render_allowed"
+        ] = True
+
+        result[
+            "final_action"
+        ] = "render"
+
+        result[
+            "forced_action"
+        ] = "render"
+
+        result[
+            "forced_room"
+        ] = "renderer_space"
+
+    # =====================================================
+    # 🔥 HEAVY IMAGE GENERATION
+    # =====================================================
+
+    elif (
+
+        visual_generation_needed
+
+        and not cognition.get(
             "internet_context_needed"
         )
 
@@ -338,22 +489,9 @@ def build_response_decision(
             "web_support_required"
         )
 
-        and (
+        and not lightweight_visual
 
-            cognition.get(
-                "prefer_visual"
-            )
-
-            or cognition.get(
-                "wants_visual",
-                0.0
-            ) >= 0.45
-
-            or cognition.get(
-                "visual_imagination",
-                0.0
-            ) >= 0.45
-        )
+        and ambiguity < 0.4
     ):
 
         result["final_action"] = (
@@ -373,6 +511,7 @@ def build_response_decision(
         result["should_generate"] = True
 
         result["generation_allowed"] = True
+
     # =====================================================
     # 🔥 UNDERSTANDING USER
     # =====================================================
@@ -564,9 +703,6 @@ def build_response_decision(
             "avoid_heavy_generation"
         ] = True
 
-        # 🔥 DeepHub stabilization:
-        # exploration больше НЕ запрещает generation
-
         result[
             "exploration_generation_mix"
         ] = True
@@ -662,12 +798,10 @@ def build_response_decision(
         executable_artifact in [
 
             "graph",
-            "image",
             "diagram",
-            "link",
-            "map",
-            "file",
-            "formula"
+            "formula",
+            "table",
+            "layout"
         ]
 
         and executable_confidence >= 0.72
@@ -676,40 +810,67 @@ def build_response_decision(
     ):
 
         result[
-            "should_execute"
+            "should_render"
         ] = True
 
         result[
-            "execution_allowed"
+            "render_allowed"
         ] = True
 
         result[
             "final_action"
-        ] = "execute"
+        ] = "render"
 
         result[
             "forced_action"
-        ] = "execute"
+        ] = "render"
 
         result[
-            "dialogue_still_alive"
+            "forced_room"
+        ] = "renderer_space"
+
+        result[
+            "avoid_heavy_generation"
         ] = True
 
         result[
-            "goal_completed"
-        ] = False
+            "prefer_lightweight_visual"
+        ] = True
+
+    # =====================================================
+    # 🔥 IMAGE GENERATION LOCK
+    # =====================================================
+
+    if (
+
+        executable_artifact == "image"
+
+        and executable_confidence >= 0.82
+
+        and ambiguity_level <= 0.35
+
+        and visual_generation_needed
+    ):
 
         result[
-            "avoid_forced_generation"
-        ] = False
+            "should_generate"
+        ] = True
 
         result[
-            "response_requires_clarification"
-        ] = False
+            "generation_allowed"
+        ] = True
 
         result[
-            "high_ambiguity_detected"
-        ] = False
+            "final_action"
+        ] = "generate"
+
+        result[
+            "forced_action"
+        ] = "generate"
+
+        result[
+            "forced_room"
+        ] = "image_generate"
 
     # =====================================================
     # 🔥 GENERATION CONTROL
@@ -724,12 +885,13 @@ def build_response_decision(
         should_generate = True
 
     if (
-        wants_visual >= 0.85
-        and wants_result >= 0.75
+        wants_visual >= 0.92
+        and wants_result >= 0.82
+        and visual_generation_needed
         and not cognition.get(
             "prefer_reference_over_generation"
         )
-        and ambiguity < 0.4
+        and ambiguity < 0.35
     ):
 
         should_generate = True
@@ -741,10 +903,6 @@ def build_response_decision(
     if result[
         "should_wait_for_user"
     ]:
-
-        # 🔥 DeepHub:
-        # ожидание пользователя больше
-        # НЕ убивает generation pipeline
 
         result[
             "response_requires_clarification"
@@ -766,6 +924,26 @@ def build_response_decision(
 
         result[
             "generation_allowed"
+        ] = True
+
+    # =====================================================
+    # 🔥 FINAL RENDER
+    # =====================================================
+
+    if result[
+        "should_render"
+    ]:
+
+        result[
+            "render_allowed"
+        ] = True
+
+        result[
+            "avoid_heavy_generation"
+        ] = True
+
+        result[
+            "prefer_lightweight_visual"
         ] = True
 
     # =====================================================
@@ -795,11 +973,19 @@ def build_response_decision(
     # 🔥 POST ACTION ANALYSIS
     # =====================================================
 
-    if result[
-        "should_generate"
-    ] or result[
-        "should_execute"
-    ]:
+    if (
+        result[
+            "should_generate"
+        ]
+
+        or result[
+            "should_execute"
+        ]
+
+        or result[
+            "should_render"
+        ]
+    ):
 
         result[
             "needs_post_action_analysis"
@@ -832,6 +1018,14 @@ def build_response_decision(
         result[
             "final_action"
         ] = "reference"
+
+    elif result[
+        "should_render"
+    ]:
+
+        result[
+            "final_action"
+        ] = "render"
 
     elif result[
         "should_generate"
@@ -916,6 +1110,14 @@ def build_response_decision(
 
     elif result[
         "final_action"
+    ] == "render":
+
+        result[
+            "response_mode"
+        ] = "renderer_space"
+
+    elif result[
+        "final_action"
     ] == "reference":
 
         result[
@@ -988,13 +1190,11 @@ def build_response_decision(
     if (
         result["final_action"] in [
             "generate",
-            "execute"
+            "execute",
+            "render"
         ]
         and ambiguity >= 0.45
     ):
-
-        # 🔥 DeepHub stabilization:
-        # ambiguity больше НЕ ломает execution
 
         result[
             "high_ambiguity_detected"
