@@ -18,6 +18,13 @@ External knowledge layer для April.
 - даёт contextual enrichment;
 - работает как capability самой April.
 
+APRIL ARCHITECTURE:
+- renderer-first;
+- provider-aware;
+- continuity-safe;
+- lightweight-first;
+- calm orchestration.
+
 April остаётся единым субъектом.
 """
 
@@ -38,7 +45,6 @@ from blocks.web_search_system import (
 )
 
 client = OpenAI()
-
 
 # =====================================================
 # 🧠 KNOWLEDGE TRIGGERS
@@ -140,7 +146,6 @@ WEB_KNOWLEDGE_TOPICS = [
     "live"
 ]
 
-
 # =====================================================
 # 🧠 INTERNET PLATFORM AWARENESS
 # =====================================================
@@ -170,7 +175,6 @@ INTERNET_PLATFORM_TYPES = {
     "wikipedia": "knowledge_platform"
 }
 
-
 # =====================================================
 # 🧠 WEB CAPABILITY STATE
 # =====================================================
@@ -179,7 +183,7 @@ WEB_CAPABILITIES = {
 
     # =================================================
     # 🌐 REAL WEB STATUS
-    # =================================================
+    # =====================================================
 
     "real_time_search": True,
 
@@ -193,7 +197,7 @@ WEB_CAPABILITIES = {
 
     # =================================================
     # 🧠 COGNITIVE AWARENESS
-    # =================================================
+    # =====================================================
 
     "platform_understanding": True,
 
@@ -205,13 +209,124 @@ WEB_CAPABILITIES = {
 
     # =================================================
     # 🔥 SAFETY
-    # =================================================
+    # =====================================================
 
     "hallucination_risk": False,
 
     "requires_verification": True
 }
 
+# =====================================================
+# 🔥 RENDERER-FIRST PROTECTION
+# =====================================================
+
+RENDERER_ARTIFACTS = [
+
+    "graph",
+    "formula",
+    "diagram",
+    "table",
+    "layout",
+    "scene"
+]
+
+# =====================================================
+# 🔥 WEB SUPPRESSION
+# =====================================================
+
+def should_block_external_lookup(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    response_decision: dict
+):
+
+    text = (
+        text or ""
+    ).lower()
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+
+    # =================================================
+    # 🔥 RENDERER-FIRST
+    # =====================================================
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        return True
+
+    if semantic.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    if semantic.get(
+        "renderer_space_request"
+    ):
+
+        return True
+
+    expected_output = semantic.get(
+        "expected_output_type"
+    )
+
+    if expected_output in RENDERER_ARTIFACTS:
+
+        return True
+
+    # =================================================
+    # 🔥 LIGHTWEIGHT VISUAL
+    # =====================================================
+
+    if semantic.get(
+        "visual_demo_request"
+    ):
+
+        return True
+
+    if semantic.get(
+        "visual_lightweight_mode"
+    ):
+
+        return True
+
+    if semantic.get(
+        "library_visual_candidate"
+    ):
+
+        return True
+
+    # =================================================
+    # 🔥 EXPLORATION PROTECTION
+    # =====================================================
+
+    if cognition.get(
+        "exploration_mode"
+    ):
+
+        if cognition.get(
+            "wants_result",
+            0.0
+        ) < 0.65:
+
+            return True
+
+    # =================================================
+    # 🔥 RESPONSE DECISION
+    # =====================================================
+
+    if response_decision.get(
+        "avoid_heavy_generation"
+    ):
+
+        return True
+
+    return False
 
 # =====================================================
 # 🧠 LIVE INTENT DETECTION
@@ -258,7 +373,6 @@ def detect_realtime_need(
 
     return False
 
-
 # =====================================================
 # 🧠 EXECUTION SUPPORT ANALYSIS
 # =====================================================
@@ -293,7 +407,7 @@ def should_support_execution(
     if semantic.get(
         "visual_expectation",
         0.0
-    ) >= 0.65:
+    ) >= 0.72:
 
         return True
 
@@ -308,7 +422,7 @@ def should_support_execution(
         if semantic.get(
             "trajectory_strength",
             0.0
-        ) >= 0.6:
+        ) >= 0.7:
 
             return True
 
@@ -322,18 +436,7 @@ def should_support_execution(
 
         return True
 
-    # =================================================
-    # 🧠 EXPLORATION SUPPORT
-    # =====================================================
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        return True
-
     return False
-
 
 # =====================================================
 # 🧠 WEB ESCALATION DETECTION
@@ -351,6 +454,31 @@ def should_use_external_knowledge(
     semantic = semantic or {}
     cognition = cognition or {}
     response_decision = response_decision or {}
+
+    # =================================================
+    # 🔥 BLOCK PROTECTION
+    # =====================================================
+
+    if should_block_external_lookup(
+
+        text,
+        semantic,
+        cognition,
+        response_decision
+    ):
+
+        return False
+
+    # =================================================
+    # 🌐 REALTIME NEED
+    # =====================================================
+
+    if detect_realtime_need(
+        text,
+        semantic
+    ):
+
+        return True
 
     # =================================================
     # 🔥 EXECUTION SUPPORT MODE
@@ -407,17 +535,6 @@ def should_use_external_knowledge(
             return True
 
     # =================================================
-    # 🌐 REALTIME NEED
-    # =====================================================
-
-    if detect_realtime_need(
-        text,
-        semantic
-    ):
-
-        return True
-
-    # =================================================
     # 🧠 USER EXPLORATION
     # =====================================================
 
@@ -428,7 +545,7 @@ def should_use_external_knowledge(
         if cognition.get(
             "wants_dialog",
             0.0
-        ) >= 0.5:
+        ) >= 0.82:
 
             return True
 
@@ -448,12 +565,11 @@ def should_use_external_knowledge(
     if semantic.get(
         "ambiguity_level",
         0.0
-    ) >= 0.75:
+    ) >= 0.82:
 
         return True
 
     return False
-
 
 # =====================================================
 # 🧠 LEGACY PROMPT LAYER
@@ -472,7 +588,6 @@ def should_use_external_knowledge(
 Теперь:
 real web layer имеет приоритет.
 """
-
 
 # =====================================================
 # 🧠 EXTERNAL KNOWLEDGE REQUEST
@@ -547,7 +662,6 @@ def build_external_prompt(
 - без воды.
 """
 
-
 # =====================================================
 # 🌐 REAL EXTERNAL KNOWLEDGE FETCH
 # =====================================================
@@ -618,21 +732,24 @@ def fetch_external_knowledge(
             model="gpt-4o-mini",
 
             input=[
+
                 {
                     "role": "system",
+
                     "content":
                         "Ты knowledge layer April."
                 },
 
                 {
                     "role": "user",
+
                     "content": prompt
                 }
             ],
 
             temperature=0.2,
 
-            max_output_tokens=220
+            max_output_tokens=180
         )
 
         output = (
@@ -677,7 +794,6 @@ def fetch_external_knowledge(
 
             "error": str(e)
         }
-
 
 # =====================================================
 # 🧠 KNOWLEDGE ENRICHMENT
@@ -729,7 +845,6 @@ def enrich_with_external_knowledge(
         + "\n\n"
         + knowledge
     )
-
 
 # =====================================================
 # 🧠 EXTERNAL CONTEXT BUILDER
