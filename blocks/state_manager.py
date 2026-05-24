@@ -25,6 +25,33 @@ def get_dialog_limit(user_id, plan):
 
 
 # =====================================================
+# 🔥 SAFE HELPERS
+# =====================================================
+
+def safe_trim_text(
+    text,
+    limit=120
+):
+
+    text = str(
+        text or ""
+    ).strip()
+
+    if len(text) <= limit:
+        return text
+
+    return text[:limit]
+
+
+def safe_list(value):
+
+    if isinstance(value, list):
+        return value
+
+    return []
+
+
+# =====================================================
 # 🔥 DEFAULT SCENE STATE
 # =====================================================
 
@@ -102,7 +129,25 @@ def build_default_scene():
 
         "confidence": 0.0,
 
-        "last_update": None
+        "last_update": None,
+
+        # =================================================
+        # 🔥 APRIL CONTINUITY
+        # =================================================
+
+        "semantic_continuity": True,
+
+        "continuity_window_active": True,
+
+        "trajectory_locked": False,
+
+        "visual_scene_active": False,
+
+        "scene_identity": "stable",
+
+        "orchestration_mode": "stable",
+
+        "preserve_visual_space": True
     }
 
 
@@ -131,6 +176,7 @@ def build_default_state():
         "image_context": None,
 
         "image_memory": [],
+
         # =================================================
         # 🔥 VISUAL SCENE MEMORY
         # =================================================
@@ -162,6 +208,16 @@ def build_default_state():
         # =================================================
 
         "scene_state": build_default_scene(),
+
+        # =================================================
+        # 🔥 CACHE
+        # =================================================
+
+        "image_analysis": None,
+
+        "image_analysis_path": None,
+
+        "last_scene_object": None,
 
         # =================================================
         # 🔥 META
@@ -202,7 +258,10 @@ def get_state(user_id):
 
     state_obj = state[user_id]
 
+    # =================================================
     # 🔥 SAFETY BACKFILL
+    # =================================================
+
     if "scene_state" not in state_obj:
 
         state_obj["scene_state"] = (
@@ -212,6 +271,30 @@ def get_state(user_id):
     if "meta" not in state_obj:
 
         state_obj["meta"] = {}
+
+    if "active_visual_scene" not in state_obj:
+
+        state_obj[
+            "active_visual_scene"
+        ] = None
+
+    if "visual_scene_history" not in state_obj:
+
+        state_obj[
+            "visual_scene_history"
+        ] = []
+
+    if "image_memory" not in state_obj:
+
+        state_obj[
+            "image_memory"
+        ] = []
+
+    if "dialog" not in state_obj:
+
+        state_obj[
+            "dialog"
+        ] = []
 
     return state_obj
 
@@ -252,9 +335,52 @@ def update_scene_state(
 
 def clear_scene_state(user_id):
 
-    get_state(user_id)[
+    state_obj = get_state(user_id)
+
+    old_scene = state_obj.get(
+        "scene_state",
+        {}
+    )
+
+    preserved_visual_scene = state_obj.get(
+        "active_visual_scene"
+    )
+
+    new_scene = build_default_scene()
+
+    # =================================================
+    # 🔥 VISUAL CONTINUITY PRESERVE
+    # =================================================
+
+    if preserved_visual_scene:
+
+        new_scene[
+            "visual_continuity"
+        ] = True
+
+        new_scene[
+            "visual_scene_active"
+        ] = True
+
+    if old_scene.get(
+        "primary_anchor"
+    ):
+
+        new_scene[
+            "primary_anchor"
+        ] = old_scene.get(
+            "primary_anchor"
+        )
+
+        new_scene[
+            "anchor_type"
+        ] = old_scene.get(
+            "anchor_type"
+        )
+
+    state_obj[
         "scene_state"
-    ] = build_default_scene()
+    ] = new_scene
 
 
 # =====================================================
@@ -282,6 +408,8 @@ def set_image_context(
 
     scene["visual_continuity"] = True
 
+    scene["visual_scene_active"] = True
+
     if isinstance(ctx, dict):
 
         hint = (
@@ -292,7 +420,10 @@ def set_image_context(
         if hint:
 
             scene["visual_target"] = (
-                hint[:120]
+                safe_trim_text(
+                    hint,
+                    120
+                )
             )
 
     state_obj["scene_state"] = scene
@@ -376,13 +507,67 @@ def update_memory_summary(
     ).strip()
 
     # 🔥 LIMIT
-    if len(updated) > 700:
+    if len(updated) > 1200:
 
-        updated = updated[-700:]
+        updated = updated[-1200:]
 
     state_obj[
         "memory_summary"
     ] = updated
+
+
+# =====================================================
+# 🔥 VISUAL CONTINUITY SUMMARY
+# =====================================================
+
+def build_visual_scene_summary(
+    state_obj
+):
+
+    visual_scene = state_obj.get(
+        "active_visual_scene"
+    )
+
+    if not visual_scene:
+        return ""
+
+    objects = visual_scene.get(
+        "objects",
+        []
+    )
+
+    scene_type = visual_scene.get(
+        "scene_type"
+    )
+
+    colors = visual_scene.get(
+        "colors",
+        []
+    )
+
+    parts = []
+
+    if scene_type:
+
+        parts.append(
+            f"SCENE:{scene_type}"
+        )
+
+    if objects:
+
+        parts.append(
+            "OBJECTS:"
+            + ",".join(objects[:5])
+        )
+
+    if colors:
+
+        parts.append(
+            "COLORS:"
+            + ",".join(colors[:5])
+        )
+
+    return " | ".join(parts)
 
 
 # =====================================================
@@ -405,15 +590,15 @@ def compress_dialog_to_summary(
     # 🔥 LAST IMPORTANT
     # =================================================
 
-    last_messages = dialog[-6:]
+    last_messages = dialog[-8:]
 
     summary_parts = []
 
     for m in last_messages:
 
-        content = (
-            m.get("content", "")
-            [:120]
+        content = safe_trim_text(
+            m.get("content", ""),
+            160
         )
 
         if content:
@@ -441,9 +626,9 @@ def compress_dialog_to_summary(
         + short_summary
     ).strip()
 
-    if len(combined) > 1000:
+    if len(combined) > 1600:
 
-        combined = combined[-1000:]
+        combined = combined[-1600:]
 
     state_obj[
         "memory_summary"
@@ -491,6 +676,22 @@ def compress_dialog_to_summary(
             f"FLOW:{scene['trajectory']}"
         )
 
+    # =================================================
+    # 🔥 VISUAL CONTINUITY PROTECTION
+    # =================================================
+
+    visual_summary = (
+        build_visual_scene_summary(
+            state_obj
+        )
+    )
+
+    if visual_summary:
+
+        protected_context.append(
+            visual_summary
+        )
+
     protected_text = " | ".join(
         protected_context
     )
@@ -516,6 +717,10 @@ def compress_dialog_to_summary(
         "🧹 DIALOG COMPRESSED"
     )
 
+    print(
+        "🧠 CONTINUITY PRESERVED"
+    )
+
 
 # =====================================================
 # 🔥 IMAGE MEMORY CLEAN
@@ -525,22 +730,50 @@ def trim_image_memory(
     state_obj
 ):
 
-    memory = state_obj.get(
-        "image_memory",
-        []
+    memory = safe_list(
+        state_obj.get(
+            "image_memory",
+            []
+        )
     )
 
     if not memory:
         return
 
-    if len(memory) > 3:
+    if len(memory) > 5:
 
         state_obj[
             "image_memory"
-        ] = memory[-3:]
+        ] = memory[-5:]
 
         print(
             "🧹 IMAGE MEMORY TRIMMED"
+        )
+
+
+# =====================================================
+# 🔥 VISUAL HISTORY CLEAN
+# =====================================================
+
+def trim_visual_history(
+    state_obj
+):
+
+    history = safe_list(
+        state_obj.get(
+            "visual_scene_history",
+            []
+        )
+    )
+
+    if len(history) > 8:
+
+        state_obj[
+            "visual_scene_history"
+        ] = history[-8:]
+
+        print(
+            "🧹 VISUAL HISTORY TRIMMED"
         )
 
 
@@ -645,6 +878,10 @@ def add_dialog(
         state_obj
     )
 
+    trim_visual_history(
+        state_obj
+    )
+
 
 # =====================================================
 # 🔥 DIALOG STATE
@@ -694,8 +931,13 @@ def set_active_flow(
         )
 
         scene["goal"] = (
-            flow.get("original")
+            safe_trim_text(
+                flow.get("original"),
+                240
+            )
         )
+
+        scene["trajectory_locked"] = True
 
         # =================================================
         # 🔥 PRIMARY ANCHOR SYNC
@@ -734,6 +976,19 @@ def set_active_flow(
 
         scene["continuity"] = True
 
+        if flow.get("type") in [
+
+            "image_generate",
+            "image_edit",
+            "image"
+        ]:
+
+            scene["visual_mode"] = True
+
+            scene["visual_continuity"] = True
+
+            scene["visual_scene_active"] = True
+
     state_obj["scene_state"] = scene
 
 
@@ -748,6 +1003,10 @@ def clear_active_flow(user_id):
 
     state_obj = get_state(user_id)
 
+    active_visual_scene = state_obj.get(
+        "active_visual_scene"
+    )
+
     state_obj["active_flow"] = None
 
     scene = state_obj.get(
@@ -758,6 +1017,18 @@ def clear_active_flow(user_id):
     scene["trajectory"] = None
 
     scene["execution_mode"] = False
+
+    scene["trajectory_locked"] = False
+
+    # =================================================
+    # 🔥 VISUAL CONTINUITY SAFE
+    # =================================================
+
+    if active_visual_scene:
+
+        scene["visual_continuity"] = True
+
+        scene["visual_scene_active"] = True
 
     state_obj["scene_state"] = scene
 
@@ -799,6 +1070,16 @@ def set_last_entity(
             scene[
                 "confirmed_direction"
             ] = entity_type
+
+            if entity_type == "image":
+
+                scene[
+                    "visual_mode"
+                ] = True
+
+                scene[
+                    "visual_scene_active"
+                ] = True
 
     state_obj["scene_state"] = scene
 
