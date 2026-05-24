@@ -1,11 +1,7 @@
 # blocks/image_edit_module.py
 
-import base64
 import asyncio
 import random
-import tempfile
-
-from openai import OpenAI
 
 from storage import (
     get_user_plan,
@@ -14,17 +10,70 @@ from storage import (
     today
 )
 
-# 🔥 NEW (META)
 from blocks.state_manager import (
     set_last_entity
 )
 
-client = OpenAI()
+# =====================================================
+# 🧠 APRIL IMAGE EDIT MODULE
+# =====================================================
+
+"""
+APRIL IMAGE EDIT MODULE — WEB-FIRST STABILIZED
+
+Главная идея:
+
+Image edit module больше НЕ:
+- OpenAI authority;
+- Telegram image pipeline;
+- hidden generation fallback;
+- recursive image rerouting.
+
+Image edit module теперь:
+- lightweight visual continuity layer;
+- scene-safe edit coordinator;
+- web-space compatible visual helper;
+- continuity-aware visual state updater.
+
+Visual rendering authority:
+всегда принадлежит April Web Space.
+"""
 
 ADMIN_ID = 2016592532
 
+# =====================================================
+# 🔥 SAFE PATCH MODE
+# =====================================================
 
-# 🔥 ЖИВЫЕ СООБЩЕНИЯ
+PATCH_LOG = []
+
+
+def safe_patch_log(msg):
+
+    try:
+
+        print(
+            "IMAGE EDIT PATCH:",
+            msg
+        )
+
+        PATCH_LOG.append(msg)
+
+    except:
+        pass
+
+
+# =====================================================
+# 🔥 VISUAL EDIT DISABLED
+# =====================================================
+
+VISUAL_EDIT_DISABLED = True
+
+
+# =====================================================
+# 🔥 LIMIT MESSAGES
+# =====================================================
+
 def get_limit_message():
 
     messages = [
@@ -43,63 +92,38 @@ def get_limit_message():
     return random.choice(messages)
 
 
-# ===== РЕДАКТИРОВАНИЕ ЧЕРЕЗ PATH =====
+# =====================================================
+# 🔥 IMAGE EDIT STUBS
+# =====================================================
+
 async def edit_image(
     image_path,
     prompt
 ):
 
-    def run():
+    safe_patch_log(
+        "LEGACY PATH EDIT BLOCKED"
+    )
 
-        try:
-
-            print(
-                "🛑 OPENAI IMAGE EDIT DISABLED (PATH)"
-            )
-
-            return None
-
-        except Exception as e:
-
-            print(
-                "EDIT IMAGE ERROR:",
-                e
-            )
-
-            return None
-
-    return await asyncio.to_thread(run)
+    return None
 
 
-# ===== РЕДАКТИРОВАНИЕ ЧЕРЕЗ BYTES =====
 async def edit_image_bytes(
     image_bytes,
     prompt
 ):
 
-    def run():
+    safe_patch_log(
+        "LEGACY BYTE EDIT BLOCKED"
+    )
 
-        try:
-
-            print(
-                "🛑 OPENAI IMAGE EDIT DISABLED (BYTES)"
-            )
-
-            return None
-
-        except Exception as e:
-
-            print(
-                "EDIT IMAGE BYTES ERROR:",
-                e
-            )
-
-            return None
-
-    return await asyncio.to_thread(run)
+    return None
 
 
-# ===== INCREMENT =====
+# =====================================================
+# 🔥 LIMIT INCREMENT
+# =====================================================
+
 def increment_images(user_id):
 
     conn = get_conn()
@@ -114,7 +138,9 @@ def increment_images(user_id):
         with conn.cursor() as cur:
 
             cur.execute(
-                "SELECT images_today, last_reset FROM users WHERE user_id = %s",
+                "SELECT images_today, last_reset "
+                "FROM users "
+                "WHERE user_id = %s",
                 (uid,)
             )
 
@@ -126,12 +152,14 @@ def increment_images(user_id):
             images = user["images_today"] or 0
 
             if user["last_reset"] != today():
+
                 images = 0
 
             cur.execute(
                 """
                 UPDATE users
-                SET images_today = %s, last_reset = %s
+                SET images_today = %s,
+                    last_reset = %s
                 WHERE user_id = %s
                 """,
                 (
@@ -142,7 +170,87 @@ def increment_images(user_id):
             )
 
 
-# ===== PROCESS =====
+# =====================================================
+# 🔥 VISUAL CONTINUITY UPDATE
+# =====================================================
+
+def update_visual_continuity(
+    state: dict,
+    prompt: str
+):
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    ) or {}
+
+    objects = active_visual_scene.get(
+        "objects",
+        []
+    )
+
+    summary = active_visual_scene.get(
+        "summary",
+        ""
+    )
+
+    state["active_visual_scene"] = {
+
+        "objects": objects,
+
+        "summary": summary,
+
+        "last_edit_prompt": prompt,
+
+        "edit_requested": True,
+
+        "renderer_expected": True,
+
+        "web_visual_space": True
+    }
+
+    return state["active_visual_scene"]
+
+
+# =====================================================
+# 🔥 SAFE VISUAL RESPONSE
+# =====================================================
+
+def build_safe_visual_response(
+    prompt: str
+):
+
+    return {
+
+        "type": "visual_guidance",
+
+        "data": {
+
+            "mode": "web_renderer_expected",
+
+            "message": (
+
+                "🎨 Visual edit request accepted.\n\n"
+
+                "April сохранила continuity сцены "
+                "и подготовила visual edit trajectory "
+                "для Web Space renderer."
+            ),
+
+            "prompt": prompt,
+
+            "renderer_expected": True,
+
+            "generation_executed": False,
+
+            "legacy_pipeline_disabled": True
+        }
+    }
+
+
+# =====================================================
+# 🔥 PROCESS
+# =====================================================
+
 async def process(
     user_id,
     prompt,
@@ -151,17 +259,23 @@ async def process(
 
     try:
 
-        print(
-            "🛑 IMAGE EDITING DISABLED FOR GEMINI TEST MODE"
+        safe_patch_log(
+            f"EDIT REQUEST: {str(prompt)[:80]}"
         )
 
-        return {
+        prompt = (
+            prompt or ""
+        ).strip()
 
-            "type": "error",
+        if not prompt:
 
-            "data":
-                "⚠️ Редактирование изображений временно отключено во время Gemini migration"
-        }
+            return {
+
+                "type": "error",
+
+                "data":
+                    "⚠️ Пустой edit-запрос."
+            }
 
         is_admin = (
             user_id == ADMIN_ID
@@ -188,7 +302,10 @@ async def process(
             img_limit=limit
         )
 
-        # 🔥 FIX: админ и premium без лимитов
+        # =================================================
+        # 🔥 LIMIT PROTECTION
+        # =====================================================
+
         if (
 
             not is_admin
@@ -206,115 +323,53 @@ async def process(
                     get_limit_message()
             }
 
-        img = None
+        # =================================================
+        # 🔥 VISUAL CONTINUITY
+        # =====================================================
 
-        # ===============================
-        # 🔥 1. META ПРИОРИТЕТ
-        # ===============================
-
-        meta = state.get(
-            "meta",
-            {}
+        update_visual_continuity(
+            state,
+            prompt
         )
 
-        entity = meta.get(
-            "last_entity",
-            {}
-        )
+        state["image_context"] = {
 
-        image_bytes = None
+            "type": "visual_edit_request",
 
-        if (
+            "hint": prompt,
 
-            entity.get("type") == "image"
-            and entity.get("data")
+            "web_renderer_expected": True,
 
-        ):
+            "legacy_pipeline_disabled": True
+        }
 
-            print(
-                "🧠 EDIT FROM META"
-            )
+        # =================================================
+        # 🔥 META MEMORY UPDATE
+        # =====================================================
 
-            image_bytes = entity.get(
-                "data"
-            )
+        set_last_entity(
 
-        # ===============================
-        # 🔥 2. FALLBACK: state
-        # ===============================
+            user_id,
 
-        if not image_bytes:
+            {
+                "type": "image_edit",
 
-            image_bytes = state.get(
-                "image_current"
-            )
+                "prompt": prompt,
 
-            if image_bytes:
+                "source": "web_visual_space",
 
-                print(
-                    "🧠 EDIT FROM STATE"
-                )
-
-        # ===============================
-        # 🔥 3. EDIT FROM BYTES
-        # ===============================
-
-        if image_bytes:
-
-            img = await asyncio.wait_for(
-
-                edit_image_bytes(
-                    image_bytes,
-                    prompt
-                ),
-
-                timeout=40
-            )
-
-        # ===============================
-        # 🔥 4. FALLBACK: PATH
-        # ===============================
-
-        if not img:
-
-            ctx = state.get(
-                "image_context"
-            ) or {}
-
-            path = ctx.get("path")
-
-            if path:
-
-                print(
-                    "📂 EDIT FROM PATH"
-                )
-
-                img = await asyncio.wait_for(
-
-                    edit_image(
-                        path,
-                        prompt
-                    ),
-
-                    timeout=40
-                )
-
-        if not img:
-
-            print(
-                "❌ EDIT FAILED"
-            )
-
-            return {
-
-                "type": "error",
-
-                "data": None,
-
-                "error": "edit_failed"
+                "renderer_expected": True
             }
+        )
 
-        # 🔥 FIX: не увеличиваем лимиты для админа и premium
+        safe_patch_log(
+            "VISUAL CONTINUITY UPDATED"
+        )
+
+        # =================================================
+        # 🔥 LIMIT UPDATE
+        # =====================================================
+
         if (
 
             not is_admin
@@ -326,39 +381,13 @@ async def process(
                 user_id
             )
 
-        # 🔥 СОХРАНЯЕМ КАК НОВУЮ ТЕКУЩУЮ
-        state["image_current"] = img
+        # =================================================
+        # 🔥 WEB-FIRST RESPONSE
+        # =====================================================
 
-        # 🔥 META UPDATE
-        set_last_entity(
-
-            user_id,
-
-            {
-                "type": "image",
-                "data": img,
-                "source": "edited"
-            }
+        return build_safe_visual_response(
+            prompt
         )
-
-        print(
-            "🧠 META UPDATED AFTER EDIT"
-        )
-
-        # 🔥 обновляем контекст
-        state["image_context"] = {
-
-            "type": "generated",
-
-            "hint": prompt
-        }
-
-        return {
-
-            "type": "image",
-
-            "data": img
-        }
 
     except asyncio.TimeoutError:
 
@@ -370,15 +399,14 @@ async def process(
 
             "type": "error",
 
-            "data": None,
-
-            "error": "timeout"
+            "data":
+                "⚠️ Visual edit timeout."
         }
 
     except Exception as e:
 
         print(
-            "🔥 EDIT ERROR:",
+            "🔥 IMAGE EDIT ERROR:",
             e
         )
 
@@ -386,7 +414,6 @@ async def process(
 
             "type": "error",
 
-            "data": None,
-
-            "error": str(e)
+            "data":
+                "⚠️ Visual edit processing failed."
         }
