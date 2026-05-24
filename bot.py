@@ -291,18 +291,61 @@ def april_web_chat():
             result = result or {}
 
             return {
-                "type":
-                    result.get(
-                        "type",
-                        "text"
-                    ),
 
-                "data":
-                    result.get(
-                        "data",
-                        ""
-                    )
-            }
+            "type":
+                result.get(
+                    "type",
+                    "text"
+                ),
+
+            "data":
+                result.get(
+                    "data",
+                    ""
+                ),
+
+            "content":
+                result.get(
+                    "content",
+                    ""
+                ),
+
+            "response":
+                result.get(
+                    "response",
+                    ""
+                ),
+
+            "graph":
+                result.get(
+                    "graph",
+                    None
+                ),
+
+            "formula":
+                result.get(
+                    "formula",
+                    None
+                ),
+
+            "gallery":
+                result.get(
+                    "gallery",
+                    None
+                ),
+
+            "image":
+                result.get(
+                    "image",
+                    None
+                ),
+
+            "blocks":
+                result.get(
+                    "blocks",
+                    []
+                )
+        }
 
         final_result = asyncio.run(
             process()
