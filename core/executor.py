@@ -451,6 +451,11 @@ def is_renderer_scene(
         False
     )
 
+    render_intent = semantic.get(
+        "render_intent",
+        False
+    )
+
     renderer_space = semantic.get(
         "renderer_space_request",
         False
@@ -470,6 +475,9 @@ def is_renderer_scene(
         "exploration_mode",
         False
     )
+
+    if render_intent:
+        return True
 
     if renderer_space:
         return True
@@ -501,6 +509,22 @@ def should_block_heavy_generation(
     cognition: dict,
     response_decision: dict
 ):
+
+    # =============================================
+    # 🔥 ABSOLUTE RENDERER-FIRST LOCK
+    # =============================================
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        return True
+
+    if response_decision.get(
+        "should_render"
+    ):
+
+        return True
 
     if response_decision.get(
         "avoid_heavy_generation"
@@ -591,14 +615,41 @@ def evaluate_response_quality(
             "needs_continuation": True
         }
 
-    output = str(
-        result.get("data", "")
-    ).strip()
-
     result_type = result.get(
         "type",
         "text"
     )
+
+    # =============================================
+    # 🔥 RENDERER TYPES ALWAYS VALID
+    # =============================================
+
+    if result_type in [
+
+        "graph",
+        "formula",
+        "diagram",
+        "scene",
+        "table",
+        "gallery",
+        "image",
+        "function"
+    ]:
+
+        return {
+
+            "success": True,
+
+            "helpful": True,
+
+            "needs_continuation": False,
+
+            "result_type": result_type
+        }
+
+    output = str(
+        result.get("data", "")
+    ).strip()
 
     helpful = True
 
@@ -647,6 +698,91 @@ def evaluate_response_quality(
 
         "result_type": result_type
     }
+
+
+# =====================================================
+# 🔥 SAFE FORMAT RESPONSE
+# =====================================================
+
+def safely_format_result(
+
+    result,
+    text,
+    semantic,
+    cognition,
+    visual_reference
+):
+
+    if not result:
+        return result
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    VISUAL_TYPES = [
+
+        "graph",
+        "formula",
+        "image",
+        "gallery",
+        "diagram",
+        "scene",
+        "function"
+    ]
+
+    # =============================================
+    # 🔥 ABSOLUTE VISUAL BYPASS
+    # =============================================
+
+    if result_type in VISUAL_TYPES:
+
+        return result
+
+    output_data = str(
+        result.get("data", "")
+    )
+
+    if not output_data.strip():
+
+        return result
+
+    scene_object_detected = any(
+
+        x in output_data
+
+        for x in [
+
+            "[[formula]]",
+            "[[graph]]",
+            "[[diagram]]",
+            "[[scene]]",
+            "[[grid]]"
+        ]
+    )
+
+    if scene_object_detected:
+
+        return result
+
+    result["data"] = (
+
+        format_response_presentation(
+
+            text=output_data,
+
+            user_text=text,
+
+            semantic=semantic,
+
+            cognition=cognition,
+
+            visual_reference=visual_reference
+        )
+    )
+
+    return result
 
 
 # =====================================================
@@ -988,10 +1124,6 @@ def stabilize_room_score(
         "stable"
     )
 
-    # =================================================
-    # 🔥 EXECUTION PREFERENCE
-    # =====================================================
-
     if cognition.get(
         "prefer_execution"
     ):
@@ -999,10 +1131,6 @@ def stabilize_room_score(
         if room.name == "text":
 
             score -= 0.5
-
-    # =================================================
-    # 🔥 VISUAL PREFERENCE
-    # =====================================================
 
     if cognition.get(
         "prefer_visual"
@@ -1016,9 +1144,29 @@ def stabilize_room_score(
 
             score += 0.6
 
-    # =================================================
-    # 🔥 RENDERER SPACE PRIORITY
-    # =====================================================
+    # =============================================
+    # 🔥 RENDERER-FIRST AUTHORITY
+    # =============================================
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        if room.name == "science":
+
+            score += 5.0
+
+        elif room.name == "text":
+
+            score += 1.2
+
+        elif room.name in [
+
+            "image_generate",
+            "image_edit"
+        ]:
+
+            score -= 10.0
 
     if is_renderer_scene(
 
@@ -1039,10 +1187,6 @@ def stabilize_room_score(
 
             score -= 3.5
 
-    # =================================================
-    # 🔥 LEGACY IMAGE SUPPRESSION
-    # =====================================================
-
     if should_block_heavy_generation(
 
         semantic,
@@ -1058,10 +1202,6 @@ def stabilize_room_score(
 
             score -= 4.0
 
-    # =================================================
-    # 🔥 BEST CAPABILITY
-    # =====================================================
-
     best_capability = semantic.get(
         "best_capability"
     )
@@ -1071,10 +1211,6 @@ def stabilize_room_score(
         if room.name == best_capability:
 
             score += 2.0
-
-    # =================================================
-    # 🔥 CONTINUATION
-    # =====================================================
 
     continuation_target = semantic.get(
         "continuation_target"
@@ -1255,9 +1391,25 @@ async def execute(
         )
     )
 
-    # =================================================
-    # 🔥 VISUAL CONTINUITY BRIDGE
-    # =====================================================
+    # =============================================
+    # 🔥 HARD RENDERER LOCK
+    # =============================================
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        semantic[
+            "prefer_renderer"
+        ] = True
+
+        semantic[
+            "visual_generation_needed"
+        ] = False
+
+        semantic[
+            "avoid_image_generation_fallback"
+        ] = True
 
     active_visual_scene = state.get(
         "active_visual_scene"
@@ -1382,10 +1534,6 @@ async def execute(
     )
 
     print("DEBUG: RESPONSE DECISION OK")
-
-    # =================================================
-    # 🔥 EXECUTOR VISUAL STABILIZATION
-    # =====================================================
 
     renderer_space = is_renderer_scene(
 
@@ -1551,8 +1699,12 @@ async def execute(
 
         try:
 
+            emaps_track_room(
+                room.name
+            )
+
             # =============================================
-            # 🔥 HEAVY IMAGE BLOCK
+            # 🔥 HARD IMAGE GENERATION BLOCK
             # =============================================
 
             if should_block_heavy_generation(
@@ -1605,123 +1757,64 @@ async def execute(
 
                 continue
 
+            result = safely_format_result(
+
+                result=result,
+
+                text=text,
+
+                semantic=semantic,
+
+                cognition=cognition,
+
+                visual_reference=visual_reference
+            )
+
             result_type = result.get(
                 "type",
                 "text"
             )
 
-            VISUAL_TYPES = [
-
-                "graph",
-                "formula",
-                "image",
-                "gallery",
-                "diagram",
-                "scene"
-            ]
-
-            # =============================================
-            # 🔥 APRIL SPACE FORMATTER
-            # =============================================
-
-            if result_type not in VISUAL_TYPES:
-
-                if result.get("data"):
-
-                    output_data = str(
-                        result["data"]
-                    )
-
-                    scene_object_detected = any(
-
-                        x in output_data
-
-                        for x in [
-
-                            "[[formula]]",
-                            "[[graph]]",
-                            "[[diagram]]",
-                            "[[scene]]",
-                            "[[grid]]"
-                        ]
-                    )
-
-                    if not scene_object_detected:
-
-                        output_data = (
-
-                            format_response_presentation(
-
-                                text=output_data,
-
-                                user_text=text,
-
-                                semantic=semantic,
-
-                                cognition=cognition,
-
-                                visual_reference=visual_reference
-                            )
-                        )
-
-                    result["data"] = output_data
-
             output_text = str(
                 result.get("data", "")
             )
 
-            add_dialog(
+            if output_text.strip():
 
-                user_id,
+                add_dialog(
 
-                "assistant",
+                    user_id,
 
-                output_text
-            )
+                    "assistant",
 
-            update_memory_summary(
+                    output_text
+                )
 
-                user_id,
+                update_memory_summary(
 
-                output_text
-            )
+                    user_id,
 
-            extract_and_store_semantics(
+                    output_text
+                )
 
-                state,
+                extract_and_store_semantics(
 
-                output_text,
+                    state,
 
-                result_type
-            )
+                    output_text,
+
+                    result_type
+                )
 
             best_result = result
 
-            scene_results.append({
-
-                "type": result_type,
-
-                "content": result.get(
-                    "data",
-                    ""
-                )
-            })
+            scene_results.append(result)
 
             # =============================================
-            # 🔥 CONTINUITY SAFE BREAK
+            # 🔥 ABSOLUTE SINGLE RESPONSE LOCK
             # =============================================
 
-            if result_type not in [
-
-                "graph",
-                "formula",
-                "diagram",
-                "gallery",
-                "image",
-                "scene"
-            ]:
-
-                break
+            break
 
         except Exception as e:
 
@@ -1732,18 +1825,13 @@ async def execute(
 
             traceback.print_exc()
 
-    if scene_results:
+    # =============================================
+    # 🔥 SAFE RETURN
+    # =============================================
 
-        if len(scene_results) == 1:
+    if best_result:
 
-            return scene_results[0]
-
-        return {
-
-            "type": "scene",
-
-            "blocks": scene_results
-        }
+        return best_result
 
     # =================================================
     # 🔥 TEXT FALLBACK
@@ -1782,7 +1870,7 @@ async def execute(
         )
     ):
 
-        fallback_result["content"] = (
+        fallback_content = (
 
             format_response_presentation(
 
@@ -1804,27 +1892,21 @@ async def execute(
 
             "assistant",
 
-            fallback_result[
-                "content"
-            ]
+            fallback_content
         )
 
         update_memory_summary(
 
             user_id,
 
-            fallback_result[
-                "content"
-            ]
+            fallback_content
         )
 
         extract_and_store_semantics(
 
             state,
 
-            fallback_result[
-                "content"
-            ],
+            fallback_content,
 
             "text"
         )
@@ -1833,10 +1915,7 @@ async def execute(
 
             "type": "text",
 
-            "data":
-                fallback_result[
-                    "content"
-                ]
+            "data": fallback_content
         }
 
     return {
