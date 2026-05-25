@@ -65,6 +65,137 @@ def _contains_any(
 
 
 # =====================================================
+# 🔥 SAFE DIALOG HELPERS
+# =====================================================
+
+def detect_meta_ai_behavior(
+    text: str
+):
+
+    t = (text or "").lower()
+
+    meta_words = [
+
+        "отвечай",
+        "будь умным",
+        "будь умнее",
+        "отвечай красиво",
+        "говори красиво",
+        "веди себя как",
+        "system prompt",
+        "prompt",
+        "ты ии",
+        "как ai",
+        "как chatgpt",
+        "roleplay assistant"
+    ]
+
+    return any(
+        x in t
+        for x in meta_words
+    )
+
+
+def stabilize_dialog_behavior(
+    cognition: dict
+):
+
+    # =================================================
+    # 🔥 HUMAN-FIRST RESPONSE
+    # =====================================================
+
+    if cognition.get(
+        "understands_user_goal"
+    ):
+
+        cognition[
+            "prefer_execution"
+        ] = True
+
+        cognition[
+            "assistant_should_follow"
+        ] = True
+
+        cognition[
+            "avoid_meta_behavior"
+        ] = True
+
+        cognition[
+            "avoid_personality_overflow"
+        ] = True
+
+        cognition[
+            "avoid_system_prompt_leakage"
+        ] = True
+
+        cognition[
+            "avoid_self_reference"
+        ] = True
+
+        cognition[
+            "avoid_ai_monologue"
+        ] = True
+
+        cognition[
+            "prefer_user_request_over_style"
+        ] = True
+
+        cognition[
+            "response_should_focus_on_goal"
+        ] = True
+
+        cognition[
+            "response_should_avoid_internal_language"
+        ] = True
+
+        cognition[
+            "response_should_avoid_fake_intelligence"
+        ] = True
+
+        cognition[
+            "response_should_avoid_meta_reasoning"
+        ] = True
+
+        cognition[
+            "response_should_stay_grounded"
+        ] = True
+
+        cognition[
+            "assistant_presence"
+        ] = min(
+            cognition.get(
+                "assistant_presence",
+                1.0
+            ),
+            0.72
+        )
+
+        cognition[
+            "assistant_restraint"
+        ] = max(
+            cognition.get(
+                "assistant_restraint",
+                0.0
+            ),
+            0.35
+        )
+
+        _decrease(
+            cognition,
+            "internal_noise",
+            0.2
+        )
+
+        _decrease(
+            cognition,
+            "signal_overload",
+            0.15
+        )
+
+    return cognition
+
+
+# =====================================================
 # 🔥 SIGNAL LIBRARY
 # =====================================================
 
@@ -636,10 +767,6 @@ def analyze_cognition(
         visual_memory
     )
 
-    # =================================================
-    # 🔥 APRIL RENDER ANALYSIS
-    # =====================================================
-
     render_analysis = detect_render_intent(
         t
     )
@@ -670,36 +797,57 @@ def analyze_cognition(
     capability_map = {
 
         "image_generation": True,
+
         "image_editing": True,
 
-        # 🔥 APRIL SPACE
         "renderer_space": True,
+
         "scene_rendering": True,
+
         "graph_rendering": True,
+
         "formula_rendering": True,
+
         "table_rendering": True,
+
         "primitive_scene_objects": True,
 
         "visual_guidance": True,
+
         "math_reasoning": True,
+
         "code_generation": True,
+
         "dialog_guidance": True,
+
         "semantic_analysis": True,
+
         "trajectory_support": True,
+
         "psychological_support": True,
+
         "screenshot_understanding": True,
 
         "internet_reasoning": True,
+
         "realtime_awareness": True,
+
         "transport_awareness": True,
+
         "geo_awareness": True,
+
         "travel_guidance": True,
+
         "human_support_reasoning": True,
 
         "capabilities_are_tools": True,
+
         "capabilities_are_not_goals": True,
+
         "capabilities_must_help_user": True,
+
         "capabilities_require_context": True,
+
         "capabilities_require_reasoning": True
     }
 
@@ -723,8 +871,8 @@ def analyze_cognition(
         "result_pressure": 0.0,
 
         "scene_stability": 0.7,
-        "internal_noise": 0.15,
-        "signal_overload": 0.1,
+        "internal_noise": 0.12,
+        "signal_overload": 0.08,
         "active_flow_strength": 0.0,
 
         "reduce_talking": False,
@@ -793,9 +941,32 @@ def analyze_cognition(
         "personality_state":
             personality_state,
 
-        "assistant_presence": 1.0,
+        # 🔥 calmer assistant
+        "assistant_presence": 0.82,
 
-        "assistant_restraint": 0.0,
+        "assistant_restraint": 0.25,
+
+        "avoid_meta_behavior": True,
+
+        "avoid_personality_overflow": True,
+
+        "avoid_system_prompt_leakage": True,
+
+        "avoid_self_reference": True,
+
+        "avoid_ai_monologue": True,
+
+        "prefer_user_request_over_style": True,
+
+        "response_should_focus_on_goal": True,
+
+        "response_should_avoid_internal_language": True,
+
+        "response_should_avoid_fake_intelligence": True,
+
+        "response_should_avoid_meta_reasoning": True,
+
+        "response_should_stay_grounded": True,
 
         "human_psychology_weight": 0.5,
 
@@ -851,6 +1022,34 @@ def analyze_cognition(
             "suggest_path": False
         }
     }
+
+    # =================================================
+    # 🔥 META BEHAVIOR SUPPRESSION
+    # =====================================================
+
+    if detect_meta_ai_behavior(t):
+
+        cognition[
+            "assistant_restraint"
+        ] = 0.85
+
+        cognition[
+            "reduce_talking"
+        ] = True
+
+        cognition[
+            "prefer_short_answer"
+        ] = True
+
+        cognition[
+            "response_depth"
+        ] = "focused"
+
+        _decrease(
+            cognition,
+            "internal_noise",
+            0.25
+        )
 
     # =================================================
     # 🔥 RENDERER PRIORITY
@@ -1451,6 +1650,14 @@ def analyze_cognition(
         ] = True
 
     # =================================================
+    # 🔥 FINAL HUMAN STABILIZATION
+    # =====================================================
+
+    cognition = stabilize_dialog_behavior(
+        cognition
+    )
+
+    # =================================================
     # 🔥 EXECUTION CONFIDENCE RESTORE
     # =====================================================
 
@@ -1487,15 +1694,14 @@ def analyze_cognition(
 
         cognition[
             "assistant_restraint"
-        ] = min(
+        ] = max(
             cognition.get(
                 "assistant_restraint",
                 0.0
             ),
-            0.25
+            0.35
         )
 
-        # 🔥 renderer restraint restore
         if cognition.get(
             "prefer_renderer"
         ):
@@ -1595,7 +1801,7 @@ def analyze_cognition(
 
     elif cognition[
         "wants_help"
-    ] >= 0.5:
+        ] >= 0.5:
 
         hypothesis[
             "direction"
