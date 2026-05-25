@@ -1,27 +1,51 @@
 # ===============================
-# 🔥 SAFE PATCH MODE (SCIENCE ROOM)
+# 🔥 APRIL SCIENCE ROOM
+# ===============================
+
+"""
+APRIL SCIENCE ROOM
+
+ROLE:
+- math capability;
+- graph capability;
+- formula capability;
+- scientific helper.
+
+NOT ROLE:
+- orchestration;
+- final authority;
+- fallback engine;
+- scene ownership;
+- continuation controller;
+- modality dictator.
+
+SCIENCE ROOM PRINCIPLES:
+
+1. calm participation
+2. no scene hijacking
+3. no hard fallback
+4. no aggressive routing
+5. no modality ownership
+6. April decides final scene
+"""
+
+# ===============================
+# 🔥 PATCH LOG
 # ===============================
 
 PATCH_LOG = []
 
 
 def safe_patch_log(msg):
+
     try:
-        print("SCIENCE PATCH:", msg)
+
+        print("SCIENCE:", msg)
+
         PATCH_LOG.append(msg)
+
     except:
         pass
-
-
-# 🔥 PATCH: контроль входа в комнату
-def patch_science_enter(text):
-    safe_patch_log(f"SCIENCE ENTER: {text[:50]}")
-    return None
-
-
-# 🔥 PATCH: будущая логика графиков
-def patch_science_future(*args, **kwargs):
-    return None
 
 
 # ===============================
@@ -29,217 +53,261 @@ def patch_science_future(*args, **kwargs):
 # ===============================
 
 import re
-import numpy as np
-import matplotlib.pyplot as plt
 import math
+import numpy as np
 
 from sympy import (
     symbols,
     sympify,
     solve,
-    solveset,
-    S,
     simplify
 )
 
-from storage import get_user_plan
 
-ADMIN_ID = 2016592532
+# ===============================
+# 🔥 HELPERS
+# ===============================
+
+def safe_lower(text):
+
+    try:
+        return str(text).lower()
+    except:
+        return ""
+
+
+def detect_code_signal(text):
+
+    t = safe_lower(text)
+
+    code_patterns = [
+
+        "import ",
+        "from ",
+        "class ",
+        "def ",
+        "async def",
+        "return ",
+        "print(",
+        "console.log",
+        "export default",
+        "function(",
+        "function ",
+        "const ",
+        "let ",
+        "var ",
+        "=>",
+        "</",
+        "/>",
+        "{",
+        "}",
+        "use client",
+        "typescript",
+        "javascript",
+        "python"
+    ]
+
+    hits = 0
+
+    for pattern in code_patterns:
+
+        if pattern in t:
+            hits += 1
+
+    return hits >= 2
+
+
+def detect_math_signal(text):
+
+    t = safe_lower(text)
+
+    signals = 0
+
+    math_patterns = [
+
+        "график",
+        "функция",
+        "формула",
+        "уравнение",
+        "реши",
+        "вычисли",
+
+        "y=",
+        "y =",
+        "f(x)",
+
+        "sin(",
+        "cos(",
+        "tan(",
+        "log(",
+
+        "x**",
+        "^2",
+        "^3"
+    ]
+
+    for pattern in math_patterns:
+
+        if pattern in t:
+            signals += 1
+
+    equation_pattern = re.search(
+
+        r"[0-9x]+\s*[\+\-\*/=]\s*[0-9x]+",
+
+        t
+    )
+
+    if equation_pattern:
+        signals += 1
+
+    return signals >= 1
+
+
+def detect_graph_intent(text):
+
+    t = safe_lower(text)
+
+    graph_words = [
+
+        "построй",
+        "покажи",
+        "визуально",
+        "нарисуй",
+        "график",
+        "как выглядит",
+        "plot",
+        "graph"
+    ]
+
+    hits = 0
+
+    for word in graph_words:
+
+        if word in t:
+            hits += 1
+
+    return hits >= 1
 
 
 # ===============================
-# 🔥 PATCH: СТАБИЛЬНЫЙ ГРАФИК
+# 🔥 SCIENCE ROOM
 # ===============================
-
-def patch_force_graph_from_memory(state, text):
-
-    try:
-
-        t = text.lower()
-
-        trigger_words = [
-            "построй",
-            "покажи",
-            "график",
-            "это"
-        ]
-
-        if not any(w in t for w in trigger_words):
-            return None
-
-        last = state.get("last_math")
-
-        if last and last.get("type") == "function":
-            return last.get("expr")
-
-    except Exception as e:
-
-        print("PATCH GRAPH ERROR:", e)
-
-    return None
-
-
-def apply_graph_patch_if_needed(state, text):
-
-    try:
-
-        expr = patch_force_graph_from_memory(
-            state,
-            text
-        )
-
-        return expr
-
-    except Exception as e:
-
-        print("PATCH APPLY ERROR:", e)
-
-        return None
-
 
 class ScienceRoom:
 
     name = "science"
 
     # ==========================================
-    # 🔥 STRICT SCIENCE ROUTING
+    # 🔥 CALM ROUTING
     # ==========================================
 
     def can_handle(self, text, context):
 
-        t = text.lower()
-
-        state = context.get("state", {})
+        t = safe_lower(text)
 
         # ======================================
-        # 🔥 CONTEXT GRAPH CONTINUATION
+        # 🔥 CODE PROTECTION
         # ======================================
 
-        if state.get("last_math"):
+        if detect_code_signal(t):
 
-            if any(
-                w in t
-                for w in [
-                    "покажи",
-                    "график",
-                    "построй",
-                    "реши",
-                    "вычисли"
-                ]
-            ):
-                return True
+            safe_patch_log(
+                "CODE DETECTED -> PASS"
+            )
+
+            return False
 
         # ======================================
-        # 🔥 STRICT GRAPH DETECTION
+        # 🔥 SEMANTIC HINT
         # ======================================
 
-        if "график" in t:
-            return True
-
-        if "y=" in t or "y =" in t:
-            return True
-
-        # ======================================
-        # 🔥 STRICT MATH WORDS
-        # ======================================
-
-        math_words = [
-
-            "уравнение",
-            "реши",
-            "вычисли",
-            "математика",
-            "функция",
-            "sin(",
-            "cos(",
-            "tan(",
-            "log("
-        ]
-
-        if any(w in t for w in math_words):
-            return True
-
-        # ======================================
-        # 🔥 STRICT EQUATION CHECK
-        # ======================================
-
-        equation_pattern = re.search(
-
-            r'[0-9]+\s*[\+\-\*/=]\s*[0-9x]+',
-
-            t
+        semantic = context.get(
+            "semantic",
+            {}
         )
 
-        if equation_pattern:
+        if semantic.get(
+            "room"
+        ) == "science":
+
+            return True
+
+        # ======================================
+        # 🔥 MATH DETECTION
+        # ======================================
+
+        if detect_math_signal(t):
+
             return True
 
         return False
 
     # ==========================================
-    # 🔥 STRICT EVALUATION
+    # 🔥 CALM EVALUATION
     # ==========================================
 
     def evaluate(self, text, context):
 
-        if context.get("task_type") == "math":
-            return 10.0
+        t = safe_lower(text)
 
-        return 0.0
+        score = 0.0
 
-    def split_into_tasks(self, text):
-
-        t = text.lower()
-
-        parts = re.split(
-            r'(sin\([^)]+\)|cos\([^)]+\)|[a-z0-9\+\-\*/\(\)]+\=[a-z0-9\+\-\*/\(\)]+)',
-            t
+        semantic = context.get(
+            "semantic",
+            {}
         )
 
-        tasks = []
+        cognition = context.get(
+            "cognition",
+            {}
+        )
 
-        for p in parts:
+        # ======================================
+        # 🔥 SEMANTIC SUPPORT
+        # ======================================
 
-            p = p.strip()
+        if semantic.get(
+            "room"
+        ) == "science":
 
-            if not p:
-                continue
+            score += 2.0
 
-            if "=" in p or "sin" in p or "cos" in p:
-                tasks.append(p)
+        # ======================================
+        # 🔥 GRAPH INTENT
+        # ======================================
 
-        return tasks
+        if detect_graph_intent(t):
 
-    def split_system(self, eq):
+            score += 2.0
 
-        parts = eq.split("=")
+        # ======================================
+        # 🔥 MATH SIGNAL
+        # ======================================
 
-        equations = []
+        if detect_math_signal(t):
 
-        if len(parts) == 3:
+            score += 1.5
 
-            equations.append(
-                parts[0] + "=" + parts[1]
-            )
+        # ======================================
+        # 🔥 VISUAL SUPPORT
+        # ======================================
 
-            equations.append(
-                parts[1] + "=" + parts[2]
-            )
+        if cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.5:
 
-        elif len(parts) > 3:
+            score += 0.5
 
-            for i in range(len(parts) - 1):
+        return score
 
-                equations.append(
-                    parts[i] + "=" + parts[i + 1]
-                )
-
-        else:
-
-            equations.append(eq)
-
-        return equations
+    # ==========================================
+    # 🔥 HANDLE
+    # ==========================================
 
     async def handle(
+
         self,
         user_id,
         text,
@@ -247,26 +315,74 @@ class ScienceRoom:
         run_with_typing
     ):
 
-        patch_science_enter(text)
+        t = safe_lower(text)
 
-        plan = get_user_plan(user_id)
-
-        if user_id == ADMIN_ID:
-            plan = "premium"
-
-        state = context.get("state", {})
-
-        self._last_state = state
-
-        expr = apply_graph_patch_if_needed(
-            state,
-            text
+        state = context.get(
+            "state",
+            {}
         )
 
+        safe_patch_log(
+            f"ENTER: {t[:80]}"
+        )
+
+        # ======================================
+        # 🔥 CODE SAFETY
+        # ======================================
+
+        if detect_code_signal(t):
+
+            safe_patch_log(
+                "CODE -> RELEASE"
+            )
+
+            return None
+
+        # ======================================
+        # 🔥 FUNCTION EXTRACTION
+        # ======================================
+
+        expr = self.extract_function(
+            t
+        )
+
+        # ======================================
+        # 🔥 CONTINUATION SUPPORT
+        # ======================================
+
         if not expr:
-            expr = self.extract_function(text)
+
+            last_math = state.get(
+                "last_math"
+            )
+
+            if last_math:
+
+                if detect_graph_intent(t):
+
+                    expr = last_math.get(
+                        "expr"
+                    )
+
+        # ======================================
+        # 🔥 FUNCTION RESULT
+        # ======================================
 
         if expr:
+
+            valid, error = (
+                self.validate_expression(
+                    expr
+                )
+            )
+
+            if not valid:
+
+                safe_patch_log(
+                    f"INVALID EXPR: {error}"
+                )
+
+                return None
 
             state["last_math"] = {
 
@@ -275,38 +391,9 @@ class ScienceRoom:
                 "expr": expr
             }
 
-        if not expr:
-
-            last = state.get("last_math")
-
-            if (
-                last
-                and last.get("type") == "function"
-            ):
-
-                expr = last.get("expr")
-
-        if expr:
-
-            valid, error = self.validate_expression(expr)
-
-            if not valid:
-
-                return {
-
-                    "type": "text",
-
-                    "data": (
-                        "Не получилось построить график — давай поправим 👇\n\n"
-                        f"Причина: {error}\n\n"
-                        "Попробуй так:\n"
-                        "y = sin(x)\n"
-                        "или\n"
-                        "y = x**2"
-                    )
-                }
-
-            state["fail_count"] = 0
+            safe_patch_log(
+                f"FUNCTION: {expr}"
+            )
 
             return {
 
@@ -317,199 +404,137 @@ class ScienceRoom:
                 "range": [-10, 10],
 
                 "meta": {
-                    "source": "frontend_function_renderer"
+
+                    "renderer":
+                        "graph_block",
+
+                    "source":
+                        "science_room"
                 }
             }
 
-        # ===== старая логика =====
+        # ======================================
+        # 🔥 EQUATION SOLVING
+        # ======================================
 
-        tasks = self.split_into_tasks(text)
+        solution = self.solve_equation(
+            t
+        )
 
-        equations = []
-        sin_tasks = []
-
-        for task in tasks:
-
-            if "=" in task:
-
-                equations.extend(
-                    self.split_system(task)
-                )
-
-            elif "sin" in task:
-
-                sin_tasks.append(task)
-
-        results = []
-        variables = {}
-
-        if len(equations) >= 2:
-
-            try:
-
-                x, y = symbols('x y')
-
-                for i in range(
-                    0,
-                    len(equations),
-                    2
-                ):
-
-                    if i + 1 >= len(equations):
-                        break
-
-                    eq1 = equations[i]
-                    eq2 = equations[i + 1]
-
-                    left1, right1 = eq1.split("=")
-                    left2, right2 = eq2.split("=")
-
-                    sol = solve(
-
-                        [
-                            sympify(left1) - sympify(right1),
-                            sympify(left2) - sympify(right2)
-                        ],
-
-                        (x, y)
-                    )
-
-                    variables["x"] = float(sol[x])
-                    variables["y"] = float(sol[y])
-
-                    results.append(
-                        f"📐 Система:\nx = {sol[x]}, y = {sol[y]}"
-                    )
-
-            except Exception as e:
-
-                print("🔥 SYSTEM ERROR:", e)
-
-        for eq in equations:
-
-            if len(equations) >= 2:
-                break
-
-            if (
-                eq.strip().startswith("y=")
-                or eq.strip().startswith("y =")
-            ):
-                continue
-
-            res = self.solve_equation(eq)
-
-            if res:
-
-                results.append(f"📐 {res}")
-
-                state["fail_count"] = 0
-
-                match = re.search(
-                    r'x\s*=\s*([\-0-9\.]+)',
-                    res
-                )
-
-                if match:
-
-                    variables["x"] = float(
-                        match.group(1)
-                    )
-
-        for s in sin_tasks:
-
-            try:
-
-                if "x" in variables:
-
-                    val = variables["x"]
-
-                    results.append(
-                        f"sin({val}) ≈ {round(math.sin(val), 4)}"
-                    )
-
-                    state["fail_count"] = 0
-
-                else:
-
-                    m = re.search(
-                        r'sin\(([\d\.]+)\)',
-                        s
-                    )
-
-                    if m:
-
-                        val = float(m.group(1))
-
-                        results.append(
-                            f"sin({val}) ≈ {round(math.sin(val), 4)}"
-                        )
-
-                        state["fail_count"] = 0
-
-            except Exception as e:
-
-                print("🔥 SIN ERROR:", e)
-
-        if results:
+        if solution:
 
             return {
 
                 "type": "text",
 
-                "data": "\n\n".join(results)
+                "data": solution
             }
 
-        state["fail_count"] = 0
+        # ======================================
+        # 🔥 CALM RELEASE
+        # ======================================
 
-        return {
+        safe_patch_log(
+            "NOT SCIENCE -> RELEASE"
+        )
 
-            "type": "text",
+        return None
 
-            "data":
-                "⚠️ ScienceRoom: задача не относится к математике или графикам"
-        }
+    # ==========================================
+    # 🔥 FUNCTION EXTRACTION
+    # ==========================================
 
     def extract_function(self, text):
 
         try:
 
-            text = text.lower().replace("^", "**")
-
-            text = text.replace("sin", "np.sin")
-            text = text.replace("cos", "np.cos")
-            text = text.replace("tan", "np.tan")
-            text = text.replace("log", "np.log")
-            text = text.replace("ln", "np.log")
-
-            match = re.search(
-                r"(y|f|s|c)\s*\(\s*[a-z]\s*\)\s*=\s*(.+)",
-                text
+            text = text.replace(
+                "^",
+                "**"
             )
 
-            if match:
-                return match.group(2).strip()
+            replacements = {
+
+                "sin": "np.sin",
+                "cos": "np.cos",
+                "tan": "np.tan",
+                "log": "np.log",
+                "ln": "np.log"
+            }
+
+            for old, new in replacements.items():
+
+                text = text.replace(
+                    old,
+                    new
+                )
+
+            # ==================================
+            # y = ...
+            # ==================================
 
             match = re.search(
+
                 r"y\s*=\s*(.+)",
+
                 text
             )
 
             if match:
-                return match.group(1).strip()
+
+                expr = match.group(1).strip()
+
+                return expr
+
+            # ==================================
+            # f(x)=...
+            # ==================================
+
+            match = re.search(
+
+                r"f\s*\(\s*x\s*\)\s*=\s*(.+)",
+
+                text
+            )
+
+            if match:
+
+                expr = match.group(1).strip()
+
+                return expr
 
             return None
 
-        except:
+        except Exception as e:
+
+            safe_patch_log(
+                f"EXTRACT ERROR: {e}"
+            )
+
             return None
 
-    def validate_expression(self, expr):
+    # ==========================================
+    # 🔥 VALIDATION
+    # ==========================================
+
+    def validate_expression(
+
+        self,
+        expr
+    ):
 
         try:
 
-            x = np.linspace(-10, 10, 10)
+            x = np.linspace(
+                -10,
+                10,
+                10
+            )
 
             eval(
+
                 expr,
+
                 {
                     "x": x,
                     "np": np,
@@ -523,262 +548,68 @@ class ScienceRoom:
 
             return False, str(e)
 
-    def build_graph(self, expr):
+    # ==========================================
+    # 🔥 EQUATION SOLVER
+    # ==========================================
+
+    def solve_equation(
+
+        self,
+        text
+    ):
 
         try:
 
-            x = np.linspace(-10, 10, 200)
-
-            y = eval(
-                expr,
-                {
-                    "x": x,
-                    "np": np,
-                    "__builtins__": {}
-                }
+            expr = text.replace(
+                " ",
+                ""
             )
 
-            plt.figure()
+            expr = re.sub(
 
-            plt.plot(x, y)
+                r"(\d)(x)",
 
-            plt.grid()
+                r"\1*\2",
 
-            path = "graph.png"
+                expr
+            )
 
-            plt.savefig(path)
+            x = symbols("x")
 
-            plt.close()
+            if "=" not in expr:
+                return None
 
-            return path
+            left, right = expr.split("=")
+
+            equation = simplify(
+
+                sympify(left)
+                - sympify(right)
+            )
+
+            solutions = solve(
+                equation,
+                x
+            )
+
+            if not solutions:
+                return None
+
+            return (
+
+                "📐 Решение:\n"
+                + "\n".join(
+                    [
+                        f"x = {s}"
+                        for s in solutions
+                    ]
+                )
+            )
 
         except Exception as e:
 
-            print("🔥 GRAPH ERROR:", e)
+            safe_patch_log(
+                f"SOLVE ERROR: {e}"
+            )
 
             return None
-
-    def solve_equation(self, text):
-
-        try:
-
-            text = text.lower()
-
-            text = text.replace("реши", "")
-
-            text = text.strip()
-
-            expr = text.replace(" ", "")
-
-            expr = re.sub(
-                r'(\d)(x)',
-                r'\1*\2',
-                expr
-            )
-
-            expr = re.sub(
-                r'(\d)\(',
-                r'\1*(',
-                expr
-            )
-
-            x = symbols('x')
-
-            if "=" in expr:
-
-                left, right = expr.split("=")
-
-                equation = simplify(
-                    sympify(left) - sympify(right)
-                )
-
-                solutions = solve(
-                    equation,
-                    x
-                )
-
-                if solutions:
-                    return f"x = {solutions[0]}"
-
-        except Exception as e:
-
-            print("🔥 SOLVE ERROR:", e)
-
-        return None
-
-
-# ===============================
-# 🔥 PATCH: ПЕРЕХВАТ extract_function
-# ===============================
-
-def patch_wrap_extract_function():
-
-    try:
-
-        original = ScienceRoom.extract_function
-
-        def wrapped(self, text):
-
-            try:
-
-                state = getattr(
-                    self,
-                    "_last_state",
-                    None
-                )
-
-                if state:
-
-                    patched = patch_force_graph_from_memory(
-                        state,
-                        text
-                    )
-
-                    if patched:
-                        return patched
-
-                return original(self, text)
-
-            except Exception as e:
-
-                print("WRAP ERROR:", e)
-
-                return original(self, text)
-
-        ScienceRoom.extract_function = wrapped
-
-        print("✅ extract_function patched")
-
-    except Exception as e:
-
-        print("PATCH WRAP ERROR:", e)
-
-
-# ===============================
-# 🔥 PATCH: AUTO MODIFY
-# ===============================
-
-def patch_auto_modify_expr(expr, text):
-
-    try:
-
-        if not expr:
-            return expr
-
-        t = text.lower()
-
-        if "круче" in t or "резче" in t:
-
-            match = re.search(
-                r"([\-]?\d+(\.\d+)?)\*x\*\*2",
-                expr
-            )
-
-            if match:
-
-                coef = float(match.group(1))
-
-                expr = expr.replace(
-                    match.group(1),
-                    str(coef * 2)
-                )
-
-        elif (
-            "плавнее" in t
-            or "менее крутой" in t
-        ):
-
-            match = re.search(
-                r"([\-]?\d+(\.\d+)?)\*x\*\*2",
-                expr
-            )
-
-            if match:
-
-                coef = float(match.group(1))
-
-                expr = expr.replace(
-                    match.group(1),
-                    str(coef / 2)
-                )
-
-        return expr
-
-    except Exception as e:
-
-        print("AUTO MODIFY ERROR:", e)
-
-        return expr
-
-
-def patch_wrap_extract_with_modify():
-
-    try:
-
-        original = ScienceRoom.extract_function
-
-        def wrapped(self, text):
-
-            try:
-
-                expr = original(self, text)
-
-                state = getattr(
-                    self,
-                    "_last_state",
-                    None
-                )
-
-                if state and expr:
-
-                    new_expr = patch_auto_modify_expr(
-                        expr,
-                        text
-                    )
-
-                    if new_expr != expr:
-
-                        state["last_math"] = {
-
-                            "type": "function",
-
-                            "expr": new_expr
-                        }
-
-                        print(
-                            "🔥 AUTO MODIFIED:",
-                            new_expr
-                        )
-
-                        return new_expr
-
-                return expr
-
-            except Exception as e:
-
-                print("WRAP MODIFY ERROR:", e)
-
-                return original(self, text)
-
-        ScienceRoom.extract_function = wrapped
-
-        print("✅ AUTO MODIFY PATCH ACTIVE")
-
-    except Exception as e:
-
-        print("PATCH INIT ERROR:", e)
-
-
-# ===============================
-# 🔥 PATCH ACTIVATION
-# ===============================
-
-try:
-
-    patch_wrap_extract_function()
-
-    patch_wrap_extract_with_modify()
-
-except Exception as e:
-
-    print("PATCH RUN ERROR:", e)
