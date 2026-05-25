@@ -1116,9 +1116,9 @@ def build_smart_presentation(
     # 🔥 LIGHT LINK BEAUTIFY
     # =====================================================
 
-    text = beautify_links(
-        text
-    )
+    #text = beautify_links(
+        #text
+    #)
 
     # =================================================
     # 🔥 RESPONSE MODES
