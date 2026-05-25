@@ -34,6 +34,107 @@ def contains_any(
 
 
 # =====================================================
+# 🔥 SAFE RENDER DETECTION
+# =====================================================
+
+def contains_math_expression(
+    text
+):
+
+    if not text:
+        return False
+
+    checks = [
+
+        "y=",
+        "y =",
+        "x**",
+        "^2",
+        "^3",
+        "sin(",
+        "cos(",
+        "tan(",
+        "log(",
+        "sqrt(",
+        "f(x)",
+        "f(x) ="
+    ]
+
+    return any(
+        x in text.lower()
+        for x in checks
+    )
+
+
+def looks_like_renderer_request(
+    text
+):
+
+    if not text:
+        return False
+
+    t = text.lower()
+
+    renderer_words = [
+
+        "график",
+        "графика",
+        "функция",
+        "формула",
+        "уравнение",
+        "таблица",
+        "сетка",
+        "layout",
+        "diagram",
+        "схема",
+        "line",
+        "стрелка"
+    ]
+
+    if contains_any(
+        t,
+        renderer_words
+    ):
+
+        return True
+
+    if contains_math_expression(
+        t
+    ):
+
+        return True
+
+    return False
+
+
+def is_explicit_image_generation(
+    text
+):
+
+    if not text:
+        return False
+
+    t = text.lower()
+
+    explicit_generation_words = [
+
+        "создай изображение",
+        "сгенерируй изображение",
+        "нарисуй картинку",
+        "создай картинку",
+        "draw image",
+        "generate image",
+        "создай арт",
+        "сделай арт"
+    ]
+
+    return contains_any(
+        t,
+        explicit_generation_words
+    )
+
+
+# =====================================================
 # 🔥 ANALYZE
 # =====================================================
 
@@ -738,21 +839,12 @@ def analyze(
         "стрелка"
     ]
 
-    explicit_generation_words = [
+    # =====================================================
+    # 🔥 EXPLICIT IMAGE GENERATION
+    # =====================================================
 
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "создай картинку",
-        "draw image",
-        "generate image",
-        "создай арт",
-        "сделай арт"
-    ]
-
-    if contains_any(
-        t,
-        explicit_generation_words
+    if is_explicit_image_generation(
+        t
     ):
 
         result[
@@ -770,6 +862,10 @@ def analyze(
         ] = "image"
 
         result[
+            "expected_result"
+        ] = "image"
+
+        result[
             "best_capability"
         ] = "image_generate"
 
@@ -777,9 +873,19 @@ def analyze(
             "renderer_priority"
         ] = 0.0
 
+        result[
+            "prefer_renderer"
+        ] = False
+
+    # =====================================================
+    # 🔥 GRAPH RENDER
+    # =====================================================
+
     elif contains_any(
         t,
         renderer_graph_words
+    ) or contains_math_expression(
+        t
     ):
 
         result["render_intent"] = True
@@ -815,6 +921,10 @@ def analyze(
         ] = "graph"
 
         result[
+            "expected_result"
+        ] = "graph"
+
+        result[
             "best_capability"
         ] = "science"
 
@@ -826,6 +936,10 @@ def analyze(
             ],
             0.92
         )
+
+    # =====================================================
+    # 🔥 FORMULA RENDER
+    # =====================================================
 
     elif contains_any(
         t,
@@ -865,8 +979,16 @@ def analyze(
         ] = "formula"
 
         result[
+            "expected_result"
+        ] = "formula"
+
+        result[
             "best_capability"
         ] = "science"
+
+    # =====================================================
+    # 🔥 TABLE RENDER
+    # =====================================================
 
     elif contains_any(
         t,
@@ -903,6 +1025,14 @@ def analyze(
             "expected_output_type"
         ] = "table"
 
+        result[
+            "expected_result"
+        ] = "table"
+
+    # =====================================================
+    # 🔥 DIAGRAM RENDER
+    # =====================================================
+
     elif contains_any(
         t,
         renderer_diagram_words
@@ -936,6 +1066,10 @@ def analyze(
 
         result[
             "expected_output_type"
+        ] = "diagram"
+
+        result[
+            "expected_result"
         ] = "diagram"
 
     # =====================================================
@@ -1018,9 +1152,17 @@ def analyze(
         "сделай изображение"
     ]
 
-    if contains_any(
-        t,
-        generation_words
+    if (
+
+        contains_any(
+            t,
+            generation_words
+        )
+
+        and not result.get(
+            "prefer_renderer"
+        )
+
     ):
 
         result[
@@ -1109,6 +1251,20 @@ def analyze(
     if flow_type:
 
         pressure += 0.08
+
+    # =====================================================
+    # 🔥 RENDERER PRIORITY BOOST
+    # =====================================================
+
+    if result.get(
+        "prefer_renderer"
+    ):
+
+        pressure += 0.35
+
+        result[
+            "execution_readiness"
+        ] += 0.35
 
     result["execution_pressure"] = clamp(
         pressure
@@ -1203,6 +1359,10 @@ def analyze(
 
         result[
             "visual_generation_needed"
+        ] = False
+
+        result[
+            "explicit_image_generation_only"
         ] = False
 
     # =====================================================
