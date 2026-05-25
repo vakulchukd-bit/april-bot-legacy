@@ -1,15 +1,52 @@
-# blocks/result_handler.py
+# =========================================================
+# 🧠 APRIL RESULT HANDLER
+# =========================================================
+
+"""
+APRIL RESULT HANDLER — SPACE RENDER TRANSPORT
+
+Этот модуль больше НЕ:
+- telegram-first renderer;
+- legacy string transport;
+- [[function:x]] bridge;
+- fallback visual serializer;
+- pseudo-render layer.
+
+Теперь это:
+- unified result transport;
+- renderer-space bridge;
+- web-first payload dispatcher;
+- structured multimodal carrier;
+- continuity-safe presentation layer.
+
+APRIL PRINCIPLES:
+
+1. renderer-first
+2. structured payloads before text
+3. no telegram authority
+4. no fake renderer strings
+5. no hidden fallback rendering
+6. pure scene transport
+7. provider-safe delivery
+"""
+
+# =========================================================
+# 🔥 IMPORTS
+# =========================================================
 
 from aiogram.types import BufferedInputFile
 
-from blocks.image_module import process as image_generate
+from blocks.image_module import (
+    process as image_generate
+)
+
 from blocks.canvas_formatter import (
     format_code_block,
     format_text
 )
 
 # =========================================================
-# 🔥 SAFE NORMALIZE HELPERS
+# 🔥 RENDER TYPES
 # =========================================================
 
 SAFE_RENDER_TYPES = [
@@ -22,9 +59,33 @@ SAFE_RENDER_TYPES = [
     "scene",
     "renderer",
     "blocks",
-    "hybrid"
+    "hybrid",
+    "layout",
+    "visual"
 ]
 
+# =========================================================
+# 🔥 PATCH LOG
+# =========================================================
+
+RESULT_PATCH_LOG = []
+
+
+def safe_result_log(msg):
+
+    try:
+
+        print("RESULT HANDLER:", msg)
+
+        RESULT_PATCH_LOG.append(msg)
+
+    except:
+        pass
+
+
+# =========================================================
+# 🔥 RENDER DETECTION
+# =========================================================
 
 def is_renderer_result(result):
 
@@ -38,23 +99,35 @@ def is_renderer_result(result):
         if r_type in SAFE_RENDER_TYPES:
             return True
 
-        if result.get("blocks"):
-            return True
+        structured_keys = [
 
-        if result.get("function"):
-            return True
+            "blocks",
+            "graph",
+            "function",
+            "formula",
+            "layout",
+            "scene"
+        ]
 
-        if result.get("graph"):
-            return True
+        for key in structured_keys:
+
+            if result.get(key) is not None:
+                return True
 
         return False
 
-    except:
+    except Exception as e:
+
+        print(
+            "RENDER DETECTION ERROR:",
+            e
+        )
+
         return False
 
 
 # =========================================================
-# 🔥 WEB PAYLOAD DETECTION
+# 🔥 WEB DETECTION
 # =========================================================
 
 def is_web_message(message):
@@ -64,43 +137,69 @@ def is_web_message(message):
         if message is None:
             return False
 
-        # =====================================================
-        # 🔥 APRIL WEB TRANSPORT
-        # =====================================================
+        web_flags = [
 
-        if getattr(message, "is_web", False):
-            return True
+            "is_web",
+            "web_mode",
+            "renderer_mode",
+            "april_web",
+            "space_mode"
+        ]
 
-        if getattr(message, "web_mode", False):
-            return True
+        for flag in web_flags:
 
-        if getattr(message, "renderer_mode", False):
-            return True
-
-        # =====================================================
-        # 🔥 FASTAPI / WEB OBJECT
-        # =====================================================
-
-        if hasattr(message, "client"):
-            return True
+            if getattr(message, flag, False):
+                return True
 
         if hasattr(message, "headers"):
             return True
 
+        if hasattr(message, "client"):
+            return True
+
+        if hasattr(message, "scope"):
+            return True
+
         return False
 
-    except:
+    except Exception as e:
+
+        print(
+            "WEB DETECTION ERROR:",
+            e
+        )
 
         return False
 
 
 # =========================================================
-# 🔥 WEB RENDER PAYLOAD
+# 🔥 NORMALIZATION
 # =========================================================
 
-def build_web_render_payload(
-    result
-):
+def normalize_result(result):
+
+    # =====================================================
+    # 🔥 EMPTY SAFETY
+    # =====================================================
+
+    if not result:
+
+        return {
+
+            "type": "text",
+
+            "content":
+                "⚠️ Пустой ответ"
+        }
+
+    if not isinstance(result, dict):
+
+        return {
+
+            "type": "text",
+
+            "content": str(result)
+        }
 
     result_type = result.get(
         "type",
@@ -108,23 +207,102 @@ def build_web_render_payload(
     )
 
     # =====================================================
-    # 🔥 GRAPH
+    # 🔥 TEXT
     # =====================================================
 
-    if result_type == "graph":
+    if result_type == "text":
 
         return {
 
-            "type": "graph",
+            "type": "text",
 
-            "graph":
-                result.get("graph"),
+            "content":
+
+                result.get("content")
+
+                or result.get("data")
+
+                or ""
+        }
+
+    # =====================================================
+    # 🔥 CODE
+    # =====================================================
+
+    if result_type == "code":
+
+        return {
+
+            "type": "code",
+
+            "code":
+                result.get("code", ""),
+
+            "file":
+                result.get("file"),
+
+            "block":
+                result.get("block")
+        }
+
+    # =====================================================
+    # 🔥 FILE
+    # =====================================================
+
+    if result_type == "file":
+
+        return {
+
+            "type": "file",
+
+            "data":
+                result.get("data"),
+
+            "filename":
+                result.get(
+                    "filename",
+                    "file.py"
+                )
+        }
+
+    # =====================================================
+    # 🔥 IMAGE
+    # =====================================================
+
+    if result_type == "image":
+
+        return {
+
+            "type": "image",
+
+            "data":
+                result.get("data"),
+
+            "caption":
+                result.get(
+                    "caption",
+                    ""
+                ),
 
             "meta":
                 result.get(
                     "meta",
                     {}
                 )
+        }
+
+    # =====================================================
+    # 🔥 IMAGE TASK
+    # =====================================================
+
+    if result_type == "image_task":
+
+        return {
+
+            "type": "image_task",
+
+            "prompt":
+                result.get("prompt")
         }
 
     # =====================================================
@@ -154,6 +332,29 @@ def build_web_render_payload(
         }
 
     # =====================================================
+    # 🔥 GRAPH
+    # =====================================================
+
+    if result_type == "graph":
+
+        return {
+
+            "type": "graph",
+
+            "graph":
+
+                result.get("graph")
+
+                or result.get("data"),
+
+            "meta":
+                result.get(
+                    "meta",
+                    {}
+                )
+        }
+
+    # =====================================================
     # 🔥 FORMULA
     # =====================================================
 
@@ -164,7 +365,10 @@ def build_web_render_payload(
             "type": "formula",
 
             "formula":
-                result.get("formula"),
+
+                result.get("formula")
+
+                or result.get("data"),
 
             "meta":
                 result.get(
@@ -196,226 +400,11 @@ def build_web_render_payload(
                 )
         }
 
-    return result
-
-
-# =========================================================
-# 🔥 NORMALIZE RESULT
-# =========================================================
-
-def normalize_result(result):
-
-    if not result or not isinstance(result, dict):
-
-        return {
-
-            "type": "text",
-
-            "content": "⚠️ Пустой ответ"
-        }
-
-    r_type = result.get("type")
-
-    # =====================================================
-    # 🔥 TEXT
-    # =====================================================
-
-    if r_type == "text":
-
-        content = (
-
-            result.get("content")
-
-            or result.get("data")
-
-            or ""
-        )
-
-        return {
-
-            "type": "text",
-
-            "content": content
-        }
-
-    # =====================================================
-    # 🔥 CODE
-    # =====================================================
-
-    if r_type == "code":
-
-        return {
-
-            "type": "code",
-
-            "code":
-                result.get("code") or "",
-
-            "file":
-                result.get("file"),
-
-            "block":
-                result.get("block")
-        }
-
-    # =====================================================
-    # 🔥 FILE
-    # =====================================================
-
-    if r_type == "file":
-
-        return {
-
-            "type": "file",
-
-            "data":
-                result.get("data"),
-
-            "filename":
-                result.get(
-                    "filename",
-                    "file.py"
-                )
-        }
-
-    # =====================================================
-    # 🔥 IMAGE
-    # =====================================================
-
-    if r_type == "image":
-
-        return {
-
-            "type": "image",
-
-            "data":
-                result.get("data"),
-
-            "caption":
-                result.get(
-                    "caption",
-                    ""
-                ),
-
-            "meta":
-                result.get(
-                    "meta",
-                    {}
-                )
-        }
-
-    # =====================================================
-    # 🔥 IMAGE TASK
-    # =====================================================
-
-    if r_type == "image_task":
-
-        return {
-
-            "type": "image_task",
-
-            "prompt":
-                result.get("prompt")
-        }
-
-    # =====================================================
-    # 🔥 FUNCTION RENDER
-    # =====================================================
-
-    if r_type == "function":
-
-        return {
-
-            "type": "function",
-
-            "function":
-                result.get("function"),
-
-            "range":
-                result.get(
-                    "range",
-                    [-10, 10]
-                ),
-
-            "meta":
-                result.get(
-                    "meta",
-                    {}
-                )
-        }
-
-    # =====================================================
-    # 🔥 GRAPH RENDER
-    # =====================================================
-
-    if r_type == "graph":
-
-        return {
-
-            "type": "graph",
-
-            "graph":
-                result.get("graph")
-
-                or result.get("data"),
-
-            "meta":
-                result.get(
-                    "meta",
-                    {}
-                )
-        }
-
-    # =====================================================
-    # 🔥 FORMULA RENDER
-    # =====================================================
-
-    if r_type == "formula":
-
-        return {
-
-            "type": "formula",
-
-            "formula":
-                result.get("formula")
-
-                or result.get("data"),
-
-            "meta":
-                result.get(
-                    "meta",
-                    {}
-                )
-        }
-
-    # =====================================================
-    # 🔥 BLOCKS
-    # =====================================================
-
-    if r_type == "blocks":
-
-        return {
-
-            "type": "blocks",
-
-            "blocks":
-                result.get(
-                    "blocks",
-                    []
-                ),
-
-            "meta":
-                result.get(
-                    "meta",
-                    {}
-                )
-        }
-
     # =====================================================
     # 🔥 HYBRID
     # =====================================================
 
-    if r_type == "hybrid":
+    if result_type == "hybrid":
 
         return {
 
@@ -427,15 +416,21 @@ def normalize_result(result):
                     ""
                 ),
 
+            "blocks":
+                result.get(
+                    "blocks",
+                    []
+                ),
+
             "image":
                 result.get(
                     "image"
                 ),
 
-            "blocks":
+            "meta":
                 result.get(
-                    "blocks",
-                    []
+                    "meta",
+                    {}
                 )
         }
 
@@ -443,7 +438,7 @@ def normalize_result(result):
     # 🔥 ERROR
     # =====================================================
 
-    if r_type == "error":
+    if result_type == "error":
 
         return {
 
@@ -459,24 +454,23 @@ def normalize_result(result):
         }
 
     # =====================================================
-    # 🔥 STRUCTURED RENDERER PROTECTION
+    # 🔥 STRUCTURED PASS
     # =====================================================
 
     if is_renderer_result(result):
 
-        print(
-            "🧠 RESULT HANDLER: STRUCTURED RENDER DETECTED"
+        safe_result_log(
+            "STRUCTURED RENDER PASSTHROUGH"
         )
 
         return result
 
     # =====================================================
-    # 🔥 SAFE FALLBACK
+    # 🔥 SAFE TEXT FALLBACK
     # =====================================================
 
-    print(
-        "⚠️ RESULT FALLBACK:",
-        r_type
+    safe_result_log(
+        f"SAFE FALLBACK: {result_type}"
     )
 
     return {
@@ -489,8 +483,158 @@ def normalize_result(result):
 
             or result.get("data")
 
-            or "⚠️ Не удалось обработать ответ"
+            or "⚠️ Не удалось обработать результат"
     }
+
+
+# =========================================================
+# 🔥 WEB PAYLOAD BUILDER
+# =========================================================
+
+def build_web_payload(result):
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    # =====================================================
+    # 🔥 PURE STRUCTURED PAYLOADS
+    # =====================================================
+
+    if result_type in [
+
+        "function",
+        "graph",
+        "formula",
+        "blocks",
+        "scene",
+        "diagram",
+        "table",
+        "layout",
+        "renderer",
+        "visual"
+    ]:
+
+        safe_result_log(
+            f"WEB STRUCTURED PAYLOAD: {result_type}"
+        )
+
+        return result
+
+    # =====================================================
+    # 🔥 HYBRID
+    # =====================================================
+
+    if result_type == "hybrid":
+
+        return result
+
+    # =====================================================
+    # 🔥 IMAGE
+    # =====================================================
+
+    if result_type == "image":
+
+        return result
+
+    # =====================================================
+    # 🔥 TEXT
+    # =====================================================
+
+    if result_type == "text":
+
+        return {
+
+            "type": "text",
+
+            "content":
+                result.get(
+                    "content",
+                    ""
+                )
+        }
+
+    # =====================================================
+    # 🔥 ERROR
+    # =====================================================
+
+    if result_type == "error":
+
+        return result
+
+    return result
+
+
+# =========================================================
+# 🔥 TELEGRAM TEXT SAFETY
+# =========================================================
+
+def build_telegram_visual_comment(
+    result
+):
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    # =====================================================
+    # 🔥 FUNCTION
+    # =====================================================
+
+    if result_type == "function":
+
+        expr = result.get(
+            "function",
+            ""
+        )
+
+        return (
+            "📈 Функция подготовлена:\n\n"
+            f"{expr}\n\n"
+            "Renderer payload отправлен."
+        )
+
+    # =====================================================
+    # 🔥 GRAPH
+    # =====================================================
+
+    if result_type == "graph":
+
+        return (
+            "📊 Графическая сцена подготовлена."
+        )
+
+    # =====================================================
+    # 🔥 FORMULA
+    # =====================================================
+
+    if result_type == "formula":
+
+        formula = result.get(
+            "formula",
+            ""
+        )
+
+        return (
+            "🧠 Формула подготовлена:\n\n"
+            f"{formula}"
+        )
+
+    # =====================================================
+    # 🔥 BLOCKS
+    # =====================================================
+
+    if result_type == "blocks":
+
+        return (
+            "🧩 Пространственная сцена подготовлена."
+        )
+
+    return (
+        "🧠 Structured payload generated."
+    )
 
 
 # =========================================================
@@ -503,7 +647,9 @@ async def send_result(
     keyboard=None
 ):
 
-    result = normalize_result(result)
+    result = normalize_result(
+        result
+    )
 
     result_type = result.get(
         "type",
@@ -511,47 +657,25 @@ async def send_result(
     )
 
     # =====================================================
-    # 🔥 APRIL WEB MODE
+    # 🔥 WEB MODE
     # =====================================================
 
     if is_web_message(message):
 
-        print(
-            "🧠 RESULT HANDLER: WEB MODE"
+        safe_result_log(
+            "WEB MODE ACTIVE"
         )
 
-        # =====================================================
-        # 🔥 STRUCTURED RENDERER RETURN
-        # =====================================================
-
-        if result_type in [
-
-            "graph",
-            "function",
-            "formula",
-            "blocks"
-        ]:
-
-            print(
-                f"🧠 WEB RENDER RETURN: {result_type}"
-            )
-
-            return build_web_render_payload(
-                result
-            )
-
-        # =====================================================
-        # 🔥 TEXT WEB RETURN
-        # =====================================================
-
-        return result
+        return build_web_payload(
+            result
+        )
 
     # =====================================================
     # 🔥 TELEGRAM MODE
     # =====================================================
 
-    print(
-        "🧠 RESULT HANDLER: TELEGRAM MODE"
+    safe_result_log(
+        "TELEGRAM PASSIVE MODE"
     )
 
     # =====================================================
@@ -561,7 +685,11 @@ async def send_result(
     if result_type == "text":
 
         content = format_text(
-            result.get("content")
+
+            result.get(
+                "content",
+                ""
+            )
         )
 
         if not content:
@@ -575,11 +703,13 @@ async def send_result(
             reply_markup=keyboard
         )
 
+        return
+
     # =====================================================
     # 🔥 CODE
     # =====================================================
 
-    elif result_type == "code":
+    if result_type == "code":
 
         code = format_code_block(
 
@@ -597,26 +727,27 @@ async def send_result(
             reply_markup=keyboard
         )
 
+        return
+
     # =====================================================
     # 🔥 FILE
     # =====================================================
 
-    elif result_type == "file":
+    if result_type == "file":
 
-        code = result.get("data") or ""
+        code = result.get(
+            "data",
+            ""
+        )
 
         filename = result.get(
             "filename",
             "file.py"
         )
 
-        code = format_code_block(
-            code,
-            filename,
-            None
+        file_bytes = code.encode(
+            "utf-8"
         )
-
-        file_bytes = code.encode("utf-8")
 
         await message.answer_document(
 
@@ -628,11 +759,21 @@ async def send_result(
             caption=f"📁 {filename}"
         )
 
+        return
+
     # =====================================================
     # 🔥 IMAGE
     # =====================================================
 
-    elif result_type == "image":
+    if result_type == "image":
+
+        if not result.get("data"):
+
+            await message.answer(
+                "⚠️ Нет изображения"
+            )
+
+            return
 
         await message.answer_photo(
 
@@ -649,62 +790,108 @@ async def send_result(
             reply_markup=keyboard
         )
 
+        return
+
     # =====================================================
-    # 🔥 FUNCTION
+    # 🔥 STRUCTURED VISUALS
     # =====================================================
 
-    elif result_type == "function":
+    if result_type in [
 
-        function_expr = result.get(
-            "function"
+        "function",
+        "graph",
+        "formula",
+        "blocks",
+        "scene",
+        "diagram",
+        "table",
+        "layout"
+    ]:
+
+        # =================================================
+        # 🔥 NO LEGACY [[FUNCTION:X]]
+        # =================================================
+
+        comment = build_telegram_visual_comment(
+            result
         )
 
         await message.answer(
 
-            f"[[function:{function_expr}]]",
+            comment,
 
             reply_markup=keyboard
         )
 
-    # =====================================================
-    # 🔥 GRAPH
-    # =====================================================
-
-    elif result_type == "graph":
-
-        graph_data = result.get(
-            "graph"
-        )
-
-        await message.answer(
-
-            f"[[graph:{graph_data}]]",
-
-            reply_markup=keyboard
-        )
+        return
 
     # =====================================================
-    # 🔥 FORMULA
+    # 🔥 IMAGE TASK
     # =====================================================
 
-    elif result_type == "formula":
+    if result_type == "image_task":
 
-        formula = result.get(
-            "formula"
-        )
+        try:
 
-        await message.answer(
+            await message.answer(
+                "🎨 Создаю изображение..."
+            )
 
-            f"[[formula:{formula}]]",
+            user_id = message.from_user.id
 
-            reply_markup=keyboard
-        )
+            state = {}
+
+            result_img = await image_generate(
+
+                user_id,
+
+                result["prompt"],
+
+                state
+            )
+
+            if (
+
+                not result_img
+                or result_img.get("type") != "image"
+            ):
+
+                await message.answer(
+                    "⚠️ Не удалось создать изображение"
+                )
+
+                return
+
+            await message.answer_photo(
+
+                BufferedInputFile(
+                    result_img["data"],
+                    filename="image.png"
+                ),
+
+                caption="🖼 Готово"
+            )
+
+            return
+
+        except Exception as e:
+
+            print(
+                "IMAGE TASK ERROR:",
+                e
+            )
+
+            await message.answer(
+                "⚠️ Ошибка генерации изображения"
+            )
+
+            return
 
     # =====================================================
     # 🔥 ERROR
     # =====================================================
 
-    elif result_type == "error":
+    if result_type == "error":
 
         await message.answer(
 
@@ -713,20 +900,19 @@ async def send_result(
             or "⚠️ Ошибка"
         )
 
+        return
+
     # =====================================================
-    # 🔥 FINAL UNKNOWN FALLBACK
+    # 🔥 FINAL FALLBACK
     # =====================================================
 
-    else:
+    safe_result_log(
+        f"UNKNOWN TYPE: {result_type}"
+    )
 
-        print(
-            "⚠️ UNKNOWN RESULT TYPE:",
-            result_type
-        )
+    await message.answer(
 
-        await message.answer(
+        "⚠️ Неизвестный тип результата",
 
-            "⚠️ Неизвестный тип результата",
-
-            reply_markup=keyboard
-        )
+        reply_markup=keyboard
+    )
