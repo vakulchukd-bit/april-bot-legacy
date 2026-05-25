@@ -1034,17 +1034,23 @@ def beautify_links(
         # 🔥 SAFE LINK WRAPPING
         # =====================================================
 
+        clean = clean_url(url)
+
+        if not clean:
+            continue
+
         card = build_link_card(
-            url
+            clean
         )
 
-        wrapped = (
-            f"{card} ({url})"
+        block = (
+            f"{card}\n"
+            f"{clean}"
         )
 
         text = text.replace(
             url,
-            wrapped
+            block
         )
 
     return text
