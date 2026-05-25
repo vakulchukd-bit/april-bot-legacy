@@ -136,10 +136,6 @@ class ImageGenerateRoom(Room):
                 return True
 
         # =================================================
-        # 🔥 APRIL VISUAL AUTHORITY
-        # =================================================
-
-        # =================================================
         # 🔥 EXPLICIT IMAGE GENERATION ONLY
         # =================================================
 
@@ -455,12 +451,27 @@ class SafeScienceRoom(ScienceRoom):
 
     name = "science"
 
+    # =================================================
+    # 🔥 APRIL SCIENCE DETECTION
+    # =====================================================
+
     def can_handle(self, text, context):
 
         semantic = context.get(
             "semantic",
             {}
         )
+
+        cognition = context.get(
+            "cognition",
+            {}
+        )
+
+        t = (text or "").lower()
+
+        # =============================================
+        # 🔥 SEMANTIC LOCK
+        # =============================================
 
         if semantic.get("room") == self.name:
 
@@ -469,17 +480,146 @@ class SafeScienceRoom(ScienceRoom):
                 0.0
             )
 
-            if confidence >= 0.6:
+            if confidence >= 0.45:
+                return True
+
+        # =============================================
+        # 🔥 RENDER INTENT
+        # =============================================
+
+        if semantic.get(
+            "render_intent"
+        ):
+
+            return True
+
+        # =============================================
+        # 🔥 FUNCTION DETECTION
+        # =============================================
+
+        math_patterns = [
+
+            "y=",
+            "y =",
+            "f(x)",
+            "sin(",
+            "cos(",
+            "tan(",
+            "log(",
+            "sqrt(",
+            "график",
+            "функция",
+            "парабола"
+        ]
+
+        if any(
+            x in t
+            for x in math_patterns
+        ):
+
+            return True
+
+        # =============================================
+        # 🔥 EXECUTION PRESSURE
+        # =============================================
+
+        if cognition.get(
+            "wants_result",
+            0.0
+        ) >= 0.7:
+
+            if any(
+                x in t
+                for x in [
+
+                    "=",
+                    "x",
+                    "y",
+                    "^",
+                    "**"
+                ]
+            ):
+
                 return True
 
         return False
 
+    # =================================================
+    # 🔥 APRIL ROOM SCORE
+    # =====================================================
+
     def evaluate(self, text, context):
 
-        return super().evaluate(
-            text,
-            context
+        semantic = context.get(
+            "semantic",
+            {}
         )
+
+        cognition = context.get(
+            "cognition",
+            {}
+        )
+
+        t = (text or "").lower()
+
+        score = 0.0
+
+        # =============================================
+        # 🔥 RENDER INTENT PRIORITY
+        # =============================================
+
+        if semantic.get(
+            "render_intent"
+        ):
+
+            score += 5.0
+
+        # =============================================
+        # 🔥 FUNCTION DETECTION
+        # =============================================
+
+        if any(
+            x in t
+            for x in [
+
+                "график",
+                "функция",
+                "y=",
+                "y =",
+                "sin(",
+                "cos(",
+                "tan(",
+                "x**",
+                "^2",
+                "^3"
+            ]
+        ):
+
+            score += 4.0
+
+        # =============================================
+        # 🔥 EXECUTION PRESSURE
+        # =============================================
+
+        if cognition.get(
+            "wants_result",
+            0.0
+        ) >= 0.6:
+
+            score += 1.5
+
+        # =============================================
+        # 🔥 VISUAL INTENT
+        # =============================================
+
+        if cognition.get(
+            "wants_visual",
+            0.0
+        ) >= 0.4:
+
+            score += 1.0
+
+        return score
 
 
 # =====================================================
@@ -502,6 +642,44 @@ class TextRoom(Room):
             {}
         )
 
+        semantic = context.get(
+            "semantic",
+            {}
+        )
+
+        t = (text or "").lower()
+
+        # =================================================
+        # 🔥 HARD GRAPH SUPPRESSION
+        # =====================================================
+
+        graph_words = [
+
+            "график",
+            "функция",
+            "y=",
+            "y =",
+            "sin(",
+            "cos(",
+            "tan(",
+            "x**",
+            "^2",
+            "^3"
+        ]
+
+        if any(
+            x in t
+            for x in graph_words
+        ):
+
+            score -= 5.0
+
+        if semantic.get(
+            "render_intent"
+        ):
+
+            score -= 5.0
+
         if cognition.get(
             "prefer_execution"
         ):
@@ -521,7 +699,7 @@ class TextRoom(Room):
 
             score -= 0.03
 
-        return max(score, 0.01)
+        return max(score, -10.0)
 
     async def handle(self, user_id, text, context, run):
 
@@ -533,16 +711,6 @@ class TextRoom(Room):
             "cognition",
             {}
         )
-
-        if (
-            cognition.get("prefer_visual")
-            and cognition.get("wants_result", 0.0) >= 0.6
-        ):
-
-            return {
-                "type": "image_task",
-                "prompt": text
-            }
 
         text_input = text
 
@@ -581,8 +749,8 @@ class TextRoom(Room):
 
 ROOMS = [
 
+    SafeScienceRoom(),
     ImageEditRoom(),
     ImageGenerateRoom(),
-    SafeScienceRoom(),
     TextRoom(),
 ]
