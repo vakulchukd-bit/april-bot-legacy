@@ -1,14 +1,31 @@
 from blocks.room_protocol import Room
 
-# === IMAGE FIRST 🔥 ===
-from blocks.image_engine import generate as image_generate
-from blocks.image_engine import edit as image_edit_engine
-from blocks.image_system import analyze_image
+# =====================================================
+# 🔥 IMAGE
+# =====================================================
 
-# === SCIENCE ===
-from blocks.science_room import ScienceRoom
+from blocks.image_engine import (
+    generate as image_generate
+)
+
+from blocks.image_engine import (
+    edit as image_edit_engine
+)
+
+from blocks.image_system import (
+    analyze_image
+)
+
+# =====================================================
+# 🔥 SCIENCE
+# =====================================================
+
+from blocks.science_room import (
+    ScienceRoom
+)
 
 import time
+import re
 
 
 # =====================================================
@@ -17,322 +34,247 @@ import time
 
 def is_repeat_generation_blocked(state):
 
-    ts = state.get("last_image_time")
+    ts = state.get(
+        "last_image_time"
+    )
 
     if not ts:
         return False
 
-    return (time.time() - ts) < 8
+    return (
+        time.time() - ts
+    ) < 8
 
 
 def mark_generation_time(state):
 
-    state["last_image_time"] = time.time()
+    state[
+        "last_image_time"
+    ] = time.time()
 
 
 def is_image_locked(state):
 
-    return state.get("image_locked") is True
+    return (
+        state.get(
+            "image_locked"
+        ) is True
+    )
 
 
 def unlock_image(state):
 
-    state["image_locked"] = False
+    state[
+        "image_locked"
+    ] = False
 
 
 # =====================================================
-# 🔥 COGNITIVE HELPERS
+# 🔥 APRIL MODALITY UNDERSTANDING
 # =====================================================
 
-def wants_visual_support(context):
+def normalize_text(text):
 
-    cognition = context.get(
-        "cognition",
-        {}
-    )
+    return (
+        text or ""
+    ).lower().strip()
 
-    if cognition.get(
-        "prefer_visual"
+
+def detect_visual_math_signal(text):
+
+    t = normalize_text(text)
+
+    patterns = [
+
+        "график",
+        "функция",
+        "построй",
+        "парабола",
+        "синус",
+        "косинус",
+        "sin(",
+        "cos(",
+        "tan(",
+        "y=",
+        "y =",
+        "f(x)",
+        "f(x) =",
+        "x**",
+        "^2",
+        "^3"
+    ]
+
+    if any(
+        x in t
+        for x in patterns
     ):
+
         return True
 
-    if cognition.get(
-        "needs_examples"
-    ):
+    equation = re.search(
+
+        r"[a-z0-9]+\s*=\s*.+",
+
+        t
+    )
+
+    if equation:
         return True
 
     return False
 
 
-def wants_execution(context):
+def detect_code_signal(text):
 
-    cognition = context.get(
-        "cognition",
-        {}
+    t = text or ""
+
+    code_patterns = [
+
+        "import ",
+        "from ",
+        "export default",
+        "const ",
+        "let ",
+        "var ",
+        "function(",
+        "=>",
+        "return (",
+        "className=",
+        "</",
+        "/>",
+        "```",
+        "async def",
+        "await ",
+        "use client",
+        "props",
+        "typescript",
+        "javascript",
+        "python",
+        ".map(",
+        "if (",
+        "{",
+        "};"
+    ]
+
+    hits = 0
+
+    for p in code_patterns:
+
+        if p in t:
+            hits += 1
+
+    return hits >= 2
+
+
+def detect_link_signal(text):
+
+    t = normalize_text(text)
+
+    patterns = [
+
+        "ссылка",
+        "url",
+        "линк",
+        "website",
+        "http://",
+        "https://"
+    ]
+
+    return any(
+        x in t
+        for x in patterns
     )
 
-    semantic = context.get(
-        "semantic",
-        {}
+
+def detect_image_signal(text):
+
+    t = normalize_text(text)
+
+    patterns = [
+
+        "нарисуй",
+        "создай изображение",
+        "сгенерируй",
+        "арт",
+        "draw",
+        "generate image"
+    ]
+
+    return any(
+        x in t
+        for x in patterns
     )
-
-    if cognition.get(
-        "prefer_execution"
-    ):
-        return True
-
-    if semantic.get(
-        "should_execute"
-    ):
-        return True
-
-    return False
-
-
-def dialog_overextended(context):
-
-    cognition = context.get(
-        "cognition",
-        {}
-    )
-
-    if cognition.get(
-        "dialog_fatigue",
-        0.0
-    ) >= 0.7:
-        return True
-
-    return False
 
 
 # =====================================================
-# 🎨 IMAGE GENERATE
+# 🔥 IMAGE GENERATE
 # =====================================================
 
 class ImageGenerateRoom(Room):
 
     name = "image_generate"
 
-    def can_handle(self, text, context):
+    def can_handle(
+        self,
+        text,
+        context
+    ):
 
-        semantic = context.get(
-            "semantic",
-            {}
+        return detect_image_signal(
+            text
         )
 
-        cognition = context.get(
-            "cognition",
-            {}
-        )
+    def evaluate(
+        self,
+        text,
+        context
+    ):
 
-        if semantic.get("room") == self.name:
-
-            confidence = semantic.get(
-                "confidence",
-                0.0
-            )
-
-            if confidence >= 0.6:
-                return True
-
-        # =================================================
-        # 🔥 EXPLICIT IMAGE GENERATION ONLY
-        # =================================================
-
-        explicit_generation_words = [
-
-            "нарисуй",
-            "создай изображение",
-            "сгенерируй изображение",
-            "сделай арт",
-            "создай арт",
-            "draw",
-            "generate image"
-        ]
-
-        if any(
-            w in text.lower()
-            for w in explicit_generation_words
+        if detect_image_signal(
+            text
         ):
 
-            return True
+            return 0.92
 
-        return False
+        return 0.0
 
-    def evaluate(self, text, context):
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
 
-        score = super().evaluate(
-            text,
-            context
-        )
-
-        cognition = context.get(
-            "cognition",
+        state = context.get(
+            "state",
             {}
         )
 
-        semantic = context.get(
-            "semantic",
-            {}
-        )
-
-        if cognition.get(
-            "prefer_visual"
+        if is_image_locked(
+            state
         ):
-
-            score += 0.3
-
-        if cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.55:
-
-            score += 0.5
-
-        if semantic.get(
-            "visual_obligation"
-        ):
-
-            score += 1.0
-
-        return score
-
-    async def handle(self, user_id, text, context, run):
-
-        state = context.get("state", {})
-
-        semantic = context.get(
-            "semantic",
-            {}
-        )
-
-        reasoning = context.get(
-            "reasoning",
-            {}
-        )
-
-        cognition = context.get(
-            "cognition",
-            {}
-        )
-
-        t = text.lower().strip()
-
-        if is_image_locked(state):
 
             return {
+
                 "type": "text",
+
                 "data":
                     "⏳ Уже генерирую изображение..."
             }
 
-        # =================================================
-        # 🔥 CONTINUATION SUPPORT
-        # =================================================
-
-        if (
-            reasoning.get(
-                "continuation_target"
-            ) == "image"
-            and len(t) <= 50
-        ):
-
-            last_prompt = state.get(
-                "last_image_prompt"
-            )
-
-            if last_prompt:
-
-                continuation_words = [
-                    "да",
-                    "ага",
-                    "ок",
-                    "окей",
-                    "давай",
-                    "подходит",
-                    "ещё",
-                    "продолжай",
-                    "сделай",
-                    "создай",
-                    "жду"
-                ]
-
-                if any(
-                    w in t
-                    for w in continuation_words
-                ):
-
-                    if is_repeat_generation_blocked(
-                        state
-                    ):
-
-                        return {
-                            "type": "text",
-                            "data":
-                                "⏳ Не дублирую генерацию"
-                        }
-
-                    text = last_prompt
-
-        # =================================================
-        # 🔥 APRIL EXECUTION AUTHORITY
-        # =================================================
-
-        should_execute = False
-
-        if semantic.get(
-            "should_execute"
-        ):
-
-            should_execute = True
-
-        if cognition.get(
-            "prefer_visual"
-        ):
-
-            should_execute = True
-
-        if cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.55:
-
-            should_execute = True
-
-        if cognition.get(
-            "wants_result",
-            0.0
-        ) >= 0.7:
-
-            should_execute = True
-
-        if semantic.get(
-            "visual_obligation"
-        ):
-
-            should_execute = True
-
-        if reasoning.get(
-            "continuation_target"
-        ) == "image":
-
-            should_execute = True
-
-        if not should_execute:
-
-            return {
-                "type": "text",
-                "data":
-                    "⚠️ Недостаточно execution intent"
-            }
-
-        state["image_locked"] = True
+        state[
+            "image_locked"
+        ] = True
 
         try:
 
             result = await run(
+
                 context["chat_id"],
+
                 image_generate(
+
                     user_id,
                     text,
                     state
@@ -341,70 +283,104 @@ class ImageGenerateRoom(Room):
 
             if (
                 result
-                and result.get("type") == "image"
+                and result.get(
+                    "type"
+                ) == "image"
             ):
 
-                state["last_image_prompt"] = text
+                state[
+                    "last_image_prompt"
+                ] = text
 
-                mark_generation_time(state)
+                mark_generation_time(
+                    state
+                )
 
                 return result
 
             return {
+
                 "type": "error",
+
                 "data":
                     "🎨 Ошибка генерации"
             }
 
         finally:
 
-            unlock_image(state)
+            unlock_image(
+                state
+            )
 
 
 # =====================================================
-# 🖼 IMAGE EDIT
+# 🔥 IMAGE EDIT
 # =====================================================
 
 class ImageEditRoom(Room):
 
     name = "image_edit"
 
-    def can_handle(self, text, context):
+    def can_handle(
+        self,
+        text,
+        context
+    ):
 
         semantic = context.get(
             "semantic",
             {}
         )
 
-        if semantic.get("room") == self.name:
+        return semantic.get(
+            "room"
+        ) == self.name
 
-            confidence = semantic.get(
-                "confidence",
-                0.0
-            )
+    def evaluate(
+        self,
+        text,
+        context
+    ):
 
-            if confidence >= 0.6:
-                return True
-
-        return False
-
-    def evaluate(self, text, context):
-
-        return super().evaluate(
-            text,
-            context
+        semantic = context.get(
+            "semantic",
+            {}
         )
 
-    async def handle(self, user_id, text, context, run):
+        if semantic.get(
+            "room"
+        ) == self.name:
 
-        state = context.get("state", {})
+            return 0.8
 
-        ctx = state.get("image_context")
+        return 0.0
 
-        if not ctx or not ctx.get("path"):
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        state = context.get(
+            "state",
+            {}
+        )
+
+        ctx = state.get(
+            "image_context"
+        )
+
+        if (
+            not ctx
+            or not ctx.get("path")
+        ):
 
             return {
+
                 "type": "text",
+
                 "data":
                     "⚠️ Нет изображения"
             }
@@ -412,6 +388,7 @@ class ImageEditRoom(Room):
         try:
 
             hint = await analyze_image(
+
                 ctx["path"],
                 state
             )
@@ -421,6 +398,7 @@ class ImageEditRoom(Room):
             hint = "изображение"
 
         prompt = (
+
             hint
             + ". "
             + text
@@ -431,8 +409,11 @@ class ImageEditRoom(Room):
         )
 
         result = await run(
+
             context["chat_id"],
+
             image_edit_engine(
+
                 user_id,
                 image_bytes,
                 prompt,
@@ -444,7 +425,7 @@ class ImageEditRoom(Room):
 
 
 # =====================================================
-# 🧠 SCIENCE
+# 🔥 SCIENCE
 # =====================================================
 
 class SafeScienceRoom(ScienceRoom):
@@ -452,219 +433,74 @@ class SafeScienceRoom(ScienceRoom):
     name = "science"
 
     # =================================================
-    # 🔥 APRIL SCIENCE DETECTION
+    # 🔥 APRIL CAPABILITY DETECTION
     # =====================================================
 
-    def can_handle(self, text, context):
-
-        semantic = context.get(
-            "semantic",
-            {}
-        )
-
-        cognition = context.get(
-            "cognition",
-            {}
-        )
-
-        t = (text or "").lower()
+    def can_handle(
+        self,
+        text,
+        context
+    ):
 
         # =============================================
-        # 🔥 SEMANTIC LOCK
+        # 🔥 CODE PROTECTION
         # =============================================
 
-        if semantic.get("room") == self.name:
-
-            confidence = semantic.get(
-                "confidence",
-                0.0
-            )
-
-            if confidence >= 0.45:
-                return True
-
-        # =============================================
-        # 🔥 RENDER INTENT
-        # =============================================
-
-        if semantic.get(
-            "render_intent"
+        if detect_code_signal(
+            text
         ):
 
-            return True
+            return False
 
-        # =============================================
-        # 🔥 FUNCTION DETECTION
-        # =============================================
-
-        math_patterns = [
-
-            "y=",
-            "y =",
-            "f(x)",
-            "sin(",
-            "cos(",
-            "tan(",
-            "log(",
-            "sqrt(",
-            "график",
-            "функция",
-            "парабола"
-        ]
-
-        if any(
-            x in t
-            for x in math_patterns
-        ):
-
-            return True
-
-        # =============================================
-        # 🔥 EXECUTION PRESSURE
-        # =============================================
-
-        if cognition.get(
-            "wants_result",
-            0.0
-        ) >= 0.7:
-
-            if any(
-                x in t
-                for x in [
-
-                    "=",
-                    "x",
-                    "y",
-                    "^",
-                    "**"
-                ]
-            ):
-
-                return True
-
-        return False
+        return detect_visual_math_signal(
+            text
+        )
 
     # =================================================
-    # 🔥 APRIL ROOM SCORE
+    # 🔥 CALM EVALUATION
     # =====================================================
 
-    def evaluate(self, text, context):
+    def evaluate(
+        self,
+        text,
+        context
+    ):
 
-        semantic = context.get(
-            "semantic",
-            {}
-        )
+        # =============================================
+        # 🔥 CODE PROTECTION
+        # =============================================
 
-        cognition = context.get(
-            "cognition",
-            {}
-        )
+        if detect_code_signal(
+            text
+        ):
 
-        t = (text or "").lower()
+            return 0.0
 
         score = 0.0
 
-        # =============================================
-        # 🔥 RENDER INTENT PRIORITY
-        # =============================================
-
-        if semantic.get(
-            "render_intent"
-        ):
-
-            score += 5.0
-
-        # =============================================
-        # 🔥 FUNCTION DETECTION
-        # =============================================
-
-        if any(
-            x in t
-            for x in [
-
-                "график",
-                "функция",
-                "y=",
-                "y =",
-                "sin(",
-                "cos(",
-                "tan(",
-                "x**",
-                "^2",
-                "^3"
-            ]
-        ):
-
-            score += 4.0
-
-        # =============================================
-        # 🔥 EXECUTION PRESSURE
-        # =============================================
-
-        if cognition.get(
-            "wants_result",
-            0.0
-        ) >= 0.6:
-
-            score += 1.5
-
-        # =============================================
-        # 🔥 VISUAL INTENT
-        # =============================================
-
-        if cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.4:
-
-            score += 1.0
-
-        return score
-
-
-# =====================================================
-# 💬 TEXT
-# =====================================================
-
-class TextRoom(Room):
-
-    name = "text"
-
-    def can_handle(self, text, context):
-        return True
-
-    def evaluate(self, text, context):
-
-        score = 0.1
-
-        cognition = context.get(
-            "cognition",
-            {}
+        t = normalize_text(
+            text
         )
 
-        semantic = context.get(
-            "semantic",
-            {}
-        )
+        # =============================================
+        # 🔥 DIRECT GRAPH SIGNAL
+        # =============================================
 
-        t = (text or "").lower()
+        if detect_visual_math_signal(
+            text
+        ):
 
-        # =================================================
-        # 🔥 HARD GRAPH SUPPRESSION
-        # =====================================================
+            score += 0.9
+
+        # =============================================
+        # 🔥 EXPLICIT GRAPH REQUEST
+        # =============================================
 
         graph_words = [
 
-            "график",
-            "функция",
-            "y=",
-            "y =",
-            "sin(",
-            "cos(",
-            "tan(",
-            "x**",
-            "^2",
-            "^3"
+            "построй",
+            "покажи график",
+            "нарисуй график"
         ]
 
         if any(
@@ -672,36 +508,76 @@ class TextRoom(Room):
             for x in graph_words
         ):
 
-            score -= 5.0
+            score += 0.3
 
-        if semantic.get(
-            "render_intent"
+        return score
+
+
+# =====================================================
+# 🔥 TEXT
+# =====================================================
+
+class TextRoom(Room):
+
+    name = "text"
+
+    def can_handle(
+        self,
+        text,
+        context
+    ):
+
+        return True
+
+    # =================================================
+    # 🔥 CALM FALLBACK
+    # =====================================================
+
+    def evaluate(
+        self,
+        text,
+        context
+    ):
+
+        # =============================================
+        # 🔥 CODE PRIORITY
+        # =============================================
+
+        if detect_code_signal(
+            text
         ):
 
-            score -= 5.0
+            return 1.0
 
-        if cognition.get(
-            "prefer_execution"
+        # =============================================
+        # 🔥 LINK PRIORITY
+        # =============================================
+
+        if detect_link_signal(
+            text
         ):
 
-            score -= 0.08
+            return 0.9
 
-        if cognition.get(
-            "prefer_visual"
+        # =============================================
+        # 🔥 MATH / GRAPH
+        # =============================================
+
+        if detect_visual_math_signal(
+            text
         ):
 
-            score -= 0.05
+            return 0.25
 
-        if cognition.get(
-            "dialog_fatigue",
-            0.0
-        ) >= 0.7:
+        return 0.55
 
-            score -= 0.03
-
-        return max(score, -10.0)
-
-    async def handle(self, user_id, text, context, run):
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
 
         from blocks.text_module import (
             process as text_process
@@ -719,13 +595,18 @@ class TextRoom(Room):
         ):
 
             text_input = (
+
                 "Ответь коротко и по делу.\n\n"
+
                 + text
             )
 
         result = await run(
+
             context["chat_id"],
+
             text_process(
+
                 user_id,
                 text_input,
                 context.get("state"),
@@ -734,8 +615,11 @@ class TextRoom(Room):
         )
 
         return {
+
             "type": "text",
+
             "data":
+
                 result.get(
                     "content",
                     "⚠️ Пустой ответ"
@@ -744,13 +628,16 @@ class TextRoom(Room):
 
 
 # =====================================================
-# 🚀 ROOMS ORDER
+# 🚀 ROOMS
 # =====================================================
 
 ROOMS = [
 
     SafeScienceRoom(),
+
     ImageEditRoom(),
+
     ImageGenerateRoom(),
+
     TextRoom(),
 ]
