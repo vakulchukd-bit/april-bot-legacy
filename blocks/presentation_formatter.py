@@ -1088,6 +1088,9 @@ def beautify_links(
 ):
 
     text = normalize_text_payload(text)
+    text = cleanup_markdown(
+        text
+    )
 
     if already_formatted(
         text
