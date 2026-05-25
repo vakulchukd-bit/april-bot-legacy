@@ -8,16 +8,20 @@ APRIL FINAL COGNITIVE AUTHORITY
 UNIFIED EXECUTIVE INTELLIGENCE LAYER
 
 Authority layer теперь:
+- governance layer;
 - stabilizer;
 - validator;
 - trajectory protector;
-- calm orchestration guard;
-- capability verifier.
+- orchestration supervisor;
+- continuity guard;
+- capability coordinator.
 
 Authority больше НЕ:
 - aggressive override layer;
 - recursive retry source;
-- forced generation trigger;
+- hidden rerouting engine;
+- forced execution trigger;
+- second executor;
 - chaos escalation system.
 
 APRIL AUTHORITY PRINCIPLES:
@@ -25,10 +29,11 @@ APRIL AUTHORITY PRINCIPLES:
 1. continuation before override
 2. renderer before generation
 3. usefulness before capability
-4. calm execution
-5. anti-recursive behavior
-6. no hidden escalation
-7. no forced personality leakage
+4. calm orchestration
+5. governance before force
+6. anti-recursive behavior
+7. no hidden escalation
+8. no forced personality leakage
 """
 
 # =====================================================
@@ -115,15 +120,15 @@ APRIL_CAPABILITIES = {
     # AUTHORITY
     # =====================================================
 
-    "override": True,
+    "governance": True,
 
-    "executor_override": True,
+    "validation": True,
 
-    "room_override": True,
+    "trajectory_protection": True,
 
-    "capability_override": True,
+    "modality_supervision": True,
 
-    "direct_capability_access": True,
+    "continuity_validation": True,
 
     "completion_validation": True,
 
@@ -283,6 +288,54 @@ def contains_system_leak(
     return hits >= 2
 
 
+def is_soft_visual_request(
+    semantic,
+    cognition
+):
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        return True
+
+    if semantic.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    continuation_target = semantic.get(
+        "continuation_target"
+    )
+
+    if continuation_target == "math":
+
+        return True
+
+    wants_visual = cognition.get(
+        "wants_visual",
+        0.0
+    )
+
+    ambiguity = semantic.get(
+        "ambiguity_level",
+        0.0
+    )
+
+    if (
+        wants_visual >= 0.72
+        and ambiguity <= 0.45
+    ):
+
+        return True
+
+    return False
+
+
 # =====================================================
 # 🔥 AUTHORITY STATE
 # =====================================================
@@ -297,13 +350,9 @@ def build_authority_state():
 
         "authority_active": True,
 
-        "override_allowed": True,
+        "governance_active": True,
 
-        "executor_override_allowed": True,
-
-        "room_override_allowed": True,
-
-        "direct_capability_access": True,
+        "validation_active": True,
 
         "final_validation": True,
 
@@ -330,24 +379,38 @@ def build_authority_state():
         "humanity_tracking": True,
 
         # =================================================
-        # EXECUTION
+        # GOVERNANCE
         # =====================================================
 
-        "can_force_execution": True,
+        "governance_mode": "calm",
 
-        "can_force_visual": False,
+        "continuity_priority": 1.0,
 
-        "can_force_web": True,
+        "renderer_priority": 1.0,
 
-        "can_force_graph": True,
+        "calm_orchestration": True,
 
-        "can_force_image_generation": False,
+        "modality_supervision": True,
 
-        "can_force_image_edit": False,
+        "execution_supervision": True,
 
-        "can_force_screenshot_analysis": True,
+        # =================================================
+        # EXECUTION POLICY
+        # =====================================================
 
-        "can_force_reasoning": True,
+        "allow_execution_guidance": True,
+
+        "allow_renderer_guidance": True,
+
+        "allow_web_guidance": True,
+
+        "allow_reasoning_guidance": True,
+
+        "avoid_force_execution": True,
+
+        "avoid_hidden_retry": True,
+
+        "avoid_recursive_override": True,
 
         # =================================================
         # SAFETY
@@ -458,45 +521,10 @@ def is_visual_obligatory(
     semantic = semantic or {}
     cognition = cognition or {}
 
-    # =================================================
-    # 🔥 RENDERER-FIRST
-    # =====================================================
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        return True
-
-    if semantic.get(
-        "prefer_renderer"
-    ):
-
-        return True
-
-    continuation_target = semantic.get(
-        "continuation_target"
+    return is_soft_visual_request(
+        semantic,
+        cognition
     )
-
-    if continuation_target == "math":
-
-        return True
-
-    if cognition.get(
-        "wants_visual",
-        0.0
-    ) >= 0.72:
-
-        ambiguity = semantic.get(
-            "ambiguity_level",
-            0.0
-        )
-
-        if ambiguity <= 0.45:
-
-            return True
-
-    return False
 
 # =====================================================
 # 🔥 COMPLETION ANALYSIS
@@ -594,7 +622,7 @@ def analyze_completion(
             }
 
     # =================================================
-    # VISUAL
+    # VISUAL VALIDATION
     # =====================================================
 
     if is_visual_obligatory(
@@ -617,7 +645,32 @@ def analyze_completion(
             "scene"
         ]
 
-        if not renderer_allowed and not visual_allowed:
+        # =================================================
+        # 🔥 SOFT VALIDATION
+        # =====================================================
+
+        if (
+
+            not renderer_allowed
+            and not visual_allowed
+
+        ):
+
+            # =============================================
+            # 🔥 TEXT EXPLANATION ALLOWED
+            # =============================================
+
+            if result_type == "text":
+
+                if len(output) >= 80:
+
+                    return {
+
+                        "completed": True,
+
+                        "reason":
+                            "textual_visual_guidance"
+                    }
 
             return {
 
@@ -661,7 +714,7 @@ def analyze_completion(
     }
 
 # =====================================================
-# 🔥 CAPABILITY PATH
+# 🔥 CAPABILITY GOVERNANCE
 # =====================================================
 
 def choose_best_capability_path(
@@ -677,7 +730,26 @@ def choose_best_capability_path(
     state = state or {}
 
     # =================================================
-    # 🔥 RENDERER-FIRST
+    # 🔥 GOVERNANCE ONLY
+    # =====================================================
+    #
+    # IMPORTANT:
+    #
+    # This function NO LONGER performs:
+    # - hard routing;
+    # - room control;
+    # - execution forcing.
+    #
+    # It now provides:
+    # - preferred orchestration direction;
+    # - modality guidance;
+    # - governance hints.
+    #
+    # Executor remains:
+    # - primary orchestration layer;
+    # - room selector;
+    # - execution coordinator.
+    #
     # =====================================================
 
     if semantic.get(
@@ -691,10 +763,6 @@ def choose_best_capability_path(
     ):
 
         return "renderer_space"
-
-    # =================================================
-    # VISUAL
-    # =====================================================
 
     if cognition.get(
         "wants_visual",
@@ -713,19 +781,11 @@ def choose_best_capability_path(
 
         return "renderer_space"
 
-    # =================================================
-    # WEB
-    # =====================================================
-
     if semantic.get(
         "internet_context_needed"
     ):
 
         return "web"
-
-    # =================================================
-    # GRAPH
-    # =====================================================
 
     continuation_target = semantic.get(
         "continuation_target"
@@ -734,10 +794,6 @@ def choose_best_capability_path(
     if continuation_target == "math":
 
         return "science"
-
-    # =================================================
-    # EXECUTION
-    # =====================================================
 
     if semantic.get(
         "should_execute"
@@ -797,7 +853,9 @@ def evaluate_usefulness(
             "type"
         ) == "text":
 
-            usefulness -= 0.45
+            if len(output) < 80:
+
+                usefulness -= 0.35
 
     # =================================================
     # 🔥 HEAVY IMAGE PENALTY
@@ -907,7 +965,7 @@ def should_override(
             return True
 
     # =================================================
-    # 🔥 VISUAL OBLIGATION
+    # 🔥 SOFT VISUAL VALIDATION
     # =====================================================
 
     if is_visual_obligatory(
@@ -921,7 +979,19 @@ def should_override(
             "type"
         )
 
+        # =============================================
+        # 🔥 TEXT GUIDANCE ALLOWED
+        # =============================================
+
         if result_type == "text":
+
+            output = safe_output(
+                result
+            )
+
+            if len(output) >= 80:
+
+                return False
 
             return True
 
@@ -973,6 +1043,43 @@ def build_authority_decision(
         )
     )
 
+    # =================================================
+    # 🔥 GOVERNANCE SIGNALS
+    # =====================================================
+
+    governance_signals = {
+
+        "preferred_modality":
+            capability_path,
+
+        "prefer_renderer":
+            capability_path == "renderer_space",
+
+        "prefer_web":
+            capability_path == "web",
+
+        "prefer_science":
+            capability_path == "science",
+
+        "prefer_execution":
+            capability_path == "execution",
+
+        "heavy_generation_allowed":
+
+            semantic.get(
+                "explicit_image_generation_only",
+                False
+            ),
+
+        "continuity_priority": 1.0,
+
+        "calm_orchestration": True,
+
+        "avoid_recursive_retry": True,
+
+        "avoid_hidden_generation": True
+    }
+
     return {
 
         # =================================================
@@ -1014,39 +1121,49 @@ def build_authority_decision(
             ),
 
         # =================================================
-        # EXECUTION
+        # GOVERNANCE
         # =====================================================
 
         "best_capability":
             capability_path,
 
-        "should_force_execution":
+        "governance_signals":
+            governance_signals,
+
+        "execution_mismatch_detected":
             override,
 
-        "should_retry":
-            override,
+        "response_quality_low":
 
-        "should_change_room":
-            override,
+            usefulness < 0.45,
+
+        "modality_mismatch_detected":
+
+            completion.get(
+                "reason"
+            ) == "visual_missing",
 
         # =================================================
-        # 🔥 RENDERER-FIRST
+        # 🔥 NON-FORCE GUIDANCE
         # =====================================================
 
-        "should_force_renderer":
+        "preferred_modality":
+            capability_path,
+
+        "preferred_renderer":
             capability_path == "renderer_space",
 
-        "should_force_visual":
+        "preferred_visual":
             capability_path in [
 
                 "image_generation",
                 "image_edit"
             ],
 
-        "should_force_web":
+        "preferred_web":
             capability_path == "web",
 
-        "should_force_science":
+        "preferred_science":
             capability_path == "science",
 
         # =================================================
@@ -1060,6 +1177,12 @@ def build_authority_decision(
         "avoid_personality_leak": True,
 
         "avoid_system_prompt_exposure": True,
+
+        "avoid_aggressive_override": True,
+
+        "avoid_force_execution": True,
+
+        "avoid_double_orchestration": True,
 
         # =================================================
         # HUMAN FLOW
