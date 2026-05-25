@@ -37,6 +37,7 @@ APRIL PRESENTATION PRINCIPLES:
 
 import re
 
+
 # =====================================================
 # 🔥 SAFE FORMAT PATCH
 # =====================================================
@@ -54,6 +55,77 @@ def safe_format_log(msg):
 
     except:
         pass
+
+
+# =====================================================
+# 🔥 SAFE TYPE NORMALIZATION
+# =====================================================
+
+def normalize_text_payload(text):
+
+    if text is None:
+        return ""
+
+    if isinstance(text, str):
+        return text
+
+    try:
+
+        return str(text)
+
+    except:
+
+        return ""
+
+
+# =====================================================
+# 🔥 RENDERER PAYLOAD DETECTION
+# =====================================================
+
+def is_renderer_payload(
+    text: str
+):
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return False
+
+    t = text.lower().strip()
+
+    renderer_checks = [
+
+        "[[graph:",
+        "[[formula",
+        "[[diagram",
+        "[[scene",
+        "[[grid",
+
+        "<svg",
+        "<canvas",
+
+        "\"type\": \"graph\"",
+        "\"type\":\"graph\"",
+
+        "\"type\": \"formula\"",
+        "\"type\":\"formula\"",
+
+        "\"graph\":",
+        "\"diagram\":",
+        "\"formula\":",
+
+        "data:image",
+
+        "desmos.com",
+
+        "```html",
+        "```svg"
+    ]
+
+    return any(
+        x in t
+        for x in renderer_checks
+    )
 
 
 # =====================================================
@@ -102,9 +174,9 @@ def looks_like_visual_payload(
     text: str
 ):
 
-    t = (
-        text or ""
-    ).lower()
+    text = normalize_text_payload(text)
+
+    t = text.lower()
 
     checks = [
 
@@ -172,6 +244,7 @@ EMOJI_MAP = {
     "discord": "🎮",
     "website": "🔗"
 }
+
 
 # =====================================================
 # 🧠 PLATFORM LABELS
@@ -244,6 +317,7 @@ PLATFORM_LABELS = [
         "🎮 Discord"
     )
 ]
+
 
 # =====================================================
 # 🌐 PLATFORM DETECTION
@@ -349,7 +423,7 @@ def extract_urls(
     text: str
 ):
 
-    text = text or ""
+    text = normalize_text_payload(text)
 
     pattern = r"https?://[^\s]+"
 
@@ -367,12 +441,7 @@ def is_code_content(
     text: str
 ):
 
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return False
+    text = normalize_text_payload(text)
 
     if not text:
         return False
@@ -398,6 +467,8 @@ def is_code_content(
 def is_realtime_content(
     text: str
 ):
+
+    text = normalize_text_payload(text)
 
     if not text:
         return False
@@ -429,6 +500,8 @@ def already_formatted(
     text: str
 ):
 
+    text = normalize_text_payload(text)
+
     if not text:
         return False
 
@@ -459,6 +532,19 @@ def should_skip_formatting(
 
     semantic = semantic or {}
     response_decision = response_decision or {}
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return True
+
+    if is_renderer_payload(text):
+
+        safe_format_log(
+            "RENDERER PAYLOAD BYPASS"
+        )
+
+        return True
 
     if looks_like_visual_payload(
         text
@@ -588,7 +674,7 @@ def beautify_links(
     text: str
 ):
 
-    text = text or ""
+    text = normalize_text_payload(text)
 
     if already_formatted(
         text
@@ -631,9 +717,9 @@ def split_into_sections(
     text: str
 ):
 
-    text = (
-        text or ""
-    ).strip()
+    text = normalize_text_payload(text)
+
+    text = text.strip()
 
     if not text:
         return []
@@ -657,6 +743,8 @@ def split_into_sections(
 def apply_light_formatting(
     text: str
 ):
+
+    text = normalize_text_payload(text)
 
     sections = split_into_sections(
         text
@@ -684,11 +772,18 @@ def apply_visual_enrichment(
     text: str
 ):
 
-    text = (
-        text or ""
-    ).strip()
+    text = normalize_text_payload(text)
+
+    text = text.strip()
 
     if not text:
+        return text
+
+    # =================================================
+    # 🔥 HARD RENDERER SAFETY
+    # =====================================================
+
+    if is_renderer_payload(text):
         return text
 
     # =================================================
@@ -761,9 +856,9 @@ def build_smart_presentation(
         response_decision or {}
     )
 
-    text = (
-        text or ""
-    ).strip()
+    text = normalize_text_payload(text)
+
+    text = text.strip()
 
     if not text:
         return text
@@ -885,9 +980,9 @@ def apply_april_final_voice(
     response_decision: dict
 ):
 
-    text = (
-        text or ""
-    ).strip()
+    text = normalize_text_payload(text)
+
+    text = text.strip()
 
     if not text:
         return text
@@ -897,6 +992,13 @@ def apply_april_final_voice(
     response_decision = (
         response_decision or {}
     )
+
+    # =================================================
+    # 🔥 HARD RENDERER SAFETY
+    # =====================================================
+
+    if is_renderer_payload(text):
+        return text
 
     # =================================================
     # 🔥 RENDERER SAFETY
@@ -1036,7 +1138,21 @@ def beautify_response(
     user_text: str = ""
 ):
 
+    text = normalize_text_payload(text)
+
     if not text:
+        return text
+
+    # =================================================
+    # 🔥 HARD RENDERER EXIT
+    # =====================================================
+
+    if is_renderer_payload(text):
+
+        safe_format_log(
+            "FULL BEAUTIFY BYPASS"
+        )
+
         return text
 
     formatted = build_smart_presentation(
@@ -1085,7 +1201,23 @@ def format_response_presentation(
 
     final_text = response or text
 
+    final_text = normalize_text_payload(
+        final_text
+    )
+
     if not final_text:
+        return final_text
+
+    # =================================================
+    # 🔥 FINAL RENDERER SAFETY
+    # =====================================================
+
+    if is_renderer_payload(final_text):
+
+        safe_format_log(
+            "FINAL FORMATTER BYPASS"
+        )
+
         return final_text
 
     return beautify_response(
