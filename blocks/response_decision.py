@@ -41,8 +41,18 @@ def build_response_decision(
         "should_continue_trajectory": False,
 
         # =================================================
-        # 🧠 SCENE COMPLETION
+        # 🧠 PRIMARY INTENT LOCK
+        # =====================================================
+
+        "primary_intent_locked": False,
+
+        "primary_intent_type": None,
+
+        "primary_intent_confidence": 0.0,
+
         # =================================================
+        # 🧠 SCENE COMPLETION
+        # =====================================================
 
         "scene_completion_required": False,
 
@@ -62,7 +72,7 @@ def build_response_decision(
 
         # =================================================
         # DIALOG CONTROL
-        # =================================================
+        # =====================================================
 
         "should_reduce_talking": False,
         "should_wait_for_user": False,
@@ -70,14 +80,14 @@ def build_response_decision(
 
         # =================================================
         # VISUAL CONTROL
-        # =================================================
+        # =====================================================
 
         "prefer_lightweight_visual": False,
         "avoid_heavy_generation": False,
 
         # =================================================
         # 🧠 RENDERER SPACE
-        # =================================================
+        # =====================================================
 
         "renderer_space_allowed": False,
 
@@ -95,7 +105,7 @@ def build_response_decision(
 
         # =================================================
         # 🔥 RENDERER-FIRST SAFETY
-        # =================================================
+        # =====================================================
 
         "renderer_first_mode": False,
 
@@ -111,19 +121,19 @@ def build_response_decision(
 
         # =================================================
         # RESPONSE STRATEGY
-        # =================================================
+        # =====================================================
 
         "response_mode": "balanced",
 
         # =================================================
         # FINAL DECISION
-        # =================================================
+        # =====================================================
 
         "final_action": "talk",
 
         # =================================================
         # 🧠 PERSONALITY AUTHORITY
-        # =================================================
+        # =====================================================
 
         "personality_active": True,
 
@@ -171,7 +181,7 @@ def build_response_decision(
 
         # =================================================
         # 🧠 POST ACTION REASONING
-        # =================================================
+        # =====================================================
 
         "dialogue_still_alive": True,
 
@@ -197,7 +207,7 @@ def build_response_decision(
 
         # =================================================
         # 🔥 DEEPHUB STABILIZATION
-        # =================================================
+        # =====================================================
 
         "high_ambiguity_detected": False,
 
@@ -418,6 +428,65 @@ def build_response_decision(
         ] = True
 
     # =====================================================
+    # 🔥 PRIMARY INTENT LOCK SYSTEM
+    # =====================================================
+
+    if (
+
+        render_intent
+        or prefer_renderer
+        or render_type
+    ):
+
+        result[
+            "primary_intent_locked"
+        ] = True
+
+        result[
+            "primary_intent_type"
+        ] = "renderer_space"
+
+        result[
+            "primary_intent_confidence"
+        ] = 0.92
+
+    elif (
+
+        visual_generation_needed
+        and explicit_image_generation_only
+        and ambiguity < 0.35
+    ):
+
+        result[
+            "primary_intent_locked"
+        ] = True
+
+        result[
+            "primary_intent_type"
+        ] = "image_generation"
+
+        result[
+            "primary_intent_confidence"
+        ] = 0.84
+
+    elif (
+        wants_result >= 0.82
+        and ambiguity < 0.4
+    ):
+
+        result[
+            "primary_intent_locked"
+        ] = True
+
+        result[
+            "primary_intent_type"
+        ] = "execution"
+
+        result[
+            "primary_intent_confidence"
+        ] = 0.78
+
+    # =====================================================
     # 🔥 RENDERER-FIRST HARD LOCK
     # =====================================================
 
@@ -496,13 +565,19 @@ def build_response_decision(
             "final_action"
         ] = "render"
 
-        result[
-            "forced_action"
-        ] = "render"
+        # =================================================
+        # 🔥 SAFE FORCE MODE
+        # =====================================================
 
-        result[
-            "forced_room"
-        ] = "renderer_space"
+        if ambiguity < 0.35:
+
+            result[
+                "forced_action"
+            ] = "render"
+
+            result[
+                "forced_room"
+            ] = "renderer_space"
 
     # =====================================================
     # 🔥 RENDERER SPACE PRIORITY
@@ -597,13 +672,19 @@ def build_response_decision(
             "final_action"
         ] = "render"
 
-        result[
-            "forced_action"
-        ] = "render"
+        # =================================================
+        # 🔥 SAFE FORCE MODE
+        # =====================================================
 
-        result[
-            "forced_room"
-        ] = "renderer_space"
+        if ambiguity < 0.35:
+
+            result[
+                "forced_action"
+            ] = "render"
+
+            result[
+                "forced_room"
+            ] = "renderer_space"
 
     # =====================================================
     # 🔥 HEAVY IMAGE GENERATION
@@ -638,19 +719,25 @@ def build_response_decision(
             "generate"
         )
 
-        result["forced_action"] = (
-            "generate"
-        )
-
-        result["forced_room"] = (
-            "image_generate"
-        )
-
         result["visual_obligation"] = True
 
         result["should_generate"] = True
 
         result["generation_allowed"] = True
+
+        # =================================================
+        # 🔥 SAFE FORCE MODE
+        # =====================================================
+
+        if ambiguity < 0.25:
+
+            result["forced_action"] = (
+                "generate"
+            )
+
+            result["forced_room"] = (
+                "image_generate"
+            )
 
     # =====================================================
     # 🔥 UNDERSTANDING USER
@@ -819,6 +906,23 @@ def build_response_decision(
     # 🔥 EXPLORATION MODE
     # =====================================================
 
+    # =====================================================
+    # ⚠️ OLD BEHAVIOR PRESERVED FOR SAFETY
+    # exploration previously forced guide-mode
+    # =====================================================
+
+    # if cognition.get(
+    #     "exploration_mode"
+    # ):
+    #
+    #     result[
+    #         "response_mode"
+    #     ] = "exploration"
+    #
+    #     result[
+    #         "final_action"
+    #     ] = "guide"
+
     if cognition.get(
         "exploration_mode"
     ):
@@ -827,9 +931,21 @@ def build_response_decision(
             "response_mode"
         ] = "exploration"
 
-        result[
-            "final_action"
-        ] = "guide"
+        # =================================================
+        # 🔥 RENDERER-SPACE PROTECTION
+        # =====================================================
+
+        if not result.get(
+            "renderer_first_mode"
+        ):
+
+            if not result.get(
+                "primary_intent_locked"
+            ):
+
+                result[
+                    "final_action"
+                ] = "guide"
 
         result[
             "should_guide"
@@ -962,14 +1078,6 @@ def build_response_decision(
         ] = "render"
 
         result[
-            "forced_action"
-        ] = "render"
-
-        result[
-            "forced_room"
-        ] = "renderer_space"
-
-        result[
             "avoid_heavy_generation"
         ] = True
 
@@ -980,6 +1088,20 @@ def build_response_decision(
         result[
             "block_image_generation_fallback"
         ] = True
+
+        # =================================================
+        # 🔥 SAFE FORCE MODE
+        # =====================================================
+
+        if ambiguity_level <= 0.25:
+
+            result[
+                "forced_action"
+            ] = "render"
+
+            result[
+                "forced_room"
+            ] = "renderer_space"
 
     # =====================================================
     # 🔥 IMAGE GENERATION LOCK
@@ -1010,13 +1132,19 @@ def build_response_decision(
             "final_action"
         ] = "generate"
 
-        result[
-            "forced_action"
-        ] = "generate"
+        # =================================================
+        # 🔥 SAFE FORCE MODE
+        # =====================================================
 
-        result[
-            "forced_room"
-        ] = "image_generate"
+        if ambiguity_level <= 0.25:
+
+            result[
+                "forced_action"
+            ] = "generate"
+
+            result[
+                "forced_room"
+            ] = "image_generate"
 
     # =====================================================
     # 🔥 GENERATION CONTROL
@@ -1172,59 +1300,91 @@ def build_response_decision(
     # 🔥 RESPONSE PRIORITY SYSTEM
     # =====================================================
 
-    if result[
-        "should_wait_for_user"
-    ]:
+    # =====================================================
+    # 🔥 PRIMARY INTENT PRIORITY
+    # =====================================================
 
-        result[
-            "final_action"
-        ] = "wait"
+    if result.get(
+        "primary_intent_locked"
+    ):
 
-    elif result[
-        "should_offer_reference"
-    ]:
+        primary_type = result.get(
+            "primary_intent_type"
+        )
 
-        result[
-            "final_action"
-        ] = "reference"
+        if primary_type == "renderer_space":
 
-    elif result[
-        "should_render"
-    ]:
+            result[
+                "final_action"
+            ] = "render"
 
-        result[
-            "final_action"
-        ] = "render"
+        elif primary_type == "image_generation":
 
-    elif result[
-        "should_generate"
-    ]:
+            result[
+                "final_action"
+            ] = "generate"
 
-        result[
-            "final_action"
-        ] = "generate"
+        elif primary_type == "execution":
 
-    elif result[
-        "should_execute"
-    ]:
-
-        result[
-            "final_action"
-        ] = "execute"
-
-    elif result[
-        "should_guide"
-    ]:
-
-        result[
-            "final_action"
-        ] = "guide"
+            result[
+                "final_action"
+            ] = "execute"
 
     else:
 
-        result[
-            "final_action"
-        ] = "talk"
+        if result[
+            "should_wait_for_user"
+        ]:
+
+            result[
+                "final_action"
+            ] = "wait"
+
+        elif result[
+            "should_offer_reference"
+        ]:
+
+            result[
+                "final_action"
+            ] = "reference"
+
+        elif result[
+            "should_render"
+        ]:
+
+            result[
+                "final_action"
+            ] = "render"
+
+        elif result[
+            "should_generate"
+        ]:
+
+            result[
+                "final_action"
+            ] = "generate"
+
+        elif result[
+            "should_execute"
+        ]:
+
+            result[
+                "final_action"
+            ] = "execute"
+
+        elif result[
+            "should_guide"
+        ]:
+
+            result[
+                "final_action"
+            ] = "guide"
+
+        else:
+
+            result[
+                "final_action"
+            ] = "talk"
 
     # =====================================================
     # 🧠 PREMATURE SCENE CLOSURE PROTECTION
