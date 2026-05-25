@@ -5,6 +5,153 @@ client = OpenAI()
 
 
 # =====================================================
+# 🧠 APRIL INTENT AI
+# =====================================================
+
+"""
+APRIL MULTI-SIGNAL INTENT SYSTEM
+
+Intent AI теперь:
+- НЕ single-intent dispatcher;
+- НЕ room selector;
+- НЕ authority system.
+
+Intent AI теперь:
+- multimodal signal analyzer;
+- orchestration helper;
+- continuation-aware interpreter;
+- renderer-aware signal composer;
+- capability hint provider.
+
+Главная идея:
+Intent НЕ принимает решение.
+Intent помогает orchestration layer
+понять направление пользователя.
+"""
+
+# =====================================================
+# 🧠 HELPERS
+# =====================================================
+
+def normalize(
+    text: str
+):
+
+    return (
+        text or ""
+    ).lower().strip()
+
+
+def contains_any(
+    text: str,
+    words: list
+):
+
+    return any(
+        w in text
+        for w in words
+    )
+
+
+# =====================================================
+# 🧠 SAFE SIGNAL BUILDER
+# =====================================================
+
+def build_signal_response(
+
+    primary_intent="text",
+    confidence=0.5,
+    source="local",
+
+    signals=None,
+    capability_hints=None,
+
+    continuation=False,
+    renderer=False,
+    visual=False,
+    execution=False,
+    explanation=False,
+    exploration=False,
+    web=False
+):
+
+    signals = signals or {}
+
+    capability_hints = capability_hints or []
+
+    return {
+
+        # =================================================
+        # 🔥 LEGACY COMPATIBILITY
+        # =====================================================
+
+        "intent": primary_intent,
+
+        # =================================================
+        # 🔥 NEW ARCHITECTURE
+        # =====================================================
+
+        "primary_intent":
+            primary_intent,
+
+        "confidence":
+            confidence,
+
+        "source":
+            source,
+
+        # =================================================
+        # 🔥 SIGNALS
+        # =====================================================
+
+        "signals": {
+
+            "continuation":
+                continuation,
+
+            "renderer":
+                renderer,
+
+            "visual":
+                visual,
+
+            "execution":
+                execution,
+
+            "explanation":
+                explanation,
+
+            "exploration":
+                exploration,
+
+            "web":
+                web,
+
+            **signals
+        },
+
+        # =================================================
+        # 🔥 CAPABILITIES
+        # =====================================================
+
+        "capability_hints":
+            capability_hints,
+
+        # =================================================
+        # 🔥 STABILIZATION
+        # =====================================================
+
+        "orchestration_ready": True,
+
+        "renderer_first_safe": True,
+
+        "provider_aware": True,
+
+        "single_route_forbidden": True
+    }
+
+
+# =====================================================
 # 🧠 LOCAL SAFE DETECTION
 # =====================================================
 
@@ -13,7 +160,7 @@ def detect_intent_local(
     state: dict = None
 ):
 
-    t = (text or "").lower().strip()
+    t = normalize(text)
 
     state = state or {}
 
@@ -22,9 +169,14 @@ def detect_intent_local(
         {}
     )
 
+    active_visual_scene = state.get(
+        "active_visual_scene",
+        {}
+    )
+
     # =================================================
-    # 🔥 CONTINUATION PROTECTION
-    # =================================================
+    # 🔥 CONTINUATION
+    # =====================================================
 
     continuation_words = [
 
@@ -40,7 +192,11 @@ def detect_intent_local(
         "сделай ярче",
         "не то",
         "переделай",
-        "продолжай"
+        "продолжай",
+        "дальше",
+        "еще",
+        "оставь",
+        "в таком стиле"
     ]
 
     if t in continuation_words:
@@ -55,24 +211,105 @@ def detect_intent_local(
 
                 "image_generate",
                 "image_edit",
-                "image"
+                "image",
+                "renderer_space",
+                "math",
+                "scene"
             ]:
 
-                return {
-                    "intent": "edit_image",
-                    "confidence": 0.82,
-                    "source": "local_continuation"
-                }
+                return build_signal_response(
 
-        return {
-            "intent": "text",
-            "confidence": 0.55,
-            "source": "safe_continuation"
-        }
+                    primary_intent="continuation",
+
+                    confidence=0.86,
+
+                    source="local_continuation",
+
+                    continuation=True,
+
+                    visual=True,
+
+                    renderer=(
+                        flow_type in [
+                            "renderer_space",
+                            "math",
+                            "scene"
+                        ]
+                    ),
+
+                    capability_hints=[
+
+                        "continuation",
+                        "trajectory",
+                        "renderer_space"
+                    ]
+                )
+
+        return build_signal_response(
+
+            primary_intent="text",
+
+            confidence=0.55,
+
+            source="soft_continuation",
+
+            continuation=True,
+
+            capability_hints=[
+
+                "conversation"
+            ]
+        )
 
     # =================================================
-    # 🔥 SAFE IMAGE GENERATION
+    # 🔥 SCIENCE / RENDERER
+    # =====================================================
+
+    math_words = [
+
+        "график",
+        "уравнение",
+        "реши",
+        "sin(",
+        "cos(",
+        "tan(",
+        "y=",
+        "формула",
+        "функция",
+        "парабола"
+    ]
+
+    if contains_any(
+        t,
+        math_words
+    ):
+
+        return build_signal_response(
+
+            primary_intent="science",
+
+            confidence=0.9,
+
+            source="local_science",
+
+            renderer=True,
+
+            execution=True,
+
+            explanation=True,
+
+            capability_hints=[
+
+                "science",
+                "renderer_space",
+                "math",
+                "formula_rendering"
+            ]
+        )
+
     # =================================================
+    # 🔥 EXPLICIT IMAGE GENERATION
+    # =====================================================
 
     strong_generate_words = [
 
@@ -83,17 +320,32 @@ def detect_intent_local(
         "generate image"
     ]
 
-    if any(x in t for x in strong_generate_words):
+    if contains_any(
+        t,
+        strong_generate_words
+    ):
 
-        return {
-            "intent": "generate_image",
-            "confidence": 0.92,
-            "source": "local_generate"
-        }
+        return build_signal_response(
+
+            primary_intent="generate_image",
+
+            confidence=0.92,
+
+            source="local_generate",
+
+            visual=True,
+
+            execution=True,
+
+            capability_hints=[
+
+                "image_generation"
+            ]
+        )
 
     # =================================================
-    # 🔥 SAFE IMAGE EDIT
-    # =================================================
+    # 🔥 IMAGE EDIT
+    # =====================================================
 
     edit_words = [
 
@@ -105,21 +357,37 @@ def detect_intent_local(
         "сделай темнее"
     ]
 
-    if any(x in t for x in edit_words):
+    if contains_any(
+        t,
+        edit_words
+    ):
 
         if state.get(
             "image_context"
         ) or active_flow:
 
-            return {
-                "intent": "edit_image",
-                "confidence": 0.88,
-                "source": "local_edit"
-            }
+            return build_signal_response(
+
+                primary_intent="edit_image",
+
+                confidence=0.88,
+
+                source="local_edit",
+
+                continuation=True,
+
+                visual=True,
+
+                capability_hints=[
+
+                    "image_edit",
+                    "continuation"
+                ]
+            )
 
     # =================================================
-    # 🔥 SAFE IMAGE ANALYZE
-    # =================================================
+    # 🔥 IMAGE ANALYSIS
+    # =====================================================
 
     analyze_words = [
 
@@ -130,40 +398,120 @@ def detect_intent_local(
         "что видишь"
     ]
 
-    if any(x in t for x in analyze_words):
+    if contains_any(
+        t,
+        analyze_words
+    ):
 
-        if state.get(
-            "image_context"
+        if (
+
+            state.get(
+                "image_context"
+            )
+
+            or active_visual_scene
         ):
 
-            return {
-                "intent": "analyze_image",
-                "confidence": 0.9,
-                "source": "local_analyze"
-            }
+            return build_signal_response(
+
+                primary_intent="analyze_image",
+
+                confidence=0.9,
+
+                source="local_analyze",
+
+                visual=True,
+
+                explanation=True,
+
+                capability_hints=[
+
+                    "image_analysis",
+                    "visual_guidance"
+                ]
+            )
 
     # =================================================
-    # 🔥 MATH / SCIENCE
-    # =================================================
+    # 🔥 WEB
+    # =====================================================
 
-    math_words = [
+    web_words = [
 
-        "график",
-        "уравнение",
-        "реши",
-        "sin(",
-        "cos(",
-        "tan(",
-        "y="
+        "погода",
+        "новости",
+        "курс валют",
+        "маршрут",
+        "карта",
+        "где находится",
+        "что происходит"
     ]
 
-    if any(x in t for x in math_words):
+    if contains_any(
+        t,
+        web_words
+    ):
 
-        return {
-            "intent": "science",
-            "confidence": 0.9,
-            "source": "local_science"
-        }
+        return build_signal_response(
+
+            primary_intent="web",
+
+            confidence=0.88,
+
+            source="local_web",
+
+            web=True,
+
+            explanation=True,
+
+            capability_hints=[
+
+                "web",
+                "guidance"
+            ]
+        )
+
+    # =================================================
+    # 🔥 VISUAL EXPLORATION
+    # =====================================================
+
+    exploration_words = [
+
+        "атмосфера",
+        "идея",
+        "референс",
+        "пример",
+        "концепт",
+        "вариант",
+        "примерно",
+        "в таком стиле"
+    ]
+
+    if contains_any(
+        t,
+        exploration_words
+    ):
+
+        return build_signal_response(
+
+            primary_intent="exploration",
+
+            confidence=0.76,
+
+            source="local_exploration",
+
+            visual=True,
+
+            exploration=True,
+
+            explanation=True,
+
+            capability_hints=[
+
+                "visual_guidance",
+                "renderer_space",
+                "conversation"
+            ]
+        )
 
     return None
 
@@ -179,11 +527,13 @@ async def detect_intent_ai(
 
     state = state or {}
 
-    t = (text or "").strip()
+    t = (
+        text or ""
+    ).strip()
 
     # =================================================
     # 🔥 LOCAL FIRST
-    # =================================================
+    # =====================================================
 
     local = detect_intent_local(
         t,
@@ -195,7 +545,7 @@ async def detect_intent_ai(
 
     # =================================================
     # 🔥 SHORT INPUT PROTECTION
-    # =================================================
+    # =====================================================
 
     if len(t) <= 15:
 
@@ -205,80 +555,83 @@ async def detect_intent_ai(
 
         if active_flow:
 
-            flow_type = active_flow.get(
-                "type"
+            return build_signal_response(
+
+                primary_intent="continuation",
+
+                confidence=0.66,
+
+                source="short_continuation",
+
+                continuation=True,
+
+                capability_hints=[
+
+                    "continuation"
+                ]
             )
 
-            if flow_type in [
+        return build_signal_response(
 
-                "image_generate",
-                "image_edit",
-                "image"
-            ]:
+            primary_intent="text",
 
-                return {
-                    "intent": "edit_image",
-                    "confidence": 0.65,
-                    "source": "short_continuation"
-                }
+            confidence=0.5,
 
-        return {
-            "intent": "text",
-            "confidence": 0.5,
-            "source": "short_safe"
-        }
+            source="short_safe",
+
+            capability_hints=[
+
+                "conversation"
+            ]
+        )
 
     # =================================================
     # 🔥 AI FALLBACK
-    # =================================================
+    # =====================================================
 
     def run():
 
         try:
 
             prompt = f"""
-Ты — intent analyzer для April DeepHub.
-
-Главное правило:
-НЕ форсируй generate_image без явного запроса.
-
-generate_image:
-ТОЛЬКО если пользователь явно хочет СОЗДАТЬ изображение.
-
-edit_image:
-если пользователь продолжает,
-изменяет,
-уточняет,
-или правит существующую сцену.
-
-analyze_image:
-если пользователь анализирует изображение.
-
-science:
-если пользователь хочет:
-- график
-- математику
-- уравнение
-- вычисление
-
-text:
-во всех остальных случаях.
+Ты — multimodal signal analyzer для April.
 
 ВАЖНО:
-- continuation важнее trigger words;
-- ambiguity НЕ означает generate_image;
-- exploration НЕ означает generate_image;
-- "картинка", "образ", "атмосфера"
-  сами по себе НЕ generate_image.
+НЕ выбирай одну capability.
+НЕ принимай execution decisions.
 
-Ответь ОДНИМ словом.
+Твоя задача:
+определить:
+- primary intent
+- renderer needs
+- visual signals
+- continuation
+- explanation
+- execution pressure
+- exploration mode
 
-Варианты:
-generate_image
-edit_image
-analyze_image
-science
-text
+Главные правила:
+
+1. continuation важнее trigger words
+2. renderer важнее heavy generation
+3. exploration != generate_image
+4. visual != image_generation
+5. explanation может существовать
+   вместе с render/science
+
+Верни JSON.
+
+Формат:
+
+{{
+  "primary_intent": "...",
+  "renderer": true/false,
+  "visual": true/false,
+  "continuation": true/false,
+  "explanation": true/false,
+  "execution": true/false,
+  "exploration": true/false
+}}
 
 Текст:
 {text}
@@ -297,34 +650,81 @@ text
 
                 temperature=0,
 
-                max_tokens=8
+                max_tokens=120
             )
 
             raw = (
                 res.choices[0]
                 .message.content
                 .strip()
-                .lower()
             )
 
-            allowed = [
+            lowered = raw.lower()
 
-                "generate_image",
-                "edit_image",
-                "analyze_image",
-                "science",
-                "text"
-            ]
+            primary = "text"
 
-            if raw not in allowed:
+            if "science" in lowered:
+                primary = "science"
 
-                raw = "text"
+            elif "generate_image" in lowered:
+                primary = "generate_image"
 
-            return {
-                "intent": raw,
-                "confidence": 0.72,
-                "source": "openai"
-            }
+            elif "edit_image" in lowered:
+                primary = "edit_image"
+
+            elif "web" in lowered:
+                primary = "web"
+
+            elif "exploration" in lowered:
+                primary = "exploration"
+
+            return build_signal_response(
+
+                primary_intent=primary,
+
+                confidence=0.72,
+
+                source="openai",
+
+                renderer=(
+                    '"renderer": true'
+                    in lowered
+                ),
+
+                visual=(
+                    '"visual": true'
+                    in lowered
+                ),
+
+                continuation=(
+                    '"continuation": true'
+                    in lowered
+                ),
+
+                explanation=(
+                    '"explanation": true'
+                    in lowered
+                ),
+
+                execution=(
+                    '"execution": true'
+                    in lowered
+                ),
+
+                exploration=(
+                    '"exploration": true'
+                    in lowered
+                ),
+
+                capability_hints=[
+
+                    primary,
+
+                    "renderer_space",
+
+                    "conversation"
+                ]
+            )
 
         except Exception as e:
 
@@ -333,10 +733,18 @@ text
                 e
             )
 
-            return {
-                "intent": "text",
-                "confidence": 0.4,
-                "source": "fallback_error"
-            }
+            return build_signal_response(
+
+                primary_intent="text",
+
+                confidence=0.4,
+
+                source="fallback_error",
+
+                capability_hints=[
+
+                    "conversation"
+                ]
+            )
 
     return await asyncio.to_thread(run)
