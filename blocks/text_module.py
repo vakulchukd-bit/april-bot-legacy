@@ -110,6 +110,135 @@ MAX_MESSAGE_CHARS = 700
 MAX_TOTAL_CHARS = 3200
 
 # =====================================================
+# 🔥 INTERNAL LEAK PROTECTION
+# =====================================================
+
+SYSTEM_LEAK_PATTERNS = [
+
+    "ты calm mobile-first ai assistant",
+    "renderer-space важнее",
+    "heavy image generation",
+    "trajectory общения",
+    "не отвечай механически",
+    "говори естественно",
+    "personality_active",
+    "response_decision",
+    "execution_pressure",
+    "cognition",
+    "semantic",
+    "system_prompt",
+    "assistant_restraint",
+    "continuity диалога",
+    "visual continuity",
+    "апril presentation principles",
+    "capability_map",
+    "reasoning_state",
+    "trajectory protection",
+    "response_mode",
+    "internal_noise",
+    "signal_overload",
+    "active_flow_strength"
+]
+
+
+def sanitize_model_output(text):
+
+    if not text:
+        return ""
+
+    text = str(text)
+
+    lower = text.lower()
+
+    leak_hits = 0
+
+    for pattern in SYSTEM_LEAK_PATTERNS:
+
+        if pattern in lower:
+            leak_hits += 1
+
+    # =================================================
+    # 🔥 HARD LEAK DETECTION
+    # =====================================================
+
+    if leak_hits >= 2:
+
+        safe_patch_log(
+            "SYSTEM LEAK DETECTED"
+        )
+
+        return (
+            "Похоже, ответ сформировался "
+            "нестабильно. Попробуй "
+            "переформулировать запрос."
+        )
+
+    # =================================================
+    # 🔥 REMOVE RAW SYSTEM FRAGMENTS
+    # =====================================================
+
+    cleaned_lines = []
+
+    blocked_prefixes = [
+
+        "ты — april",
+        "system:",
+        "assistant:",
+        "developer:",
+        "personality:",
+        "instructions:",
+        "response_decision:",
+        "semantic:",
+        "cognition:"
+    ]
+
+    for line in text.split("\n"):
+
+        stripped = line.strip().lower()
+
+        blocked = False
+
+        for prefix in blocked_prefixes:
+
+            if stripped.startswith(prefix):
+
+                blocked = True
+
+                safe_patch_log(
+                    f"REMOVED SYSTEM LINE: {line[:60]}"
+                )
+
+                break
+
+        if not blocked:
+            cleaned_lines.append(line)
+
+    cleaned = "\n".join(
+        cleaned_lines
+    ).strip()
+
+    # =================================================
+    # 🔥 DUPLICATE META CLEANUP
+    # =====================================================
+
+    cleaned = re.sub(
+        r"(говори естественно\.?\s*){2,}",
+        "Говори естественно. ",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+
+    cleaned = re.sub(
+        r"(не отвечай механически\.?\s*){2,}",
+        "",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+
+    return cleaned.strip()
+
+
+# =====================================================
 # 🔥 DETECTORS
 # =====================================================
 
@@ -341,10 +470,6 @@ def build_cognitive_state(
 
     blocks = []
 
-    # =================================================
-    # 🔥 FLOW
-    # =================================================
-
     active_flow = state.get(
         "active_flow"
     )
@@ -360,10 +485,6 @@ def build_cognitive_state(
             blocks.append(
                 f"Trajectory: {flow_type}"
             )
-
-    # =================================================
-    # 🔥 USER STATE
-    # =================================================
 
     user_state = []
 
@@ -390,10 +511,6 @@ def build_cognitive_state(
             "Состояние: "
             + ", ".join(user_state)
         )
-
-    # =================================================
-    # 🔥 RESPONSE MODE
-    # =================================================
 
     behavior = []
 
@@ -427,10 +544,6 @@ def build_cognitive_state(
             "Поведение: "
             + ", ".join(behavior)
         )
-
-    # =================================================
-    # 🔥 VISUAL CONTINUITY
-    # =================================================
 
     active_visual_scene = state.get(
         "active_visual_scene"
@@ -470,10 +583,6 @@ def build_cognitive_state(
         blocks.append(
             "\n".join(visual_lines)
         )
-
-    # =================================================
-    # 🔥 MEMORY SUMMARY
-    # =================================================
 
     summary = state.get(
         "memory_summary"
@@ -649,6 +758,24 @@ def apply_visual_beautify(
     if not text:
         return text
 
+    # =================================================
+    # 🔥 RENDERER SAFETY
+    # =====================================================
+
+    if any(
+        x in text
+        for x in [
+
+            "[[graph",
+            "[[formula",
+            "[[diagram",
+            "<svg",
+            "<canvas"
+        ]
+    ):
+
+        return text
+
     beautified = text
 
     if semantic.get(
@@ -754,6 +881,14 @@ async def process(
                 state
             )
 
+            # =============================================
+            # 🔥 ANTI-SYSTEM-INJECTION
+            # =============================================
+
+            text_fixed = sanitize_model_output(
+                text_fixed
+            )
+
             plan = get_user_plan(
                 user_id
             )
@@ -773,10 +908,18 @@ async def process(
                 )
             )
 
+            # =============================================
+            # 🔥 SAFE SYSTEM STATE
+            # =============================================
+
+            safe_cognitive_state = trim_text(
+                cognitive_state
+            )
+
             system_full = (
                 SYSTEM_PROMPT
                 + "\n\n"
-                + cognitive_state
+                + safe_cognitive_state
             )
 
             messages = [
@@ -789,23 +932,31 @@ async def process(
                 }
             ]
 
-            safe_history = [
+            safe_history = []
 
-                {
+            for m in history[-limit:]:
+
+                content = sanitize_model_output(
+
+                    trim_text(
+                        m.get(
+                            "content",
+                            ""
+                        )
+                    )
+                )
+
+                if not content:
+                    continue
+
+                safe_history.append({
+
                     "role":
                         m.get("role"),
 
                     "content":
-                        trim_text(
-                            m.get(
-                                "content",
-                                ""
-                            )
-                        )
-                }
-
-                for m in history[-limit:]
-            ]
+                        content
+                })
 
             messages.extend(
 
@@ -845,6 +996,14 @@ async def process(
             ],
 
             model="gpt-4o-mini"
+        )
+
+        # =============================================
+        # 🔥 OUTPUT SANITIZATION
+        # =============================================
+
+        output = sanitize_model_output(
+            output
         )
 
         # =============================================
@@ -964,6 +1123,14 @@ async def process(
         reply,
         semantic,
         cognition
+    )
+
+    # =================================================
+    # 🔥 FINAL SAFETY CLEAN
+    # =====================================================
+
+    reply = sanitize_model_output(
+        reply
     )
 
     state["last_reply"] = reply
