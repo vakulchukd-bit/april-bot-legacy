@@ -94,6 +94,22 @@ def build_response_decision(
         "renderer_response_type": None,
 
         # =================================================
+        # 🔥 RENDERER-FIRST SAFETY
+        # =================================================
+
+        "renderer_first_mode": False,
+
+        "renderer_hard_lock": False,
+
+        "renderer_payload_expected": False,
+
+        "block_image_generation_fallback": True,
+
+        "allow_only_explicit_generation": True,
+
+        "provider_safe_rendering": True,
+
+        # =================================================
         # RESPONSE STRATEGY
         # =================================================
 
@@ -286,6 +302,30 @@ def build_response_decision(
         "expected_result"
     )
 
+    render_intent = semantic.get(
+        "render_intent",
+        False
+    )
+
+    render_type = semantic.get(
+        "render_type"
+    )
+
+    prefer_renderer = semantic.get(
+        "prefer_renderer",
+        False
+    )
+
+    explicit_image_generation_only = semantic.get(
+        "explicit_image_generation_only",
+        False
+    )
+
+    avoid_image_generation_fallback = semantic.get(
+        "avoid_image_generation_fallback",
+        True
+    )
+
     # =====================================================
     # 🧠 SCENE COMPLETION ANALYSIS
     # =====================================================
@@ -378,10 +418,97 @@ def build_response_decision(
         ] = True
 
     # =====================================================
-    # 🔥 RENDERER SPACE PRIORITY
+    # 🔥 RENDERER-FIRST HARD LOCK
     # =====================================================
 
     if (
+
+        render_intent
+        or prefer_renderer
+        or render_type
+    ):
+
+        result[
+            "renderer_first_mode"
+        ] = True
+
+        result[
+            "renderer_hard_lock"
+        ] = True
+
+        result[
+            "renderer_payload_expected"
+        ] = True
+
+        result[
+            "renderer_space_allowed"
+        ] = True
+
+        result[
+            "renderer_scene_priority"
+        ] = True
+
+        result[
+            "renderer_lightweight_mode"
+        ] = True
+
+        result[
+            "renderer_scene_composition"
+        ] = True
+
+        result[
+            "prefer_lightweight_visual"
+        ] = True
+
+        result[
+            "avoid_heavy_generation"
+        ] = True
+
+        result[
+            "block_image_generation_fallback"
+        ] = True
+
+        result[
+            "provider_safe_rendering"
+        ] = True
+
+        result[
+            "should_render"
+        ] = True
+
+        result[
+            "render_allowed"
+        ] = True
+
+        result[
+            "generation_allowed"
+        ] = False
+
+        result[
+            "should_generate"
+        ] = False
+
+        result[
+            "visual_obligation"
+        ] = False
+
+        result[
+            "final_action"
+        ] = "render"
+
+        result[
+            "forced_action"
+        ] = "render"
+
+        result[
+            "forced_room"
+        ] = "renderer_space"
+
+    # =====================================================
+    # 🔥 RENDERER SPACE PRIORITY
+    # =====================================================
+
+    elif (
 
         renderer_supported
 
@@ -422,7 +549,12 @@ def build_response_decision(
     # 🔥 SPATIAL RENDER MODE
     # =====================================================
 
-    if expected_result in [
+    renderer_response_type = (
+        render_type
+        or expected_result
+    )
+
+    if renderer_response_type in [
 
         "graph",
         "formula",
@@ -438,7 +570,7 @@ def build_response_decision(
 
         result[
             "renderer_response_type"
-        ] = expected_result
+        ] = renderer_response_type
 
     # =====================================================
     # 🔥 APRIL GLOBAL DECISION
@@ -480,6 +612,14 @@ def build_response_decision(
     elif (
 
         visual_generation_needed
+
+        and explicit_image_generation_only
+
+        and not render_intent
+
+        and not prefer_renderer
+
+        and not avoid_image_generation_fallback
 
         and not cognition.get(
             "internet_context_needed"
@@ -837,6 +977,10 @@ def build_response_decision(
             "prefer_lightweight_visual"
         ] = True
 
+        result[
+            "block_image_generation_fallback"
+        ] = True
+
     # =====================================================
     # 🔥 IMAGE GENERATION LOCK
     # =====================================================
@@ -850,6 +994,8 @@ def build_response_decision(
         and ambiguity_level <= 0.35
 
         and visual_generation_needed
+
+        and explicit_image_generation_only
     ):
 
         result[
@@ -888,6 +1034,7 @@ def build_response_decision(
         wants_visual >= 0.92
         and wants_result >= 0.82
         and visual_generation_needed
+        and explicit_image_generation_only
         and not cognition.get(
             "prefer_reference_over_generation"
         )
@@ -895,6 +1042,28 @@ def build_response_decision(
     ):
 
         should_generate = True
+
+    # =====================================================
+    # 🔥 RENDERER SUPPRESSION
+    # =====================================================
+
+    if result.get(
+        "renderer_hard_lock"
+    ):
+
+        should_generate = False
+
+        result[
+            "should_generate"
+        ] = False
+
+        result[
+            "generation_allowed"
+        ] = False
+
+        result[
+            "visual_obligation"
+        ] = False
 
     # =====================================================
     # 🔥 RESTRAINT SUPPRESSION
