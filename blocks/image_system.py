@@ -4,398 +4,148 @@ from blocks.gemini_vision import (
     analyze_image_gemini
 )
 
-# =====================================================
+# =================================================
 # 🧠 APRIL IMAGE SYSTEM
 # =====================================================
 
 """
-APRIL IMAGE SYSTEM — WEB-FIRST STABILIZED
+APRIL IMAGE SYSTEM — PROVIDER-AWARE
+VISUAL CONTINUITY BRIDGE
 
-Главная идея:
+=====================================================
 
-Image system больше НЕ:
-- Telegram image analyzer;
-- isolated OCR layer;
-- raw image interpreter;
-- detached visual pipeline.
+Этот модуль больше НЕ:
+- vision AI;
+- OCR interpreter;
+- trigger detector;
+- scene classifier;
+- fallback analyzer;
+- keyword parser.
 
-Image system теперь:
-- visual continuity system;
-- scene-aware analyzer;
-- web-space visual bridge;
-- semantic visual memory layer.
+=====================================================
 
-Visual authority:
-принадлежит April Web Space.
+Этот модуль теперь:
+- provider bridge;
+- visual continuity layer;
+- semantic scene memory;
+- lightweight visual orchestrator;
+- multimodal context synchronizer.
+
+=====================================================
+
+Главная архитектурная идея:
+
+Gemini / OpenAI / future providers
+ПОНИМАЮТ изображение.
+
+April:
+- сохраняет continuity;
+- организует сцену;
+- удерживает visual context;
+- передаёт semantic understanding
+  дальше в cognition / memory / dialogue.
+
+=====================================================
+
+APRIL PRINCIPLES:
+
+1. providers understand
+2. April orchestrates
+3. no trigger hallucinations
+4. no regex vision
+5. no forced scene classification
+6. continuity before interpretation
+7. renderer-safe architecture
 """
 
 # =================================================
-# 🔥 VISUAL HELPERS
+# 🔥 SAFE NORMALIZATION
 # =====================================================
 
-def normalize_visual_text(
+def normalize_text(
     text
 ):
 
-    return str(
-        text or ""
-    ).lower().strip()
+    if text is None:
+        return ""
+
+    return str(text).strip()
 
 
 # =================================================
-# 🔥 VISUAL OBJECT EXTRACTION
+# 🔥 SAFE SUMMARY
 # =====================================================
 
-def extract_visual_objects(
-    text
+def build_visual_summary(
+    analysis_text
 ):
 
-    lower = normalize_visual_text(
+    """
+    Lightweight semantic summary.
+
+    НЕ:
+    - reinterpretation;
+    - hallucination;
+    - object guessing.
+
+    ONLY:
+    provider semantic preservation.
+    """
+
+    text = normalize_text(
+        analysis_text
+    )
+
+    if not text:
+        return ""
+
+    return text[:1200]
+
+
+# =================================================
+# 🔥 VISUAL MEMORY PACKAGE
+# =====================================================
+
+def build_visual_memory(
+    analysis_text,
+    provider="gemini"
+):
+
+    """
+    IMPORTANT:
+
+    This is NOT scene interpretation.
+
+    This is:
+    semantic continuity packaging.
+
+    Provider already understood image.
+    April only organizes continuity.
+    """
+
+    text = normalize_text(
+        analysis_text
+    )
+
+    summary = build_visual_summary(
         text
-    )
-
-    detected = []
-
-    object_map = {
-
-        "кубик": [
-            "кубик",
-            "rubik",
-            "cube"
-        ],
-
-        "машина": [
-            "машина",
-            "car",
-            "vehicle",
-            "автомобиль"
-        ],
-
-        "рука": [
-            "рука",
-            "hand",
-            "finger",
-            "палец"
-        ],
-
-        "бургер": [
-            "burger",
-            "бургер"
-        ],
-
-        "креветки": [
-            "shrimp",
-            "кревет"
-        ],
-
-        "бокал": [
-            "glass",
-            "cocktail",
-            "бокал"
-        ],
-
-        "меню": [
-            "menu",
-            "меню"
-        ],
-
-        "чек": [
-            "receipt",
-            "чек"
-        ],
-
-        "улица": [
-            "street",
-            "road",
-            "улица"
-        ]
-    }
-
-    for object_name, triggers in object_map.items():
-
-        if any(
-            trigger in lower
-            for trigger in triggers
-        ):
-
-            detected.append(
-                object_name
-            )
-
-    return list(
-        set(detected)
-    )
-
-
-# =================================================
-# 🔥 VISUAL COLOR EXTRACTION
-# =====================================================
-
-def extract_visual_colors(
-    text
-):
-
-    lower = normalize_visual_text(
-        text
-    )
-
-    colors = []
-
-    color_words = [
-
-        "красный",
-        "red",
-
-        "синий",
-        "blue",
-
-        "зелёный",
-        "green",
-
-        "желтый",
-        "yellow",
-
-        "белый",
-        "white",
-
-        "оранжевый",
-        "orange",
-
-        "фиолетовый",
-        "purple",
-
-        "черный",
-        "black"
-    ]
-
-    for color in color_words:
-
-        if color in lower:
-
-            colors.append(
-                color
-            )
-
-    return list(
-        set(colors)
-    )
-
-
-# =================================================
-# 🔥 VISUAL ATMOSPHERE
-# =====================================================
-
-def detect_visual_atmosphere(
-    text
-):
-
-    lower = normalize_visual_text(
-        text
-    )
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "уют",
-            "теплый",
-            "лампа",
-            "спокойный",
-            "мягкий свет"
-        ]
-    ):
-
-        return "calm_cozy"
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "неон",
-            "cyberpunk",
-            "футурист",
-            "фиолетовый свет"
-        ]
-    ):
-
-        return "futuristic"
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "минимализм",
-            "minimal",
-            "чисто",
-            "аккуратно"
-        ]
-    ):
-
-        return "minimal"
-
-    return "neutral"
-
-
-# =================================================
-# 🔥 SCENE TYPE DETECTION
-# =====================================================
-
-def detect_scene_type(
-    lower
-):
-
-    if any(
-        x in lower
-        for x in [
-            "меню",
-            "menu",
-            "dish",
-            "burger",
-            "еда"
-        ]
-    ):
-
-        return "restaurant_menu"
-
-    if any(
-        x in lower
-        for x in [
-            "чек",
-            "receipt",
-            "price"
-        ]
-    ):
-
-        return "receipt"
-
-    if any(
-        x in lower
-        for x in [
-            "улица",
-            "street",
-            "road",
-            "building"
-        ]
-    ):
-
-        return "street"
-
-    if any(
-        x in lower
-        for x in [
-            "машина",
-            "car",
-            "vehicle"
-        ]
-    ):
-
-        return "car_scene"
-
-    if any(
-        x in lower
-        for x in [
-            "кубик",
-            "rubik",
-            "cube"
-        ]
-    ):
-
-        return "object_focus"
-
-    return "general_scene"
-
-
-# =================================================
-# 🔥 VISUAL SCENE BUILDER
-# =====================================================
-
-def build_visual_scene(
-    analysis_text: str
-):
-
-    text = str(
-        analysis_text or ""
-    ).strip()
-
-    lower = text.lower()
-
-    print(
-        "🧠 BUILD VISUAL SCENE START"
     )
 
     # =================================================
-    # 🔥 CORE SEMANTICS
+    # 🔥 CONTINUITY ESTIMATION
     # =====================================================
 
-    scene_type = detect_scene_type(
-        lower
-    )
+    continuity_weight = 0.72
 
-    objects = extract_visual_objects(
-        text
-    )
+    if len(summary) >= 200:
+        continuity_weight += 0.08
 
-    colors = extract_visual_colors(
-        text
-    )
-
-    atmosphere = detect_visual_atmosphere(
-        text
-    )
-
-    summary = text[:500]
-
-    # =================================================
-    # 🔥 CONTINUITY WEIGHT
-    # =====================================================
-
-    continuity_weight = 0.5
-
-    if len(objects) >= 1:
-
-        continuity_weight += 0.2
-
-    if atmosphere != "neutral":
-
-        continuity_weight += 0.15
-
-    if len(colors) >= 1:
-
-        continuity_weight += 0.1
+    if len(summary) >= 500:
+        continuity_weight += 0.05
 
     continuity_weight = min(
         continuity_weight,
-        1.0
-    )
-
-    # =================================================
-    # 🔥 LOGGING
-    # =====================================================
-
-    print(
-        f"🧠 SCENE TYPE: {scene_type}"
-    )
-
-    print(
-        f"🧠 OBJECTS: {objects}"
-    )
-
-    print(
-        f"🧠 COLORS: {colors}"
-    )
-
-    print(
-        f"🧠 ATMOSPHERE: {atmosphere}"
-    )
-
-    print(
-        f"🧠 CONTINUITY: {continuity_weight}"
+        0.9
     )
 
     # =================================================
@@ -404,34 +154,70 @@ def build_visual_scene(
 
     return {
 
-        "scene_type": scene_type,
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
 
         "summary": summary,
 
-        "objects": objects,
+        "raw_analysis": text,
 
-        "colors": colors,
+        # =================================================
+        # 🔥 PROVIDER
+        # =====================================================
 
-        "atmosphere": atmosphere,
+        "provider": provider,
+
+        "provider_driven": True,
+
+        "semantic_source": provider,
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
 
         "continuity_weight":
             continuity_weight,
 
-        "web_space_ready": True,
+        "continuity_ready": True,
+
+        "dialog_ready": True,
+
+        "memory_ready": True,
+
+        # =================================================
+        # 🔥 APRIL WEB SPACE
+        # =====================================================
 
         "renderer_compatible": True,
 
-        "raw_analysis": text
+        "web_space_ready": True,
+
+        "scene_oriented": True,
+
+        # =================================================
+        # 🔥 SAFETY
+        # =====================================================
+
+        "trigger_based": False,
+
+        "hallucination_safe": True,
+
+        "forced_scene_detection": False,
+
+        "regex_vision": False,
+
+        "lightweight_mode": True
     }
 
 
 # =================================================
-# 🔥 VISUAL MEMORY HISTORY
+# 🔥 VISUAL HISTORY
 # =====================================================
 
 def update_visual_history(
     state,
-    visual_scene
+    visual_memory
 ):
 
     history = state.get(
@@ -440,8 +226,12 @@ def update_visual_history(
     )
 
     history.append(
-        visual_scene
+        visual_memory
     )
+
+    # =================================================
+    # 🔥 CONTINUITY WINDOW
+    # =====================================================
 
     if len(history) > 7:
 
@@ -452,6 +242,62 @@ def update_visual_history(
     ] = history
 
     return history
+
+
+# =================================================
+# 🔥 CACHE RESTORE
+# =====================================================
+
+def restore_visual_cache(
+    state,
+    path
+):
+
+    if not state:
+        return None
+
+    cached = state.get(
+        "image_analysis"
+    )
+
+    cached_path = state.get(
+        "image_analysis_path"
+    )
+
+    if (
+
+        cached
+        and cached_path == path
+
+    ):
+
+        print(
+            "🧠 USING VISUAL CACHE"
+        )
+
+        return cached
+
+    return None
+
+
+# =================================================
+# 🔥 PROVIDER ANALYSIS
+# =====================================================
+
+async def analyze_provider_image(
+    path
+):
+
+    """
+    Provider-aware bridge.
+
+    Future-safe:
+    Gemini / OpenAI / hybrid routing.
+    """
+
+    return await analyze_image_gemini(
+        path
+    )
 
 
 # =================================================
@@ -477,53 +323,29 @@ async def analyze_image(
         # 🔥 CACHE
         # =====================================================
 
-        if state:
+        cached = restore_visual_cache(
+            state,
+            path
+        )
 
-            cached = state.get(
-                "image_analysis"
-            )
+        if cached:
 
-            cached_path = state.get(
-                "image_analysis_path"
-            )
-
-            active_visual_scene = state.get(
-                "active_visual_scene"
-            )
-
-            if (
-
-                cached
-                and cached_path == path
-
-            ):
-
-                print(
-                    "🧠 USING IMAGE CACHE"
-                )
-
-                if active_visual_scene:
-
-                    print(
-                        "🧠 VISUAL SCENE RESTORED"
-                    )
-
-                return cached
+            return cached
 
         # =================================================
-        # 🔥 GEMINI ANALYSIS
+        # 🔥 PROVIDER ANALYSIS
         # =====================================================
 
         print(
-            "🧠 GEMINI ANALYSIS START"
+            "🧠 PROVIDER ANALYSIS START"
         )
 
-        result = await analyze_image_gemini(
+        result = await analyze_provider_image(
             path
         )
 
         print(
-            "🧠 GEMINI ANALYSIS COMPLETE"
+            "🧠 PROVIDER ANALYSIS COMPLETE"
         )
 
         # =================================================
@@ -533,20 +355,21 @@ async def analyze_image(
         if not result:
 
             return (
-                "⚠️ Не удалось "
+                "⚠️ Не получилось "
                 "проанализировать изображение."
             )
 
         # =================================================
-        # 🔥 BUILD VISUAL SCENE
+        # 🔥 BUILD VISUAL MEMORY
         # =====================================================
 
-        visual_scene = build_visual_scene(
-            result
+        visual_memory = build_visual_memory(
+            result,
+            provider="gemini"
         )
 
         print(
-            "🧠 VISUAL SCENE CREATED"
+            "🧠 VISUAL MEMORY CREATED"
         )
 
         # =================================================
@@ -554,6 +377,10 @@ async def analyze_image(
         # =====================================================
 
         if state is not None:
+
+            # =================================================
+            # 🔥 RAW PROVIDER RESULT
+            # =====================================================
 
             state["image_analysis"] = (
                 result
@@ -563,36 +390,43 @@ async def analyze_image(
                 path
             )
 
+            # =================================================
+            # 🔥 ACTIVE VISUAL CONTEXT
+            # =====================================================
+
             state["active_visual_scene"] = (
-                visual_scene
+                visual_memory
             )
+
+            # =================================================
+            # 🔥 CONTINUITY HISTORY
+            # =====================================================
 
             update_visual_history(
                 state,
-                visual_scene
+                visual_memory
             )
+
+            # =================================================
+            # 🔥 LIGHTWEIGHT SNAPSHOT
+            # =====================================================
 
             state[
                 "last_visual_analysis"
             ] = {
 
                 "summary":
-                    visual_scene.get(
+                    visual_memory.get(
                         "summary"
                     ),
 
-                "scene_type":
-                    visual_scene.get(
-                        "scene_type"
-                    ),
-
-                "objects":
-                    visual_scene.get(
-                        "objects"
+                "provider":
+                    visual_memory.get(
+                        "provider"
                     ),
 
                 "continuity_weight":
-                    visual_scene.get(
+                    visual_memory.get(
                         "continuity_weight"
                     )
             }
