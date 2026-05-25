@@ -8,24 +8,31 @@ from blocks.intent_ai import detect_intent_ai
 # =====================================================
 
 """
-APRIL ROUTER — WEB SPACE STABILIZED
-
-Router больше НЕ:
-- authority layer;
-- hard execution switch;
-- forced generation system;
-- telegram-oriented dispatcher.
+APRIL ROUTER — UNIFIED SPACE ORCHESTRATION
 
 Router теперь:
-- lightweight semantic hint system;
-- continuity-safe helper;
-- renderer-aware assistant;
-- provider-aware routing stabilizer.
+- calm orchestration layer;
+- continuity-safe semantic router;
+- renderer-first stabilizer;
+- lightweight capability guide;
+- provider-aware helper.
 
-Главное правило:
-router НЕ принимает финальных решений.
-Финальное решение принадлежит:
-semantic + cognition + response_decision.
+Router НЕ:
+- authority system;
+- execution owner;
+- recursive retry source;
+- hidden generation trigger;
+- telegram dispatcher.
+
+CORE PRINCIPLES:
+
+1. continuation before reroute
+2. renderer before generation
+3. lightweight before heavy
+4. preserve active scene
+5. avoid hidden escalation
+6. no forced provider chaos
+7. no room wars
 """
 
 # =====================================================
@@ -63,7 +70,74 @@ def set_router_hint(
         "router_suggestion"
     ] = hint
 
+    semantic[
+        "router_last_hint"
+    ] = hint
+
     return hint
+
+
+# =====================================================
+# 🧠 SAFE FLAGS
+# =====================================================
+
+def apply_router_stabilization(
+    semantic: dict
+):
+
+    semantic[
+        "router_is_soft"
+    ] = True
+
+    semantic[
+        "router_authority"
+    ] = "supportive"
+
+    semantic[
+        "router_provider_aware"
+    ] = True
+
+    semantic[
+        "router_renderer_aware"
+    ] = True
+
+    semantic[
+        "router_continuity_first"
+    ] = True
+
+    semantic[
+        "router_renderer_first"
+    ] = True
+
+    semantic[
+        "router_anti_escalation"
+    ] = True
+
+    semantic[
+        "router_anti_recursion"
+    ] = True
+
+    semantic[
+        "router_preserve_scene"
+    ] = True
+
+    semantic[
+        "router_preserve_flow"
+    ] = True
+
+    semantic[
+        "router_generation_requires_intent"
+    ] = True
+
+    semantic[
+        "router_lightweight_priority"
+    ] = True
+
+    semantic[
+        "router_hidden_generation_blocked"
+    ] = True
+
+    return semantic
 
 
 # =====================================================
@@ -85,31 +159,36 @@ def is_soft_continuation(
         "давай",
         "продолжай",
         "ещё",
+        "еще",
         "вот",
         "примерно",
         "ближе",
         "уже лучше",
         "дальше",
         "снова",
-        "поехали"
+        "поехали",
+        "оставь",
+        "так",
+        "в таком стиле"
     ]
 
     if t in continuation_words:
         return True
 
-    if len(t) <= 24:
+    if len(t) <= 28:
 
         if contains_any(
             t,
             continuation_words
         ):
+
             return True
 
     return False
 
 
 # =====================================================
-# 🧠 VISUAL CONTINUATION
+# 🧠 VISUAL CONTINUITY
 # =====================================================
 
 def detect_visual_continuation(
@@ -141,10 +220,14 @@ def detect_visual_continuation(
         "фон",
         "стиль",
         "атмосфера",
+        "форма",
+        "размер",
         "меню",
         "бокал",
         "бургер",
-        "креветки"
+        "креветки",
+        "машина",
+        "улица"
     ]
 
     if contains_any(
@@ -154,7 +237,7 @@ def detect_visual_continuation(
 
         return True
 
-    if len(t) <= 40:
+    if len(t) <= 48:
 
         return True
 
@@ -172,8 +255,8 @@ def detect_intent_local(
     t = normalize(text)
 
     # =================================================
-    # 🔥 SCIENCE
-    # =================================================
+    # 🔥 SCIENCE / RENDERER
+    # =====================================================
 
     math_words = [
 
@@ -201,17 +284,47 @@ def detect_intent_local(
         return "science"
 
     # =================================================
-    # 🔥 IMAGE GENERATION
+    # 🔥 RENDERER SPACE
+    # =====================================================
+
+    renderer_words = [
+
+        "таблица",
+        "формула",
+        "diagram",
+        "диаграмма",
+        "схема",
+        "layout",
+        "grid",
+        "renderer",
+        "пространство",
+        "scene",
+        "композиция",
+        "canvas",
+        "блок"
+    ]
+
+    if contains_any(
+        t,
+        renderer_words
+    ):
+
+        return "renderer_space"
+
     # =================================================
+    # 🔥 IMAGE GENERATION
+    # =====================================================
 
     generate_words = [
 
         "создай изображение",
         "сгенерируй изображение",
         "нарисуй картинку",
-        "сделай картинку",
+        "создай картинку",
+        "draw image",
+        "generate image",
         "создай арт",
-        "создай фото"
+        "сделай арт"
     ]
 
     if contains_any(
@@ -223,7 +336,7 @@ def detect_intent_local(
 
     # =================================================
     # 🔥 IMAGE EDIT
-    # =================================================
+    # =====================================================
 
     edit_words = [
 
@@ -279,6 +392,36 @@ def user_waiting_execution(
 
 
 # =====================================================
+# 🧠 RENDERER PRIORITY
+# =====================================================
+
+def renderer_priority_active(
+    semantic,
+    cognition
+):
+
+    if semantic.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        return True
+
+    if cognition.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    return False
+
+
+# =====================================================
 # 🧠 MAIN ROUTER
 # =====================================================
 
@@ -323,29 +466,13 @@ async def route_request(
             {}
         )
 
-        # =================================================
-        # 🧠 SAFE DEFAULTS
-        # =================================================
-
-        semantic[
-            "router_is_soft"
-        ] = True
-
-        semantic[
-            "router_authority"
-        ] = "weak_hint"
-
-        semantic[
-            "router_provider_aware"
-        ] = True
-
-        semantic[
-            "router_renderer_aware"
-        ] = True
+        apply_router_stabilization(
+            semantic
+        )
 
         # =================================================
         # 🧠 ACTIVE FLOW
-        # =================================================
+        # =====================================================
 
         active_flow = state.get(
             "active_flow"
@@ -356,13 +483,43 @@ async def route_request(
         )
 
         # =================================================
-        # 🧠 SCIENCE CONTINUATION
+        # 🧠 RENDERER-FIRST LOCK
+        # =====================================================
+
+        if renderer_priority_active(
+            semantic,
+            cognition
+        ):
+
+            semantic[
+                "renderer_route_locked"
+            ] = True
+
+            semantic[
+                "avoid_image_generation_fallback"
+            ] = True
+
+            semantic[
+                "visual_generation_needed"
+            ] = False
+
+            return set_router_hint(
+                semantic,
+                "renderer_space"
+            )
+
         # =================================================
+        # 🧠 SCIENCE CONTINUATION
+        # =====================================================
 
         if continuation_target == "math":
 
             semantic[
                 "math_continuation"
+            ] = True
+
+            semantic[
+                "renderer_scene_continuity"
             ] = True
 
             return set_router_hint(
@@ -372,7 +529,7 @@ async def route_request(
 
         # =================================================
         # 🧠 VISUAL CONTINUITY
-        # =================================================
+        # =====================================================
 
         if detect_visual_continuation(
             text,
@@ -385,6 +542,14 @@ async def route_request(
 
             semantic[
                 "renderer_scene_continuity"
+            ] = True
+
+            semantic[
+                "preserve_visual_scene"
+            ] = True
+
+            semantic[
+                "avoid_scene_reset"
             ] = True
 
             if user_waiting_execution(
@@ -403,7 +568,7 @@ async def route_request(
 
         # =================================================
         # 🧠 EXPLORATION MODE
-        # =================================================
+        # =====================================================
 
         if cognition.get(
             "exploration_mode"
@@ -417,8 +582,9 @@ async def route_request(
                 "generation_should_wait"
             ] = True
 
-            # 🔥 exploration больше
-            # НЕ форсит generation
+            semantic[
+                "avoid_heavy_generation"
+            ] = True
 
             if visual_reference.get(
                 "lightweight_mode"
@@ -435,7 +601,7 @@ async def route_request(
 
         # =================================================
         # 🧠 REFERENCE MODE
-        # =================================================
+        # =====================================================
 
         if response_decision.get(
             "should_offer_reference"
@@ -449,6 +615,10 @@ async def route_request(
                 "lightweight_visual_mode"
             ] = True
 
+            semantic[
+                "generation_should_wait"
+            ] = True
+
             return set_router_hint(
                 semantic,
                 "text"
@@ -456,7 +626,7 @@ async def route_request(
 
         # =================================================
         # 🧠 HARD EXECUTION
-        # =================================================
+        # =====================================================
 
         if semantic.get(
             "should_execute"
@@ -472,6 +642,10 @@ async def route_request(
                     "execution_locked"
                 ] = True
 
+                semantic[
+                    "router_respects_semantic"
+                ] = True
+
                 return set_router_hint(
                     semantic,
                     room
@@ -479,7 +653,7 @@ async def route_request(
 
         # =================================================
         # 🧠 LOCAL DETECTION
-        # =================================================
+        # =====================================================
 
         local = detect_intent_local(
             text
@@ -491,6 +665,10 @@ async def route_request(
                 "local_detection_used"
             ] = True
 
+            semantic[
+                "local_detection_safe"
+            ] = True
+
             return set_router_hint(
                 semantic,
                 local
@@ -498,7 +676,7 @@ async def route_request(
 
         # =================================================
         # 🧠 ACTIVE FLOW SUPPORT
-        # =================================================
+        # =====================================================
 
         if active_flow:
 
@@ -506,11 +684,34 @@ async def route_request(
                 "type"
             )
 
+            semantic[
+                "active_flow_detected"
+            ] = True
+
+            semantic[
+                "preserve_active_flow"
+            ] = True
+
             if flow_type == "math":
 
                 return set_router_hint(
                     semantic,
                     "science"
+                )
+
+            if flow_type in [
+
+                "renderer_space",
+                "visual_scene"
+            ]:
+
+                semantic[
+                    "renderer_scene_continuity"
+                ] = True
+
+                return set_router_hint(
+                    semantic,
+                    "renderer_space"
                 )
 
             if flow_type in [
@@ -535,12 +736,16 @@ async def route_request(
 
         # =================================================
         # 🧠 SHORT INPUT
-        # =================================================
+        # =====================================================
 
         if len(t) <= 12:
 
             semantic[
                 "short_input_detected"
+            ] = True
+
+            semantic[
+                "prefer_continuity_interpretation"
             ] = True
 
             return semantic.get(
@@ -550,7 +755,7 @@ async def route_request(
 
         # =================================================
         # 🧠 AI DETECTION
-        # =================================================
+        # =====================================================
 
         intent = await detect_intent_ai(
             text
@@ -563,7 +768,7 @@ async def route_request(
 
         # =================================================
         # 🧠 AI IMAGE GENERATION
-        # =================================================
+        # =====================================================
 
         if intent == "generate_image":
 
@@ -571,13 +776,17 @@ async def route_request(
                 "ai_image_generation"
             ] = True
 
-            # 🔥 provider-aware:
-            # generation только
-            # при явном intent
+            semantic[
+                "explicit_generation_confirmed"
+            ] = True
 
             if cognition.get(
                 "exploration_mode"
             ):
+
+                semantic[
+                    "generation_should_wait"
+                ] = True
 
                 return set_router_hint(
                     semantic,
@@ -591,7 +800,7 @@ async def route_request(
 
         # =================================================
         # 🧠 AI IMAGE EDIT
-        # =================================================
+        # =====================================================
 
         if intent == "edit_image":
 
@@ -605,6 +814,10 @@ async def route_request(
                     "ai_image_edit"
                 ] = True
 
+                semantic[
+                    "preserve_visual_scene"
+                ] = True
+
                 return set_router_hint(
                     semantic,
                     "image_edit"
@@ -612,7 +825,7 @@ async def route_request(
 
         # =================================================
         # 🧠 AI IMAGE ANALYSIS
-        # =================================================
+        # =====================================================
 
         if intent == "analyze_image":
 
@@ -626,8 +839,9 @@ async def route_request(
                     "ai_image_analysis"
                 ] = True
 
-                # 🔥 analyze_image теперь
-                # НЕ форсит generation
+                semantic[
+                    "analysis_without_generation"
+                ] = True
 
                 return set_router_hint(
                     semantic,
@@ -636,7 +850,7 @@ async def route_request(
 
         # =================================================
         # 🧠 WEB / REALTIME
-        # =================================================
+        # =====================================================
 
         if cognition.get(
             "internet_context_needed"
@@ -646,6 +860,14 @@ async def route_request(
                 "web_context_route"
             ] = True
 
+            semantic[
+                "web_support_preferred"
+            ] = True
+
+            semantic[
+                "generation_should_wait"
+            ] = True
+
             return set_router_hint(
                 semantic,
                 "text"
@@ -653,7 +875,11 @@ async def route_request(
 
         # =================================================
         # 🧠 DEFAULT SAFE ROUTE
-        # =================================================
+        # =====================================================
+
+        semantic[
+            "default_safe_route"
+        ] = True
 
         return semantic.get(
             "router_suggestion",
