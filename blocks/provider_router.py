@@ -4,7 +4,6 @@
 
 import os
 import time
-import asyncio
 
 from openai import OpenAI
 from google import genai
@@ -29,7 +28,15 @@ gemini_client = genai.Client(
 
 provider_state = {
 
-    "primary": "gemini",
+    # =================================================
+    # 🔥 OPENAI PRIMARY
+    # =================================================
+
+    "primary": "openai",
+
+    # =================================================
+    # 🔥 GEMINI VISUAL HELPER
+    # =================================================
 
     "gemini_available": True,
 
@@ -129,52 +136,6 @@ def mark_gemini_success():
 
 
 # =====================================================
-# 🔥 BUILD GEMINI PROMPT
-# =====================================================
-
-def build_gemini_prompt(
-    messages
-):
-
-    system_prompt = ""
-
-    conversation = []
-
-    for msg in messages:
-
-        role = msg.get(
-            "role",
-            "user"
-        )
-
-        content = msg.get(
-            "content",
-            ""
-        )
-
-        if role == "system":
-
-            system_prompt += (
-                content + "\n"
-            )
-
-        else:
-
-            conversation.append(
-
-                f"{role.upper()}: "
-                f"{content}"
-            )
-
-    return (
-
-        system_prompt
-        + "\n\n"
-        + "\n".join(conversation)
-    )
-
-
-# =====================================================
 # 🔥 TEXT GENERATION
 # =====================================================
 
@@ -183,92 +144,24 @@ async def generate_text(
     messages,
     temperature=0.7,
     max_output_tokens=700,
-    model="gemini-2.5-flash"
+    model="gpt-4o-mini"
 ):
 
     # =================================================
-    # 🔥 GEMINI PRIMARY
+    # 🔥 OPENAI PRIMARY
     # =================================================
 
-    if should_restore_gemini():
-
-        try:
-
-            provider_log(
-                "🧠 GEMINI TEXT START"
-            )
-
-            final_prompt = (
-                build_gemini_prompt(
-                    messages
-                )
-            )
-
-            response = (
-
-                gemini_client.models.generate_content(
-
-                    model=model,
-
-                    contents=final_prompt
-                )
-            )
-
-            text = (
-
-                response.text.strip()
-                if response.text
-                else ""
-            )
-
-            if not text:
-
-                provider_log(
-                    "🔥 GEMINI EMPTY RESPONSE"
-                )
-
-                mark_gemini_failure()
-
-                return (
-                    "⚠️ Gemini вернул пустой ответ. "
-                    "Попробуй чуть позже."
-                )
-
-            if text:
-
-                provider_log(
-                    "🧠 GEMINI TEXT SUCCESS"
-                )
-
-                mark_gemini_success()
-
-                return text
-
-        except Exception as e:
-
-            provider_log(
-                "🔥 GEMINI TEXT ERROR:",
-                e
-            )
-
-            mark_gemini_failure()
-
-    # =================================================
-    # 🔥 OPENAI FALLBACK
-    # =================================================
-
-    """
     try:
 
         provider_log(
-            "⚠️ USING OPENAI FALLBACK"
+            "🧠 OPENAI TEXT START"
         )
 
         response = (
 
             openai_client.responses.create(
 
-                model="gpt-4o-mini",
+                model=model,
 
                 input=messages,
 
@@ -278,11 +171,29 @@ async def generate_text(
             )
         )
 
+        text = (
+
+            response.output_text.strip()
+            if response.output_text
+            else ""
+        )
+
+        if not text:
+
+            provider_log(
+                "🔥 OPENAI EMPTY RESPONSE"
+            )
+
+            return (
+                "⚠️ Dialogue-space "
+                "временно перегружен."
+            )
+
         provider_log(
             "🧠 OPENAI TEXT SUCCESS"
         )
 
-        return response.output_text
+        return text
 
     except Exception as e:
 
@@ -292,23 +203,9 @@ async def generate_text(
         )
 
         return (
-            "⚠️ Сейчас dialogue-space "
+            "⚠️ Dialogue-space "
             "временно перегружен."
         )
-    """
-
-    # =================================================
-    # 🔥 TEMP DISABLED
-    # =================================================
-
-    provider_log(
-        "⚠️ OPENAI FALLBACK TEMP DISABLED"
-    )
-
-    return (
-        "⚠️ Gemini временно перегружен. "
-        "Попробуй чуть позже."
-    )
 
 
 # =====================================================
@@ -384,7 +281,7 @@ async def analyze_image_with_fallback(
 ):
 
     # =================================================
-    # 🔥 GEMINI PRIMARY
+    # 🔥 GEMINI VISUAL PRIMARY
     # =================================================
 
     if should_restore_gemini():
@@ -449,7 +346,7 @@ async def analyze_image_with_fallback(
             mark_gemini_failure()
 
     # =================================================
-    # 🔥 OPENAI EMERGENCY FALLBACK
+    # 🔥 OPENAI VISUAL FALLBACK
     # =====================================================
 
     try:
@@ -458,9 +355,55 @@ async def analyze_image_with_fallback(
             "⚠️ OPENAI IMAGE FALLBACK"
         )
 
+        with open(path, "rb") as image_file:
+
+            response = (
+
+                openai_client.responses.create(
+
+                    model="gpt-4o-mini",
+
+                    input=[
+
+                        {
+                            "role": "user",
+
+                            "content": [
+
+                                {
+                                    "type": "input_text",
+
+                                    "text": prompt
+                                },
+
+                                {
+                                    "type": "input_image",
+
+                                    "image":
+                                        image_file.read()
+                                }
+                            ]
+                        }
+                    ],
+
+                    max_output_tokens=250
+                )
+            )
+
+        text = (
+
+            response.output_text.strip()
+            if response.output_text
+            else ""
+        )
+
+        if text:
+
+            return text
+
         return (
-            "⚠️ Visual fallback "
-            "временно активирован."
+            "⚠️ Visual-space "
+            "временно перегружен."
         )
 
     except Exception as e:
