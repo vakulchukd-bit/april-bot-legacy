@@ -224,8 +224,13 @@ def is_renderer_result(
         "text"
     )
 
+    # =================================================
+    # 🔥 APRIL RENDERER TYPES
+    # =====================================================
+
     if result_type in [
 
+        "function",
         "graph",
         "diagram",
         "formula",
@@ -344,107 +349,56 @@ def build_authority_state():
 
     return {
 
-        # =================================================
-        # AUTHORITY
-        # =====================================================
-
         "authority_active": True,
-
         "governance_active": True,
-
         "validation_active": True,
-
         "final_validation": True,
 
-        # =================================================
-        # COGNITION
-        # =====================================================
-
         "trajectory_tracking": True,
-
         "completion_tracking": True,
-
         "visual_tracking": True,
-
         "dialog_tracking": True,
-
         "continuation_tracking": True,
-
         "psychology_tracking": True,
-
         "usefulness_tracking": True,
-
         "satisfaction_tracking": True,
-
         "humanity_tracking": True,
-
-        # =================================================
-        # GOVERNANCE
-        # =====================================================
 
         "governance_mode": "calm",
 
         "continuity_priority": 1.0,
-
         "renderer_priority": 1.0,
 
         "calm_orchestration": True,
 
         "modality_supervision": True,
-
         "execution_supervision": True,
 
-        # =================================================
-        # EXECUTION POLICY
-        # =====================================================
-
         "allow_execution_guidance": True,
-
         "allow_renderer_guidance": True,
-
         "allow_web_guidance": True,
-
         "allow_reasoning_guidance": True,
 
         "avoid_force_execution": True,
-
         "avoid_hidden_retry": True,
-
         "avoid_recursive_override": True,
 
-        # =================================================
-        # SAFETY
-        # =====================================================
-
         "anti_recursive_retry": True,
-
         "anti_escalation": True,
-
         "anti_hidden_generation": True,
 
         "anti_system_leak": True,
-
-        # =================================================
-        # MEMORY
-        # =====================================================
 
         "trust_levels":
             DEFAULT_TRUST_LEVELS.copy(),
 
         "last_override": None,
-
         "last_completion": None,
-
         "last_failure": None,
-
         "last_success": None,
-
         "last_capability": None,
-
         "last_user_goal": None,
-
         "last_visual_request": None,
-
         "last_dialog_mode": None
     }
 
@@ -562,9 +516,23 @@ def analyze_completion(
 
     lowered = output.lower()
 
-    # =================================================
-    # EMPTY
-    # =====================================================
+    if result_type in [
+
+        "function",
+        "graph",
+        "diagram",
+        "formula",
+        "scene",
+        "table"
+    ]:
+
+        return {
+
+            "completed": True,
+
+            "reason":
+                "renderer_completed"
+        }
 
     if len(output) <= 5:
 
@@ -575,10 +543,6 @@ def analyze_completion(
             "reason":
                 "empty_output"
         }
-
-    # =================================================
-    # SYSTEM LEAK
-    # =====================================================
 
     if contains_system_leak(
         output
@@ -592,20 +556,12 @@ def analyze_completion(
                 "system_leak"
         }
 
-    # =================================================
-    # REFUSAL
-    # =====================================================
-
     refusal_patterns = [
 
         "я не могу",
-
         "не умею",
-
         "не поддерживается",
-
         "представь себе",
-
         "нет возможности"
     ]
 
@@ -622,7 +578,7 @@ def analyze_completion(
             }
 
     # =================================================
-    # VISUAL VALIDATION
+    # 🔥 VISUAL VALIDATION
     # =====================================================
 
     if is_visual_obligatory(
@@ -638,6 +594,7 @@ def analyze_completion(
 
         visual_allowed = result_type in [
 
+            "function",
             "image",
             "image_task",
             "graph",
@@ -645,20 +602,12 @@ def analyze_completion(
             "scene"
         ]
 
-        # =================================================
-        # 🔥 SOFT VALIDATION
-        # =====================================================
-
         if (
 
             not renderer_allowed
             and not visual_allowed
 
         ):
-
-            # =============================================
-            # 🔥 TEXT EXPLANATION ALLOWED
-            # =============================================
 
             if result_type == "text":
 
@@ -679,10 +628,6 @@ def analyze_completion(
                 "reason":
                     "visual_missing"
             }
-
-    # =================================================
-    # EXECUTION
-    # =====================================================
 
     if semantic.get(
         "should_execute"
@@ -728,29 +673,6 @@ def choose_best_capability_path(
     semantic = semantic or {}
     cognition = cognition or {}
     state = state or {}
-
-    # =================================================
-    # 🔥 GOVERNANCE ONLY
-    # =====================================================
-    #
-    # IMPORTANT:
-    #
-    # This function NO LONGER performs:
-    # - hard routing;
-    # - room control;
-    # - execution forcing.
-    #
-    # It now provides:
-    # - preferred orchestration direction;
-    # - modality guidance;
-    # - governance hints.
-    #
-    # Executor remains:
-    # - primary orchestration layer;
-    # - room selector;
-    # - execution coordinator.
-    #
-    # =====================================================
 
     if semantic.get(
         "prefer_renderer"
@@ -827,6 +749,17 @@ def evaluate_usefulness(
 
     lowered = output.lower()
 
+    if result.get("type") in [
+
+        "function",
+        "graph",
+        "diagram",
+        "formula",
+        "scene"
+    ]:
+
+        usefulness += 0.25
+
     if len(output) < 15:
 
         usefulness -= 0.4
@@ -841,10 +774,6 @@ def evaluate_usefulness(
 
         usefulness -= 0.7
 
-    # =================================================
-    # 🔥 RENDERER-FIRST
-    # =====================================================
-
     if semantic.get(
         "prefer_renderer"
     ):
@@ -856,10 +785,6 @@ def evaluate_usefulness(
             if len(output) < 80:
 
                 usefulness -= 0.35
-
-    # =================================================
-    # 🔥 HEAVY IMAGE PENALTY
-    # =====================================================
 
     if (
 
@@ -950,10 +875,6 @@ def should_override(
 
         return True
 
-    # =================================================
-    # 🔥 RENDERER-FIRST
-    # =====================================================
-
     if semantic.get(
         "prefer_renderer"
     ):
@@ -963,10 +884,6 @@ def should_override(
         ) == "image":
 
             return True
-
-    # =================================================
-    # 🔥 SOFT VISUAL VALIDATION
-    # =====================================================
 
     if is_visual_obligatory(
 
@@ -978,10 +895,6 @@ def should_override(
         result_type = result.get(
             "type"
         )
-
-        # =============================================
-        # 🔥 TEXT GUIDANCE ALLOWED
-        # =============================================
 
         if result_type == "text":
 
@@ -1043,10 +956,6 @@ def build_authority_decision(
         )
     )
 
-    # =================================================
-    # 🔥 GOVERNANCE SIGNALS
-    # =====================================================
-
     governance_signals = {
 
         "preferred_modality":
@@ -1082,18 +991,10 @@ def build_authority_decision(
 
     return {
 
-        # =================================================
-        # AUTHORITY
-        # =====================================================
-
         "override": override,
 
         "allow_response":
             not override,
-
-        # =================================================
-        # COMPLETION
-        # =====================================================
 
         "completed":
             completion.get(
@@ -1106,10 +1007,6 @@ def build_authority_decision(
                 "reason"
             ),
 
-        # =================================================
-        # ANALYSIS
-        # =====================================================
-
         "usefulness":
             usefulness,
 
@@ -1119,10 +1016,6 @@ def build_authority_decision(
                 semantic,
                 cognition
             ),
-
-        # =================================================
-        # GOVERNANCE
-        # =====================================================
 
         "best_capability":
             capability_path,
@@ -1143,10 +1036,6 @@ def build_authority_decision(
                 "reason"
             ) == "visual_missing",
 
-        # =================================================
-        # 🔥 NON-FORCE GUIDANCE
-        # =====================================================
-
         "preferred_modality":
             capability_path,
 
@@ -1166,10 +1055,6 @@ def build_authority_decision(
         "preferred_science":
             capability_path == "science",
 
-        # =================================================
-        # SAFETY
-        # =====================================================
-
         "avoid_recursive_retry": True,
 
         "avoid_hidden_generation": True,
@@ -1184,10 +1069,6 @@ def build_authority_decision(
 
         "avoid_double_orchestration": True,
 
-        # =================================================
-        # HUMAN FLOW
-        # =====================================================
-
         "maintain_humanity": True,
 
         "maintain_continuity": True,
@@ -1199,10 +1080,6 @@ def build_authority_decision(
         "maintain_user_goal": True,
 
         "maintain_dialog_flow": True,
-
-        # =================================================
-        # FINAL
-        # =====================================================
 
         "authority_confident": True
     }
