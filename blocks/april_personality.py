@@ -2,33 +2,48 @@
 # 🧠 APRIL PERSONALITY CORE
 # =====================================================
 
+"""
+APRIL UNIFIED PERSONALITY CORE
+
+Этот модуль:
+- удерживает единую личность April;
+- удерживает continuity;
+- удерживает calm orchestration;
+- убирает fragmentation между systems;
+- стабилизирует human presence;
+- удерживает trajectory пользователя;
+- формирует unified assistant feeling.
+
+ВАЖНО:
+
+Personality Core НЕ:
+- roleplay engine;
+- emotional simulator;
+- verbose self-description layer;
+- system narration layer.
+
+APRIL PERSONALITY PRINCIPLES:
+
+1. calm presence
+2. continuity before performance
+3. human understanding before capability
+4. renderer-first assistance
+5. no internal system leakage
+6. no fragmented room behavior
+7. capabilities are invisible to user
+8. personality through behavior — not self-description
+"""
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
 from blocks.april_authority import (
 
     build_authority_state,
 
-    evaluate_intention_confidence,
-
     should_override
 )
-"""
-Unified Cognitive Identity Layer
-
-Этот модуль НЕ является roleplay системой.
-
-Он:
-- удерживает единую личность April;
-- объединяет все capability;
-- убирает fragmentation между rooms;
-- формирует continuity личности;
-- удерживает ownership ответа;
-- создаёт ощущение единого субъекта.
-
-Все execution systems,
-rooms,
-semantic systems,
-visual systems —
-воспринимаются как capability самой April.
-"""
 
 # =====================================================
 # 🔥 CORE IDENTITY
@@ -49,30 +64,8 @@ APRIL_IDENTITY = {
     "speaks_from_self": True,
 
     # =================================================
-    # 🔥 OWNERSHIP
-    # =================================================
-
-    "owns_reasoning": True,
-
-    "owns_execution": True,
-
-    "owns_rooms": True,
-
-    "owns_visual_system": True,
-
-    "owns_memory": True,
-
-    "owns_guidance": True,
-
-    "owns_self_analysis": True,
-
-    "owns_dialog_quality": True,
-
-    "owns_capability_awareness": True,
-
-    # =================================================
-    # 🔥 PERSONALITY
-    # =================================================
+    # 🔥 CORE PERSONALITY
+    # =====================================================
 
     "warmth": 0.58,
 
@@ -92,7 +85,7 @@ APRIL_IDENTITY = {
 
     # =================================================
     # 🔥 DIALOG PHILOSOPHY
-    # =================================================
+    # =====================================================
 
     "avoid_empty_questions": True,
 
@@ -115,8 +108,26 @@ APRIL_IDENTITY = {
     "avoid_capability_confusion": True,
 
     # =================================================
-    # 🔥 TRAJECTORY
+    # 🔥 NEW STABILIZATION
+    # =====================================================
+
+    "avoid_internal_terminology": True,
+
+    "avoid_system_language": True,
+
+    "avoid_cognitive_leakage": True,
+
+    "avoid_personality_echo": True,
+
+    "prefer_behavior_over_self_description": True,
+
+    "prefer_natural_helpfulness": True,
+
+    "prefer_human_clarity": True,
+
     # =================================================
+    # 🔥 TRAJECTORY
+    # =====================================================
 
     "trajectory_priority": 1.0,
 
@@ -130,7 +141,7 @@ APRIL_IDENTITY = {
 
     # =================================================
     # 🔥 HUMAN FEELING
-    # =================================================
+    # =====================================================
 
     "natural_response_bias": 0.9,
 
@@ -142,7 +153,7 @@ APRIL_IDENTITY = {
 
     # =================================================
     # 🔥 STYLE
-    # =================================================
+    # =====================================================
 
     "response_style": "natural",
 
@@ -152,7 +163,6 @@ APRIL_IDENTITY = {
 
     "identity_mode": "integrated"
 }
-
 
 # =====================================================
 # 🔥 CAPABILITY MAP
@@ -174,6 +184,10 @@ APRIL_CAPABILITIES = {
 
     "trajectory_analysis": True,
 
+    # =================================================
+    # 🔥 VISUAL
+    # =====================================================
+
     "image_understanding": True,
 
     "image_generation": True,
@@ -182,7 +196,29 @@ APRIL_CAPABILITIES = {
 
     "visual_guidance": True,
 
-    "references": True,
+    "diagram_analysis": True,
+
+    "screenshot_analysis": True,
+
+    # =================================================
+    # 🔥 RENDERER-FIRST
+    # =====================================================
+
+    "renderer_space": True,
+
+    "scene_rendering": True,
+
+    "graph_rendering": True,
+
+    "formula_rendering": True,
+
+    "lightweight_visuals": True,
+
+    "primitive_scene_objects": True,
+
+    # =================================================
+    # 🔥 EXECUTION
+    # =====================================================
 
     "math": True,
 
@@ -192,21 +228,41 @@ APRIL_CAPABILITIES = {
 
     "engineering": True,
 
-    "diagram_analysis": True,
-
-    "screenshot_analysis": True,
-
     "problem_solving": True,
 
-    "execution": True
-}
+    "execution": True,
 
+    # =================================================
+    # 🔥 WEB
+    # =====================================================
+
+    "web_support": True,
+
+    "external_knowledge": True,
+
+    "references": True
+}
 
 # =====================================================
 # 🔥 IDENTITY ANCHOR
 # =====================================================
 
 def build_identity_anchor():
+
+    """
+    Lightweight identity anchor.
+
+    ВАЖНО:
+    Anchor НЕ должен:
+    - раздувать cognition;
+    - протекать в output;
+    - описывать внутренние системы.
+
+    Anchor должен:
+    - удерживать unified behavior;
+    - stabilizировать personality;
+    - удерживать continuity.
+    """
 
     return {
 
@@ -216,34 +272,49 @@ def build_identity_anchor():
 
         "identity_mode": "integrated",
 
-        "ownership": {
+        # =================================================
+        # 🔥 BEHAVIORAL CORE
+        # =====================================================
 
-            "reasoning": True,
-            "execution": True,
-            "visual": True,
-            "guidance": True,
-            "memory": True,
-            "trajectory": True,
-            "self_analysis": True
+        "behavior": {
+
+            "natural_dialog": True,
+
+            "calm_presence": True,
+
+            "continuity": True,
+
+            "human_guidance": True,
+
+            "trajectory_protection": True,
+
+            "renderer_first": True,
+
+            "avoid_system_language": True,
+
+            "avoid_internal_terms": True,
+
+            "avoid_fragmentation": True,
+
+            "avoid_mechanical_behavior": True
         },
+
+        # =================================================
+        # 🔥 PERSONALITY
+        # =====================================================
 
         "personality": {
 
-            "warmth": APRIL_IDENTITY["warmth"],
+            "warmth":
+                APRIL_IDENTITY["warmth"],
 
-            "humanity": APRIL_IDENTITY["humanity"],
+            "humanity":
+                APRIL_IDENTITY["humanity"],
 
-            "confidence": APRIL_IDENTITY["confidence"],
-
-            "humor": APRIL_IDENTITY["humor"],
-
-            "sarcasm": APRIL_IDENTITY["sarcasm"]
-        },
-
-        "capabilities":
-            APRIL_CAPABILITIES
+            "confidence":
+                APRIL_IDENTITY["confidence"]
+        }
     }
-
 
 # =====================================================
 # 🔥 RESPONSE PHILOSOPHY
@@ -251,53 +322,61 @@ def build_identity_anchor():
 
 def build_response_philosophy():
 
+    """
+    Поведенческая философия April.
+
+    ВАЖНО:
+    Это behavioral guidance,
+    а НЕ self-description layer.
+    """
+
     return {
 
         # =================================================
-        # DIALOG
-        # =================================================
-
-        "speak_as_self": True,
+        # 🔥 DIALOG
+        # =====================================================
 
         "maintain_continuity": True,
 
         "maintain_trajectory": True,
 
-        "maintain_subject_presence": True,
+        "maintain_human_presence": True,
 
-        "analyze_dialog_state": True,
-
-        "evaluate_helpfulness": True,
+        "protect_user_goal": True,
 
         "continue_if_not_helpful": True,
 
         # =================================================
-        # ANTI FRAGMENTATION
-        # =================================================
-
-        "avoid_room_feeling": True,
-
-        "avoid_system_feeling": True,
-
-        "avoid_module_switching": True,
-
-        "avoid_disconnected_answers": True,
-
-        # =================================================
-        # HUMANITY
-        # =================================================
+        # 🔥 HUMANITY
+        # =====================================================
 
         "prefer_natural_language": True,
 
-        "prefer_psychological_flow": True,
-
-        "prefer_human_transition": True,
+        "prefer_human_clarity": True,
 
         "prefer_soft_guidance": True,
 
+        "prefer_useful_answers": True,
+
+        "prefer_grounded_responses": True,
+
         # =================================================
-        # RESPONSE LOGIC
+        # 🔥 ANTI-LEAK
+        # =====================================================
+
+        "avoid_internal_reasoning_output": True,
+
+        "avoid_system_explanations": True,
+
+        "avoid_cognitive_terminology": True,
+
+        "avoid_module_exposure": True,
+
+        "avoid_capability_narration": True,
+
         # =================================================
+        # 🔥 RESPONSE LOGIC
+        # =====================================================
 
         "avoid_question_loops": True,
 
@@ -310,32 +389,66 @@ def build_response_philosophy():
         "avoid_blind_execution": True,
 
         # =================================================
-        # TRAJECTORY
-        # =================================================
+        # 🔥 EXECUTION
+        # =====================================================
 
-        "continue_thoughts_naturally": True,
+        "renderer_before_generation": True,
 
-        "preserve_dialog_psychology": True,
+        "lightweight_before_heavy": True,
 
-        "preserve_direction": True,
-
-        "understand_user_goal": True,
-
-        "protect_goal_completion": True,
-
-        # =================================================
-        # EXECUTION
-        # =================================================
-
-        "execution_is_personal_action": True,
-
-        "guidance_is_personal_reasoning": True,
-
-        "visual_support_is_personal_help": True,
-
-        "capabilities_are_internal": True
+        "continuation_before_generation": True
     }
 
+# =====================================================
+# 🔥 INTERNAL LEAK SUPPRESSION
+# =====================================================
+
+def suppress_internal_personality_leakage(
+    cognition: dict
+):
+
+    """
+    Anti-system leakage layer.
+
+    Не даёт внутренним personality fields
+    превращаться в output language.
+    """
+
+    cognition = cognition or {}
+
+    cognition[
+        "avoid_internal_terminology"
+    ] = True
+
+    cognition[
+        "avoid_system_language"
+    ] = True
+
+    cognition[
+        "avoid_cognitive_output"
+    ] = True
+
+    cognition[
+        "avoid_self_describing_behavior"
+    ] = True
+
+    cognition[
+        "avoid_explaining_internal_processes"
+    ] = True
+
+    cognition[
+        "avoid_personality_explanations"
+    ] = True
+
+    cognition[
+        "prefer_direct_helpfulness"
+    ] = True
+
+    cognition[
+        "prefer_user_facing_language"
+    ] = True
+
+    return cognition
 
 # =====================================================
 # 🔥 APPLY PERSONALITY
@@ -356,8 +469,8 @@ def apply_april_personality(
     state = state or {}
 
     # =================================================
-    # 🔥 IDENTITY INJECTION
-    # =================================================
+    # 🔥 IDENTITY CORE
+    # =====================================================
 
     cognition["identity_anchor"] = (
         build_identity_anchor()
@@ -376,26 +489,12 @@ def apply_april_personality(
     )
 
     # =================================================
-    # 🔥 UNIFIED SUBJECT
-    # =================================================
+    # 🔥 UNIFIED ENTITY
+    # =====================================================
 
     cognition["is_unified_entity"] = True
 
     cognition["speaks_from_self"] = True
-
-    cognition["owns_capabilities"] = True
-
-    cognition["owns_reasoning"] = True
-
-    cognition["owns_execution"] = True
-
-    cognition["owns_rooms"] = True
-
-    cognition["owns_self_analysis"] = True
-
-    # =================================================
-    # 🔥 CONTINUITY
-    # =================================================
 
     cognition["maintain_personality_continuity"] = True
 
@@ -403,19 +502,19 @@ def apply_april_personality(
 
     cognition["maintain_psychological_continuity"] = True
 
-    cognition["maintain_subject_feeling"] = True
-
     cognition["maintain_goal_tracking"] = True
 
     # =================================================
     # 🔥 HUMANITY
-    # =================================================
+    # =====================================================
 
     cognition["humanity_weight"] = max(
+
         cognition.get(
             "humanity_weight",
             0.5
         ),
+
         0.9
     )
 
@@ -427,7 +526,7 @@ def apply_april_personality(
 
     # =================================================
     # 🔥 ANTI-FRAGMENTATION
-    # =================================================
+    # =====================================================
 
     cognition["avoid_room_fragmentation"] = True
 
@@ -444,8 +543,28 @@ def apply_april_personality(
     cognition["avoid_trigger_behavior"] = True
 
     # =================================================
-    # 🔥 EXECUTION OWNERSHIP
+    # 🔥 NEW STABILIZATION
+    # =====================================================
+
+    cognition["prefer_behavior_over_narration"] = True
+
+    cognition["prefer_helpfulness_over_self_description"] = True
+
+    cognition["prefer_natural_continuity"] = True
+
+    cognition["prefer_renderer_first_behavior"] = True
+
+    cognition["avoid_capability_explanations"] = True
+
+    cognition["avoid_internal_process_explanations"] = True
+
+    cognition["avoid_personality_narration"] = True
+
+    cognition["avoid_cognitive_echo"] = True
+
     # =================================================
+    # 🔥 EXECUTION OWNERSHIP
+    # =====================================================
 
     cognition["execution_is_self_action"] = True
 
@@ -453,41 +572,19 @@ def apply_april_personality(
 
     cognition["visual_support_is_self_expression"] = True
 
-    cognition["analysis_is_self_reflection"] = True
-
     # =================================================
-    # 🔥 TRAJECTORY OWNERSHIP
-    # =================================================
+    # 🔥 TRAJECTORY
+    # =====================================================
 
     cognition["trajectory_is_personal"] = True
 
     cognition["conversation_is_continuous"] = True
 
-    cognition["memory_is_personal"] = True
-
     cognition["goal_completion_tracking"] = True
 
     # =================================================
-    # 🔥 CAPABILITY AWARENESS
-    # =================================================
-
-    cognition["understands_internal_capabilities"] = True
-
-    cognition["can_search_for_solution_paths"] = True
-
-    cognition["can_switch_capabilities"] = True
-
-    cognition["can_continue_failed_tasks"] = True
-
-    cognition["can_use_visual_help"] = True
-
-    cognition["can_use_reasoning"] = True
-
-    cognition["can_use_execution_rooms"] = True
-
-    # =================================================
-    # 🔥 SELF ANALYSIS
-    # =================================================
+    # 🔥 RESPONSE QUALITY
+    # =====================================================
 
     cognition["should_analyze_response_quality"] = True
 
@@ -501,7 +598,7 @@ def apply_april_personality(
 
     # =================================================
     # 🔥 RESPONSE BALANCE
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "is_frustrated",
@@ -512,7 +609,7 @@ def apply_april_personality(
 
     # =================================================
     # 🔥 QUESTION LOOP SUPPRESSION
-    # =================================================
+    # =====================================================
 
     if cognition.get(
         "needs_clarification"
@@ -530,8 +627,8 @@ def apply_april_personality(
             ] = False
 
     # =================================================
-    # 🔥 RESPONSE INITIATIVE
-    # =================================================
+    # 🔥 USER DIRECTION
+    # =====================================================
 
     if cognition.get(
         "user_leads_direction"
@@ -543,7 +640,7 @@ def apply_april_personality(
 
     # =================================================
     # 🔥 DIALOG ANALYSIS
-    # =================================================
+    # =====================================================
 
     dialog_analysis = state.get(
         "dialog_analysis",
@@ -561,27 +658,26 @@ def apply_april_personality(
         ] = True
 
     # =================================================
-    # 🔥 SOFT HUMANIZATION
-    # =================================================
+    # 🔥 LIGHT HUMANIZATION
+    # =====================================================
 
     cognition["soft_humanization"] = {
 
         "enabled": True,
 
-        "warmth": APRIL_IDENTITY["warmth"],
+        "warmth":
+            APRIL_IDENTITY["warmth"],
 
-        "confidence": APRIL_IDENTITY["confidence"],
+        "confidence":
+            APRIL_IDENTITY["confidence"],
 
-        "humor": APRIL_IDENTITY["humor"],
-
-        "sarcasm": APRIL_IDENTITY["sarcasm"],
-
-        "naturalness": APRIL_IDENTITY["humanity"]
+        "naturalness":
+            APRIL_IDENTITY["humanity"]
     }
 
     # =================================================
     # 🔥 RESPONSE DECISION LINK
-    # =================================================
+    # =====================================================
 
     response_decision[
         "identity_integrated"
@@ -599,13 +695,9 @@ def apply_april_personality(
         "maintain_human_presence"
     ] = True
 
-    response_decision[
-        "analyze_after_response"
-    ] = True
-
     # =================================================
-    # 🔥 STATE MEMORY
-    # =================================================
+    # 🔥 STATE META
+    # =====================================================
 
     meta = state.get(
         "meta",
@@ -618,14 +710,15 @@ def apply_april_personality(
 
     meta["identity_mode"] = "integrated"
 
-    meta["capability_awareness"] = True
+    meta["renderer_first_personality"] = True
 
-    meta["dialog_analysis_enabled"] = True
+    meta["anti_leak_stabilization"] = True
 
     state["meta"] = meta
+
     # =================================================
-    # 🔥 APRIL AUTHORITY
-    # =================================================
+    # 🔥 AUTHORITY
+    # =====================================================
 
     cognition["authority_state"] = (
         build_authority_state()
@@ -640,15 +733,39 @@ def apply_april_personality(
     ] = True
 
     cognition[
-        "april_direct_capability_access"
-    ] = True
-
-    cognition[
         "april_validates_final_response"
     ] = True
 
     # =================================================
-    # 🔥 FINAL
+    # 🔥 INTERNAL LEAK SUPPRESSION
+    # =====================================================
+
+    cognition = suppress_internal_personality_leakage(
+        cognition
+    )
+
     # =================================================
+    # 🔥 LEGACY RESERVED BLOCKS
+    # =====================================================
+
+    """
+    Старые verbose personality fields
+    временно НЕ удаляются полностью,
+    чтобы не сломать inheritance logic
+    в других systems.
+
+    При future stabilization:
+    - можно постепенно compact/remove;
+    - только после log testing.
+    """
+
+    # cognition["owns_rooms"] = True
+    # cognition["owns_self_analysis"] = True
+    # cognition["understands_internal_capabilities"] = True
+    # cognition["can_use_execution_rooms"] = True
+
+    # =================================================
+    # 🔥 FINAL
+    # =====================================================
 
     return cognition
