@@ -54,6 +54,152 @@ def is_renderer_result(result):
 
 
 # =========================================================
+# 🔥 WEB PAYLOAD DETECTION
+# =========================================================
+
+def is_web_message(message):
+
+    try:
+
+        if message is None:
+            return False
+
+        # =====================================================
+        # 🔥 APRIL WEB TRANSPORT
+        # =====================================================
+
+        if getattr(message, "is_web", False):
+            return True
+
+        if getattr(message, "web_mode", False):
+            return True
+
+        if getattr(message, "renderer_mode", False):
+            return True
+
+        # =====================================================
+        # 🔥 FASTAPI / WEB OBJECT
+        # =====================================================
+
+        if hasattr(message, "client"):
+            return True
+
+        if hasattr(message, "headers"):
+            return True
+
+        return False
+
+    except:
+
+        return False
+
+
+# =========================================================
+# 🔥 WEB RENDER PAYLOAD
+# =========================================================
+
+def build_web_render_payload(
+    result
+):
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    # =====================================================
+    # 🔥 GRAPH
+    # =====================================================
+
+    if result_type == "graph":
+
+        return {
+
+            "type": "graph",
+
+            "graph":
+                result.get("graph"),
+
+            "meta":
+                result.get(
+                    "meta",
+                    {}
+                )
+        }
+
+    # =====================================================
+    # 🔥 FUNCTION
+    # =====================================================
+
+    if result_type == "function":
+
+        return {
+
+            "type": "function",
+
+            "function":
+                result.get("function"),
+
+            "range":
+                result.get(
+                    "range",
+                    [-10, 10]
+                ),
+
+            "meta":
+                result.get(
+                    "meta",
+                    {}
+                )
+        }
+
+    # =====================================================
+    # 🔥 FORMULA
+    # =====================================================
+
+    if result_type == "formula":
+
+        return {
+
+            "type": "formula",
+
+            "formula":
+                result.get("formula"),
+
+            "meta":
+                result.get(
+                    "meta",
+                    {}
+                )
+        }
+
+    # =====================================================
+    # 🔥 BLOCKS
+    # =====================================================
+
+    if result_type == "blocks":
+
+        return {
+
+            "type": "blocks",
+
+            "blocks":
+                result.get(
+                    "blocks",
+                    []
+                ),
+
+            "meta":
+                result.get(
+                    "meta",
+                    {}
+                )
+        }
+
+    return result
+
+
+# =========================================================
 # 🔥 NORMALIZE RESULT
 # =========================================================
 
@@ -365,6 +511,50 @@ async def send_result(
     )
 
     # =====================================================
+    # 🔥 APRIL WEB MODE
+    # =====================================================
+
+    if is_web_message(message):
+
+        print(
+            "🧠 RESULT HANDLER: WEB MODE"
+        )
+
+        # =====================================================
+        # 🔥 STRUCTURED RENDERER RETURN
+        # =====================================================
+
+        if result_type in [
+
+            "graph",
+            "function",
+            "formula",
+            "blocks"
+        ]:
+
+            print(
+                f"🧠 WEB RENDER RETURN: {result_type}"
+            )
+
+            return build_web_render_payload(
+                result
+            )
+
+        # =====================================================
+        # 🔥 TEXT WEB RETURN
+        # =====================================================
+
+        return result
+
+    # =====================================================
+    # 🔥 TELEGRAM MODE
+    # =====================================================
+
+    print(
+        "🧠 RESULT HANDLER: TELEGRAM MODE"
+    )
+
+    # =====================================================
     # 🔥 TEXT
     # =====================================================
 
@@ -444,39 +634,6 @@ async def send_result(
 
     elif result_type == "image":
 
-        try:
-
-            meta = result.get("meta", {})
-
-            source = meta.get("source")
-
-            if source == "math_graph":
-
-                await message.answer(
-                    "📊 Строю график..."
-                )
-
-            else:
-
-                await message.answer(
-                    "🧠 Обрабатываю..."
-                )
-
-        except Exception as e:
-
-            print(
-                "🔥 INDICATOR ERROR:",
-                e
-            )
-
-        if not result.get("data"):
-
-            await message.answer(
-                "⚠️ Ошибка: нет данных изображения"
-            )
-
-            return
-
         await message.answer_photo(
 
             BufferedInputFile(
@@ -493,26 +650,13 @@ async def send_result(
         )
 
     # =====================================================
-    # 🔥 FUNCTION RENDER
+    # 🔥 FUNCTION
     # =====================================================
 
     elif result_type == "function":
 
         function_expr = result.get(
             "function"
-        )
-
-        if not function_expr:
-
-            await message.answer(
-                "⚠️ Функция не найдена"
-            )
-
-            return
-
-        print(
-            "📈 FUNCTION RENDER:",
-            function_expr
         )
 
         await message.answer(
@@ -523,7 +667,7 @@ async def send_result(
         )
 
     # =====================================================
-    # 🔥 GRAPH RENDER
+    # 🔥 GRAPH
     # =====================================================
 
     elif result_type == "graph":
@@ -540,7 +684,7 @@ async def send_result(
         )
 
     # =====================================================
-    # 🔥 FORMULA RENDER
+    # 🔥 FORMULA
     # =====================================================
 
     elif result_type == "formula":
@@ -555,152 +699,6 @@ async def send_result(
 
             reply_markup=keyboard
         )
-
-    # =====================================================
-    # 🔥 BLOCKS
-    # =====================================================
-
-    elif result_type == "blocks":
-
-        blocks = result.get(
-            "blocks",
-            []
-        )
-
-        if not blocks:
-
-            await message.answer(
-                "⚠️ Блоки пусты"
-            )
-
-            return
-
-        for block in blocks:
-
-            await message.answer(
-
-                str(block),
-
-                reply_markup=keyboard
-            )
-
-    # =====================================================
-    # 🔥 HYBRID
-    # =====================================================
-
-    elif result_type == "hybrid":
-
-        text_part = result.get(
-            "text",
-            ""
-        )
-
-        image_part = result.get(
-            "image"
-        )
-
-        blocks = result.get(
-            "blocks",
-            []
-        )
-
-        if text_part:
-
-            await message.answer(
-
-                text_part,
-
-                reply_markup=keyboard
-            )
-
-        if blocks:
-
-            for block in blocks:
-
-                await message.answer(
-                    str(block)
-                )
-
-        if image_part:
-
-            await message.answer_photo(
-
-                BufferedInputFile(
-                    image_part,
-                    filename="image.png"
-                ),
-
-                caption="🖼 Готово"
-            )
-
-    # =====================================================
-    # 🔥 IMAGE TASK
-    # =====================================================
-
-    elif result_type == "image_task":
-
-        try:
-
-            print(
-                "🖼 IMAGE TASK START"
-            )
-
-            await message.answer(
-                "🎨 Создаю изображение..."
-            )
-
-            user_id = message.from_user.id
-
-            state = {}
-
-            result_img = await image_generate(
-
-                user_id,
-
-                result["prompt"],
-
-                state
-            )
-
-            print(
-                "🖼 IMAGE MODULE RESULT:",
-                result_img
-            )
-
-            if (
-
-                not result_img
-
-                or result_img["type"] != "image"
-
-            ):
-
-                await message.answer(
-                    "❌ Не удалось создать изображение"
-                )
-
-                return
-
-            await message.answer_photo(
-
-                BufferedInputFile(
-                    result_img["data"],
-                    filename="image.png"
-                ),
-
-                caption="🖼 Готово"
-            )
-
-        except Exception as e:
-
-            print(
-                "🔥 IMAGE TASK ERROR:",
-                e
-            )
-
-            await message.answer(
-                "❌ Ошибка при генерации изображения"
-            )
 
     # =====================================================
     # 🔥 ERROR
