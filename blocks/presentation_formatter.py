@@ -1278,12 +1278,12 @@ def build_smart_presentation(
         return text
 
     # =================================================
-    # 🔥 LIGHT LINK BEAUTIFY
+    # 🔥 SAFE LINK ORGANIZATION
     # =====================================================
 
-    #text = beautify_links(
-        #text
-    #)
+    text = build_safe_link_blocks(
+        text
+    )
 
     # =================================================
     # 🔥 RESPONSE MODES
