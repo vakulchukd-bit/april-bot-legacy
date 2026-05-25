@@ -1,3 +1,33 @@
+# =========================================================
+# 🧠 APRIL BOT ROOT
+# =========================================================
+
+"""
+APRIL BOT ROOT — APRIL SPACE STABILIZED
+
+BotRoot теперь:
+- web-first bridge;
+- renderer-aware transport layer;
+- continuity-safe gateway;
+- multimodal scene connector;
+- provider-safe orchestration bridge.
+
+BotRoot больше НЕ:
+- telegram-centric authority;
+- renderer blocker;
+- image escalation source;
+- legacy transport chaos layer.
+
+APRIL SPACE PRINCIPLES:
+
+1. renderer-first delivery
+2. web-space priority
+3. continuity preservation
+4. provider-safe transport
+5. calm orchestration
+6. multimodal scene support
+"""
+
 import asyncio
 import os
 import threading
@@ -299,6 +329,25 @@ tz = pytz.timezone(
 )
 
 # =========================================================
+# 🔥 TELEGRAM LEGACY SUPPRESSION
+# =========================================================
+
+"""
+Telegram теперь:
+- passive transport layer;
+- compatibility bridge;
+- optional UI endpoint.
+
+Telegram больше НЕ:
+- главный execution path;
+- authority layer;
+- visual routing source;
+- orchestration core.
+"""
+
+TELEGRAM_LEGACY_MODE = False
+
+# =========================================================
 # 🔥 RENDERER RESPONSE TYPES
 # =========================================================
 
@@ -311,7 +360,9 @@ RENDERER_RESPONSE_TYPES = [
     "scene",
     "gallery",
     "layout",
-    "visual"
+    "visual",
+    "function",
+    "renderer_scene"
 ]
 
 # =========================================================
@@ -337,6 +388,29 @@ def safe_truncate(
         return text
 
     return text[:limit] + "\n\n..."
+
+
+def safe_renderer_payload(payload):
+
+    if payload is None:
+        return ""
+
+    if isinstance(payload, dict):
+
+        try:
+
+            return json.dumps(
+
+                payload,
+
+                ensure_ascii=False
+            )
+
+        except Exception:
+
+            return str(payload)
+
+    return str(payload)
 
 # =========================================================
 # 🔥 RESULT NORMALIZATION
@@ -392,6 +466,21 @@ def normalize_result_payload(
         "image":
             result.get(
                 "image"
+            ),
+
+        "scene":
+            result.get(
+                "scene"
+            ),
+
+        "layout":
+            result.get(
+                "layout"
+            ),
+
+        "visual":
+            result.get(
+                "visual"
             ),
 
         "blocks":
@@ -484,6 +573,51 @@ def cleanup_response_text(
     )
 
 # =========================================================
+# 🔥 RENDERER DELIVERY
+# =========================================================
+
+async def send_renderer_response(
+    message,
+    result,
+    result_type
+):
+
+    renderer_payload = (
+
+        result.get("scene")
+
+        or result.get("layout")
+
+        or result.get("visual")
+
+        or result.get("graph")
+
+        or result.get("formula")
+
+        or result.get("data")
+
+        or ""
+    )
+
+    renderer_payload = safe_renderer_payload(
+        renderer_payload
+    )
+
+    renderer_payload = safe_truncate(
+        renderer_payload,
+        limit=3500
+    )
+
+    await message.answer(
+
+        f"[[{result_type}:{renderer_payload}]]",
+
+        reply_markup=main_keyboard(
+            message.message_id
+        )
+    )
+
+# =========================================================
 # 🔥 SAFE TELEGRAM RESPONSE
 # =========================================================
 
@@ -543,34 +677,18 @@ async def send_telegram_response(
         return
 
     # =====================================================
-    # 🔥 RENDERER-FIRST TYPES
+    # 🔥 RENDERER-FIRST DELIVERY
     # =====================================================
 
     if result_type in RENDERER_RESPONSE_TYPES:
 
-        renderer_payload = (
+        await send_renderer_response(
 
-            result.get("data")
+            message=message,
 
-            or result.get("graph")
+            result=result,
 
-            or result.get("formula")
-
-            or ""
-        )
-
-        renderer_payload = safe_truncate(
-            renderer_payload,
-            limit=3500
-        )
-
-        await message.answer(
-
-            f"[[{result_type}:{renderer_payload}]]",
-
-            reply_markup=main_keyboard(
-                message.message_id
-            )
+            result_type=result_type
         )
 
         return
@@ -700,10 +818,6 @@ async def run_with_activity(
     coro,
     activity_type="typing"
 ):
-
-    # =====================================================
-    # 🌐 WEB SAFE MODE
-    # =====================================================
 
     if not chat_id:
 
@@ -838,6 +952,21 @@ def april_web_chat():
             "gallery":
                 final_result.get(
                     "gallery"
+                ),
+
+            "scene":
+                final_result.get(
+                    "scene"
+                ),
+
+            "layout":
+                final_result.get(
+                    "layout"
+                ),
+
+            "visual":
+                final_result.get(
+                    "visual"
                 ),
 
             "image":
@@ -983,10 +1112,6 @@ def web_image():
                 state
             )
 
-            # =============================================
-            # 🔥 VISUAL CONTINUITY
-            # =============================================
-
             state[
                 "active_visual_scene"
             ] = {
@@ -1002,7 +1127,10 @@ def web_image():
                 "timestamp":
                     datetime.now().isoformat(),
 
-                "objects": []
+                "objects": [],
+
+                "continuity_mode":
+                    "active"
             }
 
             return result
@@ -1127,10 +1255,6 @@ async def handle(
         or ""
     )
 
-    # =====================================================
-    # 🧠 MAP EXPORT
-    # =====================================================
-
     if text.strip().lower() == "/map":
 
         snapshot = scan_project()
@@ -1216,22 +1340,6 @@ async def handle(
             path
         )
 
-        # =============================================
-        # 🔥 FIXED LEGACY BUG
-        # =============================================
-        #
-        # Старый run() был:
-        # - legacy;
-        # - undefined;
-        # - unsafe.
-        #
-        # Оставлено как comment
-        # для rollback history.
-        #
-        # text = await asyncio.to_thread(run)
-        #
-        # =============================================
-
         if not safe_string(text).strip():
 
             await message.answer(
@@ -1289,10 +1397,6 @@ async def handle(
             state
         )
 
-        # =================================================
-        # 🔥 ACTIVE VISUAL SCENE
-        # =================================================
-
         state[
             "active_visual_scene"
         ] = {
@@ -1308,7 +1412,10 @@ async def handle(
             "timestamp":
                 datetime.now().isoformat(),
 
-            "objects": []
+            "objects": [],
+
+            "continuity_mode":
+                "active"
         }
 
         add_event(
@@ -1518,10 +1625,6 @@ async def handle_callbacks(
     data = callback.data
     user_id = callback.from_user.id
 
-    # =====================================================
-    # 👍 FEEDBACK
-    # =====================================================
-
     if data.startswith("like_"):
 
         state = get_state(user_id)
@@ -1556,10 +1659,6 @@ async def handle_callbacks(
 
         return
 
-    # =====================================================
-    # 📋 MENU
-    # =====================================================
-
     if data == "menu":
 
         text, keyboard = get_menu(
@@ -1593,10 +1692,6 @@ async def handle_callbacks(
         await callback.answer()
 
         return
-
-    # =====================================================
-    # 👑 ADMIN
-    # =====================================================
 
     if user_id == ADMIN_ID:
 
@@ -1703,10 +1798,6 @@ async def handle_callbacks(
 
             return
 
-    # =====================================================
-    # 💳 BUY LITE
-    # =====================================================
-
     if data in [
 
         "buy_lite",
@@ -1751,10 +1842,6 @@ async def handle_callbacks(
 
         return
 
-    # =====================================================
-    # 👑 BUY PREMIUM
-    # =====================================================
-
     if data in [
 
         "buy_premium",
@@ -1793,166 +1880,6 @@ async def handle_callbacks(
             "👑 Premium Пакет",
 
             reply_markup=keyboard
-        )
-
-        await callback.answer()
-
-        return
-
-    # =====================================================
-    # 💳 BUY REQUESTS
-    # =====================================================
-
-    if data == "buy_yes_lite":
-
-        await bot.send_message(
-
-            ADMIN_ID,
-
-            f"💳 ЗАПРОС LITE от {user_id}",
-
-            reply_markup=InlineKeyboardMarkup(
-
-                inline_keyboard=[
-
-                    [
-
-                        InlineKeyboardButton(
-
-                            text="✅",
-
-                            callback_data=f"admin_confirm_lite_{user_id}"
-                        ),
-
-                        InlineKeyboardButton(
-
-                            text="❌",
-
-                            callback_data=f"admin_reject_lite_{user_id}"
-                        )
-                    ]
-                ]
-            )
-        )
-
-        await callback.answer(
-            "Отправлено"
-        )
-
-        return
-
-    if data == "buy_yes_premium":
-
-        await bot.send_message(
-
-            ADMIN_ID,
-
-            f"💳 ЗАПРОС PREMIUM от {user_id}",
-
-            reply_markup=InlineKeyboardMarkup(
-
-                inline_keyboard=[
-
-                    [
-
-                        InlineKeyboardButton(
-
-                            text="✅",
-
-                            callback_data=f"admin_confirm_premium_{user_id}"
-                        ),
-
-                        InlineKeyboardButton(
-
-                            text="❌",
-
-                            callback_data=f"admin_reject_premium_{user_id}"
-                        )
-                    ]
-                ]
-            )
-        )
-
-        await callback.answer(
-            "Отправлено"
-        )
-
-        return
-
-    # =====================================================
-    # ✅ CONFIRM
-    # =====================================================
-
-    if data.startswith(
-        "admin_confirm_"
-    ):
-
-        parts = data.split("_")
-
-        plan = parts[2]
-
-        uid = int(parts[3])
-
-        set_subscription(
-            uid,
-            plan
-        )
-
-        save_payment(
-            uid,
-            plan
-        )
-
-        await bot.send_message(
-
-            uid,
-
-            f"✅ Активирован {plan.upper()}"
-        )
-
-        await callback.answer(
-
-            "OK",
-
-            show_alert=True
-        )
-
-        return
-
-    # =====================================================
-    # ❌ REJECT
-    # =====================================================
-
-    if data.startswith(
-        "admin_reject_"
-    ):
-
-        uid = int(
-            data.split("_")[3]
-        )
-
-        await bot.send_message(
-            uid,
-            "❌ Отклонено"
-        )
-
-        await callback.answer(
-
-            "OK",
-
-            show_alert=True
-        )
-
-        return
-
-    # =====================================================
-    # 🚫 CANCEL
-    # =====================================================
-
-    if data == "cancel":
-
-        await callback.message.answer(
-            "❌ Отменено"
         )
 
         await callback.answer()
