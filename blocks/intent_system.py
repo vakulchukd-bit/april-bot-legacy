@@ -3,19 +3,31 @@
 # ===============================
 
 """
-DeepHub stabilized intent system.
-
-Intent system больше НЕ:
-- hard trigger authority;
-- execution launcher;
-- scene breaker.
+APRIL ORCHESTRATION INTENT SYSTEM
 
 Intent system теперь:
-- lightweight signal layer;
-- dialog-aware helper;
-- continuation-safe classifier;
-- renderer-aware router;
-- trajectory-friendly assistant.
+- lightweight semantic helper;
+- continuation-safe signal layer;
+- orchestration-aware classifier;
+- renderer-first assistant;
+- provider-safe interpreter.
+
+Intent system НЕ:
+- command router;
+- hard execution authority;
+- fallback trigger;
+- Telegram-era dispatcher;
+- aggressive escalation layer.
+
+APRIL PRINCIPLES:
+
+1. continuation before coercion
+2. renderer before generation
+3. orchestration before commands
+4. lightweight before heavy
+5. semantic neutrality
+6. no hidden escalation
+7. no Telegram assumptions
 """
 
 # ===============================
@@ -36,7 +48,7 @@ def safe_patch_log(msg):
 
         PATCH_LOG.append(msg)
 
-    except:
+    except Exception:
         pass
 
 
@@ -47,7 +59,7 @@ def safe_patch_log(msg):
 def patch_intent_detect(text):
 
     safe_patch_log(
-        f"INTENT DETECT: {text[:50]}"
+        f"INTENT DETECT: {text[:60]}"
     )
 
     return text
@@ -115,17 +127,21 @@ def is_continuation(
         "дальше",
         "теперь",
         "еще",
+        "ещё",
         "в таком стиле",
         "оставь",
         "вот это",
-        "ближе к этому"
+        "ближе к этому",
+        "продолжим",
+        "вернемся",
+        "вернёмся"
     ]
 
     if t in continuation_words:
 
         return True
 
-    if len(t) <= 24:
+    if len(t) <= 36:
 
         if contains_any(
             t,
@@ -147,6 +163,14 @@ def is_real_question(
 
     t = normalize(text)
 
+    if is_continuation(t):
+
+        return False
+
+    if len(t) <= 10:
+
+        return False
+
     question_triggers = [
 
         "как",
@@ -163,26 +187,14 @@ def is_real_question(
         "какие"
     ]
 
-    if is_continuation(t):
-
-        return False
-
-    if len(t) <= 12:
-
-        return False
-
     if "?" in t:
 
         return True
 
-    if contains_any(
+    return contains_any(
         t,
         question_triggers
-    ):
-
-        return True
-
-    return False
+    )
 
 
 # =====================================================
@@ -237,11 +249,13 @@ def is_generate_request(
         "draw image",
         "generate image",
 
-        # 🔥 explicit image only
+        # 🔥 explicit heavy visual
 
         "ultra realistic",
         "4k render",
-        "cinematic render"
+        "cinematic render",
+        "photorealistic",
+        "realistic render"
     ]
 
     return contains_any(
@@ -287,6 +301,47 @@ def is_lightweight_visual_request(
 # 🧠 RENDERER DETECTION
 # =====================================================
 
+def detect_renderer_subtype(
+    text: str
+):
+
+    t = normalize(text)
+
+    if "график" in t:
+
+        return "graph"
+
+    if "формула" in t:
+
+        return "formula"
+
+    if (
+        "таблица" in t
+        or "grid" in t
+    ):
+
+        return "table"
+
+    if (
+        "diagram" in t
+        or "диаграмма" in t
+        or "схема" in t
+    ):
+
+        return "diagram"
+
+    if (
+        "layout" in t
+        or "пространство" in t
+        or "scene" in t
+        or "композиция" in t
+    ):
+
+        return "scene"
+
+    return "renderer"
+
+
 def is_renderer_request(
     text: str
 ):
@@ -310,7 +365,8 @@ def is_renderer_request(
         "renderer",
         "пространство",
         "scene",
-        "композиция"
+        "композиция",
+        "canvas"
     ]
 
     return contains_any(
@@ -340,10 +396,7 @@ def is_spatial_request(
         "поставь",
         "расположи",
         "между",
-        "рядом",
-        "пространство",
-        "scene",
-        "layout"
+        "рядом"
     ]
 
     return contains_any(
@@ -372,7 +425,11 @@ def is_web_request(
         "карта",
         "маршрут",
         "рейс",
-        "сейчас в"
+        "сейчас в",
+        "такси",
+        "отель",
+        "навигация",
+        "локация"
     ]
 
     return contains_any(
@@ -435,6 +492,34 @@ def is_link_request(
 
 
 # =====================================================
+# 🧠 EXPLORATION DETECTION
+# =====================================================
+
+def is_exploration_request(
+    text: str
+):
+
+    t = normalize(text)
+
+    exploration_words = [
+
+        "идея",
+        "вариант",
+        "примерно",
+        "атмосфера",
+        "может",
+        "посмотрим",
+        "подумаем",
+        "как думаешь"
+    ]
+
+    return contains_any(
+        t,
+        exploration_words
+    )
+
+
+# =====================================================
 # 🧠 MAIN DETECTOR
 # =====================================================
 
@@ -460,41 +545,158 @@ def detect_intent(
     patch_intent_detect(t)
 
     # =================================================
+    # 🔥 BASE RESULT
+    # =====================================================
+
+    result = {
+
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
+
+        "intent": "chat",
+
+        "confidence": 0.5,
+
+        "source": "default",
+
+        # =================================================
+        # 🔥 ORCHESTRATION
+        # =====================================================
+
+        "prefer_renderer": False,
+
+        "prefer_lightweight": False,
+
+        "prefer_guidance": False,
+
+        "prefer_execution": False,
+
+        "prefer_continuation": False,
+
+        "prefer_web": False,
+
+        # =================================================
+        # 🔥 VISUAL
+        # =====================================================
+
+        "renderer_subtype": None,
+
+        "lightweight_visual": False,
+
+        "spatial_scene": False,
+
+        "explicit_image_generation": False,
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
+
+        "continuation": False,
+
+        "trajectory_safe": True,
+
+        "trajectory_priority": 0.5,
+
+        # =================================================
+        # 🔥 EXPLORATION
+        # =====================================================
+
+        "exploration": False,
+
+        # =================================================
+        # 🔥 SAFETY
+        # =====================================================
+
+        "avoid_heavy_generation": True,
+
+        "avoid_hidden_escalation": True,
+
+        "avoid_telegram_behavior": True,
+
+        "provider_safe": True
+    }
+
+    # =================================================
     # 🔥 CONTINUATION PRIORITY
     # =====================================================
 
     if is_continuation(t):
 
+        result[
+            "continuation"
+        ] = True
+
+        result[
+            "prefer_continuation"
+        ] = True
+
+        result[
+            "trajectory_priority"
+        ] = 0.9
+
         if active_flow:
 
-            return {
+            result[
+                "intent"
+            ] = "continuation"
 
-                "intent": "continuation",
+            result[
+                "confidence"
+            ] = 0.88
 
-                "confidence": 0.88,
+            result[
+                "source"
+            ] = "continuation"
 
-                "source": "continuation"
-            }
+            return result
 
         if active_visual_scene:
 
-            return {
+            result[
+                "intent"
+            ] = "visual_continuation"
 
-                "intent": "visual_continuation",
+            result[
+                "confidence"
+            ] = 0.84
 
-                "confidence": 0.84,
+            result[
+                "source"
+            ] = "visual_scene"
 
-                "source": "visual_scene"
-            }
+            result[
+                "prefer_renderer"
+            ] = True
 
-        return {
+            return result
 
-            "intent": "chat",
+    # =================================================
+    # 🔥 EXPLORATION
+    # =====================================================
 
-            "confidence": 0.55,
+    if is_exploration_request(t):
 
-            "source": "soft_continuation"
-        }
+        result[
+            "exploration"
+        ] = True
+
+        result[
+            "prefer_lightweight"
+        ] = True
+
+        result[
+            "lightweight_visual"
+        ] = True
+
+        result[
+            "trajectory_priority"
+        ] = max(
+            result[
+                "trajectory_priority"
+            ],
+            0.72
+        )
 
     # =================================================
     # 🔥 WEB
@@ -502,14 +704,31 @@ def detect_intent(
 
     if is_web_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "web"
 
-            "intent": "web",
+        result[
+            "confidence"
+        ] = 0.88
 
-            "confidence": 0.88,
+        result[
+            "source"
+        ] = "web"
 
-            "source": "web"
-        }
+        result[
+            "prefer_guidance"
+        ] = True
+
+        result[
+            "prefer_web"
+        ] = True
+
+        result[
+            "avoid_heavy_generation"
+        ] = True
+
+        return result
 
     # =================================================
     # 🔥 LINK
@@ -517,14 +736,19 @@ def detect_intent(
 
     if is_link_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "link"
 
-            "intent": "link",
+        result[
+            "confidence"
+        ] = 0.92
 
-            "confidence": 0.92,
+        result[
+            "source"
+        ] = "link"
 
-            "source": "link"
-        }
+        return result
 
     # =================================================
     # 🔥 EDIT
@@ -532,29 +756,55 @@ def detect_intent(
 
     if is_edit_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "edit"
 
-            "intent": "edit",
+        result[
+            "confidence"
+        ] = 0.88
 
-            "confidence": 0.88,
+        result[
+            "source"
+        ] = "edit"
 
-            "source": "edit"
-        }
+        result[
+            "prefer_execution"
+        ] = True
+
+        return result
 
     # =================================================
-    # 🔥 SPATIAL RENDER
+    # 🔥 SPATIAL
     # =====================================================
 
     if is_spatial_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "spatial"
 
-            "intent": "spatial",
+        result[
+            "confidence"
+        ] = 0.84
 
-            "confidence": 0.82,
+        result[
+            "source"
+        ] = "spatial"
 
-            "source": "spatial"
-        }
+        result[
+            "prefer_renderer"
+        ] = True
+
+        result[
+            "spatial_scene"
+        ] = True
+
+        result[
+            "renderer_subtype"
+        ] = "scene"
+
+        return result
 
     # =================================================
     # 🔥 RENDERER SPACE
@@ -562,14 +812,33 @@ def detect_intent(
 
     if is_renderer_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "render"
 
-            "intent": "render",
+        result[
+            "confidence"
+        ] = 0.88
 
-            "confidence": 0.86,
+        result[
+            "source"
+        ] = "renderer"
 
-            "source": "renderer"
-        }
+        result[
+            "prefer_renderer"
+        ] = True
+
+        result[
+            "renderer_subtype"
+        ] = detect_renderer_subtype(
+            t
+        )
+
+        result[
+            "avoid_heavy_generation"
+        ] = True
+
+        return result
 
     # =================================================
     # 🔥 LIGHTWEIGHT VISUAL
@@ -577,14 +846,31 @@ def detect_intent(
 
     if is_lightweight_visual_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "lightweight_visual"
 
-            "intent": "lightweight_visual",
+        result[
+            "confidence"
+        ] = 0.8
 
-            "confidence": 0.8,
+        result[
+            "source"
+        ] = "lightweight_visual"
 
-            "source": "lightweight_visual"
-        }
+        result[
+            "prefer_lightweight"
+        ] = True
+
+        result[
+            "lightweight_visual"
+        ] = True
+
+        result[
+            "avoid_heavy_generation"
+        ] = True
+
+        return result
 
     # =================================================
     # 🔥 HEAVY GENERATION
@@ -592,14 +878,27 @@ def detect_intent(
 
     if is_generate_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "generate"
 
-            "intent": "generate",
+        result[
+            "confidence"
+        ] = 0.9
 
-            "confidence": 0.9,
+        result[
+            "source"
+        ] = "generate"
 
-            "source": "generate"
-        }
+        result[
+            "explicit_image_generation"
+        ] = True
+
+        result[
+            "avoid_heavy_generation"
+        ] = False
+
+        return result
 
     # =================================================
     # 🔥 TEXT REQUEST
@@ -607,14 +906,23 @@ def detect_intent(
 
     if is_text_request(t):
 
-        return {
+        result[
+            "intent"
+        ] = "text"
 
-            "intent": "text",
+        result[
+            "confidence"
+        ] = 0.84
 
-            "confidence": 0.84,
+        result[
+            "source"
+        ] = "text"
 
-            "source": "text"
-        }
+        result[
+            "prefer_guidance"
+        ] = True
+
+        return result
 
     # =================================================
     # 🔥 QUESTION
@@ -622,20 +930,46 @@ def detect_intent(
 
     if is_real_question(t):
 
-        return {
+        result[
+            "intent"
+        ] = "question"
 
-            "intent": "question",
+        result[
+            "confidence"
+        ] = 0.72
 
-            "confidence": 0.72,
+        result[
+            "source"
+        ] = "question"
 
-            "source": "question"
-        }
+        result[
+            "prefer_guidance"
+        ] = True
+
+        return result
 
     # =================================================
     # 🔥 ACTIVE FLOW PROTECTION
     # =====================================================
 
     if active_flow:
+
+        result[
+            "continuation"
+        ] = True
+
+        result[
+            "prefer_continuation"
+        ] = True
+
+        result[
+            "trajectory_priority"
+        ] = max(
+            result[
+                "trajectory_priority"
+            ],
+            0.74
+        )
 
         flow_type = active_flow.get(
             "type"
@@ -651,24 +985,31 @@ def detect_intent(
             "math"
         ]:
 
-            return {
+            result[
+                "intent"
+            ] = "continuation"
 
-                "intent": "continuation",
+            result[
+                "confidence"
+            ] = 0.74
 
-                "confidence": 0.74,
+            result[
+                "source"
+            ] = "trajectory"
 
-                "source": "trajectory"
-            }
+            if flow_type in [
+
+                "renderer_space",
+                "visual_scene",
+                "math"
+            ]:
+
+                result[
+                    "prefer_renderer"
+                ] = True
 
     # =================================================
-    # 🔥 DEFAULT CHAT
+    # 🔥 FINAL DEFAULT
     # =====================================================
 
-    return {
-
-        "intent": "chat",
-
-        "confidence": 0.5,
-
-        "source": "default"
-    }
+    return result
