@@ -529,6 +529,171 @@ def extract_urls(
         text
     )
 
+# =====================================================
+# 🌐 SAFE URL CLEANER
+# =====================================================
+
+def clean_url(
+    url: str
+):
+
+    url = (
+        url or ""
+    ).strip()
+
+    if not url:
+        return ""
+
+    trailing_symbols = [
+
+        "\"",
+        "'",
+        ")",
+        "]",
+        "}",
+        ">",
+        ",",
+        ";"
+    ]
+
+    while (
+
+        url
+        and url[-1] in trailing_symbols
+
+    ):
+
+        url = url[:-1]
+
+    return url.strip()
+
+
+# =====================================================
+# 🌐 SAFE LINK ORGANIZER
+# =====================================================
+
+def build_safe_link_blocks(
+    text: str
+):
+
+    text = normalize_text_payload(
+        text
+    )
+
+    if not text:
+        return text
+
+    urls = extract_urls(
+        text
+    )
+
+    if not urls:
+        return text
+
+    cleaned_urls = []
+
+    for url in urls:
+
+        safe_url = clean_url(
+            url
+        )
+
+        if safe_url:
+
+            cleaned_urls.append(
+                safe_url
+            )
+
+    if not cleaned_urls:
+        return text
+
+    result_text = text
+
+    for old_url in urls:
+
+        result_text = result_text.replace(
+            old_url,
+            ""
+        )
+
+    result_text = re.sub(
+        r"\(\s*\)",
+        "",
+        result_text
+    )
+
+    result_text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        result_text
+    )
+
+    result_text = result_text.strip()
+
+    sections = split_into_sections(
+        result_text
+    )
+
+    if not sections:
+
+        sections = [result_text]
+
+    final_blocks = []
+
+    url_index = 0
+
+    for section in sections:
+
+        clean_section = (
+            section.strip()
+        )
+
+        if clean_section:
+
+            final_blocks.append(
+                clean_section
+            )
+
+        if url_index < len(cleaned_urls):
+
+            safe_url = cleaned_urls[
+                url_index
+            ]
+
+            platform = detect_platform_label(
+                safe_url
+            )
+
+            final_blocks.append(
+
+                f"{platform} ↗\n"
+                f"{safe_url}"
+            )
+
+            url_index += 1
+
+    while url_index < len(cleaned_urls):
+
+        safe_url = cleaned_urls[
+            url_index
+        ]
+
+        platform = detect_platform_label(
+            safe_url
+        )
+
+        final_blocks.append(
+
+            f"{platform} ↗\n"
+            f"{safe_url}"
+        )
+
+        url_index += 1
+
+    return "\n\n".join(
+        final_blocks
+    ).strip()
+
 
 # =====================================================
 # 🔥 CRITICAL CONTENT DETECTION
