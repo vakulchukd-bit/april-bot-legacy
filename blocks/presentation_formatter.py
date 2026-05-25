@@ -32,10 +32,14 @@ APRIL PRESENTATION PRINCIPLES:
 - no token inflation;
 - no formatting loops;
 - no renderer corruption;
-- no fake UI decoration.
+- no fake UI decoration;
+- no destructive payload mutation;
+- scene-safe formatting;
+- multimodal-safe presentation.
 """
 
 import re
+import json
 
 
 # =====================================================
@@ -76,6 +80,99 @@ def normalize_text_payload(text):
     except:
 
         return ""
+
+
+# =====================================================
+# 🔥 STRUCTURE DETECTION
+# =====================================================
+
+def is_structured_payload(
+    text
+):
+
+    if isinstance(
+        text,
+        (dict, list)
+    ):
+
+        return True
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return False
+
+    stripped = text.strip()
+
+    if (
+        stripped.startswith("{")
+        and stripped.endswith("}")
+    ):
+
+        try:
+
+            json.loads(stripped)
+
+            return True
+
+        except:
+            pass
+
+    if (
+        stripped.startswith("[")
+        and stripped.endswith("]")
+    ):
+
+        try:
+
+            json.loads(stripped)
+
+            return True
+
+        except:
+            pass
+
+    return False
+
+
+# =====================================================
+# 🔥 SCENE PAYLOAD DETECTION
+# =====================================================
+
+def is_scene_payload(
+    text: str
+):
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return False
+
+    t = text.lower()
+
+    scene_checks = [
+
+        "\"scene\":",
+        "\"blocks\":",
+        "\"renderer\":",
+        "\"layout\":",
+
+        "[[scene",
+        "[[layout",
+        "[[block",
+        "[[grid",
+
+        "<scene",
+        "<layout",
+
+        "scene_objects",
+        "primitive_scene"
+    ]
+
+    return any(
+        x in t
+        for x in scene_checks
+    )
 
 
 # =====================================================
@@ -455,7 +552,38 @@ def is_code_content(
         "import ",
         "class ",
         "console.log(",
-        "function("
+        "function(",
+        "async def",
+        "return {",
+        "const ",
+        "let ",
+        "var "
+    ]
+
+    return any(
+        x in text
+        for x in checks
+    )
+
+
+def is_formula_payload(
+    text: str
+):
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return False
+
+    checks = [
+
+        "y=",
+        "sin(",
+        "cos(",
+        "tan(",
+        "f(x)",
+        "^2",
+        "^3"
     ]
 
     return any(
@@ -538,6 +666,30 @@ def should_skip_formatting(
     if not text:
         return True
 
+    # =================================================
+    # 🔥 STRUCTURE SAFETY
+    # =====================================================
+
+    if is_structured_payload(text):
+
+        safe_format_log(
+            "STRUCTURED PAYLOAD BYPASS"
+        )
+
+        return True
+
+    if is_scene_payload(text):
+
+        safe_format_log(
+            "SCENE PAYLOAD BYPASS"
+        )
+
+        return True
+
+    # =================================================
+    # 🔥 RENDERER SAFETY
+    # =====================================================
+
     if is_renderer_payload(text):
 
         safe_format_log(
@@ -556,6 +708,10 @@ def should_skip_formatting(
 
         return True
 
+    # =================================================
+    # 🔥 CODE SAFETY
+    # =====================================================
+
     if is_code_content(text):
 
         safe_format_log(
@@ -563,6 +719,18 @@ def should_skip_formatting(
         )
 
         return True
+
+    if is_formula_payload(text):
+
+        safe_format_log(
+            "FORMULA BYPASS"
+        )
+
+        return True
+
+    # =================================================
+    # 🔥 RENDERER-FIRST
+    # =====================================================
 
     if semantic.get(
         "render_intent"
@@ -694,16 +862,21 @@ def beautify_links(
         if f"]({url})" in text:
             continue
 
-        if "\n" + url in text:
-            continue
+        # =================================================
+        # 🔥 SAFE LINK WRAPPING
+        # =====================================================
 
         card = build_link_card(
             url
         )
 
+        wrapped = (
+            f"{card} ({url})"
+        )
+
         text = text.replace(
             url,
-            card
+            wrapped
         )
 
     return text
@@ -724,9 +897,31 @@ def split_into_sections(
     if not text:
         return []
 
+    # =================================================
+    # 🔥 STRUCTURE SAFETY
+    # =====================================================
+
+    if is_scene_payload(text):
+        return [text]
+
+    if is_renderer_payload(text):
+        return [text]
+
+    if is_code_content(text):
+        return [text]
+
     parts = []
 
-    for block in text.split("\n"):
+    # =================================================
+    # 🔥 SAFE SECTION SPLIT
+    # =====================================================
+
+    blocks = re.split(
+        r"\n{2,}",
+        text
+    )
+
+    for block in blocks:
 
         cleaned = block.strip()
 
@@ -780,23 +975,33 @@ def apply_visual_enrichment(
         return text
 
     # =================================================
-    # 🔥 HARD RENDERER SAFETY
+    # 🔥 HARD SAFETY
     # =====================================================
 
     if is_renderer_payload(text):
+        return text
+
+    if is_scene_payload(text):
+        return text
+
+    if is_code_content(text):
+        return text
+
+    if is_formula_payload(text):
         return text
 
     # =================================================
     # 🔥 ANTI-OVERDECORATION
     # =====================================================
 
-    if len(text) <= 40:
+    if len(text) <= 80:
         return text
 
     if text.startswith((
         "```",
         "<",
-        "[["
+        "[[",
+        "{"
     )):
 
         return text
@@ -994,24 +1199,15 @@ def apply_april_final_voice(
     )
 
     # =================================================
-    # 🔥 HARD RENDERER SAFETY
+    # 🔥 HARD SAFETY
     # =====================================================
 
-    if is_renderer_payload(text):
-        return text
+    if should_skip_formatting(
 
-    # =================================================
-    # 🔥 RENDERER SAFETY
-    # =====================================================
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        return text
-
-    if response_decision.get(
-        "should_render"
+        text,
+        "",
+        semantic,
+        response_decision
     ):
 
         return text
@@ -1085,20 +1281,9 @@ def apply_april_final_voice(
             cleaned_lines
         ).strip()
 
-    replacements = {
-
-        "⚠️": "✨",
-        "ошибка": "небольшая проблема",
-        "невозможно": "пока не получается",
-        "не удалось": "не получилось"
-    }
-
-    for old, new in replacements.items():
-
-        text = text.replace(
-            old,
-            new
-        )
+    # =================================================
+    # 🔥 SAFE CLEANUP ONLY
+    # =====================================================
 
     duplicate_system_phrases = [
 
@@ -1121,6 +1306,15 @@ def apply_april_final_voice(
         "\n\n",
         text
     )
+
+    # =================================================
+    # 🔥 DESTRUCTIVE REPLACEMENTS REMOVED
+    # =====================================================
+
+    # REMOVED:
+    # "ошибка" -> ...
+    # "невозможно" -> ...
+    # "не удалось" -> ...
 
     return text.strip()
 
@@ -1147,7 +1341,13 @@ def beautify_response(
     # 🔥 HARD RENDERER EXIT
     # =====================================================
 
-    if is_renderer_payload(text):
+    if should_skip_formatting(
+
+        text,
+        user_text,
+        semantic,
+        response_decision
+    ):
 
         safe_format_log(
             "FULL BEAUTIFY BYPASS"
@@ -1212,7 +1412,13 @@ def format_response_presentation(
     # 🔥 FINAL RENDERER SAFETY
     # =====================================================
 
-    if is_renderer_payload(final_text):
+    if should_skip_formatting(
+
+        final_text,
+        user_text,
+        semantic,
+        response_decision
+    ):
 
         safe_format_log(
             "FINAL FORMATTER BYPASS"
