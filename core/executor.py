@@ -54,6 +54,10 @@ from blocks.router import (
     route_request
 )
 
+from blocks.router import (
+    route_request
+)
+
 from blocks.state_manager import (
 
     get_state,
@@ -133,6 +137,10 @@ from blocks.visual_reference_system import (
 
 from blocks.response_decision import (
     build_response_decision
+)
+
+from blocks.april_personality import (
+    apply_april_personality
 )
 
 from blocks.april_authority import (
@@ -434,6 +442,59 @@ def get_scene_authority_mode(
         "orchestration_mode",
         "stable"
     )
+
+
+# =====================================================
+# 🧠 CONTINUITY STABILIZATION
+# =====================================================
+
+def stabilize_visual_continuity(
+    semantic: dict,
+    state: dict,
+    text: str
+):
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    if not active_visual_scene:
+        return semantic
+
+    lower_text = (
+        text or ""
+    ).lower()
+
+    visual_words = [
+
+        "картин",
+        "фото",
+        "меню",
+        "бокал",
+        "бургер",
+        "кревет",
+        "слева",
+        "справа",
+        "на фото",
+        "на картинке",
+        "там",
+        "там было"
+    ]
+
+    if any(
+        x in lower_text
+        for x in visual_words
+    ):
+
+        semantic[
+            "visual_continuity"
+        ] = True
+
+        semantic[
+            "active_visual_scene"
+        ] = active_visual_scene
+
+    return semantic
 
 
 # =====================================================
@@ -1124,6 +1185,26 @@ def stabilize_room_score(
         "stable"
     )
 
+    # =============================================
+    # 🔥 PERSONALITY STABILIZATION
+    # =============================================
+
+    if cognition.get(
+        "reduce_talking"
+    ):
+
+        if room.name == "text":
+
+            score += 0.3
+
+    if cognition.get(
+        "assistant_should_follow"
+    ):
+
+        if room.name == "text":
+
+            score += 0.5
+
     if cognition.get(
         "prefer_execution"
     ):
@@ -1411,42 +1492,18 @@ async def execute(
             "avoid_image_generation_fallback"
         ] = True
 
-    active_visual_scene = state.get(
-        "active_visual_scene"
+    # =============================================
+    # 🧠 CONTINUITY STABILIZATION
+    # =============================================
+
+    semantic = stabilize_visual_continuity(
+
+        semantic=semantic,
+
+        state=state,
+
+        text=text
     )
-
-    if active_visual_scene:
-
-        lower_text = text.lower()
-
-        visual_words = [
-
-            "картин",
-            "фото",
-            "меню",
-            "бокал",
-            "бургер",
-            "кревет",
-            "слева",
-            "справа",
-            "на фото",
-            "на картинке",
-            "там",
-            "там было"
-        ]
-
-        if any(
-            x in lower_text
-            for x in visual_words
-        ):
-
-            semantic[
-                "visual_continuity"
-            ] = True
-
-            semantic[
-                "active_visual_scene"
-            ] = active_visual_scene
 
     emaps_track_system(
         "semantic_core"
@@ -1505,6 +1562,23 @@ async def execute(
 
     print("DEBUG: COGNITION OK")
 
+    # =============================================
+    # 🧠 PERSONALITY INTEGRATION
+    # =============================================
+
+    cognition = apply_april_personality(
+
+        cognition=cognition,
+
+        semantic=semantic,
+
+        reasoning=reasoning,
+
+        response_decision={},
+
+        state=state
+    )
+
     visual_reference = (
 
         build_visual_reference(
@@ -1534,6 +1608,35 @@ async def execute(
     )
 
     print("DEBUG: RESPONSE DECISION OK")
+
+    # =============================================
+    # 🧠 AUTHORITY DECISION
+    # =============================================
+
+    authority_decision = (
+
+        build_authority_decision(
+
+            result={
+
+                "type": "pre_execution",
+
+                "data": ""
+            },
+
+            semantic=semantic,
+
+            cognition=cognition,
+
+            response_decision=response_decision,
+
+            state=state
+        )
+    )
+
+    state["authority_decision"] = (
+        authority_decision
+    )
 
     renderer_space = is_renderer_scene(
 
@@ -1644,6 +1747,14 @@ async def execute(
         text=text
     )
 
+    # =============================================
+    # 🧠 AUTHORITY CONTEXT
+    # =============================================
+
+    context[
+        "authority_decision"
+    ] = authority_decision
+
     scored_rooms = []
 
     for room in ROOMS:
@@ -1669,6 +1780,26 @@ async def execute(
 
                 response_decision=response_decision
             )
+
+            # =========================================
+            # 🧠 AUTHORITY ROOM STABILIZATION
+            # =========================================
+
+            forced_room = (
+                authority_decision.get(
+                    "forced_room"
+                )
+            )
+
+            if forced_room:
+
+                if room.name == forced_room:
+
+                    score += 4.0
+
+                else:
+
+                    score -= 1.0
 
             if score <= 0:
 
@@ -1754,6 +1885,29 @@ async def execute(
             if not quality.get(
                 "helpful"
             ):
+
+                continue
+
+            # =============================================
+            # 🧠 AUTHORITY VALIDATION
+            # =============================================
+
+            override = should_override(
+
+                result=result,
+
+                semantic=semantic,
+
+                cognition=cognition,
+
+                state=state
+            )
+
+            if override:
+
+                print(
+                    "🧠 AUTHORITY OVERRIDE"
+                )
 
                 continue
 
