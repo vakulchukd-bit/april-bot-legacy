@@ -7,33 +7,33 @@
 """
 APRIL SPACE PRESENTATION LAYER
 
-Этот слой отвечает ТОЛЬКО за presentation/render preparation.
+Renderer-first presentation architecture.
 
-Он НЕ:
-- принимает решения вместо April;
-- НЕ роутит комнаты;
-- НЕ ломает renderer payload;
-- НЕ форматирует code/graph/formula payload;
-- НЕ мутирует scene objects;
-- НЕ строит fake markdown chaos.
+Этот слой:
 
-Он ДЕЛАЕТ:
-- calm formatting;
-- scene-safe cleanup;
-- renderer-safe delivery;
-- multimodal preparation;
-- clean link handling;
-- stable message presentation;
-- readable visual structure.
+✅ НЕ ломает renderer payload
+✅ НЕ мутирует scene objects
+✅ НЕ трогает graph/formula/code payload
+✅ НЕ дублирует renderer logic
+✅ НЕ создает markdown chaos
+✅ НЕ делает telegram formatting spam
+
+Он делает:
+
+- clean text presentation
+- calm readability
+- safe link extraction
+- stable multimodal formatting
+- renderer-safe delivery
+- clean TXT preparation
 
 APRIL PRINCIPLES:
 - renderer-first
 - scene-safe
 - payload-safe
-- no mutation
-- no decoration spam
+- no duplication
 - no markdown chaos
-- no telegram formatting legacy
+- no telegram legacy
 """
 
 import re
@@ -60,7 +60,7 @@ def safe_format_log(msg):
 
 
 # =====================================================
-# 🔥 SAFE NORMALIZE
+# 🔥 NORMALIZE
 # =====================================================
 
 def normalize_text_payload(value):
@@ -79,7 +79,7 @@ def normalize_text_payload(value):
 
 
 # =====================================================
-# 🔥 SAFE JSON CHECK
+# 🔥 JSON DETECTION
 # =====================================================
 
 def looks_like_json(text):
@@ -106,7 +106,7 @@ def looks_like_json(text):
 
 
 # =====================================================
-# 🔥 PAYLOAD DETECTION
+# 🔥 RENDERER PAYLOAD
 # =====================================================
 
 def is_renderer_payload(text):
@@ -120,59 +120,36 @@ def is_renderer_payload(text):
 
     checks = [
 
-        # =============================================
-        # GRAPH
-        # =============================================
-
+        # graph
         "[[graph:",
-        "\"type\": \"graph\"",
         "\"type\":\"graph\"",
+        "\"type\": \"graph\"",
 
-        # =============================================
-        # FORMULA
-        # =============================================
-
+        # formula
         "[[formula",
-        "\"type\": \"formula\"",
         "\"type\":\"formula\"",
+        "\"type\": \"formula\"",
 
-        # =============================================
-        # DIAGRAM
-        # =============================================
-
+        # diagram
         "[[diagram",
-        "\"type\": \"diagram\"",
-        "\"type\":\"diagram\"",
 
-        # =============================================
-        # SCENE
-        # =============================================
-
-        "[[scene",
+        # scene
         "\"scene\":",
         "\"blocks\":",
+        "[[scene",
 
-        # =============================================
-        # SVG / HTML
-        # =============================================
-
+        # html/svg
         "<svg",
         "<canvas",
         "```html",
         "```svg",
 
-        # =============================================
-        # IMAGE
-        # =============================================
-
+        # image
         "data:image",
 
-        # =============================================
-        # TABLE
-        # =============================================
-
-        "\"type\": \"table\"",
-        "\"type\":\"table\""
+        # tables
+        "\"type\":\"table\"",
+        "\"type\": \"table\""
     ]
 
     return any(
@@ -205,8 +182,6 @@ def is_code_payload(text):
 
         "function ",
         "async function",
-
-        "class ",
 
         "export default",
 
@@ -264,7 +239,7 @@ def is_formula_payload(text):
 
 
 # =====================================================
-# 🔥 LINK EXTRACTION
+# 🔥 URL EXTRACTION
 # =====================================================
 
 URL_REGEX = r"https?://[^\s\)\]\}\"\'<>]+"
@@ -274,14 +249,26 @@ def extract_urls(text):
 
     text = normalize_text_payload(text)
 
-    return re.findall(
+    raw_urls = re.findall(
         URL_REGEX,
         text
     )
 
+    result = []
+
+    for url in raw_urls:
+
+        clean = clean_url(url)
+
+        if clean and clean not in result:
+
+            result.append(clean)
+
+    return result
+
 
 # =====================================================
-# 🔥 CLEAN URL
+# 🔥 URL CLEANER
 # =====================================================
 
 def clean_url(url):
@@ -344,7 +331,7 @@ def detect_platform_label(url):
 
 
 # =====================================================
-# 🔥 MARKDOWN CLEANER
+# 🔥 MARKDOWN CLEANUP
 # =====================================================
 
 def cleanup_markdown(text):
@@ -354,38 +341,16 @@ def cleanup_markdown(text):
     if not text:
         return ""
 
-    # =============================================
-    # REMOVE TELEGRAM LEGACY
-    # =============================================
+    # remove telegram markdown chaos
+    text = text.replace("**", "")
+    text = text.replace("__", "")
 
-    text = text.replace(
-        "**",
-        ""
-    )
-
-    text = text.replace(
-        "__",
-        ""
-    )
-
-    text = text.replace(
-        "`",
-        "`"
-    )
-
-    # =============================================
-    # REMOVE DUPLICATE EMPTY LINES
-    # =============================================
-
+    # normalize spaces
     text = re.sub(
         r"\n{3,}",
         "\n\n",
         text
     )
-
-    # =============================================
-    # REMOVE HUGE SPACES
-    # =============================================
 
     text = re.sub(
         r"[ ]{2,}",
@@ -426,15 +391,40 @@ def split_into_sections(text):
 
         if cleaned:
 
-            result.append(
-                cleaned
-            )
+            result.append(cleaned)
 
     return result
 
 
 # =====================================================
-# 🔥 LINK BLOCKS
+# 🔥 REMOVE RAW URLS
+# =====================================================
+
+def remove_urls_from_text(
+    text,
+    urls
+):
+
+    result = text
+
+    for url in urls:
+
+        result = result.replace(
+            url,
+            ""
+        )
+
+    result = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        result
+    )
+
+    return result.strip()
+
+
+# =====================================================
+# 🔥 CLEAN LINK BLOCKS
 # =====================================================
 
 def build_safe_link_blocks(text):
@@ -448,70 +438,48 @@ def build_safe_link_blocks(text):
 
     if not urls:
 
-        return cleanup_markdown(
-            text
-        )
-
-    clean_urls = []
-
-    for url in urls:
-
-        safe_url = clean_url(url)
-
-        if safe_url:
-
-            clean_urls.append(
-                safe_url
-            )
+        return cleanup_markdown(text)
 
     # =============================================
-    # REMOVE URLS FROM TEXT
+    # REMOVE RAW URLS FROM TEXT
     # =============================================
 
-    result_text = text
+    clean_text = remove_urls_from_text(
+        text,
+        urls
+    )
 
-    for url in urls:
-
-        result_text = result_text.replace(
-            url,
-            ""
-        )
-
-    result_text = cleanup_markdown(
-        result_text
+    clean_text = cleanup_markdown(
+        clean_text
     )
 
     sections = split_into_sections(
-        result_text
+        clean_text
     )
 
     final = []
 
+    # =============================================
+    # TEXT SECTIONS
+    # =============================================
+
     for section in sections:
 
-        final.append(
-            section
-        )
+        if section:
+
+            final.append(section)
 
     # =============================================
-    # APPEND LINKS CLEANLY
+    # SAFE LINK BLOCKS
     # =============================================
 
-    used = set()
-
-    for url in clean_urls:
-
-        if url in used:
-            continue
-
-        used.add(url)
+    for url in urls:
 
         label = detect_platform_label(
             url
         )
 
         final.append(
-
             f"{label} ↗\n{url}"
         )
 
@@ -548,11 +516,6 @@ def detect_primary_emoji(text):
         ),
 
         (
-            ["ссылка", "github"],
-            "🔗"
-        ),
-
-        (
             ["ошибка", "warning"],
             "⚠️"
         )
@@ -579,6 +542,9 @@ def apply_visual_enrichment(text):
     if not text:
         return ""
 
+    # IMPORTANT:
+    # renderer payload NEVER touched
+
     if is_renderer_payload(text):
         return text
 
@@ -602,7 +568,7 @@ def apply_visual_enrichment(text):
 
 
 # =====================================================
-# 🔥 BYPASS
+# 🔥 BYPASS RULES
 # =====================================================
 
 def should_skip_formatting(
@@ -622,10 +588,7 @@ def should_skip_formatting(
     if not text:
         return True
 
-    # =============================================
-    # JSON
-    # =============================================
-
+    # json
     if looks_like_json(text):
 
         safe_format_log(
@@ -634,10 +597,7 @@ def should_skip_formatting(
 
         return True
 
-    # =============================================
-    # RENDERER
-    # =============================================
-
+    # renderer payload
     if is_renderer_payload(text):
 
         safe_format_log(
@@ -646,10 +606,7 @@ def should_skip_formatting(
 
         return True
 
-    # =============================================
-    # CODE
-    # =============================================
-
+    # code
     if is_code_payload(text):
 
         safe_format_log(
@@ -658,10 +615,7 @@ def should_skip_formatting(
 
         return True
 
-    # =============================================
-    # FORMULA
-    # =============================================
-
+    # formula
     if is_formula_payload(text):
 
         safe_format_log(
@@ -670,10 +624,7 @@ def should_skip_formatting(
 
         return True
 
-    # =============================================
-    # SEMANTIC RENDER
-    # =============================================
-
+    # semantic render
     if semantic.get(
         "render_intent"
     ):
@@ -746,7 +697,7 @@ def build_smart_presentation(
         return text
 
     # =============================================
-    # CLEAN LINKS
+    # LINKS
     # =============================================
 
     text = build_safe_link_blocks(
@@ -762,7 +713,7 @@ def build_smart_presentation(
     )
 
     # =============================================
-    # VISUAL ENRICH
+    # VISUAL ENRICHMENT
     # =============================================
 
     text = apply_visual_enrichment(
@@ -773,7 +724,7 @@ def build_smart_presentation(
 
 
 # =====================================================
-# 🔥 FINAL VOICE ALIGNMENT
+# 🔥 FINAL VOICE
 # =====================================================
 
 def apply_april_final_voice(text):
@@ -869,7 +820,7 @@ def format_response_presentation(
         return ""
 
     # =============================================
-    # FINAL SAFE BYPASS
+    # FINAL BYPASS
     # =============================================
 
     if should_skip_formatting(
