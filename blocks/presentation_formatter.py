@@ -391,7 +391,9 @@ def split_into_sections(text):
 
         if cleaned:
 
-            result.append(cleaned)
+            result.append(
+                cleaned
+            )
 
     return result
 
@@ -424,68 +426,74 @@ def remove_urls_from_text(
 
 
 # =====================================================
-# 🔥 CLEAN LINK BLOCKS
+# 🔥 SCENE LINK BUILDER
 # =====================================================
 
-def build_safe_link_blocks(text):
+def build_scene_link_blocks(text):
 
     text = normalize_text_payload(text)
 
     if not text:
-        return ""
+        return None
 
     urls = extract_urls(text)
 
     if not urls:
+        return None
 
-        return cleanup_markdown(text)
+    clean_urls = []
 
-    # =============================================
-    # REMOVE RAW URLS FROM TEXT
-    # =============================================
+    for url in urls:
+
+        safe_url = clean_url(url)
+
+        if (
+            safe_url
+            and safe_url not in clean_urls
+        ):
+
+            clean_urls.append(
+                safe_url
+            )
+
+    if not clean_urls:
+        return None
 
     clean_text = remove_urls_from_text(
         text,
-        urls
+        clean_urls
     )
 
     clean_text = cleanup_markdown(
         clean_text
     )
 
-    sections = split_into_sections(
-        clean_text
-    )
+    scene = []
 
-    final = []
+    if clean_text:
 
-    # =============================================
-    # TEXT SECTIONS
-    # =============================================
+        scene.append({
 
-    for section in sections:
+            "type": "markdown",
 
-        if section:
+            "content": clean_text
+        })
 
-            final.append(section)
+    for url in clean_urls:
 
-    # =============================================
-    # SAFE LINK BLOCKS
-    # =============================================
+        scene.append({
 
-    for url in urls:
+            "type": "link",
 
-        label = detect_platform_label(
-            url
-        )
+            "url": url
+        })
 
-        final.append(
-            f"{label} ↗\n{url}"
-        )
+    return {
 
-    return "\n\n".join(
-        final
-    ).strip()
+        "type": "scene",
+
+        "blocks": scene
+    }
 
 
 # =====================================================
@@ -542,9 +550,6 @@ def apply_visual_enrichment(text):
     if not text:
         return ""
 
-    # IMPORTANT:
-    # renderer payload NEVER touched
-
     if is_renderer_payload(text):
         return text
 
@@ -588,7 +593,6 @@ def should_skip_formatting(
     if not text:
         return True
 
-    # json
     if looks_like_json(text):
 
         safe_format_log(
@@ -597,7 +601,6 @@ def should_skip_formatting(
 
         return True
 
-    # renderer payload
     if is_renderer_payload(text):
 
         safe_format_log(
@@ -606,7 +609,6 @@ def should_skip_formatting(
 
         return True
 
-    # code
     if is_code_payload(text):
 
         safe_format_log(
@@ -615,7 +617,6 @@ def should_skip_formatting(
 
         return True
 
-    # formula
     if is_formula_payload(text):
 
         safe_format_log(
@@ -624,7 +625,6 @@ def should_skip_formatting(
 
         return True
 
-    # semantic render
     if semantic.get(
         "render_intent"
     ):
@@ -697,12 +697,16 @@ def build_smart_presentation(
         return text
 
     # =============================================
-    # LINKS
+    # 🔥 SCENE LINK MODE
     # =============================================
 
-    text = build_safe_link_blocks(
+    scene_links = build_scene_link_blocks(
         text
     )
+
+    if scene_links:
+
+        return scene_links
 
     # =============================================
     # LIGHT FORMAT
@@ -728,6 +732,9 @@ def build_smart_presentation(
 # =====================================================
 
 def apply_april_final_voice(text):
+
+    if isinstance(text, dict):
+        return text
 
     text = normalize_text_payload(text)
 
@@ -759,6 +766,9 @@ def beautify_response(
         response_decision or {}
     )
 
+    if isinstance(text, dict):
+        return text
+
     text = normalize_text_payload(text)
 
     if not text:
@@ -786,7 +796,7 @@ def beautify_response(
         formatted
     )
 
-    return formatted.strip()
+    return formatted
 
 
 # =====================================================
@@ -812,16 +822,20 @@ def format_response_presentation(
 
     final_text = response or text
 
+    # =============================================
+    # 🔥 SAFE SCENE PASS
+    # =============================================
+
+    if isinstance(final_text, dict):
+
+        return final_text
+
     final_text = normalize_text_payload(
         final_text
     )
 
     if not final_text:
         return ""
-
-    # =============================================
-    # FINAL BYPASS
-    # =============================================
 
     if should_skip_formatting(
 
