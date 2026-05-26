@@ -14,7 +14,8 @@ Interpretation layer теперь:
 - semantic hint system;
 - lightweight intention detector;
 - continuity-aware interpreter;
-- renderer-aware assistant layer.
+- cognition-assisted interpretation layer;
+- renderer-aware semantic adapter.
 
 ВАЖНО:
 
@@ -23,12 +24,15 @@ Interpretation layer теперь:
 - НЕ генерирует prompts;
 - НЕ вызывает generation;
 - НЕ ломает orchestration;
-- НЕ force routing.
+- НЕ force routing;
+- НЕ принимает решения вместо cognition.
 
 Он только:
 - помогает semantic_core;
-- добавляет semantic hints;
-- stabilizes interpretation continuity.
+- помогает cognition;
+- стабилизирует semantic continuity;
+- подготавливает безопасные semantic hints;
+- помогает executor понять тип сцены.
 """
 
 # =====================================================
@@ -60,279 +64,329 @@ def normalize_text(
 
 
 # =====================================================
-# 🔥 MATH DETECTION
+# 🔥 SAFE LOWER
+# =====================================================
+
+def normalize_lower(
+    text: str
+):
+
+    return normalize_text(
+        text
+    ).lower()
+
+
+# =====================================================
+# 🔥 SEMANTIC GROUPS
+# =====================================================
+
+MATH_WORDS = [
+
+    "график",
+    "функция",
+    "формула",
+    "уравнение",
+    "парабола",
+    "синус",
+    "косинус",
+    "тангенс",
+
+    "y=",
+    "f(x)",
+    "^2",
+    "^3",
+    "sin(",
+    "cos(",
+    "tan("
+]
+
+RENDERER_WORDS = [
+
+    "график",
+    "формула",
+    "таблица",
+    "сетка",
+    "grid",
+    "layout",
+    "diagram",
+    "схема",
+    "line",
+    "линия",
+    "стрелка",
+    "renderer",
+    "render",
+    "canvas",
+    "scene",
+    "пространство",
+    "блок"
+]
+
+LIGHTWEIGHT_VISUAL_WORDS = [
+
+    "пример",
+    "идея",
+    "вариант",
+    "референс",
+    "концепт",
+    "атмосфера",
+    "как выглядит",
+    "примерно"
+]
+
+EXPLICIT_IMAGE_WORDS = [
+
+    "создай изображение",
+    "сгенерируй изображение",
+    "нарисуй картинку",
+    "создай арт",
+    "draw image",
+    "generate image",
+    "сделай арт"
+]
+
+EXPLORATION_WORDS = [
+
+    "идея",
+    "вариант",
+    "примерно",
+    "атмосфера",
+    "может",
+    "посмотрим",
+    "подумаем",
+    "как думаешь"
+]
+
+CONTINUATION_WORDS = [
+
+    "дальше",
+    "продолжим",
+    "теперь",
+    "еще",
+    "вернемся",
+    "это",
+    "этот",
+    "эта",
+    "снова"
+]
+
+WEB_WORDS = [
+
+    "погода",
+    "новости",
+    "курс",
+    "сейчас",
+    "где находится",
+    "маршрут",
+    "рейс",
+    "карта",
+    "такси",
+    "отель",
+    "локация",
+    "навигация"
+]
+
+CODE_WORDS = [
+
+    "код",
+    "кнопка",
+    "анимация",
+    "html",
+    "css",
+    "javascript",
+    "python",
+    "react",
+    "api",
+    "функция"
+]
+
+INFORMATIONAL_WORDS = [
+
+    "информация",
+    "данные",
+    "расскажи",
+    "объясни",
+    "почему",
+    "как работает",
+    "что происходит",
+    "можешь помочь",
+    "что можешь сказать"
+]
+
+
+# =====================================================
+# 🔥 SAFE DETECTORS
 # =====================================================
 
 def detect_math_expression(
     text
 ):
 
-    t = text.lower()
-
-    math_words = [
-
-        "график",
-        "функция",
-        "формула",
-        "уравнение",
-        "парабола",
-        "синус",
-        "косинус",
-        "тангенс",
-
-        "y=",
-        "f(x)",
-        "^2",
-        "^3",
-        "sin(",
-        "cos(",
-        "tan("
-    ]
-
     return contains_any(
-        t,
-        math_words
+        normalize_lower(text),
+        MATH_WORDS
     )
 
-
-# =====================================================
-# 🔥 RENDERER DETECTION
-# =====================================================
 
 def detect_renderer_intent(
     text
 ):
 
-    t = text.lower()
-
-    renderer_words = [
-
-        "график",
-        "формула",
-        "таблица",
-        "сетка",
-        "grid",
-        "layout",
-        "diagram",
-        "схема",
-        "line",
-        "линия",
-        "стрелка",
-        "renderer",
-        "render",
-        "canvas",
-        "scene",
-        "пространство",
-        "блок"
-    ]
-
     return contains_any(
-        t,
-        renderer_words
+        normalize_lower(text),
+        RENDERER_WORDS
     )
 
-
-# =====================================================
-# 🔥 LIGHTWEIGHT VISUALS
-# =====================================================
 
 def detect_lightweight_visual(
     text
 ):
 
-    t = text.lower()
-
-    lightweight_words = [
-
-        "пример",
-        "идея",
-        "вариант",
-        "референс",
-        "концепт",
-        "атмосфера",
-        "как выглядит",
-        "примерно"
-    ]
-
     return contains_any(
-        t,
-        lightweight_words
+        normalize_lower(text),
+        LIGHTWEIGHT_VISUAL_WORDS
     )
 
-
-# =====================================================
-# 🔥 EXPLICIT IMAGE GENERATION
-# =====================================================
 
 def detect_explicit_image_generation(
     text
 ):
 
-    t = text.lower()
-
-    generation_words = [
-
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "создай арт",
-        "draw image",
-        "generate image",
-        "сделай арт"
-    ]
-
     return contains_any(
-        t,
-        generation_words
+        normalize_lower(text),
+        EXPLICIT_IMAGE_WORDS
     )
 
-
-# =====================================================
-# 🔥 EXPLORATION DETECTION
-# =====================================================
 
 def detect_exploration(
     text
 ):
 
-    t = text.lower()
-
-    exploration_words = [
-
-        "идея",
-        "вариант",
-        "примерно",
-        "атмосфера",
-        "может",
-        "посмотрим",
-        "подумаем",
-        "как думаешь"
-    ]
-
     return contains_any(
-        t,
-        exploration_words
+        normalize_lower(text),
+        EXPLORATION_WORDS
     )
 
-
-# =====================================================
-# 🔥 CONTINUATION DETECTION
-# =====================================================
 
 def detect_continuation(
     text
 ):
 
-    t = text.lower()
-
-    continuation_words = [
-
-        "дальше",
-        "продолжим",
-        "теперь",
-        "еще",
-        "вернемся",
-        "это",
-        "этот",
-        "эта",
-        "снова"
-    ]
-
     return contains_any(
-        t,
-        continuation_words
+        normalize_lower(text),
+        CONTINUATION_WORDS
     )
 
-
-# =====================================================
-# 🔥 WEB / REALTIME DETECTION
-# =====================================================
 
 def detect_web_context(
     text
 ):
 
-    t = text.lower()
-
-    web_words = [
-
-        "погода",
-        "новости",
-        "курс",
-        "сейчас",
-        "где находится",
-        "маршрут",
-        "рейс",
-        "карта",
-        "такси",
-        "отель",
-        "локация",
-        "навигация"
-    ]
-
     return contains_any(
-        t,
-        web_words
+        normalize_lower(text),
+        WEB_WORDS
     )
 
-
-# =====================================================
-# 🔥 CODE DETECTION
-# =====================================================
 
 def detect_code_request(
     text
 ):
 
-    t = text.lower()
-
-    code_words = [
-
-        "код",
-        "кнопка",
-        "анимация",
-        "html",
-        "css",
-        "javascript",
-        "python",
-        "react",
-        "api",
-        "функция"
-    ]
-
     return contains_any(
-        t,
-        code_words
+        normalize_lower(text),
+        CODE_WORDS
     )
 
-
-# =====================================================
-# 🔥 INFORMATIONAL DETECTION
-# =====================================================
 
 def detect_informational_request(
     text
 ):
 
-    t = text.lower()
-
-    informational_words = [
-
-        "информация",
-        "данные",
-        "расскажи",
-        "объясни",
-        "почему",
-        "как работает",
-        "что происходит",
-        "можешь помочь",
-        "что можешь сказать"
-    ]
-
     return contains_any(
-        t,
-        informational_words
+        normalize_lower(text),
+        INFORMATIONAL_WORDS
     )
+
+
+# =====================================================
+# 🔥 SCENE UNDERSTANDING
+# =====================================================
+
+def detect_scene_type(
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    lower = normalize_lower(
+        text
+    )
+
+    # =================================================
+    # 🔥 COGNITION PRIORITY
+    # =====================================================
+
+    if cognition.get(
+        "prefer_renderer"
+    ):
+
+        if (
+            "график" in lower
+            or "plot" in lower
+            or "graph" in lower
+        ):
+
+            return "graph"
+
+        if (
+            "формула" in lower
+            or "equation" in lower
+        ):
+
+            return "formula"
+
+        if (
+            "таблица" in lower
+            or "table" in lower
+        ):
+
+            return "table"
+
+        return "scene"
+
+    # =================================================
+    # 🔥 SAFE SEMANTIC FALLBACK
+    # =====================================================
+
+    if detect_renderer_intent(
+        lower
+    ):
+
+        if (
+            "график" in lower
+            or "plot" in lower
+            or "graph" in lower
+        ):
+
+            return "graph"
+
+        if (
+            "формула" in lower
+            or "equation" in lower
+        ):
+
+            return "formula"
+
+        if (
+            "таблица" in lower
+            or "table" in lower
+        ):
+
+            return "table"
+
+        return "scene"
+
+    return None
 
 
 # =====================================================
@@ -340,18 +394,26 @@ def detect_informational_request(
 # =====================================================
 
 def interpret_request(
-    text: str
+    text: str,
+    cognition: dict = None,
+    semantic: dict = None
 ):
 
     text = normalize_text(
         text
     )
 
+    cognition = cognition or {}
+
+    semantic = semantic or {}
+
     if not text:
 
         return None
 
-    t = text.lower()
+    t = normalize_lower(
+        text
+    )
 
     # =====================================================
     # 🔥 BASE RESULT
@@ -366,6 +428,8 @@ def interpret_request(
         "type": "text",
 
         "subtype": None,
+
+        "scene_type": None,
 
         "normalized": text,
 
@@ -384,6 +448,18 @@ def interpret_request(
         "web_context": False,
 
         "explicit_image_generation": False,
+
+        # =================================================
+        # 🔥 COGNITION COOPERATION
+        # =====================================================
+
+        "cognition_assisted": True,
+
+        "continuity_aware": True,
+
+        "scene_aware": True,
+
+        "supports_executor": True,
 
         # =================================================
         # 🔥 ORCHESTRATION
@@ -407,15 +483,22 @@ def interpret_request(
 
         "avoid_telegram_behavior": True,
 
-        "provider_safe": True
+        "avoid_trigger_execution": True,
+
+        "provider_safe": True,
+
+        "renderer_first": True
     }
 
     # =====================================================
     # 🔥 CONTINUATION
     # =====================================================
 
-    if detect_continuation(
-        t
+    if (
+        detect_continuation(t)
+        or cognition.get(
+            "needs_continuation"
+        )
     ):
 
         result[
@@ -430,8 +513,11 @@ def interpret_request(
     # 🔥 EXPLORATION
     # =====================================================
 
-    if detect_exploration(
-        t
+    if (
+        detect_exploration(t)
+        or cognition.get(
+            "exploration_mode"
+        )
     ):
 
         result[
@@ -446,8 +532,11 @@ def interpret_request(
     # 🔥 WEB
     # =====================================================
 
-    if detect_web_context(
-        t
+    if (
+        detect_web_context(t)
+        or cognition.get(
+            "internet_context_needed"
+        )
     ):
 
         result[
@@ -463,7 +552,7 @@ def interpret_request(
         ] = "web"
 
     # =====================================================
-    # 🔥 EXPLICIT IMAGE GENERATION
+    # 🔥 IMAGE GENERATION
     # =====================================================
 
     if detect_explicit_image_generation(
@@ -483,11 +572,22 @@ def interpret_request(
         ] = True
 
     # =====================================================
-    # 🔥 RENDERER-FIRST
+    # 🔥 COGNITION-FIRST RENDERER
     # =====================================================
 
-    elif detect_renderer_intent(
-        t
+    elif (
+
+        cognition.get(
+            "prefer_renderer"
+        )
+
+        or cognition.get(
+            "renderer_space_active"
+        )
+
+        or detect_renderer_intent(
+            t
+        )
     ):
 
         result[
@@ -502,49 +602,32 @@ def interpret_request(
             "type"
         ] = "render"
 
-        # =================================================
-        # 🔥 RENDER SUBTYPES
-        # =====================================================
+        scene_type = detect_scene_type(
+            t,
+            cognition
+        )
 
-        if "график" in t:
+        result[
+            "scene_type"
+        ] = scene_type
 
-            result[
-                "subtype"
-            ] = "graph"
-
-        elif "формула" in t:
-
-            result[
-                "subtype"
-            ] = "formula"
-
-        elif "таблица" in t:
-
-            result[
-                "subtype"
-            ] = "table"
-
-        elif (
-            "diagram" in t
-            or "схема" in t
-        ):
-
-            result[
-                "subtype"
-            ] = "diagram"
-
-        else:
-
-            result[
-                "subtype"
-            ] = "scene"
+        result[
+            "subtype"
+        ] = scene_type
 
     # =====================================================
     # 🔥 MATH
     # =====================================================
 
-    elif detect_math_expression(
-        t
+    elif (
+
+        detect_math_expression(
+            t
+        )
+
+        or cognition.get(
+            "math_reasoning"
+        )
     ):
 
         result[
@@ -587,8 +670,15 @@ def interpret_request(
     # 🔥 INFORMATIONAL
     # =====================================================
 
-    elif detect_informational_request(
-        t
+    elif (
+
+        detect_informational_request(
+            t
+        )
+
+        or cognition.get(
+            "needs_guidance"
+        )
     ):
 
         result[
@@ -607,12 +697,38 @@ def interpret_request(
     # 🔥 LIGHTWEIGHT VISUALS
     # =====================================================
 
-    if detect_lightweight_visual(
-        t
+    if (
+        detect_lightweight_visual(
+            t
+        )
+
+        or cognition.get(
+            "visual_reference_mode"
+        )
     ):
 
         result[
             "lightweight_visual"
+        ] = True
+
+    # =====================================================
+    # 🔥 CONTINUITY STABILIZATION
+    # =====================================================
+
+    if cognition.get(
+        "tracks_multiple_topics"
+    ):
+
+        result[
+            "continuity_aware"
+        ] = True
+
+    if cognition.get(
+        "avoid_topic_loss"
+    ):
+
+        result[
+            "scene_aware"
         ] = True
 
     # =====================================================
@@ -630,6 +746,18 @@ def interpret_request(
         result[
             "explicit_image_generation"
         ] = False
+
+    # =====================================================
+    # 🔥 EXECUTION STABILIZATION
+    # =====================================================
+
+    if cognition.get(
+        "prefer_execution"
+    ):
+
+        result[
+            "prefer_execution"
+        ] = True
 
     # =====================================================
     # 🔥 FINAL
