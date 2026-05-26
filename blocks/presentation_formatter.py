@@ -470,6 +470,10 @@ def build_scene_link_blocks(text):
 
     scene = []
 
+    # =================================================
+    # 🔥 TEXT BLOCK
+    # =================================================
+
     if clean_text:
 
         scene.append({
@@ -478,6 +482,10 @@ def build_scene_link_blocks(text):
 
             "content": clean_text
         })
+
+    # =================================================
+    # 🔥 LINK BLOCKS
+    # =================================================
 
     for url in clean_urls:
 
@@ -488,11 +496,24 @@ def build_scene_link_blocks(text):
             "url": url
         })
 
+    # =================================================
+    # 🔥 IMPORTANT
+    # =================================================
+    #
+    # RenderMessage expects:
+    #
+    # {
+    #   "type": "scene",
+    #   "scene": [...]
+    # }
+    #
+    # =================================================
+
     return {
 
         "type": "scene",
 
-        "blocks": scene
+        "scene": scene
     }
 
 
@@ -588,6 +609,9 @@ def should_skip_formatting(
         response_decision or {}
     )
 
+    if isinstance(text, dict):
+        return True
+
     text = normalize_text_payload(text)
 
     if not text:
@@ -681,6 +705,9 @@ def build_smart_presentation(
     response_decision = (
         response_decision or {}
     )
+
+    if isinstance(text, dict):
+        return text
 
     text = normalize_text_payload(text)
 
