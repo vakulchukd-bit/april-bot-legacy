@@ -25,6 +25,10 @@ CLEAN TEXT-ONLY PIPELINE.
 - safe text cleanup
 - calm readability
 - stable text formatting
+- continuity-aware presentation
+- multi-topic stability
+- semantic pacing
+- response ordering stabilization
 - safe plain-text preparation
 
 Renderer / scene / links / graphs:
@@ -71,6 +75,21 @@ def normalize_text_payload(value):
 
     except:
         return ""
+
+
+# =====================================================
+# 🔥 SAFE CONTAINS
+# =====================================================
+
+def contains_any(
+    text,
+    words
+):
+
+    return any(
+        w in text
+        for w in words
+    )
 
 
 # =====================================================
@@ -217,6 +236,159 @@ def split_into_sections(text):
 
 
 # =====================================================
+# 🔥 CONTINUITY DETECTION
+# =====================================================
+
+def detect_multi_topic(
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    return cognition.get(
+        "tracks_multiple_topics",
+        False
+    )
+
+
+def detect_order_preservation(
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    return cognition.get(
+        "preserve_question_order",
+        False
+    )
+
+
+def detect_dialogue_alive(
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    return cognition.get(
+        "dialogue_still_alive",
+        False
+    )
+
+
+# =====================================================
+# 🔥 SEMANTIC PACING
+# =====================================================
+
+def stabilize_semantic_flow(
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    text = normalize_text_payload(
+        text
+    )
+
+    if not text:
+        return ""
+
+    sections = split_into_sections(
+        text
+    )
+
+    if not sections:
+        return text
+
+    stabilized = []
+
+    for section in sections:
+
+        cleaned = section.strip()
+
+        if not cleaned:
+            continue
+
+        # =============================================
+        # SOFT NORMALIZATION
+        # =============================================
+
+        cleaned = re.sub(
+            r"\n{2,}",
+            "\n",
+            cleaned
+        )
+
+        stabilized.append(
+            cleaned
+        )
+
+    # =============================================
+    # MULTI TOPIC STABILITY
+    # =============================================
+
+    if detect_multi_topic(
+        cognition
+    ):
+
+        return "\n\n".join(
+            stabilized
+        ).strip()
+
+    return "\n\n".join(
+        stabilized
+    ).strip()
+
+
+# =====================================================
+# 🔥 ORDER STABILIZATION
+# =====================================================
+
+def preserve_response_order(
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    text = normalize_text_payload(
+        text
+    )
+
+    if not text:
+        return ""
+
+    if not detect_order_preservation(
+        cognition
+    ):
+
+        return text
+
+    sections = split_into_sections(
+        text
+    )
+
+    if not sections:
+        return text
+
+    ordered = []
+
+    for section in sections:
+
+        cleaned = section.strip()
+
+        if cleaned:
+
+            ordered.append(
+                cleaned
+            )
+
+    return "\n\n".join(
+        ordered
+    ).strip()
+
+
+# =====================================================
 # 🔥 EMOJI DETECTION
 # =====================================================
 
@@ -263,17 +435,43 @@ def detect_primary_emoji(text):
 # 🔥 VISUAL ENRICHMENT
 # =====================================================
 
-def apply_visual_enrichment(text):
+def apply_visual_enrichment(
+
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
 
     text = normalize_text_payload(text)
 
     if not text:
         return ""
 
+    # =============================================
+    # CODE SAFE
+    # =============================================
+
     if is_code_payload(text):
         return text
 
+    # =============================================
+    # SHORT SAFE
+    # =============================================
+
     if len(text) <= 60:
+        return text
+
+    # =============================================
+    # RESTRAINED MODE
+    # =============================================
+
+    restraint = cognition.get(
+        "assistant_restraint",
+        0.4
+    )
+
+    if restraint >= 0.7:
         return text
 
     emoji = detect_primary_emoji(
@@ -341,15 +539,67 @@ def should_skip_formatting(
 # 🔥 LIGHT FORMAT
 # =====================================================
 
-def apply_light_formatting(text):
+def apply_light_formatting(
+
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
 
     sections = split_into_sections(
         text
     )
 
+    if not sections:
+        return text
+
+    # =============================================
+    # ORDER STABILITY
+    # =============================================
+
+    if cognition.get(
+        "should_answer_in_order"
+    ):
+
+        return "\n\n".join(
+            sections
+        ).strip()
+
     return "\n\n".join(
         sections
     ).strip()
+
+
+# =====================================================
+# 🔥 CONTINUITY VOICE
+# =====================================================
+
+def stabilize_dialogue_presence(
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    text = normalize_text_payload(
+        text
+    )
+
+    if not text:
+        return ""
+
+    # =============================================
+    # DIALOGUE ALIVE
+    # =============================================
+
+    if detect_dialogue_alive(
+        cognition
+    ):
+
+        return text.strip()
+
+    return text.strip()
 
 
 # =====================================================
@@ -397,11 +647,39 @@ def build_smart_presentation(
     )
 
     # =============================================
+    # FLOW STABILIZATION
+    # =============================================
+
+    text = stabilize_semantic_flow(
+        text,
+        cognition
+    )
+
+    # =============================================
+    # ORDER PRESERVATION
+    # =============================================
+
+    text = preserve_response_order(
+        text,
+        cognition
+    )
+
+    # =============================================
     # LIGHT FORMAT
     # =============================================
 
     text = apply_light_formatting(
-        text
+        text,
+        cognition
+    )
+
+    # =============================================
+    # DIALOGUE PRESENCE
+    # =============================================
+
+    text = stabilize_dialogue_presence(
+        text,
+        cognition
     )
 
     # =============================================
@@ -409,7 +687,8 @@ def build_smart_presentation(
     # =============================================
 
     text = apply_visual_enrichment(
-        text
+        text,
+        cognition
     )
 
     return text.strip()
@@ -419,7 +698,13 @@ def build_smart_presentation(
 # 🔥 FINAL VOICE
 # =====================================================
 
-def apply_april_final_voice(text):
+def apply_april_final_voice(
+
+    text,
+    cognition=None
+):
+
+    cognition = cognition or {}
 
     if isinstance(text, dict):
         return text
@@ -432,7 +717,13 @@ def apply_april_final_voice(text):
         text
     )
 
-    return text.strip()
+    # =============================================
+    # SAFE CALM OUTPUT
+    # =============================================
+
+    text = text.strip()
+
+    return text
 
 
 # =====================================================
@@ -481,7 +772,8 @@ def beautify_response(
     )
 
     formatted = apply_april_final_voice(
-        formatted
+        formatted,
+        cognition
     )
 
     return formatted
