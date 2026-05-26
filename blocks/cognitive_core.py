@@ -79,7 +79,13 @@ def build_dialog_continuity(
         "recent_user_requests": [],
         "conversation_stage": "active",
         "multi_topic": False,
-        "user_waiting_answer": False
+        "user_waiting_answer": False,
+
+        # 🔥 human continuity
+        "dialog_momentum": 0.0,
+        "human_depth": 0.0,
+        "user_uncertainty": 0.0,
+        "user_reflection": False
     }
 
     if not dialog:
@@ -119,16 +125,51 @@ def build_dialog_continuity(
             content[:280]
         )
 
+        lowered = content.lower()
+
         if (
             "?" in content
-            or "как" in content.lower()
-            or "почему" in content.lower()
-            or "что" in content.lower()
+            or "как" in lowered
+            or "почему" in lowered
+            or "что" in lowered
         ):
 
             unresolved.append(
                 content[:280]
             )
+
+        # =================================================
+        # 🔥 HUMAN UNDERSTANDING
+        # =====================================================
+
+        if (
+            "не понимаю" in lowered
+            or "сложно" in lowered
+            or "запутался" in lowered
+            or "не уверен" in lowered
+        ):
+
+            continuity[
+                "user_uncertainty"
+            ] += 0.25
+
+        if (
+            "думаю" in lowered
+            or "мне кажется" in lowered
+            or "как думаешь" in lowered
+        ):
+
+            continuity[
+                "user_reflection"
+            ] = True
+
+            continuity[
+                "human_depth"
+            ] += 0.2
+
+        continuity[
+            "dialog_momentum"
+        ] += 0.12
 
     continuity[
         "recent_user_requests"
@@ -143,6 +184,30 @@ def build_dialog_continuity(
         continuity[
             "user_waiting_answer"
         ] = True
+
+    continuity[
+        "dialog_momentum"
+    ] = _clamp(
+        continuity[
+            "dialog_momentum"
+        ]
+    )
+
+    continuity[
+        "human_depth"
+    ] = _clamp(
+        continuity[
+            "human_depth"
+        ]
+    )
+
+    continuity[
+        "user_uncertainty"
+    ] = _clamp(
+        continuity[
+            "user_uncertainty"
+        ]
+    )
 
     return continuity
 
@@ -207,6 +272,44 @@ def stabilize_multi_topic_dialog(
             "execution_confidence",
             0.2
         )
+
+    # =================================================
+    # 🔥 HUMAN CONTINUITY
+    # =====================================================
+
+    if continuity.get(
+        "human_depth",
+        0.0
+    ) >= 0.2:
+
+        cognition[
+            "response_should_feel_human"
+        ] = True
+
+        cognition[
+            "response_should_continue_naturally"
+        ] = True
+
+        cognition[
+            "should_preserve_dialog_momentum"
+        ] = True
+
+    if continuity.get(
+        "user_uncertainty",
+        0.0
+    ) >= 0.2:
+
+        cognition[
+            "should_reduce_pressure"
+        ] = True
+
+        cognition[
+            "should_help_calmly"
+        ] = True
+
+        cognition[
+            "response_should_feel_safe"
+        ] = True
 
     return cognition
 
@@ -307,6 +410,42 @@ def stabilize_dialog_behavior(
             ),
             0.35
         )
+
+        # =================================================
+        # 🔥 NATURAL HUMAN FLOW
+        # =====================================================
+
+        cognition[
+            "response_should_feel_alive"
+        ] = True
+
+        cognition[
+            "response_should_flow_naturally"
+        ] = True
+
+        cognition[
+            "response_should_maintain_continuity"
+        ] = True
+
+        cognition[
+            "response_should_feel_human"
+        ] = True
+
+        cognition[
+            "response_should_help_gently"
+        ] = True
+
+        cognition[
+            "response_should_reduce_robotic_tone"
+        ] = True
+
+        cognition[
+            "response_should_adapt_pacing"
+        ] = True
+
+        cognition[
+            "response_should_respect_user_state"
+        ] = True
 
         _decrease(
             cognition,
@@ -533,6 +672,14 @@ def stabilize_trajectory(
         "active_flow_strength"
     ] = 0.85
 
+    cognition[
+        "response_should_continue_naturally"
+    ] = True
+
+    cognition[
+        "response_should_preserve_context"
+    ] = True
+
     _increase(
         cognition,
         "trajectory_confidence",
@@ -620,6 +767,16 @@ def analyze_cognition(
         "response_should_focus_on_goal": True,
         "response_should_stay_grounded": True,
 
+        # 🔥 human continuity
+        "response_should_feel_alive": False,
+        "response_should_flow_naturally": False,
+        "response_should_feel_human": False,
+        "response_should_continue_naturally": False,
+        "response_should_help_gently": False,
+        "response_should_reduce_robotic_tone": True,
+        "response_should_adapt_pacing": False,
+        "response_should_preserve_context": False,
+
         "tracks_multiple_topics": False,
         "should_answer_in_order": False,
         "preserve_question_order": False,
@@ -693,6 +850,10 @@ def analyze_cognition(
 
         cognition[
             "needs_guidance"
+        ] = True
+
+        cognition[
+            "response_should_help_gently"
         ] = True
 
     # =================================================
