@@ -88,6 +88,21 @@ def normalize_lower(
 
 
 # =====================================================
+# 🔥 SAFE CONTAINS
+# =====================================================
+
+def contains_any(
+    text,
+    words
+):
+
+    return any(
+        word in text
+        for word in words
+    )
+
+
+# =====================================================
 # 🔥 SPATIAL KEYWORDS
 # =====================================================
 
@@ -111,6 +126,49 @@ SPATIAL_KEYWORDS = [
     "chart",
     "diagram",
     "function"
+]
+
+
+# =====================================================
+# 🔥 SCENE UNDERSTANDING SIGNALS
+# =====================================================
+
+GRAPH_SIGNALS = [
+
+    "график",
+    "графика",
+    "функция",
+    "ось",
+    "кривая",
+    "plot",
+    "graph"
+]
+
+FORMULA_SIGNALS = [
+
+    "формула",
+    "уравнение",
+    "formula",
+    "equation"
+]
+
+TABLE_SIGNALS = [
+
+    "таблица",
+    "сравнение",
+    "сводка",
+    "table",
+    "compare"
+]
+
+SCENE_SIGNALS = [
+
+    "схема",
+    "пространство",
+    "scene",
+    "layout",
+    "diagram",
+    "canvas"
 ]
 
 
@@ -209,10 +267,45 @@ def normalize_graph_expression(
 # =====================================================
 
 def has_spatial_intent(
-    text: str
+    text: str,
+    cognition: dict = None
 ):
 
     t = normalize_lower(text)
+
+    cognition = cognition or {}
+
+    # =================================================
+    # 🔥 COGNITION-FIRST
+    # =====================================================
+
+    if cognition.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    if cognition.get(
+        "renderer_space_active"
+    ):
+
+        return True
+
+    if cognition.get(
+        "prefer_scene_render"
+    ):
+
+        return True
+
+    if cognition.get(
+        "prefer_lightweight_render"
+    ):
+
+        return True
+
+    # =================================================
+    # 🔥 FALLBACK KEYWORDS
+    # =====================================================
 
     return any(
         word in t
@@ -271,6 +364,98 @@ def detect_graph_expression(
 
 
 # =====================================================
+# 🔥 SCENE TYPE DETECTION
+# =====================================================
+
+def detect_scene_type(
+    text: str,
+    cognition: dict = None
+):
+
+    lower = normalize_lower(
+        text
+    )
+
+    cognition = cognition or {}
+
+    # =================================================
+    # 🔥 COGNITION PRIORITY
+    # =====================================================
+
+    if cognition.get(
+        "prefer_renderer"
+    ):
+
+        graph_expr = detect_graph_expression(
+            text
+        )
+
+        if graph_expr:
+            return "graph"
+
+    # =================================================
+    # 🔥 GRAPH
+    # =====================================================
+
+    if contains_any(
+        lower,
+        GRAPH_SIGNALS
+    ):
+
+        graph_expr = detect_graph_expression(
+            text
+        )
+
+        if graph_expr:
+            return "graph"
+
+    # =================================================
+    # 🔥 TABLE
+    # =====================================================
+
+    if contains_any(
+        lower,
+        TABLE_SIGNALS
+    ):
+
+        return "table"
+
+    # =================================================
+    # 🔥 FORMULA
+    # =====================================================
+
+    if contains_any(
+        lower,
+        FORMULA_SIGNALS
+    ):
+
+        return "formula"
+
+    # =================================================
+    # 🔥 SCENE
+    # =====================================================
+
+    if contains_any(
+        lower,
+        SCENE_SIGNALS
+    ):
+
+        return "scene"
+
+    # =================================================
+    # 🔥 COGNITION SAFE FALLBACK
+    # =====================================================
+
+    if cognition.get(
+        "renderer_space_active"
+    ):
+
+        return "scene"
+
+    return None
+
+
+# =====================================================
 # 🔥 GRAPH PAYLOAD
 # =====================================================
 
@@ -317,6 +502,14 @@ def build_graph_payload(
         "avoid_generation": True,
 
         # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
+
+        "continuity_safe": True,
+
+        "scene_continuation": True,
+
+        # =================================================
         # 🔥 UI
         # =====================================================
 
@@ -354,7 +547,11 @@ def build_formula_payload(
 
         "lightweight_render": True,
 
-        "avoid_generation": True
+        "avoid_generation": True,
+
+        "continuity_safe": True,
+
+        "scene_continuation": True
     }
 
 
@@ -382,101 +579,21 @@ def build_table_payload():
 
         "lightweight_render": True,
 
-        "avoid_generation": True
+        "avoid_generation": True,
+
+        "continuity_safe": True,
+
+        "scene_continuation": True
     }
 
 
 # =====================================================
-# 🔥 MAIN INTERPRETER
+# 🔥 GENERIC SCENE PAYLOAD
 # =====================================================
 
-def interpret_graph_request(
-    text: str
+def build_scene_payload(
+    content: str
 ):
-
-    """
-    Main April science interpreter.
-
-    IMPORTANT:
-
-    This is NOT:
-    - math solving;
-    - trigger matching;
-    - python execution.
-
-    This IS:
-    - spatial intent interpretation;
-    - renderer-scene preparation.
-    """
-
-    text = normalize_text(
-        text
-    )
-
-    if not text:
-        return None
-
-    # =================================================
-    # 🔥 SPATIAL CHECK
-    # =====================================================
-
-    if not has_spatial_intent(
-        text
-    ):
-
-        return None
-
-    lower = normalize_lower(
-        text
-    )
-
-    # =================================================
-    # 🔥 TABLE SPACE
-    # =====================================================
-
-    if (
-        "таблица" in lower
-        or "table" in lower
-    ):
-
-        return build_table_payload()
-
-    # =================================================
-    # 🔥 GRAPH SPACE
-    # =====================================================
-
-    graph_expr = detect_graph_expression(
-        text
-    )
-
-    if graph_expr:
-
-        return build_graph_payload(
-            graph_expr
-        )
-
-    # =================================================
-    # 🔥 FORMULA SPACE
-    # =====================================================
-
-    if (
-        "формула" in lower
-        or "formula" in lower
-    ):
-
-        formula = detect_graph_expression(
-            text
-        )
-
-        if formula:
-
-            return build_formula_payload(
-                formula
-            )
-
-    # =================================================
-    # 🔥 SAFE FALLBACK
-    # =====================================================
 
     return {
 
@@ -498,5 +615,130 @@ def interpret_graph_request(
 
         "avoid_generation": True,
 
-        "content": text
+        "continuity_safe": True,
+
+        "scene_continuation": True,
+
+        "content": content
     }
+
+
+# =====================================================
+# 🔥 MAIN INTERPRETER
+# =====================================================
+
+def interpret_graph_request(
+    text: str,
+    cognition: dict = None,
+    semantic: dict = None
+):
+
+    """
+    Main April science interpreter.
+
+    IMPORTANT:
+
+    This is NOT:
+    - math solving;
+    - trigger matching;
+    - python execution.
+
+    This IS:
+    - spatial intent interpretation;
+    - renderer-scene preparation.
+    """
+
+    text = normalize_text(
+        text
+    )
+
+    cognition = cognition or {}
+
+    semantic = semantic or {}
+
+    if not text:
+        return None
+
+    # =================================================
+    # 🔥 SPATIAL CHECK
+    # =====================================================
+
+    if not has_spatial_intent(
+        text,
+        cognition
+    ):
+
+        return None
+
+    # =================================================
+    # 🔥 SCENE DETECTION
+    # =====================================================
+
+    scene_type = detect_scene_type(
+        text,
+        cognition
+    )
+
+    # =================================================
+    # 🔥 GRAPH SPACE
+    # =====================================================
+
+    if scene_type == "graph":
+
+        graph_expr = detect_graph_expression(
+            text
+        )
+
+        if graph_expr:
+
+            return build_graph_payload(
+                graph_expr
+            )
+
+    # =================================================
+    # 🔥 TABLE SPACE
+    # =====================================================
+
+    if scene_type == "table":
+
+        return build_table_payload()
+
+    # =================================================
+    # 🔥 FORMULA SPACE
+    # =====================================================
+
+    if scene_type == "formula":
+
+        formula = detect_graph_expression(
+            text
+        )
+
+        if formula:
+
+            return build_formula_payload(
+                formula
+            )
+
+    # =================================================
+    # 🔥 GENERIC SCENE
+    # =====================================================
+
+    if scene_type == "scene":
+
+        return build_scene_payload(
+            text
+        )
+
+    # =================================================
+    # 🔥 SAFE FALLBACK
+    # =====================================================
+
+    if cognition.get(
+        "renderer_space_active"
+    ):
+
+        return build_scene_payload(
+            text
+        )
+
+    return None
