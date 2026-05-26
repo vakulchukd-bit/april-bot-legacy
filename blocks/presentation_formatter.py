@@ -5,37 +5,35 @@
 # =====================================================
 
 """
-Presentation layer April.
+APRIL SPACE PRESENTATION LAYER
 
-Этот модуль:
+Этот слой отвечает ТОЛЬКО за presentation/render preparation.
 
-- НЕ меняет personality;
-- НЕ отвечает вместо April;
-- НЕ ломает trajectory;
-- НЕ превращает ответы в UI-кашу.
+Он НЕ:
+- принимает решения вместо April;
+- НЕ роутит комнаты;
+- НЕ ломает renderer payload;
+- НЕ форматирует code/graph/formula payload;
+- НЕ мутирует scene objects;
+- НЕ строит fake markdown chaos.
 
-Он:
-
-- улучшает readability;
-- делает ответы визуально приятнее;
-- добавляет лёгкую структуру;
-- помогает удерживать внимание;
-- делает ответы более "живыми".
-
-Работает как formatting capability самой April.
-
-APRIL PRESENTATION PRINCIPLES:
-
-- renderer-first;
+Он ДЕЛАЕТ:
 - calm formatting;
-- lightweight visuality;
-- no token inflation;
-- no formatting loops;
-- no renderer corruption;
-- no fake UI decoration;
-- no destructive payload mutation;
-- scene-safe formatting;
-- multimodal-safe presentation.
+- scene-safe cleanup;
+- renderer-safe delivery;
+- multimodal preparation;
+- clean link handling;
+- stable message presentation;
+- readable visual structure.
+
+APRIL PRINCIPLES:
+- renderer-first
+- scene-safe
+- payload-safe
+- no mutation
+- no decoration spam
+- no markdown chaos
+- no telegram formatting legacy
 """
 
 import re
@@ -43,7 +41,7 @@ import json
 
 
 # =====================================================
-# 🔥 SAFE FORMAT PATCH
+# 🔥 LOG
 # =====================================================
 
 FORMAT_PATCH_LOG = []
@@ -53,7 +51,7 @@ def safe_format_log(msg):
 
     try:
 
-        print("FORMAT PATCH:", msg)
+        print("PRESENTATION:", msg)
 
         FORMAT_PATCH_LOG.append(msg)
 
@@ -62,236 +60,119 @@ def safe_format_log(msg):
 
 
 # =====================================================
-# 🔥 SAFE TYPE NORMALIZATION
+# 🔥 SAFE NORMALIZE
 # =====================================================
 
-def normalize_text_payload(text):
+def normalize_text_payload(value):
 
-    if text is None:
+    if value is None:
         return ""
 
-    if isinstance(text, str):
-        return text
+    if isinstance(value, str):
+        return value
+
+    try:
+        return str(value)
+
+    except:
+        return ""
+
+
+# =====================================================
+# 🔥 SAFE JSON CHECK
+# =====================================================
+
+def looks_like_json(text):
+
+    text = normalize_text_payload(text).strip()
+
+    if not text:
+        return False
+
+    if not (
+        text.startswith("{")
+        or text.startswith("[")
+    ):
+        return False
 
     try:
 
-        return str(text)
-
-    except:
-
-        return ""
-
-
-# =====================================================
-# 🔥 STRUCTURE DETECTION
-# =====================================================
-
-def is_structured_payload(
-    text
-):
-
-    if isinstance(
-        text,
-        (dict, list)
-    ):
+        json.loads(text)
 
         return True
 
-    text = normalize_text_payload(text)
-
-    if not text:
+    except:
         return False
 
-    stripped = text.strip()
-
-    if (
-        stripped.startswith("{")
-        and stripped.endswith("}")
-    ):
-
-        try:
-
-            json.loads(stripped)
-
-            return True
-
-        except:
-            pass
-
-    if (
-        stripped.startswith("[")
-        and stripped.endswith("]")
-    ):
-
-        try:
-
-            json.loads(stripped)
-
-            return True
-
-        except:
-            pass
-
-    return False
-
 
 # =====================================================
-# 🔥 SCENE PAYLOAD DETECTION
+# 🔥 PAYLOAD DETECTION
 # =====================================================
 
-def is_scene_payload(
-    text: str
-):
+def is_renderer_payload(text):
 
     text = normalize_text_payload(text)
 
     if not text:
         return False
-
-    t = text.lower()
-
-    scene_checks = [
-
-        "\"scene\":",
-        "\"blocks\":",
-        "\"renderer\":",
-        "\"layout\":",
-
-        "[[scene",
-        "[[layout",
-        "[[block",
-        "[[grid",
-
-        "<scene",
-        "<layout",
-
-        "scene_objects",
-        "primitive_scene"
-    ]
-
-    return any(
-        x in t
-        for x in scene_checks
-    )
-
-
-# =====================================================
-# 🔥 RENDERER PAYLOAD DETECTION
-# =====================================================
-
-def is_renderer_payload(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return False
-
-    t = text.lower().strip()
-
-    renderer_checks = [
-
-        "[[graph:",
-        "[[formula",
-        "[[diagram",
-        "[[scene",
-        "[[grid",
-
-        "<svg",
-        "<canvas",
-
-        "\"type\": \"graph\"",
-        "\"type\":\"graph\"",
-
-        "\"type\": \"formula\"",
-        "\"type\":\"formula\"",
-
-        "\"graph\":",
-        "\"diagram\":",
-        "\"formula\":",
-
-        "data:image",
-
-        "desmos.com",
-
-        "```html",
-        "```svg"
-    ]
-
-    return any(
-        x in t
-        for x in renderer_checks
-    )
-
-
-# =====================================================
-# 🔥 WEB / UI DETECTION
-# =====================================================
-
-def is_web_render_context(
-    user_text: str
-):
-
-    t = (
-        user_text or ""
-    ).lower()
-
-    web_words = [
-
-        "график",
-        "diagram",
-        "диаграм",
-        "chart",
-        "canvas",
-        "render",
-        "ui",
-        "интерфейс",
-        "картин",
-        "image",
-        "визуал",
-        "нарисуй",
-        "сгенерируй",
-        "plot",
-        "desmos",
-        "scene",
-        "layout",
-        "formula",
-        "таблица",
-        "renderer"
-    ]
-
-    return any(
-        x in t
-        for x in web_words
-    )
-
-
-def looks_like_visual_payload(
-    text: str
-):
-
-    text = normalize_text_payload(text)
 
     t = text.lower()
 
     checks = [
 
-        "```html",
-        "<svg",
-        "<canvas",
-        "desmos.com",
+        # =============================================
+        # GRAPH
+        # =============================================
+
+        "[[graph:",
         "\"type\": \"graph\"",
         "\"type\":\"graph\"",
-        "\"graph\":",
-        "\"diagram\":",
-        "\"image_url\":",
+
+        # =============================================
+        # FORMULA
+        # =============================================
+
+        "[[formula",
+        "\"type\": \"formula\"",
+        "\"type\":\"formula\"",
+
+        # =============================================
+        # DIAGRAM
+        # =============================================
+
+        "[[diagram",
+        "\"type\": \"diagram\"",
+        "\"type\":\"diagram\"",
+
+        # =============================================
+        # SCENE
+        # =============================================
+
+        "[[scene",
+        "\"scene\":",
+        "\"blocks\":",
+
+        # =============================================
+        # SVG / HTML
+        # =============================================
+
+        "<svg",
+        "<canvas",
+        "```html",
+        "```svg",
+
+        # =============================================
+        # IMAGE
+        # =============================================
+
         "data:image",
-        "[[formula]]",
-        "[[graph]]",
-        "[[diagram]]",
-        "[[scene]]",
-        "[[grid]]"
+
+        # =============================================
+        # TABLE
+        # =============================================
+
+        "\"type\": \"table\"",
+        "\"type\":\"table\""
     ]
 
     return any(
@@ -301,104 +182,181 @@ def looks_like_visual_payload(
 
 
 # =====================================================
-# 🔥 EMOJI MAP
+# 🔥 CODE DETECTION
 # =====================================================
 
-EMOJI_MAP = {
-
-    "travel": "🌍",
-    "city": "🏙️",
-    "nature": "🌿",
-    "history": "🏛️",
-    "food": "🍽️",
-    "science": "🧠",
-    "warning": "⚠️",
-    "idea": "💡",
-    "guide": "🧭",
-    "visual": "🖼️",
-    "music": "🎵",
-    "technology": "⚙️",
-    "news": "📰",
-    "success": "✅",
-    "rest": "🏖️",
-    "map": "🗺️",
-
-    "youtube": "▶️",
-    "telegram": "📨",
-    "instagram": "📸",
-    "facebook": "📘",
-    "twitter": "𝕏",
-    "x": "𝕏",
-    "github": "💻",
-    "wikipedia": "📚",
-    "linkedin": "💼",
-    "reddit": "👽",
-    "tiktok": "🎬",
-    "discord": "🎮",
-    "website": "🔗"
-}
-
-
-# =====================================================
-# 🌐 PLATFORM DETECTION
-# =====================================================
-
-def detect_platform_label(
-    url: str
-):
-
-    url = (
-        url or ""
-    ).lower()
-
-    if "youtube.com" in url:
-        return "▶️ Видео"
-
-    if "youtu.be" in url:
-        return "▶️ Видео"
-
-    if "github.com" in url:
-        return "💻 GitHub"
-
-    if "reddit.com" in url:
-        return "👽 Reddit"
-
-    if "t.me" in url:
-        return "📨 Telegram"
-
-    return "🔗 Ссылка"
-
-
-# =====================================================
-# 🌐 EXTRACT URLS
-# =====================================================
-
-def extract_urls(
-    text: str
-):
+def is_code_payload(text):
 
     text = normalize_text_payload(text)
 
-    pattern = r"https?://[^\s]+"
+    if not text:
+        return False
+
+    checks = [
+
+        "```",
+
+        "import ",
+        "from ",
+
+        "const ",
+        "let ",
+        "var ",
+
+        "function ",
+        "async function",
+
+        "class ",
+
+        "export default",
+
+        "return (",
+
+        "def ",
+        "async def",
+
+        "console.log(",
+
+        "<div",
+        "</div>"
+    ]
+
+    return any(
+        x in text
+        for x in checks
+    )
+
+
+# =====================================================
+# 🔥 FORMULA DETECTION
+# =====================================================
+
+def is_formula_payload(text):
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return False
+
+    t = text.lower()
+
+    checks = [
+
+        "y=",
+        "y =",
+
+        "f(x)",
+
+        "sin(",
+        "cos(",
+        "tan(",
+
+        "^2",
+        "^3",
+
+        "$$"
+    ]
+
+    return any(
+        x in t
+        for x in checks
+    )
+
+
+# =====================================================
+# 🔥 LINK EXTRACTION
+# =====================================================
+
+URL_REGEX = r"https?://[^\s\)\]\}\"\'<>]+"
+
+
+def extract_urls(text):
+
+    text = normalize_text_payload(text)
 
     return re.findall(
-        pattern,
+        URL_REGEX,
         text
     )
 
 
 # =====================================================
-# 🧠 SAFE MARKDOWN CLEANER
+# 🔥 CLEAN URL
 # =====================================================
 
-def cleanup_markdown(
-    text: str
-):
+def clean_url(url):
+
+    url = normalize_text_payload(url).strip()
+
+    if not url:
+        return ""
+
+    trailing = [
+
+        ".",
+        ",",
+        ";",
+        ":",
+        "\"",
+        "'",
+        ")",
+        "]",
+        "}",
+        ">"
+    ]
+
+    while (
+        url
+        and url[-1] in trailing
+    ):
+
+        url = url[:-1]
+
+    return url.strip()
+
+
+# =====================================================
+# 🔥 URL LABEL
+# =====================================================
+
+def detect_platform_label(url):
+
+    u = (
+        url or ""
+    ).lower()
+
+    if "github.com" in u:
+        return "💻 GitHub"
+
+    if "youtube.com" in u:
+        return "▶️ YouTube"
+
+    if "youtu.be" in u:
+        return "▶️ YouTube"
+
+    if "reddit.com" in u:
+        return "👽 Reddit"
+
+    if "t.me" in u:
+        return "📨 Telegram"
+
+    return "🔗 Link"
+
+
+# =====================================================
+# 🔥 MARKDOWN CLEANER
+# =====================================================
+
+def cleanup_markdown(text):
 
     text = normalize_text_payload(text)
 
     if not text:
-        return text
+        return ""
+
+    # =============================================
+    # REMOVE TELEGRAM LEGACY
+    # =============================================
 
     text = text.replace(
         "**",
@@ -410,35 +368,24 @@ def cleanup_markdown(
         ""
     )
 
-    text = re.sub(
-        r"([^]+)\][^)]+",
-        r"\1",
-        text
+    text = text.replace(
+        "`",
+        "`"
     )
 
-    text = re.sub(
-        r"|",
-        "",
-        text
-    )
-
-    text = re.sub(
-        r"\s*$",
-        "",
-        text
-    )
-
-    text = re.sub(
-        r"\s*$",
-        "",
-        text
-    )
+    # =============================================
+    # REMOVE DUPLICATE EMPTY LINES
+    # =============================================
 
     text = re.sub(
         r"\n{3,}",
         "\n\n",
         text
     )
+
+    # =============================================
+    # REMOVE HUGE SPACES
+    # =============================================
 
     text = re.sub(
         r"[ ]{2,}",
@@ -450,95 +397,83 @@ def cleanup_markdown(
 
 
 # =====================================================
-# 🌐 SAFE URL CLEANER
+# 🔥 SECTION SPLITTER
 # =====================================================
 
-def clean_url(
-    url: str
-):
+def split_into_sections(text):
 
-    url = (
-        url or ""
-    ).strip()
-
-    if not url:
-        return ""
-
-    trailing_symbols = [
-
-        "\"",
-        "'",
-        ")",
-        "]",
-        "}",
-        ">",
-        ",",
-        ";",
-        ".",
-        "*",
-        "_"
-    ]
-
-    while (
-
-        url
-        and url[-1] in trailing_symbols
-
-    ):
-
-        url = url[:-1]
-
-    return url.strip()
-
-
-# =====================================================
-# 🌐 SAFE LINK ORGANIZER
-# =====================================================
-
-def build_safe_link_blocks(
-    text: str
-):
-
-    text = normalize_text_payload(
-        text
-    )
+    text = normalize_text_payload(text)
 
     if not text:
-        return text
+        return []
 
-    urls = extract_urls(
+    if is_renderer_payload(text):
+        return [text]
+
+    if is_code_payload(text):
+        return [text]
+
+    blocks = re.split(
+        r"\n{2,}",
         text
     )
 
+    result = []
+
+    for block in blocks:
+
+        cleaned = block.strip()
+
+        if cleaned:
+
+            result.append(
+                cleaned
+            )
+
+    return result
+
+
+# =====================================================
+# 🔥 LINK BLOCKS
+# =====================================================
+
+def build_safe_link_blocks(text):
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return ""
+
+    urls = extract_urls(text)
+
     if not urls:
+
         return cleanup_markdown(
             text
         )
 
-    cleaned_urls = []
+    clean_urls = []
 
     for url in urls:
 
-        safe_url = clean_url(
-            url
-        )
+        safe_url = clean_url(url)
 
         if safe_url:
 
-            cleaned_urls.append(
+            clean_urls.append(
                 safe_url
             )
 
+    # =============================================
+    # REMOVE URLS FROM TEXT
+    # =============================================
+
     result_text = text
 
-    # =================================================
-    # 🔥 REMOVE RAW URLS
-    # =====================================================
-
-    for old_url in urls:
+    for url in urls:
 
         result_text = result_text.replace(
-            old_url,
+            url,
             ""
         )
 
@@ -546,327 +481,50 @@ def build_safe_link_blocks(
         result_text
     )
 
-    # =================================================
-    # 🔥 REMOVE DUPLICATE PLATFORM LINES
-    # =====================================================
-
-    duplicate_lines = [
-
-        "💻 github ↗",
-        "▶️ youtube ↗",
-        "▶️ видео ↗",
-        "👽 reddit ↗",
-        "📨 telegram ↗"
-    ]
-
-    cleaned_lines = []
-
-    for line in result_text.split("\n"):
-
-        normalized = (
-            line.strip().lower()
-        )
-
-        if normalized in duplicate_lines:
-            continue
-
-        cleaned_lines.append(
-            line
-        )
-
-    result_text = "\n".join(
-        cleaned_lines
-    )
-
-    result_text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        result_text
-    ).strip()
-
-    # =================================================
-    # 🔥 BUILD ORDERED BLOCKS
-    # =====================================================
-
     sections = split_into_sections(
         result_text
     )
 
-    final_blocks = []
-
-    url_index = 0
+    final = []
 
     for section in sections:
 
-        clean_section = (
-            section.strip()
+        final.append(
+            section
         )
 
-        if clean_section:
+    # =============================================
+    # APPEND LINKS CLEANLY
+    # =============================================
 
-            final_blocks.append(
-                clean_section
-            )
+    used = set()
 
-        if url_index < len(cleaned_urls):
+    for url in clean_urls:
 
-            safe_url = cleaned_urls[
-                url_index
-            ]
+        if url in used:
+            continue
 
-            platform = detect_platform_label(
-                safe_url
-            )
+        used.add(url)
 
-            final_blocks.append(
-
-                f"{platform} ↗\n"
-                f"{safe_url}"
-            )
-
-            url_index += 1
-
-    while url_index < len(cleaned_urls):
-
-        safe_url = cleaned_urls[
-            url_index
-        ]
-
-        platform = detect_platform_label(
-            safe_url
+        label = detect_platform_label(
+            url
         )
 
-        final_blocks.append(
+        final.append(
 
-            f"{platform} ↗\n"
-            f"{safe_url}"
+            f"{label} ↗\n{url}"
         )
-
-        url_index += 1
 
     return "\n\n".join(
-        final_blocks
+        final
     ).strip()
 
 
 # =====================================================
-# 🔥 CRITICAL CONTENT DETECTION
+# 🔥 EMOJI DETECTION
 # =====================================================
 
-def is_code_content(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return False
-
-    checks = [
-
-        "```",
-        "<!DOCTYPE html>",
-        "<html",
-        "def ",
-        "import ",
-        "class ",
-        "console.log(",
-        "function(",
-        "async def",
-        "return {",
-        "const ",
-        "let ",
-        "var "
-    ]
-
-    return any(
-        x in text
-        for x in checks
-    )
-
-
-def is_formula_payload(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return False
-
-    checks = [
-
-        "y=",
-        "sin(",
-        "cos(",
-        "tan(",
-        "f(x)",
-        "^2",
-        "^3"
-    ]
-
-    return any(
-        x in text
-        for x in checks
-    )
-
-
-def is_realtime_content(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return False
-
-    t = text.lower()
-
-    realtime_words = [
-
-        "live",
-        "realtime",
-        "tracking",
-        "маршрут",
-        "координаты",
-        "где находится",
-        "рейс",
-        "судно",
-        "самолет",
-        "поезд",
-        "карта"
-    ]
-
-    return any(
-        x in t
-        for x in realtime_words
-    )
-
-
-def already_formatted(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return False
-
-    checks = [
-
-        "━━━",
-        "💻 github ↗",
-        "▶️ видео ↗",
-        "👽 reddit ↗"
-    ]
-
-    lowered = text.lower()
-
-    return any(
-        x in lowered
-        for x in checks
-    )
-
-
-# =====================================================
-# 🔥 RENDERER BLOCK PROTECTION
-# =====================================================
-
-def should_skip_formatting(
-    text: str,
-    user_text: str,
-    semantic: dict,
-    response_decision: dict
-):
-
-    semantic = semantic or {}
-    response_decision = response_decision or {}
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return True
-
-    if is_structured_payload(text):
-
-        safe_format_log(
-            "STRUCTURED PAYLOAD BYPASS"
-        )
-
-        return True
-
-    if is_scene_payload(text):
-
-        safe_format_log(
-            "SCENE PAYLOAD BYPASS"
-        )
-
-        return True
-
-    if is_renderer_payload(text):
-
-        safe_format_log(
-            "RENDERER PAYLOAD BYPASS"
-        )
-
-        return True
-
-    if looks_like_visual_payload(
-        text
-    ):
-
-        safe_format_log(
-            "VISUAL PAYLOAD BYPASS"
-        )
-
-        return True
-
-    if is_code_content(text):
-
-        safe_format_log(
-            "CODE BYPASS"
-        )
-
-        return True
-
-    if is_formula_payload(text):
-
-        safe_format_log(
-            "FORMULA BYPASS"
-        )
-
-        return True
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        safe_format_log(
-            "RENDER INTENT BYPASS"
-        )
-
-        return True
-
-    if response_decision.get(
-        "should_render"
-    ):
-
-        safe_format_log(
-            "RENDER RESPONSE BYPASS"
-        )
-
-        return True
-
-    return False
-
-
-# =====================================================
-# 🧠 KEYWORD EMOJI DETECTION
-# =====================================================
-
-def detect_primary_emoji(
-    text: str
-):
+def detect_primary_emoji(text):
 
     t = (
         text or ""
@@ -875,43 +533,28 @@ def detect_primary_emoji(
     checks = [
 
         (
-            ["город", "страна", "улица"],
-            EMOJI_MAP["city"]
+            ["код", "python", "react"],
+            "💻"
         ),
 
         (
-            ["путешествие", "отдых"],
-            EMOJI_MAP["travel"]
+            ["график", "формула"],
+            "📈"
         ),
 
         (
-            ["природа", "лес", "горы"],
-            EMOJI_MAP["nature"]
+            ["идея", "концепция"],
+            "💡"
         ),
 
         (
-            ["история", "музей"],
-            EMOJI_MAP["history"]
+            ["ссылка", "github"],
+            "🔗"
         ),
 
         (
-            ["еда", "ресторан"],
-            EMOJI_MAP["food"]
-        ),
-
-        (
-            ["идея", "концепт"],
-            EMOJI_MAP["idea"]
-        ),
-
-        (
-            ["новости"],
-            EMOJI_MAP["news"]
-        ),
-
-        (
-            ["карта", "маршрут"],
-            EMOJI_MAP["map"]
+            ["ошибка", "warning"],
+            "⚠️"
         )
     ]
 
@@ -926,111 +569,26 @@ def detect_primary_emoji(
 
 
 # =====================================================
-# 🧠 SECTION SPLITTER
+# 🔥 VISUAL ENRICHMENT
 # =====================================================
 
-def split_into_sections(
-    text: str
-):
+def apply_visual_enrichment(text):
 
     text = normalize_text_payload(text)
-
-    text = text.strip()
 
     if not text:
-        return []
-
-    if is_scene_payload(text):
-        return [text]
-
-    if is_renderer_payload(text):
-        return [text]
-
-    if is_code_content(text):
-        return [text]
-
-    parts = []
-
-    blocks = re.split(
-        r"\n{2,}",
-        text
-    )
-
-    for block in blocks:
-
-        cleaned = block.strip()
-
-        if cleaned:
-            parts.append(cleaned)
-
-    return parts
-
-
-# =====================================================
-# 🧠 LIGHT FORMAT
-# =====================================================
-
-def apply_light_formatting(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    sections = split_into_sections(
-        text
-    )
-
-    if not sections:
-        return text
-
-    result = []
-
-    for section in sections:
-
-        result.append(
-            section.strip()
-        )
-
-    return "\n\n".join(result)
-
-
-# =====================================================
-# 🧠 VISUAL ENRICHMENT
-# =====================================================
-
-def apply_visual_enrichment(
-    text: str
-):
-
-    text = normalize_text_payload(text)
-
-    text = text.strip()
-
-    if not text:
-        return text
+        return ""
 
     if is_renderer_payload(text):
         return text
 
-    if is_scene_payload(text):
-        return text
-
-    if is_code_content(text):
+    if is_code_payload(text):
         return text
 
     if is_formula_payload(text):
         return text
 
-    if len(text) <= 80:
-        return text
-
-    if text.startswith((
-        "```",
-        "<",
-        "[[",
-        "{"
-    )):
-
+    if len(text) <= 60:
         return text
 
     emoji = detect_primary_emoji(
@@ -1044,16 +602,127 @@ def apply_visual_enrichment(
 
 
 # =====================================================
-# 🧠 SMART PRESENTATION
+# 🔥 BYPASS
+# =====================================================
+
+def should_skip_formatting(
+
+    text,
+    semantic=None,
+    response_decision=None
+):
+
+    semantic = semantic or {}
+    response_decision = (
+        response_decision or {}
+    )
+
+    text = normalize_text_payload(text)
+
+    if not text:
+        return True
+
+    # =============================================
+    # JSON
+    # =============================================
+
+    if looks_like_json(text):
+
+        safe_format_log(
+            "JSON BYPASS"
+        )
+
+        return True
+
+    # =============================================
+    # RENDERER
+    # =============================================
+
+    if is_renderer_payload(text):
+
+        safe_format_log(
+            "RENDERER BYPASS"
+        )
+
+        return True
+
+    # =============================================
+    # CODE
+    # =============================================
+
+    if is_code_payload(text):
+
+        safe_format_log(
+            "CODE BYPASS"
+        )
+
+        return True
+
+    # =============================================
+    # FORMULA
+    # =============================================
+
+    if is_formula_payload(text):
+
+        safe_format_log(
+            "FORMULA BYPASS"
+        )
+
+        return True
+
+    # =============================================
+    # SEMANTIC RENDER
+    # =============================================
+
+    if semantic.get(
+        "render_intent"
+    ):
+
+        safe_format_log(
+            "SEMANTIC RENDER BYPASS"
+        )
+
+        return True
+
+    if response_decision.get(
+        "should_render"
+    ):
+
+        safe_format_log(
+            "RESPONSE RENDER BYPASS"
+        )
+
+        return True
+
+    return False
+
+
+# =====================================================
+# 🔥 LIGHT FORMAT
+# =====================================================
+
+def apply_light_formatting(text):
+
+    sections = split_into_sections(
+        text
+    )
+
+    return "\n\n".join(
+        sections
+    ).strip()
+
+
+# =====================================================
+# 🔥 SMART PRESENTATION
 # =====================================================
 
 def build_smart_presentation(
 
-    text: str,
-    semantic: dict,
-    cognition: dict,
-    response_decision: dict,
-    user_text: str = ""
+    text,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    user_text=""
 ):
 
     semantic = semantic or {}
@@ -1063,74 +732,53 @@ def build_smart_presentation(
     )
 
     text = normalize_text_payload(text)
-    text = text.strip()
 
     if not text:
-        return text
+        return ""
 
     if should_skip_formatting(
 
         text,
-        user_text,
         semantic,
         response_decision
     ):
 
         return text
 
-    if is_realtime_content(
-        text
-    ):
-
-        safe_format_log(
-            "REALTIME LIGHT FORMAT"
-        )
-
-        return apply_light_formatting(
-            text
-        )
-
-    # =================================================
-    # 🔥 SAFE LINK ORGANIZATION
-    # =====================================================
+    # =============================================
+    # CLEAN LINKS
+    # =============================================
 
     text = build_safe_link_blocks(
         text
     )
 
-    if cognition.get(
-        "reduce_talking"
-    ):
+    # =============================================
+    # LIGHT FORMAT
+    # =============================================
 
-        return apply_visual_enrichment(
-            text
-        )
-
-    return apply_visual_enrichment(
-
-        apply_light_formatting(
-            text
-        )
+    text = apply_light_formatting(
+        text
     )
 
+    # =============================================
+    # VISUAL ENRICH
+    # =============================================
+
+    text = apply_visual_enrichment(
+        text
+    )
+
+    return text.strip()
+
 
 # =====================================================
-# 🧠 APRIL FINAL VOICE ALIGNMENT
+# 🔥 FINAL VOICE ALIGNMENT
 # =====================================================
 
-def apply_april_final_voice(
-
-    text: str,
-    semantic: dict,
-    cognition: dict,
-    response_decision: dict
-):
+def apply_april_final_voice(text):
 
     text = normalize_text_payload(text)
-    text = text.strip()
-
-    if not text:
-        return text
 
     text = re.sub(
         r"\n{3,}",
@@ -1142,34 +790,35 @@ def apply_april_final_voice(
 
 
 # =====================================================
-# 🧠 RESPONSE BEAUTIFIER
+# 🔥 BEAUTIFIER
 # =====================================================
 
 def beautify_response(
 
-    text: str,
-    semantic: dict,
-    cognition: dict,
-    response_decision: dict,
-    user_text: str = ""
+    text,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    user_text=""
 ):
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = (
+        response_decision or {}
+    )
 
     text = normalize_text_payload(text)
 
     if not text:
-        return text
+        return ""
 
     if should_skip_formatting(
 
         text,
-        user_text,
         semantic,
         response_decision
     ):
-
-        safe_format_log(
-            "FULL BEAUTIFY BYPASS"
-        )
 
         return text
 
@@ -1183,29 +832,25 @@ def beautify_response(
     )
 
     formatted = apply_april_final_voice(
-
-        formatted,
-        semantic,
-        cognition,
-        response_decision
+        formatted
     )
 
     return formatted.strip()
 
 
 # =====================================================
-# 🧠 MAIN PUBLIC FORMATTER
+# 🔥 MAIN PUBLIC API
 # =====================================================
 
 def format_response_presentation(
 
-    text: str = "",
-    response: str = "",
-    semantic: dict = None,
-    cognition: dict = None,
-    response_decision: dict = None,
-    user_text: str = "",
-    visual_reference: dict = None
+    text="",
+    response="",
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    user_text="",
+    visual_reference=None
 ):
 
     semantic = semantic or {}
@@ -1221,18 +866,21 @@ def format_response_presentation(
     )
 
     if not final_text:
-        return final_text
+        return ""
+
+    # =============================================
+    # FINAL SAFE BYPASS
+    # =============================================
 
     if should_skip_formatting(
 
         final_text,
-        user_text,
         semantic,
         response_decision
     ):
 
         safe_format_log(
-            "FINAL FORMATTER BYPASS"
+            "FINAL BYPASS"
         )
 
         return final_text
