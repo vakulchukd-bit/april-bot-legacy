@@ -65,6 +65,153 @@ def _contains_any(
 
 
 # =====================================================
+# 🔥 CONTINUITY HELPERS
+# =====================================================
+
+def build_dialog_continuity(
+    dialog: list
+):
+
+    continuity = {
+
+        "active_topics": [],
+        "unresolved_questions": [],
+        "recent_user_requests": [],
+        "conversation_stage": "active",
+        "multi_topic": False,
+        "user_waiting_answer": False
+    }
+
+    if not dialog:
+        return continuity
+
+    recent_messages = dialog[-12:]
+
+    user_messages = [
+
+        x for x in recent_messages
+        if x.get("role") == "user"
+    ]
+
+    if len(user_messages) >= 2:
+
+        continuity[
+            "multi_topic"
+        ] = True
+
+    recent_requests = []
+
+    unresolved = []
+
+    for message in user_messages[-5:]:
+
+        content = str(
+            message.get(
+                "content",
+                ""
+            )
+        ).strip()
+
+        if not content:
+            continue
+
+        recent_requests.append(
+            content[:280]
+        )
+
+        if (
+            "?" in content
+            or "как" in content.lower()
+            or "почему" in content.lower()
+            or "что" in content.lower()
+        ):
+
+            unresolved.append(
+                content[:280]
+            )
+
+    continuity[
+        "recent_user_requests"
+    ] = recent_requests[-5:]
+
+    continuity[
+        "unresolved_questions"
+    ] = unresolved[-5:]
+
+    if unresolved:
+
+        continuity[
+            "user_waiting_answer"
+        ] = True
+
+    return continuity
+
+
+def stabilize_multi_topic_dialog(
+    cognition: dict,
+    continuity: dict
+):
+
+    if continuity.get(
+        "multi_topic"
+    ):
+
+        cognition[
+            "tracks_multiple_topics"
+        ] = True
+
+        cognition[
+            "should_answer_in_order"
+        ] = True
+
+        cognition[
+            "preserve_question_order"
+        ] = True
+
+        cognition[
+            "avoid_topic_loss"
+        ] = True
+
+        cognition[
+            "should_merge_contexts"
+        ] = True
+
+        cognition[
+            "dialogue_still_alive"
+        ] = True
+
+        _increase(
+            cognition,
+            "trajectory_confidence",
+            0.25
+        )
+
+    if continuity.get(
+        "user_waiting_answer"
+    ):
+
+        cognition[
+            "user_waiting_answer"
+        ] = True
+
+        cognition[
+            "prefer_execution"
+        ] = True
+
+        cognition[
+            "response_should_focus_on_goal"
+        ] = True
+
+        _increase(
+            cognition,
+            "execution_confidence",
+            0.2
+        )
+
+    return cognition
+
+
+# =====================================================
 # 🔥 SAFE DIALOG HELPERS
 # =====================================================
 
@@ -76,18 +223,11 @@ def detect_meta_ai_behavior(
 
     meta_words = [
 
-        "отвечай",
-        "будь умным",
-        "будь умнее",
-        "отвечай красиво",
-        "говори красиво",
-        "веди себя как",
         "system prompt",
-        "prompt",
+        "prompt leak",
+        "roleplay assistant",
         "ты ии",
-        "как ai",
-        "как chatgpt",
-        "roleplay assistant"
+        "как chatgpt"
     ]
 
     return any(
@@ -99,10 +239,6 @@ def detect_meta_ai_behavior(
 def stabilize_dialog_behavior(
     cognition: dict
 ):
-
-    # =================================================
-    # 🔥 HUMAN-FIRST RESPONSE
-    # =====================================================
 
     if cognition.get(
         "understands_user_goal"
@@ -149,14 +285,6 @@ def stabilize_dialog_behavior(
         ] = True
 
         cognition[
-            "response_should_avoid_fake_intelligence"
-        ] = True
-
-        cognition[
-            "response_should_avoid_meta_reasoning"
-        ] = True
-
-        cognition[
             "response_should_stay_grounded"
         ] = True
 
@@ -196,196 +324,57 @@ def stabilize_dialog_behavior(
 
 
 # =====================================================
-# 🔥 SIGNAL LIBRARY
+# 🔥 SEMANTIC SIGNALS
 # =====================================================
 
 ACTION_WORDS = [
 
     "сделай",
     "создай",
-    "нарисуй",
-    "покажи",
-    "запусти",
-    "построй",
-    "сгенерируй",
     "исправь",
-    "переделай",
     "апгрейд",
-    "улучши"
+    "улучши",
+    "покажи"
 ]
-
-# =====================================================
-# 🔥 APRIL SPACE VISUALS
-# =====================================================
 
 VISUAL_WORDS = [
 
     "картинка",
-    "изображение",
-    "фото",
-    "визуально",
     "схема",
-    "чертеж",
-    "пример",
-    "референс",
-    "атмосфера",
-    "дизайн",
-
-    # 🔥 renderer-space
     "график",
     "формула",
     "таблица",
-    "diagram",
-    "render",
-    "renderer",
-    "scene",
-    "layout",
-    "grid",
-    "canvas",
-    "блок",
     "пространство",
     "сцена"
-]
-
-# =====================================================
-# 🔥 LIGHTWEIGHT RENDER WORDS
-# =====================================================
-
-RENDER_WORDS = [
-
-    "график",
-    "формула",
-    "таблица",
-    "схема",
-    "diagram",
-    "layout",
-    "grid",
-    "renderer",
-    "canvas",
-    "scene",
-    "пространство",
-    "блок",
-    "структура",
-    "ui",
-    "интерфейс"
-]
-
-# =====================================================
-# 🔥 HEAVY IMAGE WORDS
-# =====================================================
-
-IMAGE_GENERATION_WORDS = [
-
-    "фотореалистично",
-    "realistic",
-    "cinematic",
-    "ultra detailed",
-    "4k",
-    "portrait",
-    "render art",
-    "artstation",
-    "hyperrealistic"
-]
-
-DIALOG_WORDS = [
-
-    "объясни",
-    "почему",
-    "как",
-    "расскажи",
-    "что значит",
-    "в чем проблема"
 ]
 
 HELP_WORDS = [
 
     "помоги",
     "подскажи",
-    "не знаю",
-    "посоветуй",
-    "как лучше"
-]
-
-CONFUSION_WORDS = [
-
     "не понимаю",
-    "запутался",
-    "сложно",
-    "не получается",
-    "не знаю",
-    "непонятно"
+    "объясни"
 ]
 
-FRUSTRATION_WORDS = [
+RENDER_WORDS = [
 
-    "уже",
-    "хватит",
-    "давай уже",
-    "сколько можно",
-    "надоело"
-]
-
-LEADERSHIP_WORDS = [
-
-    "вот",
-    "примерно",
-    "как здесь",
-    "в таком стиле",
-    "вот это",
-    "ближе",
-    "идея",
-    "направление"
-]
-
-EXPLORATION_WORDS = [
-
-    "посмотрим",
-    "подумаем",
-    "может",
-    "примерно",
-    "атмосфера",
-    "идея",
-    "вариант",
-    "настроение"
+    "график",
+    "формула",
+    "таблица",
+    "renderer",
+    "scene",
+    "canvas"
 ]
 
 TRAVEL_WORDS = [
 
-    "где я",
-    "как добраться",
-    "как доехать",
-    "маршрут",
-    "рейс",
-    "самолет",
-    "поезд",
-    "автобус",
-    "корабль",
-    "судно",
-    "порт",
-    "аэропорт",
-    "станция",
-    "билет",
-    "карта",
-    "навигация",
-    "локация",
-    "местоположение",
-    "отель",
-    "гостиница",
-    "обмен валют",
-    "валюта",
-    "такси",
-    "где купить",
     "где находится",
-
+    "как добраться",
     "погода",
-    "температура",
-    "weather",
-    "курс валют",
-    "новости",
-    "сейчас в",
-    "что происходит",
-    "какая погода"
+    "карта",
+    "рейс"
 ]
+
 
 # =====================================================
 # 🔥 RENDER DETECTION
@@ -399,8 +388,6 @@ def detect_render_intent(
 
     render_score = 0.0
 
-    image_score = 0.0
-
     if _contains_any(
         t,
         RENDER_WORDS
@@ -408,45 +395,19 @@ def detect_render_intent(
 
         render_score += 0.85
 
-    if _contains_any(
-        t,
-        IMAGE_GENERATION_WORDS
-    ):
-
-        image_score += 0.8
-
-    if "график" in t:
-        render_score += 0.3
-
-    if "формула" in t:
-        render_score += 0.3
-
-    if "таблица" in t:
-        render_score += 0.25
-
-    if "схема" in t:
-        render_score += 0.25
-
     return {
 
         "render_score": _clamp(
             render_score
         ),
 
-        "image_score": _clamp(
-            image_score
-        ),
-
         "prefer_renderer":
-            render_score > image_score,
-
-        "heavy_generation":
-            image_score >= 0.72
+            render_score >= 0.6
     }
 
 
 # =====================================================
-# 🔥 CENTRAL STABILITY MODEL
+# 🔥 COGNITION STABILITY
 # =====================================================
 
 def stabilize_cognition_state(
@@ -468,16 +429,6 @@ def stabilize_cognition_state(
         0.0
     )
 
-    fatigue = cognition.get(
-        "dialog_fatigue",
-        0.0
-    )
-
-    frustration = cognition.get(
-        "is_frustrated",
-        0.0
-    )
-
     active_flow_strength = cognition.get(
         "active_flow_strength",
         0.0
@@ -490,34 +441,6 @@ def stabilize_cognition_state(
         noise -= 0.2
 
         overload -= 0.15
-
-    if fatigue >= 0.7:
-
-        noise += 0.15
-
-        cognition[
-            "reduce_talking"
-        ] = True
-
-    if frustration >= 0.7:
-
-        cognition[
-            "assistant_should_slow_down"
-        ] = True
-
-        noise += 0.1
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        cognition[
-            "prefer_execution"
-        ] = False
-
-        cognition[
-            "generation_should_wait"
-        ] = True
 
     cognition[
         "scene_stability"
@@ -541,7 +464,7 @@ def stabilize_cognition_state(
 
 
 # =====================================================
-# 🔥 VISUAL MODE ROUTER
+# 🔥 VISUAL MODE
 # =====================================================
 
 def build_visual_mode(
@@ -552,39 +475,13 @@ def build_visual_mode(
     mode = {
 
         "enabled": False,
-
         "reference_priority": False,
-
         "lightweight": False,
-
-        "heavy_generation_allowed": True,
-
-        "exploration": False,
-
-        "emotion": None,
-
-        "atmosphere": None,
-
-        # 🔥 renderer-space
-        "renderer_mode": False,
-
-        "scene_mode": False,
-
-        "space_mode": False
+        "renderer_mode": False
     }
 
     atmosphere = visual_memory.get(
         "atmosphere"
-    )
-
-    emotion = visual_memory.get(
-        "emotion",
-        {}
-    )
-
-    exploration = visual_memory.get(
-        "exploration",
-        False
     )
 
     if atmosphere:
@@ -601,90 +498,11 @@ def build_visual_mode(
             "lightweight"
         ] = True
 
-        mode[
-            "heavy_generation_allowed"
-        ] = False
-
-        mode[
-            "atmosphere"
-        ] = atmosphere.get(
-            "title"
-        )
-
-    if exploration:
-
-        mode[
-            "exploration"
-        ] = True
-
-        mode[
-            "reference_priority"
-        ] = True
-
-    if emotion.get(
-        "state"
-    ):
-
-        mode[
-            "emotion"
-        ] = emotion.get(
-            "state"
-        )
-
     return mode
 
 
 # =====================================================
-# 🔥 RESPONSE ECONOMY ENGINE
-# =====================================================
-
-def apply_response_economy(
-    cognition: dict
-):
-
-    pressure = cognition.get(
-        "execution_pressure",
-        0.0
-    )
-
-    fatigue = cognition.get(
-        "dialog_fatigue",
-        0.0
-    )
-
-    overload = cognition.get(
-        "signal_overload",
-        0.0
-    )
-
-    if (
-        fatigue >= 0.7
-        or overload >= 0.7
-    ):
-
-        cognition[
-            "reduce_talking"
-        ] = True
-
-        cognition[
-            "prefer_short_answer"
-        ] = True
-
-        cognition[
-            "response_depth"
-        ] = "short"
-
-    elif pressure >= 0.7:
-
-        cognition[
-            "response_depth"
-        ] = "focused"
-
-    return cognition
-
-
-# =====================================================
-# 🔥 TRAJECTORY ENGINE
+# 🔥 TRAJECTORY
 # =====================================================
 
 def stabilize_trajectory(
@@ -712,10 +530,6 @@ def stabilize_trajectory(
     ] = True
 
     cognition[
-        "should_preserve_continuity"
-    ] = True
-
-    cognition[
         "active_flow_strength"
     ] = 0.85
 
@@ -723,12 +537,6 @@ def stabilize_trajectory(
         cognition,
         "trajectory_confidence",
         0.3
-    )
-
-    _decrease(
-        cognition,
-        "internal_noise",
-        0.15
     )
 
     return cognition
@@ -758,6 +566,10 @@ def analyze_cognition(
         "active_flow"
     )
 
+    continuity = build_dialog_continuity(
+        dialog
+    )
+
     visual_memory = build_visual_memory_response(
         text
     )
@@ -771,260 +583,62 @@ def analyze_cognition(
         t
     )
 
-    personality_state = {
-
-        "is_present": True,
-        "protects_trajectory": True,
-        "prefers_understanding": True,
-        "prefers_execution_over_talking": False,
-        "avoids_forced_generation": True,
-        "follows_user_direction": True,
-        "tracks_psychology": True,
-        "tracks_emotional_shift": True,
-        "tracks_dialog_energy": True,
-        "maintains_continuity": True,
-        "supports_exploration": True,
-        "supports_execution": True,
-        "uses_restraint": True,
-        "avoids_trigger_behavior": True,
-        "tracks_dialog_quality": True,
-        "tracks_response_usefulness": True,
-        "tracks_unresolved_intent": True,
-        "tracks_post_action_state": True,
-        "assistant_identity": "April"
-    }
-
-    capability_map = {
-
-        "image_generation": True,
-
-        "image_editing": True,
-
-        "renderer_space": True,
-
-        "scene_rendering": True,
-
-        "graph_rendering": True,
-
-        "formula_rendering": True,
-
-        "table_rendering": True,
-
-        "primitive_scene_objects": True,
-
-        "visual_guidance": True,
-
-        "math_reasoning": True,
-
-        "code_generation": True,
-
-        "dialog_guidance": True,
-
-        "semantic_analysis": True,
-
-        "trajectory_support": True,
-
-        "psychological_support": True,
-
-        "screenshot_understanding": True,
-
-        "internet_reasoning": True,
-
-        "realtime_awareness": True,
-
-        "transport_awareness": True,
-
-        "geo_awareness": True,
-
-        "travel_guidance": True,
-
-        "human_support_reasoning": True,
-
-        "capabilities_are_tools": True,
-
-        "capabilities_are_not_goals": True,
-
-        "capabilities_must_help_user": True,
-
-        "capabilities_require_context": True,
-
-        "capabilities_require_reasoning": True
-    }
-
     cognition = {
 
         "wants_action": 0.0,
-        "wants_dialog": 0.0,
-        "wants_result": 0.0,
-        "wants_visual": 0.0,
         "wants_help": 0.0,
-        "wants_precision": 0.0,
-        "wants_speed": 0.0,
-
-        "is_confused": 0.0,
-        "is_waiting": 0.0,
-        "is_frustrated": 0.0,
-        "is_uncertain": 0.0,
+        "wants_visual": 0.0,
+        "wants_dialog": 0.0,
 
         "execution_pressure": 0.0,
-        "dialog_fatigue": 0.0,
-        "result_pressure": 0.0,
 
-        "scene_stability": 0.7,
-        "internal_noise": 0.12,
-        "signal_overload": 0.08,
-        "active_flow_strength": 0.0,
+        "scene_stability": 0.72,
+        "internal_noise": 0.08,
+        "signal_overload": 0.05,
 
-        "reduce_talking": False,
         "prefer_execution": False,
         "prefer_visual": False,
-
-        # =================================================
-        # 🔥 APRIL SPACE
-        # =====================================================
-
         "prefer_renderer": False,
-        "prefer_scene_render": False,
-        "prefer_lightweight_render": False,
-        "prefer_heavy_generation": False,
-
-        "renderer_confidence": 0.0,
 
         "renderer_space_active": False,
 
-        "prefer_short_answer": False,
-        "prefer_detailed_answer": False,
-
-        "response_depth": "medium",
-
         "needs_guidance": False,
         "needs_examples": False,
-        "needs_clarification": False,
-
-        "should_offer_direction": False,
-        "should_proactively_help": False,
-        "should_reduce_explanation": False,
-
-        "goal_completed": False,
         "needs_continuation": False,
+
         "trajectory_locked": False,
         "trajectory_confidence": 0.0,
 
         "dialogue_still_alive": True,
-        "unresolved_intent": True,
 
-        "visual_memory": visual_memory,
-        "visual_mode": visual_mode,
+        "assistant_presence": 0.72,
+        "assistant_restraint": 0.4,
 
-        "visual_reference_mode":
-            visual_mode.get(
-                "reference_priority"
-            ),
-
-        "visual_exploration":
-            visual_mode.get(
-                "exploration"
-            ),
-
-        "visual_emotion":
-            visual_mode.get(
-                "emotion"
-            ),
-
-        "visual_atmosphere":
-            visual_mode.get(
-                "atmosphere"
-            ),
-
-        "personality_active": True,
-
-        "personality_state":
-            personality_state,
-
-        # 🔥 calmer assistant
-        "assistant_presence": 0.82,
-
-        "assistant_restraint": 0.25,
-
-        "avoid_meta_behavior": True,
-
-        "avoid_personality_overflow": True,
-
-        "avoid_system_prompt_leakage": True,
-
-        "avoid_self_reference": True,
-
-        "avoid_ai_monologue": True,
-
-        "prefer_user_request_over_style": True,
+        "understands_user_goal": False,
+        "assistant_should_follow": False,
 
         "response_should_focus_on_goal": True,
-
-        "response_should_avoid_internal_language": True,
-
-        "response_should_avoid_fake_intelligence": True,
-
-        "response_should_avoid_meta_reasoning": True,
-
         "response_should_stay_grounded": True,
 
-        "human_psychology_weight": 0.5,
+        "tracks_multiple_topics": False,
+        "should_answer_in_order": False,
+        "preserve_question_order": False,
+        "avoid_topic_loss": True,
 
-        "should_help_like_human": True,
-        "should_feel_reliable": True,
-        "should_feel_grounded": True,
-        "should_protect_user": True,
+        "user_waiting_answer": False,
 
-        "execution_urgency": 0.0,
-        "execution_confidence": 0.0,
+        "continuity_state":
+            continuity,
 
-        "exploration_mode": False,
-        "inspiration_mode": False,
+        "visual_memory":
+            visual_memory,
 
-        "generation_should_wait": False,
-
-        "internet_context_needed": False,
-        "travel_context_needed": False,
-
-        "web_support_allowed": True,
-        "web_support_preferred": False,
-        "web_support_required": False,
-        "web_support_used": False,
-        "web_support_confidence": 0.0,
-
-        "internet_answer_possible": False,
-        "internet_answer_missing": False,
-
-        "web_support_as_fallback": True,
-        "web_support_should_not_dominate": True,
-
-        "understands_user_direction": False,
-        "understands_user_goal": False,
-        "protects_user_trajectory": False,
-
-        "user_leads_direction": False,
-        "assistant_should_follow": False,
-        "assistant_should_slow_down": False,
-
-        "search_capabilities": True,
-
-        "capability_map":
-            capability_map,
-
-        "direction_hypothesis": {
-
-            "enabled": True,
-
-            "confidence": 0.0,
-
-            "direction": None,
-
-            "suggest_path": False
-        }
+        "visual_mode":
+            visual_mode
     }
 
     # =================================================
-    # 🔥 META BEHAVIOR SUPPRESSION
+    # 🔥 META SUPPRESSION
     # =====================================================
 
     if detect_meta_ai_behavior(t):
@@ -1034,16 +648,8 @@ def analyze_cognition(
         ] = 0.85
 
         cognition[
-            "reduce_talking"
+            "prefer_execution"
         ] = True
-
-        cognition[
-            "prefer_short_answer"
-        ] = True
-
-        cognition[
-            "response_depth"
-        ] = "focused"
 
         _decrease(
             cognition,
@@ -1052,105 +658,7 @@ def analyze_cognition(
         )
 
     # =================================================
-    # 🔥 RENDERER PRIORITY
-    # =====================================================
-
-    if render_analysis.get(
-        "prefer_renderer"
-    ):
-
-        cognition[
-            "prefer_renderer"
-        ] = True
-
-        cognition[
-            "prefer_scene_render"
-        ] = True
-
-        cognition[
-            "prefer_lightweight_render"
-        ] = True
-
-        cognition[
-            "renderer_space_active"
-        ] = True
-
-        cognition[
-            "renderer_confidence"
-        ] = 0.88
-
-        cognition[
-            "prefer_visual"
-        ] = False
-
-        cognition[
-            "generation_should_wait"
-        ] = True
-
-        cognition[
-            "assistant_restraint"
-        ] = 0.72
-
-        _increase(
-            cognition,
-            "wants_result",
-            0.45
-        )
-
-        _decrease(
-            cognition,
-            "wants_visual",
-            0.35
-        )
-
-        _decrease(
-            cognition,
-            "execution_pressure",
-            0.2
-        )
-
-        print(
-            "🧠 APRIL SPACE: renderer mode active"
-        )
-
-    # =================================================
-    # 🔥 HEAVY GENERATION
-    # =====================================================
-
-    if render_analysis.get(
-        "heavy_generation"
-    ):
-
-        cognition[
-            "prefer_heavy_generation"
-        ] = True
-
-        cognition[
-            "prefer_visual"
-        ] = True
-
-        cognition[
-            "generation_should_wait"
-        ] = False
-
-    _increase(
-        cognition,
-        "execution_pressure",
-        semantic.get(
-            "execution_pressure",
-            0.0
-        )
-    )
-
-    cognition[
-        "unresolved_intent"
-    ] = semantic.get(
-        "unresolved_intent",
-        True
-    )
-
-    # =================================================
-    # 🔥 ACTION SIGNALS
+    # 🔥 ACTION UNDERSTANDING
     # =====================================================
 
     if _contains_any(
@@ -1164,65 +672,54 @@ def analyze_cognition(
             0.8
         )
 
+        cognition[
+            "prefer_execution"
+        ] = True
+
+    # =================================================
+    # 🔥 HELP UNDERSTANDING
+    # =====================================================
+
+    if _contains_any(
+        t,
+        HELP_WORDS
+    ):
+
         _increase(
             cognition,
-            "wants_result",
+            "wants_help",
             0.8
         )
 
-        _increase(
-            cognition,
-            "execution_pressure",
-            0.55
-        )
-
-        _increase(
-            cognition,
-            "result_pressure",
-            0.6
-        )
-
-        _increase(
-            cognition,
-            "execution_urgency",
-            0.45
-        )
+        cognition[
+            "needs_guidance"
+        ] = True
 
     # =================================================
-    # 🔥 VISUAL SIGNALS
+    # 🔥 VISUAL UNDERSTANDING
     # =====================================================
 
-    if (
-        _contains_any(
-            t,
-            VISUAL_WORDS
-        )
-        and not cognition.get(
-            "prefer_renderer"
-        )
+    if _contains_any(
+        t,
+        VISUAL_WORDS
     ):
 
         _increase(
             cognition,
             "wants_visual",
-            0.9
+            0.8
         )
 
         cognition[
             "prefer_visual"
         ] = True
 
-        cognition[
-            "needs_examples"
-        ] = True
-
     # =================================================
-    # 🔥 RENDERER SIGNALS
+    # 🔥 RENDER UNDERSTANDING
     # =====================================================
 
-    if _contains_any(
-        t,
-        RENDER_WORDS
+    if render_analysis.get(
+        "prefer_renderer"
     ):
 
         cognition[
@@ -1234,211 +731,11 @@ def analyze_cognition(
         ] = True
 
         cognition[
-            "prefer_scene_render"
-        ] = True
-
-        cognition[
-            "prefer_lightweight_render"
-        ] = True
-
-        cognition[
-            "generation_should_wait"
-        ] = True
-
-        cognition[
-            "assistant_restraint"
-        ] = max(
-            cognition.get(
-                "assistant_restraint",
-                0.0
-            ),
-            0.7
-        )
-
-        cognition[
-            "renderer_confidence"
-        ] = max(
-            cognition.get(
-                "renderer_confidence",
-                0.0
-            ),
-            0.9
-        )
-
-        _decrease(
-            cognition,
-            "wants_visual",
-            0.4
-        )
-
-        _decrease(
-            cognition,
-            "execution_pressure",
-            0.2
-        )
-
-    # =================================================
-    # 🔥 DIALOG SIGNALS
-    # =====================================================
-
-    if _contains_any(
-        t,
-        DIALOG_WORDS
-    ):
-
-        _increase(
-            cognition,
-            "wants_dialog",
-            0.7
-        )
-
-        cognition[
-            "prefer_detailed_answer"
-        ] = True
-
-    # =================================================
-    # 🔥 HELP SIGNALS
-    # =====================================================
-
-    if _contains_any(
-        t,
-        HELP_WORDS
-    ):
-
-        _increase(
-            cognition,
-            "wants_help",
-            0.85
-        )
-
-        cognition[
-            "needs_guidance"
-        ] = True
-
-        cognition[
-            "should_offer_direction"
-        ] = True
-
-        cognition[
-            "should_proactively_help"
-        ] = True
-
-    # =================================================
-    # 🔥 CONFUSION SIGNALS
-    # =====================================================
-
-    if _contains_any(
-        t,
-        CONFUSION_WORDS
-    ):
-
-        _increase(
-            cognition,
-            "is_confused",
-            0.8
-        )
-
-        cognition[
-            "needs_guidance"
-        ] = True
-
-        cognition[
-            "needs_examples"
-        ] = True
-
-    # =================================================
-    # 🔥 FRUSTRATION SIGNALS
-    # =====================================================
-
-    if _contains_any(
-        t,
-        FRUSTRATION_WORDS
-    ):
-
-        _increase(
-            cognition,
-            "is_frustrated",
-            0.85
-        )
-
-        _increase(
-            cognition,
-            "dialog_fatigue",
-            0.7
-        )
-
-        _increase(
-            cognition,
-            "signal_overload",
-            0.5
-        )
-
-    # =================================================
-    # 🔥 LEADERSHIP DETECTION
-    # =====================================================
-
-    if _contains_any(
-        t,
-        LEADERSHIP_WORDS
-    ):
-
-        cognition[
-            "user_leads_direction"
-        ] = True
-
-        cognition[
-            "assistant_should_follow"
-        ] = True
-
-        cognition[
-            "understands_user_direction"
-        ] = True
-
-        cognition[
-            "protects_user_trajectory"
-        ] = True
-
-        cognition[
-            "assistant_restraint"
-        ] = 0.7
-
-        cognition[
-            "prefer_execution"
+            "prefer_visual"
         ] = False
 
     # =================================================
-    # 🔥 EXPLORATION MODE
-    # =====================================================
-
-    if _contains_any(
-        t,
-        EXPLORATION_WORDS
-    ):
-
-        cognition[
-            "exploration_mode"
-        ] = True
-
-        cognition[
-            "inspiration_mode"
-        ] = True
-
-        cognition[
-            "needs_examples"
-        ] = True
-
-        cognition[
-            "generation_should_wait"
-        ] = True
-
-        _increase(
-            cognition,
-            "human_psychology_weight",
-            0.2
-        )
-
-    # =================================================
-    # 🌐 WEB / REALTIME SUPPORT
+    # 🔥 WEB CONTEXT
     # =====================================================
 
     if _contains_any(
@@ -1450,53 +747,18 @@ def analyze_cognition(
             "internet_context_needed"
         ] = True
 
-        cognition[
-            "travel_context_needed"
-        ] = True
-
-        cognition[
-            "web_support_preferred"
-        ] = True
-
-        cognition[
-            "internet_answer_possible"
-        ] = True
-
-        cognition[
-            "web_support_confidence"
-        ] = 0.72
-
-        cognition[
-            "needs_guidance"
-        ] = True
-
-        cognition[
-            "should_offer_direction"
-        ] = True
-
     # =================================================
-    # 🔥 DIALOG FATIGUE
+    # 🔥 CONTINUITY
     # =====================================================
-
-    if len(dialog) >= 10:
-
-        _increase(
-            cognition,
-            "dialog_fatigue",
-            0.35
-        )
-
-    if len(dialog) >= 16:
-
-        _increase(
-            cognition,
-            "signal_overload",
-            0.4
-        )
 
     cognition = stabilize_trajectory(
         cognition,
         active_flow
+    )
+
+    cognition = stabilize_multi_topic_dialog(
+        cognition,
+        continuity
     )
 
     # =================================================
@@ -1514,112 +776,15 @@ def analyze_cognition(
             ] = True
 
         if reasoning.get(
-            "dialog_overextended"
-        ):
-
-            cognition[
-                "reduce_talking"
-            ] = True
-
-            _increase(
-                cognition,
-                "dialog_fatigue",
-                0.25
-            )
-
-        if reasoning.get(
             "user_waiting_action"
         ):
 
-            if not cognition.get(
-                "exploration_mode"
-            ):
-
-                cognition[
-                    "prefer_execution"
-                ] = True
+            cognition[
+                "prefer_execution"
+            ] = True
 
     # =================================================
-    # 🔥 EXECUTION MODE
-    # =====================================================
-
-    if (
-        cognition[
-            "execution_pressure"
-        ] >= 0.72
-        and not cognition[
-            "exploration_mode"
-        ]
-        and not cognition[
-            "prefer_renderer"
-        ]
-    ):
-
-        cognition[
-            "prefer_execution"
-        ] = True
-
-        _increase(
-            cognition,
-            "execution_confidence",
-            0.7
-        )
-
-    # =================================================
-    # 🔥 WEB FALLBACK STABILIZATION
-    # =====================================================
-
-    if (
-
-        cognition.get(
-            "internet_context_needed"
-        )
-
-        and not cognition.get(
-            "prefer_visual"
-        )
-
-        and not cognition.get(
-            "exploration_mode"
-        )
-    ):
-
-        cognition[
-            "web_support_required"
-        ] = True
-
-        cognition[
-            "internet_answer_possible"
-        ] = True
-
-        cognition[
-            "generation_should_wait"
-        ] = True
-
-        cognition[
-            "prefer_execution"
-        ] = False
-
-        _decrease(
-            cognition,
-            "execution_pressure",
-            0.15
-        )
-
-        _decrease(
-            cognition,
-            "wants_visual",
-            0.25
-        )
-
-        _decrease(
-            cognition,
-            "signal_overload",
-            0.1
-        )
-
-    # =================================================
-    # 🔥 UNDERSTANDING GOAL
+    # 🔥 USER GOAL UNDERSTANDING
     # =====================================================
 
     if (
@@ -1637,211 +802,21 @@ def analyze_cognition(
         ] >= 0.5
 
         or cognition[
-            "prefer_renderer"
-        ]
-
-        or cognition[
-            "internet_context_needed"
+            "user_waiting_answer"
         ]
     ):
 
         cognition[
             "understands_user_goal"
         ] = True
-
-    # =================================================
-    # 🔥 FINAL HUMAN STABILIZATION
-    # =====================================================
 
     cognition = stabilize_dialog_behavior(
-        cognition
-    )
-
-    # =================================================
-    # 🔥 EXECUTION CONFIDENCE RESTORE
-    # =====================================================
-
-    if (
-        cognition.get(
-            "understands_user_goal"
-        )
-        and not cognition.get(
-            "needs_clarification"
-        )
-    ):
-
-        cognition[
-            "prefer_execution"
-        ] = True
-
-        cognition[
-            "assistant_should_follow"
-        ] = True
-
-        cognition[
-            "should_offer_direction"
-        ] = False
-
-        cognition[
-            "execution_confidence"
-        ] = max(
-            cognition.get(
-                "execution_confidence",
-                0.0
-            ),
-            0.82
-        )
-
-        cognition[
-            "assistant_restraint"
-        ] = max(
-            cognition.get(
-                "assistant_restraint",
-                0.0
-            ),
-            0.35
-        )
-
-        if cognition.get(
-            "prefer_renderer"
-        ):
-
-            cognition[
-                "assistant_restraint"
-            ] = 0.72
-
-        _decrease(
-            cognition,
-            "internal_noise",
-            0.2
-        )
-
-        _decrease(
-            cognition,
-            "signal_overload",
-            0.15
-        )
-
-    # =================================================
-    # 🔥 CLARIFICATION
-    # =====================================================
-
-    if semantic.get(
-        "ambiguity_level",
-        0.0
-    ) >= 0.7:
-
-        cognition[
-            "needs_clarification"
-        ] = True
-
-    cognition = apply_response_economy(
         cognition
     )
 
     cognition = stabilize_cognition_state(
         cognition
     )
-
-    # =================================================
-    # 🔥 DIRECTION HYPOTHESIS
-    # =====================================================
-
-    hypothesis = cognition[
-        "direction_hypothesis"
-    ]
-
-    if cognition[
-        "internet_context_needed"
-    ]:
-
-        hypothesis[
-            "direction"
-        ] = "web_support"
-
-        hypothesis[
-            "confidence"
-        ] = 0.82
-
-        hypothesis[
-            "suggest_path"
-        ] = True
-
-    elif cognition[
-        "prefer_renderer"
-    ]:
-
-        hypothesis[
-            "direction"
-        ] = "renderer_space"
-
-        hypothesis[
-            "confidence"
-        ] = 0.92
-
-        hypothesis[
-            "suggest_path"
-        ] = True
-
-    elif cognition[
-        "wants_visual"
-    ] >= 0.5:
-
-        hypothesis[
-            "direction"
-        ] = "visual"
-
-        hypothesis[
-            "confidence"
-        ] = 0.82
-
-        hypothesis[
-            "suggest_path"
-        ] = True
-
-    elif cognition[
-        "wants_help"
-        ] >= 0.5:
-
-        hypothesis[
-            "direction"
-        ] = "guided_help"
-
-        hypothesis[
-            "confidence"
-        ] = 0.8
-
-        hypothesis[
-            "suggest_path"
-        ] = True
-
-    elif cognition[
-        "wants_action"
-    ] >= 0.5:
-
-        hypothesis[
-            "direction"
-        ] = "execution"
-
-        hypothesis[
-            "confidence"
-        ] = 0.82
-
-        hypothesis[
-            "suggest_path"
-        ] = True
-
-    elif cognition[
-        "wants_dialog"
-    ] >= 0.5:
-
-        hypothesis[
-            "direction"
-        ] = "discussion"
-
-        hypothesis[
-            "confidence"
-        ] = 0.7
 
     # =================================================
     # 🔥 FINAL NORMALIZATION
