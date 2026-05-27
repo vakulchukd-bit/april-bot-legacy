@@ -1,5 +1,6 @@
 import os
 import time
+import json
 
 from google import genai
 from google.genai import errors as gemini_errors
@@ -23,7 +24,6 @@ from blocks.provider_router import (
     provider_log
 )
 
-
 # =====================================================
 # 🔥 PROVIDERS
 # =====================================================
@@ -36,13 +36,20 @@ openai_client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-
 # =====================================================
 # 🔥 VISUAL PROVIDER MODE
 # =====================================================
 
 ACTIVE_PROVIDER = "gemini"
 
+# =====================================================
+# 🔥 VISUAL MEMORY CONFIG
+# =====================================================
+
+MAX_OBJECTS = 12
+MAX_VISIBLE_TEXT = 10
+MAX_SCENE_SUMMARY = 320
+MAX_PASSIVE_SCENES = 6
 
 # =====================================================
 # 🔥 PROVIDER SWITCH
@@ -64,7 +71,6 @@ def get_provider():
 
     return ACTIVE_PROVIDER
 
-
 # =====================================================
 # 🔥 SAFE GEMINI RECOVERY
 # =====================================================
@@ -77,68 +83,203 @@ def can_try_gemini():
 
     return False
 
-
 # =====================================================
-# 🔥 APRIL VISUAL RESPONSE SHAPER
+# 🔥 VISUAL SCENE NORMALIZATION
 # =====================================================
 
-def shape_april_visual_response(
-    text: str
-) -> str:
+def normalize_visual_scene(
+    raw_scene: dict
+):
 
-    if not text:
+    raw_scene = raw_scene or {}
 
-        return (
-            "Я получила изображение, "
-            "но пока не смогла спокойно "
-            "его разобрать."
-        )
-
-    cleaned = (
-        text
-        .replace("*", "")
-        .replace("На изображении", "")
-        .replace("изображено", "")
-        .replace("показано", "")
-        .strip()
+    objects = raw_scene.get(
+        "objects",
+        []
     )
 
-    # =========================================
-    # 🔥 LIMIT RESPONSE SIZE
-    # =========================================
+    visible_text = raw_scene.get(
+        "visible_text",
+        []
+    )
 
-    if len(cleaned) > 420:
+    normalized = {
 
-        cleaned = (
-            cleaned[:420].rsplit(".", 1)[0]
-            + "."
-        )
+        "scene_type":
+            raw_scene.get(
+                "scene_type",
+                "unknown"
+            ),
 
-    # =========================================
-    # 🔥 LIGHT APRIL TONE
-    # =========================================
+        "semantic_focus":
+            raw_scene.get(
+                "semantic_focus",
+                "general"
+            ),
 
-    if (
-        "надпись" in cleaned.lower()
-        or "текст" in cleaned.lower()
-    ):
+        "summary":
+            str(
+                raw_scene.get(
+                    "summary",
+                    ""
+                )
+            )[:MAX_SCENE_SUMMARY],
 
-        return (
-            f"{cleaned}\n\n"
-            "Похоже, в этом есть "
-            "небольшое настроение или смысл 🙂"
-        )
+        "objects":
+            objects[:MAX_OBJECTS],
 
-    return cleaned
+        "visible_text":
+            visible_text[:MAX_VISIBLE_TEXT],
 
+        "environment":
+            raw_scene.get(
+                "environment",
+                {}
+            ),
+
+        "colors":
+            raw_scene.get(
+                "colors",
+                []
+            ),
+
+        "brands":
+            raw_scene.get(
+                "brands",
+                []
+            ),
+
+        "positions":
+            raw_scene.get(
+                "positions",
+                []
+            ),
+
+        "continuity_active": True,
+
+        "scene_alive": True,
+
+        "lifecycle_state": "ACTIVE",
+
+        "provider":
+            ACTIVE_PROVIDER,
+
+        "timestamp":
+            time.time()
+    }
+
+    return normalized
 
 # =====================================================
-# 🔥 GEMINI ANALYSIS
+# 🔥 VISUAL SCENE COMPRESSION
+# =====================================================
+
+def compress_visual_scene(
+    scene: dict
+):
+
+    if not scene:
+        return {}
+
+    return {
+
+        "scene_type":
+            scene.get(
+                "scene_type"
+            ),
+
+        "semantic_focus":
+            scene.get(
+                "semantic_focus"
+            ),
+
+        "summary":
+            scene.get(
+                "summary"
+            ),
+
+        "objects":
+            scene.get(
+                "objects",
+                []
+            )[:5],
+
+        "brands":
+            scene.get(
+                "brands",
+                []
+            )[:5],
+
+        "colors":
+            scene.get(
+                "colors",
+                []
+            )[:5],
+
+        "lifecycle_state":
+            "PASSIVE"
+    }
+
+# =====================================================
+# 🔥 VISUAL MEMORY UPDATE
+# =====================================================
+
+def update_visual_memory(
+    state: dict,
+    visual_scene: dict
+):
+
+    if not state:
+        return
+
+    previous_scene = state.get(
+        "active_visual_scene"
+    )
+
+    passive_memory = state.get(
+        "passive_visual_memory",
+        []
+    )
+
+    # =================================================
+    # 🔥 ARCHIVE PREVIOUS
+    # =====================================================
+
+    if previous_scene:
+
+        compressed = compress_visual_scene(
+            previous_scene
+        )
+
+        passive_memory.append(
+            compressed
+        )
+
+        passive_memory = (
+            passive_memory[
+                -MAX_PASSIVE_SCENES:
+            ]
+        )
+
+    # =================================================
+    # 🔥 STORE ACTIVE
+    # =====================================================
+
+    state[
+        "active_visual_scene"
+    ] = visual_scene
+
+    state[
+        "passive_visual_memory"
+    ] = passive_memory
+
+# =====================================================
+# 🔥 GEMINI VISUAL EXTRACTION
 # =====================================================
 
 async def analyze_with_gemini(
     path: str
-) -> str:
+):
 
     provider_log(
         "🧠 GEMINI VISUAL START"
@@ -160,44 +301,80 @@ async def analyze_with_gemini(
 
             uploaded_file,
 
-            (
-                "Ты visual helper внутри April.\n"
-                "\n"
-                "НЕ описывай изображение "
-                "как robotic AI.\n"
-                "\n"
-                "НЕ делай длинные простыни.\n"
-                "\n"
-                "НЕ перечисляй все объекты.\n"
-                "\n"
-                "Выделяй только главное.\n"
-                "\n"
-                "Отвечай спокойно, "
-                "по-человечески и кратко.\n"
-                "\n"
-                "Если есть надпись — "
-                "объясни её смысл.\n"
-                "\n"
-                "Допускается лёгкий "
-                "живой tone или мягкий юмор.\n"
-                "\n"
-                "Ты helper layer. "
-                "Пользователь должен "
-                "ощущать April, "
-                "а не Gemini."
-            )
+            """
+Ты visual semantic extractor внутри April.
+
+Твоя задача:
+НЕ писать человеческий ответ.
+
+Нужно извлечь semantic visual scene.
+
+Верни JSON:
+
+{
+  "scene_type": "...",
+  "semantic_focus": "...",
+  "summary": "...",
+
+  "objects": [
+    {
+      "type": "...",
+      "brand": "...",
+      "model": "...",
+      "color": "...",
+      "position": "..."
+    }
+  ],
+
+  "visible_text": [],
+  "colors": [],
+  "brands": [],
+  "positions": [],
+
+  "environment": {
+    "location_type": "...",
+    "lighting": "...",
+    "atmosphere": "..."
+  }
+}
+
+Правила:
+- НЕ roleplay;
+- НЕ объясняй;
+- НЕ говори как AI;
+- НЕ добавляй markdown;
+- только JSON;
+- кратко;
+- semantic continuity priority.
+"""
         ]
     )
 
     raw_text = (
-
         response.text
         if response.text
-        else (
-            "Изображение получено "
-            "и обработано."
-        )
+        else "{}"
     )
+
+    try:
+
+        parsed = json.loads(
+            raw_text
+        )
+
+    except Exception:
+
+        parsed = {
+
+            "scene_type": "unknown",
+
+            "semantic_focus": "general",
+
+            "summary":
+                raw_text[:220],
+
+            "objects": []
+        }
 
     mark_gemini_success()
 
@@ -205,10 +382,9 @@ async def analyze_with_gemini(
         "🧠 GEMINI VISUAL SUCCESS"
     )
 
-    return shape_april_visual_response(
-        raw_text
+    return normalize_visual_scene(
+        parsed
     )
-
 
 # =====================================================
 # 🔥 OPENAI FALLBACK
@@ -216,7 +392,7 @@ async def analyze_with_gemini(
 
 async def analyze_with_openai(
     path: str
-) -> str:
+):
 
     provider_log(
         "⚠️ OPENAI VISUAL FALLBACK"
@@ -240,12 +416,15 @@ async def analyze_with_openai(
                     {
                         "type": "input_text",
 
-                        "text": (
-                            "Кратко и спокойно "
-                            "объясни изображение. "
-                            "Без robotic AI тона. "
-                            "Выдели только главное."
-                        )
+                        "text": """
+Extract visual semantic scene.
+
+Return ONLY JSON.
+
+No markdown.
+No explanations.
+No AI phrases.
+"""
                     },
 
                     {
@@ -261,49 +440,70 @@ async def analyze_with_openai(
     raw_text = getattr(
         response,
         "output_text",
-        ""
+        "{}"
     )
 
-    if not raw_text:
+    try:
 
-        raw_text = (
-            "Изображение обработано."
+        parsed = json.loads(
+            raw_text
         )
+
+    except Exception:
+
+        parsed = {
+
+            "scene_type": "unknown",
+
+            "semantic_focus": "general",
+
+            "summary":
+                raw_text[:220],
+
+            "objects": []
+        }
 
     provider_log(
         "🧠 OPENAI VISUAL SUCCESS"
     )
 
-    return shape_april_visual_response(
-        raw_text
+    return normalize_visual_scene(
+        parsed
     )
-
 
 # =====================================================
 # 🔥 MAIN VISUAL SYSTEM
 # =====================================================
 
 async def analyze_image_gemini(
-    path: str
-) -> str:
+    path: str,
+    state: dict = None
+):
 
     global ACTIVE_PROVIDER
 
+    state = state or {}
+
     try:
 
-        # =============================================
+        # =================================================
         # 🔥 GEMINI PRIMARY
-        # =============================================
+        # =====================================================
 
         if can_try_gemini():
 
             try:
 
-                result = await analyze_with_gemini(
+                visual_scene = await analyze_with_gemini(
                     path
                 )
 
-                return result
+                update_visual_memory(
+                    state,
+                    visual_scene
+                )
+
+                return visual_scene
 
             except Exception as gemini_error:
 
@@ -314,19 +514,26 @@ async def analyze_image_gemini(
 
                 mark_gemini_failure()
 
-                set_provider("openai")
+                set_provider(
+                    "openai"
+                )
 
-        # =============================================
+        # =================================================
         # 🔥 OPENAI FALLBACK
-        # =============================================
+        # =====================================================
 
-        result = await analyze_with_openai(
+        visual_scene = await analyze_with_openai(
             path
         )
 
-        # =============================================
-        # 🔥 GEMINI RECOVERY WINDOW
-        # =============================================
+        update_visual_memory(
+            state,
+            visual_scene
+        )
+
+        # =================================================
+        # 🔥 GEMINI RECOVERY
+        # =====================================================
 
         now = time.time()
 
@@ -346,9 +553,11 @@ async def analyze_image_gemini(
                 "🧠 GEMINI RECOVERY READY"
             )
 
-            set_provider("gemini")
+            set_provider(
+                "gemini"
+            )
 
-        return result
+        return visual_scene
 
     except Exception as e:
 
@@ -357,9 +566,16 @@ async def analyze_image_gemini(
             e
         )
 
-        return (
-            "Сейчас visual-space "
-            "немного перегружен. "
-            "Попробуй ещё раз "
-            "через несколько секунд."
-        )
+        return {
+
+            "scene_type": "error",
+
+            "semantic_focus": "error",
+
+            "summary":
+                "visual analysis failed",
+
+            "objects": [],
+
+            "continuity_active": False
+        }
