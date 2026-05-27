@@ -13,7 +13,9 @@ Resolver больше НЕ:
 Resolver теперь:
 - lightweight helper;
 - continuation-safe analyzer;
-- trajectory-aware assistant.
+- trajectory-aware assistant;
+- semantic continuity bridge;
+- machine-context stabilizer.
 
 Главный authority:
 - cognition
@@ -39,6 +41,63 @@ def normalize(
 
 
 # =====================================================
+# 🧠 MACHINE TASK PACKAGING
+# =====================================================
+
+def build_machine_task(
+    text: str,
+    mode: str = "generic"
+):
+
+    normalized = normalize(text)
+
+    return {
+
+        "raw": text,
+
+        "normalized": normalized,
+
+        "mode": mode,
+
+        "semantic_ready": True,
+
+        "continuation_safe": True,
+
+        "machine_context": {
+
+            "length": len(normalized),
+
+            "contains_math":
+                any(
+                    x in normalized
+                    for x in [
+                        "=",
+                        "+",
+                        "-",
+                        "*",
+                        "/",
+                        "sin",
+                        "cos",
+                        "tan"
+                    ]
+                ),
+
+            "contains_visual":
+                any(
+                    x in normalized
+                    for x in [
+                        "картин",
+                        "изображ",
+                        "фото",
+                        "схема",
+                        "график"
+                    ]
+                )
+        }
+    }
+
+
+# =====================================================
 # 🧠 EXPLICIT EXECUTION
 # =====================================================
 
@@ -50,10 +109,6 @@ def is_explicit(
 
     if not t:
         return False
-
-    # =================================================
-    # 🔥 SAFE KEYWORDS
-    # =================================================
 
     keywords = [
 
@@ -72,10 +127,6 @@ def is_explicit(
     ):
 
         return True
-
-    # =================================================
-    # 🔥 SAFE MATH DETECTION
-    # =================================================
 
     math_patterns = [
 
@@ -186,11 +237,7 @@ def find_explicit_task(
     if not history:
         return None
 
-    # =================================================
-    # 🔥 SEARCH ONLY RECENT
-    # =================================================
-
-    recent = history[-6:]
+    recent = history[-10:]
 
     for msg in reversed(recent):
 
@@ -201,7 +248,12 @@ def find_explicit_task(
 
         if is_explicit(text):
 
-            return text
+            return build_machine_task(
+
+                text=text,
+
+                mode="explicit_task"
+            )
 
     return None
 
@@ -216,15 +268,9 @@ def resolve_input(
 ):
 
     """
-    DeepHub logic:
-
-    Resolver НЕ должен:
-    - forcing execute;
-    - resurrect old tasks;
-    - override active scene;
-    - break continuation.
-
-    Resolver only suggests.
+    Resolver НЕ форсит execution.
+    Resolver удерживает trajectory
+    и semantic continuity.
     """
 
     state = state or {}
@@ -244,7 +290,9 @@ def resolve_input(
 
             "confidence": 0.0,
 
-            "source": "empty"
+            "source": "empty",
+
+            "machine_context": {}
         }
 
     last = history[-1].get(
@@ -262,7 +310,14 @@ def resolve_input(
     # 🔥 HARD CANCEL
     # =================================================
 
-    if contradicts(last, task):
+    if contradicts(
+
+        last,
+
+        task["raw"]
+        if task else ""
+
+    ):
 
         return {
 
@@ -272,7 +327,12 @@ def resolve_input(
 
             "confidence": 0.9,
 
-            "source": "contradiction"
+            "source": "contradiction",
+
+            "machine_context": {
+
+                "trajectory_reset": True
+            }
         }
 
     # =================================================
@@ -291,7 +351,17 @@ def resolve_input(
 
                 "confidence": 0.82,
 
-                "source": "active_flow"
+                "source": "active_flow",
+
+                "machine_context": {
+
+                    "trajectory_active": True,
+
+                    "flow_type":
+                        active_flow.get(
+                            "type"
+                        )
+                }
             }
 
         if task:
@@ -300,11 +370,27 @@ def resolve_input(
 
                 "mode": "soft_execute",
 
-                "text": task,
+                "text":
+                    task["raw"],
 
                 "confidence": 0.62,
 
-                "source": "reference_task"
+                "source": "reference_task",
+
+                "machine_task":
+                    task,
+
+                "machine_context": {
+
+                    "semantic_restore": True,
+
+                    "trajectory_resume": True,
+
+                    "restore_type":
+                        task.get(
+                            "mode"
+                        )
+                }
             }
 
         return {
@@ -315,12 +401,17 @@ def resolve_input(
 
             "confidence": 0.55,
 
-            "source": "reference_dialog"
+            "source": "reference_dialog",
+
+            "machine_context": {
+
+                "light_continuation": True
+            }
         }
 
     # =================================================
     # 🔥 EXPLICIT EXECUTION
-    # =================================================
+    # =====================================================
 
     if is_explicit(last):
 
@@ -332,12 +423,25 @@ def resolve_input(
 
             "confidence": 0.9,
 
-            "source": "explicit"
+            "source": "explicit",
+
+            "machine_task":
+                build_machine_task(
+
+                    last,
+
+                    mode="execution"
+                ),
+
+            "machine_context": {
+
+                "execution_ready": True
+            }
         }
 
     # =================================================
     # 🔥 ACTIVE FLOW PROTECTION
-    # =================================================
+    # =====================================================
 
     if active_flow:
 
@@ -361,32 +465,49 @@ def resolve_input(
 
                 "confidence": 0.74,
 
-                "source": "trajectory"
+                "source": "trajectory",
+
+                "machine_context": {
+
+                    "trajectory_locked": True,
+
+                    "flow_type": flow_type
+                }
             }
 
     # =================================================
     # 🔥 SAFE TASK CONTINUATION
-    # =================================================
+    # =====================================================
 
     if task:
-
-        # 🔥 DeepHub:
-        # больше НЕ forcing execute
 
         return {
 
             "mode": "soft_execute",
 
-            "text": task,
+            "text":
+                task["raw"],
 
             "confidence": 0.45,
 
-            "source": "memory_task"
+            "source": "memory_task",
+
+            "machine_task":
+                task,
+
+            "machine_context": {
+
+                "semantic_memory_restore": True,
+
+                "trajectory_soft_resume": True,
+
+                "machine_only": True
+            }
         }
 
     # =================================================
     # 🔥 DEFAULT DIALOG
-    # =================================================
+    # =====================================================
 
     return {
 
@@ -396,5 +517,10 @@ def resolve_input(
 
         "confidence": 0.5,
 
-        "source": "default"
+        "source": "default",
+
+        "machine_context": {
+
+            "dialog_safe": True
+        }
     }
