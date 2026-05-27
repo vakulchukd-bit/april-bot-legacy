@@ -78,25 +78,41 @@ def build_dialog_continuity(
         "unresolved_questions": [],
         "recent_user_requests": [],
         "conversation_stage": "active",
+
         "multi_topic": False,
         "user_waiting_answer": False,
 
-        # 🔥 human continuity
+        # 🔥 HUMAN CONTINUITY
         "dialog_momentum": 0.0,
         "human_depth": 0.0,
         "user_uncertainty": 0.0,
-        "user_reflection": False
+        "user_reflection": False,
+
+        # 🔥 SCENE CONTINUITY
+        "scene_continuation_possible": False,
+        "recent_visual_reference": False,
+        "soft_scene_memory": [],
+        "continuation_priority": 0.0,
+        "dialogue_should_continue": False,
+        "scene_transition_detected": False,
+        "return_to_previous_topic_possible": False
     }
 
     if not dialog:
         return continuity
 
-    recent_messages = dialog[-12:]
+    recent_messages = dialog[-15:]
 
     user_messages = [
 
         x for x in recent_messages
         if x.get("role") == "user"
+    ]
+
+    assistant_messages = [
+
+        x for x in recent_messages
+        if x.get("role") == "assistant"
     ]
 
     if len(user_messages) >= 2:
@@ -106,10 +122,40 @@ def build_dialog_continuity(
         ] = True
 
     recent_requests = []
-
     unresolved = []
 
-    for message in user_messages[-5:]:
+    visual_words = [
+
+        "скрин",
+        "скриншот",
+        "фото",
+        "картинка",
+        "изображение",
+        "на фото",
+        "на скрине",
+        "это",
+        "тут",
+        "здесь",
+        "смотри"
+    ]
+
+    continuation_words = [
+
+        "а тут",
+        "а здесь",
+        "теперь",
+        "еще",
+        "сейчас",
+        "вот",
+        "дальше",
+        "продолжение",
+        "снова",
+        "еще один"
+    ]
+
+    soft_scene_memory = []
+
+    for message in user_messages[-6:]:
 
         content = str(
             message.get(
@@ -121,11 +167,11 @@ def build_dialog_continuity(
         if not content:
             continue
 
+        lowered = content.lower()
+
         recent_requests.append(
             content[:280]
         )
-
-        lowered = content.lower()
 
         if (
             "?" in content
@@ -171,6 +217,66 @@ def build_dialog_continuity(
             "dialog_momentum"
         ] += 0.12
 
+        # =================================================
+        # 🔥 VISUAL CONTINUITY
+        # =====================================================
+
+        if _contains_any(
+            lowered,
+            visual_words
+        ):
+
+            continuity[
+                "recent_visual_reference"
+            ] = True
+
+            continuity[
+                "scene_continuation_possible"
+            ] = True
+
+            continuity[
+                "dialogue_should_continue"
+            ] = True
+
+            continuity[
+                "continuation_priority"
+            ] += 0.22
+
+            soft_scene_memory.append(
+                content[:120]
+            )
+
+        if _contains_any(
+            lowered,
+            continuation_words
+        ):
+
+            continuity[
+                "scene_continuation_possible"
+            ] = True
+
+            continuity[
+                "dialogue_should_continue"
+            ] = True
+
+            continuity[
+                "continuation_priority"
+            ] += 0.18
+
+    # =====================================================
+    # 🔥 SOFT RETURN TO PREVIOUS TOPIC
+    # =====================================================
+
+    if len(recent_requests) >= 3:
+
+        continuity[
+            "return_to_previous_topic_possible"
+        ] = True
+
+    continuity[
+        "soft_scene_memory"
+    ] = soft_scene_memory[-5:]
+
     continuity[
         "recent_user_requests"
     ] = recent_requests[-5:]
@@ -206,6 +312,14 @@ def build_dialog_continuity(
     ] = _clamp(
         continuity[
             "user_uncertainty"
+        ]
+    )
+
+    continuity[
+        "continuation_priority"
+    ] = _clamp(
+        continuity[
+            "continuation_priority"
         ]
     )
 
@@ -310,6 +424,60 @@ def stabilize_multi_topic_dialog(
         cognition[
             "response_should_feel_safe"
         ] = True
+
+    # =================================================
+    # 🔥 SCENE CONTINUITY
+    # =====================================================
+
+    if continuity.get(
+        "scene_continuation_possible"
+    ):
+
+        cognition[
+            "needs_continuation"
+        ] = True
+
+        cognition[
+            "dialogue_still_alive"
+        ] = True
+
+        cognition[
+            "response_should_continue_naturally"
+        ] = True
+
+        cognition[
+            "response_should_preserve_context"
+        ] = True
+
+        cognition[
+            "response_should_not_restart_scene"
+        ] = True
+
+        cognition[
+            "response_should_respect_previous_scene"
+        ] = True
+
+        cognition[
+            "scene_memory_active"
+        ] = True
+
+        cognition[
+            "should_preserve_scene_direction"
+        ] = True
+
+        cognition[
+            "soft_scene_continuation"
+        ] = True
+
+        cognition[
+            "avoid_day_surka_behavior"
+        ] = True
+
+        _increase(
+            cognition,
+            "trajectory_confidence",
+            0.3
+        )
 
     return cognition
 
@@ -447,6 +615,22 @@ def stabilize_dialog_behavior(
             "response_should_respect_user_state"
         ] = True
 
+        cognition[
+            "response_should_continue_scene"
+        ] = True
+
+        cognition[
+            "response_should_detect_scene_shift"
+        ] = True
+
+        cognition[
+            "response_should_support_return_to_topic"
+        ] = True
+
+        cognition[
+            "response_should_keep_soft_memory"
+        ] = True
+
         _decrease(
             cognition,
             "internal_noise",
@@ -484,7 +668,10 @@ VISUAL_WORDS = [
     "формула",
     "таблица",
     "пространство",
-    "сцена"
+    "сцена",
+    "скрин",
+    "скриншот",
+    "фото"
 ]
 
 HELP_WORDS = [
@@ -680,6 +867,14 @@ def stabilize_trajectory(
         "response_should_preserve_context"
     ] = True
 
+    cognition[
+        "response_should_continue_scene"
+    ] = True
+
+    cognition[
+        "response_should_not_restart_scene"
+    ] = True
+
     _increase(
         cognition,
         "trajectory_confidence",
@@ -767,7 +962,7 @@ def analyze_cognition(
         "response_should_focus_on_goal": True,
         "response_should_stay_grounded": True,
 
-        # 🔥 human continuity
+        # 🔥 HUMAN CONTINUITY
         "response_should_feel_alive": False,
         "response_should_flow_naturally": False,
         "response_should_feel_human": False,
@@ -776,6 +971,14 @@ def analyze_cognition(
         "response_should_reduce_robotic_tone": True,
         "response_should_adapt_pacing": False,
         "response_should_preserve_context": False,
+
+        # 🔥 SCENE CONTINUITY
+        "response_should_continue_scene": False,
+        "response_should_not_restart_scene": False,
+        "response_should_support_return_to_topic": False,
+        "response_should_detect_scene_shift": True,
+        "response_should_keep_soft_memory": True,
+        "soft_scene_continuation": False,
 
         "tracks_multiple_topics": False,
         "should_answer_in_order": False,
@@ -934,6 +1137,10 @@ def analyze_cognition(
 
             cognition[
                 "needs_continuation"
+            ] = True
+
+            cognition[
+                "response_should_continue_scene"
             ] = True
 
         if reasoning.get(
