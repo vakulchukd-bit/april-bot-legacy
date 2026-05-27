@@ -1,66 +1,560 @@
 import re
-from sympy import symbols, sympify, solveset, S, sin, cos, tan, pi
 
+from sympy import (
+    symbols,
+    sympify,
+    solveset,
+    S,
+    sin,
+    cos,
+    tan,
+    pi
+)
+
+
+# =====================================================
+# 🧠 APRIL TRIG ROOM
+# =====================================================
+
+"""
+APRIL TRIG ROOM
+
+ROLE:
+- trigonometric understanding;
+- trig equation solving;
+- trig graph support;
+- renderer-compatible math payloads.
+
+NOT ROLE:
+- orchestration;
+- hard routing;
+- scene ownership;
+- renderer replacement;
+- dialogue control.
+
+APRIL PRINCIPLES:
+1. renderer-first
+2. continuity-safe
+3. structured payloads
+4. no trigger chaos
+5. no scene hijacking
+6. machine-readable output
+"""
+
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+PATCH_LOG = []
+
+
+def safe_patch_log(msg):
+
+    try:
+
+        print("TRIG:", msg)
+
+        PATCH_LOG.append(msg)
+
+    except:
+        pass
+
+
+# =====================================================
+# 🔥 HELPERS
+# =====================================================
+
+def safe_lower(text):
+
+    try:
+        return str(text).lower().strip()
+
+    except:
+        return ""
+
+
+def contains_any(
+    text,
+    words
+):
+
+    return any(
+        word in text
+        for word in words
+    )
+
+
+# =====================================================
+# 🔥 MACHINE SIGNALS
+# =====================================================
+
+TRIG_KEYWORDS = [
+
+    "sin(",
+    "cos(",
+    "tan(",
+
+    "sin x",
+    "cos x",
+    "tan x",
+
+    "синус",
+    "косинус",
+    "тангенс",
+
+    "тригонометр"
+]
+
+GRAPH_WORDS = [
+
+    "график",
+    "построй",
+    "plot",
+    "graph",
+    "визуально",
+    "функция"
+]
+
+FORMULA_WORDS = [
+
+    "формула",
+    "уравнение",
+    "реши",
+    "решение"
+]
+
+
+# =====================================================
+# 🔥 SAFE EXPRESSION DETECTION
+# =====================================================
+
+def detect_trig_expression(text):
+
+    t = safe_lower(text)
+
+    if not contains_any(
+        t,
+        TRIG_KEYWORDS
+    ):
+
+        return None
+
+    equation_match = re.search(
+
+        r'([a-z0-9\(\)\+\-\*/\.\s=]+)',
+
+        t
+    )
+
+    if not equation_match:
+        return None
+
+    expr = equation_match.group(1)
+
+    expr = expr.replace(
+        "^",
+        "**"
+    )
+
+    expr = expr.strip()
+
+    return expr
+
+
+# =====================================================
+# 🔥 RENDERER DETECTION
+# =====================================================
+
+def wants_renderer(
+    text,
+    context
+):
+
+    semantic = context.get(
+        "semantic",
+        {}
+    )
+
+    cognition = context.get(
+        "cognition",
+        {}
+    )
+
+    t = safe_lower(text)
+
+    if semantic.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    if cognition.get(
+        "prefer_renderer"
+    ):
+
+        return True
+
+    if contains_any(
+        t,
+        GRAPH_WORDS
+    ):
+
+        return True
+
+    return False
+
+
+# =====================================================
+# 🔥 CONTINUITY
+# =====================================================
+
+def trig_continuation_active(
+    context
+):
+
+    state = context.get(
+        "state",
+        {}
+    )
+
+    active_flow = state.get(
+        "active_flow"
+    )
+
+    if not active_flow:
+        return False
+
+    flow_type = active_flow.get(
+        "type"
+    )
+
+    return flow_type in [
+
+        "science",
+        "math",
+        "graph",
+        "formula",
+        "trigonometry"
+    ]
+
+
+# =====================================================
+# 🔥 VALIDATION
+# =====================================================
+
+def validate_expression(expr):
+
+    if not expr:
+        return False
+
+    allowed = re.fullmatch(
+
+        r"[a-zA-Z0-9\(\)\+\-\*/=\.\s,_]+",
+
+        expr
+    )
+
+    return bool(allowed)
+
+
+# =====================================================
+# 🧠 TRIG ROOM
+# =====================================================
 
 class TrigRoom:
+
     name = "trigonometry"
 
-    # ===== 🎯 ОПРЕДЕЛЕНИЕ =====
-    def can_handle(self, text, context):
-        t = text.lower()
+    # =================================================
+    # 🔥 CAN HANDLE
+    # =====================================================
 
-        return any(w in t for w in [
-            "sin", "cos", "tan",
-            "синус", "косинус", "тангенс"
-        ])
+    def can_handle(
+        self,
+        text,
+        context
+    ):
 
-    # ===== 🔥 ВАЛИДАТОР (ПРИОРИТЕТ) =====
-    def evaluate(self, text, context):
-        t = text.lower()
+        expr = detect_trig_expression(
+            text
+        )
 
-        if any(w in t for w in ["sin", "cos", "tan"]):
-            return 9.5  # чуть ниже 10 (math force), но выше всех
+        if expr:
+            return True
 
-        return 0.0
+        if trig_continuation_active(
+            context
+        ):
 
-    # ===== 🧠 ОБРАБОТКА =====
-    async def handle(self, user_id, text, context, run_with_typing):
+            return True
+
+        return False
+
+    # =================================================
+    # 🔥 EVALUATE
+    # =====================================================
+
+    def evaluate(
+        self,
+        text,
+        context
+    ):
+
+        score = 0.0
+
+        expr = detect_trig_expression(
+            text
+        )
+
+        if expr:
+            score += 6.5
+
+        if wants_renderer(
+            text,
+            context
+        ):
+
+            score += 1.8
+
+        if trig_continuation_active(
+            context
+        ):
+
+            score += 1.2
+
+        semantic = context.get(
+            "semantic",
+            {}
+        )
+
+        if semantic.get(
+            "room"
+        ) == "science":
+
+            score += 1.0
+
+        return score
+
+    # =================================================
+    # 🔥 HANDLE
+    # =====================================================
+
+    async def handle(
+
+        self,
+        user_id,
+        text,
+        context,
+        run_with_typing
+    ):
+
         try:
-            expr = self.extract_expression(text)
+
+            semantic = context.get(
+                "semantic",
+                {}
+            )
+
+            state = context.get(
+                "state",
+                {}
+            )
+
+            expr = detect_trig_expression(
+                text
+            )
 
             if not expr:
-                return {"type": "skip"}
 
-            x = symbols('x')
+                last_trig = state.get(
+                    "last_trig_expression"
+                )
+
+                if last_trig:
+
+                    if trig_continuation_active(
+                        context
+                    ):
+
+                        expr = last_trig
+
+            if not expr:
+
+                return {
+
+                    "type": "skip"
+                }
+
+            if not validate_expression(
+                expr
+            ):
+
+                safe_patch_log(
+                    "INVALID EXPR"
+                )
+
+                return {
+
+                    "type": "skip"
+                }
+
+            state[
+                "last_trig_expression"
+            ] = expr
+
+            # =================================================
+            # 🔥 RENDERER-FIRST
+            # =====================================================
+
+            if wants_renderer(
+                text,
+                context
+            ):
+
+                safe_patch_log(
+                    "RENDERER PAYLOAD"
+                )
+
+                return {
+
+                    "type":
+                        "graph_payload",
+
+                    "renderer":
+                        "april_graph",
+
+                    "scene_type":
+                        "trig_graph",
+
+                    "expression":
+                        expr,
+
+                    "renderer_mode":
+                        "spatial",
+
+                    "spatial_object":
+                        True,
+
+                    "scene_ready":
+                        True,
+
+                    "renderer_first":
+                        True,
+
+                    "avoid_generation":
+                        True,
+
+                    "continuity_safe":
+                        True,
+
+                    "source":
+                        "trig_room"
+                }
+
+            # =================================================
+            # 🔥 EQUATION SOLVING
+            # =====================================================
+
+            if "=" not in expr:
+
+                return {
+
+                    "type":
+                        "formula_payload",
+
+                    "formula":
+                        expr,
+
+                    "scene_type":
+                        "trig_formula",
+
+                    "renderer":
+                        "april_formula",
+
+                    "renderer_mode":
+                        "spatial",
+
+                    "source":
+                        "trig_room"
+                }
+
+            x = symbols("x")
 
             left, right = expr.split("=")
 
-            equation = sympify(left) - sympify(right)
+            equation = (
 
-            solutions = solveset(equation, x, domain=S.Reals)
+                sympify(left)
+                - sympify(right)
+            )
 
-            if not solutions:
-                return {"type": "text", "data": "⚠️ Нет решений"}
+            solutions = solveset(
+
+                equation,
+                x,
+                domain=S.Reals
+            )
+
+            if solutions == S.EmptySet:
+
+                return {
+
+                    "type":
+                        "math_result",
+
+                    "status":
+                        "empty_solution",
+
+                    "expression":
+                        expr,
+
+                    "content":
+                        "⚠️ Нет решений"
+                }
+
+            safe_patch_log(
+                f"SOLVED: {expr}"
+            )
 
             return {
-                "type": "text",
-                "data": f"📐 Решение:\n{expr}\n\nx ∈ {solutions}"
+
+                "type":
+                    "math_result",
+
+                "expression":
+                    expr,
+
+                "solutions":
+                    str(solutions),
+
+                "scene_type":
+                    "trig_solution",
+
+                "renderer":
+                    "april_formula",
+
+                "renderer_mode":
+                    "spatial",
+
+                "structured":
+                    True,
+
+                "continuity_safe":
+                    True,
+
+                "source":
+                    "trig_room"
             }
 
         except Exception as e:
-            print("🔥 TRIG ERROR:", e)
-            return {"type": "skip"}
 
-    # ===== 🔧 ПАРСИНГ =====
-    def extract_expression(self, text):
-        t = text.lower()
+            print(
+                "🔥 TRIG ERROR:",
+                e
+            )
 
-        t = t.replace("^", "**")
-        t = t.replace(":", " ")
+            return {
 
-        match = re.search(r'([a-z()\d\+\-\*/\.\s]+=[a-z()\d\+\-\*/\.\s]+)', t)
-
-        if match:
-            return match.group(1)
-
-        return None
+                "type": "skip"
+            }
