@@ -5,28 +5,19 @@
 """
 APRIL SCIENCE ROOM
 
+Lightweight science capability layer.
+
 ROLE:
-- math capability;
-- graph capability;
-- formula capability;
-- scientific helper.
+- graph interpretation
+- formula support
+- equation solving
+- renderer-safe math handling
 
 NOT ROLE:
-- orchestration;
-- final authority;
-- fallback engine;
-- scene ownership;
-- continuation controller;
-- modality dictator.
-
-SCIENCE ROOM PRINCIPLES:
-
-1. calm participation
-2. no scene hijacking
-3. no hard fallback
-4. no aggressive routing
-5. no modality ownership
-6. April decides final scene
+- orchestration
+- routing authority
+- scene ownership
+- fallback control
 """
 
 # ===============================
@@ -53,14 +44,16 @@ def safe_patch_log(msg):
 # ===============================
 
 import re
-import math
-import numpy as np
 
 from sympy import (
     symbols,
     sympify,
     solve,
     simplify
+)
+
+from blocks.science_interpreter import (
+    interpret_graph_request
 )
 
 
@@ -76,11 +69,15 @@ def safe_lower(text):
         return ""
 
 
+# ===============================
+# 🔥 CODE DETECTION
+# ===============================
+
 def detect_code_signal(text):
 
     t = safe_lower(text)
 
-    code_patterns = [
+    patterns = [
 
         "import ",
         "from ",
@@ -88,19 +85,13 @@ def detect_code_signal(text):
         "def ",
         "async def",
         "return ",
-        "print(",
-        "console.log",
-        "export default",
-        "function(",
-        "function ",
         "const ",
         "let ",
         "var ",
+        "export default",
         "=>",
         "</",
         "/>",
-        "{",
-        "}",
         "use client",
         "typescript",
         "javascript",
@@ -109,21 +100,23 @@ def detect_code_signal(text):
 
     hits = 0
 
-    for pattern in code_patterns:
+    for p in patterns:
 
-        if pattern in t:
+        if p in t:
             hits += 1
 
     return hits >= 2
 
 
+# ===============================
+# 🔥 MATH DETECTION
+# ===============================
+
 def detect_math_signal(text):
 
     t = safe_lower(text)
 
-    signals = 0
-
-    math_patterns = [
+    patterns = [
 
         "график",
         "функция",
@@ -139,30 +132,29 @@ def detect_math_signal(text):
         "sin(",
         "cos(",
         "tan(",
-        "log(",
 
-        "x**",
         "^2",
         "^3"
     ]
 
-    for pattern in math_patterns:
+    for p in patterns:
 
-        if pattern in t:
-            signals += 1
+        if p in t:
+            return True
 
-    equation_pattern = re.search(
+    equation = re.search(
 
         r"[0-9x]+\s*[\+\-\*/=]\s*[0-9x]+",
 
         t
     )
 
-    if equation_pattern:
-        signals += 1
+    return equation is not None
 
-    return signals >= 1
 
+# ===============================
+# 🔥 GRAPH INTENT
+# ===============================
 
 def detect_graph_intent(text):
 
@@ -171,23 +163,17 @@ def detect_graph_intent(text):
     graph_words = [
 
         "построй",
-        "покажи",
-        "визуально",
-        "нарисуй",
         "график",
-        "как выглядит",
         "plot",
-        "graph"
+        "graph",
+        "визуально",
+        "нарисуй"
     ]
 
-    hits = 0
-
-    for word in graph_words:
-
-        if word in t:
-            hits += 1
-
-    return hits >= 1
+    return any(
+        w in t
+        for w in graph_words
+    )
 
 
 # ===============================
@@ -199,28 +185,24 @@ class ScienceRoom:
     name = "science"
 
     # ==========================================
-    # 🔥 CALM ROUTING
+    # 🔥 ROUTING
     # ==========================================
 
-    def can_handle(self, text, context):
+    def can_handle(
+        self,
+        text,
+        context
+    ):
 
         t = safe_lower(text)
-
-        # ======================================
-        # 🔥 CODE PROTECTION
-        # ======================================
 
         if detect_code_signal(t):
 
             safe_patch_log(
-                "CODE DETECTED -> PASS"
+                "CODE -> PASS"
             )
 
             return False
-
-        # ======================================
-        # 🔥 SEMANTIC HINT
-        # ======================================
 
         semantic = context.get(
             "semantic",
@@ -233,21 +215,19 @@ class ScienceRoom:
 
             return True
 
-        # ======================================
-        # 🔥 MATH DETECTION
-        # ======================================
-
-        if detect_math_signal(t):
-
-            return True
-
-        return False
+        return detect_math_signal(
+            t
+        )
 
     # ==========================================
-    # 🔥 CALM EVALUATION
+    # 🔥 EVALUATION
     # ==========================================
 
-    def evaluate(self, text, context):
+    def evaluate(
+        self,
+        text,
+        context
+    ):
 
         t = safe_lower(text)
 
@@ -263,42 +243,26 @@ class ScienceRoom:
             {}
         )
 
-        # ======================================
-        # 🔥 SEMANTIC SUPPORT
-        # ======================================
-
         if semantic.get(
             "room"
         ) == "science":
 
-            score += 2.0
-
-        # ======================================
-        # 🔥 GRAPH INTENT
-        # ======================================
-
-        if detect_graph_intent(t):
-
-            score += 2.0
-
-        # ======================================
-        # 🔥 MATH SIGNAL
-        # ======================================
+            score += 1.5
 
         if detect_math_signal(t):
 
-            score += 1.5
+            score += 1.2
 
-        # ======================================
-        # 🔥 VISUAL SUPPORT
-        # ======================================
+        if detect_graph_intent(t):
+
+            score += 0.8
 
         if cognition.get(
             "wants_visual",
             0.0
         ) >= 0.5:
 
-            score += 0.5
+            score += 0.3
 
         return score
 
@@ -322,8 +286,18 @@ class ScienceRoom:
             {}
         )
 
+        cognition = context.get(
+            "cognition",
+            {}
+        )
+
+        semantic = context.get(
+            "semantic",
+            {}
+        )
+
         safe_patch_log(
-            f"ENTER: {t[:80]}"
+            f"SCIENCE ENTER: {t[:60]}"
         )
 
         # ======================================
@@ -333,92 +307,48 @@ class ScienceRoom:
         if detect_code_signal(t):
 
             safe_patch_log(
-                "CODE -> RELEASE"
+                "CODE RELEASE"
             )
 
             return None
 
         # ======================================
-        # 🔥 FUNCTION EXTRACTION
+        # 🔥 RENDERER PAYLOAD
         # ======================================
 
-        expr = self.extract_function(
-            t
+        renderer_payload = (
+            interpret_graph_request(
+                text,
+                cognition,
+                semantic
+            )
         )
 
-        # ======================================
-        # 🔥 CONTINUATION SUPPORT
-        # ======================================
-
-        if not expr:
-
-            last_math = state.get(
-                "last_math"
-            )
-
-            if last_math:
-
-                if detect_graph_intent(t):
-
-                    expr = last_math.get(
-                        "expr"
-                    )
-
-        # ======================================
-        # 🔥 FUNCTION RESULT
-        # ======================================
-
-        if expr:
-
-            valid, error = (
-                self.validate_expression(
-                    expr
-                )
-            )
-
-            if not valid:
-
-                safe_patch_log(
-                    f"INVALID EXPR: {error}"
-                )
-
-                return None
+        if renderer_payload:
 
             state["last_math"] = {
 
-                "type": "function",
+                "type":
+                    renderer_payload.get(
+                        "type"
+                    ),
 
-                "expr": expr
+                "payload":
+                    renderer_payload
             }
 
             safe_patch_log(
-                f"FUNCTION: {expr}"
+                "RENDERER PAYLOAD"
             )
 
-            return {
-
-                "type": "function",
-
-                "function": expr,
-
-                "range": [-10, 10],
-
-                "meta": {
-
-                    "renderer":
-                        "graph_block",
-
-                    "source":
-                        "science_room"
-                }
-            }
+            return renderer_payload
 
         # ======================================
-        # 🔥 EQUATION SOLVING
+        # 🔥 EQUATION SOLVER
         # ======================================
 
         solution = self.solve_equation(
-            t
+            text
         )
 
         if solution:
@@ -431,129 +361,20 @@ class ScienceRoom:
             }
 
         # ======================================
-        # 🔥 CALM RELEASE
+        # 🔥 RELEASE
         # ======================================
 
         safe_patch_log(
-            "NOT SCIENCE -> RELEASE"
+            "SCIENCE RELEASE"
         )
 
         return None
-
-    # ==========================================
-    # 🔥 FUNCTION EXTRACTION
-    # ==========================================
-
-    def extract_function(self, text):
-
-        try:
-
-            text = text.replace(
-                "^",
-                "**"
-            )
-
-            replacements = {
-
-                "sin": "np.sin",
-                "cos": "np.cos",
-                "tan": "np.tan",
-                "log": "np.log",
-                "ln": "np.log"
-            }
-
-            for old, new in replacements.items():
-
-                text = text.replace(
-                    old,
-                    new
-                )
-
-            # ==================================
-            # y = ...
-            # ==================================
-
-            match = re.search(
-
-                r"y\s*=\s*(.+)",
-
-                text
-            )
-
-            if match:
-
-                expr = match.group(1).strip()
-
-                return expr
-
-            # ==================================
-            # f(x)=...
-            # ==================================
-
-            match = re.search(
-
-                r"f\s*\(\s*x\s*\)\s*=\s*(.+)",
-
-                text
-            )
-
-            if match:
-
-                expr = match.group(1).strip()
-
-                return expr
-
-            return None
-
-        except Exception as e:
-
-            safe_patch_log(
-                f"EXTRACT ERROR: {e}"
-            )
-
-            return None
-
-    # ==========================================
-    # 🔥 VALIDATION
-    # ==========================================
-
-    def validate_expression(
-
-        self,
-        expr
-    ):
-
-        try:
-
-            x = np.linspace(
-                -10,
-                10,
-                10
-            )
-
-            eval(
-
-                expr,
-
-                {
-                    "x": x,
-                    "np": np,
-                    "__builtins__": {}
-                }
-            )
-
-            return True, None
-
-        except Exception as e:
-
-            return False, str(e)
 
     # ==========================================
     # 🔥 EQUATION SOLVER
     # ==========================================
 
     def solve_equation(
-
         self,
         text
     ):
@@ -574,12 +395,12 @@ class ScienceRoom:
                 expr
             )
 
-            x = symbols("x")
-
             if "=" not in expr:
                 return None
 
             left, right = expr.split("=")
+
+            x = symbols("x")
 
             equation = simplify(
 
