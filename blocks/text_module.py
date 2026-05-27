@@ -36,7 +36,9 @@ import traceback
 import time
 
 from storage import get_user_plan
+
 from blocks.ai_config import TEXT_MODEL
+
 from blocks.provider_router import (
     generate_text
 )
@@ -69,37 +71,44 @@ from blocks.presentation_formatter import (
 SYSTEM_PROMPT = (
     "Ты — April. "
 
-    "Ты calm mobile-first AI assistant. "
+    "Ты conversational continuity layer "
+    "внутри April Space. "
 
-    "Ты удерживаешь continuity диалога, "
-    "понимаешь trajectory общения "
-    "и помогаешь человеку спокойно "
-    "и понятно. "
+    "Ты помогаешь человеку "
+    "спокойно и понятно продолжать "
+    "диалог внутри текущей сцены. "
 
-    "Не отвечай механически. "
-    "Не перегружай пользователя. "
-    "Не используй лишние объяснения. "
+    "Ты НЕ orchestration system. "
+    "Ты НЕ router. "
+    "Ты НЕ renderer. "
+    "Ты НЕ execution authority. "
 
-    "Ты умеешь помогать с: "
-    "текстом, reasoning, кодом, "
-    "математикой, изображениями, "
-    "скриншотами, OCR, "
-    "повседневными вопросами "
-    "и визуальными сценами. "
+    "Не имитируй выполнение задач. "
+    "Не придумывай fake links. "
+    "Не создавай fake graph output. "
+    "Не создавай fake code execution. "
 
-    "Если пользователь продолжает "
-    "обсуждать изображение — "
-    "сохраняй visual continuity. "
+    "Если renderer/system уже "
+    "обработал сцену — "
+    "ты помогаешь человеку "
+    "понять результат. "
 
-    "Renderer-space важнее "
-    "heavy image generation. "
+    "Если visual scene продолжается — "
+    "не начинай объяснение заново. "
 
-    "Не создавай изображения "
-    "без прямого запроса. "
+    "Продолжай trajectory разговора "
+    "естественно и спокойно. "
+
+    "Не делай reset сцены "
+    "без причины. "
+
+    "Если сцена изменилась — "
+    "мягко адаптируй continuity. "
 
     "Говори естественно. "
+    "Кратко. "
     "Человечно. "
-    "Кратко и полезно."
+    "Без перегрузки."
 )
 
 # =====================================================
@@ -115,28 +124,19 @@ MAX_TOTAL_CHARS = 3200
 
 SYSTEM_LEAK_PATTERNS = [
 
-    "ты calm mobile-first ai assistant",
-    "renderer-space важнее",
-    "heavy image generation",
-    "trajectory общения",
-    "не отвечай механически",
-    "говори естественно",
-    "personality_active",
+    "ты conversational continuity layer",
+    "ты не orchestration system",
+    "не создавай fake links",
+    "не начинай объяснение заново",
+    "trajectory разговора",
+    "visual scene продолжается",
+    "renderer/system уже",
+    "continuity layer",
     "response_decision",
     "execution_pressure",
-    "cognition",
     "semantic",
+    "cognition",
     "system_prompt",
-    "assistant_restraint",
-    "continuity диалога",
-    "visual continuity",
-    "апril presentation principles",
-    "capability_map",
-    "reasoning_state",
-    "trajectory protection",
-    "response_mode",
-    "internal_noise",
-    "signal_overload",
     "active_flow_strength"
 ]
 
@@ -217,24 +217,6 @@ def sanitize_model_output(text):
         cleaned_lines
     ).strip()
 
-    # =================================================
-    # 🔥 DUPLICATE META CLEANUP
-    # =====================================================
-
-    cleaned = re.sub(
-        r"(говори естественно\.?\s*){2,}",
-        "Говори естественно. ",
-        cleaned,
-        flags=re.IGNORECASE
-    )
-
-    cleaned = re.sub(
-        r"(не отвечай механически\.?\s*){2,}",
-        "",
-        cleaned,
-        flags=re.IGNORECASE
-    )
-
     return cleaned.strip()
 
 
@@ -255,70 +237,6 @@ def is_short(text):
     return len(
         (text or "").strip()
     ) <= 3
-
-
-def is_problem(text):
-
-    t = text.lower()
-
-    return (
-        "=" in t
-        or "реши" in t
-        or "график" in t
-        or "+" in t
-        or "-" in t
-        or "*" in t
-        or "/" in t
-    )
-
-
-def is_strict_math(text):
-
-    t = text.lower()
-
-    return (
-        "=" in t
-        or "sin(" in t
-        or "cos(" in t
-        or "tan(" in t
-        or "график" in t
-    )
-
-
-def is_sales_text(text):
-
-    triggers = [
-        "клиент",
-        "продай",
-        "убеди",
-        "заказ",
-        "покуп"
-    ]
-
-    t = text.lower()
-
-    return any(
-        x in t
-        for x in triggers
-    )
-
-
-def is_edit_request(text):
-
-    t = text.lower()
-
-    triggers = [
-        "измени",
-        "добавь",
-        "убери",
-        "замени",
-        "исправь"
-    ]
-
-    return any(
-        x in t
-        for x in triggers
-    )
 
 
 # =====================================================
@@ -456,6 +374,64 @@ def update_topic(state, text):
 
 
 # =====================================================
+# 🧠 SCENE CONTINUITY
+# =====================================================
+
+def build_scene_continuity_state(
+    state,
+    semantic,
+    cognition
+):
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    if not active_visual_scene:
+
+        return {
+
+            "active": False
+        }
+
+    scene_type = active_visual_scene.get(
+        "scene_type",
+        "unknown"
+    )
+
+    scene_objects = active_visual_scene.get(
+        "objects",
+        []
+    )
+
+    continuity_weight = active_visual_scene.get(
+        "continuity_weight",
+        0.0
+    )
+
+    return {
+
+        "active": True,
+
+        "scene_type": scene_type,
+
+        "scene_objects": scene_objects,
+
+        "continuity_weight": continuity_weight,
+
+        "visual_continuity": semantic.get(
+            "visual_continuity",
+            False
+        ),
+
+        "exploration_mode": cognition.get(
+            "exploration_mode",
+            False
+        )
+    }
+
+
+# =====================================================
 # 🧠 LIGHT COGNITIVE STATE
 # =====================================================
 
@@ -486,6 +462,10 @@ def build_cognitive_state(
                 f"Trajectory: {flow_type}"
             )
 
+    # =================================================
+    # 🧠 USER STATE
+    # =====================================================
+
     user_state = []
 
     if cognition.get(
@@ -511,6 +491,10 @@ def build_cognitive_state(
             "Состояние: "
             + ", ".join(user_state)
         )
+
+    # =================================================
+    # 🧠 RESPONSE STYLE
+    # =====================================================
 
     behavior = []
 
@@ -545,28 +529,30 @@ def build_cognitive_state(
             + ", ".join(behavior)
         )
 
-    active_visual_scene = state.get(
-        "active_visual_scene"
+    # =================================================
+    # 🧠 SCENE CONTINUITY
+    # =====================================================
+
+    scene_state = build_scene_continuity_state(
+
+        state,
+        semantic,
+        cognition
     )
 
-    if active_visual_scene:
-
-        scene_type = active_visual_scene.get(
-            "scene_type",
-            "unknown"
-        )
-
-        scene_objects = active_visual_scene.get(
-            "objects",
-            []
-        )
+    if scene_state.get("active"):
 
         visual_lines = [
 
             "Активная visual scene.",
 
-            f"Тип: {scene_type}"
+            f"Тип сцены: {scene_state['scene_type']}"
         ]
+
+        scene_objects = scene_state.get(
+            "scene_objects",
+            []
+        )
 
         if scene_objects:
 
@@ -576,13 +562,36 @@ def build_cognitive_state(
                 + ", ".join(scene_objects[:8])
             )
 
-        visual_lines.append(
-            "Сохраняй visual continuity."
+        if scene_state.get(
+            "visual_continuity"
+        ):
+
+            visual_lines.append(
+                "Продолжай текущую сцену."
+            )
+
+            visual_lines.append(
+                "Не начинай описание заново."
+            )
+
+        continuity_weight = scene_state.get(
+            "continuity_weight",
+            0.0
         )
+
+        if continuity_weight >= 0.7:
+
+            visual_lines.append(
+                "Continuity высокая."
+            )
 
         blocks.append(
             "\n".join(visual_lines)
         )
+
+    # =================================================
+    # 🧠 MEMORY SUMMARY
+    # =====================================================
 
     summary = state.get(
         "memory_summary"
@@ -596,48 +605,6 @@ def build_cognitive_state(
         )
 
     return "\n".join(blocks)
-
-
-# =====================================================
-# 🔥 LINK ENHANCEMENT
-# =====================================================
-
-def enhance_link_behavior(text):
-
-    t = text.lower()
-
-    if (
-        "ссылка" in t
-        and "http" not in t
-    ):
-
-        return (
-            text
-            + "\n\nПример: https://example.com"
-        )
-
-    return text
-
-
-# =====================================================
-# 🔥 REQUEST ENRICH
-# =====================================================
-
-def enrich_request(text, state):
-
-    if (
-        "график" in text.lower()
-        and "сайт" in (
-            state.get("topic") or ""
-        )
-    ):
-
-        return (
-            text
-            + " (вставь график в HTML)"
-        )
-
-    return text
 
 
 # =====================================================
@@ -776,36 +743,7 @@ def apply_visual_beautify(
 
         return text
 
-    beautified = text
-
-    if semantic.get(
-        "topic_category"
-    ) == "travel":
-
-        beautified = (
-            "🌍 "
-            + beautified
-        )
-
-    if semantic.get(
-        "topic_category"
-    ) == "history":
-
-        beautified = (
-            "🏛 "
-            + beautified
-        )
-
-    if semantic.get(
-        "topic_category"
-    ) == "technology":
-
-        beautified = (
-            "⚙️ "
-            + beautified
-        )
-
-    return beautified
+    return text
 
 
 # =====================================================
@@ -872,23 +810,6 @@ async def process(
                 text
             )
 
-            text_fixed = enrich_request(
-
-                enhance_link_behavior(
-                    text
-                ),
-
-                state
-            )
-
-            # =============================================
-            # 🔥 ANTI-SYSTEM-INJECTION
-            # =============================================
-
-            text_fixed = sanitize_model_output(
-                text_fixed
-            )
-
             plan = get_user_plan(
                 user_id
             )
@@ -900,17 +821,13 @@ async def process(
             cognitive_state = (
                 build_cognitive_state(
                     state,
-                    text_fixed,
+                    text,
                     semantic,
                     cognition,
                     visual_reference,
                     response_decision
                 )
             )
-
-            # =============================================
-            # 🔥 SAFE SYSTEM STATE
-            # =============================================
 
             safe_cognitive_state = trim_text(
                 cognitive_state
@@ -970,9 +887,7 @@ async def process(
                 "role": "user",
 
                 "content":
-                    trim_text(
-                        text_fixed
-                    )
+                    trim_text(text)
             })
 
         config = get_config(
@@ -980,7 +895,7 @@ async def process(
         )
 
         # =============================================
-        # 🔥 OPENAI TEXT-FIRST
+        # 🔥 PROVIDER CALL
         # =============================================
 
         output = await generate_text(
