@@ -9,6 +9,27 @@ def build_response_decision(
     state: dict
 ):
 
+    """
+    LIGHTWEIGHT RESPONSE DECISION
+
+    Новый decision-layer:
+
+    - меньше giant flags
+    - меньше duplicated logic
+    - меньше orchestration noise
+    - меньше token expansion
+
+    Главная задача:
+    выбрать спокойное
+    и trajectory-safe действие.
+
+    Decision layer больше НЕ:
+    - giant authority system
+    - recursive analyzer
+    - overcontrolled dispatcher
+    - heavy scene simulator
+    """
+
     semantic = semantic or {}
     cognition = cognition or {}
     visual_reference = visual_reference or {}
@@ -18,217 +39,14 @@ def build_response_decision(
         "active_flow"
     )
 
-    reasoning = state.get(
-        "reasoning",
-        {}
+    # =================================================
+    # 🔥 CORE SIGNALS
+    # =====================================================
+
+    ambiguity = semantic.get(
+        "ambiguity_level",
+        0.0
     )
-
-    # =====================================================
-    # 🧠 BASE
-    # =====================================================
-
-    result = {
-
-        # =================================================
-        # FINAL MODES
-        # =================================================
-
-        "should_execute": False,
-        "should_generate": False,
-        "should_render": False,
-        "should_guide": False,
-        "should_offer_reference": False,
-        "should_continue_trajectory": False,
-
-        # =================================================
-        # 🧠 PRIMARY INTENT LOCK
-        # =====================================================
-
-        "primary_intent_locked": False,
-
-        "primary_intent_type": None,
-
-        "primary_intent_confidence": 0.0,
-
-        # =================================================
-        # 🧠 SCENE COMPLETION
-        # =====================================================
-
-        "scene_completion_required": False,
-
-        "scene_practical_goal_alive": False,
-
-        "scene_has_multiple_meanings": False,
-
-        "scene_needs_enrichment": False,
-
-        "scene_completion_confidence": 0.0,
-
-        "should_expand_reasoning": False,
-
-        "should_preserve_scene_layers": True,
-
-        "should_allow_tool_enrichment": False,
-
-        # =================================================
-        # DIALOG CONTROL
-        # =====================================================
-
-        "should_reduce_talking": False,
-        "should_wait_for_user": False,
-        "should_follow_user": False,
-
-        # =================================================
-        # VISUAL CONTROL
-        # =====================================================
-
-        "prefer_lightweight_visual": False,
-        "avoid_heavy_generation": False,
-
-        # =================================================
-        # 🧠 RENDERER SPACE
-        # =====================================================
-
-        "renderer_space_allowed": False,
-
-        "renderer_scene_priority": False,
-
-        "renderer_lightweight_mode": False,
-
-        "renderer_spatial_mode": False,
-
-        "renderer_should_preserve_layout": True,
-
-        "renderer_scene_composition": False,
-
-        "renderer_response_type": None,
-
-        # =================================================
-        # 🔥 RENDERER-FIRST SAFETY
-        # =====================================================
-
-        "renderer_first_mode": False,
-
-        "renderer_hard_lock": False,
-
-        "renderer_payload_expected": False,
-
-        "block_image_generation_fallback": True,
-
-        "allow_only_explicit_generation": True,
-
-        "provider_safe_rendering": True,
-
-        # =================================================
-        # RESPONSE STRATEGY
-        # =====================================================
-
-        "response_mode": "balanced",
-
-        # =================================================
-        # FINAL DECISION
-        # =====================================================
-
-        "final_action": "talk",
-
-        # =================================================
-        # 🧠 PERSONALITY AUTHORITY
-        # =====================================================
-
-        "personality_active": True,
-
-        "personality_mode": "adaptive",
-
-        "trajectory_protection": True,
-
-        "human_continuity": True,
-
-        "awareness_active": True,
-
-        "understands_user_direction": False,
-
-        "understands_user_goal": False,
-
-        "protects_user_intent": True,
-
-        "assistant_restraint": 0.0,
-
-        "assistant_presence": 1.0,
-
-        "avoid_trigger_behavior": True,
-
-        "avoid_forced_generation": True,
-
-        "avoid_unnecessary_talking": True,
-
-        "avoid_room_conflicts": True,
-
-        "maintain_psychology": True,
-
-        "maintain_dialog_continuity": True,
-
-        "maintain_goal_trajectory": True,
-
-        "maintain_emotional_flow": True,
-
-        "execution_allowed": False,
-
-        "generation_allowed": False,
-
-        "render_allowed": False,
-
-        "guidance_allowed": False,
-
-        # =================================================
-        # 🧠 POST ACTION REASONING
-        # =====================================================
-
-        "dialogue_still_alive": True,
-
-        "goal_completed": False,
-
-        "needs_reflection": True,
-
-        "needs_post_action_analysis": True,
-
-        "should_recheck_user_state": True,
-
-        "should_preserve_meaning": True,
-
-        "capability_is_not_final": True,
-
-        "trajectory_before_capability": True,
-
-        "response_requires_usefulness_check": True,
-
-        "response_requires_context_check": True,
-
-        "response_requires_psychology_check": True,
-
-        # =================================================
-        # 🔥 DEEPHUB STABILIZATION
-        # =====================================================
-
-        "high_ambiguity_detected": False,
-
-        "response_requires_clarification": False,
-
-        "exploration_generation_mix": False
-    }
-
-    # =====================================================
-    # 🔥 APRIL MASTER AUTHORITY
-    # =====================================================
-
-    result["visual_obligation"] = False
-
-    result["forced_room"] = None
-
-    result["forced_action"] = None
-
-    # =====================================================
-    # 🔥 EXECUTION PRESSURE
-    # =====================================================
 
     execution_pressure = cognition.get(
         "execution_pressure",
@@ -245,21 +63,6 @@ def build_response_decision(
         0.0
     )
 
-    wants_dialog = cognition.get(
-        "wants_dialog",
-        0.0
-    )
-
-    wants_help = cognition.get(
-        "wants_help",
-        0.0
-    )
-
-    dialog_fatigue = cognition.get(
-        "dialog_fatigue",
-        0.0
-    )
-
     assistant_restraint = cognition.get(
         "assistant_restraint",
         0.0
@@ -270,46 +73,18 @@ def build_response_decision(
         True
     )
 
-    ambiguity = semantic.get(
-        "ambiguity_level",
-        0.0
-    )
-
     goal_stage = semantic.get(
         "goal_stage",
         "exploration"
     )
 
-    # =====================================================
+    # =================================================
     # 🔥 RENDERER SIGNALS
     # =====================================================
 
-    renderer_supported = semantic.get(
-        "renderer_supported",
+    prefer_renderer = semantic.get(
+        "prefer_renderer",
         False
-    )
-
-    renderer_request = semantic.get(
-        "renderer_request",
-        False
-    )
-
-    lightweight_visual = semantic.get(
-        "visual_lightweight_mode",
-        False
-    )
-
-    visual_generation_needed = semantic.get(
-        "visual_generation_needed",
-        False
-    )
-
-    expected_output_type = semantic.get(
-        "expected_output_type"
-    )
-
-    expected_result = semantic.get(
-        "expected_result"
     )
 
     render_intent = semantic.get(
@@ -321,8 +96,13 @@ def build_response_decision(
         "render_type"
     )
 
-    prefer_renderer = semantic.get(
-        "prefer_renderer",
+    renderer_request = semantic.get(
+        "renderer_request",
+        False
+    )
+
+    visual_generation_needed = semantic.get(
+        "visual_generation_needed",
         False
     )
 
@@ -336,635 +116,13 @@ def build_response_decision(
         True
     )
 
-    # =====================================================
-    # 🧠 SCENE COMPLETION ANALYSIS
-    # =====================================================
-
-    practical_goal_alive = False
-
-    if (
-        wants_result >= 0.45
-        or wants_help >= 0.45
-        or execution_pressure >= 0.45
-        or cognition.get(
-            "internet_context_needed"
-        )
-    ):
-
-        practical_goal_alive = True
-
-    result[
-        "scene_practical_goal_alive"
-    ] = practical_goal_alive
-
-    multiple_meanings = 0
-
-    if wants_dialog >= 0.4:
-        multiple_meanings += 1
-
-    if wants_result >= 0.4:
-        multiple_meanings += 1
-
-    if wants_visual >= 0.4:
-        multiple_meanings += 1
-
-    if wants_help >= 0.4:
-        multiple_meanings += 1
-
-    if multiple_meanings >= 2:
-
-        result[
-            "scene_has_multiple_meanings"
-        ] = True
-
-    # =====================================================
-    # 🧠 SCENE CONTINUITY PROTECTION
-    # =====================================================
-
-    if (
-
-        result[
-            "scene_has_multiple_meanings"
-        ]
-
-        or practical_goal_alive
-
-        or unresolved_intent
-    ):
-
-        result[
-            "scene_completion_required"
-        ] = True
-
-        result[
-            "dialogue_still_alive"
-        ] = True
-
-        result[
-            "goal_completed"
-        ] = False
-
-    # =====================================================
-    # 🧠 ENRICHMENT POSSIBILITY
-    # =====================================================
-
-    if (
-
-        practical_goal_alive
-
-        and not cognition.get(
-            "exploration_mode"
-        )
-
-        and ambiguity < 0.7
-    ):
-
-        result[
-            "scene_needs_enrichment"
-        ] = True
-
-        result[
-            "should_allow_tool_enrichment"
-        ] = True
-
-    # =====================================================
-    # 🔥 PRIMARY INTENT LOCK SYSTEM
-    # =====================================================
-
-    if (
-
-        render_intent
-        or prefer_renderer
-        or render_type
-    ):
-
-        result[
-            "primary_intent_locked"
-        ] = True
-
-        result[
-            "primary_intent_type"
-        ] = "renderer_space"
-
-        result[
-            "primary_intent_confidence"
-        ] = 0.92
-
-    elif (
-
-        visual_generation_needed
-        and explicit_image_generation_only
-        and ambiguity < 0.35
-    ):
-
-        result[
-            "primary_intent_locked"
-        ] = True
-
-        result[
-            "primary_intent_type"
-        ] = "image_generation"
-
-        result[
-            "primary_intent_confidence"
-        ] = 0.84
-
-    elif (
-        wants_result >= 0.82
-        and ambiguity < 0.4
-    ):
-
-        result[
-            "primary_intent_locked"
-        ] = True
-
-        result[
-            "primary_intent_type"
-        ] = "execution"
-
-        result[
-            "primary_intent_confidence"
-        ] = 0.78
-
-    # =====================================================
-    # 🔥 RENDERER-FIRST HARD LOCK
-    # =====================================================
-
-    if (
-
-        render_intent
-        or prefer_renderer
-        or render_type
-    ):
-
-        result[
-            "renderer_first_mode"
-        ] = True
-
-        result[
-            "renderer_hard_lock"
-        ] = True
-
-        result[
-            "renderer_payload_expected"
-        ] = True
-
-        result[
-            "renderer_space_allowed"
-        ] = True
-
-        result[
-            "renderer_scene_priority"
-        ] = True
-
-        result[
-            "renderer_lightweight_mode"
-        ] = True
-
-        result[
-            "renderer_scene_composition"
-        ] = True
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        result[
-            "block_image_generation_fallback"
-        ] = True
-
-        result[
-            "provider_safe_rendering"
-        ] = True
-
-        result[
-            "should_render"
-        ] = True
-
-        result[
-            "render_allowed"
-        ] = True
-
-        result[
-            "generation_allowed"
-        ] = False
-
-        result[
-            "should_generate"
-        ] = False
-
-        result[
-            "visual_obligation"
-        ] = False
-
-        result[
-            "final_action"
-        ] = "render"
-
-        # =================================================
-        # 🔥 SAFE FORCE MODE
-        # =====================================================
-
-        if ambiguity < 0.35:
-
-            result[
-                "forced_action"
-            ] = "render"
-
-            result[
-                "forced_room"
-            ] = "renderer_space"
-
-    # =====================================================
-    # 🔥 RENDERER SPACE PRIORITY
-    # =====================================================
-
-    elif (
-
-        renderer_supported
-
-        or renderer_request
-
-        or lightweight_visual
-
-        or semantic.get(
-            "visual_routing"
-        )
-    ):
-
-        result[
-            "renderer_space_allowed"
-        ] = True
-
-        result[
-            "renderer_scene_priority"
-        ] = True
-
-        result[
-            "renderer_lightweight_mode"
-        ] = True
-
-        result[
-            "renderer_scene_composition"
-        ] = True
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-    # =====================================================
-    # 🔥 SPATIAL RENDER MODE
-    # =====================================================
-
-    renderer_response_type = (
-        render_type
-        or expected_result
+    lightweight_visual = semantic.get(
+        "visual_lightweight_mode",
+        False
     )
 
-    if renderer_response_type in [
-
-        "graph",
-        "formula",
-        "table",
-        "layout",
-        "diagram",
-        "visual"
-    ]:
-
-        result[
-            "renderer_spatial_mode"
-        ] = True
-
-        result[
-            "renderer_response_type"
-        ] = renderer_response_type
-
-    # =====================================================
-    # 🔥 APRIL GLOBAL DECISION
-    # =====================================================
-
-    if (
-
-        result[
-            "renderer_space_allowed"
-        ]
-
-        and not visual_generation_needed
-    ):
-
-        result[
-            "should_render"
-        ] = True
-
-        result[
-            "render_allowed"
-        ] = True
-
-        result[
-            "final_action"
-        ] = "render"
-
-        # =================================================
-        # 🔥 SAFE FORCE MODE
-        # =====================================================
-
-        if ambiguity < 0.35:
-
-            result[
-                "forced_action"
-            ] = "render"
-
-            result[
-                "forced_room"
-            ] = "renderer_space"
-
-    # =====================================================
-    # 🔥 HEAVY IMAGE GENERATION
-    # =====================================================
-
-    elif (
-
-        visual_generation_needed
-
-        and explicit_image_generation_only
-
-        and not render_intent
-
-        and not prefer_renderer
-
-        and not avoid_image_generation_fallback
-
-        and not cognition.get(
-            "internet_context_needed"
-        )
-
-        and not cognition.get(
-            "web_support_required"
-        )
-
-        and not lightweight_visual
-
-        and ambiguity < 0.4
-    ):
-
-        result["final_action"] = (
-            "generate"
-        )
-
-        result["visual_obligation"] = True
-
-        result["should_generate"] = True
-
-        result["generation_allowed"] = True
-
-        # =================================================
-        # 🔥 SAFE FORCE MODE
-        # =====================================================
-
-        if ambiguity < 0.25:
-
-            result["forced_action"] = (
-                "generate"
-            )
-
-            result["forced_room"] = (
-                "image_generate"
-            )
-
-    # =====================================================
-    # 🔥 UNDERSTANDING USER
-    # =====================================================
-
-    if cognition.get(
-        "user_leads_direction"
-    ):
-
-        result[
-            "understands_user_direction"
-        ] = True
-
-        result[
-            "should_follow_user"
-        ] = True
-
-    if (
-        cognition.get(
-            "wants_action",
-            0.0
-        ) >= 0.5
-        or cognition.get(
-            "wants_help",
-            0.0
-        ) >= 0.5
-        or cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.5
-        or cognition.get(
-            "wants_result",
-            0.0
-        ) >= 0.5
-    ):
-
-        result[
-            "understands_user_goal"
-        ] = True
-
-    # =====================================================
-    # 🔥 CONTINUATION
-    # =====================================================
-
-    if cognition.get(
-        "needs_continuation"
-    ):
-
-        result[
-            "should_continue_trajectory"
-        ] = True
-
-    if active_flow:
-
-        result[
-            "maintain_goal_trajectory"
-        ] = True
-
-        result[
-            "dialogue_still_alive"
-        ] = True
-
-    # =====================================================
-    # 🔥 REDUCE TALKING
-    # =====================================================
-
-    if cognition.get(
-        "reduce_talking"
-    ):
-
-        result[
-            "should_reduce_talking"
-        ] = True
-
-    if dialog_fatigue >= 0.7:
-
-        result[
-            "response_mode"
-        ] = "compact"
-
-    # =====================================================
-    # 🔥 GUIDANCE
-    # =====================================================
-
-    if cognition.get(
-        "needs_guidance"
-    ):
-
-        result[
-            "should_guide"
-        ] = True
-
-        result[
-            "guidance_allowed"
-        ] = True
-
-        result[
-            "response_mode"
-        ] = "guide"
-
-    # =====================================================
-    # 🔥 VISUAL REFERENCE MODE
-    # =====================================================
-
-    if cognition.get(
-        "prefer_reference_over_generation"
-    ):
-
-        result[
-            "should_offer_reference"
-        ] = True
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-    # =====================================================
-    # 🔥 VISUAL REFERENCE SYSTEM
-    # =====================================================
-
-    if visual_reference.get(
-        "enabled"
-    ):
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-    if visual_reference.get(
-        "lightweight_mode"
-    ):
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-    # =====================================================
-    # 🔥 RESTRAINT
-    # =====================================================
-
-    result[
-        "assistant_restraint"
-    ] = assistant_restraint
-
-    if cognition.get(
-        "generation_should_wait"
-    ):
-
-        result[
-            "should_wait_for_user"
-        ] = True
-
-        result[
-            "avoid_forced_generation"
-        ] = True
-
-    # =====================================================
-    # 🔥 EXPLORATION MODE
-    # =====================================================
-
-    # =====================================================
-    # ⚠️ OLD BEHAVIOR PRESERVED FOR SAFETY
-    # exploration previously forced guide-mode
-    # =====================================================
-
-    # if cognition.get(
-    #     "exploration_mode"
-    # ):
-    #
-    #     result[
-    #         "response_mode"
-    #     ] = "exploration"
-    #
-    #     result[
-    #         "final_action"
-    #     ] = "guide"
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        result[
-            "response_mode"
-        ] = "exploration"
-
-        # =================================================
-        # 🔥 RENDERER-SPACE PROTECTION
-        # =====================================================
-
-        if not result.get(
-            "renderer_first_mode"
-        ):
-
-            if not result.get(
-                "primary_intent_locked"
-            ):
-
-                result[
-                    "final_action"
-                ] = "guide"
-
-        result[
-            "should_guide"
-        ] = True
-
-        result[
-            "guidance_allowed"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        result[
-            "exploration_generation_mix"
-        ] = True
-
-    # =====================================================
-    # 🔥 EXECUTION AUTHORITY
+    # =================================================
+    # 🔥 EXECUTION SIGNAL
     # =====================================================
 
     should_execute = False
@@ -976,565 +134,409 @@ def build_response_decision(
         should_execute = True
 
     if (
-        execution_pressure >= 0.75
-        and ambiguity < 0.45
+        execution_pressure >= 0.78
+        and ambiguity <= 0.35
     ):
 
         should_execute = True
 
     if (
-        wants_result >= 0.8
-        and ambiguity < 0.45
+        wants_result >= 0.82
+        and ambiguity <= 0.35
     ):
 
         should_execute = True
 
-    # =====================================================
-    # 🔥 USER LEADS → EXECUTION RESTRAINT
+    # =================================================
+    # 🔥 USER LEADS
     # =====================================================
 
-    if cognition.get(
-        "user_leads_direction"
-    ):
+    if (
+        cognition.get(
+            "user_leads_direction"
+        )
 
-        if cognition.get(
+        and cognition.get(
             "exploration_mode"
-        ):
-
-            should_execute = False
-
-    # =====================================================
-    # 🔥 UNRESOLVED INTENT PROTECTION
-    # =====================================================
-
-    if unresolved_intent:
-
-        result[
-            "dialogue_still_alive"
-        ] = True
-
-        result[
-            "goal_completed"
-        ] = False
-
-    # =====================================================
-    # 🔥 FINAL EXECUTION
-    # =====================================================
-
-    if should_execute:
-
-        result[
-            "should_execute"
-        ] = True
-
-        result[
-            "execution_allowed"
-        ] = True
-
-    # =====================================================
-    # 🔥 ACTION LOCK SYSTEM
-    # =====================================================
-
-    executable_artifact = semantic.get(
-        "expected_artifact"
-    )
-
-    executable_confidence = semantic.get(
-        "execution_confidence",
-        0.0
-    )
-
-    ambiguity_level = semantic.get(
-        "ambiguity_level",
-        1.0
-    )
-
-    if (
-
-        executable_artifact in [
-
-            "graph",
-            "diagram",
-            "formula",
-            "table",
-            "layout"
-        ]
-
-        and executable_confidence >= 0.72
-
-        and ambiguity_level <= 0.35
+        )
     ):
 
-        result[
-            "should_render"
-        ] = True
+        should_execute = False
 
-        result[
-            "render_allowed"
-        ] = True
-
-        result[
-            "final_action"
-        ] = "render"
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-        result[
-            "block_image_generation_fallback"
-        ] = True
-
-        # =================================================
-        # 🔥 SAFE FORCE MODE
-        # =====================================================
-
-        if ambiguity_level <= 0.25:
-
-            result[
-                "forced_action"
-            ] = "render"
-
-            result[
-                "forced_room"
-            ] = "renderer_space"
-
-    # =====================================================
-    # 🔥 IMAGE GENERATION LOCK
+    # =================================================
+    # 🔥 RENDERER LOCK
     # =====================================================
 
-    if (
+    renderer_lock = bool(
 
-        executable_artifact == "image"
+        render_intent
+        or prefer_renderer
+        or renderer_request
+        or render_type
+    )
 
-        and executable_confidence >= 0.82
-
-        and ambiguity_level <= 0.35
-
-        and visual_generation_needed
-
-        and explicit_image_generation_only
-    ):
-
-        result[
-            "should_generate"
-        ] = True
-
-        result[
-            "generation_allowed"
-        ] = True
-
-        result[
-            "final_action"
-        ] = "generate"
-
-        # =================================================
-        # 🔥 SAFE FORCE MODE
-        # =====================================================
-
-        if ambiguity_level <= 0.25:
-
-            result[
-                "forced_action"
-            ] = "generate"
-
-            result[
-                "forced_room"
-            ] = "image_generate"
-
-    # =====================================================
-    # 🔥 GENERATION CONTROL
+    # =================================================
+    # 🔥 GENERATION LOCK
     # =====================================================
 
     should_generate = False
 
-    if visual_reference.get(
-        "should_generate"
-    ):
-
-        should_generate = True
-
     if (
-        wants_visual >= 0.92
-        and wants_result >= 0.82
-        and visual_generation_needed
+
+        visual_generation_needed
+
         and explicit_image_generation_only
-        and not cognition.get(
-            "prefer_reference_over_generation"
-        )
-        and ambiguity < 0.35
+
+        and not renderer_lock
+
+        and not lightweight_visual
+
+        and not avoid_image_generation_fallback
+
+        and ambiguity <= 0.35
+
+        and assistant_restraint < 0.7
     ):
 
         should_generate = True
 
-    # =====================================================
-    # 🔥 RENDERER SUPPRESSION
-    # =====================================================
-
-    if result.get(
-        "renderer_hard_lock"
-    ):
-
-        should_generate = False
-
-        result[
-            "should_generate"
-        ] = False
-
-        result[
-            "generation_allowed"
-        ] = False
-
-        result[
-            "visual_obligation"
-        ] = False
-
-    # =====================================================
-    # 🔥 RESTRAINT SUPPRESSION
+    # =================================================
+    # 🔥 RENDER DECISION
     # =====================================================
 
-    if result[
-        "should_wait_for_user"
-    ]:
+    should_render = False
 
-        result[
-            "response_requires_clarification"
-        ] = True
+    if renderer_lock:
 
-    if assistant_restraint >= 0.7:
-
-        should_generate = False
-
-    # =====================================================
-    # 🔥 FINAL GENERATION
-    # =====================================================
-
-    if should_generate:
-
-        result[
-            "should_generate"
-        ] = True
-
-        result[
-            "generation_allowed"
-        ] = True
-
-    # =====================================================
-    # 🔥 FINAL RENDER
-    # =====================================================
-
-    if result[
-        "should_render"
-    ]:
-
-        result[
-            "render_allowed"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        result[
-            "prefer_lightweight_visual"
-        ] = True
-
-    # =====================================================
-    # 🧠 SCENE COMPLETION PRESSURE
-    # =====================================================
+        should_render = True
 
     if (
-
-        result[
-            "scene_completion_required"
-        ]
-
-        and result[
-            "understands_user_goal"
-        ]
+        lightweight_visual
+        and not should_generate
     ):
 
-        result[
-            "scene_completion_confidence"
-        ] = 0.82
+        should_render = True
 
-        result[
-            "should_expand_reasoning"
-        ] = True
-
-    # =====================================================
-    # 🔥 POST ACTION ANALYSIS
+    # =================================================
+    # 🔥 GUIDANCE
     # =====================================================
 
-    if (
-        result[
-            "should_generate"
-        ]
+    should_guide = False
 
-        or result[
-            "should_execute"
-        ]
-
-        or result[
-            "should_render"
-        ]
+    if cognition.get(
+        "needs_guidance"
     ):
 
-        result[
-            "needs_post_action_analysis"
-        ] = True
+        should_guide = True
 
-        result[
-            "dialogue_still_alive"
-        ] = True
-
-        result[
-            "goal_completed"
-        ] = False
-
-    # =====================================================
-    # 🔥 RESPONSE PRIORITY SYSTEM
-    # =====================================================
-
-    # =====================================================
-    # 🔥 PRIMARY INTENT PRIORITY
-    # =====================================================
-
-    if result.get(
-        "primary_intent_locked"
+    if cognition.get(
+        "exploration_mode"
     ):
 
-        primary_type = result.get(
-            "primary_intent_type"
-        )
+        should_guide = True
 
-        if primary_type == "renderer_space":
-
-            result[
-                "final_action"
-            ] = "render"
-
-        elif primary_type == "image_generation":
-
-            result[
-                "final_action"
-            ] = "generate"
-
-        elif primary_type == "execution":
-
-            result[
-                "final_action"
-            ] = "execute"
-
-    else:
-
-        if result[
-            "should_wait_for_user"
-        ]:
-
-            result[
-                "final_action"
-            ] = "wait"
-
-        elif result[
-            "should_offer_reference"
-        ]:
-
-            result[
-                "final_action"
-            ] = "reference"
-
-        elif result[
-            "should_render"
-        ]:
-
-            result[
-                "final_action"
-            ] = "render"
-
-        elif result[
-            "should_generate"
-        ]:
-
-            result[
-                "final_action"
-            ] = "generate"
-
-        elif result[
-            "should_execute"
-        ]:
-
-            result[
-                "final_action"
-            ] = "execute"
-
-        elif result[
-            "should_guide"
-        ]:
-
-            result[
-                "final_action"
-            ] = "guide"
-
-        else:
-
-            result[
-                "final_action"
-            ] = "talk"
-
-    # =====================================================
-    # 🧠 PREMATURE SCENE CLOSURE PROTECTION
+    # =================================================
+    # 🔥 CONTINUATION
     # =====================================================
 
-    if (
+    should_continue = False
 
-        result[
-            "final_action"
-        ] == "talk"
-
-        and result[
-            "scene_practical_goal_alive"
-        ]
-
-        and result[
-            "should_allow_tool_enrichment"
-        ]
+    if cognition.get(
+        "needs_continuation"
     ):
 
-        result[
-            "dialogue_still_alive"
-        ] = True
+        should_continue = True
 
-        result[
-            "goal_completed"
-        ] = False
+    if active_flow:
 
-        result[
-            "should_expand_reasoning"
-        ] = True
+        should_continue = True
 
-    # =====================================================
-    # 🔥 RESPONSE STYLE CONTROL
+    # =================================================
+    # 🔥 FINAL ACTION
     # =====================================================
 
-    if result[
-        "final_action"
-    ] == "execute":
+    final_action = "talk"
 
-        result[
-            "response_mode"
-        ] = "execution"
+    if should_render:
 
-    elif result[
-        "final_action"
-    ] == "generate":
+        final_action = "render"
 
-        result[
-            "response_mode"
-        ] = "visual_generation"
+    elif should_generate:
 
-    elif result[
-        "final_action"
-    ] == "render":
+        final_action = "generate"
 
-        result[
-            "response_mode"
-        ] = "renderer_space"
+    elif should_execute:
 
-    elif result[
-        "final_action"
-    ] == "reference":
+        final_action = "execute"
 
-        result[
-            "response_mode"
-        ] = "visual_guidance"
+    elif should_guide:
 
-    elif result[
-        "final_action"
-    ] == "guide":
+        final_action = "guide"
 
-        result[
-            "response_mode"
-        ] = "human_guidance"
-
+    # =================================================
+    # 🔥 RESPONSE MODE
     # =====================================================
-    # 🔥 HUMANITY STABILIZATION
+
+    response_mode = "balanced"
+
+    if final_action == "render":
+
+        response_mode = "renderer_space"
+
+    elif final_action == "generate":
+
+        response_mode = "visual_generation"
+
+    elif final_action == "execute":
+
+        response_mode = "execution"
+
+    elif final_action == "guide":
+
+        response_mode = "guidance"
+
+    # =================================================
+    # 🔥 DIALOG MODE
     # =====================================================
 
     if cognition.get(
-        "is_frustrated",
-        0.0
-    ) >= 0.7:
-
-        result[
-            "assistant_presence"
-        ] -= 0.15
-
-        result[
-            "should_reduce_talking"
-        ] = True
-
-    # =====================================================
-    # 🔥 TRAJECTORY STABILIZATION
-    # =====================================================
-
-    if goal_stage == "exploration":
-
-        result[
-            "goal_completed"
-        ] = False
-
-        result[
-            "dialogue_still_alive"
-        ] = True
-
-        result[
-            "should_continue_trajectory"
-        ] = True
-
-    # =====================================================
-    # 🔥 FINAL SAFETY
-    # =====================================================
-
-    if result[
-        "avoid_heavy_generation"
-    ]:
-
-        if cognition.get(
-            "exploration_mode"
-        ):
-
-            result[
-                "exploration_generation_mix"
-            ] = True
-
-    # =====================================================
-    # 🔥 CAPABILITY SAFETY
-    # =====================================================
-
-    if (
-        result["final_action"] in [
-            "generate",
-            "execute",
-            "render"
-        ]
-        and ambiguity >= 0.45
+        "reduce_talking"
     ):
 
-        result[
-            "high_ambiguity_detected"
-        ] = True
+        response_mode = "compact"
 
-        result[
-            "response_requires_clarification"
-        ] = True
+    # =================================================
+    # 🔥 EXPLORATION
+    # =====================================================
 
-        result[
-            "scene_completion_confidence"
-        ] *= 0.82
+    exploration_active = bool(
+        cognition.get(
+            "exploration_mode"
+        )
+    )
+
+    # =================================================
+    # 🔥 FINAL MACHINE STATE
+    # =====================================================
+
+    result = {
+
+        # =================================================
+        # 🔥 ACTION
+        # =====================================================
+
+        "final_action":
+            final_action,
+
+        "response_mode":
+            response_mode,
+
+        # =================================================
+        # 🔥 EXECUTION
+        # =====================================================
+
+        "should_execute":
+            should_execute,
+
+        "execution_allowed":
+            should_execute,
+
+        # =================================================
+        # 🔥 RENDER
+        # =====================================================
+
+        "should_render":
+            should_render,
+
+        "render_allowed":
+            should_render,
+
+        "renderer_first_mode":
+            should_render,
+
+        "renderer_hard_lock":
+            should_render,
+
+        # =================================================
+        # 🔥 GENERATION
+        # =====================================================
+
+        "should_generate":
+            should_generate,
+
+        "generation_allowed":
+            should_generate,
+
+        "avoid_heavy_generation":
+            not should_generate,
+
+        # =================================================
+        # 🔥 GUIDANCE
+        # =====================================================
+
+        "should_guide":
+            should_guide,
+
+        "guidance_allowed":
+            should_guide,
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
+
+        "should_continue_trajectory":
+            should_continue,
+
+        "maintain_dialog_continuity":
+            True,
+
+        "maintain_goal_trajectory":
+            True,
+
+        # =================================================
+        # 🔥 USER UNDERSTANDING
+        # =====================================================
+
+        "understands_user_goal":
+            (
+                wants_result >= 0.5
+                or wants_visual >= 0.5
+            ),
+
+        "understands_user_direction":
+            cognition.get(
+                "user_leads_direction",
+                False
+            ),
+
+        "should_follow_user":
+            cognition.get(
+                "user_leads_direction",
+                False
+            ),
+
+        # =================================================
+        # 🔥 RESPONSE CONTROL
+        # =====================================================
+
+        "should_reduce_talking":
+            cognition.get(
+                "reduce_talking",
+                False
+            ),
+
+        "should_wait_for_user":
+            cognition.get(
+                "generation_should_wait",
+                False
+            ),
+
+        "should_offer_reference":
+            cognition.get(
+                "prefer_reference_over_generation",
+                False
+            ),
+
+        # =================================================
+        # 🔥 STABILIZATION
+        # =====================================================
+
+        "trajectory_protection":
+            True,
+
+        "human_continuity":
+            True,
+
+        "avoid_trigger_behavior":
+            True,
+
+        "avoid_overthinking":
+            True,
+
+        "avoid_recursive_analysis":
+            True,
+
+        "avoid_context_rebuild":
+            True,
+
+        # =================================================
+        # 🔥 SCENE
+        # =====================================================
+
+        "dialogue_still_alive":
+            True,
+
+        "goal_completed":
+            False,
+
+        "scene_practical_goal_alive":
+            (
+                wants_result >= 0.45
+                or execution_pressure >= 0.45
+            ),
+
+        "scene_completion_required":
+            unresolved_intent,
+
+        # =================================================
+        # 🔥 REFLECTION
+        # =====================================================
+
+        "needs_reflection":
+            (
+                ambiguity >= 0.45
+            ),
+
+        "needs_post_action_analysis":
+            (
+                should_execute
+                or should_generate
+                or should_render
+            ),
+
+        # =================================================
+        # 🔥 SAFETY
+        # =====================================================
+
+        "high_ambiguity_detected":
+            ambiguity >= 0.45,
+
+        "response_requires_clarification":
+            ambiguity >= 0.45,
+
+        "block_image_generation_fallback":
+            True,
+
+        "allow_only_explicit_generation":
+            True,
+
+        "provider_safe_rendering":
+            True,
+
+        # =================================================
+        # 🔥 MACHINE MODES
+        # =====================================================
+
+        "decision_style":
+            "lightweight",
+
+        "continuity_mode":
+            "active",
+
+        "reasoning_pressure":
+            "reduced",
+
+        "scene_priority":
+            True,
+
+        "dialog_priority":
+            False,
+
+        "exploration_active":
+            exploration_active,
+
+        "goal_stage":
+            goal_stage
+    }
 
     return result
