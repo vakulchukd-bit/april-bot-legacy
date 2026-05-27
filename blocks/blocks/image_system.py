@@ -3,33 +3,33 @@
 # =====================================================
 
 """
-Passive legacy image analyzer.
+Passive visual support layer.
 
-DeepHub stabilized version.
+April renderer-first architecture.
 
 Этот модуль:
-- НЕ управляет trajectory;
-- НЕ принимает orchestration decisions;
-- НЕ заменяет image rooms;
-- НЕ вмешивается в cognition;
-- НЕ конкурирует с renderer-space;
-- НЕ конкурирует с Gemini helper;
-- НЕ является primary visual system.
+- НЕ orchestration layer;
+- НЕ trajectory authority;
+- НЕ renderer;
+- НЕ primary cognition;
+- НЕ visual narrator;
+- НЕ standalone image system.
 
-Он используется только как:
-- passive visual helper;
-- lightweight fallback;
-- safe OpenAI visual backup.
+Он:
+- помогает visual continuity;
+- извлекает lightweight scene observations;
+- поддерживает semantic visual understanding;
+- работает как passive provider helper;
+- не ломает active scene.
 
 Главная задача:
-безопасно и кратко анализировать изображения,
-не ломая continuity April
-и не создавая visual conflicts.
+давать April
+спокойные structured visual signals,
+а НЕ narration или storytelling.
 
-Future philosophy:
-этот модуль должен оставаться
-тихим passive visual support layer
-для OpenAI-first architecture.
+Архитектурный принцип:
+machine-readable inside,
+human-safe outside.
 """
 
 # =====================================================
@@ -40,6 +40,7 @@ from openai import OpenAI
 
 import asyncio
 import os
+import re
 
 client = OpenAI()
 
@@ -70,7 +71,90 @@ ALLOW_HEAVY_VISUAL_REASONING = False
 PRIMARY_VISUAL_SYSTEM = False
 
 # =====================================================
-# 🔥 SAFE RESPONSE
+# 🔥 MACHINE VISUAL FORMAT
+# =====================================================
+
+MACHINE_VISUAL_PROMPT = """
+
+Analyze image safely.
+
+Return ONLY lightweight visual observations.
+
+Avoid:
+- narration;
+- storytelling;
+- assumptions;
+- emotional overexplaining;
+- "probably";
+- "maybe";
+- "looks like";
+- AI-style commentary.
+
+Focus only on:
+
+- visible objects
+- ui elements
+- layout
+- text
+- colors
+- scene type
+- atmosphere
+- continuity-safe observations
+
+Keep response compact.
+"""
+
+# =====================================================
+# 🔥 NOISE FILTER
+# =====================================================
+
+NOISE_PATTERNS = [
+
+    "вероятно",
+    "возможно",
+    "похоже",
+    "кажется",
+    "скорее всего",
+
+    "probably",
+    "maybe",
+    "it seems",
+    "appears to",
+    "looks like"
+]
+
+# =====================================================
+# 🔥 SAFE CLEAN
+# =====================================================
+
+def clean_visual_noise(
+    text: str
+):
+
+    if not text:
+        return ""
+
+    cleaned = str(text)
+
+    for pattern in NOISE_PATTERNS:
+
+        cleaned = re.sub(
+            pattern,
+            "",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned
+    )
+
+    return cleaned.strip()
+
+# =====================================================
+# 🔥 SAFE OUTPUT
 # =====================================================
 
 def safe_output(text: str):
@@ -78,10 +162,12 @@ def safe_output(text: str):
     if not text:
 
         return (
-            "Я увидела изображение, "
-            "но не смогла нормально "
-            "его проанализировать."
+            "Visual observation unavailable."
         )
+
+    text = clean_visual_noise(
+        text
+    )
 
     text = str(text).strip()
 
@@ -94,7 +180,6 @@ def safe_output(text: str):
 
     return text
 
-
 # =====================================================
 # 🔥 PASSIVE VALIDATION
 # =====================================================
@@ -102,18 +187,13 @@ def safe_output(text: str):
 def passive_analysis_allowed():
 
     """
-    DeepHub philosophy:
+    Passive visual support only.
 
-    Этот модуль НЕ должен:
-    - становиться main visual pipeline;
-    - конкурировать с renderer-space;
-    - создавать parallel visual execution;
-    - создавать orchestration conflicts.
-
-    Он всегда работает:
-    - тихо;
-    - локально;
-    - как passive helper.
+    Этот модуль:
+    - не конкурирует с renderer-space;
+    - не заменяет cognition;
+    - не управляет trajectory;
+    - не создает orchestration conflicts.
     """
 
     if not PASSIVE_MODE:
@@ -139,6 +219,30 @@ def passive_analysis_allowed():
 
     return True
 
+# =====================================================
+# 🔥 BUILD MACHINE VISUAL STATE
+# =====================================================
+
+def build_machine_visual_state(
+    text: str
+):
+
+    text = safe_output(text)
+
+    return {
+
+        "type": "passive_visual_observation",
+
+        "continuity_safe": True,
+
+        "renderer_conflict": False,
+
+        "provider": "openai",
+
+        "mode": "passive_helper",
+
+        "summary": text
+    }
 
 # =====================================================
 # 🔥 ANALYZE IMAGE
@@ -152,9 +256,9 @@ async def analyze_image(path: str):
 
     if not passive_analysis_allowed():
 
-        return (
-            "Passive visual helper "
-            "temporarily disabled."
+        return build_machine_visual_state(
+
+            "Passive visual helper disabled."
         )
 
     # ================================================
@@ -163,14 +267,16 @@ async def analyze_image(path: str):
 
     if not path:
 
-        return (
-            "Изображение не найдено."
+        return build_machine_visual_state(
+
+            "Image path missing."
         )
 
     if not os.path.exists(path):
 
-        return (
-            "Файл изображения отсутствует."
+        return build_machine_visual_state(
+
+            "Image file missing."
         )
 
     # ================================================
@@ -198,12 +304,7 @@ async def analyze_image(path: str):
                                     "type": "input_text",
 
                                     "text":
-                                        (
-                                            "Кратко и естественно "
-                                            "опиши изображение. "
-                                            "Без лишней болтовни. "
-                                            "Без robotic AI tone."
-                                        )
+                                        MACHINE_VISUAL_PROMPT
                                 },
 
                                 {
@@ -222,13 +323,16 @@ async def analyze_image(path: str):
                 None
             )
 
-            return safe_output(output)
+            return build_machine_visual_state(
+
+                safe_output(output)
+            )
 
         except Exception:
 
-            return (
-                "Не удалось "
-                "проанализировать изображение."
+            return build_machine_visual_state(
+
+                "Passive visual analysis failed."
             )
 
     # ================================================
