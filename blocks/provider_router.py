@@ -29,14 +29,14 @@ gemini_client = genai.Client(
 provider_state = {
 
     # =================================================
-    # 🔥 OPENAI PRIMARY
-    # =================================================
+    # 🔥 PRIMARY ORCHESTRATION
+    # =====================================================
 
     "primary": "openai",
 
     # =================================================
-    # 🔥 GEMINI VISUAL HELPER
-    # =================================================
+    # 🔥 VISUAL ASSIST LAYER
+    # =====================================================
 
     "gemini_available": True,
 
@@ -44,7 +44,19 @@ provider_state = {
 
     "last_health_check": 0,
 
-    "recovery_cooldown": 45
+    "recovery_cooldown": 45,
+
+    # =================================================
+    # 🔥 BEHAVIOR STABILIZATION
+    # =====================================================
+
+    "visual_mode": "lightweight",
+
+    "execution_mode": "calm",
+
+    "fallback_pressure": 0.0,
+
+    "provider_balance": "stable"
 }
 
 
@@ -63,10 +75,62 @@ def provider_log(*args):
 
 
 # =====================================================
+# 🔥 PROVIDER BEHAVIOR
+# =====================================================
+
+def update_provider_behavior():
+
+    now = time.time()
+
+    last_failure = provider_state.get(
+        "last_gemini_failure",
+        0
+    )
+
+    delta = now - last_failure
+
+    if delta <= 60:
+
+        provider_state[
+            "fallback_pressure"
+        ] = 0.7
+
+        provider_state[
+            "provider_balance"
+        ] = "recovery"
+
+    else:
+
+        provider_state[
+            "fallback_pressure"
+        ] = 0.2
+
+        provider_state[
+            "provider_balance"
+        ] = "stable"
+
+    if provider_state.get(
+        "gemini_available"
+    ):
+
+        provider_state[
+            "visual_mode"
+        ] = "distributed"
+
+    else:
+
+        provider_state[
+            "visual_mode"
+        ] = "restricted"
+
+
+# =====================================================
 # 🔥 GEMINI RESTORE CHECK
 # =====================================================
 
 def should_restore_gemini():
+
+    update_provider_behavior()
 
     if provider_state["gemini_available"]:
 
@@ -96,6 +160,10 @@ def should_restore_gemini():
             "last_health_check"
         ] = now
 
+        provider_state[
+            "provider_balance"
+        ] = "probing"
+
         return True
 
     return False
@@ -119,6 +187,14 @@ def mark_gemini_failure():
         "last_gemini_failure"
     ] = time.time()
 
+    provider_state[
+        "provider_balance"
+    ] = "fallback"
+
+    provider_state[
+        "fallback_pressure"
+    ] = 0.9
+
 
 # =====================================================
 # 🔥 GEMINI SUCCESS
@@ -134,6 +210,47 @@ def mark_gemini_success():
         "last_health_check"
     ] = time.time()
 
+    provider_state[
+        "provider_balance"
+    ] = "stable"
+
+    provider_state[
+        "fallback_pressure"
+    ] = 0.1
+
+
+# =====================================================
+# 🔥 RESPONSE NORMALIZER
+# =====================================================
+
+def normalize_response_text(text):
+
+    if not text:
+        return ""
+
+    text = str(text).strip()
+
+    text = text.replace(
+        "\n\n\n",
+        "\n\n"
+    )
+
+    return text.strip()
+
+
+# =====================================================
+# 🔥 SAFE OVERLOAD RESPONSE
+# =====================================================
+
+def build_overload_response(
+    space="Dialogue-space"
+):
+
+    return (
+        f"⚠️ {space} "
+        f"временно перегружен."
+    )
+
 
 # =====================================================
 # 🔥 TEXT GENERATION
@@ -147,14 +264,19 @@ async def generate_text(
     model="gpt-4o-mini"
 ):
 
-    # =================================================
-    # 🔥 OPENAI PRIMARY
-    # =================================================
-
     try:
+
+        update_provider_behavior()
 
         provider_log(
             "🧠 OPENAI TEXT START"
+        )
+
+        provider_log(
+            "🧠 PROVIDER BALANCE:",
+            provider_state.get(
+                "provider_balance"
+            )
         )
 
         response = (
@@ -171,9 +293,9 @@ async def generate_text(
             )
         )
 
-        text = (
+        text = normalize_response_text(
 
-            response.output_text.strip()
+            response.output_text
             if response.output_text
             else ""
         )
@@ -184,9 +306,8 @@ async def generate_text(
                 "🔥 OPENAI EMPTY RESPONSE"
             )
 
-            return (
-                "⚠️ Dialogue-space "
-                "временно перегружен."
+            return build_overload_response(
+                "Dialogue-space"
             )
 
         provider_log(
@@ -202,9 +323,8 @@ async def generate_text(
             e
         )
 
-        return (
-            "⚠️ Dialogue-space "
-            "временно перегружен."
+        return build_overload_response(
+            "Dialogue-space"
         )
 
 
@@ -239,9 +359,9 @@ async def transcribe_voice(
                 )
             )
 
-        text = (
+        text = normalize_response_text(
 
-            transcript.text.strip()
+            transcript.text
             if transcript.text
             else ""
         )
@@ -280,9 +400,11 @@ async def analyze_image_with_fallback(
     prompt
 ):
 
+    update_provider_behavior()
+
     # =================================================
     # 🔥 GEMINI VISUAL PRIMARY
-    # =================================================
+    # =====================================================
 
     if should_restore_gemini():
 
@@ -290,6 +412,13 @@ async def analyze_image_with_fallback(
 
             provider_log(
                 "🧠 GEMINI IMAGE START"
+            )
+
+            provider_log(
+                "🧠 VISUAL MODE:",
+                provider_state.get(
+                    "visual_mode"
+                )
             )
 
             provider_log(
@@ -318,9 +447,9 @@ async def analyze_image_with_fallback(
                 )
             )
 
-            text = (
+            text = normalize_response_text(
 
-                response.text.strip()
+                response.text
                 if response.text
                 else ""
             )
@@ -353,6 +482,13 @@ async def analyze_image_with_fallback(
 
         provider_log(
             "⚠️ OPENAI IMAGE FALLBACK"
+        )
+
+        provider_log(
+            "🧠 FALLBACK PRESSURE:",
+            provider_state.get(
+                "fallback_pressure"
+            )
         )
 
         with open(path, "rb") as image_file:
@@ -390,9 +526,9 @@ async def analyze_image_with_fallback(
                 )
             )
 
-        text = (
+        text = normalize_response_text(
 
-            response.output_text.strip()
+            response.output_text
             if response.output_text
             else ""
         )
@@ -401,9 +537,8 @@ async def analyze_image_with_fallback(
 
             return text
 
-        return (
-            "⚠️ Visual-space "
-            "временно перегружен."
+        return build_overload_response(
+            "Visual-space"
         )
 
     except Exception as e:
@@ -413,7 +548,6 @@ async def analyze_image_with_fallback(
             e
         )
 
-        return (
-            "⚠️ Visual-space "
-            "временно перегружен."
+        return build_overload_response(
+            "Visual-space"
         )
