@@ -1,15 +1,61 @@
+# =========================================================
+# 🌐 APRIL WEB GATEWAY
+# =========================================================
+
+"""
+APRIL WEB SPACE GATEWAY
+
+Это больше НЕ:
+- text-only flask layer;
+- telegram-era bridge;
+- plain request → plain text system.
+
+Теперь это:
+- web orchestration gateway;
+- scene transport layer;
+- renderer-aware gateway;
+- multimodal response bridge;
+- continuity-aware web entrypoint.
+
+Главная задача:
+НЕ схлопывать April обратно в текст.
+
+Web gateway должен:
+- сохранять scene packets;
+- сохранять renderer blocks;
+- сохранять multimodal continuity;
+- передавать executor response как space state;
+- поддерживать future live scene-space.
+
+Это foundation для:
+- April Web;
+- live renderer;
+- scene continuity;
+- semantic UI;
+- multimodal orchestration.
+"""
+
+# =========================================================
+# 🔥 IMPORTS
+# =========================================================
+
 import os
 import json
+import asyncio
 
 from flask import (
     Flask,
     request,
     jsonify,
     render_template,
-    render_template_string,
-    redirect
+    render_template_string
 )
+
 from flask_cors import CORS
+
+import requests
+
+from openai import OpenAI
 
 from blocks.paypal_module import (
     get_access_token,
@@ -22,11 +68,221 @@ from storage import (
     save_payment
 )
 
-import requests
-
-from openai import OpenAI
-import asyncio
 from core.executor import execute
+
+
+# =========================================================
+# 🔥 CONFIG
+# =========================================================
+
+PORT = int(
+    os.getenv(
+        "CHECKOUT_PORT",
+        8080
+    )
+)
+
+DOMAIN = os.getenv(
+    "CHECKOUT_DOMAIN",
+    "https://aprill.site"
+)
+
+PAYPAL_CLIENT_ID = os.getenv(
+    "PAYPAL_CLIENT_ID"
+)
+
+BASE_URL = (
+    "https://api-m.paypal.com"
+)
+
+OPENAI_API_KEY = os.getenv(
+    "OPENAI_API_KEY"
+)
+
+client = OpenAI(
+    api_key=OPENAI_API_KEY
+)
+
+# =========================================================
+# 🔥 APRIL WEB MODES
+# =========================================================
+
+WEB_RENDERER_MODE = True
+
+WEB_SCENE_MODE = True
+
+WEB_CONTINUITY_MODE = True
+
+WEB_MULTIMODAL_MODE = True
+
+ALLOW_TEXT_COLLAPSE = False
+
+ALLOW_RENDER_PACKET_LOSS = False
+
+ALLOW_SCENE_RESET = False
+
+
+# =========================================================
+# 🔥 FLASK
+# =========================================================
+
+app = Flask(__name__)
+
+CORS(app)
+
+
+# =========================================================
+# 🧠 SAFE JSON
+# =========================================================
+
+def safe_json(value):
+
+    try:
+
+        json.dumps(value)
+
+        return value
+
+    except:
+
+        return str(value)
+
+
+# =========================================================
+# 🧠 RESPONSE NORMALIZATION
+# =========================================================
+
+def normalize_executor_response(
+    result
+):
+
+    if not isinstance(result, dict):
+
+        return {
+
+            "type": "text",
+
+            "content": str(result),
+
+            "space": {}
+        }
+
+    normalized = {
+
+        # =================================================
+        # 🔥 CORE
+        # =================================================
+
+        "type":
+            result.get(
+                "type",
+                "text"
+            ),
+
+        "content":
+            result.get(
+                "content",
+                ""
+            ),
+
+        # =================================================
+        # 🔥 RENDER
+        # =================================================
+
+        "render_blocks":
+            safe_json(
+                result.get(
+                    "render_blocks",
+                    []
+                )
+            ),
+
+        "scene":
+            safe_json(
+                result.get(
+                    "scene",
+                    {}
+                )
+            ),
+
+        "space":
+            safe_json(
+                result.get(
+                    "space",
+                    {}
+                )
+            ),
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =================================================
+
+        "continuity":
+            safe_json(
+                result.get(
+                    "continuity",
+                    {}
+                )
+            ),
+
+        "trajectory":
+            safe_json(
+                result.get(
+                    "trajectory",
+                    {}
+                )
+            ),
+
+        # =================================================
+        # 🔥 MULTIMODAL
+        # =================================================
+
+        "visual_blocks":
+            safe_json(
+                result.get(
+                    "visual_blocks",
+                    []
+                )
+            ),
+
+        "ui_actions":
+            safe_json(
+                result.get(
+                    "ui_actions",
+                    []
+                )
+            ),
+
+        "renderer_state":
+            safe_json(
+                result.get(
+                    "renderer_state",
+                    {}
+                )
+            )
+    }
+
+    # =====================================================
+    # 🔥 LEGACY TEXT SAFETY
+    # =====================================================
+
+    if (
+
+        not ALLOW_TEXT_COLLAPSE
+
+        and normalized["render_blocks"]
+    ):
+
+        normalized[
+            "preserve_render_space"
+        ] = True
+
+    return normalized
+
+
+# =========================================================
+# 🧠 WEB EXECUTION
+# =========================================================
 
 async def process_web_message(
     user_id,
@@ -44,49 +300,18 @@ async def process_web_message(
         run_with_activity=lambda *args, **kwargs: None
     )
 
-    return result
+    # =====================================================
+    # 🔥 NORMALIZE FOR WEB SPACE
+    # =====================================================
 
+    normalized = (
+        normalize_executor_response(
+            result
+        )
+    )
 
-print("🔥🔥🔥 REAL CHECKOUT SERVER STARTED 🔥🔥🔥")
+    return normalized
 
-# =========================================================
-# 🔥 CONFIG
-# =========================================================
-
-PORT = int(
-    os.getenv("CHECKOUT_PORT", 8080)
-)
-
-DOMAIN = os.getenv(
-    "CHECKOUT_DOMAIN",
-    "https://aprill.site"
-)
-
-PAYPAL_CLIENT_ID = os.getenv(
-    "PAYPAL_CLIENT_ID"
-)
-
-BOT_USERNAME = os.getenv(
-    "BOT_USERNAME",
-    "aprill_bot"
-)
-
-BASE_URL = "https://api-m.paypal.com"
-
-OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY"
-)
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY
-)
-
-# =========================================================
-# 🔥 FLASK
-# =========================================================
-
-app = Flask(__name__)
-CORS(app)
 
 # =========================================================
 # 🎨 SUCCESS HTML
@@ -142,28 +367,17 @@ body{
 </div>
 
 <div class="text">
-Можешь возвращаться в APRIL
+Возвращаемся в APRIL Space...
 </div>
 
 </div>
-
-<script>
-
-setTimeout(() => {
-
-    window.location.href =
-        "https://t.me/{{ bot_username }}";
-
-}, 2500);
-
-</script>
 
 </body>
 </html>
 """
 
 # =========================================================
-# ❌ CANCEL PAGE
+# ❌ CANCEL HTML
 # =========================================================
 
 CANCEL_HTML = """
@@ -216,7 +430,7 @@ body{
 </div>
 
 <div class="text">
-Можешь вернуться позже
+Можно вернуться позже
 </div>
 
 </div>
@@ -226,7 +440,33 @@ body{
 """
 
 # =========================================================
-# 🚀 CHECKOUT PAGE
+# 🟢 HEALTH
+# =========================================================
+
+@app.route("/")
+def health():
+
+    return {
+
+        "status":
+            "APRIL WEB GATEWAY ONLINE",
+
+        "renderer_mode":
+            WEB_RENDERER_MODE,
+
+        "scene_mode":
+            WEB_SCENE_MODE,
+
+        "continuity_mode":
+            WEB_CONTINUITY_MODE,
+
+        "multimodal_mode":
+            WEB_MULTIMODAL_MODE
+    }
+
+
+# =========================================================
+# 🚀 CHECKOUT
 # =========================================================
 
 @app.route("/checkout/<plan>/<user_id>")
@@ -250,31 +490,111 @@ def checkout(plan, user_id):
 
         amount=amount,
 
-        plan_name=plan_name,
-
-        plan=plan,
+        plan_name=plan,
 
         user_id=user_id
     )
+
+
+# =========================================================
+# 🌐 APRIL WEB EXECUTION
+# =========================================================
+
+@app.route(
+    "/api/v1/chat",
+    methods=["POST"]
+)
+
+def web_chat():
+
+    try:
+
+        data = request.json or {}
+
+        user_id = data.get(
+            "user_id"
+        )
+
+        text = data.get(
+            "text",
+            ""
+        )
+
+        if not user_id:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "user_id required"
+            }), 400
+
+        result = asyncio.run(
+
+            process_web_message(
+                user_id,
+                text
+            )
+        )
+
+        return jsonify({
+
+            "success": True,
+
+            "space_response":
+                safe_json(result),
+
+            "renderer_mode":
+                WEB_RENDERER_MODE,
+
+            "scene_mode":
+                WEB_SCENE_MODE
+        })
+
+    except Exception as e:
+
+        print(
+            "WEB EXECUTION ERROR:",
+            e
+        )
+
+        return jsonify({
+
+            "success": False,
+
+            "error": str(e)
+        }), 500
+
 
 # =========================================================
 # 🔥 CREATE ORDER
 # =========================================================
 
-@app.route("/create-order", methods=["POST"])
+@app.route(
+    "/create-order",
+    methods=["POST"]
+)
+
 def create_order():
 
     data = request.json
 
     amount = data.get("amount")
+
     plan = data.get("plan")
+
     user_id = data.get("user_id")
 
     token = get_access_token()
 
     if not token:
+
         return jsonify({
-            "error": "TOKEN ERROR"
+
+            "error":
+                "TOKEN ERROR"
+
         }), 500
 
     response = requests.post(
@@ -282,8 +602,12 @@ def create_order():
         f"{BASE_URL}/v2/checkout/orders",
 
         headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
+
+            "Content-Type":
+                "application/json",
+
+            "Authorization":
+                f"Bearer {token}"
         },
 
         json={
@@ -291,34 +615,25 @@ def create_order():
             "intent": "CAPTURE",
 
             "purchase_units": [
+
                 {
+
                     "amount": {
-                        "currency_code": "USD",
-                        "value": str(amount)
+
+                        "currency_code":
+                            "USD",
+
+                        "value":
+                            str(amount)
                     },
 
                     "custom_id":
                         f"{user_id}:{plan}",
 
                     "description":
-                        f"APRIL AI {plan.upper()}"
+                        f"APRIL {plan.upper()}"
                 }
-            ],
-
-            "application_context": {
-
-                "brand_name":
-                    "APRIL AI",
-
-                "landing_page":
-                    "BILLING",
-
-                "user_action":
-                    "PAY_NOW",
-
-                "shipping_preference":
-                    "NO_SHIPPING"
-            }
+            ]
         }
     )
 
@@ -326,64 +641,107 @@ def create_order():
 
     if "id" not in result:
 
-        print("PAYPAL CREATE ERROR:", result)
+        print(
+            "PAYPAL CREATE ERROR:",
+            result
+        )
 
         return jsonify(result), 500
 
     return jsonify({
-        "id": result["id"]
+
+        "id":
+            result["id"]
     })
 
+
 # =========================================================
-# 🔥 CAPTURE ORDER
+# 🔥 CAPTURE
 # =========================================================
 
-@app.route("/capture-order", methods=["POST"])
+@app.route(
+    "/capture-order",
+    methods=["POST"]
+)
+
 def capture_order():
 
     data = request.json
 
-    order_id = data.get("orderID")
+    order_id = data.get(
+        "orderID"
+    )
 
-    capture = capture_payment(order_id)
+    capture = capture_payment(
+        order_id
+    )
 
     if not capture:
+
         return jsonify({
-            "error": "CAPTURE FAILED"
+
+            "error":
+                "CAPTURE FAILED"
+
         }), 500
 
     order = get_order(order_id)
 
     if not order:
+
         return jsonify({
-            "error": "ORDER ERROR"
+
+            "error":
+                "ORDER ERROR"
+
         }), 500
 
     try:
 
-        purchase = order["purchase_units"][0]
+        purchase = order[
+            "purchase_units"
+        ][0]
 
-        custom_id = purchase["custom_id"]
+        custom_id = purchase[
+            "custom_id"
+        ]
 
-        user_id, plan = custom_id.split(":")
+        user_id, plan = (
+            custom_id.split(":")
+        )
 
         user_id = int(user_id)
 
-        set_subscription(user_id, plan)
+        set_subscription(
+            user_id,
+            plan
+        )
 
-        save_payment(user_id, plan)
+        save_payment(
+            user_id,
+            plan
+        )
 
     except Exception as e:
 
-        print("CAPTURE PROCESS ERROR:", e)
+        print(
+            "CAPTURE ERROR:",
+            e
+        )
 
         return jsonify({
-            "error": str(e)
+
+            "error":
+                str(e)
+
         }), 500
 
     return jsonify({
-        "status": "success"
+
+        "status":
+            "success"
     })
+
 
 # =========================================================
 # 🟢 SUCCESS
@@ -393,9 +751,9 @@ def capture_order():
 def paypal_success():
 
     return render_template_string(
-        SUCCESS_HTML,
-        bot_username=BOT_USERNAME
+        SUCCESS_HTML
     )
+
 
 # =========================================================
 # ❌ CANCEL
@@ -408,11 +766,16 @@ def paypal_cancel():
         CANCEL_HTML
     )
 
+
 # =========================================================
 # 🔥 WEBHOOK
 # =========================================================
 
-@app.route("/webhook/paypal", methods=["POST"])
+@app.route(
+    "/webhook/paypal",
+    methods=["POST"]
+)
+
 def paypal_webhook():
 
     try:
@@ -420,122 +783,32 @@ def paypal_webhook():
         data = request.json
 
         print(
+
             "PAYPAL WEBHOOK:",
-            json.dumps(data, indent=4)
+
+            json.dumps(
+                data,
+                indent=4
+            )
         )
 
         return {
+
             "status": "ok"
         }
 
     except Exception as e:
 
-        print("WEBHOOK ERROR:", e)
+        print(
+            "WEBHOOK ERROR:",
+            e
+        )
 
         return {
+
             "status": "error"
         }
 
-
-
-# =========================================================
-# 🟢 HEALTH
-# =========================================================
-
-@app.route("/")
-def health():
-
-    return {
-        "status": "APRIL CHECKOUT ONLINE"
-    }
-
-# =========================================================
-# 🌐 EXTERNAL BROWSER OPEN
-# =========================================================
-
-@app.route("/open/<plan>/<user_id>")
-def open_external(plan, user_id):
-
-    return f"""
-<!DOCTYPE html>
-<html>
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
->
-
-<title>APRIL BROWSER OPEN</title>
-
-<style>
-
-body{{
-    background:#0f1117;
-    color:white;
-    font-family:Arial;
-    display:flex;
-    justify-content:center;
-    align-items:center;
-    min-height:100vh;
-    text-align:center;
-}}
-
-.box{{
-    max-width:500px;
-    padding:40px;
-}}
-
-.title{{
-    font-size:32px;
-    margin-bottom:20px;
-}}
-
-.text{{
-    opacity:.8;
-    margin-bottom:30px;
-}}
-
-.button{{
-    display:inline-block;
-    padding:16px 28px;
-    border-radius:14px;
-    background:#ffd140;
-    color:black;
-    text-decoration:none;
-    font-weight:bold;
-}}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<div class="title">
-🌐 APRIL CHECKOUT
-</div>
-
-<div class="text">
-Открываем оплату во внешнем браузере...
-</div>
-
-<a
-    class="button"
-    href="intent://checkout/{plan}/{user_id}#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=https://aprill.site/checkout/{plan}/{user_id};end"
->
-    Открыть вручную
-</a>
-
-</div>
-
-</body>
-</html>
-"""
 
 # =========================================================
 # 🚀 START
@@ -543,9 +816,17 @@ body{{
 
 if __name__ == "__main__":
 
+    print(
+        "🌐 APRIL WEB GATEWAY STARTED"
+    )
+
     app.run(
+
         host="0.0.0.0",
+
         port=PORT,
+
         debug=False,
+
         use_reloader=False
     )
