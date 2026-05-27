@@ -5,6 +5,24 @@ def detect_response_mode(
     cognition: dict = None
 ) -> str:
 
+    """
+    APRIL RESPONSE MODE DETECTOR
+
+    Lightweight orchestration detector.
+
+    Этот слой:
+    - НЕ authority;
+    - НЕ executor;
+    - НЕ router override.
+
+    Этот слой:
+    - помогает orchestration;
+    - удерживает continuity;
+    - stabilizes renderer routing;
+    - разделяет visual/render/generate;
+    - уменьшает routing chaos.
+    """
+
     t = (
         text or ""
     ).lower().strip()
@@ -23,26 +41,16 @@ def detect_response_mode(
         {}
     )
 
+    # =====================================================
+    # 🔥 SEMANTIC SIGNALS
+    # =====================================================
+
     expected_artifact = semantic.get(
         "expected_artifact"
     )
 
-    expected_output_type = semantic.get(
-        "expected_output_type"
-    )
-
     render_type = semantic.get(
         "render_type"
-    )
-
-    renderer_payload_expected = semantic.get(
-        "renderer_payload_expected",
-        False
-    )
-
-    renderer_scene_priority = semantic.get(
-        "renderer_scene_priority",
-        False
     )
 
     render_intent = semantic.get(
@@ -55,13 +63,18 @@ def detect_response_mode(
         False
     )
 
+    renderer_payload_expected = semantic.get(
+        "renderer_payload_expected",
+        False
+    )
+
     scene_completion_required = semantic.get(
         "scene_completion_required",
         False
     )
 
     # =====================================================
-    # 🔥 CONTINUATION SAFETY
+    # 🔥 CONTINUATION
     # =====================================================
 
     continuation_triggers = [
@@ -77,8 +90,6 @@ def detect_response_mode(
         "дальше",
         "продолжай",
         "не то",
-        "сделай темнее",
-        "сделай ярче",
         "оставь",
         "в таком стиле"
     ]
@@ -86,180 +97,69 @@ def detect_response_mode(
     if t in continuation_triggers:
 
         if active_visual_scene:
-
             return "visual_continuation"
 
         if active_flow:
-
             return "continuation"
 
         return "casual"
 
     # =====================================================
-    # 🔥 SEMANTIC RENDERER LOCK
+    # 🔥 RENDERER LOCK
     # =====================================================
 
-    if (
+    renderer_lock = bool(
 
         render_intent
         or prefer_renderer
         or renderer_payload_expected
-        or renderer_scene_priority
-    ):
+    )
 
-        # =================================================
-        # 🔥 GRAPH
-        # =====================================================
+    if renderer_lock:
 
-        if (
+        semantic[
+            "renderer_scene_locked"
+        ] = True
 
-            expected_artifact == "graph"
-            or expected_output_type == "graph"
-            or render_type == "graph"
-        ):
+        semantic[
+            "renderer_payload_expected"
+        ] = True
 
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "graph"
+        artifact_map = {
 
-            semantic[
-                "renderer_payload_expected"
-            ] = True
+            "graph":
+                "renderer_graph",
 
-            semantic[
-                "renderer_scene_locked"
-            ] = True
+            "formula":
+                "renderer_formula",
 
-            return "renderer_graph"
+            "table":
+                "renderer_table",
 
-        # =================================================
-        # 🔥 FORMULA
-        # =====================================================
+            "diagram":
+                "renderer_diagram",
 
-        if (
+            "code":
+                "renderer_code",
 
-            expected_artifact == "formula"
-            or expected_output_type == "formula"
-            or render_type == "formula"
-        ):
+            "link":
+                "renderer_link"
+        }
 
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "formula"
+        artifact = (
+            expected_artifact
+            or render_type
+        )
 
-            semantic[
-                "renderer_payload_expected"
-            ] = True
-
-            semantic[
-                "renderer_scene_locked"
-            ] = True
-
-            return "renderer_formula"
-
-        # =================================================
-        # 🔥 TABLE
-        # =====================================================
-
-        if (
-
-            expected_artifact == "table"
-            or expected_output_type == "table"
-            or render_type == "table"
-        ):
+        if artifact in artifact_map:
 
             semantic[
                 "confirmed_renderer_artifact"
-            ] = "table"
+            ] = artifact
 
-            semantic[
-                "renderer_payload_expected"
-            ] = True
-
-            semantic[
-                "renderer_scene_locked"
-            ] = True
-
-            return "renderer_table"
-
-        # =================================================
-        # 🔥 DIAGRAM
-        # =====================================================
-
-        if (
-
-            expected_artifact == "diagram"
-            or expected_output_type == "diagram"
-            or render_type == "diagram"
-        ):
-
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "diagram"
-
-            semantic[
-                "renderer_payload_expected"
-            ] = True
-
-            semantic[
-                "renderer_scene_locked"
-            ] = True
-
-            return "renderer_diagram"
-
-        # =================================================
-        # 🔥 CODE
-        # =====================================================
-
-        if (
-
-            expected_artifact == "code"
-            or expected_output_type == "code"
-            or render_type == "code"
-        ):
-
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "code"
-
-            semantic[
-                "renderer_payload_expected"
-            ] = True
-
-            semantic[
-                "renderer_scene_locked"
-            ] = True
-
-            return "renderer_code"
-
-        # =================================================
-        # 🔥 LINK
-        # =====================================================
-
-        if (
-
-            expected_artifact == "link"
-            or expected_output_type == "link"
-            or render_type == "link"
-        ):
-
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "link"
-
-            semantic[
-                "renderer_payload_expected"
-            ] = True
-
-            semantic[
-                "renderer_scene_locked"
-            ] = True
-
-            return "renderer_link"
-
-        # =================================================
-        # 🔥 MULTI BLOCK
-        # =====================================================
+            return artifact_map[
+                artifact
+            ]
 
         if scene_completion_required:
 
@@ -267,282 +167,136 @@ def detect_response_mode(
                 "multi_scene_response"
             ] = True
 
-            semantic[
-                "renderer_payload_expected"
-            ] = True
-
-            semantic[
-                "renderer_scene_locked"
-            ] = True
-
             return "renderer_multi"
-
-        # =================================================
-        # 🔥 SAFE GENERIC RENDERER
-        # =====================================================
-
-        semantic[
-            "renderer_payload_expected"
-        ] = True
-
-        semantic[
-            "renderer_scene_locked"
-        ] = True
 
         return "renderer"
 
     # =====================================================
-    # 🔥 RENDERER-FIRST
+    # 🔥 KEYWORD GROUPS
     # =====================================================
 
-    renderer_triggers = [
+    mode_groups = {
 
-        "график",
-        "формула",
-        "таблица",
-        "diagram",
-        "диаграмма",
-        "схема",
-        "layout",
-        "структура",
-        "grid",
-        "scene",
-        "пространство",
-        "renderer",
-        "canvas"
-    ]
+        "renderer": [
 
-    for w in renderer_triggers:
+            "график",
+            "формула",
+            "таблица",
+            "diagram",
+            "диаграмма",
+            "схема",
+            "layout",
+            "grid",
+            "scene",
+            "renderer",
+            "canvas"
+        ],
 
-        if w in t:
+        "spatial": [
 
-            return "renderer"
+            "слева",
+            "справа",
+            "сверху",
+            "снизу",
+            "размести",
+            "расположи",
+            "между"
+        ],
 
-    # =====================================================
-    # 🔥 SPATIAL / SCENE
-    # =====================================================
+        "link": [
 
-    spatial_triggers = [
+            "ссылка",
+            "url",
+            "линк",
+            "short link"
+        ],
 
-        "слева",
-        "справа",
-        "сверху",
-        "снизу",
-        "по центру",
-        "расположи",
-        "размести",
-        "между",
-        "рядом"
-    ]
+        "web": [
 
-    for w in spatial_triggers:
+            "погода",
+            "новости",
+            "курс валют",
+            "маршрут",
+            "карта",
+            "рейс",
+            "сейчас"
+        ],
 
-        if w in t:
+        "copy": [
 
-            return "spatial"
+            "шаблон",
+            "письмо",
+            "документ",
+            "напиши сообщение",
+            "готовый текст"
+        ],
 
-    # =====================================================
-    # ===== LINK MODE
-    # =====================================================
+        "format": [
 
-    link_triggers = [
+            "оформи",
+            "структурируй",
+            "разбей текст",
+            "сделай красиво"
+        ],
 
-        "ссылка",
-        "url",
-        "линк",
-        "дай ссылку",
-        "короткую ссылку",
-        "сократи ссылку",
-        "сокращённую ссылку",
-        "short link"
-    ]
+        "visual": [
 
-    for w in link_triggers:
+            "что на фото",
+            "что изображено",
+            "что видишь",
+            "проанализируй фото"
+        ],
 
-        if w in t:
+        "lightweight_visual": [
 
-            return "link"
+            "референс",
+            "пример",
+            "концепт",
+            "идея",
+            "атмосфера"
+        ],
 
-    # =====================================================
-    # 🔥 WEB / LIVE
-    # =====================================================
+        "generate": [
 
-    web_triggers = [
+            "создай изображение",
+            "сгенерируй изображение",
+            "создай арт",
+            "4k render",
+            "ultra realistic"
+        ],
 
-        "погода",
-        "новости",
-        "курс валют",
-        "что происходит",
-        "маршрут",
-        "карта",
-        "рейс",
-        "сейчас"
-    ]
+        "supportive": [
 
-    for w in web_triggers:
+            "помоги",
+            "объясни",
+            "что делать",
+            "подскажи"
+        ],
 
-        if w in t:
+        "casual": [
 
-            return "web"
-
-    # =====================================================
-    # ===== COPY / READY TEXT
-    # =====================================================
-
-    copy_triggers = [
-
-        "скопируй",
-        "для копирования",
-        "копировать",
-        "дай текст",
-        "готовый текст",
-        "шаблон",
-        "напиши текст",
-        "заявление",
-        "письмо",
-        "документ",
-        "сообщение клиенту",
-        "напиши сообщение",
-        "сделай текст",
-        "напиши красиво"
-    ]
-
-    for w in copy_triggers:
-
-        if w in t:
-
-            return "copy"
+            "привет",
+            "hello",
+            "доброе утро",
+            "как дела"
+        ]
+    }
 
     # =====================================================
-    # ===== FORMATTED / STRUCTURED
+    # 🔥 MODE DETECTION
     # =====================================================
 
-    format_triggers = [
+    for mode, words in mode_groups.items():
 
-        "красиво",
-        "оформи",
-        "сделай красиво",
-        "оформи текст",
-        "структурируй",
-        "сделай читабельно",
-        "разбей текст"
-    ]
+        if any(
+            word in t
+            for word in words
+        ):
 
-    for w in format_triggers:
-
-        if w in t:
-
-            return "format"
+            return mode
 
     # =====================================================
-    # ===== VISUAL / CAMERA / IMAGE
-    # =====================================================
-
-    visual_triggers = [
-
-        "что на фото",
-        "что это",
-        "что изображено",
-        "что видишь",
-        "посмотри",
-        "проанализируй фото",
-        "объясни фото",
-        "что за место",
-        "что за объект",
-        "что это такое"
-    ]
-
-    for w in visual_triggers:
-
-        if w in t:
-
-            return "visual"
-
-    # =====================================================
-    # 🔥 LIGHTWEIGHT VISUAL
-    # =====================================================
-
-    lightweight_visual_triggers = [
-
-        "референс",
-        "пример",
-        "концепт",
-        "идея",
-        "атмосфера",
-        "примерно как",
-        "визуально"
-    ]
-
-    for w in lightweight_visual_triggers:
-
-        if w in t:
-
-            return "lightweight_visual"
-
-    # =====================================================
-    # 🔥 HEAVY IMAGE GENERATION
-    # =====================================================
-
-    generate_triggers = [
-
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "создай арт",
-        "создай фото",
-        "ultra realistic",
-        "4k render"
-    ]
-
-    for w in generate_triggers:
-
-        if w in t:
-
-            return "generate"
-
-    # =====================================================
-    # ===== SUPPORTIVE / HUMAN
-    # =====================================================
-
-    supportive_triggers = [
-
-        "помоги",
-        "не понимаю",
-        "объясни",
-        "что делать",
-        "как быть",
-        "подскажи",
-        "посоветуй"
-    ]
-
-    for w in supportive_triggers:
-
-        if w in t:
-
-            return "supportive"
-
-    # =====================================================
-    # ===== SHORT CASUAL
-    # =====================================================
-
-    short_triggers = [
-
-        "привет",
-        "хай",
-        "hello",
-        "доброе утро",
-        "добрый вечер",
-        "как дела"
-    ]
-
-    for w in short_triggers:
-
-        if w in t:
-
-            return "casual"
-
-    # =====================================================
-    # 🔥 ACTIVE FLOW CONTINUITY
+    # 🔥 ACTIVE FLOW
     # =====================================================
 
     if active_flow:
@@ -569,12 +323,6 @@ def detect_response_mode(
     # =====================================================
 
     if semantic.get(
-        "render_intent"
-    ):
-
-        return "renderer"
-
-    if semantic.get(
         "internet_context_needed"
     ):
 
@@ -587,7 +335,7 @@ def detect_response_mode(
         return "exploration"
 
     # =====================================================
-    # ===== DEFAULT
+    # 🔥 DEFAULT
     # =====================================================
 
     return "normal"
