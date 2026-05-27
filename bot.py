@@ -10,13 +10,18 @@ BotRoot теперь:
 - renderer-aware transport layer;
 - continuity-safe gateway;
 - multimodal scene connector;
-- provider-safe orchestration bridge.
+- provider-safe orchestration bridge;
+- renderer-first delivery core;
+- continuity-aware scene transport;
+- multimodal response stabilizer.
 
 BotRoot больше НЕ:
 - telegram-centric authority;
 - renderer blocker;
 - image escalation source;
-- legacy transport chaos layer.
+- legacy transport chaos layer;
+- text-only bottleneck;
+- scene-collapsing transport layer.
 
 APRIL SPACE PRINCIPLES:
 
@@ -26,6 +31,9 @@ APRIL SPACE PRINCIPLES:
 4. provider-safe transport
 5. calm orchestration
 6. multimodal scene support
+7. scene continuity protection
+8. renderer-safe transport
+9. unified response delivery
 """
 
 import asyncio
@@ -424,6 +432,10 @@ def normalize_result_payload(
 
     normalized = {
 
+        # =================================================
+        # 🔥 CORE
+        # =================================================
+
         "type":
             result.get(
                 "type",
@@ -432,21 +444,22 @@ def normalize_result_payload(
 
         "data":
             result.get(
-                "data",
-                ""
+                "data"
             ),
 
         "content":
             result.get(
-                "content",
-                ""
+                "content"
             ),
 
         "response":
             result.get(
-                "response",
-                ""
+                "response"
             ),
+
+        # =================================================
+        # 🔥 VISUAL OBJECTS
+        # =================================================
 
         "graph":
             result.get(
@@ -487,19 +500,66 @@ def normalize_result_payload(
             result.get(
                 "blocks",
                 []
+            ),
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =================================================
+
+        "continuity":
+            result.get(
+                "continuity",
+                {}
+            ),
+
+        "active_scene":
+            result.get(
+                "active_scene"
+            ),
+
+        # =================================================
+        # 🔥 TRANSPORT
+        # =================================================
+
+        "transport":
+            result.get(
+                "transport",
+                "unified"
             )
     }
 
     normalized["final_text"] = (
 
-        normalized["content"]
+        normalized.get("content")
 
-        or normalized["response"]
+        or normalized.get("response")
 
-        or normalized["data"]
+        or (
+            normalized.get("data")
+            if isinstance(
+                normalized.get("data"),
+                str
+            )
+            else ""
+        )
 
         or ""
     )
+
+    normalized["has_scene"] = any([
+
+        normalized.get("scene"),
+
+        normalized.get("layout"),
+
+        normalized.get("visual"),
+
+        normalized.get("graph"),
+
+        normalized.get("formula"),
+
+        normalized.get("blocks")
+    ])
 
     return normalized
 
@@ -509,10 +569,19 @@ def normalize_result_payload(
 
 def cleanup_response_text(
     text,
-    user_text=""
+    user_text="",
+    result_type="text"
 ):
 
     text = safe_string(text)
+
+    # =====================================================
+    # 🔥 NEVER TOUCH RENDERER OBJECTS
+    # =====================================================
+
+    if result_type in RENDERER_RESPONSE_TYPES:
+
+        return text
 
     lower_user_text = (
         user_text or ""
@@ -569,7 +638,7 @@ def cleanup_response_text(
 
     return safe_truncate(
         text,
-        limit=1400
+        limit=3000
     )
 
 # =========================================================
@@ -582,25 +651,48 @@ async def send_renderer_response(
     result_type
 ):
 
-    renderer_payload = (
+    renderer_object = {
 
-        result.get("scene")
+        "type": result_type,
 
-        or result.get("layout")
+        "scene":
+            result.get("scene"),
 
-        or result.get("visual")
+        "layout":
+            result.get("layout"),
 
-        or result.get("graph")
+        "visual":
+            result.get("visual"),
 
-        or result.get("formula")
+        "graph":
+            result.get("graph"),
 
-        or result.get("data")
+        "formula":
+            result.get("formula"),
 
-        or ""
-    )
+        "blocks":
+            result.get(
+                "blocks",
+                []
+            ),
 
-    renderer_payload = safe_renderer_payload(
-        renderer_payload
+        "continuity":
+            result.get(
+                "continuity",
+                {}
+            ),
+
+        "active_scene":
+            result.get(
+                "active_scene"
+            )
+    }
+
+    renderer_payload = json.dumps(
+
+        renderer_object,
+
+        ensure_ascii=False
     )
 
     renderer_payload = safe_truncate(
@@ -610,7 +702,7 @@ async def send_renderer_response(
 
     await message.answer(
 
-        f"[[{result_type}:{renderer_payload}]]",
+        f"[[APRIL_RENDERER:{renderer_payload}]]",
 
         reply_markup=main_keyboard(
             message.message_id
@@ -643,7 +735,9 @@ async def send_telegram_response(
             ""
         ),
 
-        user_text=user_text
+        user_text=user_text,
+
+        result_type=result_type
     )
 
     # =====================================================
@@ -680,7 +774,12 @@ async def send_telegram_response(
     # 🔥 RENDERER-FIRST DELIVERY
     # =====================================================
 
-    if result_type in RENDERER_RESPONSE_TYPES:
+    if (
+
+        result_type in RENDERER_RESPONSE_TYPES
+
+        or result.get("has_scene")
+    ):
 
         await send_renderer_response(
 
@@ -763,6 +862,63 @@ async def send_telegram_response(
         )
     )
 
+# =========================================================
+# 🔥 CONTINUITY STATE
+# =========================================================
+
+def build_scene_state(
+    result,
+    user_id
+):
+
+    state = get_state(
+        user_id
+    )
+
+    if not result:
+        return
+
+    has_scene = any([
+
+        result.get("scene"),
+
+        result.get("layout"),
+
+        result.get("visual"),
+
+        result.get("graph"),
+
+        result.get("formula")
+    ])
+
+    if not has_scene:
+        return
+
+    state["active_visual_scene"] = {
+
+        "source": "executor",
+
+        "updated":
+            datetime.now().isoformat(),
+
+        "continuity_mode":
+            "active",
+
+        "scene":
+            result.get("scene"),
+
+        "layout":
+            result.get("layout"),
+
+        "visual":
+            result.get("visual"),
+
+        "graph":
+            result.get("graph"),
+
+        "formula":
+            result.get("formula")
+    }
 # =========================================================
 # ⏰ TIME QUESTIONS
 # =========================================================
@@ -902,9 +1058,16 @@ def april_web_chat():
                 run_with_activity
             )
 
-            return normalize_result_payload(
+            normalized = normalize_result_payload(
                 result
             )
+
+            build_scene_state(
+                normalized,
+                user_id
+            )
+
+            return normalized
 
         final_result = asyncio.run(
             process()
@@ -972,6 +1135,17 @@ def april_web_chat():
             "image":
                 final_result.get(
                     "image"
+                ),
+
+            "continuity":
+                final_result.get(
+                    "continuity",
+                    {}
+                ),
+
+            "active_scene":
+                final_result.get(
+                    "active_scene"
                 )
         })
 
@@ -1232,9 +1406,16 @@ async def process_web_message(
         run_with_activity
     )
 
-    return normalize_result_payload(
+    normalized = normalize_result_payload(
         result
     )
+
+    build_scene_state(
+        normalized,
+        user_id
+    )
+
+    return normalized
 
 # =========================================================
 # 💬 MESSAGE HANDLER
@@ -1589,11 +1770,20 @@ async def handle(
             activity_type=activity_type
         )
 
+        normalized_result = normalize_result_payload(
+            result
+        )
+
+        build_scene_state(
+            normalized_result,
+            user_id
+        )
+
         await send_telegram_response(
 
             message,
 
-            result,
+            normalized_result,
 
             user_text=text
         )
@@ -1668,216 +1858,6 @@ async def handle_callbacks(
         await callback.message.answer(
 
             text,
-
-            reply_markup=keyboard
-        )
-
-        await callback.answer()
-
-        return
-
-    if data == "info":
-
-        text, keyboard = build_info_menu(
-            user_id
-        )
-
-        await callback.message.answer(
-
-            text,
-
-            reply_markup=keyboard
-        )
-
-        await callback.answer()
-
-        return
-
-    if user_id == ADMIN_ID:
-
-        if data == "admin_stats":
-
-            errors = get_errors()
-
-            text = "📊 Анализ\n\n"
-
-            text += (
-
-                "✅ Ошибок нет"
-
-                if not errors
-
-                else "\n".join(
-                    errors[-5:]
-                )
-            )
-
-            await callback.answer(
-
-                text[:200],
-
-                show_alert=True
-            )
-
-            return
-
-        if data == "admin_payments":
-
-            keyboard = InlineKeyboardMarkup(
-
-                inline_keyboard=[
-
-                    [
-
-                        InlineKeyboardButton(
-
-                            text="💳 OpenAI",
-
-                            url="https://platform.openai.com/account/billing"
-                        )
-                    ],
-
-                    [
-
-                        InlineKeyboardButton(
-
-                            text="🚂 Railway",
-
-                            url="https://railway.app/dashboard"
-                        )
-                    ],
-
-                    [
-
-                        InlineKeyboardButton(
-
-                            text="⬅️ Назад",
-
-                            callback_data="menu"
-                        )
-                    ]
-                ]
-            )
-
-            await callback.message.answer(
-
-                "💳 Оплаты:",
-
-                reply_markup=keyboard
-            )
-
-            await callback.answer()
-
-            return
-
-        if data == "admin_broadcast":
-
-            set_mode(
-                user_id,
-                "broadcast"
-            )
-
-            await callback.answer(
-
-                "📢 Введи текст",
-
-                show_alert=True
-            )
-
-            return
-
-        if data == "admin_system":
-
-            text = get_system_status()
-
-            await callback.message.answer(
-                text
-            )
-
-            await callback.answer()
-
-            return
-
-    if data in [
-
-        "buy_lite",
-        "lite",
-        "go_lite"
-    ]:
-
-        keyboard = InlineKeyboardMarkup(
-
-            inline_keyboard=[
-
-                [
-
-                    InlineKeyboardButton(
-
-                        text="💳 Карта / PayPal",
-
-                        url=f"{CHECKOUT_DOMAIN}/checkout/lite/{user_id}"
-                    )
-                ],
-
-                [
-
-                    InlineKeyboardButton(
-
-                        text="🤖 Android • Google Pay",
-
-                        url=f"{CHECKOUT_DOMAIN}/open/lite/{user_id}"
-                    )
-                ]
-            ]
-        )
-
-        await callback.message.answer(
-
-            "⚡ Lite Пакет",
-
-            reply_markup=keyboard
-        )
-
-        await callback.answer()
-
-        return
-
-    if data in [
-
-        "buy_premium",
-        "premium",
-        "go_premium"
-    ]:
-
-        keyboard = InlineKeyboardMarkup(
-
-            inline_keyboard=[
-
-                [
-
-                    InlineKeyboardButton(
-
-                        text="💳 Карта / PayPal",
-
-                        url=f"{CHECKOUT_DOMAIN}/checkout/premium/{user_id}"
-                    )
-                ],
-
-                [
-
-                    InlineKeyboardButton(
-
-                        text="🤖 Android • Google Pay",
-
-                        url=f"{CHECKOUT_DOMAIN}/open/premium/{user_id}"
-                    )
-                ]
-            ]
-        )
-
-        await callback.message.answer(
-
-            "👑 Premium Пакет",
 
             reply_markup=keyboard
         )
