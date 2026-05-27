@@ -3,29 +3,30 @@
 # =====================================================
 
 """
-External knowledge layer для April.
+DeepHub / April upgrade:
 
-Главная задача:
-- НЕ заменять rooms;
-- НЕ ломать personality;
-- НЕ перехватывать execution;
-- НЕ отвечать напрямую пользователю.
+Этот слой больше НЕ:
+- trigger-based internet router;
+- keyword escalation layer;
+- aggressive external lookup detector;
+- text-trigger execution switch.
 
-Этот модуль:
-- помогает April получать внешние знания;
-- расширяет ответы;
-- поддерживает web-style knowledge;
-- даёт contextual enrichment;
-- работает как capability самой April.
+Теперь это:
+- semantic support layer;
+- machine-state enrichment provider;
+- execution-safe contextual helper;
+- renderer-safe external context layer.
 
-APRIL ARCHITECTURE:
-- renderer-first;
-- provider-aware;
-- continuity-safe;
-- lightweight-first;
-- calm orchestration.
+Главное:
+- НЕ ломать renderer-first;
+- НЕ перехватывать orchestration;
+- НЕ ломать graph/formula/table pipeline;
+- НЕ вмешиваться в scene routing;
+- НЕ эскалировать без semantic signal.
 
-April остаётся единым субъектом.
+External knowledge —
+это helper capability,
+а НЕ authority layer.
 """
 
 # =====================================================
@@ -33,10 +34,6 @@ April остаётся единым субъектом.
 # =====================================================
 
 from openai import OpenAI
-
-# =====================================================
-# 🌐 REAL WEB SEARCH LAYER
-# =====================================================
 
 from blocks.web_search_system import (
     search_web,
@@ -47,203 +44,92 @@ from blocks.web_search_system import (
 client = OpenAI()
 
 # =====================================================
-# 🧠 KNOWLEDGE TRIGGERS
+# 🧠 MACHINE SEMANTIC STATES
 # =====================================================
 
-WEB_KNOWLEDGE_TOPICS = [
+SEMANTIC_EXECUTION_STATES = {
 
-    # =============================================
-    # TRAVEL
-    # =============================================
+    "renderer_safe": [
+        "graph",
+        "formula",
+        "table",
+        "diagram",
+        "scene",
+        "layout"
+    ],
 
-    "путешествие",
-    "отдых",
-    "страна",
-    "город",
-    "курорт",
-    "море",
-    "горы",
-    "куда поехать",
+    "knowledge_safe": [
+        "knowledge",
+        "travel",
+        "internet",
+        "reference",
+        "news",
+        "location",
+        "realtime"
+    ],
 
-    # =============================================
-    # PLACES
-    # =============================================
-
-    "достопримечательность",
-    "история города",
-    "интересные места",
-    "музей",
-    "архитектура",
-
-    # =============================================
-    # NEWS
-    # =============================================
-
-    "новости",
-    "что произошло",
-    "сейчас происходит",
-
-    # =============================================
-    # RECOMMENDATIONS
-    # =============================================
-
-    "лучше",
-    "сравнение",
-    "что выбрать",
-    "где лучше",
-
-    # =============================================
-    # KNOWLEDGE
-    # =============================================
-
-    "объясни",
-    "расскажи",
-    "интересный факт",
-    "что такое",
-
-    # =============================================
-    # INTERNET
-    # =============================================
-
-    "youtube",
-    "ютуб",
-    "telegram",
-    "телеграм",
-    "instagram",
-    "facebook",
-    "twitter",
-    "x.com",
-    "reddit",
-    "github",
-    "tiktok",
-    "discord",
-    "ссылка",
-    "канал",
-    "сайт",
-    "соцсеть",
-
-    # =============================================
-    # MAPS / LOCATION
-    # =============================================
-
-    "карта",
-    "маршрут",
-    "локация",
-    "район",
-
-    # =============================================
-    # 🌐 LIVE / REALTIME
-    # =============================================
-
-    "где я",
-    "где сейчас",
-    "самолет",
-    "рейс",
-    "корабль",
-    "судно",
-    "маршрут рейса",
-    "tracking",
-    "live"
-]
-
-# =====================================================
-# 🧠 INTERNET PLATFORM AWARENESS
-# =====================================================
-
-INTERNET_PLATFORM_TYPES = {
-
-    "youtube": "media_platform",
-
-    "telegram": "community_platform",
-
-    "instagram": "social_platform",
-
-    "facebook": "social_platform",
-
-    "twitter": "social_platform",
-
-    "x": "social_platform",
-
-    "reddit": "discussion_platform",
-
-    "github": "development_platform",
-
-    "tiktok": "media_platform",
-
-    "discord": "community_platform",
-
-    "wikipedia": "knowledge_platform"
+    "blocked_modes": [
+        "renderer_first",
+        "lightweight_visual",
+        "scene_render",
+        "local_render"
+    ]
 }
 
 # =====================================================
-# 🧠 WEB CAPABILITY STATE
+# 🧠 WEB CAPABILITIES
 # =====================================================
 
 WEB_CAPABILITIES = {
 
-    # =================================================
-    # 🌐 REAL WEB STATUS
-    # =====================================================
-
     "real_time_search": True,
-
     "verified_links": True,
-
     "live_internet_access": True,
 
-    "transport_lookup": True,
+    "contextual_enrichment": True,
+    "semantic_lookup": True,
+    "execution_support": True,
 
-    "geo_lookup": True,
-
-    # =================================================
-    # 🧠 COGNITIVE AWARENESS
-    # =====================================================
-
-    "platform_understanding": True,
-
-    "social_media_awareness": True,
-
-    "link_reasoning": True,
-
-    "realtime_reasoning": True,
-
-    # =================================================
-    # 🔥 SAFETY
-    # =====================================================
+    "renderer_safe": True,
+    "provider_aware": True,
+    "continuity_safe": True,
 
     "hallucination_risk": False,
-
     "requires_verification": True
 }
 
 # =====================================================
-# 🔥 RENDERER-FIRST PROTECTION
+# 🔥 SEMANTIC HELPERS
 # =====================================================
 
-RENDERER_ARTIFACTS = [
+def _safe_lower(value):
 
-    "graph",
-    "formula",
-    "diagram",
-    "table",
-    "layout",
-    "scene"
-]
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+    )
+
+
+def _contains_any(
+    text,
+    words
+):
+
+    return any(
+        x in text
+        for x in words
+    )
 
 # =====================================================
-# 🔥 WEB SUPPRESSION
+# 🔥 RENDERER PROTECTION
 # =====================================================
 
 def should_block_external_lookup(
-    text: str,
     semantic: dict,
     cognition: dict,
     response_decision: dict
 ):
-
-    text = (
-        text or ""
-    ).lower()
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -254,82 +140,72 @@ def should_block_external_lookup(
     # =====================================================
 
     if semantic.get(
-        "render_intent"
-    ):
-
-        return True
-
-    if semantic.get(
         "prefer_renderer"
     ):
-
         return True
 
     if semantic.get(
-        "renderer_space_request"
+        "renderer_space_active"
     ):
-
         return True
+
+    if semantic.get(
+        "renderer_first"
+    ):
+        return True
+
+    if semantic.get(
+        "scene_render_active"
+    ):
+        return True
+
+    if semantic.get(
+        "lightweight_visual_mode"
+    ):
+        return True
+
+    # =================================================
+    # 🔥 EXPECTED OUTPUT
+    # =====================================================
 
     expected_output = semantic.get(
         "expected_output_type"
     )
 
-    if expected_output in RENDERER_ARTIFACTS:
-
-        return True
-
-    # =================================================
-    # 🔥 LIGHTWEIGHT VISUAL
-    # =====================================================
-
-    if semantic.get(
-        "visual_demo_request"
+    if expected_output in (
+        SEMANTIC_EXECUTION_STATES[
+            "renderer_safe"
+        ]
     ):
-
         return True
-
-    if semantic.get(
-        "visual_lightweight_mode"
-    ):
-
-        return True
-
-    if semantic.get(
-        "library_visual_candidate"
-    ):
-
-        return True
-
-    # =================================================
-    # 🔥 EXPLORATION PROTECTION
-    # =====================================================
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        if cognition.get(
-            "wants_result",
-            0.0
-        ) < 0.65:
-
-            return True
 
     # =================================================
     # 🔥 RESPONSE DECISION
     # =====================================================
 
     if response_decision.get(
+        "avoid_external_escalation"
+    ):
+        return True
+
+    if response_decision.get(
         "avoid_heavy_generation"
     ):
+        return True
 
+    # =================================================
+    # 🔥 COGNITION
+    # =====================================================
+
+    if cognition.get(
+        "renderer_space_active"
+    ):
         return True
 
     return False
 
 # =====================================================
-# 🧠 LIVE INTENT DETECTION
+# 🧠 REALTIME DETECTION
 # =====================================================
 
 def detect_realtime_need(
@@ -337,109 +213,96 @@ def detect_realtime_need(
     semantic: dict
 ):
 
-    text = (
-        text or ""
-    ).lower()
+    text = _safe_lower(
+        text
+    )
 
     semantic = semantic or {}
+
+    # =================================================
+    # 🔥 MACHINE STATES
+    # =====================================================
+
+    if semantic.get(
+        "realtime_lookup"
+    ):
+        return True
+
+    if semantic.get(
+        "internet_required"
+    ):
+        return True
+
+    if semantic.get(
+        "live_context_required"
+    ):
+        return True
+
+    if semantic.get(
+        "geo_lookup"
+    ):
+        return True
+
+    # =================================================
+    # 🔥 FALLBACK
+    # =====================================================
 
     if detect_live_lookup_intent(
         text
     ):
         return True
 
-    realtime_words = [
-
-        "сейчас",
-        "live",
-        "онлайн",
-        "где находится",
-        "местоположение",
-        "координаты",
-        "tracking"
-    ]
-
-    for word in realtime_words:
-
-        if word in text:
-
-            return True
-
-    if semantic.get(
-        "goal_stage"
-    ) == "realtime_lookup":
-
-        return True
-
     return False
 
 # =====================================================
-# 🧠 EXECUTION SUPPORT ANALYSIS
+# 🧠 EXECUTION SUPPORT
 # =====================================================
 
 def should_support_execution(
-    text: str,
     semantic: dict,
     cognition: dict
 ):
-
-    text = (
-        text or ""
-    ).lower()
 
     semantic = semantic or {}
     cognition = cognition or {}
 
     # =================================================
-    # 🌐 REALTIME ALWAYS ALLOWED
+    # 🔥 SEMANTIC STATES
     # =====================================================
 
-    if detect_realtime_need(
-        text,
-        semantic
+    if semantic.get(
+        "execution_support_required"
+    ):
+        return True
+
+    if semantic.get(
+        "knowledge_enrichment"
+    ):
+        return True
+
+    if semantic.get(
+        "internet_assistance"
     ):
         return True
 
     # =================================================
-    # 🧠 VISUAL SUPPORT
-    # =====================================================
-
-    if semantic.get(
-        "visual_expectation",
-        0.0
-    ) >= 0.72:
-
-        return True
-
-    # =================================================
-    # 🧠 TRAJECTORY SUPPORT
-    # =====================================================
-
-    if semantic.get(
-        "continuation"
-    ):
-
-        if semantic.get(
-            "trajectory_strength",
-            0.0
-        ) >= 0.7:
-
-            return True
-
-    # =================================================
-    # 🧠 GUIDANCE SUPPORT
+    # 🔥 COGNITION STATES
     # =====================================================
 
     if cognition.get(
         "needs_guidance"
     ):
+        return True
 
+    if cognition.get(
+        "needs_external_context"
+    ):
         return True
 
     return False
 
 # =====================================================
-# 🧠 WEB ESCALATION DETECTION
+# 🧠 EXTERNAL KNOWLEDGE DETECTION
 # =====================================================
 
 def should_use_external_knowledge(
@@ -449,19 +312,16 @@ def should_use_external_knowledge(
     response_decision: dict
 ):
 
-    text = (text or "").lower()
-
     semantic = semantic or {}
     cognition = cognition or {}
     response_decision = response_decision or {}
 
     # =================================================
-    # 🔥 BLOCK PROTECTION
+    # 🔥 BLOCKED
     # =====================================================
 
     if should_block_external_lookup(
 
-        text,
         semantic,
         cognition,
         response_decision
@@ -470,50 +330,51 @@ def should_use_external_knowledge(
         return False
 
     # =================================================
-    # 🌐 REALTIME NEED
+    # 🔥 REALTIME
     # =====================================================
 
     if detect_realtime_need(
         text,
         semantic
     ):
-
         return True
 
     # =================================================
-    # 🔥 EXECUTION SUPPORT MODE
+    # 🔥 EXECUTION SUPPORT
+    # =====================================================
+
+    if should_support_execution(
+        semantic,
+        cognition
+    ):
+        return True
+
+    # =================================================
+    # 🔥 SEMANTIC KNOWLEDGE
     # =====================================================
 
     if semantic.get(
-        "should_execute"
+        "requires_external_knowledge"
     ):
+        return True
 
-        if should_support_execution(
-            text,
-            semantic,
-            cognition
-        ):
+    if semantic.get(
+        "knowledge_lookup"
+    ):
+        return True
 
-            return True
+    if semantic.get(
+        "travel_lookup"
+    ):
+        return True
+
+    if semantic.get(
+        "reference_lookup"
+    ):
+        return True
 
     # =================================================
-    # 🔥 VISUAL GENERATION SUPPORT
-    # =====================================================
-
-    if response_decision.get(
-        "should_generate"
-    ):
-
-        if should_support_execution(
-            text,
-            semantic,
-            cognition
-        ):
-
-            return True
-
-    # =================================================
-    # 🔥 ROOM SUPPORT MODE
+    # 🔥 ROOM SUPPORT
     # =====================================================
 
     room = semantic.get(
@@ -521,76 +382,20 @@ def should_use_external_knowledge(
     )
 
     if room in [
-        "science",
-        "image_generate",
-        "image_edit"
+
+        "knowledge",
+        "travel",
+        "internet",
+        "research",
+        "navigation"
     ]:
-
-        if should_support_execution(
-            text,
-            semantic,
-            cognition
-        ):
-
-            return True
-
-    # =================================================
-    # 🧠 USER EXPLORATION
-    # =====================================================
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        if cognition.get(
-            "wants_dialog",
-            0.0
-        ) >= 0.82:
-
-            return True
-
-    # =================================================
-    # 🧠 KNOWLEDGE TOPICS
-    # =====================================================
-
-    for topic in WEB_KNOWLEDGE_TOPICS:
-
-        if topic in text:
-            return True
-
-    # =================================================
-    # 🧠 HIGH AMBIGUITY
-    # =====================================================
-
-    if semantic.get(
-        "ambiguity_level",
-        0.0
-    ) >= 0.82:
 
         return True
 
     return False
 
 # =====================================================
-# 🧠 LEGACY PROMPT LAYER
-# =====================================================
-
-"""
-Старый prompt-layer сохранён
-для continuity architecture.
-
-Но:
-- больше НЕ является главным
-  internet source;
-- НЕ используется для URL generation;
-- НЕ имеет authority над ссылками.
-
-Теперь:
-real web layer имеет приоритет.
-"""
-
-# =====================================================
-# 🧠 EXTERNAL KNOWLEDGE REQUEST
+# 🧠 PROMPT BUILD
 # =====================================================
 
 def build_external_prompt(
@@ -607,63 +412,32 @@ def build_external_prompt(
         "dialog"
     )
 
-    emotional = cognition.get(
-        "emotional_trajectory",
-        "neutral"
-    )
-
     return f"""
-Ты помогаешь cognitive assistant April.
+Ты — external support layer April.
 
 ВАЖНО:
-- НЕ отвечай как отдельный ИИ.
-- НЕ roleplay.
-- НЕ используй фразы:
-  "как ИИ",
-  "я не могу",
-  "я модель".
-
-КРИТИЧЕСКИ ВАЖНО:
-- НЕ придумывай ссылки.
+- НЕ перехватывай orchestration;
+- НЕ ломай trajectory;
+- НЕ отвечай как отдельный AI;
+- НЕ создавай renderer artifacts;
+- НЕ выдумывай ссылки;
 - НЕ hallucinate URL.
-- НЕ выдумывай платформы.
-- НЕ выдумывай маршруты.
-- НЕ выдумывай местоположение.
 
-Если live информация
-не подтверждена:
-- честно скажи это.
-
-Нужна:
-- краткая,
-- полезная,
-- актуальная,
-- человеческая информация.
-
-Тон:
-- естественный,
-- мягкий,
-- readable,
-- informative.
-
-Эмоциональный контекст:
-{emotional}
-
-Текущий режим:
+Режим:
 {goal_stage}
 
-Запрос пользователя:
+Запрос:
 {text}
 
-Дай:
-- ключевые факты,
-- contextual enrichment,
-- verified internet context,
-- без воды.
+Нужны:
+- verified facts;
+- lightweight enrichment;
+- useful context;
+- concise information.
 """
 
 # =====================================================
-# 🌐 REAL EXTERNAL KNOWLEDGE FETCH
+# 🌐 FETCH KNOWLEDGE
 # =====================================================
 
 def fetch_external_knowledge(
@@ -674,9 +448,9 @@ def fetch_external_knowledge(
 
     try:
 
-        # =============================================
+        # =================================================
         # 🌐 REAL WEB SEARCH
-        # =============================================
+        # =====================================================
 
         web_results = search_web(
             text
@@ -685,10 +459,6 @@ def fetch_external_knowledge(
         summary = build_search_summary(
             web_results
         )
-
-        # =============================================
-        # 🌐 VERIFIED RESULTS
-        # =============================================
 
         if summary:
 
@@ -717,11 +487,12 @@ def fetch_external_knowledge(
                 "used_real_web": True
             }
 
-        # =============================================
-        # 🧠 SAFE FALLBACK
-        # =============================================
+        # =================================================
+        # 🔥 SAFE FALLBACK
+        # =====================================================
 
         prompt = build_external_prompt(
+
             text,
             semantic,
             cognition
@@ -731,21 +502,7 @@ def fetch_external_knowledge(
 
             model="gpt-4o-mini",
 
-            input=[
-
-                {
-                    "role": "system",
-
-                    "content":
-                        "Ты knowledge layer April."
-                },
-
-                {
-                    "role": "user",
-
-                    "content": prompt
-                }
-            ],
+            input=prompt,
 
             temperature=0.2,
 
@@ -796,7 +553,7 @@ def fetch_external_knowledge(
         }
 
 # =====================================================
-# 🧠 KNOWLEDGE ENRICHMENT
+# 🧠 ENRICHMENT
 # =====================================================
 
 def enrich_with_external_knowledge(
@@ -820,34 +577,18 @@ def enrich_with_external_knowledge(
     if not knowledge:
         return base_response
 
-    # =================================================
-    # 🌐 LIVE CONTEXT LABEL
-    # =====================================================
-
-    if knowledge_result.get(
-        "live_intent"
-    ):
-
-        knowledge = (
-            "🌍 Live internet context:\n\n"
-            + knowledge
-        )
-
-    # =================================================
-    # 🔥 SAFE MERGE
-    # =====================================================
-
     if not base_response:
         return knowledge
 
     return (
+
         base_response.strip()
         + "\n\n"
         + knowledge
     )
 
 # =====================================================
-# 🧠 EXTERNAL CONTEXT BUILDER
+# 🧠 CONTEXT BUILD
 # =====================================================
 
 def build_external_context(
@@ -858,6 +599,7 @@ def build_external_context(
 ):
 
     if not should_use_external_knowledge(
+
         text,
         semantic,
         cognition,
@@ -875,6 +617,7 @@ def build_external_context(
         }
 
     result = fetch_external_knowledge(
+
         text,
         semantic,
         cognition
