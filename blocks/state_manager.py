@@ -1,26 +1,46 @@
 # blocks/state_manager.py
 
+import time
+
 state = {}
 
+# =====================================================
 # 🔥 STABLE IMAGE STORAGE
+# =====================================================
+
 image_storage = {}
 
 ADMIN_ID = 2016592532
+
+# =====================================================
+# 🔥 LIMITS
+# =====================================================
+
+SESSION_MEMORY_LIMIT = 1600
+
+VISUAL_HISTORY_LIMIT = 8
+
+IMAGE_MEMORY_LIMIT = 5
 
 
 # =====================================================
 # 🔥 DIALOG LIMITS
 # =====================================================
 
-def get_dialog_limit(user_id, plan):
+def get_dialog_limit(
+    user_id,
+    plan
+):
 
     if user_id == ADMIN_ID:
         return 50
 
     return {
+
         "free": 10,
         "lite": 20,
         "premium": 30
+
     }.get(plan, 10)
 
 
@@ -51,8 +71,24 @@ def safe_list(value):
     return []
 
 
+def compact_dialog_message(
+    role,
+    content
+):
+
+    return {
+
+        "role": role,
+
+        "content": safe_trim_text(
+            content,
+            320
+        )
+    }
+
+
 # =====================================================
-# 🔥 DEFAULT SCENE STATE
+# 🔥 DEFAULT SCENE
 # =====================================================
 
 def build_default_scene():
@@ -60,94 +96,50 @@ def build_default_scene():
     return {
 
         # =================================================
-        # 🔥 CORE SCENE
-        # =================================================
+        # 🔥 CORE
+        # =====================================================
+
+        "mode": "idle",
 
         "type": None,
 
         "goal": None,
 
-        "trajectory": None,
-
-        "continuity": True,
-
-        "status": "active",
+        "continuity_mode": None,
 
         # =================================================
-        # 🔥 PRIMARY CONTINUITY
-        # =================================================
+        # 🔥 RENDER
+        # =====================================================
 
-        "primary_anchor": None,
+        "render_type": None,
 
-        "anchor_type": None,
+        "renderer_active": False,
 
-        "anchor_priority": 0.0,
-
-        "anchor_updated_at": None,
-
-        # =================================================
-        # 🔥 USER
-        # =================================================
-
-        "user_intent": None,
-
-        "user_direction": None,
-
-        "user_expectation": None,
-
-        # =================================================
-        # 🔥 VISUAL
-        # =================================================
-
-        "visual_mode": False,
-
-        "visual_target": None,
-
-        "visual_continuity": False,
-
-        # =================================================
-        # 🔥 EXECUTION
-        # =================================================
-
-        "execution_mode": False,
-
-        "execution_target": None,
+        "visual_active": False,
 
         # =================================================
         # 🔥 FLOW
-        # =================================================
+        # =====================================================
 
-        "active_room": None,
-
-        "confirmed_direction": None,
-
-        "last_completed_step": None,
-
-        # =================================================
-        # 🔥 STABILITY
-        # =================================================
-
-        "confidence": 0.0,
-
-        "last_update": None,
-
-        # =================================================
-        # 🔥 APRIL CONTINUITY
-        # =================================================
-
-        "semantic_continuity": True,
-
-        "continuity_window_active": True,
+        "active_flow": None,
 
         "trajectory_locked": False,
 
-        "visual_scene_active": False,
+        # =================================================
+        # 🔥 ANCHOR
+        # =====================================================
 
-        "scene_identity": "stable",
+        "anchor": None,
 
-        "orchestration_mode": "stable",
+        "anchor_type": None,
 
-        "preserve_visual_space": True
+        # =================================================
+        # 🔥 STATE
+        # =====================================================
+
+        "confidence": 0.0,
+
+        "updated_at": None
     }
 
 
@@ -161,25 +153,23 @@ def build_default_state():
 
         # =================================================
         # 🔥 DIALOG
-        # =================================================
+        # =====================================================
 
         "dialog": [],
 
         "memory_summary": "",
 
-        "dialog_state": {},
-
         # =================================================
         # 🔥 IMAGE
-        # =================================================
+        # =====================================================
 
         "image_context": None,
 
         "image_memory": [],
 
         # =================================================
-        # 🔥 VISUAL SCENE MEMORY
-        # =================================================
+        # 🔥 VISUAL
+        # =====================================================
 
         "active_visual_scene": None,
 
@@ -187,15 +177,13 @@ def build_default_state():
 
         # =================================================
         # 🔥 FLOW
-        # =================================================
+        # =====================================================
 
         "active_flow": None,
 
-        "passive_memory": [],
-
         # =================================================
-        # 🔥 REQUEST STATE
-        # =================================================
+        # 🔥 EXECUTION
+        # =====================================================
 
         "awaiting": False,
 
@@ -204,42 +192,32 @@ def build_default_state():
         "task_type": None,
 
         # =================================================
-        # 🔥 UNIFIED SCENE
-        # =================================================
+        # 🔥 SCENE
+        # =====================================================
 
         "scene_state": build_default_scene(),
 
         # =================================================
         # 🔥 CACHE
-        # =================================================
+        # =====================================================
 
         "image_analysis": None,
 
         "image_analysis_path": None,
 
-        "last_scene_object": None,
-
         # =================================================
         # 🔥 META
-        # =================================================
+        # =====================================================
 
         "meta": {
-
-            "last_intent": None,
-
-            "last_action": None,
-
-            "last_entity": None,
 
             "last_user_message": None,
 
             "last_bot_message": None,
 
-            "identity_initialized": False,
+            "last_entity": None,
 
-            "identity_name": "April",
-
-            "identity_mode": "integrated"
+            "last_intent": None
         }
     }
 
@@ -259,42 +237,22 @@ def get_state(user_id):
     state_obj = state[user_id]
 
     # =================================================
-    # 🔥 SAFETY BACKFILL
-    # =================================================
+    # 🔥 SAFE BACKFILL
+    # =====================================================
+
+    defaults = build_default_state()
+
+    for key, value in defaults.items():
+
+        if key not in state_obj:
+
+            state_obj[key] = value
 
     if "scene_state" not in state_obj:
 
-        state_obj["scene_state"] = (
-            build_default_scene()
-        )
-
-    if "meta" not in state_obj:
-
-        state_obj["meta"] = {}
-
-    if "active_visual_scene" not in state_obj:
-
         state_obj[
-            "active_visual_scene"
-        ] = None
-
-    if "visual_scene_history" not in state_obj:
-
-        state_obj[
-            "visual_scene_history"
-        ] = []
-
-    if "image_memory" not in state_obj:
-
-        state_obj[
-            "image_memory"
-        ] = []
-
-    if "dialog" not in state_obj:
-
-        state_obj[
-            "dialog"
-        ] = []
+            "scene_state"
+        ] = build_default_scene()
 
     return state_obj
 
@@ -313,10 +271,14 @@ def get_scene_state(user_id):
 
 def update_scene_state(
     user_id,
-    updates: dict
+    updates
 ):
 
-    if not isinstance(updates, dict):
+    if not isinstance(
+        updates,
+        dict
+    ):
+
         return
 
     state_obj = get_state(user_id)
@@ -326,57 +288,57 @@ def update_scene_state(
         {}
     )
 
+    allowed_keys = [
+
+        "mode",
+        "type",
+        "goal",
+        "continuity_mode",
+        "render_type",
+        "renderer_active",
+        "visual_active",
+        "active_flow",
+        "trajectory_locked",
+        "anchor",
+        "anchor_type",
+        "confidence",
+        "updated_at"
+    ]
+
     for key, value in updates.items():
 
-        scene[key] = value
+        if key in allowed_keys:
 
-    state_obj["scene_state"] = scene
+            scene[key] = value
+
+    state_obj[
+        "scene_state"
+    ] = scene
 
 
 def clear_scene_state(user_id):
 
     state_obj = get_state(user_id)
 
-    old_scene = state_obj.get(
-        "scene_state",
-        {}
-    )
-
-    preserved_visual_scene = state_obj.get(
+    visual_scene = state_obj.get(
         "active_visual_scene"
     )
 
     new_scene = build_default_scene()
 
     # =================================================
-    # 🔥 VISUAL CONTINUITY PRESERVE
-    # =================================================
+    # 🔥 VISUAL CONTINUITY
+    # =====================================================
 
-    if preserved_visual_scene:
+    if visual_scene:
 
         new_scene[
-            "visual_continuity"
+            "visual_active"
         ] = True
 
         new_scene[
-            "visual_scene_active"
-        ] = True
-
-    if old_scene.get(
-        "primary_anchor"
-    ):
-
-        new_scene[
-            "primary_anchor"
-        ] = old_scene.get(
-            "primary_anchor"
-        )
-
-        new_scene[
-            "anchor_type"
-        ] = old_scene.get(
-            "anchor_type"
-        )
+            "continuity_mode"
+        ] = "visual"
 
     state_obj[
         "scene_state"
@@ -396,42 +358,37 @@ def set_image_context(
 
     state_obj = get_state(user_id)
 
-    state_obj["image_context"] = ctx
+    state_obj[
+        "image_context"
+    ] = ctx
 
-    # 🔥 SCENE LINK
+    # =================================================
+    # 🔥 SCENE SYNC
+    # =====================================================
+
     scene = state_obj.get(
         "scene_state",
         {}
     )
 
-    scene["visual_mode"] = True
+    scene[
+        "visual_active"
+    ] = True
 
-    scene["visual_continuity"] = True
+    scene[
+        "continuity_mode"
+    ] = "visual"
 
-    scene["visual_scene_active"] = True
-
-    if isinstance(ctx, dict):
-
-        hint = (
-            ctx.get("hint")
-            or ctx.get("prompt")
-        )
-
-        if hint:
-
-            scene["visual_target"] = (
-                safe_trim_text(
-                    hint,
-                    120
-                )
-            )
-
-    state_obj["scene_state"] = scene
+    state_obj[
+        "scene_state"
+    ] = scene
 
 
 def get_image_context(user_id):
 
-    ctx = image_storage.get(user_id)
+    ctx = image_storage.get(
+        user_id
+    )
 
     if ctx:
         return ctx
@@ -447,7 +404,7 @@ def get_image_context(user_id):
 
 def set_awaiting(
     user_id,
-    value: bool
+    value
 ):
 
     get_state(user_id)[
@@ -500,74 +457,66 @@ def update_memory_summary(
         ""
     )
 
-    updated = (
+    combined = (
+
         current
-        + " "
-        + str(new_text)
+        + " | "
+        + safe_trim_text(
+            new_text,
+            240
+        )
+
     ).strip()
 
-    # 🔥 LIMIT
-    if len(updated) > 1200:
+    if len(combined) > SESSION_MEMORY_LIMIT:
 
-        updated = updated[-1200:]
+        combined = combined[
+            -SESSION_MEMORY_LIMIT:
+        ]
 
     state_obj[
         "memory_summary"
-    ] = updated
+    ] = combined
 
 
 # =====================================================
-# 🔥 VISUAL CONTINUITY SUMMARY
+# 🔥 VISUAL SUMMARY
 # =====================================================
 
 def build_visual_scene_summary(
     state_obj
 ):
 
-    visual_scene = state_obj.get(
+    scene = state_obj.get(
         "active_visual_scene"
     )
 
-    if not visual_scene:
-        return ""
+    if not scene:
+        return {}
 
-    objects = visual_scene.get(
-        "objects",
-        []
-    )
+    return {
 
-    scene_type = visual_scene.get(
-        "scene_type"
-    )
+        "type":
+            scene.get(
+                "scene_type"
+            ),
 
-    colors = visual_scene.get(
-        "colors",
-        []
-    )
+        "objects":
+            safe_list(
+                scene.get(
+                    "objects",
+                    []
+                )
+            )[:5],
 
-    parts = []
-
-    if scene_type:
-
-        parts.append(
-            f"SCENE:{scene_type}"
-        )
-
-    if objects:
-
-        parts.append(
-            "OBJECTS:"
-            + ",".join(objects[:5])
-        )
-
-    if colors:
-
-        parts.append(
-            "COLORS:"
-            + ",".join(colors[:5])
-        )
-
-    return " | ".join(parts)
+        "colors":
+            safe_list(
+                scene.get(
+                    "colors",
+                    []
+                )
+            )[:5]
+    }
 
 
 # =====================================================
@@ -586,131 +535,91 @@ def compress_dialog_to_summary(
     if not dialog:
         return
 
-    # =================================================
-    # 🔥 LAST IMPORTANT
-    # =================================================
+    recent = dialog[-8:]
 
-    last_messages = dialog[-8:]
+    compact_dialog = []
 
-    summary_parts = []
+    for msg in recent:
 
-    for m in last_messages:
+        compact_dialog.append({
 
-        content = safe_trim_text(
-            m.get("content", ""),
-            160
-        )
+            "role":
+                msg.get("role"),
 
-        if content:
+            "content":
 
-            summary_parts.append(
-                content
-            )
-
-    short_summary = " | ".join(
-        summary_parts
-    )
-
-    # =================================================
-    # 🔥 MEMORY SUMMARY
-    # =================================================
-
-    existing = state_obj.get(
-        "memory_summary",
-        ""
-    )
-
-    combined = (
-        existing
-        + " | "
-        + short_summary
-    ).strip()
-
-    if len(combined) > 1600:
-
-        combined = combined[-1600:]
-
-    state_obj[
-        "memory_summary"
-    ] = combined
-
-    # =================================================
-    # 🔥 SCENE PROTECTION
-    # =================================================
+                safe_trim_text(
+                    msg.get(
+                        "content",
+                        ""
+                    ),
+                    180
+                )
+        })
 
     scene = state_obj.get(
         "scene_state",
         {}
     )
 
-    protected_context = []
-
-    # =================================================
-    # 🔥 PRIMARY ANCHOR PROTECTION
-    # =================================================
-
-    primary_anchor = scene.get(
-        "primary_anchor"
-    )
-
-    anchor_type = scene.get(
-        "anchor_type"
-    )
-
-    if primary_anchor:
-
-        protected_context.append(
-
-            f"ANCHOR:{anchor_type}:{primary_anchor}"
-        )
-
-    if scene.get("goal"):
-
-        protected_context.append(
-            f"GOAL:{scene['goal']}"
-        )
-
-    if scene.get("trajectory"):
-
-        protected_context.append(
-            f"FLOW:{scene['trajectory']}"
-        )
-
-    # =================================================
-    # 🔥 VISUAL CONTINUITY PROTECTION
-    # =================================================
-
-    visual_summary = (
-        build_visual_scene_summary(
-            state_obj
-        )
-    )
-
-    if visual_summary:
-
-        protected_context.append(
-            visual_summary
-        )
-
-    protected_text = " | ".join(
-        protected_context
+    visual = build_visual_scene_summary(
+        state_obj
     )
 
     # =================================================
-    # 🔥 NEW DIALOG
-    # =================================================
+    # 🔥 MACHINE SUMMARY
+    # =====================================================
 
-    compressed_content = (
-        protected_text
-        + "\n"
-        + short_summary
-    ).strip()
+    machine_summary = {
+
+        "scene": {
+
+            "type":
+                scene.get("type"),
+
+            "goal":
+                scene.get("goal"),
+
+            "flow":
+                scene.get(
+                    "active_flow"
+                ),
+
+            "continuity":
+                scene.get(
+                    "continuity_mode"
+                ),
+
+            "render":
+                scene.get(
+                    "render_type"
+                )
+        },
+
+        "visual":
+            visual,
+
+        "dialog":
+            compact_dialog
+    }
+
+    state_obj[
+        "memory_summary"
+    ] = str(
+        machine_summary
+    )[
+        -SESSION_MEMORY_LIMIT:
+    ]
+
+    # =================================================
+    # 🔥 SAFE DIALOG RESET
+    # =====================================================
 
     state_obj["dialog"] = [{
 
         "role": "system",
 
-        "content": compressed_content
+        "content": "[COMPRESSED_MEMORY]"
     }]
 
     print(
@@ -718,12 +627,12 @@ def compress_dialog_to_summary(
     )
 
     print(
-        "🧠 CONTINUITY PRESERVED"
+        "🧠 MACHINE MEMORY UPDATED"
     )
 
 
 # =====================================================
-# 🔥 IMAGE MEMORY CLEAN
+# 🔥 IMAGE MEMORY
 # =====================================================
 
 def trim_image_memory(
@@ -731,28 +640,24 @@ def trim_image_memory(
 ):
 
     memory = safe_list(
+
         state_obj.get(
             "image_memory",
             []
         )
     )
 
-    if not memory:
-        return
-
-    if len(memory) > 5:
+    if len(memory) > IMAGE_MEMORY_LIMIT:
 
         state_obj[
             "image_memory"
-        ] = memory[-5:]
-
-        print(
-            "🧹 IMAGE MEMORY TRIMMED"
-        )
+        ] = memory[
+            -IMAGE_MEMORY_LIMIT:
+        ]
 
 
 # =====================================================
-# 🔥 VISUAL HISTORY CLEAN
+# 🔥 VISUAL HISTORY
 # =====================================================
 
 def trim_visual_history(
@@ -760,21 +665,20 @@ def trim_visual_history(
 ):
 
     history = safe_list(
+
         state_obj.get(
             "visual_scene_history",
             []
         )
     )
 
-    if len(history) > 8:
+    if len(history) > VISUAL_HISTORY_LIMIT:
 
         state_obj[
             "visual_scene_history"
-        ] = history[-8:]
-
-        print(
-            "🧹 VISUAL HISTORY TRIMMED"
-        )
+        ] = history[
+            -VISUAL_HISTORY_LIMIT:
+        ]
 
 
 # =====================================================
@@ -792,18 +696,22 @@ def add_dialog(
 
     state_obj = get_state(user_id)
 
-    dialog = state_obj["dialog"]
+    dialog = state_obj.get(
+        "dialog",
+        []
+    )
 
-    dialog.append({
+    dialog.append(
 
-        "role": role,
-
-        "content": content
-    })
+        compact_dialog_message(
+            role,
+            content
+        )
+    )
 
     # =================================================
-    # 🔥 META UPDATE
-    # =================================================
+    # 🔥 META
+    # =====================================================
 
     meta = state_obj.get(
         "meta",
@@ -814,65 +722,40 @@ def add_dialog(
 
         meta[
             "last_user_message"
-        ] = content
+        ] = safe_trim_text(
+            content,
+            320
+        )
 
     else:
 
         meta[
             "last_bot_message"
-        ] = content
+        ] = safe_trim_text(
+            content,
+            320
+        )
 
     state_obj["meta"] = meta
 
     # =================================================
-    # 🔥 SCENE UPDATE
-    # =================================================
+    # 🔥 LIMIT
+    # =====================================================
 
-    scene = state_obj.get(
-        "scene_state",
-        {}
+    plan = get_user_plan(
+        user_id
     )
-
-    if role == "user":
-
-        scene["last_update"] = (
-            "user"
-        )
-
-    else:
-
-        scene["last_update"] = (
-            "assistant"
-        )
-
-    state_obj[
-        "scene_state"
-    ] = scene
-
-    # =================================================
-    # 🔥 LIMITS
-    # =================================================
-
-    plan = get_user_plan(user_id)
 
     limit = get_dialog_limit(
         user_id,
         plan
     )
 
-    # =================================================
-    # 🔥 COMPRESSION
-    # =================================================
-
     if len(dialog) > limit:
 
         compress_dialog_to_summary(
             state_obj
         )
-
-    # =================================================
-    # 🔥 IMAGE MEMORY
-    # =================================================
 
     trim_image_memory(
         state_obj
@@ -911,14 +794,15 @@ def set_dialog_state(
 
 def set_active_flow(
     user_id,
-    flow: dict
+    flow
 ):
 
     state_obj = get_state(user_id)
 
-    state_obj["active_flow"] = flow
+    state_obj[
+        "active_flow"
+    ] = flow
 
-    # 🔥 SCENE SYNC
     scene = state_obj.get(
         "scene_state",
         {}
@@ -926,70 +810,76 @@ def set_active_flow(
 
     if isinstance(flow, dict):
 
-        scene["trajectory"] = (
-            flow.get("type")
+        flow_type = flow.get(
+            "type"
         )
 
-        scene["goal"] = (
-            safe_trim_text(
-                flow.get("original"),
-                240
-            )
-        )
+        scene[
+            "active_flow"
+        ] = flow_type
 
-        scene["trajectory_locked"] = True
+        scene[
+            "trajectory_locked"
+        ] = True
+
+        scene[
+            "goal"
+        ] = safe_trim_text(
+
+            flow.get(
+                "original"
+            ),
+
+            240
+        )
 
         # =================================================
-        # 🔥 PRIMARY ANCHOR SYNC
-        # =================================================
+        # 🔥 RENDER MODE
+        # =====================================================
 
-        primary_anchor = flow.get(
-            "primary_anchor"
-        )
+        if flow_type in [
 
-        anchor_type = flow.get(
-            "anchor_type"
-        )
-
-        if primary_anchor:
-
-            scene["primary_anchor"] = (
-                primary_anchor
-            )
-
-            scene["anchor_type"] = (
-                anchor_type
-            )
-
-            scene["anchor_priority"] = (
-                flow.get(
-                    "anchor_priority",
-                    1.0
-                )
-            )
-
-            scene["anchor_updated_at"] = (
-                flow.get(
-                    "timestamp"
-                )
-            )
-
-        scene["continuity"] = True
-
-        if flow.get("type") in [
-
-            "image_generate",
-            "image_edit",
-            "image"
+            "renderer_space",
+            "graph",
+            "formula",
+            "diagram",
+            "table"
         ]:
 
-            scene["visual_mode"] = True
+            scene[
+                "renderer_active"
+            ] = True
 
-            scene["visual_continuity"] = True
+            scene[
+                "render_type"
+            ] = flow_type
 
-            scene["visual_scene_active"] = True
+            scene[
+                "continuity_mode"
+            ] = "renderer"
 
-    state_obj["scene_state"] = scene
+        # =================================================
+        # 🔥 VISUAL MODE
+        # =====================================================
+
+        if flow_type in [
+
+            "image",
+            "image_generate",
+            "image_edit"
+        ]:
+
+            scene[
+                "visual_active"
+            ] = True
+
+            scene[
+                "continuity_mode"
+            ] = "visual"
+
+    state_obj[
+        "scene_state"
+    ] = scene
 
 
 def get_active_flow(user_id):
@@ -1003,43 +893,53 @@ def clear_active_flow(user_id):
 
     state_obj = get_state(user_id)
 
-    active_visual_scene = state_obj.get(
+    visual = state_obj.get(
         "active_visual_scene"
     )
 
-    state_obj["active_flow"] = None
+    state_obj[
+        "active_flow"
+    ] = None
 
     scene = state_obj.get(
         "scene_state",
         {}
     )
 
-    scene["trajectory"] = None
+    scene[
+        "active_flow"
+    ] = None
 
-    scene["execution_mode"] = False
-
-    scene["trajectory_locked"] = False
+    scene[
+        "trajectory_locked"
+    ] = False
 
     # =================================================
-    # 🔥 VISUAL CONTINUITY SAFE
-    # =================================================
+    # 🔥 SAFE VISUAL
+    # =====================================================
 
-    if active_visual_scene:
+    if visual:
 
-        scene["visual_continuity"] = True
+        scene[
+            "visual_active"
+        ] = True
 
-        scene["visual_scene_active"] = True
+        scene[
+            "continuity_mode"
+        ] = "visual"
 
-    state_obj["scene_state"] = scene
+    state_obj[
+        "scene_state"
+    ] = scene
 
 
 # =====================================================
-# 🔥 META HELPERS
+# 🔥 ENTITY
 # =====================================================
 
 def set_last_entity(
     user_id,
-    entity: dict
+    entity
 ):
 
     state_obj = get_state(user_id)
@@ -1049,44 +949,13 @@ def set_last_entity(
         {}
     )
 
-    meta["last_entity"] = entity
+    meta[
+        "last_entity"
+    ] = entity
 
-    state_obj["meta"] = meta
-
-    # 🔥 SCENE ENTITY LINK
-    scene = state_obj.get(
-        "scene_state",
-        {}
-    )
-
-    if isinstance(entity, dict):
-
-        entity_type = entity.get(
-            "type"
-        )
-
-        if entity_type:
-
-            scene[
-                "confirmed_direction"
-            ] = entity_type
-
-            if entity_type == "image":
-
-                scene[
-                    "visual_mode"
-                ] = True
-
-                scene[
-                    "visual_scene_active"
-                ] = True
-
-    state_obj["scene_state"] = scene
-
-    print(
-        "🧠 META UPDATED:",
-        meta
-    )
+    state_obj[
+        "meta"
+    ] = meta
 
 
 def get_last_entity(user_id):
