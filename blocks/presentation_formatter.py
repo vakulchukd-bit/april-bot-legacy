@@ -1,5 +1,3 @@
-# blocks/presentation_formatter.py
-
 # =====================================================
 # 🧠 APRIL PRESENTATION FORMATTER
 # =====================================================
@@ -7,30 +5,39 @@
 """
 APRIL SPACE PRESENTATION LAYER
 
-SAFE HYBRID PRESENTATION PIPELINE.
+BEHAVIOR-AWARE SAFE PRESENTATION PIPELINE
 
 Этот слой теперь:
 
 ✅ НЕ ломает renderer payload
-✅ НЕ сериализует scene objects в text
+✅ НЕ сериализует scene objects
 ✅ НЕ flatten'ит multimodal blocks
 ✅ НЕ уничтожает graph/formula/code payload
 ✅ НЕ вмешивается в renderer execution
 ✅ НЕ мутирует artifact objects
 ✅ НЕ ломает future spatial architecture
 
-Он делает только:
+И теперь дополнительно:
 
-- safe text cleanup
-- calm readability
-- stable text formatting
-- continuity-aware presentation
-- semantic pacing
-- response ordering stabilization
-- formatting ONLY text fragments
+✅ понимает behavioral field
+✅ регулирует плотность ответа
+✅ suppress robotic rhythm
+✅ stabilizes latent guidance
+✅ controls pacing
+✅ reduces dialogue bloat
+✅ preserves calm continuity
 
-Renderer / graph / formula / code / links:
-→ проходят через слой БЕЗ уничтожения структуры.
+Этот слой НЕ:
+- personality prompt;
+- emotional inflator;
+- chatbot beautifier;
+- corporate formatter.
+
+Он теперь:
+- behavior-aware formatter;
+- continuity pacing layer;
+- semantic density stabilizer;
+- latent guidance presenter.
 """
 
 import re
@@ -57,6 +64,25 @@ def safe_format_log(msg):
 
 
 # =====================================================
+# 🔥 SAFE HELPERS
+# =====================================================
+
+def clamp(
+    value,
+    minimum=0.0,
+    maximum=1.0
+):
+
+    if value < minimum:
+        return minimum
+
+    if value > maximum:
+        return maximum
+
+    return value
+
+
+# =====================================================
 # 🔥 SAFE PAYLOAD DETECTION
 # =====================================================
 
@@ -64,10 +90,6 @@ def is_renderer_payload(value):
 
     if not isinstance(value, (dict, list)):
         return False
-
-    # =================================================
-    # 🔥 DIRECT TYPE
-    # =====================================================
 
     if isinstance(value, dict):
 
@@ -92,10 +114,6 @@ def is_renderer_payload(value):
         ]:
 
             return True
-
-    # =================================================
-    # 🔥 LIST OF BLOCKS
-    # =====================================================
 
     if isinstance(value, list):
 
@@ -134,10 +152,6 @@ def is_renderer_payload(value):
 
 def normalize_text_payload(value):
 
-    # =================================================
-    # 🔥 KEEP RENDERER OBJECTS ALIVE
-    # =====================================================
-
     if is_renderer_payload(value):
 
         safe_format_log(
@@ -151,10 +165,6 @@ def normalize_text_payload(value):
 
     if isinstance(value, str):
         return value
-
-    # =================================================
-    # 🔥 SAFE NON-TEXT
-    # =====================================================
 
     if isinstance(value, (dict, list)):
 
@@ -262,6 +272,67 @@ def is_code_payload(text):
 
 
 # =====================================================
+# 🔥 BEHAVIOR EXTRACTION
+# =====================================================
+
+def extract_behavior_field(
+    cognition=None
+):
+
+    cognition = cognition or {}
+
+    behavior = cognition.get(
+        "behavior_state",
+        {}
+    )
+
+    return {
+
+        "response_density":
+
+            behavior.get(
+                "response_density",
+                0.5
+            ),
+
+        "initiative_level":
+
+            behavior.get(
+                "initiative_level",
+                0.35
+            ),
+
+        "latent_guidance":
+
+            behavior.get(
+                "latent_guidance",
+                0.6
+            ),
+
+        "robotic_suppression":
+
+            behavior.get(
+                "robotic_suppression",
+                0.9
+            ),
+
+        "humanization":
+
+            behavior.get(
+                "humanization",
+                0.6
+            ),
+
+        "exploration_support":
+
+            behavior.get(
+                "exploration_support",
+                0.5
+            )
+    }
+
+
+# =====================================================
 # 🔥 MARKDOWN CLEANUP
 # =====================================================
 
@@ -324,43 +395,139 @@ def split_into_sections(text):
 
 
 # =====================================================
-# 🔥 CONTINUITY DETECTION
+# 🔥 DIALOG BLOAT SUPPRESSION
 # =====================================================
 
-def detect_multi_topic(
-    cognition=None
+def suppress_dialog_bloat(
+    text,
+    behavior=None
 ):
 
-    cognition = cognition or {}
+    behavior = behavior or {}
 
-    return cognition.get(
-        "tracks_multiple_topics",
-        False
+    if not isinstance(text, str):
+        return text
+
+    density = behavior.get(
+        "response_density",
+        0.5
     )
 
+    if density >= 0.55:
+        return text
 
-def detect_order_preservation(
-    cognition=None
+    replacements = {
+
+        "Я думаю, что": "",
+        "Мне кажется, что": "",
+        "Стоит отметить, что": "",
+        "Можно сказать, что": "",
+        "Важно понимать, что": "",
+        "Следует отметить, что": ""
+    }
+
+    for old, new in replacements.items():
+
+        text = text.replace(
+            old,
+            new
+        )
+
+    return text.strip()
+
+
+# =====================================================
+# 🔥 ROBOTIC SUPPRESSION
+# =====================================================
+
+def suppress_robotic_phrasing(
+    text,
+    behavior=None
 ):
 
-    cognition = cognition or {}
+    behavior = behavior or {}
 
-    return cognition.get(
-        "preserve_question_order",
-        False
+    if not isinstance(text, str):
+        return text
+
+    suppression = behavior.get(
+        "robotic_suppression",
+        0.9
     )
 
+    if suppression < 0.5:
+        return text
 
-def detect_dialogue_alive(
-    cognition=None
+    robotic = [
+
+        "Конечно!",
+        "Отличный вопрос!",
+        "Давай разберемся.",
+        "Я готов помочь.",
+        "Чем еще помочь?",
+        "Буду рад помочь.",
+        "С удовольствием."
+    ]
+
+    for phrase in robotic:
+
+        text = text.replace(
+            phrase,
+            ""
+        )
+
+    return text.strip()
+
+
+# =====================================================
+# 🔥 LATENT GUIDANCE
+# =====================================================
+
+def stabilize_latent_guidance(
+    text,
+    behavior=None
 ):
 
-    cognition = cognition or {}
+    behavior = behavior or {}
 
-    return cognition.get(
-        "dialogue_still_alive",
-        False
+    if not isinstance(text, str):
+        return text
+
+    guidance = behavior.get(
+        "latent_guidance",
+        0.6
     )
+
+    if guidance < 0.65:
+        return text
+
+    sections = split_into_sections(
+        text
+    )
+
+    if not sections:
+        return text
+
+    final = []
+
+    for section in sections:
+
+        cleaned = section.strip()
+
+        if not cleaned:
+            continue
+
+        cleaned = re.sub(
+            r"\?$",
+            ".",
+            cleaned
+        )
+
+        final.append(
+            cleaned
+        )
+
+    return "\n\n".join(final)
 
 
 # =====================================================
@@ -369,14 +536,10 @@ def detect_dialogue_alive(
 
 def stabilize_semantic_flow(
     text,
-    cognition=None
+    behavior=None
 ):
 
-    cognition = cognition or {}
-
-    # =================================================
-    # 🔥 PRESERVE PAYLOADS
-    # =====================================================
+    behavior = behavior or {}
 
     if not isinstance(text, str):
         return text
@@ -387,9 +550,6 @@ def stabilize_semantic_flow(
     sections = split_into_sections(
         text
     )
-
-    if not sections:
-        return text
 
     stabilized = []
 
@@ -412,53 +572,6 @@ def stabilize_semantic_flow(
 
     return "\n\n".join(
         stabilized
-    ).strip()
-
-
-# =====================================================
-# 🔥 ORDER STABILIZATION
-# =====================================================
-
-def preserve_response_order(
-    text,
-    cognition=None
-):
-
-    cognition = cognition or {}
-
-    if not isinstance(text, str):
-        return text
-
-    if not text:
-        return ""
-
-    if not detect_order_preservation(
-        cognition
-    ):
-
-        return text
-
-    sections = split_into_sections(
-        text
-    )
-
-    if not sections:
-        return text
-
-    ordered = []
-
-    for section in sections:
-
-        cleaned = section.strip()
-
-        if cleaned:
-
-            ordered.append(
-                cleaned
-            )
-
-    return "\n\n".join(
-        ordered
     ).strip()
 
 
@@ -503,7 +616,7 @@ def detect_primary_emoji(text):
             if word in t:
                 return emoji
 
-    return "✨"
+    return None
 
 
 # =====================================================
@@ -511,16 +624,11 @@ def detect_primary_emoji(text):
 # =====================================================
 
 def apply_visual_enrichment(
-
     text,
-    cognition=None
+    behavior=None
 ):
 
-    cognition = cognition or {}
-
-    # =================================================
-    # 🔥 PRESERVE NON-TEXT
-    # =====================================================
+    behavior = behavior or {}
 
     if not isinstance(text, str):
         return text
@@ -531,15 +639,12 @@ def apply_visual_enrichment(
     if is_code_payload(text):
         return text
 
-    if len(text) <= 60:
-        return text
-
-    restraint = cognition.get(
-        "assistant_restraint",
-        0.4
+    initiative = behavior.get(
+        "initiative_level",
+        0.35
     )
 
-    if restraint >= 0.7:
+    if initiative <= 0.25:
         return text
 
     emoji = detect_primary_emoji(
@@ -560,7 +665,6 @@ def apply_visual_enrichment(
 # =====================================================
 
 def should_skip_formatting(
-
     text,
     semantic=None,
     response_decision=None
@@ -570,10 +674,6 @@ def should_skip_formatting(
     response_decision = (
         response_decision or {}
     )
-
-    # =================================================
-    # 🔥 KEEP PAYLOADS SAFE
-    # =====================================================
 
     if is_renderer_payload(text):
 
@@ -617,131 +717,15 @@ def should_skip_formatting(
 
 
 # =====================================================
-# 🔥 LIGHT FORMAT
-# =====================================================
-
-def apply_light_formatting(
-
-    text,
-    cognition=None
-):
-
-    cognition = cognition or {}
-
-    if not isinstance(text, str):
-        return text
-
-    sections = split_into_sections(
-        text
-    )
-
-    if not sections:
-        return text
-
-    return "\n\n".join(
-        sections
-    ).strip()
-
-
-# =====================================================
-# 🔥 CONTINUITY VOICE
-# =====================================================
-
-def stabilize_dialogue_presence(
-    text,
-    cognition=None
-):
-
-    cognition = cognition or {}
-
-    if not isinstance(text, str):
-        return text
-
-    if not text:
-        return ""
-
-    return text.strip()
-
-
-# =====================================================
-# 🔥 SMART PRESENTATION
-# =====================================================
-
-def build_smart_presentation(
-
-    text,
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    user_text=""
-):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-    response_decision = (
-        response_decision or {}
-    )
-
-    # =================================================
-    # 🔥 KEEP PAYLOADS SAFE
-    # =====================================================
-
-    if should_skip_formatting(
-
-        text,
-        semantic,
-        response_decision
-    ):
-
-        return text
-
-    text = cleanup_markdown(
-        text
-    )
-
-    text = stabilize_semantic_flow(
-        text,
-        cognition
-    )
-
-    text = preserve_response_order(
-        text,
-        cognition
-    )
-
-    text = apply_light_formatting(
-        text,
-        cognition
-    )
-
-    text = stabilize_dialogue_presence(
-        text,
-        cognition
-    )
-
-    text = apply_visual_enrichment(
-        text,
-        cognition
-    )
-
-    return text.strip()
-
-
-# =====================================================
 # 🔥 FINAL VOICE
 # =====================================================
 
 def apply_april_final_voice(
-
     text,
-    cognition=None
+    behavior=None
 ):
 
-    cognition = cognition or {}
-
-    # =================================================
-    # 🔥 KEEP PAYLOADS SAFE
-    # =====================================================
+    behavior = behavior or {}
 
     if not isinstance(text, str):
         return text
@@ -749,6 +733,12 @@ def apply_april_final_voice(
     text = re.sub(
         r"\n{3,}",
         "\n\n",
+        text
+    )
+
+    text = re.sub(
+        r"[ ]{2,}",
+        " ",
         text
     )
 
@@ -760,7 +750,6 @@ def apply_april_final_voice(
 # =====================================================
 
 def beautify_response(
-
     text,
     semantic=None,
     cognition=None,
@@ -774,12 +763,11 @@ def beautify_response(
         response_decision or {}
     )
 
-    # =================================================
-    # 🔥 KEEP PAYLOADS SAFE
-    # =====================================================
+    behavior = extract_behavior_field(
+        cognition
+    )
 
     if should_skip_formatting(
-
         text,
         semantic,
         response_decision
@@ -787,21 +775,41 @@ def beautify_response(
 
         return text
 
-    formatted = build_smart_presentation(
+    text = cleanup_markdown(
+        text
+    )
 
+    text = suppress_robotic_phrasing(
         text,
-        semantic,
-        cognition,
-        response_decision,
-        user_text
+        behavior
     )
 
-    formatted = apply_april_final_voice(
-        formatted,
-        cognition
+    text = suppress_dialog_bloat(
+        text,
+        behavior
     )
 
-    return formatted
+    text = stabilize_latent_guidance(
+        text,
+        behavior
+    )
+
+    text = stabilize_semantic_flow(
+        text,
+        behavior
+    )
+
+    text = apply_visual_enrichment(
+        text,
+        behavior
+    )
+
+    text = apply_april_final_voice(
+        text,
+        behavior
+    )
+
+    return text
 
 
 # =====================================================
@@ -827,10 +835,6 @@ def format_response_presentation(
 
     final_text = response or text
 
-    # =================================================
-    # 🔥 PRESERVE RENDERER PAYLOAD
-    # =====================================================
-
     if is_renderer_payload(final_text):
 
         safe_format_log(
@@ -839,17 +843,9 @@ def format_response_presentation(
 
         return final_text
 
-    # =================================================
-    # 🔥 SAFE NORMALIZATION
-    # =====================================================
-
     final_text = normalize_text_payload(
         final_text
     )
-
-    # =================================================
-    # 🔥 PAYLOAD SAFE
-    # =====================================================
 
     if not isinstance(final_text, str):
 
@@ -863,7 +859,6 @@ def format_response_presentation(
         return ""
 
     if should_skip_formatting(
-
         final_text,
         semantic,
         response_decision
