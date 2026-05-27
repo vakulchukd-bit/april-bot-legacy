@@ -23,6 +23,43 @@ def detect_response_mode(
         {}
     )
 
+    expected_artifact = semantic.get(
+        "expected_artifact"
+    )
+
+    expected_output_type = semantic.get(
+        "expected_output_type"
+    )
+
+    render_type = semantic.get(
+        "render_type"
+    )
+
+    renderer_payload_expected = semantic.get(
+        "renderer_payload_expected",
+        False
+    )
+
+    renderer_scene_priority = semantic.get(
+        "renderer_scene_priority",
+        False
+    )
+
+    render_intent = semantic.get(
+        "render_intent",
+        False
+    )
+
+    prefer_renderer = semantic.get(
+        "prefer_renderer",
+        False
+    )
+
+    scene_completion_required = semantic.get(
+        "scene_completion_required",
+        False
+    )
+
     # =====================================================
     # 🔥 CONTINUATION SAFETY
     # =====================================================
@@ -57,6 +94,202 @@ def detect_response_mode(
             return "continuation"
 
         return "casual"
+
+    # =====================================================
+    # 🔥 SEMANTIC RENDERER LOCK
+    # =====================================================
+
+    if (
+
+        render_intent
+        or prefer_renderer
+        or renderer_payload_expected
+        or renderer_scene_priority
+    ):
+
+        # =================================================
+        # 🔥 GRAPH
+        # =====================================================
+
+        if (
+
+            expected_artifact == "graph"
+            or expected_output_type == "graph"
+            or render_type == "graph"
+        ):
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "graph"
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_graph"
+
+        # =================================================
+        # 🔥 FORMULA
+        # =====================================================
+
+        if (
+
+            expected_artifact == "formula"
+            or expected_output_type == "formula"
+            or render_type == "formula"
+        ):
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "formula"
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_formula"
+
+        # =================================================
+        # 🔥 TABLE
+        # =====================================================
+
+        if (
+
+            expected_artifact == "table"
+            or expected_output_type == "table"
+            or render_type == "table"
+        ):
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "table"
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_table"
+
+        # =================================================
+        # 🔥 DIAGRAM
+        # =====================================================
+
+        if (
+
+            expected_artifact == "diagram"
+            or expected_output_type == "diagram"
+            or render_type == "diagram"
+        ):
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "diagram"
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_diagram"
+
+        # =================================================
+        # 🔥 CODE
+        # =====================================================
+
+        if (
+
+            expected_artifact == "code"
+            or expected_output_type == "code"
+            or render_type == "code"
+        ):
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "code"
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_code"
+
+        # =================================================
+        # 🔥 LINK
+        # =====================================================
+
+        if (
+
+            expected_artifact == "link"
+            or expected_output_type == "link"
+            or render_type == "link"
+        ):
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "link"
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_link"
+
+        # =================================================
+        # 🔥 MULTI BLOCK
+        # =====================================================
+
+        if scene_completion_required:
+
+            semantic[
+                "multi_scene_response"
+            ] = True
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "renderer_scene_locked"
+            ] = True
+
+            return "renderer_multi"
+
+        # =================================================
+        # 🔥 SAFE GENERIC RENDERER
+        # =====================================================
+
+        semantic[
+            "renderer_payload_expected"
+        ] = True
+
+        semantic[
+            "renderer_scene_locked"
+        ] = True
+
+        return "renderer"
 
     # =====================================================
     # 🔥 RENDERER-FIRST
