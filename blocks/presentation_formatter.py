@@ -7,18 +7,17 @@
 """
 APRIL SPACE PRESENTATION LAYER
 
-CLEAN TEXT-ONLY PIPELINE.
+SAFE HYBRID PRESENTATION PIPELINE.
 
 Этот слой теперь:
 
-✅ НЕ строит scene payload
-✅ НЕ создает link blocks
-✅ НЕ работает с graph payload
-✅ НЕ работает с formula payload
-✅ НЕ мутирует renderer objects
-✅ НЕ занимается multimedia rendering
-✅ НЕ вмешивается в message renderer
-✅ НЕ ломает future BASIC scene system
+✅ НЕ ломает renderer payload
+✅ НЕ сериализует scene objects в text
+✅ НЕ flatten'ит multimodal blocks
+✅ НЕ уничтожает graph/formula/code payload
+✅ НЕ вмешивается в renderer execution
+✅ НЕ мутирует artifact objects
+✅ НЕ ломает future spatial architecture
 
 Он делает только:
 
@@ -26,13 +25,12 @@ CLEAN TEXT-ONLY PIPELINE.
 - calm readability
 - stable text formatting
 - continuity-aware presentation
-- multi-topic stability
 - semantic pacing
 - response ordering stabilization
-- safe plain-text preparation
+- formatting ONLY text fragments
 
-Renderer / scene / links / graphs:
-→ полностью вынесены из этого слоя.
+Renderer / graph / formula / code / links:
+→ проходят через слой БЕЗ уничтожения структуры.
 """
 
 import re
@@ -59,15 +57,111 @@ def safe_format_log(msg):
 
 
 # =====================================================
+# 🔥 SAFE PAYLOAD DETECTION
+# =====================================================
+
+def is_renderer_payload(value):
+
+    if not isinstance(value, (dict, list)):
+        return False
+
+    # =================================================
+    # 🔥 DIRECT TYPE
+    # =====================================================
+
+    if isinstance(value, dict):
+
+        payload_type = value.get(
+            "type"
+        )
+
+        if payload_type in [
+
+            "graph",
+            "formula",
+            "code",
+            "table",
+            "diagram",
+            "layout",
+            "link",
+            "renderer",
+            "scene",
+            "visual",
+            "artifact",
+            "message_block"
+        ]:
+
+            return True
+
+    # =================================================
+    # 🔥 LIST OF BLOCKS
+    # =====================================================
+
+    if isinstance(value, list):
+
+        for item in value:
+
+            if isinstance(item, dict):
+
+                item_type = item.get(
+                    "type"
+                )
+
+                if item_type in [
+
+                    "graph",
+                    "formula",
+                    "code",
+                    "table",
+                    "diagram",
+                    "layout",
+                    "link",
+                    "renderer",
+                    "scene",
+                    "visual",
+                    "artifact",
+                    "message_block"
+                ]:
+
+                    return True
+
+    return False
+
+
+# =====================================================
 # 🔥 NORMALIZE
 # =====================================================
 
 def normalize_text_payload(value):
 
+    # =================================================
+    # 🔥 KEEP RENDERER OBJECTS ALIVE
+    # =====================================================
+
+    if is_renderer_payload(value):
+
+        safe_format_log(
+            "RENDERER PAYLOAD PRESERVED"
+        )
+
+        return value
+
     if value is None:
         return ""
 
     if isinstance(value, str):
+        return value
+
+    # =================================================
+    # 🔥 SAFE NON-TEXT
+    # =====================================================
+
+    if isinstance(value, (dict, list)):
+
+        safe_format_log(
+            "NON-TEXT PAYLOAD PRESERVED"
+        )
+
         return value
 
     try:
@@ -98,7 +192,10 @@ def contains_any(
 
 def looks_like_json(text):
 
-    text = normalize_text_payload(text).strip()
+    if not isinstance(text, str):
+        return False
+
+    text = text.strip()
 
     if not text:
         return False
@@ -125,7 +222,8 @@ def looks_like_json(text):
 
 def is_code_payload(text):
 
-    text = normalize_text_payload(text)
+    if not isinstance(text, str):
+        return False
 
     if not text:
         return False
@@ -169,31 +267,20 @@ def is_code_payload(text):
 
 def cleanup_markdown(text):
 
-    text = normalize_text_payload(text)
+    if not isinstance(text, str):
+        return text
 
     if not text:
         return ""
 
-    # =============================================
-    # REMOVE TELEGRAM LEGACY
-    # =============================================
-
     text = text.replace("**", "")
     text = text.replace("__", "")
-
-    # =============================================
-    # NORMALIZE EMPTY LINES
-    # =============================================
 
     text = re.sub(
         r"\n{3,}",
         "\n\n",
         text
     )
-
-    # =============================================
-    # NORMALIZE SPACES
-    # =============================================
 
     text = re.sub(
         r"[ ]{2,}",
@@ -210,7 +297,8 @@ def cleanup_markdown(text):
 
 def split_into_sections(text):
 
-    text = normalize_text_payload(text)
+    if not isinstance(text, str):
+        return [text]
 
     if not text:
         return []
@@ -286,9 +374,12 @@ def stabilize_semantic_flow(
 
     cognition = cognition or {}
 
-    text = normalize_text_payload(
-        text
-    )
+    # =================================================
+    # 🔥 PRESERVE PAYLOADS
+    # =====================================================
+
+    if not isinstance(text, str):
+        return text
 
     if not text:
         return ""
@@ -309,10 +400,6 @@ def stabilize_semantic_flow(
         if not cleaned:
             continue
 
-        # =============================================
-        # SOFT NORMALIZATION
-        # =============================================
-
         cleaned = re.sub(
             r"\n{2,}",
             "\n",
@@ -322,18 +409,6 @@ def stabilize_semantic_flow(
         stabilized.append(
             cleaned
         )
-
-    # =============================================
-    # MULTI TOPIC STABILITY
-    # =============================================
-
-    if detect_multi_topic(
-        cognition
-    ):
-
-        return "\n\n".join(
-            stabilized
-        ).strip()
 
     return "\n\n".join(
         stabilized
@@ -351,9 +426,8 @@ def preserve_response_order(
 
     cognition = cognition or {}
 
-    text = normalize_text_payload(
-        text
-    )
+    if not isinstance(text, str):
+        return text
 
     if not text:
         return ""
@@ -394,9 +468,10 @@ def preserve_response_order(
 
 def detect_primary_emoji(text):
 
-    t = (
-        text or ""
-    ).lower()
+    if not isinstance(text, str):
+        return None
+
+    t = text.lower()
 
     checks = [
 
@@ -443,28 +518,21 @@ def apply_visual_enrichment(
 
     cognition = cognition or {}
 
-    text = normalize_text_payload(text)
+    # =================================================
+    # 🔥 PRESERVE NON-TEXT
+    # =====================================================
+
+    if not isinstance(text, str):
+        return text
 
     if not text:
         return ""
 
-    # =============================================
-    # CODE SAFE
-    # =============================================
-
     if is_code_payload(text):
         return text
 
-    # =============================================
-    # SHORT SAFE
-    # =============================================
-
     if len(text) <= 60:
         return text
-
-    # =============================================
-    # RESTRAINED MODE
-    # =============================================
 
     restraint = cognition.get(
         "assistant_restraint",
@@ -477,6 +545,9 @@ def apply_visual_enrichment(
     emoji = detect_primary_emoji(
         text
     )
+
+    if not emoji:
+        return text
 
     if text.startswith(emoji):
         return text
@@ -500,17 +571,31 @@ def should_skip_formatting(
         response_decision or {}
     )
 
-    if isinstance(text, dict):
+    # =================================================
+    # 🔥 KEEP PAYLOADS SAFE
+    # =====================================================
+
+    if is_renderer_payload(text):
+
+        safe_format_log(
+            "RENDERER BYPASS"
+        )
+
         return True
 
-    text = normalize_text_payload(text)
+    if isinstance(text, (dict, list)):
+
+        safe_format_log(
+            "OBJECT BYPASS"
+        )
+
+        return True
+
+    if not isinstance(text, str):
+        return True
 
     if not text:
         return True
-
-    # =============================================
-    # JSON
-    # =============================================
 
     if looks_like_json(text):
 
@@ -519,10 +604,6 @@ def should_skip_formatting(
         )
 
         return True
-
-    # =============================================
-    # CODE
-    # =============================================
 
     if is_code_payload(text):
 
@@ -547,24 +628,15 @@ def apply_light_formatting(
 
     cognition = cognition or {}
 
+    if not isinstance(text, str):
+        return text
+
     sections = split_into_sections(
         text
     )
 
     if not sections:
         return text
-
-    # =============================================
-    # ORDER STABILITY
-    # =============================================
-
-    if cognition.get(
-        "should_answer_in_order"
-    ):
-
-        return "\n\n".join(
-            sections
-        ).strip()
 
     return "\n\n".join(
         sections
@@ -582,22 +654,11 @@ def stabilize_dialogue_presence(
 
     cognition = cognition or {}
 
-    text = normalize_text_payload(
-        text
-    )
+    if not isinstance(text, str):
+        return text
 
     if not text:
         return ""
-
-    # =============================================
-    # DIALOGUE ALIVE
-    # =============================================
-
-    if detect_dialogue_alive(
-        cognition
-    ):
-
-        return text.strip()
 
     return text.strip()
 
@@ -621,13 +682,9 @@ def build_smart_presentation(
         response_decision or {}
     )
 
-    if isinstance(text, dict):
-        return text
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return ""
+    # =================================================
+    # 🔥 KEEP PAYLOADS SAFE
+    # =====================================================
 
     if should_skip_formatting(
 
@@ -638,53 +695,29 @@ def build_smart_presentation(
 
         return text
 
-    # =============================================
-    # CLEANUP
-    # =============================================
-
     text = cleanup_markdown(
         text
     )
-
-    # =============================================
-    # FLOW STABILIZATION
-    # =============================================
 
     text = stabilize_semantic_flow(
         text,
         cognition
     )
 
-    # =============================================
-    # ORDER PRESERVATION
-    # =============================================
-
     text = preserve_response_order(
         text,
         cognition
     )
-
-    # =============================================
-    # LIGHT FORMAT
-    # =============================================
 
     text = apply_light_formatting(
         text,
         cognition
     )
 
-    # =============================================
-    # DIALOGUE PRESENCE
-    # =============================================
-
     text = stabilize_dialogue_presence(
         text,
         cognition
     )
-
-    # =============================================
-    # VISUAL ENRICHMENT
-    # =============================================
 
     text = apply_visual_enrichment(
         text,
@@ -706,10 +739,12 @@ def apply_april_final_voice(
 
     cognition = cognition or {}
 
-    if isinstance(text, dict):
-        return text
+    # =================================================
+    # 🔥 KEEP PAYLOADS SAFE
+    # =====================================================
 
-    text = normalize_text_payload(text)
+    if not isinstance(text, str):
+        return text
 
     text = re.sub(
         r"\n{3,}",
@@ -717,13 +752,7 @@ def apply_april_final_voice(
         text
     )
 
-    # =============================================
-    # SAFE CALM OUTPUT
-    # =============================================
-
-    text = text.strip()
-
-    return text
+    return text.strip()
 
 
 # =====================================================
@@ -745,13 +774,9 @@ def beautify_response(
         response_decision or {}
     )
 
-    if isinstance(text, dict):
-        return text
-
-    text = normalize_text_payload(text)
-
-    if not text:
-        return ""
+    # =================================================
+    # 🔥 KEEP PAYLOADS SAFE
+    # =====================================================
 
     if should_skip_formatting(
 
@@ -802,17 +827,37 @@ def format_response_presentation(
 
     final_text = response or text
 
-    # =============================================
-    # SAFE PASS
-    # =============================================
+    # =================================================
+    # 🔥 PRESERVE RENDERER PAYLOAD
+    # =====================================================
 
-    if isinstance(final_text, dict):
+    if is_renderer_payload(final_text):
+
+        safe_format_log(
+            "FINAL RENDERER PAYLOAD PRESERVED"
+        )
 
         return final_text
+
+    # =================================================
+    # 🔥 SAFE NORMALIZATION
+    # =====================================================
 
     final_text = normalize_text_payload(
         final_text
     )
+
+    # =================================================
+    # 🔥 PAYLOAD SAFE
+    # =====================================================
+
+    if not isinstance(final_text, str):
+
+        safe_format_log(
+            "FINAL OBJECT PRESERVED"
+        )
+
+        return final_text
 
     if not final_text:
         return ""
