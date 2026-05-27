@@ -925,3 +925,45 @@ def build_search_summary(
             )
 
     return "\n".join(lines)
+
+
+# =====================================================
+# 🌐 LEGACY COMPATIBILITY
+# =====================================================
+
+def detect_live_lookup_intent(
+    query: str
+):
+
+    """
+    Legacy compatibility wrapper.
+
+    Старые модули могут вызывать
+    detect_live_lookup_intent().
+
+    Wrapper сохранён
+    для DeepHub stability.
+    """
+
+    query = normalize_lower(
+        query
+    )
+
+    weak_live_words = [
+
+        "рейс",
+        "flight",
+        "карта",
+        "маршрут",
+        "отель",
+        "поезд",
+        "метро",
+        "такси",
+        "где находится",
+        "локация"
+    ]
+
+    return contains_any(
+        query,
+        weak_live_words
+    )
