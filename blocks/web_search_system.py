@@ -3,31 +3,43 @@
 # =====================================================
 
 """
-REAL INTERNET EXECUTION LAYER
+APRIL WEB EXECUTION LAYER
 
-Этот модуль:
-- НЕ roleplay;
-- НЕ hallucination layer;
-- НЕ formatter;
-- НЕ отвечает пользователю напрямую.
+ROLE:
+- real internet execution;
+- verified web access;
+- safe realtime lookup;
+- structured web transport;
+- provider-safe internet support.
 
-Он:
-- выполняет реальный web search;
-- валидирует ссылки;
-- проверяет существование URL;
-- извлекает verified links;
-- помогает April работать с интернетом честно.
+NOT ROLE:
+- orchestration;
+- semantic authority;
+- hallucination;
+- dialogue generation;
+- trigger routing;
+- renderer ownership.
 
-Главная цель:
-НЕ выдумывать ссылки.
+APRIL WEB PRINCIPLES:
+
+1. semantic decides
+2. web layer executes
+3. links must be verified
+4. no fake internet
+5. no keyword authority
+6. structured transport only
+7. continuity-safe execution
+8. predictable routing
+9. renderer-safe behavior
+10. calm internet assistance
 """
 
 # =====================================================
 # 🔥 IMPORTS
 # =====================================================
 
-import requests
 import re
+import requests
 
 from bs4 import BeautifulSoup
 from urllib.parse import quote
@@ -40,6 +52,7 @@ from urllib.parse import quote
 HEADERS = {
 
     "User-Agent": (
+
         "Mozilla/5.0 "
         "(Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 "
@@ -52,124 +65,141 @@ SEARCH_TIMEOUT = 10
 
 MAX_RESULTS = 7
 
-
-# =====================================================
-# 🌐 REALTIME TRANSPORT KEYWORDS
-# =====================================================
-
-TRANSPORT_KEYWORDS = [
-
-    "самолет",
-    "рейс",
-    "flight",
-    "airbus",
-    "boeing",
-
-    "корабль",
-    "судно",
-    "лайнер",
-    "ship",
-
-    "поезд",
-    "train",
-
-    "автобус",
-    "bus",
-
-    "такси",
-    "taxi",
-
-    "метро",
-
-    "маршрут",
-    "route",
-
-    "где я",
-    "где сейчас",
-
-    "tracking",
-    "live"
-]
+MAX_LINKS_EXTRACT = 40
 
 
 # =====================================================
-# 🌐 GEO KEYWORDS
+# 🌐 SAFE HELPERS
 # =====================================================
 
-GEO_KEYWORDS = [
+def normalize(
+    text
+):
 
-    "страна",
-    "город",
-    "локация",
-    "местоположение",
-    "координаты",
+    return str(
+        text or ""
+    ).strip()
 
-    "карта",
-    "map",
-    "gps",
 
-    "рядом",
-    "поблизости",
-    "nearby",
+def normalize_lower(
+    text
+):
 
-    "улица",
-    "адрес",
+    return normalize(
+        text
+    ).lower()
 
-    "аэропорт",
-    "вокзал",
-    "порт"
-]
+
+def clamp(
+    value,
+    minimum=0.0,
+    maximum=1.0
+):
+
+    if value < minimum:
+        return minimum
+
+    if value > maximum:
+        return maximum
+
+    return value
+
+
+def contains_any(
+    text,
+    words
+):
+
+    return any(
+        word in text
+        for word in words
+    )
 
 
 # =====================================================
-# 🌐 TRAVEL / SURVIVAL KEYWORDS
+# 🌐 PLATFORM MAP
 # =====================================================
 
-TRAVEL_SUPPORT_KEYWORDS = [
+SUPPORTED_PLATFORMS = {
 
-    "билет",
-    "купить билет",
-    "где купить",
+    # =================================================
+    # 🌍 SOCIAL
+    # =====================================================
 
-    "отель",
-    "гостиница",
-    "хостел",
+    "youtube": [
 
-    "еда",
-    "ресторан",
-    "кафе",
+        "youtube.com",
+        "youtu.be"
+    ],
 
-    "банкомат",
-    "обмен валют",
+    "telegram": [
 
-    "аптека",
-    "больница",
+        "t.me",
+        "telegram.me"
+    ],
 
-    "туалет",
+    "github": [
 
-    "зарядка",
-    "wifi",
-    "сим карта",
+        "github.com"
+    ],
 
-    "полиция",
-    "экстренно",
+    "reddit": [
 
-    "какой валютой",
-    "чем платить",
+        "reddit.com"
+    ],
 
-    "сколько стоит",
+    # =================================================
+    # ✈️ TRANSPORT
+    # =====================================================
 
-    "как добраться",
+    "flight": [
 
-    "маршрут"
-]
+        "flightradar24.com",
+        "flightaware.com"
+    ],
+
+    "ship": [
+
+        "marinetraffic.com",
+        "vesselfinder.com"
+    ],
+
+    # =================================================
+    # 🗺 MAPS
+    # =====================================================
+
+    "maps": [
+
+        "google.com/maps",
+        "openstreetmap.org",
+        "apple.com/maps"
+    ],
+
+    # =================================================
+    # 🏨 TRAVEL
+    # =====================================================
+
+    "travel": [
+
+        "booking.com",
+        "airbnb.com",
+        "tripadvisor.com",
+        "rome2rio.com",
+        "kayak.com",
+        "skyscanner.com",
+        "omio.com",
+        "12go.asia"
+    ]
+}
 
 
 # =====================================================
 # 🌐 SAFE REQUEST
 # =====================================================
 
-def safe_request(url: str):
+def safe_request(
+    url: str
+):
 
     try:
 
@@ -184,7 +214,26 @@ def safe_request(url: str):
 
         if response.status_code == 200:
 
-            return response.text
+            return {
+
+                "success": True,
+
+                "status_code":
+                    response.status_code,
+
+                "html":
+                    response.text
+            }
+
+        return {
+
+            "success": False,
+
+            "status_code":
+                response.status_code,
+
+            "html": None
+        }
 
     except Exception as e:
 
@@ -193,14 +242,23 @@ def safe_request(url: str):
             e
         )
 
-    return None
+        return {
+
+            "success": False,
+
+            "status_code": None,
+
+            "html": None
+        }
 
 
 # =====================================================
 # 🌐 URL VALIDATION
 # =====================================================
 
-def validate_url(url: str):
+def validate_url(
+    url: str
+):
 
     try:
 
@@ -215,417 +273,394 @@ def validate_url(url: str):
             allow_redirects=True
         )
 
-        return response.status_code < 400
+        return {
 
-    except:
+            "valid":
+                response.status_code < 400,
 
-        return False
+            "status_code":
+                response.status_code
+        }
+
+    except Exception as e:
+
+        print(
+            "VALIDATION ERROR:",
+            e
+        )
+
+        return {
+
+            "valid": False,
+
+            "status_code": None
+        }
 
 
 # =====================================================
 # 🌐 EXTRACT LINKS
 # =====================================================
 
-def extract_links(html: str):
+def extract_links(
+    html: str
+):
 
     if not html:
 
         return []
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
+    try:
 
-    results = []
+        soup = BeautifulSoup(
 
-    for a in soup.find_all(
-        "a",
-        href=True
-    ):
+            html,
+            "html.parser"
+        )
 
-        href = a["href"]
+        links = []
 
-        if href.startswith(
-            "http"
+        for a in soup.find_all(
+            "a",
+            href=True
         ):
 
-            results.append(href)
+            href = str(
+                a["href"]
+            ).strip()
 
-    return list(set(results))
+            if not href.startswith(
+                "http"
+            ):
+
+                continue
+
+            links.append(href)
+
+        unique = list(
+            dict.fromkeys(
+                links
+            )
+        )
+
+        return unique[
+            :MAX_LINKS_EXTRACT
+        ]
+
+    except Exception as e:
+
+        print(
+            "LINK EXTRACT ERROR:",
+            e
+        )
+
+        return []
 
 
 # =====================================================
-# 🌐 FILTER PLATFORM LINKS
+# 🌐 PLATFORM DETECTION
 # =====================================================
 
-def filter_platform_links(
-    links: list
+def detect_platform(
+    url: str
 ):
 
-    allowed = [
+    lower = normalize_lower(
+        url
+    )
 
-        # =============================================
-        # 🌐 SOCIAL / MEDIA
-        # =============================================
+    for platform, domains in (
 
-        "youtube.com",
-        "youtu.be",
+        SUPPORTED_PLATFORMS.items()
+    ):
 
-        "t.me",
-        "telegram.me",
+        for domain in domains:
 
-        "instagram.com",
-        "facebook.com",
+            if domain in lower:
 
-        "x.com",
-        "twitter.com",
+                return platform
 
-        "github.com",
+    return "generic"
 
-        "linkedin.com",
 
-        "reddit.com",
+# =====================================================
+# 🌐 FILTER SAFE LINKS
+# =====================================================
 
-        "tiktok.com",
-
-        # =============================================
-        # ✈️ FLIGHTS
-        # =============================================
-
-        "flightradar24.com",
-
-        "flightaware.com",
-
-        "airnavradar.com",
-
-        # =============================================
-        # 🚢 SHIPS
-        # =============================================
-
-        "marinetraffic.com",
-
-        "vesselfinder.com",
-
-        # =============================================
-        # 🗺 MAPS
-        # =============================================
-
-        "google.com/maps",
-
-        "openstreetmap.org",
-
-        # =============================================
-        # 🚌 TRAVEL
-        # =============================================
-
-        "booking.com",
-
-        "airbnb.com",
-
-        "tripadvisor.com",
-
-        "rome2rio.com",
-
-        "kayak.com",
-
-        "skyscanner.com",
-
-        "omio.com",
-
-        "12go.asia",
-
-        "uber.com",
-
-        "bolt.eu",
-
-        "blaBlaCar",
-
-        # =============================================
-        # 🌍 SERVICES
-        # =============================================
-
-        "google.com",
-
-        "apple.com/maps"
-    ]
+def filter_links(
+    links: list
+):
 
     filtered = []
 
     for link in links:
 
-        for platform in allowed:
+        platform = detect_platform(
+            link
+        )
 
-            if platform.lower() in link.lower():
+        if platform != "generic":
 
-                filtered.append(
-                    link
-                )
+            filtered.append({
 
-                break
+                "url": link,
 
-    return list(set(filtered))
+                "platform":
+                    platform
+            })
+
+    return filtered
 
 
 # =====================================================
-# 🌐 DETECT LIVE INTENT
+# 🌐 WEB INTENT DETECTION
 # =====================================================
 
-def detect_live_lookup_intent(
+def detect_web_context(
+    semantic: dict,
+    cognition: dict,
+    reasoning: dict,
     query: str
 ):
 
-    query = (
-        query or ""
-    ).lower()
+    result = {
 
-    all_keywords = (
+        "internet_needed": False,
 
-        TRANSPORT_KEYWORDS
-        + GEO_KEYWORDS
-        + TRAVEL_SUPPORT_KEYWORDS
+        "realtime": False,
+
+        "geo": False,
+
+        "travel": False,
+
+        "renderer_safe": True,
+
+        "provider_safe": True,
+
+        "source": "semantic"
+    }
+
+    # =================================================
+    # 🔥 SEMANTIC
+    # =====================================================
+
+    if semantic.get(
+        "internet_context_needed"
+    ):
+
+        result[
+            "internet_needed"
+        ] = True
+
+    if semantic.get(
+        "realtime_context"
+    ):
+
+        result[
+            "realtime"
+        ] = True
+
+    if semantic.get(
+        "geo_context"
+    ):
+
+        result[
+            "geo"
+        ] = True
+
+    if semantic.get(
+        "travel_context"
+    ):
+
+        result[
+            "travel"
+        ] = True
+
+    # =================================================
+    # 🔥 COGNITION
+    # =====================================================
+
+    if cognition.get(
+        "internet_context_needed"
+    ):
+
+        result[
+            "internet_needed"
+        ] = True
+
+    # =================================================
+    # 🔥 SAFE FALLBACK
+    # =====================================================
+
+    lower = normalize_lower(
+        query
     )
 
-    for keyword in all_keywords:
+    weak_geo_words = [
 
-        if keyword in query:
+        "карта",
+        "маршрут",
+        "рейс",
+        "отель",
+        "поезд"
+    ]
 
-            return True
+    if (
 
-    return False
+        not result[
+            "internet_needed"
+        ]
+
+        and contains_any(
+            lower,
+            weak_geo_words
+        )
+    ):
+
+        result[
+            "internet_needed"
+        ] = True
+
+        result[
+            "geo"
+        ] = True
+
+        result[
+            "source"
+        ] = "fallback"
+
+    return result
 
 
 # =====================================================
-# 🌐 DETECT NEED TYPE
+# 🌐 SEARCH CATEGORY
 # =====================================================
 
-def detect_support_category(
-    query: str
+def detect_search_category(
+    query: str,
+    web_context: dict
 ):
 
-    q = (
-        query or ""
-    ).lower()
+    lower = normalize_lower(
+        query
+    )
 
-    # =============================================
-    # ✈️ TRANSPORT
-    # =============================================
+    if web_context.get(
+        "realtime"
+    ):
 
-    if any(
+        return "realtime"
 
-        x in q
+    if web_context.get(
+        "travel"
+    ):
 
-        for x in [
+        return "travel"
 
-            "рейс",
-            "самолет",
-            "поезд",
-            "автобус",
-            "такси",
-            "метро",
-            "корабль"
+    if web_context.get(
+        "geo"
+    ):
+
+        return "geo"
+
+    if contains_any(
+
+        lower,
+
+        [
+            "github",
+            "repository",
+            "repo"
         ]
     ):
 
-        return "transport"
-
-    # =============================================
-    # 🏨 HOTELS
-    # =============================================
-
-    if any(
-
-        x in q
-
-        for x in [
-
-            "отель",
-            "гостиница",
-            "хостел"
-        ]
-    ):
-
-        return "hotel"
-
-    # =============================================
-    # 🍔 FOOD
-    # =============================================
-
-    if any(
-
-        x in q
-
-        for x in [
-
-            "еда",
-            "ресторан",
-            "кафе"
-        ]
-    ):
-
-        return "food"
-
-    # =============================================
-    # 💳 MONEY
-    # =============================================
-
-    if any(
-
-        x in q
-
-        for x in [
-
-            "валюта",
-            "обмен",
-            "банкомат",
-            "чем платить"
-        ]
-    ):
-
-        return "money"
-
-    # =============================================
-    # 🚨 EMERGENCY
-    # =============================================
-
-    if any(
-
-        x in q
-
-        for x in [
-
-            "экстренно",
-            "больница",
-            "аптека",
-            "полиция"
-        ]
-    ):
-
-        return "emergency"
+        return "developer"
 
     return "general"
 
 
 # =====================================================
-# 🌐 BUILD SMART SEARCH QUERY
+# 🌐 BUILD SEARCH QUERY
 # =====================================================
 
 def build_search_query(
-    query: str
+    query: str,
+    category: str
 ):
 
-    query = (
-        query or ""
-    ).strip()
+    query = normalize(
+        query
+    )
 
-    lower = query.lower()
-
-    # =============================================
-    # ✈️ FLIGHTS
-    # =============================================
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "рейс",
-            "flight",
-            "самолет"
-        ]
-    ):
+    if category == "realtime":
 
         return (
             query
-            + " flightradar24"
+            + " realtime live"
         )
 
-    # =============================================
-    # 🚢 SHIPS
-    # =============================================
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "судно",
-            "корабль",
-            "ship"
-        ]
-    ):
+    if category == "travel":
 
         return (
             query
-            + " marinetraffic"
+            + " booking maps route"
         )
 
-    # =============================================
-    # 🗺 MAPS
-    # =============================================
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "карта",
-            "локация",
-            "координаты"
-        ]
-    ):
+    if category == "geo":
 
         return (
             query
-            + " google maps"
+            + " maps location"
         )
 
-    # =============================================
-    # 🏨 HOTELS
-    # =============================================
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "отель",
-            "гостиница",
-            "хостел"
-        ]
-    ):
+    if category == "developer":
 
         return (
             query
-            + " booking"
-        )
-
-    # =============================================
-    # 🍔 FOOD
-    # =============================================
-
-    if any(
-
-        x in lower
-
-        for x in [
-
-            "еда",
-            "ресторан",
-            "кафе"
-        ]
-    ):
-
-        return (
-            query
-            + " nearby food"
+            + " github"
         )
 
     return query
+
+
+# =====================================================
+# 🌐 STRUCTURED RESULT
+# =====================================================
+
+def build_result_item(
+    url,
+    validation,
+    category
+):
+
+    return {
+
+        "url": url,
+
+        "verified":
+            validation.get(
+                "valid",
+                False
+            ),
+
+        "status_code":
+            validation.get(
+                "status_code"
+            ),
+
+        "platform":
+            detect_platform(
+                url
+            ),
+
+        "category":
+            category,
+
+        "provider_safe": True,
+
+        "renderer_safe": True,
+
+        "hallucination_safe": True
+    }
 
 
 # =====================================================
@@ -633,12 +668,21 @@ def build_search_query(
 # =====================================================
 
 def search_web(
-    query: str
+    query: str,
+    semantic: dict = None,
+    cognition: dict = None,
+    reasoning: dict = None
 ):
 
-    query = (
-        query or ""
-    ).strip()
+    semantic = semantic or {}
+
+    cognition = cognition or {}
+
+    reasoning = reasoning or {}
+
+    query = normalize(
+        query
+    )
 
     if not query:
 
@@ -646,21 +690,36 @@ def search_web(
 
             "success": False,
 
-            "results": []
+            "results": [],
+
+            "reason":
+                "empty_query"
         }
 
     try:
 
-        smart_query = (
-            build_search_query(
-                query
-            )
+        # =================================================
+        # 🌐 MACHINE CONTEXT
+        # =====================================================
+
+        web_context = detect_web_context(
+
+            semantic,
+            cognition,
+            reasoning,
+            query
         )
 
-        support_category = (
-            detect_support_category(
-                query
-            )
+        category = detect_search_category(
+
+            query,
+            web_context
+        )
+
+        smart_query = build_search_query(
+
+            query,
+            category
         )
 
         encoded = quote(
@@ -668,52 +727,69 @@ def search_web(
         )
 
         url = (
-            f"https://duckduckgo.com/html/?q={encoded}"
+
+            "https://duckduckgo.com/html/?q="
+            + encoded
         )
 
-        html = safe_request(
+        request_result = safe_request(
             url
         )
 
-        if not html:
+        if not request_result.get(
+            "success"
+        ):
 
             return {
 
                 "success": False,
 
-                "results": []
+                "results": [],
+
+                "reason":
+                    "request_failed",
+
+                "web_context":
+                    web_context
             }
+
+        html = request_result.get(
+            "html"
+        )
 
         links = extract_links(
             html
         )
 
-        links = (
-            filter_platform_links(
-                links
-            )
+        links = filter_links(
+            links
         )
 
         verified = []
 
-        for link in links[:MAX_RESULTS]:
+        for item in links[:MAX_RESULTS]:
 
-            if validate_url(link):
+            link = item.get(
+                "url"
+            )
 
-                verified.append({
+            validation = validate_url(
+                link
+            )
 
-                    "url": link,
+            if validation.get(
+                "valid"
+            ):
 
-                    "verified": True,
+                verified.append(
 
-                    "live_related":
-                        detect_live_lookup_intent(
-                            query
-                        ),
+                    build_result_item(
 
-                    "support_category":
-                        support_category
-                })
+                        link,
+                        validation,
+                        category
+                    )
+                )
 
         return {
 
@@ -721,13 +797,20 @@ def search_web(
 
             "results": verified,
 
-            "live_intent":
-                detect_live_lookup_intent(
-                    query
-                ),
+            "query":
+                smart_query,
 
-            "support_category":
-                support_category
+            "category":
+                category,
+
+            "web_context":
+                web_context,
+
+            "provider_safe": True,
+
+            "renderer_safe": True,
+
+            "continuity_safe": True
         }
 
     except Exception as e:
@@ -741,12 +824,15 @@ def search_web(
 
             "success": False,
 
-            "results": []
+            "results": [],
+
+            "reason":
+                str(e)
         }
 
 
 # =====================================================
-# 🌐 BUILD SEARCH SUMMARY
+# 🌐 BUILD SUMMARY
 # =====================================================
 
 def build_search_summary(
@@ -761,7 +847,10 @@ def build_search_summary(
         "success"
     ):
 
-        return ""
+        return (
+            "Не удалось получить "
+            "подтверждённые web results."
+        )
 
     links = results.get(
         "results",
@@ -771,62 +860,50 @@ def build_search_summary(
     if not links:
 
         return (
-            "Ничего подтверждённого "
-            "найти не удалось."
+            "Подтверждённые ссылки "
+            "не найдены."
         )
 
     lines = []
 
-    # =================================================
-    # 🌍 LIVE CONTEXT
-    # =================================================
-
-    if results.get(
-        "live_intent"
-    ):
-
-        lines.append(
-            "🌍 Найдены live/realtime источники:"
-        )
-
-    # =================================================
-    # 🧠 SUPPORT CATEGORY
-    # =================================================
-
     category = results.get(
-        "support_category",
+        "category",
         "general"
     )
 
-    if category == "transport":
+    # =================================================
+    # 🌐 CATEGORY
+    # =====================================================
 
-        lines.append(
-            "🚌 Найдены транспортные сервисы:"
+    category_titles = {
+
+        "realtime":
+            "🌍 Realtime web sources:",
+
+        "travel":
+            "✈️ Travel sources:",
+
+        "geo":
+            "🗺 Geo sources:",
+
+        "developer":
+            "💻 Developer sources:",
+
+        "general":
+            "🌐 Verified sources:"
+    }
+
+    lines.append(
+
+        category_titles.get(
+            category,
+            "🌐 Sources:"
         )
+    )
 
-    elif category == "hotel":
-
-        lines.append(
-            "🏨 Найдены сервисы жилья:"
-        )
-
-    elif category == "food":
-
-        lines.append(
-            "🍔 Найдены сервисы еды:"
-        )
-
-    elif category == "money":
-
-        lines.append(
-            "💳 Найдены финансовые сервисы:"
-        )
-
-    elif category == "emergency":
-
-        lines.append(
-            "🚨 Найдены emergency сервисы:"
-        )
+    # =================================================
+    # 🌐 LINKS
+    # =====================================================
 
     for item in links:
 
@@ -835,10 +912,16 @@ def build_search_summary(
             ""
         )
 
+        platform = item.get(
+            "platform",
+            "generic"
+        )
+
         if url:
 
             lines.append(
-                f"• {url}"
+
+                f"• [{platform}] {url}"
             )
 
     return "\n".join(lines)
