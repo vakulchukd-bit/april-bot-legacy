@@ -1,192 +1,144 @@
 # =========================================================
-# 🧠 APRIL BOT ROOT
+# 🌐 APRIL WEB ROUTER CORE
 # =========================================================
 
 """
-APRIL BOT ROOT — STABILIZED TRANSPORT EDITION
+APRIL WEB ROUTER CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-FIXES:
-- internal machine garbage suppression
-- renderer transport stabilization
-- scene continuity protection
-- visual memory separation
-- safer telegram delivery
-- voice language stabilization hooks
-- hidden orchestration isolation
+ROLE IN APRIL:
+This file is NOT the intelligence core of April.
+
+This file works as:
+- transport router
+- machine ↔ human translator
+- response organizer
+- multimedia response formatter
+- Web communication layer
+
+APRIL ARCHITECTURE:
+User
+  ↓
+Web Router Core (THIS FILE)
+  ↓
+Executor / ExtruderCore
+  ↓
+Internal April Systems
+  ↓
+Machine Response Assembly
+  ↓
+Web Router Core
+  ↓
+Human Structured Output
+
+MAIN RESPONSIBILITIES:
+- receive Web requests
+- normalize user payloads
+- forward tasks into April core
+- distribute execution into April systems
+- receive machine-formatted responses
+- clean machine garbage
+- organize multimedia responses
+- structure complex multi-question outputs
+- return human-readable Web payloads
+
+THIS FILE MUST REMAIN LIGHTWEIGHT.
+
+DO NOT RE-ADD:
+- Telegram
+- aiogram
+- polling
+- admin systems
+- subscriptions
+- premium logic
+- heavy orchestration
+- transport-side reasoning
+- map scanners
+- legacy payment systems
+- transport AI execution
+
+REAL INTELLIGENCE EXISTS INSIDE:
+- core.executor
+- ExtruderCore
+- renderer systems
+- memory systems
+- reasoning systems
+- tool systems
+- scene systems
+
+THIS FILE ONLY:
+- routes
+- cleans
+- formats
+- structures
+- stabilizes
 """
+
+# =========================================================
+# 🔥 CORE IMPORTS
+# =========================================================
 
 import asyncio
-import os
-import threading
-import traceback
-import tempfile
 import json
+import os
 import re
+import traceback
 
-from datetime import (
-    datetime,
-    timedelta
-)
-
-import pytz
-
-from aiogram import (
-    Bot,
-    Dispatcher,
-    types
-)
-
-from aiogram.types import (
-    BufferedInputFile
-)
-
-from aiogram.client.session.aiohttp import (
-    AiohttpSession
-)
-
-from openai import OpenAI
-
-from io import BytesIO
-
-# =========================================================
-# 🔥 STORAGE
-# =========================================================
-
-from storage import (
-
-    check_subscription,
-
-    should_warn,
-
-    can_send_message,
-
-    set_subscription,
-
-    get_remaining_messages,
-
-    get_remaining_days,
-
-    get_limits,
-
-    get_admin_stats,
-
-    get_user_plan,
-
-    get_all_users,
-
-    init_db,
-
-    ensure_user_db,
-
-    save_payment
-)
-
-# =========================================================
-# 🧠 EXECUTOR
-# =========================================================
-
-from core.executor import (
-    execute,
-    EMAPS
-)
-
-# =========================================================
-# 🧠 UI
-# =========================================================
-
-from blocks.ui import (
-    main_keyboard
-)
-
-# =========================================================
-# 🧠 STATE
-# =========================================================
-
-from blocks.state_manager import (
-
-    set_image_context,
-
-    get_state
-)
-
-# =========================================================
-# 🧠 ERRORS
-# =========================================================
-
-from blocks.error_handler import (
-    handle_error
-)
-
-# =========================================================
-# 🧠 ADMIN
-# =========================================================
-
-from blocks.admin_system import (
-    register_user
-)
-
-# =========================================================
-# 🧠 MODES
-# =========================================================
-
-from blocks.mode_manager import (
-    get_mode,
-    clear_mode
-)
-
-# =========================================================
-# 🧠 MAP
-# =========================================================
-
-from architecture.build_map import (
-    scan_project,
-    save_snapshot
-)
-
-# =========================================================
-# 🔥 SUBSCRIPTION
-# =========================================================
-
-from blocks.subscription_module import (
-    check as subscription_check
-)
-
-# =========================================================
-# 🎤 PROVIDER ROUTER
-# =========================================================
-
-from blocks.provider_router import (
-    transcribe_voice
-)
-
-# =========================================================
-# 🌐 WEB
-# =========================================================
-
-from checkout_server import app
+from datetime import datetime
 
 from flask import (
     request,
     jsonify
 )
 
+from openai import OpenAI
+
 # =========================================================
-# 🔥 TOKENS
+# 🧠 APRIL EXECUTOR
 # =========================================================
 
-TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN"
+"""
+Executor is the real intelligence entrypoint.
+
+This router MUST NOT replace executor logic.
+"""
+
+from core.executor import execute
+
+# =========================================================
+# 🧠 STATE SYSTEM
+# =========================================================
+
+from blocks.state_manager import get_state
+
+# =========================================================
+# 🌐 WEB SERVER
+# =========================================================
+
+from checkout_server import app
+
+# =========================================================
+# 🔥 API CONFIGURATION
+# =========================================================
+
+OPENAI_API_KEY = os.getenv(
+    "OPENAI_API_KEY"
 )
 
-client = OpenAI(
-    api_key=os.getenv(
-        "OPENAI_API_KEY"
-    )
+GEMINI_API_KEY = os.getenv(
+    "GEMINI_API_KEY"
 )
 
-# =========================================================
-# 🌐 CHECKOUT DOMAIN
-# =========================================================
+# Payment credentials intentionally preserved
+# for future Web monetization integration.
+
+PAYPAL_CLIENT_ID = os.getenv(
+    "PAYPAL_CLIENT_ID"
+)
+
+PAYPAL_SECRET = os.getenv(
+    "PAYPAL_SECRET"
+)
 
 CHECKOUT_DOMAIN = os.getenv(
     "CHECKOUT_DOMAIN",
@@ -194,35 +146,21 @@ CHECKOUT_DOMAIN = os.getenv(
 )
 
 # =========================================================
-# 🧠 BOT SESSION
+# 🧠 OPENAI CLIENT
 # =========================================================
 
-session = AiohttpSession(
-    timeout=300
-)
-
-bot = Bot(
-    token=TOKEN,
-    session=session
-)
-
-dp = Dispatcher()
-
-# =========================================================
-# 🔥 CENTRAL CONFIG
-# =========================================================
-
-from blocks.tariffs_config import (
-    ADMIN_ID
-)
-
-tz = pytz.timezone(
-    "Europe/Kyiv"
+client = OpenAI(
+    api_key=OPENAI_API_KEY
 )
 
 # =========================================================
-# 🔥 RENDER TYPES
+# 🎨 RENDERER RESPONSE TYPES
 # =========================================================
+
+"""
+These payloads are processed by frontend
+renderer systems separately.
+"""
 
 RENDERER_RESPONSE_TYPES = [
 
@@ -239,8 +177,16 @@ RENDERER_RESPONSE_TYPES = [
 ]
 
 # =========================================================
-# 🔥 INTERNAL MACHINE FILTER
+# 🧠 INTERNAL MACHINE FILTER
 # =========================================================
+
+"""
+April internally operates using machine-oriented
+execution language.
+
+Machine internals must NEVER leak into
+public Web responses.
+"""
 
 MACHINE_PATTERNS = [
 
@@ -259,7 +205,6 @@ MACHINE_PATTERNS = [
     r"scene_stability",
     r"reasoning_state",
     r"executor",
-    r"EMAPS",
     r"pipeline",
     r"traceback",
     r"syntaxerror",
@@ -270,6 +215,10 @@ MACHINE_PATTERNS = [
 # =========================================================
 
 def safe_string(value):
+
+    """
+    Prevents NoneType transport crashes.
+    """
 
     if value is None:
         return ""
@@ -282,6 +231,10 @@ def safe_truncate(
     limit=4000
 ):
 
+    """
+    Prevents oversized response payloads.
+    """
+
     text = safe_string(text)
 
     if len(text) <= limit:
@@ -289,14 +242,16 @@ def safe_truncate(
 
     return text[:limit] + "\n\n..."
 
-
 # =========================================================
-# 🔥 MACHINE GARBAGE CLEANER
+# 🧠 MACHINE GARBAGE CLEANER
 # =========================================================
 
-def remove_machine_garbage(
-    text
-):
+def remove_machine_garbage(text):
+
+    """
+    Removes internal machine garbage
+    before returning responses to users.
+    """
 
     text = safe_string(text)
 
@@ -343,136 +298,8 @@ def remove_machine_garbage(
 
     return text.strip()
 
-
 # =========================================================
-# 🔥 RESPONSE NORMALIZATION
-# =========================================================
-
-def normalize_result_payload(
-    result
-):
-
-    result = result or {}
-
-    normalized = {
-
-        "type":
-            result.get(
-                "type",
-                "text"
-            ),
-
-        "data":
-            result.get(
-                "data"
-            ),
-
-        "content":
-            result.get(
-                "content"
-            ),
-
-        "response":
-            result.get(
-                "response"
-            ),
-
-        "graph":
-            result.get(
-                "graph"
-            ),
-
-        "formula":
-            result.get(
-                "formula"
-            ),
-
-        "gallery":
-            result.get(
-                "gallery"
-            ),
-
-        "image":
-            result.get(
-                "image"
-            ),
-
-        "scene":
-            result.get(
-                "scene"
-            ),
-
-        "layout":
-            result.get(
-                "layout"
-            ),
-
-        "visual":
-            result.get(
-                "visual"
-            ),
-
-        "blocks":
-            result.get(
-                "blocks",
-                []
-            ),
-
-        "continuity":
-            result.get(
-                "continuity",
-                {}
-            ),
-
-        "active_scene":
-            result.get(
-                "active_scene"
-            )
-    }
-
-    final_text = (
-
-        normalized.get("content")
-
-        or normalized.get("response")
-
-        or (
-            normalized.get("data")
-            if isinstance(
-                normalized.get("data"),
-                str
-            )
-            else ""
-        )
-
-        or ""
-    )
-
-    final_text = remove_machine_garbage(
-        final_text
-    )
-
-    normalized["final_text"] = final_text
-
-    normalized["has_scene"] = any([
-
-        normalized.get("scene"),
-
-        normalized.get("layout"),
-
-        normalized.get("visual"),
-
-        normalized.get("graph"),
-
-        normalized.get("formula"),
-
-        normalized.get("blocks")
-    ])
-
-    return normalized
-
-# =========================================================
-# 🔥 CLEAN USER RESPONSE
+# 🧠 HUMAN LANGUAGE NORMALIZER
 # =========================================================
 
 def cleanup_response_text(
@@ -480,14 +307,17 @@ def cleanup_response_text(
     result_type="text"
 ):
 
+    """
+    Converts machine-heavy wording into
+    cleaner human-readable communication.
+    """
+
     text = safe_string(text)
 
     if result_type in RENDERER_RESPONSE_TYPES:
         return text
 
-    text = remove_machine_garbage(
-        text
-    )
+    text = remove_machine_garbage(text)
 
     replacements = {
 
@@ -499,10 +329,7 @@ def cleanup_response_text(
 
     for old, new in replacements.items():
 
-        text = text.replace(
-            old,
-            new
-        )
+        text = text.replace(old, new)
 
     return safe_truncate(
         text,
@@ -510,7 +337,7 @@ def cleanup_response_text(
     )
 
 # =========================================================
-# 🔥 SCENE STATE
+# 🎨 SCENE CONTINUITY
 # =========================================================
 
 def build_scene_state(
@@ -518,9 +345,12 @@ def build_scene_state(
     user_id
 ):
 
-    state = get_state(
-        user_id
-    )
+    """
+    Preserves visual continuity between
+    Web interactions.
+    """
+
+    state = get_state(user_id)
 
     if not result:
         return
@@ -566,222 +396,344 @@ def build_scene_state(
     }
 
 # =========================================================
-# 🔥 TELEGRAM RESPONSE
+# 🧠 RESPONSE NORMALIZATION
 # =========================================================
 
-async def send_telegram_response(
-    message,
-    result
-):
+def normalize_result_payload(result):
 
-    result = normalize_result_payload(
-        result
+    """
+    Converts internal executor payloads
+    into stable transport-safe structures.
+    """
+
+    result = result or {}
+
+    normalized = {
+
+        "type":
+            result.get(
+                "type",
+                "text"
+            ),
+
+        "content":
+            result.get(
+                "content"
+            ),
+
+        "response":
+            result.get(
+                "response"
+            ),
+
+        "data":
+            result.get(
+                "data"
+            ),
+
+        "scene":
+            result.get(
+                "scene"
+            ),
+
+        "layout":
+            result.get(
+                "layout"
+            ),
+
+        "visual":
+            result.get(
+                "visual"
+            ),
+
+        "graph":
+            result.get(
+                "graph"
+            ),
+
+        "formula":
+            result.get(
+                "formula"
+            ),
+
+        "table":
+            result.get(
+                "table"
+            ),
+
+        "gallery":
+            result.get(
+                "gallery"
+            ),
+
+        "links":
+            result.get(
+                "links",
+                []
+            ),
+
+        "blocks":
+            result.get(
+                "blocks",
+                []
+            ),
+
+        "sections":
+            result.get(
+                "sections",
+                []
+            )
+    }
+
+    final_text = (
+
+        normalized.get("content")
+
+        or normalized.get("response")
+
+        or (
+            normalized.get("data")
+            if isinstance(
+                normalized.get("data"),
+                str
+            )
+            else ""
+        )
+
+        or ""
     )
 
-    result_type = result.get(
-        "type",
-        "text"
+    normalized["final_text"] = remove_machine_garbage(
+        final_text
     )
 
-    text = cleanup_response_text(
+    return normalized
 
-        result.get(
-            "final_text",
-            ""
+# =========================================================
+# 🧠 MULTIMEDIA RESPONSE ORGANIZER
+# =========================================================
+
+def organize_multimedia_response(result):
+
+    """
+    Core multimedia organization layer.
+
+    This function transforms machine payloads
+    into structured human-readable Web responses.
+
+    Supports:
+    - multiple questions
+    - multiple tasks
+    - renderer blocks
+    - tables
+    - links
+    - scenes
+    - visual sections
+    - ordered response grouping
+    """
+
+    organized = {
+
+        "response": cleanup_response_text(
+
+            result.get(
+                "final_text",
+                ""
+            ),
+
+            result.get(
+                "type",
+                "text"
+            )
         ),
 
-        result_type=result_type
-    )
+        "sections": [],
 
-    if not text.strip():
+        "visual_blocks": [],
 
-        text = (
-            "⚠️ Ответ обработан, "
-            "но transport вернул "
-            "пустой payload."
+        "tables": [],
+
+        "graphs": [],
+
+        "formulas": [],
+
+        "links": [],
+
+        "gallery": [],
+
+        "scenes": []
+    }
+
+    # =====================================================
+    # STRUCTURED BLOCKS
+    # =====================================================
+
+    for block in result.get("blocks", []):
+
+        organized["sections"].append({
+
+            "type":
+                block.get(
+                    "type",
+                    "text"
+                ),
+
+            "title":
+                block.get(
+                    "title",
+                    ""
+                ),
+
+            "content":
+                cleanup_response_text(
+
+                    block.get(
+                        "content",
+                        ""
+                    )
+                )
+        })
+
+    # =====================================================
+    # TABLES
+    # =====================================================
+
+    if result.get("table"):
+
+        organized["tables"].append(
+            result.get("table")
         )
 
     # =====================================================
-    # TEXT
+    # LINKS
     # =====================================================
 
-    if result_type == "text":
+    if result.get("links"):
 
-        await message.answer(
-
-            text,
-
-            reply_markup=main_keyboard(
-                message.message_id
-            )
+        organized["links"] = result.get(
+            "links",
+            []
         )
 
-        return
-
     # =====================================================
-    # IMAGE
+    # VISUALS
     # =====================================================
 
-    if result_type == "image":
+    if result.get("visual"):
 
-        await safe_send_image(
-            message,
-            result.get("data")
+        organized["visual_blocks"].append({
+
+            "type": "visual",
+            "payload": result.get("visual")
+        })
+
+    # =====================================================
+    # GRAPH
+    # =====================================================
+
+    if result.get("graph"):
+
+        organized["graphs"].append(
+            result.get("graph")
         )
 
-        return
-
     # =====================================================
-    # RENDERER
+    # FORMULA
     # =====================================================
 
-    if (
+    if result.get("formula"):
 
-        result_type in RENDERER_RESPONSE_TYPES
+        organized["formulas"].append(
+            result.get("formula")
+        )
 
-        or result.get("has_scene")
-    ):
+    # =====================================================
+    # GALLERY
+    # =====================================================
 
-        renderer_payload = {
+    if result.get("gallery"):
 
-            "type": result_type,
+        organized["gallery"] = result.get(
+            "gallery"
+        )
+
+    # =====================================================
+    # SCENES
+    # =====================================================
+
+    if result.get("scene"):
+
+        organized["scenes"].append({
 
             "scene":
                 result.get("scene"),
 
             "layout":
-                result.get("layout"),
+                result.get("layout")
+        })
 
-            "visual":
-                result.get("visual"),
+    return organized
 
-            "graph":
-                result.get("graph"),
+# =========================================================
+# ⚡ APRIL EXECUTION WRAPPER
+# =========================================================
 
-            "formula":
-                result.get("formula"),
+async def process_april_request(
+    user_id,
+    text
+):
 
-            "blocks":
-                result.get(
-                    "blocks",
-                    []
-                )
-        }
+    """
+    Main routing pipeline.
 
-        await message.answer(
+    Human request
+      ↓
+    April executor
+      ↓
+    Machine response
+      ↓
+    Human multimedia organization
+    """
 
-            f"[[APRIL_RENDERER:{json.dumps(renderer_payload, ensure_ascii=False)}]]",
+    result = await execute(
 
-            reply_markup=main_keyboard(
-                message.message_id
-            )
-        )
-
-        return
-
-    # =====================================================
-    # FALLBACK
-    # =====================================================
-
-    await message.answer(
-
+        user_id,
         text,
-
-        reply_markup=main_keyboard(
-            message.message_id
-        )
+        0,
+        None
     )
 
-# =========================================================
-# 🔥 SAFE IMAGE SEND
-# =========================================================
-
-async def safe_send_image(
-    message,
-    data
-):
-
-    try:
-
-        await bot.send_chat_action(
-
-            message.chat.id,
-
-            "upload_photo"
-        )
-
-        await message.answer_photo(
-
-            BufferedInputFile(
-
-                data,
-
-                filename="image.png"
-            )
-        )
-
-    except Exception:
-
-        bio = BytesIO(data)
-
-        bio.name = "image.png"
-
-        await message.answer_document(
-            bio
-        )
-
-# =========================================================
-# ⚡ ACTIVITY
-# =========================================================
-
-async def activity_loop(
-    chat_id,
-    activity_type="typing"
-):
-
-    try:
-
-        for _ in range(120):
-
-            await bot.send_chat_action(
-                chat_id,
-                activity_type
-            )
-
-            await asyncio.sleep(2)
-
-    except Exception:
-        pass
-
-
-async def run_with_activity(
-    chat_id,
-    coro,
-    activity_type="typing"
-):
-
-    task = asyncio.create_task(
-
-        activity_loop(
-            chat_id,
-            activity_type
-        )
+    normalized = normalize_result_payload(
+        result
     )
 
-    try:
+    build_scene_state(
+        normalized,
+        user_id
+    )
 
-        return await coro
+    organized = organize_multimedia_response(
+        normalized
+    )
 
-    finally:
-
-        task.cancel()
+    return organized
 
 # =========================================================
-# 🌐 CHAT
+# 🌐 APRIL WEB CHAT API
 # =========================================================
 
 @app.route("/chat", methods=["POST"])
 def april_web_chat():
+
+    """
+    Main April Web endpoint.
+
+    Handles:
+    - user requests
+    - executor routing
+    - multimedia formatting
+    - structured Web responses
+    """
 
     try:
 
@@ -801,29 +753,12 @@ def april_web_chat():
             ).strip()
         )
 
-        async def process():
+        final_response = asyncio.run(
 
-            result = await execute(
-
+            process_april_request(
                 user_id,
-                text,
-                0,
-                run_with_activity
+                text
             )
-
-            normalized = normalize_result_payload(
-                result
-            )
-
-            build_scene_state(
-                normalized,
-                user_id
-            )
-
-            return normalized
-
-        final_result = asyncio.run(
-            process()
         )
 
         return jsonify({
@@ -831,45 +766,55 @@ def april_web_chat():
             "success": True,
 
             "response":
-                final_result.get(
-                    "final_text",
-                    ""
+                final_response.get(
+                    "response"
                 ),
 
-            "type":
-                final_result.get(
-                    "type",
-                    "text"
+            "sections":
+                final_response.get(
+                    "sections",
+                    []
                 ),
 
-            "scene":
-                final_result.get(
-                    "scene"
+            "visual_blocks":
+                final_response.get(
+                    "visual_blocks",
+                    []
                 ),
 
-            "layout":
-                final_result.get(
-                    "layout"
+            "tables":
+                final_response.get(
+                    "tables",
+                    []
                 ),
 
-            "graph":
-                final_result.get(
-                    "graph"
+            "graphs":
+                final_response.get(
+                    "graphs",
+                    []
                 ),
 
-            "formula":
-                final_result.get(
-                    "formula"
+            "formulas":
+                final_response.get(
+                    "formulas",
+                    []
                 ),
 
-            "visual":
-                final_result.get(
-                    "visual"
+            "links":
+                final_response.get(
+                    "links",
+                    []
                 ),
 
-            "blocks":
-                final_result.get(
-                    "blocks",
+            "gallery":
+                final_response.get(
+                    "gallery",
+                    []
+                ),
+
+            "scenes":
+                final_response.get(
+                    "scenes",
                     []
                 )
         })
@@ -886,123 +831,31 @@ def april_web_chat():
         }), 500
 
 # =========================================================
-# 💬 TELEGRAM
-# =========================================================
-
-@dp.message()
-async def handle(
-    message: types.Message
-):
-
-    user_id = message.from_user.id
-
-    ensure_user_db(user_id)
-
-    text = (
-        message.text
-        or message.caption
-        or ""
-    )
-
-    register_user(user_id)
-
-    check_result = await subscription_check(
-
-        user_id,
-        "message"
-    )
-
-    if not check_result["allowed"]:
-
-        await message.answer(
-            check_result["reason"]
-        )
-
-        return
-
-    try:
-
-        result = await run_with_activity(
-
-            message.chat.id,
-
-            execute(
-
-                user_id,
-
-                text,
-
-                message.chat.id,
-
-                run_with_activity
-            )
-        )
-
-        normalized = normalize_result_payload(
-            result
-        )
-
-        build_scene_state(
-            normalized,
-            user_id
-        )
-
-        await send_telegram_response(
-            message,
-            normalized
-        )
-
-    except Exception as e:
-
-        traceback.print_exc()
-
-        await handle_error(
-
-            bot,
-            message,
-            e,
-            "global_handler"
-        )
-
-# =========================================================
-# 🚀 MAIN
-# =========================================================
-
-async def main():
-
-    init_db()
-
-    await bot.delete_webhook(
-        drop_pending_updates=True
-    )
-
-    await dp.start_polling(bot)
-
-# =========================================================
-# ▶️ START
+# 🚀 START APRIL WEB CORE
 # =========================================================
 
 if __name__ == "__main__":
 
-    threading.Thread(
+    """
+    Starts April Web Router Core.
 
-        target=lambda: app.run(
+    Lightweight.
+    Web-only.
+    Transport-focused.
+    """
 
-            host="0.0.0.0",
+    app.run(
 
-            port=int(
-                os.environ.get(
-                    "PORT",
-                    10000
-                )
-            ),
+        host="0.0.0.0",
 
-            debug=False,
-
-            use_reloader=False
+        port=int(
+            os.environ.get(
+                "PORT",
+                10000
+            )
         ),
 
-        daemon=True
-    ).start()
+        debug=False,
 
-    asyncio.run(main())
+        use_reloader=False
+    )
