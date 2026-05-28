@@ -6,35 +6,8 @@ from blocks.visual_memory_library import (
 # 🧠 APRIL COGNITION CORE
 # =====================================================
 
-"""
-APRIL COGNITION CORE
-
-NEW PRINCIPLES:
-
-- compact cognition
-- machine-readable orchestration
-- low-noise state transfer
-- continuity compression
-- renderer-first cognition
-- executor-friendly signals
-- no emotional flag explosion
-- semantic continuity over prose cognition
-
-COGNITION IS NOW:
-
-NOT:
-- giant emotional state blob
-- prose-like orchestration
-- duplicated semantic flags
-
-BUT:
-- compact machine state
-- executor-readable orchestration
-- continuity transport layer
-"""
-
 # =====================================================
-# 🔥 HELPERS
+# 🔥 NORMALIZATION HELPERS
 # =====================================================
 
 def _clamp(
@@ -52,9 +25,37 @@ def _clamp(
     return value
 
 
+def _increase(
+    cognition: dict,
+    key: str,
+    amount: float
+):
+
+    cognition[key] = _clamp(
+        cognition.get(
+            key,
+            0.0
+        ) + amount
+    )
+
+
+def _decrease(
+    cognition: dict,
+    key: str,
+    amount: float
+):
+
+    cognition[key] = _clamp(
+        cognition.get(
+            key,
+            0.0
+        ) - amount
+    )
+
+
 def _contains_any(
-    text,
-    words
+    text: str,
+    words: list
 ):
 
     return any(
@@ -63,16 +64,406 @@ def _contains_any(
     )
 
 
-def _safe_lower(text):
+# =====================================================
+# 🔥 CONTINUITY HELPERS
+# =====================================================
 
-    try:
-        return str(text).lower().strip()
-    except:
-        return ""
+def build_dialog_continuity(
+    dialog: list
+):
+
+    continuity = {
+
+        "active_topics": [],
+        "unresolved_questions": [],
+        "recent_user_requests": [],
+        "conversation_stage": "active",
+        "multi_topic": False,
+        "user_waiting_answer": False,
+
+        # 🔥 human continuity
+        "dialog_momentum": 0.0,
+        "human_depth": 0.0,
+        "user_uncertainty": 0.0,
+        "user_reflection": False
+    }
+
+    if not dialog:
+        return continuity
+
+    recent_messages = dialog[-12:]
+
+    user_messages = [
+
+        x for x in recent_messages
+        if x.get("role") == "user"
+    ]
+
+    if len(user_messages) >= 2:
+
+        continuity[
+            "multi_topic"
+        ] = True
+
+    recent_requests = []
+
+    unresolved = []
+
+    for message in user_messages[-5:]:
+
+        content = str(
+            message.get(
+                "content",
+                ""
+            )
+        ).strip()
+
+        if not content:
+            continue
+
+        recent_requests.append(
+            content[:280]
+        )
+
+        lowered = content.lower()
+
+        if (
+            "?" in content
+            or "как" in lowered
+            or "почему" in lowered
+            or "что" in lowered
+        ):
+
+            unresolved.append(
+                content[:280]
+            )
+
+        # =================================================
+        # 🔥 HUMAN UNDERSTANDING
+        # =====================================================
+
+        if (
+            "не понимаю" in lowered
+            or "сложно" in lowered
+            or "запутался" in lowered
+            or "не уверен" in lowered
+        ):
+
+            continuity[
+                "user_uncertainty"
+            ] += 0.25
+
+        if (
+            "думаю" in lowered
+            or "мне кажется" in lowered
+            or "как думаешь" in lowered
+        ):
+
+            continuity[
+                "user_reflection"
+            ] = True
+
+            continuity[
+                "human_depth"
+            ] += 0.2
+
+        continuity[
+            "dialog_momentum"
+        ] += 0.12
+
+    continuity[
+        "recent_user_requests"
+    ] = recent_requests[-5:]
+
+    continuity[
+        "unresolved_questions"
+    ] = unresolved[-5:]
+
+    if unresolved:
+
+        continuity[
+            "user_waiting_answer"
+        ] = True
+
+    continuity[
+        "dialog_momentum"
+    ] = _clamp(
+        continuity[
+            "dialog_momentum"
+        ]
+    )
+
+    continuity[
+        "human_depth"
+    ] = _clamp(
+        continuity[
+            "human_depth"
+        ]
+    )
+
+    continuity[
+        "user_uncertainty"
+    ] = _clamp(
+        continuity[
+            "user_uncertainty"
+        ]
+    )
+
+    return continuity
+
+
+def stabilize_multi_topic_dialog(
+    cognition: dict,
+    continuity: dict
+):
+
+    if continuity.get(
+        "multi_topic"
+    ):
+
+        cognition[
+            "tracks_multiple_topics"
+        ] = True
+
+        cognition[
+            "should_answer_in_order"
+        ] = True
+
+        cognition[
+            "preserve_question_order"
+        ] = True
+
+        cognition[
+            "avoid_topic_loss"
+        ] = True
+
+        cognition[
+            "should_merge_contexts"
+        ] = True
+
+        cognition[
+            "dialogue_still_alive"
+        ] = True
+
+        _increase(
+            cognition,
+            "trajectory_confidence",
+            0.25
+        )
+
+    if continuity.get(
+        "user_waiting_answer"
+    ):
+
+        cognition[
+            "user_waiting_answer"
+        ] = True
+
+        cognition[
+            "prefer_execution"
+        ] = True
+
+        cognition[
+            "response_should_focus_on_goal"
+        ] = True
+
+        _increase(
+            cognition,
+            "execution_confidence",
+            0.2
+        )
+
+    # =================================================
+    # 🔥 HUMAN CONTINUITY
+    # =====================================================
+
+    if continuity.get(
+        "human_depth",
+        0.0
+    ) >= 0.2:
+
+        cognition[
+            "response_should_feel_human"
+        ] = True
+
+        cognition[
+            "response_should_continue_naturally"
+        ] = True
+
+        cognition[
+            "should_preserve_dialog_momentum"
+        ] = True
+
+    if continuity.get(
+        "user_uncertainty",
+        0.0
+    ) >= 0.2:
+
+        cognition[
+            "should_reduce_pressure"
+        ] = True
+
+        cognition[
+            "should_help_calmly"
+        ] = True
+
+        cognition[
+            "response_should_feel_safe"
+        ] = True
+
+    return cognition
 
 
 # =====================================================
-# 🔥 COMPACT SIGNALS
+# 🔥 SAFE DIALOG HELPERS
+# =====================================================
+
+def detect_meta_ai_behavior(
+    text: str
+):
+
+    t = (text or "").lower()
+
+    meta_words = [
+
+        "system prompt",
+        "prompt leak",
+        "roleplay assistant",
+        "ты ии",
+        "как chatgpt"
+    ]
+
+    return any(
+        x in t
+        for x in meta_words
+    )
+
+
+def stabilize_dialog_behavior(
+    cognition: dict
+):
+
+    if cognition.get(
+        "understands_user_goal"
+    ):
+
+        cognition[
+            "prefer_execution"
+        ] = True
+
+        cognition[
+            "assistant_should_follow"
+        ] = True
+
+        cognition[
+            "avoid_meta_behavior"
+        ] = True
+
+        cognition[
+            "avoid_personality_overflow"
+        ] = True
+
+        cognition[
+            "avoid_system_prompt_leakage"
+        ] = True
+
+        cognition[
+            "avoid_self_reference"
+        ] = True
+
+        cognition[
+            "avoid_ai_monologue"
+        ] = True
+
+        cognition[
+            "prefer_user_request_over_style"
+        ] = True
+
+        cognition[
+            "response_should_focus_on_goal"
+        ] = True
+
+        cognition[
+            "response_should_avoid_internal_language"
+        ] = True
+
+        cognition[
+            "response_should_stay_grounded"
+        ] = True
+
+        cognition[
+            "assistant_presence"
+        ] = min(
+            cognition.get(
+                "assistant_presence",
+                1.0
+            ),
+            0.72
+        )
+
+        cognition[
+            "assistant_restraint"
+        ] = max(
+            cognition.get(
+                "assistant_restraint",
+                0.0
+            ),
+            0.35
+        )
+
+        # =================================================
+        # 🔥 NATURAL HUMAN FLOW
+        # =====================================================
+
+        cognition[
+            "response_should_feel_alive"
+        ] = True
+
+        cognition[
+            "response_should_flow_naturally"
+        ] = True
+
+        cognition[
+            "response_should_maintain_continuity"
+        ] = True
+
+        cognition[
+            "response_should_feel_human"
+        ] = True
+
+        cognition[
+            "response_should_help_gently"
+        ] = True
+
+        cognition[
+            "response_should_reduce_robotic_tone"
+        ] = True
+
+        cognition[
+            "response_should_adapt_pacing"
+        ] = True
+
+        cognition[
+            "response_should_respect_user_state"
+        ] = True
+
+        _decrease(
+            cognition,
+            "internal_noise",
+            0.2
+        )
+
+        _decrease(
+            cognition,
+            "signal_overload",
+            0.15
+        )
+
+    return cognition
+
+
+# =====================================================
+# 🔥 SEMANTIC SIGNALS
 # =====================================================
 
 ACTION_WORDS = [
@@ -80,30 +471,28 @@ ACTION_WORDS = [
     "сделай",
     "создай",
     "исправь",
-    "покажи",
-    "построй",
-    "сгенерируй",
-    "нарисуй"
+    "апгрейд",
+    "улучши",
+    "покажи"
+]
+
+VISUAL_WORDS = [
+
+    "картинка",
+    "схема",
+    "график",
+    "формула",
+    "таблица",
+    "пространство",
+    "сцена"
 ]
 
 HELP_WORDS = [
 
     "помоги",
-    "объясни",
+    "подскажи",
     "не понимаю",
-    "подскажи"
-]
-
-VISUAL_WORDS = [
-
-    "график",
-    "формула",
-    "таблица",
-    "схема",
-    "картинка",
-    "изображение",
-    "скрин",
-    "фото"
+    "объясни"
 ]
 
 RENDER_WORDS = [
@@ -113,297 +502,195 @@ RENDER_WORDS = [
     "таблица",
     "renderer",
     "scene",
-    "canvas",
-    "diagram",
-    "layout"
+    "canvas"
 ]
 
-WEB_WORDS = [
+TRAVEL_WORDS = [
 
+    "где находится",
+    "как добраться",
     "погода",
     "карта",
-    "маршрут",
-    "рейс",
-    "курс валют",
-    "новости"
+    "рейс"
 ]
-
-EXPLORATION_WORDS = [
-
-    "примерно",
-    "идея",
-    "вариант",
-    "может",
-    "как думаешь",
-    "референс",
-    "атмосфера"
-]
-
-CONTINUATION_WORDS = [
-
-    "да",
-    "ага",
-    "дальше",
-    "продолжай",
-    "вот",
-    "не то",
-    "уже лучше",
-    "примерно",
-    "так"
-]
-
-
-# =====================================================
-# 🔥 CONTINUITY
-# =====================================================
-
-def build_continuity_state(
-    text,
-    dialog,
-    active_flow,
-    state
-):
-
-    t = _safe_lower(text)
-
-    continuity = {
-
-        "mode": "none",
-
-        "strength": 0.0,
-
-        "visual": False,
-
-        "scene": False,
-
-        "continuation": False,
-
-        "active_flow": None
-    }
-
-    if active_flow:
-
-        continuity[
-            "continuation"
-        ] = True
-
-        continuity[
-            "active_flow"
-        ] = active_flow.get(
-            "type"
-        )
-
-        continuity[
-            "strength"
-        ] += 0.45
-
-    active_visual_scene = state.get(
-        "active_visual_scene"
-    )
-
-    if active_visual_scene:
-
-        visual_words = [
-
-            "это",
-            "этот",
-            "эта",
-            "слева",
-            "справа",
-            "цвет",
-            "объект",
-            "картинка",
-            "фото",
-            "здесь"
-        ]
-
-        if (
-
-            _contains_any(
-                t,
-                visual_words
-            )
-
-            or len(t) <= 60
-        ):
-
-            continuity[
-                "visual"
-            ] = True
-
-            continuity[
-                "scene"
-            ] = True
-
-            continuity[
-                "continuation"
-            ] = True
-
-            continuity[
-                "mode"
-            ] = "visual_scene"
-
-            continuity[
-                "strength"
-            ] += 0.45
-
-    if _contains_any(
-        t,
-        CONTINUATION_WORDS
-    ):
-
-        continuity[
-            "continuation"
-        ] = True
-
-        continuity[
-            "strength"
-        ] += 0.25
-
-    continuity[
-        "strength"
-    ] = _clamp(
-        continuity[
-            "strength"
-        ]
-    )
-
-    return continuity
 
 
 # =====================================================
 # 🔥 RENDER DETECTION
 # =====================================================
 
-def detect_render_state(
-    text
+def detect_render_intent(
+    text: str
 ):
 
-    t = _safe_lower(text)
+    t = text.lower()
 
-    render = {
+    render_score = 0.0
 
-        "active": False,
-
-        "type": None,
-
-        "priority": 0.0
-    }
-
-    if not _contains_any(
+    if _contains_any(
         t,
         RENDER_WORDS
     ):
 
-        return render
+        render_score += 0.85
 
-    render[
-        "active"
-    ] = True
+    return {
 
-    render[
-        "priority"
-    ] = 0.92
+        "render_score": _clamp(
+            render_score
+        ),
 
-    if (
-
-        "график" in t
-        or "y=" in t
-        or "sin(" in t
-        or "cos(" in t
-    ):
-
-        render["type"] = "graph"
-
-    elif (
-
-        "формула" in t
-        or "уравнение" in t
-    ):
-
-        render["type"] = "formula"
-
-    elif (
-
-        "таблица" in t
-        or "grid" in t
-    ):
-
-        render["type"] = "table"
-
-    elif (
-
-        "схема" in t
-        or "diagram" in t
-    ):
-
-        render["type"] = "diagram"
-
-    else:
-
-        render["type"] = "scene"
-
-    return render
-
-
-# =====================================================
-# 🔥 EXECUTION STATE
-# =====================================================
-
-def detect_execution_state(
-    text
-):
-
-    t = _safe_lower(text)
-
-    state = {
-
-        "execute": False,
-
-        "pressure": 0.0,
-
-        "mode": "talk"
+        "prefer_renderer":
+            render_score >= 0.6
     }
 
-    if _contains_any(
-        t,
-        ACTION_WORDS
-    ):
 
-        state[
-            "execute"
-        ] = True
+# =====================================================
+# 🔥 COGNITION STABILITY
+# =====================================================
 
-        state[
-            "pressure"
-        ] = 0.82
+def stabilize_cognition_state(
+    cognition: dict
+):
 
-        state[
-            "mode"
-        ] = "execute"
+    stability = cognition.get(
+        "scene_stability",
+        0.5
+    )
 
-    elif _contains_any(
-        t,
-        EXPLORATION_WORDS
-    ):
+    noise = cognition.get(
+        "internal_noise",
+        0.0
+    )
 
-        state[
-            "execute"
-        ] = False
+    overload = cognition.get(
+        "signal_overload",
+        0.0
+    )
 
-        state[
-            "pressure"
-        ] = 0.25
+    active_flow_strength = cognition.get(
+        "active_flow_strength",
+        0.0
+    )
 
-        state[
-            "mode"
-        ] = "exploration"
+    if active_flow_strength >= 0.5:
 
-    return state
+        stability += 0.25
+
+        noise -= 0.2
+
+        overload -= 0.15
+
+    cognition[
+        "scene_stability"
+    ] = _clamp(
+        stability
+    )
+
+    cognition[
+        "internal_noise"
+    ] = _clamp(
+        noise
+    )
+
+    cognition[
+        "signal_overload"
+    ] = _clamp(
+        overload
+    )
+
+    return cognition
 
 
 # =====================================================
-# 🔥 MAIN ANALYZER
+# 🔥 VISUAL MODE
+# =====================================================
+
+def build_visual_mode(
+    cognition: dict,
+    visual_memory: dict
+):
+
+    mode = {
+
+        "enabled": False,
+        "reference_priority": False,
+        "lightweight": False,
+        "renderer_mode": False
+    }
+
+    atmosphere = visual_memory.get(
+        "atmosphere"
+    )
+
+    if atmosphere:
+
+        mode[
+            "enabled"
+        ] = True
+
+        mode[
+            "reference_priority"
+        ] = True
+
+        mode[
+            "lightweight"
+        ] = True
+
+    return mode
+
+
+# =====================================================
+# 🔥 TRAJECTORY
+# =====================================================
+
+def stabilize_trajectory(
+    cognition: dict,
+    active_flow
+):
+
+    if not active_flow:
+        return cognition
+
+    cognition[
+        "needs_continuation"
+    ] = True
+
+    cognition[
+        "trajectory_locked"
+    ] = True
+
+    cognition[
+        "protects_user_trajectory"
+    ] = True
+
+    cognition[
+        "dialogue_still_alive"
+    ] = True
+
+    cognition[
+        "active_flow_strength"
+    ] = 0.85
+
+    cognition[
+        "response_should_continue_naturally"
+    ] = True
+
+    cognition[
+        "response_should_preserve_context"
+    ] = True
+
+    _increase(
+        cognition,
+        "trajectory_confidence",
+        0.3
+    )
+
+    return cognition
+
+
+# =====================================================
+# 🔥 CORE ANALYZER
 # =====================================================
 
 def analyze_cognition(
@@ -413,11 +700,9 @@ def analyze_cognition(
     reasoning: dict
 ):
 
-    t = _safe_lower(text)
-
-    state = state or {}
-    semantic = semantic or {}
-    reasoning = reasoning or {}
+    t = (
+        text or ""
+    ).lower().strip()
 
     dialog = state.get(
         "dialog",
@@ -428,293 +713,285 @@ def analyze_cognition(
         "active_flow"
     )
 
-    continuity = build_continuity_state(
-
-        t,
-        dialog,
-        active_flow,
-        state
-    )
-
-    render = detect_render_state(
-        t
-    )
-
-    execution = detect_execution_state(
-        t
+    continuity = build_dialog_continuity(
+        dialog
     )
 
     visual_memory = build_visual_memory_response(
         text
     )
 
+    visual_mode = build_visual_mode(
+        {},
+        visual_memory
+    )
+
+    render_analysis = detect_render_intent(
+        t
+    )
+
     cognition = {
 
-        # =================================================
-        # 🔥 CORE MODES
-        # =====================================================
+        "wants_action": 0.0,
+        "wants_help": 0.0,
+        "wants_visual": 0.0,
+        "wants_dialog": 0.0,
 
-        "mode": execution.get(
-            "mode",
-            "talk"
-        ),
+        "execution_pressure": 0.0,
 
-        "continuity_mode": continuity.get(
-            "mode",
-            "none"
-        ),
-
-        "render_mode": render.get(
-            "type"
-        ),
-
-        # =================================================
-        # 🔥 EXECUTOR SIGNALS
-        # =====================================================
-
-        "prefer_execution":
-            execution.get(
-                "execute",
-                False
-            ),
-
-        "prefer_renderer":
-            render.get(
-                "active",
-                False
-            ),
-
-        "renderer_space_active":
-            render.get(
-                "active",
-                False
-            ),
-
-        "internet_context_needed":
-
-            _contains_any(
-                t,
-                WEB_WORDS
-            ),
-
-        # =================================================
-        # 🔥 CONTINUITY
-        # =====================================================
-
-        "needs_continuation":
-
-            continuity.get(
-                "continuation",
-                False
-            ),
-
-        "trajectory_locked":
-
-            continuity.get(
-                "strength",
-                0.0
-            ) >= 0.55,
-
-        "continuity_strength":
-
-            continuity.get(
-                "strength",
-                0.0
-            ),
-
-        "active_flow":
-
-            continuity.get(
-                "active_flow"
-            ),
-
-        # =================================================
-        # 🔥 HUMAN STATE
-        # =====================================================
-
-        "needs_guidance":
-
-            _contains_any(
-                t,
-                HELP_WORDS
-            ),
-
-        "exploration_mode":
-
-            execution.get(
-                "mode"
-            ) == "exploration",
-
-        "prefer_visual":
-
-            _contains_any(
-                t,
-                VISUAL_WORDS
-            ),
-
-        # =================================================
-        # 🔥 EXECUTION
-        # =====================================================
-
-        "execution_pressure":
-
-            execution.get(
-                "pressure",
-                0.0
-            ),
-
-        "execution_confidence":
-
-            0.88
-
-            if execution.get(
-                "execute"
-            )
-
-            else 0.45,
-
-        # =================================================
-        # 🔥 RENDER
-        # =====================================================
-
-        "render_priority":
-
-            render.get(
-                "priority",
-                0.0
-            ),
-
-        "render_type":
-
-            render.get(
-                "type"
-            ),
-
-        # =================================================
-        # 🔥 STABILITY
-        # =====================================================
-
-        "scene_stability": 0.88,
-
+        "scene_stability": 0.72,
         "internal_noise": 0.08,
-
         "signal_overload": 0.05,
 
-        # =================================================
-        # 🔥 MACHINE FLAGS
-        # =====================================================
+        "prefer_execution": False,
+        "prefer_visual": False,
+        "prefer_renderer": False,
 
-        "machine_state": {
+        "renderer_space_active": False,
 
-            "renderer":
-                render.get(
-                    "active",
-                    False
-                ),
+        "needs_guidance": False,
+        "needs_examples": False,
+        "needs_continuation": False,
 
-            "continuation":
-                continuity.get(
-                    "continuation",
-                    False
-                ),
+        "trajectory_locked": False,
+        "trajectory_confidence": 0.0,
 
-            "visual":
-                continuity.get(
-                    "visual",
-                    False
-                ),
+        "dialogue_still_alive": True,
 
-            "execution":
-                execution.get(
-                    "execute",
-                    False
-                )
-        },
+        "assistant_presence": 0.72,
+        "assistant_restraint": 0.4,
 
-        # =================================================
-        # 🔥 MEMORY
-        # =====================================================
+        "understands_user_goal": False,
+        "assistant_should_follow": False,
+
+        "response_should_focus_on_goal": True,
+        "response_should_stay_grounded": True,
+
+        # 🔥 human continuity
+        "response_should_feel_alive": False,
+        "response_should_flow_naturally": False,
+        "response_should_feel_human": False,
+        "response_should_continue_naturally": False,
+        "response_should_help_gently": False,
+        "response_should_reduce_robotic_tone": True,
+        "response_should_adapt_pacing": False,
+        "response_should_preserve_context": False,
+
+        "tracks_multiple_topics": False,
+        "should_answer_in_order": False,
+        "preserve_question_order": False,
+        "avoid_topic_loss": True,
+
+        "user_waiting_answer": False,
+
+        "continuity_state":
+            continuity,
 
         "visual_memory":
-            visual_memory
+            visual_memory,
+
+        "visual_mode":
+            visual_mode
     }
 
     # =================================================
-    # 🔥 REASONING INHERITANCE
+    # 🔥 META SUPPRESSION
     # =====================================================
 
-    if reasoning.get(
-        "continuation"
-    ):
+    if detect_meta_ai_behavior(t):
 
         cognition[
-            "needs_continuation"
-        ] = True
-
-        cognition[
-            "trajectory_locked"
-        ] = True
-
-        cognition[
-            "continuity_strength"
-        ] = max(
-
-            cognition[
-                "continuity_strength"
-            ],
-
-            0.72
-        )
-
-    # =================================================
-    # 🔥 RENDER PRIORITY
-    # =====================================================
-
-    if cognition.get(
-        "prefer_renderer"
-    ):
-
-        cognition[
-            "prefer_visual"
-        ] = False
+            "assistant_restraint"
+        ] = 0.85
 
         cognition[
             "prefer_execution"
         ] = True
 
+        _decrease(
+            cognition,
+            "internal_noise",
+            0.25
+        )
+
+    # =================================================
+    # 🔥 ACTION UNDERSTANDING
+    # =====================================================
+
+    if _contains_any(
+        t,
+        ACTION_WORDS
+    ):
+
+        _increase(
+            cognition,
+            "wants_action",
+            0.8
+        )
+
         cognition[
-            "execution_pressure"
-        ] = max(
+            "prefer_execution"
+        ] = True
+
+    # =================================================
+    # 🔥 HELP UNDERSTANDING
+    # =====================================================
+
+    if _contains_any(
+        t,
+        HELP_WORDS
+    ):
+
+        _increase(
+            cognition,
+            "wants_help",
+            0.8
+        )
+
+        cognition[
+            "needs_guidance"
+        ] = True
+
+        cognition[
+            "response_should_help_gently"
+        ] = True
+
+    # =================================================
+    # 🔥 VISUAL UNDERSTANDING
+    # =====================================================
+
+    if _contains_any(
+        t,
+        VISUAL_WORDS
+    ):
+
+        _increase(
+            cognition,
+            "wants_visual",
+            0.8
+        )
+
+        cognition[
+            "prefer_visual"
+        ] = True
+
+    # =================================================
+    # 🔥 RENDER UNDERSTANDING
+    # =====================================================
+
+    if render_analysis.get(
+        "prefer_renderer"
+    ):
+
+        cognition[
+            "prefer_renderer"
+        ] = True
+
+        cognition[
+            "renderer_space_active"
+        ] = True
+
+        cognition[
+            "prefer_visual"
+        ] = False
+
+    # =================================================
+    # 🔥 WEB CONTEXT
+    # =====================================================
+
+    if _contains_any(
+        t,
+        TRAVEL_WORDS
+    ):
+
+        cognition[
+            "internet_context_needed"
+        ] = True
+
+    # =================================================
+    # 🔥 CONTINUITY
+    # =====================================================
+
+    cognition = stabilize_trajectory(
+        cognition,
+        active_flow
+    )
+
+    cognition = stabilize_multi_topic_dialog(
+        cognition,
+        continuity
+    )
+
+    # =================================================
+    # 🔥 REASONING INHERITANCE
+    # =====================================================
+
+    if reasoning:
+
+        if reasoning.get(
+            "continuation"
+        ):
 
             cognition[
-                "execution_pressure"
-            ],
+                "needs_continuation"
+            ] = True
 
-            0.82
-        )
+        if reasoning.get(
+            "user_waiting_action"
+        ):
+
+            cognition[
+                "prefer_execution"
+            ] = True
+
+    # =================================================
+    # 🔥 USER GOAL UNDERSTANDING
+    # =====================================================
+
+    if (
+
+        cognition[
+            "wants_action"
+        ] >= 0.5
+
+        or cognition[
+            "wants_help"
+        ] >= 0.5
+
+        or cognition[
+            "wants_visual"
+        ] >= 0.5
+
+        or cognition[
+            "user_waiting_answer"
+        ]
+    ):
+
+        cognition[
+            "understands_user_goal"
+        ] = True
+
+    cognition = stabilize_dialog_behavior(
+        cognition
+    )
+
+    cognition = stabilize_cognition_state(
+        cognition
+    )
 
     # =================================================
     # 🔥 FINAL NORMALIZATION
     # =====================================================
 
-    float_keys = [
+    for key, value in cognition.items():
 
-        "execution_pressure",
-        "execution_confidence",
-        "render_priority",
-        "scene_stability",
-        "internal_noise",
-        "signal_overload",
-        "continuity_strength"
-    ]
+        if isinstance(
+            value,
+            float
+        ):
 
-    for key in float_keys:
-
-        cognition[key] = _clamp(
-            cognition.get(
-                key,
-                0.0
+            cognition[key] = _clamp(
+                value
             )
-        )
 
     return cognition
