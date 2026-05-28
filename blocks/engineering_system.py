@@ -2,6 +2,13 @@
 # 🧠 APRIL ENGINEERING ANALYZER CORE
 # =====================================================
 
+from openai import OpenAI
+import os
+
+# =====================================================
+# 🧠 APRIL ENGINEERING ANALYZER
+# =====================================================
+
 """
 APRIL ENGINEERING ANALYZER CORE
 
@@ -9,62 +16,45 @@ APRIL_FILE_ID:
 APRIL_ENGINEERING_ANALYZER_CORE
 
 ROLE:
-ENGINEERING_SEMANTIC_ANALYZER
+ENGINEERING_REASONING_AND_DIAGNOSTICS
 
 INPUT:
 CODE_INPUT
-EXECUTOR_CONTEXT
-PIPELINE_CONTEXT
-RENDERER_CONTEXT
+PIPELINE_STRUCTURES
+ARCHITECTURE_CONTEXT
+RENDERER_PAYLOADS
+EXECUTION_ERRORS
 
 OUTPUT:
-ENGINEERING_ANALYSIS
-ARCHITECTURE_DIAGNOSTICS
-PIPELINE_INSIGHTS
-SAFE_ENGINEERING_PROMPT
+ENGINEERING_REPORT
+SAFE_FIX_RECOMMENDATIONS
+PIPELINE_DIAGNOSTICS
+STRUCTURED_ANALYSIS
 
 THIS FILE IS:
-- engineering semantic helper
-- architecture diagnostics layer
-- pipeline analysis assistant
-- renderer conflict analyzer
-- structured engineering reasoning bridge
+- engineering analysis helper
+- executor support layer
+- structured diagnostics system
+- architecture reasoning helper
+- continuity-safe analyzer
+- pipeline diagnostics bridge
 
 THIS FILE IS NOT:
-- orchestration layer
 - renderer authority
-- response formatter
+- orchestration engine
 - execution router
-- frontend renderer
+- response formatter
 - trigger system
+- frontend layer
 
 GOLDEN APRIL RULES:
-- continuity-safe engineering
-- preserve architecture integrity
-- no destructive rewrites
-- no orchestration duplication
-- renderer-safe diagnostics
-- structured engineering reasoning
+- preserve continuity
+- preserve orchestration structure
+- avoid destructive rewrites
+- avoid hidden escalation
+- preserve renderer payloads
+- stabilize execution flow
 """
-
-# =====================================================
-# 🔥 IMPORTS
-# =====================================================
-
-from openai import OpenAI
-
-import os
-
-# =====================================================
-# 🔥 OPENAI CLIENT
-# =====================================================
-
-client = OpenAI(
-
-    api_key=os.getenv(
-        "OPENAI_API_KEY"
-    )
-)
 
 # =====================================================
 # 🔥 MACHINE CHANNELS
@@ -89,13 +79,24 @@ ENGINEERING_RESPONSE_CHANNEL = {
 }
 
 # =====================================================
-# 🔥 ANALYZER LOGGING
+# 🔥 OPENAI
+# =====================================================
+
+client = OpenAI(
+    api_key=os.getenv(
+        "OPENAI_API_KEY"
+    )
+)
+
+# =====================================================
+# 🔥 PIPELINE LOGGING
 # =====================================================
 
 def log_engineering_input(
 
-    code,
-    context=None
+    semantic_score=None,
+    pipeline_related=False,
+    renderer_related=False
 ):
 
     """
@@ -103,9 +104,8 @@ def log_engineering_input(
 
     Used by:
     - analyzer
+    - governance
     - admin diagnostics
-    - pipeline tracing
-    - architecture observability
     """
 
     return {
@@ -119,11 +119,14 @@ def log_engineering_input(
         "channel":
             ENGINEERING_TASK_CHANNEL,
 
-        "code_length":
-            len(code or ""),
+        "semantic_score":
+            semantic_score,
 
-        "context":
-            context or {},
+        "pipeline_related":
+            pipeline_related,
+
+        "renderer_related":
+            renderer_related,
 
         "machine_only":
             True
@@ -131,16 +134,18 @@ def log_engineering_input(
 
 
 def log_engineering_output(
-    analysis
+
+    success=True,
+    report_generated=True
 ):
 
     """
     OUTPUT MACHINE TRACE
 
-    Used by:
+    Used internally by:
+    - admin analytics
     - analyzer
-    - architecture diagnostics
-    - pipeline monitoring
+    - recovery diagnostics
     """
 
     return {
@@ -154,23 +159,11 @@ def log_engineering_output(
         "channel":
             ENGINEERING_RESPONSE_CHANNEL,
 
-        "semantic_score":
-            analysis.get(
-                "semantic_score",
-                0.0
-            ),
+        "success":
+            success,
 
-        "architecture_related":
-            analysis.get(
-                "architecture_related",
-                False
-            ),
-
-        "renderer_related":
-            analysis.get(
-                "renderer_related",
-                False
-            ),
+        "report_generated":
+            report_generated,
 
         "machine_only":
             True
@@ -245,38 +238,38 @@ CODE_SIGNALS = [
 ]
 
 # =====================================================
-# 🔥 ENGINEERING ANALYSIS
+# 🔥 ANALYSIS
 # =====================================================
 
 def analyze_engineering_semantics(
     code: str
 ):
 
-    log_engineering_input(code)
+    """
+    Semantic engineering understanding.
 
-    text = normalize_text(
-        code
-    ).lower()
+    Detects:
+    - renderer context
+    - pipeline structures
+    - architecture semantics
+    - code reasoning relevance
+    """
+
+    text = normalize_text(code).lower()
 
     result = {
 
-        "engineering_context":
-            False,
+        "engineering_context": False,
 
-        "renderer_related":
-            False,
+        "renderer_related": False,
 
-        "architecture_related":
-            False,
+        "architecture_related": False,
 
-        "code_detected":
-            False,
+        "code_detected": False,
 
-        "pipeline_related":
-            False,
+        "pipeline_related": False,
 
-        "semantic_score":
-            0.0,
+        "semantic_score": 0.0,
 
         "machine_channel":
             ENGINEERING_RESPONSE_CHANNEL
@@ -369,10 +362,6 @@ def analyze_engineering_semantics(
         "semantic_score"
     ] = min(score, 1.0)
 
-    log_engineering_output(
-        result
-    )
-
     return result
 
 # =====================================================
@@ -384,16 +373,31 @@ def build_engineering_prompt(
 ):
 
     """
-    Structured engineering prompt builder.
+    Safe engineering analysis prompt.
 
     Preserves:
-    - architecture integrity
-    - renderer continuity
-    - execution stability
+    - continuity architecture
+    - renderer payload integrity
+    - orchestration stability
     """
 
     semantics = analyze_engineering_semantics(
         code
+    )
+
+    log_engineering_input(
+
+        semantic_score=semantics.get(
+            "semantic_score"
+        ),
+
+        pipeline_related=semantics.get(
+            "pipeline_related"
+        ),
+
+        renderer_related=semantics.get(
+            "renderer_related"
+        )
     )
 
     system_lines = [
@@ -470,7 +474,7 @@ def build_engineering_prompt(
         "(код)"
     ])
 
-    prompt = (
+    return (
 
         "\n".join(system_lines)
 
@@ -478,24 +482,6 @@ def build_engineering_prompt(
 
         + code
     )
-
-    return {
-
-        "channel":
-            ENGINEERING_RESPONSE_CHANNEL,
-
-        "file_id":
-            "APRIL_ENGINEERING_ANALYZER_CORE",
-
-        "prompt":
-            prompt,
-
-        "renderer_safe":
-            True,
-
-        "machine_only":
-            True
-    }
 
 # =====================================================
 # 🔥 MAIN API
@@ -506,16 +492,16 @@ def analyze_code(
 ) -> str:
 
     """
-    Main engineering analysis entry.
+    Main engineering analysis API.
 
-    Used internally by:
+    Used by:
     - Executor
-    - analyzer systems
-    - architecture diagnostics
+    - diagnostics systems
     - admin engineering tools
+    - pipeline debugging
     """
 
-    payload = build_engineering_prompt(
+    prompt = build_engineering_prompt(
         code
     )
 
@@ -523,9 +509,14 @@ def analyze_code(
 
         model="gpt-4o-mini",
 
-        input=payload.get(
-            "prompt"
-        )
+        input=prompt
+    )
+
+    log_engineering_output(
+
+        success=True,
+
+        report_generated=True
     )
 
     return r.output_text
