@@ -11,6 +11,8 @@ from sympy import (
     pi
 )
 
+from blocks.room_protocol import Room
+
 
 # =====================================================
 # 🧠 APRIL TRIG ROOM
@@ -19,28 +21,74 @@ from sympy import (
 """
 APRIL TRIG ROOM
 
+WEB-FIRST LIGHTWEIGHT TRIGONOMETRY LAYER
+
 ROLE:
-- trigonometric understanding;
-- trig equation solving;
-- trig graph support;
-- renderer-compatible math payloads.
+- trigonometric interpretation
+- trig equation solving
+- renderer-safe graph payloads
+- continuation-safe math flow
+- structured math transport
+- web-space compatible responses
 
 NOT ROLE:
-- orchestration;
-- hard routing;
-- scene ownership;
-- renderer replacement;
-- dialogue control.
+- orchestration authority
+- routing ownership
+- renderer replacement
+- presentation formatting
+- provider execution
+- cognition control
 
-APRIL PRINCIPLES:
+=====================================================
+🔥 APRIL PRINCIPLES
+=====================================================
+
 1. renderer-first
 2. continuity-safe
 3. structured payloads
-4. no trigger chaos
+4. lightweight execution
 5. no scene hijacking
-6. machine-readable output
+6. no recursive routing
+7. web-space compatible
+8. machine-readable output
+9. provider-safe math execution
+10. compact reasoning
 """
 
+# =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = "APRIL_TRIG_ROOM"
+
+APRIL_ROOM_VERSION = "WEB_STABILIZED"
+
+# =====================================================
+# 🔥 MACHINE FLAGS
+# =====================================================
+
+TRIG_ROOM_FLAGS = {
+
+    "renderer_first": True,
+
+    "continuity_safe": True,
+
+    "trajectory_safe": True,
+
+    "provider_safe": True,
+
+    "web_ready": True,
+
+    "botru_compatible": True,
+
+    "structured_output": True,
+
+    "lightweight_reasoning": True,
+
+    "anti_trigger_behavior": True,
+
+    "avoid_generation_fallback": True
+}
 
 # =====================================================
 # 🔥 PATCH LOG
@@ -53,7 +101,10 @@ def safe_patch_log(msg):
 
     try:
 
-        print("TRIG:", msg)
+        print(
+            "TRIG ROOM:",
+            msg
+        )
 
         PATCH_LOG.append(msg)
 
@@ -68,9 +119,13 @@ def safe_patch_log(msg):
 def safe_lower(text):
 
     try:
-        return str(text).lower().strip()
+
+        return str(
+            text or ""
+        ).lower().strip()
 
     except:
+
         return ""
 
 
@@ -80,7 +135,9 @@ def contains_any(
 ):
 
     return any(
+
         word in text
+
         for word in words
     )
 
@@ -103,7 +160,11 @@ TRIG_KEYWORDS = [
     "косинус",
     "тангенс",
 
-    "тригонометр"
+    "тригонометр",
+
+    "cot(",
+    "sec(",
+    "csc("
 ]
 
 GRAPH_WORDS = [
@@ -113,7 +174,9 @@ GRAPH_WORDS = [
     "plot",
     "graph",
     "визуально",
-    "функция"
+    "функция",
+    "curve",
+    "ось"
 ]
 
 FORMULA_WORDS = [
@@ -121,9 +184,23 @@ FORMULA_WORDS = [
     "формула",
     "уравнение",
     "реши",
-    "решение"
+    "решение",
+    "вычисли"
 ]
 
+CONTINUATION_WORDS = [
+
+    "да",
+    "ага",
+    "дальше",
+    "продолжай",
+    "ещё",
+    "еще",
+    "покажи",
+    "построй",
+    "вот",
+    "это"
+]
 
 # =====================================================
 # 🔥 SAFE EXPRESSION DETECTION
@@ -142,12 +219,13 @@ def detect_trig_expression(text):
 
     equation_match = re.search(
 
-        r'([a-z0-9\(\)\+\-\*/\.\s=]+)',
+        r'([a-z0-9\(\)\+\-\*/\.\s=,_]+)',
 
         t
     )
 
     if not equation_match:
+
         return None
 
     expr = equation_match.group(1)
@@ -157,9 +235,90 @@ def detect_trig_expression(text):
         "**"
     )
 
+    expr = expr.replace(
+        "π",
+        "pi"
+    )
+
     expr = expr.strip()
 
     return expr
+
+
+# =====================================================
+# 🔥 VALIDATION
+# =====================================================
+
+def validate_expression(expr):
+
+    if not expr:
+
+        return False
+
+    allowed = re.fullmatch(
+
+        r"[a-zA-Z0-9\(\)\+\-\*/=\.\s,_]+",
+
+        expr
+    )
+
+    return bool(allowed)
+
+
+# =====================================================
+# 🔥 CONTINUITY
+# =====================================================
+
+def trig_continuation_active(
+    context
+):
+
+    state = context.get(
+        "state",
+        {}
+    )
+
+    active_flow = state.get(
+        "active_flow"
+    )
+
+    if not active_flow:
+
+        return False
+
+    flow_type = active_flow.get(
+        "type"
+    )
+
+    return flow_type in [
+
+        "science",
+        "math",
+        "graph",
+        "formula",
+        "trigonometry",
+        "renderer_space"
+    ]
+
+
+# =====================================================
+# 🔥 CONTINUATION TEXT
+# =====================================================
+
+def is_soft_trig_continuation(
+    text
+):
+
+    t = safe_lower(text)
+
+    if len(t) > 42:
+
+        return False
+
+    return contains_any(
+        t,
+        CONTINUATION_WORDS
+    )
 
 
 # =====================================================
@@ -189,6 +348,12 @@ def wants_renderer(
 
         return True
 
+    if semantic.get(
+        "render_intent"
+    ):
+
+        return True
+
     if cognition.get(
         "prefer_renderer"
     ):
@@ -206,63 +371,122 @@ def wants_renderer(
 
 
 # =====================================================
-# 🔥 CONTINUITY
+# 🔥 RENDERER PAYLOAD
 # =====================================================
 
-def trig_continuation_active(
-    context
+def build_graph_payload(expr):
+
+    payload = {
+
+        "type":
+            "graph",
+
+        "graph":
+            expr,
+
+        "renderer":
+            "april_graph",
+
+        "scene_type":
+            "trig_graph",
+
+        "renderer_mode":
+            "spatial",
+
+        "spatial_object":
+            True,
+
+        "scene_ready":
+            True,
+
+        "expression":
+            expr,
+
+        "source":
+            "trig_room"
+    }
+
+    payload.update(
+        TRIG_ROOM_FLAGS
+    )
+
+    return payload
+
+
+def build_formula_payload(expr):
+
+    payload = {
+
+        "type":
+            "formula",
+
+        "formula":
+            expr,
+
+        "renderer":
+            "april_formula",
+
+        "scene_type":
+            "trig_formula",
+
+        "renderer_mode":
+            "spatial",
+
+        "source":
+            "trig_room"
+    }
+
+    payload.update(
+        TRIG_ROOM_FLAGS
+    )
+
+    return payload
+
+
+def build_solution_payload(
+    expr,
+    solutions
 ):
 
-    state = context.get(
-        "state",
-        {}
+    payload = {
+
+        "type":
+            "math_result",
+
+        "expression":
+            expr,
+
+        "solutions":
+            str(solutions),
+
+        "scene_type":
+            "trig_solution",
+
+        "renderer":
+            "april_formula",
+
+        "renderer_mode":
+            "spatial",
+
+        "structured":
+            True,
+
+        "source":
+            "trig_room"
+    }
+
+    payload.update(
+        TRIG_ROOM_FLAGS
     )
 
-    active_flow = state.get(
-        "active_flow"
-    )
-
-    if not active_flow:
-        return False
-
-    flow_type = active_flow.get(
-        "type"
-    )
-
-    return flow_type in [
-
-        "science",
-        "math",
-        "graph",
-        "formula",
-        "trigonometry"
-    ]
-
-
-# =====================================================
-# 🔥 VALIDATION
-# =====================================================
-
-def validate_expression(expr):
-
-    if not expr:
-        return False
-
-    allowed = re.fullmatch(
-
-        r"[a-zA-Z0-9\(\)\+\-\*/=\.\s,_]+",
-
-        expr
-    )
-
-    return bool(allowed)
+    return payload
 
 
 # =====================================================
 # 🧠 TRIG ROOM
 # =====================================================
 
-class TrigRoom:
+class TrigRoom(Room):
 
     name = "trigonometry"
 
@@ -281,10 +505,18 @@ class TrigRoom:
         )
 
         if expr:
+
             return True
 
-        if trig_continuation_active(
-            context
+        if (
+
+            trig_continuation_active(
+                context
+            )
+
+            and is_soft_trig_continuation(
+                text
+            )
         ):
 
             return True
@@ -308,6 +540,7 @@ class TrigRoom:
         )
 
         if expr:
+
             score += 6.5
 
         if wants_renderer(
@@ -330,7 +563,11 @@ class TrigRoom:
 
         if semantic.get(
             "room"
-        ) == "science":
+        ) in [
+
+            "science",
+            "trigonometry"
+        ]:
 
             score += 1.0
 
@@ -365,19 +602,26 @@ class TrigRoom:
                 text
             )
 
+            # =============================================
+            # 🔥 CONTINUATION RESTORE
+            # =============================================
+
             if not expr:
 
                 last_trig = state.get(
                     "last_trig_expression"
                 )
 
-                if last_trig:
+                if (
 
-                    if trig_continuation_active(
+                    last_trig
+
+                    and trig_continuation_active(
                         context
-                    ):
+                    )
+                ):
 
-                        expr = last_trig
+                    expr = last_trig
 
             if not expr:
 
@@ -385,6 +629,10 @@ class TrigRoom:
 
                     "type": "skip"
                 }
+
+            # =============================================
+            # 🔥 VALIDATION
+            # =============================================
 
             if not validate_expression(
                 expr
@@ -399,13 +647,37 @@ class TrigRoom:
                     "type": "skip"
                 }
 
+            # =============================================
+            # 🔥 SAVE STATE
+            # =============================================
+
             state[
                 "last_trig_expression"
             ] = expr
 
-            # =================================================
-            # 🔥 RENDERER-FIRST
-            # =====================================================
+            state[
+                "last_math_expression"
+            ] = expr
+
+            # =============================================
+            # 🔥 SEMANTIC FLAGS
+            # =============================================
+
+            semantic[
+                "renderer_payload_expected"
+            ] = True
+
+            semantic[
+                "confirmed_renderer_artifact"
+            ] = "formula"
+
+            semantic[
+                "math_scene_active"
+            ] = True
+
+            # =============================================
+            # 🔥 GRAPH / RENDERER
+            # =============================================
 
             if wants_renderer(
                 text,
@@ -413,71 +685,30 @@ class TrigRoom:
             ):
 
                 safe_patch_log(
-                    "RENDERER PAYLOAD"
+                    "GRAPH PAYLOAD"
                 )
 
-                return {
+                return build_graph_payload(
+                    expr
+                )
 
-                    "type":
-                        "graph_payload",
-
-                    "renderer":
-                        "april_graph",
-
-                    "scene_type":
-                        "trig_graph",
-
-                    "expression":
-                        expr,
-
-                    "renderer_mode":
-                        "spatial",
-
-                    "spatial_object":
-                        True,
-
-                    "scene_ready":
-                        True,
-
-                    "renderer_first":
-                        True,
-
-                    "avoid_generation":
-                        True,
-
-                    "continuity_safe":
-                        True,
-
-                    "source":
-                        "trig_room"
-                }
-
-            # =================================================
-            # 🔥 EQUATION SOLVING
-            # =====================================================
+            # =============================================
+            # 🔥 FORMULA ONLY
+            # =============================================
 
             if "=" not in expr:
 
-                return {
+                safe_patch_log(
+                    "FORMULA PAYLOAD"
+                )
 
-                    "type":
-                        "formula_payload",
+                return build_formula_payload(
+                    expr
+                )
 
-                    "formula":
-                        expr,
-
-                    "scene_type":
-                        "trig_formula",
-
-                    "renderer":
-                        "april_formula",
-
-                    "renderer_mode":
-                        "spatial",
-
-                    "source":
-                        "trig_room"
-                }
+            # =============================================
+            # 🔥 EQUATION SOLVING
+            # =============================================
 
             x = symbols("x")
 
@@ -496,6 +727,10 @@ class TrigRoom:
                 domain=S.Reals
             )
 
+            # =============================================
+            # 🔥 EMPTY SOLUTION
+            # =============================================
+
             if solutions == S.EmptySet:
 
                 return {
@@ -510,47 +745,29 @@ class TrigRoom:
                         expr,
 
                     "content":
-                        "⚠️ Нет решений"
+                        "⚠️ Нет решений",
+
+                    "source":
+                        "trig_room",
+
+                    "continuity_safe":
+                        True
                 }
 
             safe_patch_log(
                 f"SOLVED: {expr}"
             )
 
-            return {
+            return build_solution_payload(
 
-                "type":
-                    "math_result",
-
-                "expression":
-                    expr,
-
-                "solutions":
-                    str(solutions),
-
-                "scene_type":
-                    "trig_solution",
-
-                "renderer":
-                    "april_formula",
-
-                "renderer_mode":
-                    "spatial",
-
-                "structured":
-                    True,
-
-                "continuity_safe":
-                    True,
-
-                "source":
-                    "trig_room"
-            }
+                expr,
+                solutions
+            )
 
         except Exception as e:
 
             print(
-                "🔥 TRIG ERROR:",
+                "🔥 TRIG ROOM ERROR:",
                 e
             )
 
@@ -558,3 +775,29 @@ class TrigRoom:
 
                 "type": "skip"
             }
+
+
+# =====================================================
+# 🔥 ROOM EXPORT
+# =====================================================
+
+TRIG_ROOM_EXPORT = {
+
+    "id":
+        APRIL_FILE_ID,
+
+    "version":
+        APRIL_ROOM_VERSION,
+
+    "room":
+        "trigonometry",
+
+    "renderer_safe":
+        True,
+
+    "web_ready":
+        True,
+
+    "machine_readable":
+        True
+}
