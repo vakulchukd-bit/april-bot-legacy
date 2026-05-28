@@ -2071,119 +2071,265 @@ async def execute(
 
                     continue
 
-            result = await room.handle(
+# =====================================================
+# 🧠 RESPONSE QUALITY
+# =====================================================
 
-                user_id,
+def evaluate_response_quality(
+    result: dict,
+    semantic: dict,
+    cognition: dict
+):
 
-                text,
+    if not result:
 
-                context,
+        return {
 
-                run_with_activity
-            )
+            "success": False,
 
-            if not result:
-                continue
+            "helpful": False,
 
-            quality = (
-                evaluate_response_quality(
+            "needs_continuation": True
+        }
 
-                    result,
+    result_type = result.get(
+        "type",
+        "text"
+    )
 
-                    semantic,
+    if result_type in [
 
-                    cognition
-                )
-            )
+        "graph",
+        "formula",
+        "diagram",
+        "scene",
+        "table",
+        "gallery",
+        "image",
+        "function"
+    ]:
 
-            if not quality.get(
-                "helpful"
+        return {
+
+            "success": True,
+
+            "helpful": True,
+
+            "needs_continuation": False,
+
+            "result_type": result_type
+        }
+
+    output = str(
+        result.get("data", "")
+    ).strip()
+
+    helpful = True
+
+    if len(output) <= 8:
+
+        helpful = False
+
+    bad_words = [
+
+        "pipeline",
+        "execution room",
+        "traceback",
+        "syntaxerror"
+    ]
+
+    if any(
+        x in output.lower()
+        for x in bad_words
+    ):
+
+        helpful = False
+
+    return {
+
+        "success": True,
+
+        "helpful": helpful,
+
+        "needs_continuation":
+            not helpful,
+
+        "result_type": result_type
+    }
+
+
+# =====================================================
+# 🔥 SAFE FORMAT RESPONSE
+# =====================================================
+
+def safely_format_result(
+
+    result,
+    text,
+    semantic,
+    cognition,
+    visual_reference
+):
+
+    if not result:
+        return result
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    VISUAL_TYPES = [
+
+        "graph",
+        "formula",
+        "image",
+        "gallery",
+        "diagram",
+        "scene",
+        "function",
+        "table"
+    ]
+
+    if result_type in VISUAL_TYPES:
+
+        return result
+
+    output_data = str(
+        result.get("data", "")
+    )
+
+    if not output_data.strip():
+
+        return result
+
+    scene_object_detected = any(
+
+        x in output_data
+
+        for x in [
+
+            "[[formula]]",
+            "[[graph]]",
+            "[[diagram]]",
+            "[[scene]]",
+            "[[grid]]",
+            "[[table]]"
+        ]
+    )
+
+    # =================================================
+    # 🔥 TABLE AUTO DETECTION
+    # =====================================================
+
+    table_patterns = [
+
+        "|---",
+        "+---",
+        "│",
+        "┌",
+        "└",
+        "┬",
+        "┴"
+    ]
+
+    looks_like_table = any(
+
+        x in output_data
+
+        for x in table_patterns
+    )
+
+    if looks_like_table:
+
+        lines = [
+
+            line.strip()
+
+            for line in output_data.split("\n")
+
+            if line.strip()
+        ]
+
+        cleaned_rows = []
+
+        for line in lines:
+
+            if any(
+
+                border in line
+
+                for border in [
+
+                    "+---",
+                    "┌",
+                    "└",
+                    "┬",
+                    "┴",
+                    "├",
+                    "┤"
+                ]
             ):
 
                 continue
 
-            override = should_override(
+            normalized = (
 
-                result=result,
-
-                semantic=semantic,
-
-                cognition=cognition,
-
-                state=state
+                line
+                .replace("│", "|")
+                .strip("| ")
             )
 
-            if override:
+            cells = [
 
-                print(
-                    "🧠 AUTHORITY OVERRIDE"
+                cell.strip()
+
+                for cell in normalized.split("|")
+
+                if cell.strip()
+            ]
+
+            if cells:
+
+                cleaned_rows.append(
+                    cells
                 )
 
-                continue
+        if cleaned_rows:
 
-            result = safely_format_result(
+            return {
 
-                result=result,
+                "type": "table",
 
-                text=text,
+                "table": {
 
-                semantic=semantic,
+                    "rows": cleaned_rows
+                },
 
-                cognition=cognition,
+                "data": output_data
+            }
 
-                visual_reference=visual_reference
-            )
+    if scene_object_detected:
 
-            result = assemble_room_response(
+        return result
 
-                result=result,
+    result["data"] = (
 
-                room_name=room.name,
+        format_response_presentation(
 
-                state=state
-            )
+            text=output_data,
 
-            result_type = result.get(
-                "type",
-                "text"
-            )
+            user_text=text,
 
-            output_text = str(
-                result.get("data", "")
-            )
+            semantic=semantic,
 
-            if output_text.strip():
+            cognition=cognition,
 
-                add_dialog(
+            visual_reference=visual_reference
+        )
+    )
 
-                    user_id,
-
-                    "assistant",
-
-                    output_text
-                )
-
-                update_memory_summary(
-
-                    user_id,
-
-                    output_text
-                )
-
-                extract_and_store_semantics(
-
-                    state,
-
-                    output_text,
-
-                    result_type
-                )
-
-            best_result = result
-
-            scene_results.append(result)
-
-            break
+    return result
 
         except Exception as e:
 
