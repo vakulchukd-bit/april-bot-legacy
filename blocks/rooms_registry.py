@@ -1,3 +1,59 @@
+# =====================================================
+# 🧠 APRIL ROOMS REGISTRY
+# =====================================================
+#
+# APRIL_FILE_ID:
+# APRIL_ROOMS_REGISTRY
+#
+# ROLE:
+# ROOM_EXECUTION_REGISTRY
+#
+# INPUT:
+# USER_TEXT
+# SEMANTIC_CONTEXT
+# COGNITION_CONTEXT
+# ROOM_CONTEXT
+# EXECUTION_CONTEXT
+#
+# OUTPUT:
+# ROOM_SELECTION
+# ROOM_EXECUTION_RESULT
+# MULTIMODAL_ROUTING
+#
+# DEPENDENCIES:
+# room_protocol
+# image_engine
+# image_system
+# science_room
+# text_module
+# excrouter
+#
+# =====================================================
+#
+# APRIL ROOMS REGISTRY
+#
+# Этот слой:
+# - room registry;
+# - execution-safe orchestration layer;
+# - continuity-safe room collection;
+# - multimodal routing bridge.
+#
+# Этот слой НЕ:
+# - Telegram dispatcher;
+# - routing authority;
+# - semantic core;
+# - renderer authority.
+#
+# =====================================================
+
+print(
+    "🧠 APRIL ROOMS REGISTRY LOADED"
+)
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
 from blocks.room_protocol import Room
 
 # =====================================================
@@ -26,6 +82,58 @@ from blocks.science_room import (
 
 import time
 import re
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "excrouter",
+
+    "target":
+        "rooms_registry",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "rooms_registry",
+
+    "target":
+        "executor",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+ROOMS_PATCH_LOG = []
+
+def safe_rooms_log(*args):
+
+    try:
+
+        print(
+            "APRIL ROOMS:",
+            *args
+        )
+
+        ROOMS_PATCH_LOG.append(
+            " ".join(
+                [str(x) for x in args]
+            )
+        )
+
+    except:
+        pass
 
 
 # =====================================================
@@ -119,6 +227,7 @@ def detect_visual_math_signal(text):
     )
 
     if equation:
+
         return True
 
     return False
@@ -161,6 +270,7 @@ def detect_code_signal(text):
     for p in code_patterns:
 
         if p in t:
+
             hits += 1
 
     return hits >= 2
@@ -214,6 +324,8 @@ class ImageGenerateRoom(Room):
 
     name = "image_generate"
 
+    room_type = "visual_generation"
+
     def can_handle(
         self,
         text,
@@ -245,6 +357,10 @@ class ImageGenerateRoom(Room):
         context,
         run
     ):
+
+        safe_rooms_log(
+            "IMAGE GENERATE START"
+        )
 
         state = context.get(
             "state",
@@ -296,6 +412,10 @@ class ImageGenerateRoom(Room):
                     state
                 )
 
+                safe_rooms_log(
+                    "IMAGE GENERATE SUCCESS"
+                )
+
                 return result
 
             return {
@@ -320,6 +440,8 @@ class ImageGenerateRoom(Room):
 class ImageEditRoom(Room):
 
     name = "image_edit"
+
+    room_type = "visual_edit"
 
     def can_handle(
         self,
@@ -362,6 +484,10 @@ class ImageEditRoom(Room):
         context,
         run
     ):
+
+        safe_rooms_log(
+            "IMAGE EDIT START"
+        )
 
         state = context.get(
             "state",
@@ -431,6 +557,8 @@ class ImageEditRoom(Room):
 class SafeScienceRoom(ScienceRoom):
 
     name = "science"
+
+    room_type = "science_renderer"
 
     # =================================================
     # 🔥 APRIL CAPABILITY DETECTION
@@ -521,6 +649,8 @@ class TextRoom(Room):
 
     name = "text"
 
+    room_type = "dialog"
+
     def can_handle(
         self,
         text,
@@ -578,6 +708,10 @@ class TextRoom(Room):
         context,
         run
     ):
+
+        safe_rooms_log(
+            "TEXT ROOM START"
+        )
 
         from blocks.text_module import (
             process as text_process
@@ -641,3 +775,28 @@ ROOMS = [
 
     TextRoom(),
 ]
+
+# =====================================================
+# 🔥 REGISTRY METADATA
+# =====================================================
+
+ROOM_REGISTRY_STATE = {
+
+    "registry_ready":
+        True,
+
+    "web_space_ready":
+        True,
+
+    "renderer_safe":
+        True,
+
+    "continuity_safe":
+        True,
+
+    "telegram_bound":
+        False,
+
+    "machine_isolated":
+        True
+}
