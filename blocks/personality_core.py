@@ -3,27 +3,151 @@
 # =====================================================
 
 """
-APRIL BEHAVIORAL FIELD SYSTEM
+APRIL_FILE_ID: APRIL_PERSONALITY_CORE
 
-Этот слой больше НЕ:
-- giant personality prompt;
-- emotional text inflation layer;
-- robotic instruction wall;
-- dialogue expansion engine.
+ROLE:
+behavioral_modulation_layer
 
-Теперь это:
-- behavioral modulation system;
-- latent guidance layer;
-- continuity-aware behavior field;
-- trajectory stabilizer;
-- response density controller.
+PURPOSE:
+- latent behavioral regulation
+- trajectory stabilization
+- response density control
+- initiative balancing
+- continuity-aware behavior modulation
 
-Главная идея:
-April НЕ играет personality текстом.
-April регулирует поведение системы.
+INPUT:
+- text
+- state
+- semantic
+- cognition
+- reasoning
+- response_decision
+
+OUTPUT:
+- behavior_state
+- personality_state_update
+
+DEPENDENCIES:
+- cognition
+- semantic_core
+- response_decision
+- trajectory_system
+- executor
+
+APRIL PRINCIPLES:
+
+1. behavior over roleplay
+2. continuity before emotion
+3. latent modulation over prompt acting
+4. renderer-safe behavior
+5. orchestration-aware regulation
+6. no forced personality
+7. no telegram personality inflation
 """
 
+print("🧠 APRIL PERSONALITY CORE LOADED")
+
 import time
+
+
+# =====================================================
+# 🔥 SAFE PATCH MODE
+# =====================================================
+
+PATCH_LOG = []
+
+
+def safe_patch_log(msg):
+
+    try:
+
+        print(
+            "PERSONALITY PATCH:",
+            msg
+        )
+
+        PATCH_LOG.append(msg)
+
+    except Exception:
+        pass
+
+
+# =====================================================
+# 🔥 SAFE ENTRY LOG
+# =====================================================
+
+def personality_enter(
+    text,
+    cognition=None,
+    semantic=None
+):
+
+    cognition = cognition or {}
+    semantic = semantic or {}
+
+    safe_patch_log(
+
+        f"ENTER: "
+        f"{str(text)[:80]}"
+    )
+
+    return {
+
+        "personality_active": True,
+
+        "trajectory_safe": True,
+
+        "renderer_safe": True,
+
+        "behavior_mode":
+
+            cognition.get(
+                "behavior_mode"
+            ),
+
+        "execution_pressure":
+
+            semantic.get(
+                "execution_pressure",
+                0.0
+            )
+    }
+
+
+# =====================================================
+# 🔥 SAFE EXIT LOG
+# =====================================================
+
+def personality_exit(
+    behavior_state
+):
+
+    safe_patch_log(
+
+        f"EXIT MODE: "
+        f"{behavior_state.get('behavior_mode')}"
+    )
+
+    return {
+
+        "behavior_processed": True,
+
+        "continuity_safe": True,
+
+        "trajectory_preserved": True
+    }
+
+
+# =====================================================
+# 🔥 FUTURE PLACEHOLDER
+# =====================================================
+
+def personality_future(
+    *args,
+    **kwargs
+):
+
+    return None
 
 
 # =====================================================
@@ -34,7 +158,8 @@ def safe_get(d, key, default=None):
 
     try:
         return d.get(key, default)
-    except:
+
+    except Exception:
         return default
 
 
@@ -400,6 +525,12 @@ def build_personality_layer(
     response_decision: dict
 ):
 
+    personality_enter(
+        text,
+        cognition,
+        semantic
+    )
+
     text = normalize_text(text)
 
     semantic = semantic or {}
@@ -528,11 +659,27 @@ def build_personality_layer(
 
         "continuity_safe": True,
 
-        "renderer_first_safe": True
+        "renderer_first_safe": True,
+
+        # =================================================
+        # 🧠 MACHINE FLAGS
+        # =====================================================
+
+        "machine_behavior_layer": True,
+
+        "executor_compatible": True,
+
+        "semantic_bridge_ready": True,
+
+        "cognition_integrated": True
     }
 
     update_personality_state(
         state,
+        behavior_state
+    )
+
+    personality_exit(
         behavior_state
     )
 
