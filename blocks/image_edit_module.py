@@ -1,25 +1,27 @@
 # blocks/image_edit_module.py
 
-import asyncio
-import random
-
-from storage import (
-    get_user_plan,
-    get_limits,
-    get_conn,
-    today
-)
-
-from blocks.state_manager import (
-    set_last_entity
-)
-
 # =====================================================
 # 🧠 APRIL IMAGE EDIT MODULE
 # =====================================================
 
 """
 APRIL IMAGE EDIT MODULE — WEB-FIRST STABILIZED
+
+APRIL_FILE_ID:
+APRIL_IMAGE_EDIT_CONTINUITY_MODULE
+
+ROLE:
+VISUAL_EDIT_CONTINUITY_COORDINATOR
+
+INPUT:
+USER_EDIT_REQUEST
+VISUAL_STATE
+ACTIVE_VISUAL_SCENE
+
+OUTPUT:
+VISUAL_EDIT_TRAJECTORY
+VISUAL_CONTINUITY_STATE
+WEB_RENDERER_CONTEXT
 
 Главная идея:
 
@@ -38,6 +40,94 @@ Image edit module теперь:
 Visual rendering authority:
 всегда принадлежит April Web Space.
 """
+
+import asyncio
+import random
+
+from storage import (
+
+    get_user_plan,
+    get_limits,
+    get_conn,
+    today
+)
+
+from blocks.state_manager import (
+    set_last_entity
+)
+
+# =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = (
+    "APRIL_IMAGE_EDIT_CONTINUITY_MODULE"
+)
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+IMAGE_EDIT_TASK_CHANNEL = {
+
+    "channel":
+        "image_edit_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+IMAGE_EDIT_RESPONSE_CHANNEL = {
+
+    "channel":
+        "image_edit_machine_response_channel",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGGING
+# =====================================================
+
+IMAGE_EDIT_LOGS = []
+
+MAX_IMAGE_EDIT_LOGS = 40
+
+
+def log_image_edit_event(
+    event,
+    payload=None
+):
+
+    try:
+
+        IMAGE_EDIT_LOGS.append({
+
+            "file_id":
+                APRIL_FILE_ID,
+
+            "event":
+                event,
+
+            "payload":
+                payload or {},
+
+            "machine_only":
+                True
+        })
+
+        if len(IMAGE_EDIT_LOGS) > MAX_IMAGE_EDIT_LOGS:
+
+            IMAGE_EDIT_LOGS.pop(0)
+
+    except:
+        pass
+
+
+# =====================================================
+# 🔥 ADMIN
+# =====================================================
 
 ADMIN_ID = 2016592532
 
@@ -62,13 +152,11 @@ def safe_patch_log(msg):
     except:
         pass
 
-
 # =====================================================
 # 🔥 VISUAL EDIT DISABLED
 # =====================================================
 
 VISUAL_EDIT_DISABLED = True
-
 
 # =====================================================
 # 🔥 LIMIT MESSAGES
@@ -91,7 +179,6 @@ def get_limit_message():
 
     return random.choice(messages)
 
-
 # =====================================================
 # 🔥 IMAGE EDIT STUBS
 # =====================================================
@@ -100,6 +187,16 @@ async def edit_image(
     image_path,
     prompt
 ):
+
+    log_image_edit_event(
+
+        "legacy_edit_blocked",
+
+        {
+            "mode":
+                "path_edit"
+        }
+    )
 
     safe_patch_log(
         "LEGACY PATH EDIT BLOCKED"
@@ -113,12 +210,21 @@ async def edit_image_bytes(
     prompt
 ):
 
+    log_image_edit_event(
+
+        "legacy_edit_blocked",
+
+        {
+            "mode":
+                "byte_edit"
+        }
+    )
+
     safe_patch_log(
         "LEGACY BYTE EDIT BLOCKED"
     )
 
     return None
-
 
 # =====================================================
 # 🔥 LIMIT INCREMENT
@@ -138,9 +244,11 @@ def increment_images(user_id):
         with conn.cursor() as cur:
 
             cur.execute(
+
                 "SELECT images_today, last_reset "
                 "FROM users "
                 "WHERE user_id = %s",
+
                 (uid,)
             )
 
@@ -169,7 +277,6 @@ def increment_images(user_id):
                 )
             )
 
-
 # =====================================================
 # 🔥 VISUAL CONTINUITY UPDATE
 # =====================================================
@@ -193,23 +300,54 @@ def update_visual_continuity(
         ""
     )
 
-    state["active_visual_scene"] = {
+    visual_state = {
 
-        "objects": objects,
+        "objects":
+            objects,
 
-        "summary": summary,
+        "summary":
+            summary,
 
-        "last_edit_prompt": prompt,
+        "last_edit_prompt":
+            prompt,
 
-        "edit_requested": True,
+        "edit_requested":
+            True,
 
-        "renderer_expected": True,
+        "renderer_expected":
+            True,
 
-        "web_visual_space": True
+        "web_visual_space":
+            True,
+
+        "visual_continuity_active":
+            True,
+
+        "machine_channel":
+            IMAGE_EDIT_RESPONSE_CHANNEL,
+
+        "file_id":
+            APRIL_FILE_ID
     }
 
-    return state["active_visual_scene"]
+    state[
+        "active_visual_scene"
+    ] = visual_state
 
+    log_image_edit_event(
+
+        "visual_continuity_updated",
+
+        {
+            "objects":
+                len(objects),
+
+            "renderer_expected":
+                True
+        }
+    )
+
+    return visual_state
 
 # =====================================================
 # 🔥 SAFE VISUAL RESPONSE
@@ -219,13 +357,15 @@ def build_safe_visual_response(
     prompt: str
 ):
 
-    return {
+    response = {
 
-        "type": "visual_guidance",
+        "type":
+            "visual_guidance",
 
         "data": {
 
-            "mode": "web_renderer_expected",
+            "mode":
+                "web_renderer_expected",
 
             "message": (
 
@@ -236,16 +376,37 @@ def build_safe_visual_response(
                 "для Web Space renderer."
             ),
 
-            "prompt": prompt,
+            "prompt":
+                prompt,
 
-            "renderer_expected": True,
+            "renderer_expected":
+                True,
 
-            "generation_executed": False,
+            "generation_executed":
+                False,
 
-            "legacy_pipeline_disabled": True
+            "legacy_pipeline_disabled":
+                True,
+
+            "continuity_preserved":
+                True,
+
+            "machine_only":
+                False
         }
     }
 
+    log_image_edit_event(
+
+        "safe_visual_response_built",
+
+        {
+            "renderer_expected":
+                True
+        }
+    )
+
+    return response
 
 # =====================================================
 # 🔥 PROCESS
@@ -256,6 +417,26 @@ async def process(
     prompt,
     state
 ):
+
+    """
+    Main visual edit continuity processor.
+
+    Responsible ONLY for:
+    - visual continuity
+    - scene-safe updates
+    - renderer preparation
+    - edit trajectory preservation
+    """
+
+    log_image_edit_event(
+
+        "process_started",
+
+        {
+            "user_id":
+                str(user_id)
+        }
+    )
 
     try:
 
@@ -268,6 +449,10 @@ async def process(
         ).strip()
 
         if not prompt:
+
+            log_image_edit_event(
+                "empty_prompt"
+            )
 
             return {
 
@@ -309,11 +494,17 @@ async def process(
         if (
 
             not is_admin
+
             and plan != "premium"
+
             and limits["images_used"]
             >= limits["images_limit"]
 
         ):
+
+            log_image_edit_event(
+                "limit_reached"
+            )
 
             return {
 
@@ -334,13 +525,23 @@ async def process(
 
         state["image_context"] = {
 
-            "type": "visual_edit_request",
+            "type":
+                "visual_edit_request",
 
-            "hint": prompt,
+            "hint":
+                prompt,
 
-            "web_renderer_expected": True,
+            "web_renderer_expected":
+                True,
 
-            "legacy_pipeline_disabled": True
+            "legacy_pipeline_disabled":
+                True,
+
+            "visual_trajectory_active":
+                True,
+
+            "file_id":
+                APRIL_FILE_ID
         }
 
         # =================================================
@@ -352,18 +553,30 @@ async def process(
             user_id,
 
             {
-                "type": "image_edit",
 
-                "prompt": prompt,
+                "type":
+                    "image_edit",
 
-                "source": "web_visual_space",
+                "prompt":
+                    prompt,
 
-                "renderer_expected": True
+                "source":
+                    "web_visual_space",
+
+                "renderer_expected":
+                    True,
+
+                "continuity_preserved":
+                    True
             }
         )
 
         safe_patch_log(
             "VISUAL CONTINUITY UPDATED"
+        )
+
+        log_image_edit_event(
+            "visual_state_updated"
         )
 
         # =================================================
@@ -385,14 +598,30 @@ async def process(
         # 🔥 WEB-FIRST RESPONSE
         # =====================================================
 
-        return build_safe_visual_response(
+        result = build_safe_visual_response(
             prompt
         )
+
+        log_image_edit_event(
+
+            "process_completed",
+
+            {
+                "success":
+                    True
+            }
+        )
+
+        return result
 
     except asyncio.TimeoutError:
 
         print(
             "⏱ EDIT TIMEOUT"
+        )
+
+        log_image_edit_event(
+            "timeout"
         )
 
         return {
@@ -408,6 +637,16 @@ async def process(
         print(
             "🔥 IMAGE EDIT ERROR:",
             e
+        )
+
+        log_image_edit_event(
+
+            "process_error",
+
+            {
+                "error":
+                    str(e)
+            }
         )
 
         return {
