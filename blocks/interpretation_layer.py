@@ -3,6 +3,26 @@
 # =====================================================
 
 """
+APRIL_FILE_ID:
+APRIL_INTERPRETATION_LAYER
+
+ROLE:
+SEMANTIC_INTERPRETATION_BRIDGE
+
+INPUT:
+USER_TEXT
+COGNITION_STATE
+SEMANTIC_STATE
+ACTIVE_TRAJECTORY
+
+OUTPUT:
+INTERPRETATION_HINTS
+SCENE_CLASSIFICATION
+SEMANTIC_SUPPORT_PAYLOAD
+RENDERER_COMPATIBLE_CONTEXT
+
+=====================================================
+
 APRIL SEMANTIC INTERPRETATION LAYER
 
 Этот слой:
@@ -17,6 +37,8 @@ Interpretation layer теперь:
 - cognition-assisted interpretation layer;
 - renderer-aware semantic adapter.
 
+=====================================================
+
 ВАЖНО:
 
 Этот слой НЕ:
@@ -27,6 +49,8 @@ Interpretation layer теперь:
 - НЕ force routing;
 - НЕ принимает решения вместо cognition.
 
+=====================================================
+
 Он только:
 - помогает semantic_core;
 - помогает cognition;
@@ -34,6 +58,76 @@ Interpretation layer теперь:
 - подготавливает безопасные semantic hints;
 - помогает executor понять тип сцены.
 """
+
+import time
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "semantic_core",
+
+    "type":
+        "interpretation_input",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target":
+        "executor_orchestration",
+
+    "type":
+        "interpretation_output",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 PATCH LOGGING
+# =====================================================
+
+PATCH_LOG = []
+
+MAX_PATCH_LOGS = 120
+
+
+def safe_patch_log(message):
+
+    try:
+
+        print(
+            "INTERPRETATION PATCH:",
+            message
+        )
+
+        PATCH_LOG.append({
+
+            "timestamp":
+                time.time(),
+
+            "message":
+                message,
+
+            "file_id":
+                "APRIL_INTERPRETATION_LAYER",
+
+            "machine_only":
+                True
+        })
+
+        if len(PATCH_LOG) > MAX_PATCH_LOGS:
+
+            PATCH_LOG.pop(0)
+
+    except Exception:
+        pass
 
 # =====================================================
 # 🔥 HELPERS
@@ -49,7 +143,6 @@ def contains_any(
         for w in words
     )
 
-
 # =====================================================
 # 🔥 SAFE NORMALIZATION
 # =====================================================
@@ -62,7 +155,6 @@ def normalize_text(
         text or ""
     ).strip()
 
-
 # =====================================================
 # 🔥 SAFE LOWER
 # =====================================================
@@ -74,7 +166,6 @@ def normalize_lower(
     return normalize_text(
         text
     ).lower()
-
 
 # =====================================================
 # 🔥 SEMANTIC GROUPS
@@ -212,7 +303,6 @@ INFORMATIONAL_WORDS = [
     "что можешь сказать"
 ]
 
-
 # =====================================================
 # 🔥 SAFE DETECTORS
 # =====================================================
@@ -306,7 +396,6 @@ def detect_informational_request(
         INFORMATIONAL_WORDS
     )
 
-
 # =====================================================
 # 🔥 SCENE UNDERSTANDING
 # =====================================================
@@ -388,6 +477,124 @@ def detect_scene_type(
 
     return None
 
+# =====================================================
+# 🔥 RESULT PACKAGE
+# =====================================================
+
+def build_result(
+    text
+):
+
+    return {
+
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
+
+        "type":
+            "text",
+
+        "subtype":
+            None,
+
+        "scene_type":
+            None,
+
+        "normalized":
+            text,
+
+        # =================================================
+        # 🔥 SEMANTIC HINTS
+        # =====================================================
+
+        "renderer_intent":
+            False,
+
+        "lightweight_visual":
+            False,
+
+        "exploration":
+            False,
+
+        "continuation":
+            False,
+
+        "web_context":
+            False,
+
+        "explicit_image_generation":
+            False,
+
+        # =================================================
+        # 🔥 COGNITION COOPERATION
+        # =====================================================
+
+        "cognition_assisted":
+            True,
+
+        "continuity_aware":
+            True,
+
+        "scene_aware":
+            True,
+
+        "supports_executor":
+            True,
+
+        # =================================================
+        # 🔥 ORCHESTRATION
+        # =====================================================
+
+        "prefer_renderer":
+            False,
+
+        "prefer_guidance":
+            False,
+
+        "prefer_execution":
+            False,
+
+        "prefer_continuation":
+            False,
+
+        # =================================================
+        # 🔥 SAFETY
+        # =====================================================
+
+        "avoid_force_generation":
+            True,
+
+        "avoid_hidden_escalation":
+            True,
+
+        "avoid_telegram_behavior":
+            True,
+
+        "avoid_trigger_execution":
+            True,
+
+        "provider_safe":
+            True,
+
+        "renderer_first":
+            True,
+
+        # =================================================
+        # 🔥 MACHINE FLAGS
+        # =====================================================
+
+        "machine_only":
+            True,
+
+        "semantic_bridge":
+            True,
+
+        "orchestration_safe":
+            True,
+
+        "continuity_preserved":
+            True
+    }
 
 # =====================================================
 # 🔥 MAIN INTERPRETER
@@ -409,86 +616,19 @@ def interpret_request(
 
     if not text:
 
+        safe_patch_log(
+            "EMPTY REQUEST"
+        )
+
         return None
 
     t = normalize_lower(
         text
     )
 
-    # =====================================================
-    # 🔥 BASE RESULT
-    # =====================================================
-
-    result = {
-
-        # =================================================
-        # 🔥 CORE
-        # =====================================================
-
-        "type": "text",
-
-        "subtype": None,
-
-        "scene_type": None,
-
-        "normalized": text,
-
-        # =================================================
-        # 🔥 SEMANTIC HINTS
-        # =====================================================
-
-        "renderer_intent": False,
-
-        "lightweight_visual": False,
-
-        "exploration": False,
-
-        "continuation": False,
-
-        "web_context": False,
-
-        "explicit_image_generation": False,
-
-        # =================================================
-        # 🔥 COGNITION COOPERATION
-        # =====================================================
-
-        "cognition_assisted": True,
-
-        "continuity_aware": True,
-
-        "scene_aware": True,
-
-        "supports_executor": True,
-
-        # =================================================
-        # 🔥 ORCHESTRATION
-        # =====================================================
-
-        "prefer_renderer": False,
-
-        "prefer_guidance": False,
-
-        "prefer_execution": False,
-
-        "prefer_continuation": False,
-
-        # =================================================
-        # 🔥 SAFETY
-        # =====================================================
-
-        "avoid_force_generation": True,
-
-        "avoid_hidden_escalation": True,
-
-        "avoid_telegram_behavior": True,
-
-        "avoid_trigger_execution": True,
-
-        "provider_safe": True,
-
-        "renderer_first": True
-    }
+    result = build_result(
+        text
+    )
 
     # =====================================================
     # 🔥 CONTINUATION
@@ -509,6 +649,10 @@ def interpret_request(
             "prefer_continuation"
         ] = True
 
+        safe_patch_log(
+            "CONTINUATION DETECTED"
+        )
+
     # =====================================================
     # 🔥 EXPLORATION
     # =====================================================
@@ -527,6 +671,10 @@ def interpret_request(
         result[
             "lightweight_visual"
         ] = True
+
+        safe_patch_log(
+            "EXPLORATION MODE"
+        )
 
     # =====================================================
     # 🔥 WEB
@@ -551,6 +699,10 @@ def interpret_request(
             "subtype"
         ] = "web"
 
+        safe_patch_log(
+            "WEB CONTEXT DETECTED"
+        )
+
     # =====================================================
     # 🔥 IMAGE GENERATION
     # =====================================================
@@ -570,6 +722,10 @@ def interpret_request(
         result[
             "explicit_image_generation"
         ] = True
+
+        safe_patch_log(
+            "EXPLICIT IMAGE GENERATION"
+        )
 
     # =====================================================
     # 🔥 COGNITION-FIRST RENDERER
@@ -615,6 +771,10 @@ def interpret_request(
             "subtype"
         ] = scene_type
 
+        safe_patch_log(
+            f"RENDERER MODE: {scene_type}"
+        )
+
     # =====================================================
     # 🔥 MATH
     # =====================================================
@@ -646,6 +806,10 @@ def interpret_request(
             "prefer_renderer"
         ] = True
 
+        safe_patch_log(
+            "MATH INTERPRETATION"
+        )
+
     # =====================================================
     # 🔥 CODE
     # =====================================================
@@ -665,6 +829,10 @@ def interpret_request(
         result[
             "prefer_execution"
         ] = True
+
+        safe_patch_log(
+            "CODE REQUEST"
+        )
 
     # =====================================================
     # 🔥 INFORMATIONAL
@@ -693,6 +861,10 @@ def interpret_request(
             "prefer_guidance"
         ] = True
 
+        safe_patch_log(
+            "GUIDANCE REQUEST"
+        )
+
     # =====================================================
     # 🔥 LIGHTWEIGHT VISUALS
     # =====================================================
@@ -710,6 +882,10 @@ def interpret_request(
         result[
             "lightweight_visual"
         ] = True
+
+        safe_patch_log(
+            "LIGHTWEIGHT VISUAL MODE"
+        )
 
     # =====================================================
     # 🔥 CONTINUITY STABILIZATION
@@ -758,6 +934,17 @@ def interpret_request(
         result[
             "prefer_execution"
         ] = True
+
+    # =====================================================
+    # 🔥 OUTPUT LOG
+    # =====================================================
+
+    safe_patch_log(
+
+        f"INTERPRETATION COMPLETE | "
+        f"type={result.get('type')} | "
+        f"subtype={result.get('subtype')}"
+    )
 
     # =====================================================
     # 🔥 FINAL
