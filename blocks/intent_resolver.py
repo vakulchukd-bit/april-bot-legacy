@@ -3,6 +3,25 @@
 # =====================================================
 
 """
+APRIL_FILE_ID:
+APRIL_INTENT_RESOLVER
+
+ROLE:
+TRAJECTORY_SAFE_INTENT_RESOLVER
+
+INPUT:
+DIALOG_HISTORY
+SESSION_STATE
+ACTIVE_FLOW
+SEMANTIC_CONTEXT
+
+OUTPUT:
+RESOLVED_INTENT_STATE
+MACHINE_TASK
+TRAJECTORY_CONTINUITY_STATE
+
+=====================================================
+
 DeepHub stabilized resolver.
 
 Resolver больше НЕ:
@@ -17,15 +36,93 @@ Resolver теперь:
 - semantic continuity bridge;
 - machine-context stabilizer.
 
+=====================================================
+
 Главный authority:
 - cognition
 - semantic_core
 - active_flow
 - response_decision
+
+=====================================================
+
+GOLDEN APRIL PRINCIPLE:
+
+Resolver НЕ принимает решение.
+Resolver помогает orchestration continuity.
 """
 
 import re
+import time
 
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "executor_semantic_pipeline",
+
+    "type":
+        "intent_resolution_input",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target":
+        "executor_orchestration_pipeline",
+
+    "type":
+        "intent_resolution_output",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGS
+# =====================================================
+
+INTENT_RESOLVER_LOGS = []
+
+MAX_INTENT_RESOLVER_LOGS = 120
+
+
+def log_resolver_event(
+    event,
+    payload=None
+):
+
+    try:
+
+        INTENT_RESOLVER_LOGS.append({
+
+            "timestamp":
+                time.time(),
+
+            "event":
+                event,
+
+            "payload":
+                payload or {},
+
+            "file_id":
+                "APRIL_INTENT_RESOLVER",
+
+            "machine_only":
+                True
+        })
+
+        if len(INTENT_RESOLVER_LOGS) > MAX_INTENT_RESOLVER_LOGS:
+
+            INTENT_RESOLVER_LOGS.pop(0)
+
+    except:
+        pass
 
 # =====================================================
 # 🧠 SAFE HELPERS
@@ -39,7 +136,6 @@ def normalize(
         text or ""
     ).strip().lower()
 
-
 # =====================================================
 # 🧠 MACHINE TASK PACKAGING
 # =====================================================
@@ -51,21 +147,27 @@ def build_machine_task(
 
     normalized = normalize(text)
 
-    return {
+    payload = {
 
-        "raw": text,
+        "raw":
+            text,
 
-        "normalized": normalized,
+        "normalized":
+            normalized,
 
-        "mode": mode,
+        "mode":
+            mode,
 
-        "semantic_ready": True,
+        "semantic_ready":
+            True,
 
-        "continuation_safe": True,
+        "continuation_safe":
+            True,
 
         "machine_context": {
 
-            "length": len(normalized),
+            "length":
+                len(normalized),
 
             "contains_math":
                 any(
@@ -93,9 +195,31 @@ def build_machine_task(
                         "график"
                     ]
                 )
-        }
+        },
+
+        # =================================================
+        # 🔥 MACHINE FLAGS
+        # =====================================================
+
+        "machine_only":
+            True
     }
 
+    log_resolver_event(
+
+        "machine_task_created",
+
+        {
+
+            "mode":
+                mode,
+
+            "normalized":
+                normalized[:80]
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🧠 EXPLICIT EXECUTION
@@ -126,6 +250,10 @@ def is_explicit(
         for word in keywords
     ):
 
+        log_resolver_event(
+            "explicit_keyword_detected"
+        )
+
         return True
 
     math_patterns = [
@@ -145,10 +273,19 @@ def is_explicit(
             t
         ):
 
+            log_resolver_event(
+
+                "explicit_pattern_detected",
+
+                {
+                    "pattern":
+                        pattern
+                }
+            )
+
             return True
 
     return False
-
 
 # =====================================================
 # 🧠 CONTINUATION DETECTION
@@ -179,6 +316,10 @@ def is_reference(
 
     if t in continuation_words:
 
+        log_resolver_event(
+            "reference_detected"
+        )
+
         return True
 
     if len(t) <= 20:
@@ -188,10 +329,13 @@ def is_reference(
             for x in continuation_words
         ):
 
+            log_resolver_event(
+                "short_reference_detected"
+            )
+
             return True
 
     return False
-
 
 # =====================================================
 # 🧠 CONTRADICTION DETECTION
@@ -220,11 +364,18 @@ def contradicts(
         "не то"
     ]
 
-    return any(
+    detected = any(
         t in l
         for t in triggers
     )
 
+    if detected:
+
+        log_resolver_event(
+            "contradiction_detected"
+        )
+
+    return detected
 
 # =====================================================
 # 🧠 SAFE TASK SEARCH
@@ -248,6 +399,10 @@ def find_explicit_task(
 
         if is_explicit(text):
 
+            log_resolver_event(
+                "explicit_task_restored"
+            )
+
             return build_machine_task(
 
                 text=text,
@@ -256,7 +411,6 @@ def find_explicit_task(
             )
 
     return None
-
 
 # =====================================================
 # 🧠 MAIN RESOLVER
@@ -273,6 +427,10 @@ def resolve_input(
     и semantic continuity.
     """
 
+    log_resolver_event(
+        "resolver_started"
+    )
+
     state = state or {}
 
     active_flow = state.get(
@@ -284,15 +442,23 @@ def resolve_input(
 
         return {
 
-            "mode": "dialog",
+            "mode":
+                "dialog",
 
-            "text": "",
+            "text":
+                "",
 
-            "confidence": 0.0,
+            "confidence":
+                0.0,
 
-            "source": "empty",
+            "source":
+                "empty",
 
-            "machine_context": {}
+            "machine_context":
+                {},
+
+            "machine_only":
+                True
         }
 
     last = history[-1].get(
@@ -308,7 +474,7 @@ def resolve_input(
 
     # =================================================
     # 🔥 HARD CANCEL
-    # =================================================
+    # =====================================================
 
     if contradicts(
 
@@ -319,94 +485,146 @@ def resolve_input(
 
     ):
 
+        log_resolver_event(
+            "trajectory_reset"
+        )
+
         return {
 
-            "mode": "dialog",
+            "mode":
+                "dialog",
 
-            "text": last,
+            "text":
+                last,
 
-            "confidence": 0.9,
+            "confidence":
+                0.9,
 
-            "source": "contradiction",
+            "source":
+                "contradiction",
 
             "machine_context": {
 
-                "trajectory_reset": True
-            }
+                "trajectory_reset":
+                    True
+            },
+
+            "machine_only":
+                True
         }
 
     # =================================================
     # 🔥 CONTINUATION PRIORITY
-    # =================================================
+    # =====================================================
 
     if is_reference(last):
 
         if active_flow:
 
+            flow_type = active_flow.get(
+                "type"
+            )
+
+            log_resolver_event(
+
+                "active_flow_continuation",
+
+                {
+                    "flow_type":
+                        flow_type
+                }
+            )
+
             return {
 
-                "mode": "continuation",
+                "mode":
+                    "continuation",
 
-                "text": last,
+                "text":
+                    last,
 
-                "confidence": 0.82,
+                "confidence":
+                    0.82,
 
-                "source": "active_flow",
+                "source":
+                    "active_flow",
 
                 "machine_context": {
 
-                    "trajectory_active": True,
+                    "trajectory_active":
+                        True,
 
                     "flow_type":
-                        active_flow.get(
-                            "type"
-                        )
-                }
+                        flow_type
+                },
+
+                "machine_only":
+                    True
             }
 
         if task:
 
+            log_resolver_event(
+                "semantic_restore"
+            )
+
             return {
 
-                "mode": "soft_execute",
+                "mode":
+                    "soft_execute",
 
                 "text":
                     task["raw"],
 
-                "confidence": 0.62,
+                "confidence":
+                    0.62,
 
-                "source": "reference_task",
+                "source":
+                    "reference_task",
 
                 "machine_task":
                     task,
 
                 "machine_context": {
 
-                    "semantic_restore": True,
+                    "semantic_restore":
+                        True,
 
-                    "trajectory_resume": True,
+                    "trajectory_resume":
+                        True,
 
                     "restore_type":
                         task.get(
                             "mode"
                         )
-                }
+                },
+
+                "machine_only":
+                    True
             }
 
         return {
 
-            "mode": "dialog",
+            "mode":
+                "dialog",
 
-            "text": last,
+            "text":
+                last,
 
-            "confidence": 0.55,
+            "confidence":
+                0.55,
 
-            "source": "reference_dialog",
+            "source":
+                "reference_dialog",
 
             "machine_context": {
 
-                "light_continuation": True
-            }
+                "light_continuation":
+                    True
+            },
+
+            "machine_only":
+                True
         }
 
     # =================================================
@@ -415,15 +633,23 @@ def resolve_input(
 
     if is_explicit(last):
 
+        log_resolver_event(
+            "explicit_execution"
+        )
+
         return {
 
-            "mode": "execute",
+            "mode":
+                "execute",
 
-            "text": last,
+            "text":
+                last,
 
-            "confidence": 0.9,
+            "confidence":
+                0.9,
 
-            "source": "explicit",
+            "source":
+                "explicit",
 
             "machine_task":
                 build_machine_task(
@@ -435,8 +661,12 @@ def resolve_input(
 
             "machine_context": {
 
-                "execution_ready": True
-            }
+                "execution_ready":
+                    True
+            },
+
+            "machine_only":
+                True
         }
 
     # =================================================
@@ -457,22 +687,41 @@ def resolve_input(
             "math"
         ]:
 
+            log_resolver_event(
+
+                "trajectory_protection",
+
+                {
+                    "flow_type":
+                        flow_type
+                }
+            )
+
             return {
 
-                "mode": "continuation",
+                "mode":
+                    "continuation",
 
-                "text": last,
+                "text":
+                    last,
 
-                "confidence": 0.74,
+                "confidence":
+                    0.74,
 
-                "source": "trajectory",
+                "source":
+                    "trajectory",
 
                 "machine_context": {
 
-                    "trajectory_locked": True,
+                    "trajectory_locked":
+                        True,
 
-                    "flow_type": flow_type
-                }
+                    "flow_type":
+                        flow_type
+                },
+
+                "machine_only":
+                    True
             }
 
     # =================================================
@@ -481,46 +730,71 @@ def resolve_input(
 
     if task:
 
+        log_resolver_event(
+            "memory_task_restore"
+        )
+
         return {
 
-            "mode": "soft_execute",
+            "mode":
+                "soft_execute",
 
             "text":
                 task["raw"],
 
-            "confidence": 0.45,
+            "confidence":
+                0.45,
 
-            "source": "memory_task",
+            "source":
+                "memory_task",
 
             "machine_task":
                 task,
 
             "machine_context": {
 
-                "semantic_memory_restore": True,
+                "semantic_memory_restore":
+                    True,
 
-                "trajectory_soft_resume": True,
+                "trajectory_soft_resume":
+                    True,
 
-                "machine_only": True
-            }
+                "machine_only":
+                    True
+            },
+
+            "machine_only":
+                True
         }
 
     # =================================================
     # 🔥 DEFAULT DIALOG
     # =====================================================
 
+    log_resolver_event(
+        "default_dialog"
+    )
+
     return {
 
-        "mode": "dialog",
+        "mode":
+            "dialog",
 
-        "text": last,
+        "text":
+            last,
 
-        "confidence": 0.5,
+        "confidence":
+            0.5,
 
-        "source": "default",
+        "source":
+            "default",
 
         "machine_context": {
 
-            "dialog_safe": True
-        }
+            "dialog_safe":
+                True
+        },
+
+        "machine_only":
+            True
     }
