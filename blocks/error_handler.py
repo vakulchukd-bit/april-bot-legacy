@@ -2,58 +2,6 @@
 # 🧠 APRIL ERROR ORCHESTRATION CORE
 # =====================================================
 
-"""
-APRIL ERROR ORCHESTRATION CORE
-
-APRIL_FILE_ID:
-APRIL_ERROR_ORCHESTRATION_CORE
-
-ROLE:
-SAFE_DELIVERY_AND_ERROR_STABILIZATION
-
-INPUT:
-EXECUTOR_RESULTS
-RENDERER_RESULTS
-IMAGE_PIPELINE_RESULTS
-EXCEPTION_OBJECTS
-DELIVERY_CONTEXT
-
-OUTPUT:
-SAFE_USER_RESPONSE
-ADMIN_ERROR_REPORT
-PIPELINE_DIAGNOSTICS
-STABILIZED_DELIVERY
-
-THIS FILE IS:
-- unified error orchestration layer
-- safe delivery stabilizer
-- renderer continuity protector
-- image pipeline recovery layer
-- admin diagnostics bridge
-- execution stabilization helper
-
-THIS FILE IS NOT:
-- orchestration router
-- hidden fallback engine
-- recursive retry system
-- frontend renderer
-- trigger layer
-- Telegram-only system
-
-GOLDEN APRIL RULES:
-- safe delivery first
-- renderer continuity preservation
-- no hidden rerouting
-- no recursive chaos
-- stable modality recovery
-- structured diagnostics
-- admin-safe observability
-"""
-
-# =====================================================
-# 🔥 IMPORTS
-# =====================================================
-
 import traceback
 import time
 
@@ -66,6 +14,58 @@ from blocks.image_module import (
 from blocks.tariffs_config import (
     ADMIN_ID
 )
+
+# =====================================================
+# 🧠 APRIL ERROR ORCHESTRATION
+# =====================================================
+
+"""
+APRIL ERROR ORCHESTRATION CORE
+
+APRIL_FILE_ID:
+APRIL_ERROR_ORCHESTRATION_CORE
+
+ROLE:
+SAFE_DELIVERY_AND_PIPELINE_STABILIZATION
+
+INPUT:
+EXECUTOR_RESULTS
+RENDERER_RESULTS
+IMAGE_PIPELINE_RESULTS
+EXCEPTION_OBJECTS
+DELIVERY_CONTEXT
+
+OUTPUT:
+SAFE_USER_RESPONSE
+ADMIN_DIAGNOSTICS
+PIPELINE_RECOVERY
+STRUCTURED_ERROR_REPORT
+
+THIS FILE IS:
+- unified error handling layer
+- renderer continuity stabilizer
+- image pipeline protector
+- structured delivery orchestrator
+- executor recovery helper
+- admin diagnostics bridge
+
+THIS FILE IS NOT:
+- telegram-only layer
+- orchestration router
+- recursive retry engine
+- hidden fallback chaos system
+- frontend renderer
+- trigger routing layer
+
+GOLDEN APRIL RULES:
+- stable delivery first
+- preserve renderer continuity
+- preserve modality structure
+- avoid recursive chaos
+- avoid hidden rerouting
+- safe user-facing responses
+- machine-isolated diagnostics
+"""
 
 # =====================================================
 # 🔥 MACHINE CHANNELS
@@ -151,10 +151,10 @@ def log_error_input(
     INPUT MACHINE TRACE
 
     Used by:
-    - admin diagnostics
     - analyzer
+    - admin monitoring
+    - governance diagnostics
     - recovery tracing
-    - pipeline observability
     """
 
     return {
@@ -184,8 +184,8 @@ def log_error_input(
 
 def log_error_output(
 
-    handled,
-    context
+    handled=True,
+    context=None
 ):
 
     """
@@ -193,8 +193,8 @@ def log_error_output(
 
     Used internally by:
     - analyzer
-    - governance
-    - admin monitoring
+    - diagnostics systems
+    - admin observability
     """
 
     return {
@@ -330,6 +330,7 @@ def build_user_error_message(
     if modality == ERROR_CONTEXT_VISUAL:
 
         return (
+
             "🎨 Не удалось "
             "обработать визуальный запрос. "
             "Попробуй изменить запрос."
@@ -357,6 +358,7 @@ def build_user_error_message(
     ):
 
         return (
+
             "🖼 Не удалось "
             "выполнить визуальный запрос."
         )
@@ -382,12 +384,12 @@ async def process_image_task(
 ):
 
     """
-    Safe image pipeline execution.
+    Stable image task execution.
 
     Preserves:
-    - renderer continuity
-    - visual modality stability
-    - delivery structure
+    - image continuity
+    - modality integrity
+    - renderer-safe delivery
     """
 
     print(
@@ -467,13 +469,13 @@ async def send_result(
 ):
 
     """
-    Unified stabilized delivery layer.
+    Unified stable delivery layer.
 
     Supports:
-    - text
-    - image
-    - renderer payloads
-    - visual tasks
+    - text responses
+    - visual responses
+    - image tasks
+    - renderer-safe payloads
     """
 
     try:
@@ -624,7 +626,7 @@ async def handle_error(
 ):
 
     """
-    Unified safe error handling.
+    Unified error handling.
 
     User:
     - receives safe response.
