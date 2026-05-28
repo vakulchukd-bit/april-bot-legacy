@@ -1,28 +1,53 @@
-# blocks/event_system.py
-
 # =====================================================
-# 🧠 APRIL EVENT SYSTEM
+# 🧠 APRIL EVENT SYSTEM CORE
 # =====================================================
 
 """
-Unified internal event layer.
+APRIL EVENT SYSTEM CORE
 
-Этот слой:
+APRIL_FILE_ID:
+APRIL_EVENT_SYSTEM_CORE
 
-✅ удерживает continuity
-✅ удерживает structured history
-✅ удерживает semantic event flow
-✅ помогает trajectory tracking
-✅ помогает DeepHub context
-✅ помогает executor continuity
+ROLE:
+SEMANTIC_EVENT_CONTINUITY_AND_MACHINE_FLOW
 
-❌ НЕ telegram formatter
-❌ НЕ text beautifier
-❌ НЕ trigger router
-❌ НЕ legacy event logger
+INPUT:
+USER_EVENTS
+ASSISTANT_EVENTS
+RENDER_EVENTS
+SCENE_EVENTS
+EXECUTION_EVENTS
+MEMORY_EVENTS
 
-Главная задача:
-единый machine-readable event flow.
+OUTPUT:
+MACHINE_READABLE_EVENT_PAYLOADS
+DIALOG_CONTINUITY
+MEMORY_CONTINUITY
+DEEPHUB_EVENT_FLOW
+
+THIS FILE IS:
+- unified semantic event layer
+- continuity stabilizer
+- structured history system
+- event trajectory helper
+- DeepHub continuity bridge
+- executor event support layer
+
+THIS FILE IS NOT:
+- telegram formatter
+- frontend renderer
+- beautifier
+- trigger router
+- orchestration authority
+- legacy logger
+
+GOLDEN APRIL RULES:
+- continuity before fragmentation
+- semantic structure before keywords
+- renderer-safe event flow
+- machine-readable architecture
+- no renderer flattening
+- no hidden rerouting
 """
 
 from blocks.state_manager import (
@@ -31,6 +56,28 @@ from blocks.state_manager import (
 
     update_memory_summary
 )
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+EVENT_TASK_CHANNEL = {
+
+    "channel":
+        "event_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+EVENT_RESPONSE_CHANNEL = {
+
+    "channel":
+        "event_machine_response_channel",
+
+    "isolated":
+        True
+}
 
 # =====================================================
 # 🔥 EVENT TYPES
@@ -71,6 +118,93 @@ VISUAL_EVENTS = {
 }
 
 # =====================================================
+# 🔥 EVENT LOGGING
+# =====================================================
+
+def build_event_input_log(
+
+    role,
+    event_type
+):
+
+    """
+    INPUT MACHINE TRACE
+
+    Used internally by:
+    - continuity systems
+    - diagnostics
+    - DeepHub
+    - governance
+    """
+
+    return {
+
+        "file_id":
+            "APRIL_EVENT_SYSTEM_CORE",
+
+        "event":
+            "event_input",
+
+        "channel":
+            EVENT_TASK_CHANNEL,
+
+        "role":
+            role,
+
+        "event_type":
+            event_type,
+
+        "machine_only":
+            True
+    }
+
+
+def build_event_output_log(
+    payload
+):
+
+    """
+    OUTPUT MACHINE TRACE
+
+    Used internally by:
+    - continuity systems
+    - trajectory systems
+    - machine analytics
+    """
+
+    return {
+
+        "file_id":
+            "APRIL_EVENT_SYSTEM_CORE",
+
+        "event":
+            "event_output",
+
+        "channel":
+            EVENT_RESPONSE_CHANNEL,
+
+        "payload_type":
+            payload.get(
+                "event"
+            ),
+
+        "renderer":
+            payload.get(
+                "renderer",
+                False
+            ),
+
+        "semantic":
+            payload.get(
+                "semantic",
+                False
+            ),
+
+        "machine_only":
+            True
+    }
+
+# =====================================================
 # 🔥 HELPERS
 # =====================================================
 
@@ -91,6 +225,9 @@ def normalize_lower(
         text
     ).lower()
 
+# =====================================================
+# 🔥 EVENT PAYLOAD
+# =====================================================
 
 def build_event_payload(
 
@@ -100,15 +237,22 @@ def build_event_payload(
 ):
 
     """
-    Machine-readable event payload.
+    Machine-readable semantic payload.
 
-    ВАЖНО:
-    event flow теперь строится
-    НЕ через human trigger text,
-    а через semantic structure.
+    Event flow now builds through:
+    - semantic structure
+    - renderer awareness
+    - continuity-safe payloads
+
+    NOT:
+    - trigger words
+    - telegram formatting
     """
 
     return {
+
+        "channel":
+            EVENT_RESPONSE_CHANNEL,
 
         "role":
             role,
@@ -143,25 +287,32 @@ def build_event_payload(
                 "formula",
                 "diagram",
                 "scene"
-            ]
+            ],
+
+        "machine_only":
+            True
     }
 
+# =====================================================
+# 🔥 DIALOG TRACE
+# =====================================================
 
 def build_dialog_trace(
     payload
 ):
 
     """
-    Safe dialog trace.
+    Safe continuity trace.
 
-    Нужен:
-    - для continuity;
-    - для state manager;
-    - для debug visibility.
+    Used for:
+    - state manager
+    - continuity stabilization
+    - memory trajectory
+    - debug visibility
 
-    НЕ должен:
-    - ломать renderer blocks;
-    - flatten renderer payload.
+    MUST NOT:
+    - flatten renderer payloads
+    - destroy modality structure
     """
 
     role = payload.get(
@@ -186,7 +337,6 @@ def build_dialog_trace(
         f"{content}"
     )
 
-
 # =====================================================
 # 🔥 EVENT ENTRY
 # =====================================================
@@ -201,7 +351,7 @@ def add_event(
     """
     Unified semantic event entry.
 
-    Flow:
+    FLOW:
 
     user/action
         ↓
@@ -213,6 +363,13 @@ def add_event(
         ↓
     DeepHub context
     """
+
+    build_event_input_log(
+
+        role=role,
+
+        event_type=event_type
+    )
 
     # =================================================
     # 🔥 PAYLOAD
@@ -236,7 +393,7 @@ def add_event(
     )
 
     # =================================================
-    # 🔥 DIALOG
+    # 🔥 DIALOG CONTINUITY
     # =====================================================
 
     add_dialog(
@@ -249,7 +406,7 @@ def add_event(
     )
 
     # =================================================
-    # 🔥 MEMORY
+    # 🔥 MEMORY CONTINUITY
     # =====================================================
 
     update_memory_summary(
@@ -257,6 +414,14 @@ def add_event(
         user_id,
 
         dialog_trace
+    )
+
+    # =================================================
+    # 🔥 MACHINE OUTPUT TRACE
+    # =====================================================
+
+    build_event_output_log(
+        payload
     )
 
     # =================================================
