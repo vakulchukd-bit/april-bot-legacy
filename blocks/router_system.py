@@ -1,7 +1,7 @@
-# ==================== 🧠 ROUTER SYSTEM ====================
+# ==================== 🧠 APRIL LEGACY ROUTER ====================
 
 """
-Legacy compatibility router.
+APRIL LEGACY COMPATIBILITY ROUTER
 
 ⚠️ IMPORTANT:
 Этот router больше НЕ является главным мозгом April.
@@ -13,15 +13,111 @@ Legacy compatibility router.
 - executor orchestration
 
 Router теперь:
-- помогает legacy совместимости;
-- даёт weak hypotheses;
-- НЕ должен ломать trajectory;
-- НЕ должен делать hard trigger behavior.
+- compatibility helper;
+- weak hypothesis layer;
+- continuity-safe stabilizer;
+- lightweight orchestration assistant.
+
+Router НЕ:
+- execution authority;
+- hard trigger layer;
+- recursive router;
+- generation authority;
+- telegram dispatcher.
 """
+
+# =====================================================
+# 🔥 MACHINE IDENTITY
+# =====================================================
+
+APRIL_FILE_ID = "APRIL_LEGACY_ROUTER"
+
+ROUTER_MACHINE_CHANNEL = {
+
+    "type": "legacy_router",
+
+    "mode": "supportive",
+
+    "authority": "soft",
+
+    "continuity_safe": True,
+
+    "web_safe": True,
+
+    "renderer_first": True
+}
+
+# =====================================================
+# 🔥 ROUTER CONTRACT
+# =====================================================
+
+def build_router_contract():
+
+    return {
+
+        "legacy_compatible":
+            True,
+
+        "execution_authority":
+            False,
+
+        "generation_authority":
+            False,
+
+        "renderer_authority":
+            False,
+
+        "hard_trigger_behavior":
+            False,
+
+        "continuity_first":
+            True,
+
+        "trajectory_safe":
+            True,
+
+        "web_oriented":
+            True
+    }
+
+ROUTER_CONTRACT = build_router_contract()
+
+# =====================================================
+# 🔥 LOGGING
+# =====================================================
+
+ROUTER_PATCH_LOG = []
+
+def safe_router_log(msg):
+
+    try:
+
+        print(
+            "APRIL LEGACY ROUTER:",
+            msg
+        )
+
+        ROUTER_PATCH_LOG.append(
+            str(msg)
+        )
+
+    except:
+        pass
+
+safe_router_log(
+    "LEGACY ROUTER INITIALIZED"
+)
 
 # =====================================================
 # 🧠 SAFE HELPERS
 # =====================================================
+
+def normalize(text):
+
+    return (
+        text or ""
+    ).lower().strip()
+
 
 def contains_any(text, words):
 
@@ -29,7 +125,6 @@ def contains_any(text, words):
         w in text
         for w in words
     )
-
 
 # =====================================================
 # 🧠 NEGATION DETECTION
@@ -51,7 +146,6 @@ def has_negation(text):
         text,
         negations
     )
-
 
 # =====================================================
 # 🧠 EXPLORATION DETECTION
@@ -81,7 +175,6 @@ def is_exploration(text):
         exploration_words
     )
 
-
 # =====================================================
 # 🧠 USER LEADS DETECTION
 # =====================================================
@@ -104,9 +197,8 @@ def user_leads_direction(text):
         direction_words
     )
 
-
 # =====================================================
-# 🧠 LIGHT IMAGE DETECTION
+# 🧠 LIGHT VISUAL DETECTION
 # =====================================================
 
 def wants_visual_reference(text):
@@ -127,9 +219,8 @@ def wants_visual_reference(text):
         visual_words
     )
 
-
 # =====================================================
-# 🧠 IMAGE EXECUTION DETECTION
+# 🧠 IMAGE GENERATION DETECTION
 # =====================================================
 
 def wants_real_generation(text):
@@ -147,7 +238,6 @@ def wants_real_generation(text):
         text,
         generation_words
     )
-
 
 # =====================================================
 # 🧠 SHORT CONTINUATION
@@ -179,6 +269,42 @@ def is_short_continuation(text):
 
     return False
 
+# =====================================================
+# 🧠 SAFE RESULT TEMPLATE
+# =====================================================
+
+def build_result():
+
+    return {
+
+        "action": "chat",
+
+        "confidence": 0.5,
+
+        "is_soft_decision": True,
+
+        "trajectory_safe": True,
+
+        "continuity_safe": True,
+
+        "exploration_mode": False,
+
+        "visual_guidance": False,
+
+        "generation_allowed": False,
+
+        "continuation_detected": False,
+
+        "legacy_router": True,
+
+        "hard_authority": False,
+
+        "executor_override_allowed": True,
+
+        "renderer_first": True,
+
+        "web_safe": True
+    }
 
 # =====================================================
 # 🧠 MAIN ROUTER
@@ -189,34 +315,21 @@ def decide_action(
     history: list
 ):
 
-    t = text.lower().strip()
+    t = normalize(text)
+
+    safe_router_log(
+        f"INPUT: {t[:80]}"
+    )
 
     # =================================================
     # 🔥 BASE RESULT
-    # =================================================
+    # =====================================================
 
-    result = {
-
-        "action": "chat",
-
-        "confidence": 0.5,
-
-        "is_soft_decision": True,
-
-        "trajectory_safe": True,
-
-        "exploration_mode": False,
-
-        "visual_guidance": False,
-
-        "generation_allowed": False,
-
-        "continuation_detected": False
-    }
+    result = build_result()
 
     # =================================================
     # 🔥 NEGATION
-    # =================================================
+    # =====================================================
 
     if has_negation(t):
 
@@ -228,25 +341,29 @@ def decide_action(
 
     # =================================================
     # 🔥 SHORT CONTINUATION
-    # =================================================
+    # =====================================================
 
     if is_short_continuation(t):
 
         result["action"] = "continue"
 
-        result["continuation_detected"] = True
+        result[
+            "continuation_detected"
+        ] = True
 
         result["confidence"] = 0.85
 
         return result
 
     # =================================================
-    # 🔥 EXPLORATION MODE
-    # =================================================
+    # 🔥 EXPLORATION
+    # =====================================================
 
     if is_exploration(t):
 
-        result["exploration_mode"] = True
+        result[
+            "exploration_mode"
+        ] = True
 
         result["action"] = "guide"
 
@@ -254,13 +371,17 @@ def decide_action(
 
     # =================================================
     # 🔥 USER LEADS
-    # =================================================
+    # =====================================================
 
     if user_leads_direction(t):
 
-        result["trajectory_safe"] = True
+        result[
+            "trajectory_safe"
+        ] = True
 
-        result["exploration_mode"] = True
+        result[
+            "exploration_mode"
+        ] = True
 
         result["action"] = "guide"
 
@@ -268,11 +389,13 @@ def decide_action(
 
     # =================================================
     # 🔥 VISUAL GUIDANCE
-    # =================================================
+    # =====================================================
 
     if wants_visual_reference(t):
 
-        result["visual_guidance"] = True
+        result[
+            "visual_guidance"
+        ] = True
 
         result["action"] = "reference"
 
@@ -280,14 +403,19 @@ def decide_action(
 
     # =================================================
     # 🔥 REAL GENERATION
-    # =================================================
+    # =====================================================
 
     if wants_real_generation(t):
 
-        # ⚠️ exploration suppresses generation
-        if not result["exploration_mode"]:
+        # exploration suppresses generation
 
-            result["generation_allowed"] = True
+        if not result[
+            "exploration_mode"
+        ]:
+
+            result[
+                "generation_allowed"
+            ] = True
 
             result["action"] = "image"
 
@@ -295,7 +423,7 @@ def decide_action(
 
     # =================================================
     # 🔥 DIAGRAM
-    # =================================================
+    # =====================================================
 
     diagram_words = [
 
@@ -316,7 +444,7 @@ def decide_action(
 
     # =================================================
     # 🔥 QUESTION
-    # =================================================
+    # =====================================================
 
     question_words = [
 
@@ -327,7 +455,9 @@ def decide_action(
     ]
 
     if (
+
         "?" in t
+
         or contains_any(
             t,
             question_words
@@ -340,11 +470,9 @@ def decide_action(
 
     # =================================================
     # 🔥 WEAK SHORT INPUT
-    # =================================================
+    # =====================================================
 
     if len(t.split()) <= 2:
-
-        # ⚠️ больше НЕ forcing clarify
 
         if result["action"] == "chat":
 
@@ -358,16 +486,22 @@ def decide_action(
 
     # =================================================
     # 🔥 FINAL SAFETY
-    # =================================================
+    # =====================================================
 
-    # Router больше НЕ имеет hard authority.
-    # Executor / cognition / response_decision
-    # могут полностью переопределить router result.
+    result[
+        "executor_override_allowed"
+    ] = True
 
-    result["legacy_router"] = True
+    result[
+        "hard_authority"
+    ] = False
 
-    result["hard_authority"] = False
+    result[
+        "trajectory_safe"
+    ] = True
 
-    result["executor_override_allowed"] = True
+    result[
+        "continuity_safe"
+    ] = True
 
     return result
