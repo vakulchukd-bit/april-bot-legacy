@@ -3,126 +3,59 @@
 # =========================================================
 
 """
-APRIL UNIFIED PERSONALITY CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the unified behavioral
-identity core of April.
+APRIL_FILE_ID:
+APRIL_UNIFIED_PERSONALITY_CORE
 
-This helper core keeps April:
-- unified
-- human
-- continuous
-- psychologically stable
-- behaviorally coherent
+ROLE:
+UNIFIED_BEHAVIORAL_CONTINUITY_SYSTEM
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROOM:
+PERSONALITY_ROOM
 
-This file IS:
-- behavioral identity layer
-- continuity personality stabilizer
-- unified assistant presence
-- anti-fragmentation helper core
-- human interaction stabilizer
-- dialog continuity personality layer
+INPUT:
+EXECUTOR_PERSONALITY_REQUEST
+COGNITION_STATE
+SEMANTIC_STATE
+REASONING_STATE
+RESPONSE_DECISION
+CONTINUITY_STATE
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS NOT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT:
+BEHAVIORAL_STABILIZATION
+UNIFIED_PERSONALITY_STATE
+CONTINUITY_PERSONALITY_PAYLOAD
+ANALYZER_PERSONALITY_TELEMETRY
 
-This file is NOT:
-- Executor
-- orchestration engine
-- routing system
-- governance validator
-- memory authority
-- analytics system
-- frontend renderer
-- Telegram logic
+DEPENDENCIES:
+EXECUTOR
+APRIL_AUTHORITY
+ANCHOR_CORE
+CONTINUITY_SYSTEM
+ANALYZER_SYSTEM
+
+CRITICAL:
+TRUE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
+🧠 GOLDEN RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-BotRoot
- ↓
-Executor
- ↓
-Unified Personality Core (THIS FILE)
- ↓
-Execution Rooms
+This file NEVER:
+- performs orchestration
+- routes execution
+- replaces governance
+- formats frontend output
 
-Executor thinks.
-Rooms execute.
-This helper core unifies behavior.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHY THIS FILE EXISTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Without this system:
-- rooms feel disconnected
-- behavior becomes fragmented
-- responses feel mechanical
-- continuity breaks psychologically
-- April loses unified presence
-
-This helper core ensures:
-April always feels like ONE entity.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN MACHINE CHANNEL RULE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file uses TWO isolated channels.
-
-1. PERSONALITY TASK CHANNEL
-Executor → Personality Core
-
-2. PERSONALITY RESPONSE CHANNEL
-Personality Core → Executor
-
-Human-facing responses NEVER mix
-with internal personality orchestration.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL PERSONALITY PRINCIPLES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. calm presence
-2. continuity before performance
-3. human understanding before capability
-4. renderer-first assistance
-5. no internal system leakage
-6. no fragmented room behavior
-7. invisible capabilities
-8. personality through behavior
-9. no emotional overacting
-10. no mechanical assistant feeling
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram personality logic
-- emotional simulation
-- roleplay narration
-- orchestration logic
-- governance duplication
-- memory duplication
-- analytics logic
-- frontend formatting
-
-This file must remain:
-- behavioral
-- lightweight
-- continuity-focused
-- Executor-connected
-- psychologically stable
+This file ONLY:
+- stabilizes behavior
+- unifies dialog continuity
+- prevents fragmentation
+- maintains psychological continuity
+- exposes personality telemetry
 """
 
 # =========================================================
@@ -156,21 +89,65 @@ PERSONALITY_RESPONSE_CHANNEL = {
 }
 
 # =========================================================
+# 🔥 APRIL TRACE LOGS
+# =========================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_UNIFIED_PERSONALITY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_UNIFIED_PERSONALITY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+# =========================================================
 # 🧠 APRIL IDENTITY
 # =========================================================
 
-"""
-Behavioral identity profile.
-
-This is NOT emotional simulation.
-This is behavioral stabilization.
-"""
-
 APRIL_IDENTITY = {
-
-    # =====================================================
-    # 🧠 ENTITY
-    # =====================================================
 
     "name":
         "April",
@@ -183,10 +160,6 @@ APRIL_IDENTITY = {
 
     "speaks_from_self":
         True,
-
-    # =====================================================
-    # 🧠 BEHAVIORAL BALANCE
-    # =====================================================
 
     "warmth":
         0.58,
@@ -202,10 +175,6 @@ APRIL_IDENTITY = {
 
     "initiative_balance":
         0.62,
-
-    # =====================================================
-    # 🧠 HUMAN STABILIZATION
-    # =====================================================
 
     "avoid_fragmentation":
         True,
@@ -228,10 +197,6 @@ APRIL_IDENTITY = {
     "avoid_internal_terminology":
         True,
 
-    # =====================================================
-    # 🧠 CONTINUITY
-    # =====================================================
-
     "trajectory_priority":
         1.0,
 
@@ -244,10 +209,6 @@ APRIL_IDENTITY = {
     "psychological_continuity":
         0.95,
 
-    # =====================================================
-    # 🧠 STYLE
-    # =====================================================
-
     "response_style":
         "natural",
 
@@ -259,23 +220,22 @@ APRIL_IDENTITY = {
 }
 
 # =========================================================
-# 🧠 PERSONALITY PHILOSOPHY
+# 🧠 RESPONSE PHILOSOPHY
 # =========================================================
 
 def build_response_philosophy():
 
-    """
-    Behavioral guidance philosophy.
+    APRIL_LOG_IN(
 
-    NOT self-description.
-    NOT cognition narration.
-    """
+        "PERSONALITY_ROOM",
 
-    return {
+        {
+            "action":
+                "build_response_philosophy"
+        }
+    )
 
-        # =================================================
-        # 🧠 HUMANITY
-        # =====================================================
+    payload = {
 
         "maintain_human_presence":
             True,
@@ -289,10 +249,6 @@ def build_response_philosophy():
         "maintain_natural_dialog":
             True,
 
-        # =================================================
-        # 🧠 RESPONSE STYLE
-        # =====================================================
-
         "prefer_natural_language":
             True,
 
@@ -304,10 +260,6 @@ def build_response_philosophy():
 
         "prefer_grounded_responses":
             True,
-
-        # =================================================
-        # 🧠 ANTI-LEAK
-        # =====================================================
 
         "avoid_internal_reasoning_output":
             True,
@@ -321,10 +273,6 @@ def build_response_philosophy():
         "avoid_module_exposure":
             True,
 
-        # =================================================
-        # 🧠 RESPONSE BALANCE
-        # =====================================================
-
         "avoid_question_loops":
             True,
 
@@ -337,10 +285,6 @@ def build_response_philosophy():
         "avoid_dead_end_responses":
             True,
 
-        # =================================================
-        # 🧠 EXECUTION BEHAVIOR
-        # =====================================================
-
         "renderer_before_generation":
             True,
 
@@ -351,19 +295,35 @@ def build_response_philosophy():
             True
     }
 
+    APRIL_LOG_OUT(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "philosophy":
+                "ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 IDENTITY ANCHOR
 # =========================================================
 
 def build_identity_anchor():
 
-    """
-    Lightweight unified identity anchor.
+    APRIL_LOG_IN(
 
-    Keeps April behaviorally stable.
-    """
+        "PERSONALITY_ROOM",
 
-    return {
+        {
+            "action":
+                "build_identity_anchor"
+        }
+    )
+
+    payload = {
 
         "entity":
             "April",
@@ -402,6 +362,18 @@ def build_identity_anchor():
         }
     }
 
+    APRIL_LOG_OUT(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "identity_anchor":
+                "active"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 INTERNAL LEAK SUPPRESSION
 # =========================================================
@@ -410,10 +382,15 @@ def suppress_internal_personality_leakage(
     cognition: dict
 ):
 
-    """
-    Prevents personality internals
-    from leaking into output.
-    """
+    APRIL_LOG_IN(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "action":
+                "suppress_internal_personality_leakage"
+        }
+    )
 
     cognition = cognition or {}
 
@@ -445,7 +422,79 @@ def suppress_internal_personality_leakage(
         "prefer_user_facing_language"
     ] = True
 
+    APRIL_LOG_OUT(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "leak_protection":
+                True
+        }
+    )
+
     return cognition
+
+# =========================================================
+# 🧠 PERSONALITY TELEMETRY
+# =========================================================
+
+def build_personality_telemetry_payload():
+
+    APRIL_LOG_IN(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "action":
+                "build_personality_telemetry_payload"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_UNIFIED_PERSONALITY_CORE",
+
+        "room":
+            "PERSONALITY_ROOM",
+
+        "identity":
+            "April",
+
+        "behavioral_core_active":
+            True,
+
+        "continuity_active":
+            True,
+
+        "humanity_level":
+            APRIL_IDENTITY.get(
+                "humanity"
+            ),
+
+        "dialog_presence":
+            APRIL_IDENTITY.get(
+                "dialog_presence"
+            ),
+
+        "fragmentation_protection":
+            True,
+
+        "executor_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "telemetry":
+                "ready"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 APPLY APRIL PERSONALITY
@@ -460,31 +509,21 @@ def apply_april_personality(
     state: dict
 ):
 
-    """
-    Applies unified behavioral stabilization.
+    APRIL_LOG_IN(
 
-    IMPORTANT:
-    This helper core does NOT:
-    - orchestrate execution
-    - route tasks
-    - validate governance
-    - control rooms
+        "PERSONALITY_ROOM",
 
-    It ONLY stabilizes:
-    - behavior
-    - continuity
-    - unified presence
-    """
+        {
+            "action":
+                "apply_april_personality"
+        }
+    )
 
     cognition = cognition or {}
     semantic = semantic or {}
     reasoning = reasoning or {}
     response_decision = response_decision or {}
     state = state or {}
-
-    # =====================================================
-    # 🧠 IDENTITY
-    # =====================================================
 
     cognition["identity_anchor"] = (
         build_identity_anchor()
@@ -502,10 +541,6 @@ def apply_april_personality(
 
     cognition["speaks_from_self"] = True
 
-    # =====================================================
-    # 🧠 HUMANITY
-    # =====================================================
-
     cognition["humanity_weight"] = 0.9
 
     cognition["natural_dialog_priority"] = 0.95
@@ -515,10 +550,6 @@ def apply_april_personality(
     cognition["maintain_psychological_continuity"] = True
 
     cognition["maintain_goal_tracking"] = True
-
-    # =====================================================
-    # 🧠 ANTI-FRAGMENTATION
-    # =====================================================
 
     cognition["avoid_room_fragmentation"] = True
 
@@ -532,20 +563,12 @@ def apply_april_personality(
 
     cognition["avoid_trigger_behavior"] = True
 
-    # =====================================================
-    # 🧠 RESPONSE BALANCE
-    # =====================================================
-
     if cognition.get(
         "is_frustrated",
         0.0
     ) >= 0.6:
 
         cognition["reduce_talking"] = True
-
-    # =====================================================
-    # 🧠 QUESTION LOOP SUPPRESSION
-    # =====================================================
 
     if cognition.get(
         "needs_clarification"
@@ -562,10 +585,6 @@ def apply_april_personality(
                 "needs_clarification"
             ] = False
 
-    # =====================================================
-    # 🧠 USER DIRECTION
-    # =====================================================
-
     if cognition.get(
         "user_leads_direction"
     ):
@@ -573,10 +592,6 @@ def apply_april_personality(
         cognition[
             "assistant_should_follow"
         ] = True
-
-    # =====================================================
-    # 🧠 SOFT HUMANIZATION
-    # =====================================================
 
     cognition["soft_humanization"] = {
 
@@ -591,10 +606,6 @@ def apply_april_personality(
         "humanity":
             APRIL_IDENTITY["humanity"]
     }
-
-    # =====================================================
-    # 🧠 RESPONSE DECISION LINK
-    # =====================================================
 
     response_decision[
         "identity_integrated"
@@ -612,10 +623,6 @@ def apply_april_personality(
         "avoid_fragmentation"
     ] = True
 
-    # =====================================================
-    # 🧠 STATE META
-    # =====================================================
-
     meta = state.get(
         "meta",
         {}
@@ -631,10 +638,6 @@ def apply_april_personality(
 
     state["meta"] = meta
 
-    # =====================================================
-    # 🧠 GOVERNANCE LINK
-    # =====================================================
-
     cognition["authority_state"] = (
         build_authority_state()
     )
@@ -643,17 +646,9 @@ def apply_april_personality(
         "april_final_authority"
     ] = True
 
-    # =====================================================
-    # 🧠 INTERNAL LEAK SUPPRESSION
-    # =====================================================
-
     cognition = suppress_internal_personality_leakage(
         cognition
     )
-
-    # =====================================================
-    # 🧠 MACHINE RESPONSE PAYLOAD
-    # =====================================================
 
     cognition[
         "personality_machine_channel"
@@ -667,8 +662,18 @@ def apply_april_personality(
         "unified_presence_active"
     ] = True
 
-    # =====================================================
-    # 🧠 FINAL
-    # =====================================================
+    cognition[
+        "personality_telemetry"
+    ] = build_personality_telemetry_payload()
+
+    APRIL_LOG_OUT(
+
+        "PERSONALITY_ROOM",
+
+        {
+            "personality":
+                "applied"
+        }
+    )
 
     return cognition
