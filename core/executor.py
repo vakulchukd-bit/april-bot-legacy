@@ -945,6 +945,110 @@ def evaluate_response_quality(
 # 🔥 SAFE FORMAT RESPONSE
 # =====================================================
 
+# =====================================================
+# 🧠 EXECUTOR OUTPUT SANITIZER
+# =====================================================
+
+def sanitize_executor_output(
+    result: dict
+):
+
+    if not result:
+        return result
+
+    result_type = result.get(
+        "type",
+        "text"
+    )
+
+    # =================================================
+    # 🔥 VISUAL OBJECTS
+    # =====================================================
+
+    if result_type in [
+
+        "graph",
+        "formula",
+        "diagram",
+        "scene",
+        "image",
+        "gallery",
+        "table",
+        "function"
+    ]:
+
+        return result
+
+    output = str(
+        result.get("data", "")
+    )
+
+    if not output.strip():
+
+        return result
+
+    # =================================================
+    # 🔥 MACHINE LEAK PATTERNS
+    # =====================================================
+
+    blocked_lines = [
+
+        "FLOW=",
+        "MEMORY=",
+        "OBJECTS=",
+        "SCENE=",
+        "STYLE=",
+        "APRIL_STATE",
+        "RULES:",
+        "verbosity=",
+        "role=",
+        "mode=",
+        "renderer priority",
+        "continuity_dialogue",
+        "machine_orchestration",
+        "renderer_space_request",
+        "visual_continuity"
+    ]
+
+    cleaned = []
+
+    for line in output.split("\n"):
+
+        stripped = line.strip()
+
+        should_block = False
+
+        for pattern in blocked_lines:
+
+            if pattern.lower() in stripped.lower():
+
+                should_block = True
+                break
+
+        if should_block:
+            continue
+
+        cleaned.append(line)
+
+    cleaned_output = "\n".join(
+        cleaned
+    ).strip()
+
+    # =================================================
+    # 🔥 EMPTY AFTER CLEAN
+    # =====================================================
+
+    if not cleaned_output:
+
+        cleaned_output = (
+            "⚠️ Ответ сформировался "
+            "нестабильно."
+        )
+
+    result["data"] = cleaned_output
+
+    return result
+
 def safely_format_result(
 
     result,
