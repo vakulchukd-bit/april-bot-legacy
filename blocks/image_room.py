@@ -1,3 +1,43 @@
+# =====================================================
+# 🧠 APRIL IMAGE ROOM
+# =====================================================
+
+"""
+APRIL IMAGE ROOM
+
+APRIL_FILE_ID:
+APRIL_IMAGE_ROOM_COORDINATOR
+
+ROLE:
+VISUAL_ROOM_ORCHESTRATION_LAYER
+
+INPUT:
+USER_VISUAL_REQUEST
+SEMANTIC_CONTEXT
+VISUAL_STATE
+IMAGE_CONTEXT
+
+OUTPUT:
+IMAGE_TASK
+VISUAL_ANALYSIS
+EDIT_TRAJECTORY
+RENDERER_SAFE_VISUAL_RESPONSE
+
+Главная задача:
+- semantic visual routing;
+- visual continuity;
+- image orchestration;
+- renderer-safe image coordination;
+- Web Space compatible visual execution.
+
+Этот файл НЕ:
+- renderer authority;
+- frontend renderer;
+- Telegram-only image pipeline;
+- cognition authority;
+- hidden orchestration engine.
+"""
+
 # ===============================
 # 🔥 SAFE PATCH MODE (IMAGE ROOM)
 # ===============================
@@ -19,6 +59,73 @@ def safe_patch_log(msg):
     except:
         pass
 
+# =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = (
+    "APRIL_IMAGE_ROOM_COORDINATOR"
+)
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+IMAGE_ROOM_TASK_CHANNEL = {
+
+    "channel":
+        "image_room_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+IMAGE_ROOM_RESPONSE_CHANNEL = {
+
+    "channel":
+        "image_room_machine_response_channel",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGS
+# =====================================================
+
+IMAGE_ROOM_LOGS = []
+
+MAX_IMAGE_ROOM_LOGS = 60
+
+
+def log_image_room_event(
+    event,
+    payload=None
+):
+
+    try:
+
+        IMAGE_ROOM_LOGS.append({
+
+            "file_id":
+                APRIL_FILE_ID,
+
+            "event":
+                event,
+
+            "payload":
+                payload or {},
+
+            "machine_only":
+                True
+        })
+
+        if len(IMAGE_ROOM_LOGS) > MAX_IMAGE_ROOM_LOGS:
+
+            IMAGE_ROOM_LOGS.pop(0)
+
+    except:
+        pass
 
 # =====================================================
 # 🧠 SEMANTIC IMAGE SIGNALS
@@ -49,7 +156,6 @@ SEMANTIC_IMAGE_SIGNALS = {
         "ocr_analysis"
     ]
 }
-
 
 # =====================================================
 # 🔥 PATCH: SEMANTIC ENTRY
@@ -83,6 +189,19 @@ def patch_image_enter(
         "image_analysis"
     ]:
 
+        log_image_room_event(
+
+            "semantic_room_detected",
+
+            {
+                "room":
+                    room,
+
+                "intent":
+                    intent
+            }
+        )
+
         return {
 
             "semantic_room":
@@ -92,7 +211,10 @@ def patch_image_enter(
                 intent,
 
             "semantic_detected":
-                True
+                True,
+
+            "machine_channel":
+                IMAGE_ROOM_RESPONSE_CHANNEL
         }
 
     return {
@@ -100,7 +222,6 @@ def patch_image_enter(
         "semantic_detected":
             False
     }
-
 
 # =====================================================
 # 🔥 FUTURE PLACEHOLDER
@@ -113,7 +234,6 @@ def patch_image_future(
 
     return None
 
-
 # =====================================================
 # 🔥 IMAGE LOCKS
 # =====================================================
@@ -123,9 +243,12 @@ def is_image_locked(
 ):
 
     return (
+
         state.get(
             "image_locked"
-        ) is True
+        )
+
+        is True
     )
 
 
@@ -137,6 +260,10 @@ def lock_image(
         "image_locked"
     ] = True
 
+    log_image_room_event(
+        "image_locked"
+    )
+
 
 def unlock_image(
     state
@@ -146,6 +273,9 @@ def unlock_image(
         "image_locked"
     ] = False
 
+    log_image_room_event(
+        "image_unlocked"
+    )
 
 # =====================================================
 # 🔥 SAFE UNLOCK
@@ -176,6 +306,9 @@ def ensure_unlock(
             "image_locked"
         ] = False
 
+        log_image_room_event(
+            "force_unlock"
+        )
 
 # =====================================================
 # 🔥 IMPORTS
@@ -200,7 +333,6 @@ from blocks.state_manager import (
     get_state
 )
 
-
 # =====================================================
 # 🧠 IMAGE ROOM
 # =====================================================
@@ -208,6 +340,10 @@ from blocks.state_manager import (
 class ImageRoom:
 
     name = "image"
+
+    ROOM_ID = (
+        "APRIL_IMAGE_ROOM"
+    )
 
     # =================================================
     # 🔥 SEMANTIC ROUTING
@@ -319,9 +455,11 @@ class ImageRoom:
     ):
 
         semantic = (
+
             context.get(
                 "semantic"
             )
+
             or {}
         )
 
@@ -346,9 +484,11 @@ class ImageRoom:
     ):
 
         semantic = (
+
             context.get(
                 "semantic"
             )
+
             or {}
         )
 
@@ -397,8 +537,17 @@ class ImageRoom:
 
                 score += 0.25
 
-        except:
-            pass
+        except Exception as e:
+
+            log_image_room_event(
+
+                "legacy_evaluation_error",
+
+                {
+                    "error":
+                        str(e)
+                }
+            )
 
         return min(
             score,
@@ -417,6 +566,16 @@ class ImageRoom:
         run_with_typing
     ):
 
+        log_image_room_event(
+
+            "handle_started",
+
+            {
+                "user_id":
+                    str(user_id)
+            }
+        )
+
         ctx = get_image_context(
             user_id
         )
@@ -426,9 +585,11 @@ class ImageRoom:
         )
 
         semantic = (
+
             context.get(
                 "semantic"
             )
+
             or {}
         )
 
@@ -465,9 +626,14 @@ class ImageRoom:
                 "→ skip duplicate"
             )
 
+            log_image_room_event(
+                "duplicate_blocked"
+            )
+
             return {
 
-                "type": "text",
+                "type":
+                    "text",
 
                 "data":
                     "⏳ Уже обрабатываю изображение..."
@@ -571,11 +737,19 @@ class ImageRoom:
 
             if path:
 
+                log_image_room_event(
+                    "analysis_started"
+                )
+
                 result = await analyze_image(
 
                     path,
 
                     state
+                )
+
+                log_image_room_event(
+                    "analysis_completed"
                 )
 
                 return result
@@ -602,6 +776,10 @@ class ImageRoom:
 
                 try:
 
+                    log_image_room_event(
+                        "edit_started"
+                    )
+
                     result = await image_edit(
 
                         user_id,
@@ -611,6 +789,10 @@ class ImageRoom:
                         text,
 
                         state
+                    )
+
+                    log_image_room_event(
+                        "edit_completed"
                     )
 
                     return result
@@ -631,11 +813,17 @@ class ImageRoom:
                 state
             )
 
+            log_image_room_event(
+                "generation_task_created"
+            )
+
             return {
 
-                "type": "image_task",
+                "type":
+                    "image_task",
 
-                "prompt": text,
+                "prompt":
+                    text,
 
                 "semantic": {
 
@@ -646,7 +834,10 @@ class ImageRoom:
                         False,
 
                     "continuity_safe":
-                        True
+                        True,
+
+                    "machine_channel":
+                        IMAGE_ROOM_RESPONSE_CHANNEL
                 }
             }
 
@@ -662,11 +853,17 @@ class ImageRoom:
                 state
             )
 
+            log_image_room_event(
+                "legacy_generation_task_created"
+            )
+
             return {
 
-                "type": "image_task",
+                "type":
+                    "image_task",
 
-                "prompt": text,
+                "prompt":
+                    text,
 
                 "semantic": {
 
@@ -674,7 +871,10 @@ class ImageRoom:
                         True,
 
                     "continuity_safe":
-                        True
+                        True,
+
+                    "machine_channel":
+                        IMAGE_ROOM_RESPONSE_CHANNEL
                 }
             }
 
@@ -682,9 +882,14 @@ class ImageRoom:
         # 🔥 SAFE FALLBACK
         # =============================================
 
+        log_image_room_event(
+            "safe_fallback"
+        )
+
         return {
 
-            "type": "text",
+            "type":
+                "text",
 
             "data":
                 "⚠️ Visual request detected, "
