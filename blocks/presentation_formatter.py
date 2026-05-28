@@ -1,76 +1,155 @@
 # =====================================================
-# 🧠 APRIL PRESENTATION FORMATTER
+# 🧠 APRIL WEB PRESENTATION ORCHESTRATOR
 # =====================================================
 
 """
-APRIL SPACE PRESENTATION LAYER
+APRIL WEB PRESENTATION SYSTEM
 
-BEHAVIOR-AWARE SAFE PRESENTATION PIPELINE
+ROLE:
+Этот файл является
+финальным presentation coordinator
+между machine routing
+и human-visible web response.
 
-Этот слой теперь:
+=====================================================
+🔥 MAIN PURPOSE
+=====================================================
 
-✅ НЕ ломает renderer payload
-✅ НЕ сериализует scene objects
-✅ НЕ flatten'ит multimodal blocks
-✅ НЕ уничтожает graph/formula/code payload
-✅ НЕ вмешивается в renderer execution
-✅ НЕ мутирует artifact objects
-✅ НЕ ломает future spatial architecture
+Система отвечает за:
 
-И теперь дополнительно:
+- calm response formatting;
+- semantic pacing;
+- renderer-safe presentation;
+- behavioral stabilization;
+- dialogue density control;
+- anti-robotic cleanup;
+- continuity-safe output;
+- web-space presentation adaptation.
 
-✅ понимает behavioral field
-✅ регулирует плотность ответа
-✅ suppress robotic rhythm
-✅ stabilizes latent guidance
-✅ controls pacing
-✅ reduces dialogue bloat
-✅ preserves calm continuity
+=====================================================
+🧠 GOLDEN APRIL ARCHITECTURE
+=====================================================
+
+INPUT MACHINE CHANNEL:
+Executor / ExcRouter → Presentation Layer
+
+OUTPUT HUMAN CHANNEL:
+Presentation Layer → BotRU → Web UI
+
+=====================================================
+🔥 IMPORTANT
+=====================================================
 
 Этот слой НЕ:
-- personality prompt;
-- emotional inflator;
-- chatbot beautifier;
-- corporate formatter.
 
-Он теперь:
-- behavior-aware formatter;
-- continuity pacing layer;
-- semantic density stabilizer;
-- latent guidance presenter.
+- personality engine;
+- cognition engine;
+- semantic analyzer;
+- renderer executor;
+- scene mutator;
+- markdown beautifier;
+- Telegram formatter.
+
+=====================================================
+🌐 WEB-FIRST ARCHITECTURE
+=====================================================
+
+Система адаптирована под:
+
+- web admin panel;
+- web assistant UI;
+- renderer-safe payloads;
+- multimodal blocks;
+- spatial architecture;
+- future visual interfaces.
+
+=====================================================
+🔥 GOLDEN RULE
+=====================================================
+
+Presentation Layer
+НИКОГДА НЕ:
+
+- мутирует renderer payload;
+- ломает visual blocks;
+- сериализует machine objects;
+- вмешивается в execution routing;
+- смешивает machine/output каналы.
+
+=====================================================
+🧠 CHANNEL ISOLATION
+=====================================================
+
+Machine routing:
+internal only.
+
+Human presentation:
+output only.
+
+Никаких пересечений.
+Никаких утечек.
+Никакой каши.
+
+=====================================================
 """
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
 
 import re
 import json
 
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source": "executor",
+    "type": "presentation_machine_input",
+    "isolated": True
+}
+
+OUTPUT_HUMAN_CHANNEL = {
+
+    "target": "botru_web_output",
+    "type": "human_response_output",
+    "isolated": True
+}
 
 # =====================================================
-# 🔥 LOG
+# 🔥 LOGGING
 # =====================================================
 
 FORMAT_PATCH_LOG = []
-
 
 def safe_format_log(msg):
 
     try:
 
-        print("PRESENTATION:", msg)
+        print(
+            "APRIL PRESENTATION:",
+            msg
+        )
 
-        FORMAT_PATCH_LOG.append(msg)
+        FORMAT_PATCH_LOG.append(
+            str(msg)
+        )
 
     except:
         pass
-
 
 # =====================================================
 # 🔥 SAFE HELPERS
 # =====================================================
 
 def clamp(
+
     value,
     minimum=0.0,
     maximum=1.0
+
 ):
 
     if value < minimum:
@@ -81,15 +160,43 @@ def clamp(
 
     return value
 
+# =====================================================
+# 🔥 RENDERER TYPES
+# =====================================================
+
+RENDERER_TYPES = [
+
+    "graph",
+    "formula",
+    "code",
+    "table",
+    "diagram",
+    "layout",
+    "renderer",
+    "scene",
+    "visual",
+    "artifact",
+    "message_block",
+    "canvas",
+    "svg"
+]
 
 # =====================================================
-# 🔥 SAFE PAYLOAD DETECTION
+# 🔥 PAYLOAD DETECTION
 # =====================================================
 
 def is_renderer_payload(value):
 
-    if not isinstance(value, (dict, list)):
+    if not isinstance(
+        value,
+        (dict, list)
+    ):
+
         return False
+
+    # =================================================
+    # 🔥 DICT
+    # =====================================================
 
     if isinstance(value, dict):
 
@@ -97,23 +204,19 @@ def is_renderer_payload(value):
             "type"
         )
 
-        if payload_type in [
-
-            "graph",
-            "formula",
-            "code",
-            "table",
-            "diagram",
-            "layout",
-            "link",
-            "renderer",
-            "scene",
-            "visual",
-            "artifact",
-            "message_block"
-        ]:
+        if payload_type in RENDERER_TYPES:
 
             return True
+
+        if value.get(
+            "machine_only"
+        ):
+
+            return True
+
+    # =================================================
+    # 🔥 LIST
+    # =====================================================
 
     if isinstance(value, list):
 
@@ -125,32 +228,39 @@ def is_renderer_payload(value):
                     "type"
                 )
 
-                if item_type in [
-
-                    "graph",
-                    "formula",
-                    "code",
-                    "table",
-                    "diagram",
-                    "layout",
-                    "link",
-                    "renderer",
-                    "scene",
-                    "visual",
-                    "artifact",
-                    "message_block"
-                ]:
+                if item_type in RENDERER_TYPES:
 
                     return True
 
     return False
 
+# =====================================================
+# 🔥 MACHINE PAYLOAD DETECTION
+# =====================================================
+
+def is_machine_payload(value):
+
+    if not isinstance(
+        value,
+        dict
+    ):
+
+        return False
+
+    return value.get(
+        "machine_only",
+        False
+    )
 
 # =====================================================
-# 🔥 NORMALIZE
+# 🔥 NORMALIZATION
 # =====================================================
 
 def normalize_text_payload(value):
+
+    # =================================================
+    # 🔥 RENDERER SAFE
+    # =====================================================
 
     if is_renderer_payload(value):
 
@@ -160,41 +270,54 @@ def normalize_text_payload(value):
 
         return value
 
+    # =================================================
+    # 🔥 MACHINE SAFE
+    # =====================================================
+
+    if is_machine_payload(value):
+
+        safe_format_log(
+            "MACHINE PAYLOAD PRESERVED"
+        )
+
+        return value
+
+    # =================================================
+    # 🔥 NONE
+    # =====================================================
+
     if value is None:
         return ""
+
+    # =================================================
+    # 🔥 STRING
+    # =====================================================
 
     if isinstance(value, str):
         return value
 
-    if isinstance(value, (dict, list)):
+    # =================================================
+    # 🔥 OBJECT SAFE
+    # =====================================================
+
+    if isinstance(
+        value,
+        (dict, list)
+    ):
 
         safe_format_log(
-            "NON-TEXT PAYLOAD PRESERVED"
+            "OBJECT PAYLOAD PRESERVED"
         )
 
         return value
 
     try:
+
         return str(value)
 
     except:
+
         return ""
-
-
-# =====================================================
-# 🔥 SAFE CONTAINS
-# =====================================================
-
-def contains_any(
-    text,
-    words
-):
-
-    return any(
-        w in text
-        for w in words
-    )
-
 
 # =====================================================
 # 🔥 JSON DETECTION
@@ -202,7 +325,11 @@ def contains_any(
 
 def looks_like_json(text):
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return False
 
     text = text.strip()
@@ -211,9 +338,12 @@ def looks_like_json(text):
         return False
 
     if not (
+
         text.startswith("{")
         or text.startswith("[")
+
     ):
+
         return False
 
     try:
@@ -223,8 +353,8 @@ def looks_like_json(text):
         return True
 
     except:
-        return False
 
+        return False
 
 # =====================================================
 # 🔥 CODE DETECTION
@@ -232,7 +362,11 @@ def looks_like_json(text):
 
 def is_code_payload(text):
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return False
 
     if not text:
@@ -269,7 +403,6 @@ def is_code_payload(text):
         x in text
         for x in checks
     )
-
 
 # =====================================================
 # 🔥 BEHAVIOR EXTRACTION
@@ -321,31 +454,34 @@ def extract_behavior_field(
             behavior.get(
                 "humanization",
                 0.6
-            ),
-
-        "exploration_support":
-
-            behavior.get(
-                "exploration_support",
-                0.5
             )
     }
 
-
 # =====================================================
-# 🔥 MARKDOWN CLEANUP
+# 🔥 CLEANUP
 # =====================================================
 
 def cleanup_markdown(text):
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     if not text:
         return ""
 
-    text = text.replace("**", "")
-    text = text.replace("__", "")
+    text = text.replace(
+        "**",
+        ""
+    )
+
+    text = text.replace(
+        "__",
+        ""
+    )
 
     text = re.sub(
         r"\n{3,}",
@@ -361,14 +497,17 @@ def cleanup_markdown(text):
 
     return text.strip()
 
-
 # =====================================================
 # 🔥 SECTION SPLITTER
 # =====================================================
 
 def split_into_sections(text):
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return [text]
 
     if not text:
@@ -393,19 +532,24 @@ def split_into_sections(text):
 
     return result
 
-
 # =====================================================
 # 🔥 DIALOG BLOAT SUPPRESSION
 # =====================================================
 
 def suppress_dialog_bloat(
+
     text,
     behavior=None
+
 ):
 
     behavior = behavior or {}
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     density = behavior.get(
@@ -414,6 +558,7 @@ def suppress_dialog_bloat(
     )
 
     if density >= 0.55:
+
         return text
 
     replacements = {
@@ -435,19 +580,24 @@ def suppress_dialog_bloat(
 
     return text.strip()
 
-
 # =====================================================
 # 🔥 ROBOTIC SUPPRESSION
 # =====================================================
 
 def suppress_robotic_phrasing(
+
     text,
     behavior=None
+
 ):
 
     behavior = behavior or {}
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     suppression = behavior.get(
@@ -456,9 +606,10 @@ def suppress_robotic_phrasing(
     )
 
     if suppression < 0.5:
+
         return text
 
-    robotic = [
+    robotic_phrases = [
 
         "Конечно!",
         "Отличный вопрос!",
@@ -469,7 +620,7 @@ def suppress_robotic_phrasing(
         "С удовольствием."
     ]
 
-    for phrase in robotic:
+    for phrase in robotic_phrases:
 
         text = text.replace(
             phrase,
@@ -478,19 +629,24 @@ def suppress_robotic_phrasing(
 
     return text.strip()
 
-
 # =====================================================
 # 🔥 LATENT GUIDANCE
 # =====================================================
 
 def stabilize_latent_guidance(
+
     text,
     behavior=None
+
 ):
 
     behavior = behavior or {}
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     guidance = behavior.get(
@@ -499,6 +655,7 @@ def stabilize_latent_guidance(
     )
 
     if guidance < 0.65:
+
         return text
 
     sections = split_into_sections(
@@ -506,6 +663,7 @@ def stabilize_latent_guidance(
     )
 
     if not sections:
+
         return text
 
     final = []
@@ -529,19 +687,24 @@ def stabilize_latent_guidance(
 
     return "\n\n".join(final)
 
-
 # =====================================================
 # 🔥 SEMANTIC PACING
 # =====================================================
 
 def stabilize_semantic_flow(
+
     text,
     behavior=None
+
 ):
 
     behavior = behavior or {}
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     if not text:
@@ -574,14 +737,17 @@ def stabilize_semantic_flow(
         stabilized
     ).strip()
 
-
 # =====================================================
-# 🔥 EMOJI DETECTION
+# 🔥 VISUAL ENRICHMENT
 # =====================================================
 
 def detect_primary_emoji(text):
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return None
 
     t = text.lower()
@@ -604,7 +770,7 @@ def detect_primary_emoji(text):
         ),
 
         (
-            ["новость", "обновление"],
+            ["обновление", "новость"],
             "📰"
         )
     ]
@@ -614,29 +780,32 @@ def detect_primary_emoji(text):
         for word in words:
 
             if word in t:
+
                 return emoji
 
     return None
 
-
-# =====================================================
-# 🔥 VISUAL ENRICHMENT
-# =====================================================
-
 def apply_visual_enrichment(
+
     text,
     behavior=None
+
 ):
 
     behavior = behavior or {}
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     if not text:
         return ""
 
     if is_code_payload(text):
+
         return text
 
     initiative = behavior.get(
@@ -645,6 +814,7 @@ def apply_visual_enrichment(
     )
 
     if initiative <= 0.25:
+
         return text
 
     emoji = detect_primary_emoji(
@@ -652,28 +822,48 @@ def apply_visual_enrichment(
     )
 
     if not emoji:
+
         return text
 
     if text.startswith(emoji):
+
         return text
 
     return f"{emoji} {text}"
-
 
 # =====================================================
 # 🔥 BYPASS RULES
 # =====================================================
 
 def should_skip_formatting(
+
     text,
     semantic=None,
     response_decision=None
+
 ):
 
     semantic = semantic or {}
+
     response_decision = (
         response_decision or {}
     )
+
+    # =================================================
+    # 🔥 MACHINE SAFE
+    # =====================================================
+
+    if is_machine_payload(text):
+
+        safe_format_log(
+            "MACHINE BYPASS"
+        )
+
+        return True
+
+    # =================================================
+    # 🔥 RENDERER SAFE
+    # =====================================================
 
     if is_renderer_payload(text):
 
@@ -683,7 +873,14 @@ def should_skip_formatting(
 
         return True
 
-    if isinstance(text, (dict, list)):
+    # =================================================
+    # 🔥 OBJECT SAFE
+    # =====================================================
+
+    if isinstance(
+        text,
+        (dict, list)
+    ):
 
         safe_format_log(
             "OBJECT BYPASS"
@@ -691,11 +888,24 @@ def should_skip_formatting(
 
         return True
 
-    if not isinstance(text, str):
+    # =================================================
+    # 🔥 STRING SAFE
+    # =====================================================
+
+    if not isinstance(
+        text,
+        str
+    ):
+
         return True
 
     if not text:
+
         return True
+
+    # =================================================
+    # 🔥 JSON SAFE
+    # =====================================================
 
     if looks_like_json(text):
 
@@ -704,6 +914,10 @@ def should_skip_formatting(
         )
 
         return True
+
+    # =================================================
+    # 🔥 CODE SAFE
+    # =====================================================
 
     if is_code_payload(text):
 
@@ -715,19 +929,24 @@ def should_skip_formatting(
 
     return False
 
-
 # =====================================================
-# 🔥 FINAL VOICE
+# 🔥 FINAL VOICE STABILIZATION
 # =====================================================
 
 def apply_april_final_voice(
+
     text,
     behavior=None
+
 ):
 
     behavior = behavior or {}
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return text
 
     text = re.sub(
@@ -744,21 +963,24 @@ def apply_april_final_voice(
 
     return text.strip()
 
-
 # =====================================================
-# 🔥 BEAUTIFIER
+# 🔥 BEAUTIFY RESPONSE
 # =====================================================
 
 def beautify_response(
+
     text,
     semantic=None,
     cognition=None,
     response_decision=None,
     user_text=""
+
 ):
 
     semantic = semantic or {}
+
     cognition = cognition or {}
+
     response_decision = (
         response_decision or {}
     )
@@ -768,9 +990,11 @@ def beautify_response(
     )
 
     if should_skip_formatting(
+
         text,
         semantic,
         response_decision
+
     ):
 
         return text
@@ -811,9 +1035,8 @@ def beautify_response(
 
     return text
 
-
 # =====================================================
-# 🔥 MAIN PUBLIC API
+# 🔥 FINAL PRESENTATION ENTRY
 # =====================================================
 
 def format_response_presentation(
@@ -825,15 +1048,34 @@ def format_response_presentation(
     response_decision=None,
     user_text="",
     visual_reference=None
+
 ):
 
     semantic = semantic or {}
+
     cognition = cognition or {}
+
     response_decision = (
         response_decision or {}
     )
 
     final_text = response or text
+
+    # =================================================
+    # 🔥 MACHINE SAFE
+    # =====================================================
+
+    if is_machine_payload(final_text):
+
+        safe_format_log(
+            "FINAL MACHINE PAYLOAD PRESERVED"
+        )
+
+        return final_text
+
+    # =================================================
+    # 🔥 RENDERER SAFE
+    # =====================================================
 
     if is_renderer_payload(final_text):
 
@@ -843,11 +1085,22 @@ def format_response_presentation(
 
         return final_text
 
+    # =================================================
+    # 🔥 NORMALIZATION
+    # =====================================================
+
     final_text = normalize_text_payload(
         final_text
     )
 
-    if not isinstance(final_text, str):
+    # =================================================
+    # 🔥 OBJECT SAFE
+    # =====================================================
+
+    if not isinstance(
+        final_text,
+        str
+    ):
 
         safe_format_log(
             "FINAL OBJECT PRESERVED"
@@ -856,12 +1109,19 @@ def format_response_presentation(
         return final_text
 
     if not final_text:
+
         return ""
 
+    # =================================================
+    # 🔥 FINAL BYPASS
+    # =====================================================
+
     if should_skip_formatting(
+
         final_text,
         semantic,
         response_decision
+
     ):
 
         safe_format_log(
@@ -870,11 +1130,17 @@ def format_response_presentation(
 
         return final_text
 
+    # =================================================
+    # 🔥 FINAL HUMAN PRESENTATION
+    # =====================================================
+
     return beautify_response(
 
         final_text,
+
         semantic,
         cognition,
         response_decision,
+
         user_text
     )
