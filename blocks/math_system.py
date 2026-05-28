@@ -2,14 +2,34 @@
 
 import re
 import ast
+import time
 import operator
-
 
 # =====================================================
 # 🧠 APRIL MATH SYSTEM
 # =====================================================
 
 """
+APRIL_FILE_ID:
+APRIL_MATH_SYSTEM
+
+ROLE:
+RENDERER_SAFE_MATH_BRIDGE
+
+INPUT:
+USER_TEXT
+SEMANTIC_STATE
+ACTIVE_FLOW
+RENDERER_CONTEXT
+
+OUTPUT:
+MATH_RESULT
+GRAPH_BYPASS_SIGNAL
+FORMULA_CONTINUITY_PAYLOAD
+RENDERER_SAFE_RESPONSE
+
+=====================================================
+
 APRIL MATH SYSTEM
 RENDERER-FIRST
 CONTINUITY-SAFE
@@ -50,19 +70,97 @@ APRIL PRINCIPLES:
 """
 
 # =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "semantic_core",
+
+    "type":
+        "math_input",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target":
+        "renderer_or_executor",
+
+    "type":
+        "math_output",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 PATCH LOGGING
+# =====================================================
+
+PATCH_LOG = []
+
+MAX_PATCH_LOGS = 120
+
+
+def safe_patch_log(message):
+
+    try:
+
+        print(
+            "MATH PATCH:",
+            message
+        )
+
+        PATCH_LOG.append({
+
+            "timestamp":
+                time.time(),
+
+            "message":
+                message,
+
+            "file_id":
+                "APRIL_MATH_SYSTEM",
+
+            "machine_only":
+                True
+        })
+
+        if len(PATCH_LOG) > MAX_PATCH_LOGS:
+
+            PATCH_LOG.pop(0)
+
+    except Exception:
+        pass
+
+# =====================================================
 # 🔥 SAFE OPERATORS
 # =====================================================
 
 SAFE_OPERATORS = {
 
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
-    ast.USub: operator.neg,
-}
+    ast.Add:
+        operator.add,
 
+    ast.Sub:
+        operator.sub,
+
+    ast.Mult:
+        operator.mul,
+
+    ast.Div:
+        operator.truediv,
+
+    ast.Pow:
+        operator.pow,
+
+    ast.USub:
+        operator.neg,
+}
 
 # =====================================================
 # 🔥 GRAPH DETECTION
@@ -101,11 +199,18 @@ def is_graph_request(
         "3x"
     ]
 
-    return any(
+    detected = any(
         word in t
         for word in graph_words
     )
 
+    if detected:
+
+        safe_patch_log(
+            "GRAPH REQUEST DETECTED"
+        )
+
+    return detected
 
 # =====================================================
 # 🔥 FORMULA DETECTION
@@ -137,11 +242,18 @@ def is_formula_request(
         "log"
     ]
 
-    return any(
+    detected = any(
         word in t
         for word in formula_words
     )
 
+    if detected:
+
+        safe_patch_log(
+            "FORMULA REQUEST DETECTED"
+        )
+
+    return detected
 
 # =====================================================
 # 🔥 LIGHTWEIGHT CALCULATOR
@@ -152,6 +264,7 @@ def is_math_request(
 ) -> bool:
 
     if not text:
+
         return False
 
     # =================================================
@@ -159,6 +272,7 @@ def is_math_request(
     # =====================================================
 
     if is_graph_request(text):
+
         return False
 
     # =================================================
@@ -193,7 +307,7 @@ def is_math_request(
         )
     )
 
-    return (
+    detected = (
 
         (
             has_math_symbols
@@ -208,6 +322,13 @@ def is_math_request(
         )
     )
 
+    if detected:
+
+        safe_patch_log(
+            "LIGHTWEIGHT MATH REQUEST"
+        )
+
+    return detected
 
 # =====================================================
 # 🔥 SAFE AST CALCULATOR
@@ -283,7 +404,6 @@ def safe_eval(
         "Unsafe expression"
     )
 
-
 # =====================================================
 # 🔥 SAFE EXPRESSION CLEANER
 # =====================================================
@@ -330,8 +450,47 @@ def normalize_expression(
         normalized
     )
 
-    return normalized.strip()
+    normalized = normalized.strip()
 
+    safe_patch_log(
+        f"NORMALIZED EXPRESSION: {normalized}"
+    )
+
+    return normalized
+
+# =====================================================
+# 🔥 MACHINE RESULT PACKAGE
+# =====================================================
+
+def build_math_payload(
+    mode,
+    content,
+    renderer_safe=True
+):
+
+    return {
+
+        "mode":
+            mode,
+
+        "content":
+            content,
+
+        "renderer_safe":
+            renderer_safe,
+
+        "continuity_safe":
+            True,
+
+        "machine_only":
+            True,
+
+        "orchestration_ready":
+            True,
+
+        "timestamp":
+            time.time()
+    }
 
 # =====================================================
 # 🔥 MAIN SOLVER
@@ -343,6 +502,10 @@ def solve_math(
 
     try:
 
+        safe_patch_log(
+            f"MATH REQUEST: {str(text)[:80]}"
+        )
+
         # =================================================
         # 🔥 RENDERER-FIRST BYPASS
         # =====================================================
@@ -351,6 +514,17 @@ def solve_math(
 
             print(
                 "🧠 GRAPH REQUEST BYPASS"
+            )
+
+            payload = build_math_payload(
+
+                mode="graph",
+
+                content=text.strip()
+            )
+
+            safe_patch_log(
+                "GRAPH PAYLOAD CREATED"
             )
 
             return (
@@ -369,6 +543,17 @@ def solve_math(
                 "🧠 FORMULA REQUEST BYPASS"
             )
 
+            payload = build_math_payload(
+
+                mode="formula",
+
+                content=text.strip()
+            )
+
+            safe_patch_log(
+                "FORMULA PAYLOAD CREATED"
+            )
+
             return text
 
         # =================================================
@@ -380,6 +565,10 @@ def solve_math(
         )
 
         if not expr:
+
+            safe_patch_log(
+                "EMPTY EXPRESSION"
+            )
 
             return (
                 "Не удалось распознать "
@@ -412,6 +601,10 @@ def solve_math(
 
                 result = int(result)
 
+        safe_patch_log(
+            f"MATH RESULT: {result}"
+        )
+
         # =================================================
         # 🔥 RESPONSE
         # =====================================================
@@ -419,6 +612,10 @@ def solve_math(
         return f"Ответ: {result}"
 
     except ZeroDivisionError:
+
+        safe_patch_log(
+            "DIVISION BY ZERO"
+        )
 
         return (
             "⚠️ Деление на ноль невозможно."
@@ -428,6 +625,10 @@ def solve_math(
 
         print(
             f"🔥 MATH SYSTEM ERROR: {e}"
+        )
+
+        safe_patch_log(
+            f"MATH ERROR: {str(e)}"
         )
 
         return (
