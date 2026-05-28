@@ -1,16 +1,29 @@
 print("🔥 MAIN IMAGE SYSTEM WORKING")
 
-from blocks.gemini_vision import (
-    analyze_image_gemini
-)
-
-# =================================================
+# =====================================================
 # 🧠 APRIL IMAGE SYSTEM
 # =====================================================
 
 """
-APRIL IMAGE SYSTEM — PROVIDER-AWARE
-VISUAL CONTINUITY BRIDGE
+APRIL IMAGE SYSTEM
+
+APRIL_FILE_ID:
+APRIL_IMAGE_SYSTEM_BRIDGE
+
+ROLE:
+VISUAL_PROVIDER_BRIDGE
+VISUAL_CONTINUITY_COORDINATOR
+
+INPUT:
+IMAGE_PATH
+VISUAL_STATE
+PROVIDER_VISUAL_ANALYSIS
+
+OUTPUT:
+VISUAL_MEMORY
+ACTIVE_VISUAL_SCENE
+CONTINUITY_STATE
+VISUAL_ANALYSIS_RESULT
 
 =====================================================
 
@@ -58,7 +71,85 @@ APRIL PRINCIPLES:
 7. renderer-safe architecture
 """
 
-# =================================================
+from blocks.gemini_vision import (
+    analyze_image_gemini
+)
+
+# =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = (
+    "APRIL_IMAGE_SYSTEM_BRIDGE"
+)
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "executor_visual_input",
+
+    "type":
+        "visual_analysis_request",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target":
+        "executor_visual_memory",
+
+    "type":
+        "visual_analysis_result",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGS
+# =====================================================
+
+IMAGE_SYSTEM_LOGS = []
+
+MAX_IMAGE_SYSTEM_LOGS = 50
+
+
+def log_image_system_event(
+    event,
+    payload=None
+):
+
+    try:
+
+        IMAGE_SYSTEM_LOGS.append({
+
+            "file_id":
+                APRIL_FILE_ID,
+
+            "event":
+                event,
+
+            "payload":
+                payload or {},
+
+            "machine_only":
+                True
+        })
+
+        if len(IMAGE_SYSTEM_LOGS) > MAX_IMAGE_SYSTEM_LOGS:
+
+            IMAGE_SYSTEM_LOGS.pop(0)
+
+    except:
+        pass
+
+# =====================================================
 # 🔥 SAFE NORMALIZATION
 # =====================================================
 
@@ -71,8 +162,7 @@ def normalize_text(
 
     return str(text).strip()
 
-
-# =================================================
+# =====================================================
 # 🔥 SAFE SUMMARY
 # =====================================================
 
@@ -101,8 +191,7 @@ def build_visual_summary(
 
     return text[:1200]
 
-
-# =================================================
+# =====================================================
 # 🔥 VISUAL MEMORY PACKAGE
 # =====================================================
 
@@ -152,25 +241,30 @@ def build_visual_memory(
     # 🔥 RESULT
     # =====================================================
 
-    return {
+    visual_memory = {
 
         # =================================================
         # 🔥 CORE
         # =====================================================
 
-        "summary": summary,
+        "summary":
+            summary,
 
-        "raw_analysis": text,
+        "raw_analysis":
+            text,
 
         # =================================================
         # 🔥 PROVIDER
         # =====================================================
 
-        "provider": provider,
+        "provider":
+            provider,
 
-        "provider_driven": True,
+        "provider_driven":
+            True,
 
-        "semantic_source": provider,
+        "semantic_source":
+            provider,
 
         # =================================================
         # 🔥 CONTINUITY
@@ -179,39 +273,74 @@ def build_visual_memory(
         "continuity_weight":
             continuity_weight,
 
-        "continuity_ready": True,
+        "continuity_ready":
+            True,
 
-        "dialog_ready": True,
+        "dialog_ready":
+            True,
 
-        "memory_ready": True,
+        "memory_ready":
+            True,
 
         # =================================================
         # 🔥 APRIL WEB SPACE
         # =====================================================
 
-        "renderer_compatible": True,
+        "renderer_compatible":
+            True,
 
-        "web_space_ready": True,
+        "web_space_ready":
+            True,
 
-        "scene_oriented": True,
+        "scene_oriented":
+            True,
 
         # =================================================
         # 🔥 SAFETY
         # =====================================================
 
-        "trigger_based": False,
+        "trigger_based":
+            False,
 
-        "hallucination_safe": True,
+        "hallucination_safe":
+            True,
 
-        "forced_scene_detection": False,
+        "forced_scene_detection":
+            False,
 
-        "regex_vision": False,
+        "regex_vision":
+            False,
 
-        "lightweight_mode": True
+        "lightweight_mode":
+            True,
+
+        # =================================================
+        # 🔥 MACHINE
+        # =====================================================
+
+        "machine_only":
+            True,
+
+        "human_visible":
+            False
     }
 
+    log_image_system_event(
 
-# =================================================
+        "visual_memory_created",
+
+        {
+            "provider":
+                provider,
+
+            "continuity_weight":
+                continuity_weight
+        }
+    )
+
+    return visual_memory
+
+# =====================================================
 # 🔥 VISUAL HISTORY
 # =====================================================
 
@@ -241,10 +370,19 @@ def update_visual_history(
         "visual_scene_history"
     ] = history
 
+    log_image_system_event(
+
+        "visual_history_updated",
+
+        {
+            "history_size":
+                len(history)
+        }
+    )
+
     return history
 
-
-# =================================================
+# =====================================================
 # 🔥 CACHE RESTORE
 # =====================================================
 
@@ -275,12 +413,15 @@ def restore_visual_cache(
             "🧠 USING VISUAL CACHE"
         )
 
+        log_image_system_event(
+            "visual_cache_restored"
+        )
+
         return cached
 
     return None
 
-
-# =================================================
+# =====================================================
 # 🔥 PROVIDER ANALYSIS
 # =====================================================
 
@@ -295,12 +436,33 @@ async def analyze_provider_image(
     Gemini / OpenAI / hybrid routing.
     """
 
-    return await analyze_image_gemini(
+    log_image_system_event(
+
+        "provider_analysis_started",
+
+        {
+            "provider":
+                "gemini"
+        }
+    )
+
+    result = await analyze_image_gemini(
         path
     )
 
+    log_image_system_event(
 
-# =================================================
+        "provider_analysis_completed",
+
+        {
+            "provider":
+                "gemini"
+        }
+    )
+
+    return result
+
+# =====================================================
 # 🔥 MAIN ANALYZE IMAGE
 # =====================================================
 
@@ -319,6 +481,16 @@ async def analyze_image(
             f"🧠 IMAGE PATH: {path}"
         )
 
+        log_image_system_event(
+
+            "analyze_image_started",
+
+            {
+                "path":
+                    str(path)
+            }
+        )
+
         # =================================================
         # 🔥 CACHE
         # =====================================================
@@ -329,6 +501,10 @@ async def analyze_image(
         )
 
         if cached:
+
+            log_image_system_event(
+                "cache_hit"
+            )
 
             return cached
 
@@ -353,6 +529,10 @@ async def analyze_image(
         # =====================================================
 
         if not result:
+
+            log_image_system_event(
+                "empty_provider_result"
+            )
 
             return (
                 "⚠️ Не получилось "
@@ -435,6 +615,10 @@ async def analyze_image(
                 "🧠 VISUAL STATE SAVED"
             )
 
+            log_image_system_event(
+                "visual_state_saved"
+            )
+
         # =================================================
         # 🔥 COMPLETE
         # =====================================================
@@ -443,12 +627,26 @@ async def analyze_image(
             "🧠 ANALYZE IMAGE COMPLETE"
         )
 
+        log_image_system_event(
+            "analyze_image_completed"
+        )
+
         return result
 
     except Exception as e:
 
         print(
             f"🔥 IMAGE SYSTEM ERROR: {str(e)}"
+        )
+
+        log_image_system_event(
+
+            "analyze_image_error",
+
+            {
+                "error":
+                    str(e)
+            }
         )
 
         return (
