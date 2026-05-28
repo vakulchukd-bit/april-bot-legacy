@@ -3,92 +3,117 @@
 # =====================================================
 
 """
-APRIL RESOURCE SYSTEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+APRIL_FILE_ID:
+APRIL_RESOURCE_EXECUTION_COST_COORDINATOR
 
 ROLE:
-Этот файл является внутренней
-resource-coordination системой April.
+RESOURCE_COORDINATOR
 
-=====================================================
-🔥 MAIN PURPOSE
-=====================================================
+ROOM:
+RESOURCE_ROOM
 
-Система отвечает за:
+INPUT:
+EXECUTOR_EVENTS
+ROOM_ACTIVITY
+PROVIDER_ACTIVITY
+RENDER_ACTIVITY
+WEB_CONTEXT_ACTIVITY
+GENERATION_ACTIVITY
 
-- execution resource tracking;
-- room execution load;
-- renderer pressure tracking;
-- provider usage analytics;
-- lightweight/heavy execution balance;
-- web execution metrics;
-- internal cost coordination;
-- admin analytics preparation.
+OUTPUT:
+RESOURCE_ANALYTICS
+EXECUTION_PRESSURE
+ROOM_LOAD
+PROVIDER_LOAD
+ADMIN_ANALYTICS
+EXECUTOR_RESOURCE_SNAPSHOT
 
-=====================================================
-🧠 GOLDEN APRIL ARCHITECTURE
-=====================================================
+DEPENDENCIES:
+ANALYTICS_STORAGE
+EXECUTOR
+ADMIN_MONITOR_CORE
 
-INPUT MACHINE CHANNEL:
-Executor → Cost Coordinator
+CRITICAL:
+TRUE
 
-OUTPUT MACHINE CHANNEL:
-Cost Coordinator → Executor Analytics
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 GOLDEN RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-=====================================================
-🔥 IMPORTANT
-=====================================================
+This file NEVER:
+- performs billing
+- controls subscriptions
+- exposes analytics to users
+- formats frontend output
+- performs orchestration
 
-Этот файл НЕ:
-
-- billing system;
-- subscription manager;
-- telegram monetization;
-- payment system;
-- admin UI;
-- user-facing analytics.
-
-=====================================================
-🌐 WEB-FIRST ARCHITECTURE
-=====================================================
-
-Система полностью адаптирована под:
-
-- April Web Space;
-- renderer-first execution;
-- room orchestration;
-- multimedia rendering;
-- structured execution blocks;
-- future web-admin integration.
-
-=====================================================
-🧠 RESOURCE PHILOSOPHY
-=====================================================
-
-Главная задача:
-не просто считать расходы,
-а помогать Executor понимать:
-
-- execution pressure;
-- renderer load;
-- provider load;
-- heavy generation pressure;
-- orchestration balance.
-
-=====================================================
-🔥 INTERNAL CHANNEL ISOLATION
-=====================================================
-
-Machine analytics никогда
-не должны попадать:
-
-- в BotRU output;
-- в user responses;
-- в renderer blocks.
-
-Только внутренние каналы.
-
-=====================================================
+This file ONLY:
+- coordinates execution resources
+- tracks system pressure
+- tracks provider usage
+- tracks room load
+- stabilizes execution awareness
+- prepares admin analytics
 """
+
+# =====================================================
+# 🔥 APRIL TRACE LOGS
+# =====================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_RESOURCE_EXECUTION_COST_COORDINATOR",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_RESOURCE_EXECUTION_COST_COORDINATOR",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
 
 # =====================================================
 # 🔥 IMPORTS
@@ -134,10 +159,75 @@ OUTPUT_MACHINE_CHANNEL = {
 }
 
 # =====================================================
+# 🔥 ANALYZER TELEMETRY
+# =====================================================
+
+def build_resource_telemetry():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "build_resource_telemetry"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_RESOURCE_EXECUTION_COST_COORDINATOR",
+
+        "room":
+            "RESOURCE_ROOM",
+
+        "resource_tracking":
+            True,
+
+        "execution_pressure_tracking":
+            True,
+
+        "provider_tracking":
+            True,
+
+        "room_tracking":
+            True,
+
+        "admin_analytics_ready":
+            True,
+
+        "executor_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "RESOURCE_ROOM",
+
+        {
+            "telemetry":
+                "ready"
+        }
+    )
+
+    return payload
+
+# =====================================================
 # 🔥 STORAGE INITIALIZATION
 # =====================================================
 
 def ensure_resource_structure(data):
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "ensure_resource_structure"
+        }
+    )
 
     data.setdefault(
         "messages",
@@ -184,6 +274,16 @@ def ensure_resource_structure(data):
         0.0
     )
 
+    APRIL_LOG_OUT(
+
+        "RESOURCE_ROOM",
+
+        {
+            "resource_structure":
+                "validated"
+        }
+    )
+
     return data
 
 # =====================================================
@@ -191,6 +291,19 @@ def ensure_resource_structure(data):
 # =====================================================
 
 def track_room_execution(room_name):
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "track_room_execution",
+
+            "room_name":
+                room_name
+        }
+    )
 
     try:
 
@@ -219,6 +332,16 @@ def track_room_execution(room_name):
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "room_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -226,11 +349,34 @@ def track_room_execution(room_name):
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "room_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 PROVIDER TRACKING
 # =====================================================
 
 def track_provider_usage(provider):
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "track_provider_usage",
+
+            "provider":
+                provider
+        }
+    )
 
     try:
 
@@ -259,6 +405,16 @@ def track_provider_usage(provider):
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "provider_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -266,11 +422,31 @@ def track_provider_usage(provider):
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "provider_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 TEXT EXECUTION
 # =====================================================
 
 def add_text():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "add_text"
+        }
+    )
 
     try:
 
@@ -284,6 +460,16 @@ def add_text():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "text_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -291,11 +477,31 @@ def add_text():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "text_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 IMAGE EXECUTION
 # =====================================================
 
 def add_image():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "add_image"
+        }
+    )
 
     try:
 
@@ -309,6 +515,16 @@ def add_image():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "image_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -316,11 +532,31 @@ def add_image():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "image_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 RENDERER EXECUTION
 # =====================================================
 
 def add_renderer_operation():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "add_renderer_operation"
+        }
+    )
 
     try:
 
@@ -336,6 +572,16 @@ def add_renderer_operation():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "renderer_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -343,11 +589,31 @@ def add_renderer_operation():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "renderer_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 WEB CONTEXT EXECUTION
 # =====================================================
 
 def add_web_context_operation():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "add_web_context_operation"
+        }
+    )
 
     try:
 
@@ -363,6 +629,16 @@ def add_web_context_operation():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "web_context_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -370,11 +646,31 @@ def add_web_context_operation():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "web_context_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 LIGHTWEIGHT VISUALS
 # =====================================================
 
 def add_lightweight_visual():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "add_lightweight_visual"
+        }
+    )
 
     try:
 
@@ -390,6 +686,16 @@ def add_lightweight_visual():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "light_visual_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -397,11 +703,31 @@ def add_lightweight_visual():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "light_visual_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 HEAVY GENERATION
 # =====================================================
 
 def add_heavy_generation():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "add_heavy_generation"
+        }
+    )
 
     try:
 
@@ -417,6 +743,16 @@ def add_heavy_generation():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "heavy_generation_tracking":
+                    "success"
+            }
+        )
+
     except Exception as e:
 
         print(
@@ -424,11 +760,31 @@ def add_heavy_generation():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "heavy_generation_tracking":
+                    "failed"
+            }
+        )
+
 # =====================================================
 # 🔥 EXECUTION PRESSURE
 # =====================================================
 
 def calculate_execution_pressure():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "calculate_execution_pressure"
+        }
+    )
 
     try:
 
@@ -474,6 +830,16 @@ def calculate_execution_pressure():
 
         save_data(data)
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "execution_pressure":
+                    pressure
+            }
+        )
+
         return pressure
 
     except Exception as e:
@@ -483,6 +849,16 @@ def calculate_execution_pressure():
             e
         )
 
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "execution_pressure":
+                    "failed"
+            }
+        )
+
         return 0.0
 
 # =====================================================
@@ -490,6 +866,16 @@ def calculate_execution_pressure():
 # =====================================================
 
 def calculate_cost():
+
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "calculate_cost"
+        }
+    )
 
     try:
 
@@ -570,7 +956,7 @@ def calculate_cost():
             calculate_execution_pressure()
         )
 
-        return {
+        payload = {
 
             # =============================================
             # 🔥 COSTS
@@ -650,14 +1036,39 @@ def calculate_cost():
 
             "machine_only": True,
 
-            "human_visible": False
+            "human_visible": False,
+
+            "telemetry":
+                build_resource_telemetry()
         }
+
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "analytics":
+                    "ready"
+            }
+        )
+
+        return payload
 
     except Exception as e:
 
         print(
             "🔥 COST SYSTEM ERROR:",
             e
+        )
+
+        APRIL_LOG_OUT(
+
+            "RESOURCE_ROOM",
+
+            {
+                "analytics":
+                    "failed"
+            }
         )
 
         return {
@@ -675,9 +1086,19 @@ def calculate_cost():
 
 def build_executor_resource_snapshot():
 
+    APRIL_LOG_IN(
+
+        "RESOURCE_ROOM",
+
+        {
+            "action":
+                "build_executor_resource_snapshot"
+        }
+    )
+
     analytics = calculate_cost()
 
-    return {
+    payload = {
 
         "execution_pressure":
 
@@ -714,5 +1135,20 @@ def build_executor_resource_snapshot():
                 {}
             ),
 
-        "machine_only": True
+        "machine_only": True,
+
+        "telemetry":
+            build_resource_telemetry()
     }
+
+    APRIL_LOG_OUT(
+
+        "RESOURCE_ROOM",
+
+        {
+            "resource_snapshot":
+                "ready"
+        }
+    )
+
+    return payload
