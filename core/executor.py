@@ -6,91 +6,95 @@
 APRIL CENTRAL BRAIN CORE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-MAIN ROLE:
-This file is the MAIN BRAIN of April.
-
-This is NOT:
-- Telegram pipeline
-- UI layer
-- transport layer
-- frontend renderer
-- payment system
-- admin system
-
-This file IS:
-- April orchestration intelligence
-- cognitive routing center
-- machine-language coordination layer
-- room synchronization system
-- execution authority core
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE
+NEW GOLDEN ARCHITECTURE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-User
- ↓
-BotRoot / Web Router
- ↓
-APRIL CENTRAL BRAIN CORE (THIS FILE)
- ↓
-Cognitive / System / Helper Rooms
- ↓
-Machine Response Assembly
- ↓
-BotRoot Human Formatting Layer
- ↓
-Web User
+This file is now:
+
+✅ semantic orchestration core
+✅ trajectory-aware machine router
+✅ modality synchronization center
+✅ scene-first coordination layer
+✅ machine-language execution hub
+✅ continuity-safe room dispatcher
+✅ renderer-aware executor
+✅ unified response contract authority
+
+This file is NOT:
+
+❌ trigger router
+❌ keyword dispatcher
+❌ telegram-style controller
+❌ text-first chatbot core
+❌ frontend renderer
+❌ ui formatter
+❌ transport pipeline
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT PRINCIPLES
+🧠 GOLDEN FLOW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. April is ONE personality.
-All rooms are helper cognition systems of April.
-
-2. Rooms are NOT isolated personalities.
-They are internal intelligence extensions.
-
-3. Machine channels are isolated.
-
-TASK CHANNEL:
-Executor → Rooms
-
-RESPONSE CHANNEL:
-Rooms → Executor
-
-Human layer NEVER enters internal routing.
-
-4. BotRoot NEVER communicates directly with rooms.
-
-ONLY:
-BotRoot ↔ Executor ↔ Rooms
-
-5. This file MUST remain clean and stable.
-
-DO NOT RE-ADD:
-- Telegram
-- aiogram
-- subscriptions
-- premium systems
-- admin panels
-- legacy payment logic
-- map scanners
-- heavy UI logic
-- frontend rendering
-- transport formatting
+Human Layer
+    ↓
+BotRoot / Web
+    ↓
+Human → Machine Translator
+    ↓
+APRIL CENTRAL BRAIN
+    ↓
+Semantic State
+Trajectory
+Scene Continuity
+Modality Context
+    ↓
+TASK CHANNEL
+    ↓
+Rooms
+    ↓
+RESPONSE CHANNEL
+    ↓
+Unified Machine Payload
+    ↓
+BotRoot Human Translator
+    ↓
+Web Renderer Space
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL SPACE PHILOSOPHY
+🧠 GOLDEN RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-- calm orchestration
-- continuity-first execution
-- renderer-safe routing
-- cognitive synchronization
-- stable machine communication
-- human-safe output isolation
+1. Rooms NEVER compete using keywords.
+
+2. Routing is based on:
+- trajectory
+- modality
+- continuity
+- semantic intent
+- scene ownership
+
+3. Human language NEVER routes rooms directly.
+
+4. Machine channels are isolated.
+
+5. Scene continuity is higher priority
+than trigger words.
+
+6. "show", "continue", "fix", "this"
+must inherit active trajectory.
+
+7. Renderer payloads are sacred.
+
+Never flatten:
+- graph
+- formula
+- diagram
+- scene
+- layout
+- multimodal blocks
+
+8. Executor owns orchestration.
+
+Rooms only execute cognition tasks.
 """
 
 # =========================================================
@@ -98,18 +102,13 @@ DO NOT RE-ADD:
 # =========================================================
 
 import traceback
-import re
+import time
 
 from datetime import datetime
 
 # =========================================================
 # 🧠 COGNITIVE SYSTEMS
 # =========================================================
-
-"""
-All imported systems below are helper cognition
-extensions of April central intelligence.
-"""
 
 from blocks.semantic_core import (
     analyze as semantic_analyze
@@ -147,7 +146,7 @@ from blocks.april_authority import (
 )
 
 # =========================================================
-# 🧠 MEMORY + STATE
+# 🧠 MEMORY + CONTEXT
 # =========================================================
 
 from blocks.state_manager import (
@@ -166,22 +165,12 @@ from blocks.mode_manager import (
 )
 
 from blocks.context_system import (
-    build_context_text
+    build_deephub_context
 )
 
 # =========================================================
-# 🧠 EXECUTION ROOMS
+# 🧠 ROOMS
 # =========================================================
-
-"""
-Rooms are internal execution spaces of April.
-
-They receive:
-- machine task payloads
-
-They return:
-- machine response payloads
-"""
 
 from blocks.rooms_registry import (
     ROOMS
@@ -196,7 +185,7 @@ from blocks.text_module import (
 )
 
 # =========================================================
-# 🧠 PRESENTATION SAFETY
+# 🧠 PRESENTATION
 # =========================================================
 
 from blocks.presentation_formatter import (
@@ -204,7 +193,7 @@ from blocks.presentation_formatter import (
 )
 
 # =========================================================
-# 🧠 ENERGY + EXPERIENCE
+# 🧠 EXPERIENCE
 # =========================================================
 
 from blocks.energy_manager import (
@@ -217,60 +206,42 @@ from blocks.experience import (
 )
 
 # =========================================================
-# 🧠 INTERNAL EXECUTION MAP
-# =========================================================
-
-"""
-Internal monitoring metadata.
-
-NOT exposed to BotRoot.
-NOT exposed to users.
-"""
-
-EMAPS = {
-
-    "active_systems": set(),
-
-    "active_rooms": set(),
-
-    "routing_chains": [],
-
-    "task_types": set(),
-
-    "execution_sessions": []
-}
-
-# =========================================================
 # 🔥 MACHINE CHANNELS
 # =========================================================
 
-"""
-Two isolated machine channels exist inside April.
-
-1. TASK CHANNEL
-Executor → Rooms
-
-2. RESPONSE CHANNEL
-Rooms → Executor
-
-This isolation prevents:
-- response corruption
-- orchestration leakage
-- human-layer contamination
-"""
-
 TASK_CHANNEL = {
 
-    "channel": "machine_task_channel",
+    "type": "machine_task_channel",
 
-    "isolated": True
+    "isolated": True,
+
+    "human_access": False
 }
 
 RESPONSE_CHANNEL = {
 
-    "channel": "machine_response_channel",
+    "type": "machine_response_channel",
 
-    "isolated": True
+    "isolated": True,
+
+    "human_access": False
+}
+
+# =========================================================
+# 🔥 EXECUTION MAP
+# =========================================================
+
+EMAPS = {
+
+    "active_rooms": set(),
+
+    "active_trajectories": set(),
+
+    "active_modalities": set(),
+
+    "execution_sessions": [],
+
+    "machine_routes": []
 }
 
 # =========================================================
@@ -299,18 +270,8 @@ def clamp(
     return value
 
 # =========================================================
-# 🧠 EXECUTION TRACKING
+# 🔥 TRACKERS
 # =========================================================
-
-def track_system(name):
-
-    if not name:
-        return
-
-    EMAPS[
-        "active_systems"
-    ].add(name)
-
 
 def track_room(name):
 
@@ -322,118 +283,122 @@ def track_room(name):
     ].add(name)
 
 
-def track_task(task_type):
+def track_trajectory(name):
 
-    if not task_type:
+    if not name:
         return
 
     EMAPS[
-        "task_types"
-    ].add(task_type)
+        "active_trajectories"
+    ].add(name)
+
+
+def track_modality(name):
+
+    if not name:
+        return
+
+    EMAPS[
+        "active_modalities"
+    ].add(name)
 
 # =========================================================
-# 🧠 RESPONSE QUALITY
+# 🔥 RESPONSE VALIDATION
 # =========================================================
 
-def evaluate_response_quality(result):
-
-    """
-    Prevents unstable or corrupted
-    machine payloads from escaping rooms.
-    """
+def validate_machine_response(
+    result
+):
 
     if not result:
-
         return False
 
-    output = str(
-        result.get("data", "")
-    ).strip()
-
-    if len(output) <= 5:
-
-        return False
-
-    blocked_words = [
-
-        "traceback",
-        "pipeline",
-        "syntaxerror",
-        "execution room"
-    ]
-
-    if any(
-        x in output.lower()
-        for x in blocked_words
+    if not isinstance(
+        result,
+        dict
     ):
 
         return False
+
+    blocked = [
+
+        "traceback",
+        "system prompt",
+        "internal reasoning",
+        "execution room",
+        "cognitive state"
+    ]
+
+    payload = str(result)
+
+    lower = payload.lower()
+
+    for word in blocked:
+
+        if word in lower:
+            return False
 
     return True
 
 # =========================================================
-# 🧠 TASK TYPE DETECTION
+# 🔥 TASK TYPE
 # =========================================================
 
-def detect_task_type(text):
+def detect_task_type(
+    semantic,
+    cognition,
+    state
+):
 
-    t = normalize_text(
-        text
-    ).lower()
+    scene_state = state.get(
+        "scene_state",
+        {}
+    )
 
-    renderer_words = [
+    trajectory = scene_state.get(
+        "trajectory"
+    )
 
-        "diagram",
-        "scene",
-        "layout",
-        "renderer",
-        "graph",
-        "formula"
-    ]
+    if trajectory:
 
-    if any(
-        x in t
-        for x in renderer_words
+        track_trajectory(
+            trajectory
+        )
+
+    if semantic.get(
+        "render_intent"
     ):
 
-        return "renderer_scene"
+        track_modality(
+            "renderer"
+        )
 
-    image_words = [
+        return "renderer"
 
-        "image",
-        "photo",
-        "picture",
-        "draw",
-        "render"
-    ]
-
-    if any(
-        x in t
-        for x in image_words
+    if semantic.get(
+        "visual_generation_needed"
     ):
+
+        track_modality(
+            "image"
+        )
 
         return "image"
 
-    math_words = [
-
-        "equation",
-        "function",
-        "solve",
-        "math",
-        "graph"
-    ]
-
-    if any(
-        x in t
-        for x in math_words
+    if semantic.get(
+        "math_intent"
     ):
+
+        track_modality(
+            "math"
+        )
 
         return "math"
 
     return "text"
 
 # =========================================================
-# 🧠 EXECUTOR CONTEXT
+# 🔥 EXECUTOR CONTEXT
 # =========================================================
 
 def build_executor_context(
@@ -450,25 +415,52 @@ def build_executor_context(
     text
 ):
 
-    """
-    Builds unified machine context for all rooms.
+    scene_state = state.get(
+        "scene_state",
+        {}
+    )
 
-    Rooms NEVER receive raw human-layer state.
-    """
+    active_flow = state.get(
+        "active_flow"
+    )
 
     return {
 
-        "user_id": user_id,
+        # =================================================
+        # 🔥 MACHINE
+        # =====================================================
 
-        "chat_id": chat_id,
+        "machine_channel":
+            TASK_CHANNEL,
 
-        "task_type": task_type,
+        "task_type":
+            task_type,
 
-        "semantic": semantic,
+        "executor_version":
+            "golden_machine_architecture",
 
-        "reasoning": reasoning,
+        # =================================================
+        # 🔥 USER
+        # =====================================================
 
-        "cognition": cognition,
+        "user_id":
+            user_id,
+
+        "chat_id":
+            chat_id,
+
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
+
+        "semantic":
+            semantic,
+
+        "reasoning":
+            reasoning,
+
+        "cognition":
+            cognition,
 
         "response_decision":
             response_decision,
@@ -476,16 +468,43 @@ def build_executor_context(
         "visual_reference":
             visual_reference,
 
-        "state": state,
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
 
-        "machine_channel":
-            TASK_CHANNEL,
+        "scene_state":
+            scene_state,
 
-        "text": text
+        "active_flow":
+            active_flow,
+
+        "trajectory":
+            scene_state.get(
+                "trajectory"
+            ),
+
+        "continuity_mode":
+            scene_state.get(
+                "continuity_mode"
+            ),
+
+        # =================================================
+        # 🔥 MACHINE INPUT
+        # =====================================================
+
+        "machine_input":
+            text,
+
+        # =================================================
+        # 🔥 FULL STATE
+        # =====================================================
+
+        "state":
+            state
     }
 
 # =========================================================
-# 🧠 ROOM SCORING
+# 🔥 ROOM SCORING
 # =========================================================
 
 def stabilize_room_score(
@@ -494,33 +513,49 @@ def stabilize_room_score(
     score,
     semantic,
     cognition,
-    response_decision
+    response_decision,
+    state
 ):
 
-    """
-    Stabilizes orchestration behavior
-    between cognitive rooms.
-    """
+    scene_state = state.get(
+        "scene_state",
+        {}
+    )
 
-    if semantic.get(
-        "render_intent"
-    ):
+    active_room = scene_state.get(
+        "active_room"
+    )
 
-        if room.name == "science":
+    # =====================================================
+    # 🔥 ACTIVE ROOM CONTINUITY
+    # =====================================================
 
-            score += 5.0
+    if active_room:
 
-    if cognition.get(
-        "prefer_visual"
+        if room.name == active_room:
+
+            score += 4.0
+
+    # =====================================================
+    # 🔥 RENDERER PRIORITY
+    # =====================================================
+
+    if response_decision.get(
+        "renderer_first_mode"
     ):
 
         if room.name in [
 
-            "image_generate",
-            "image_edit"
+            "science",
+            "renderer",
+            "graph"
         ]:
 
-            score += 2.0
+            score += 5.0
+
+    # =====================================================
+    # 🔥 VISUAL GENERATION CONTROL
+    # =====================================================
 
     if response_decision.get(
         "avoid_heavy_generation"
@@ -532,16 +567,43 @@ def stabilize_room_score(
             "image_edit"
         ]:
 
-            score -= 5.0
+            score -= 8.0
+
+    # =====================================================
+    # 🔥 TRAJECTORY LOCK
+    # =====================================================
+
+    if cognition.get(
+        "trajectory_locked"
+    ):
+
+        room_type = getattr(
+            room,
+            "room_type",
+            None
+        )
+
+        active_type = scene_state.get(
+            "active_room_type"
+        )
+
+        if (
+
+            room_type
+            and active_type
+            and room_type == active_type
+        ):
+
+            score += 3.0
 
     return clamp(
         score,
-        -5.0,
-        15.0
+        -10.0,
+        20.0
     )
 
 # =========================================================
-# 🧠 ROOM EXECUTION PIPELINE
+# 🔥 ROOM EXECUTION
 # =========================================================
 
 async def execute_rooms(
@@ -552,32 +614,24 @@ async def execute_rooms(
     semantic,
     cognition,
     response_decision,
+    state,
     run_with_activity
 ):
 
-    """
-    Central room orchestration system.
-
-    Flow:
-    Executor
-      ↓
-    TASK CHANNEL
-      ↓
-    Rooms
-      ↓
-    RESPONSE CHANNEL
-      ↓
-    Executor
-    """
-
     scored_rooms = []
+
+    # =====================================================
+    # 🔥 EVALUATION
+    # =====================================================
 
     for room in ROOMS:
 
         try:
 
             score = room.evaluate(
+
                 text,
+
                 context
             )
 
@@ -591,7 +645,9 @@ async def execute_rooms(
 
                 cognition=cognition,
 
-                response_decision=response_decision
+                response_decision=response_decision,
+
+                state=state
             )
 
             if score <= 0:
@@ -604,9 +660,13 @@ async def execute_rooms(
         except Exception as e:
 
             print(
-                f"ROOM SCORE ERROR [{room.name}]",
+                f"ROOM EVALUATION ERROR [{room.name}]",
                 e
             )
+
+    # =====================================================
+    # 🔥 SORT
+    # =====================================================
 
     scored_rooms.sort(
 
@@ -616,7 +676,7 @@ async def execute_rooms(
     )
 
     # =====================================================
-    # 🧠 EXECUTION LOOP
+    # 🔥 EXECUTION
     # =====================================================
 
     for score, room in scored_rooms:
@@ -634,6 +694,16 @@ async def execute_rooms(
 
                 "room":
                     room.name,
+
+                "trajectory":
+                    context.get(
+                        "trajectory"
+                    ),
+
+                "scene_state":
+                    context.get(
+                        "scene_state"
+                    ),
 
                 "context":
                     context
@@ -653,19 +723,7 @@ async def execute_rooms(
             if not result:
                 continue
 
-            machine_response_payload = {
-
-                "channel":
-                    RESPONSE_CHANNEL,
-
-                "room":
-                    room.name,
-
-                "result":
-                    result
-            }
-
-            if not evaluate_response_quality(
+            if not validate_machine_response(
                 result
             ):
 
@@ -679,15 +737,29 @@ async def execute_rooms(
 
                 cognition=cognition,
 
-                state=context.get(
-                    "state",
-                    {}
-                )
+                state=state
             )
 
             if override:
 
                 continue
+
+            machine_response_payload = {
+
+                "channel":
+                    RESPONSE_CHANNEL,
+
+                "room":
+                    room.name,
+
+                "trajectory":
+                    context.get(
+                        "trajectory"
+                    ),
+
+                "result":
+                    result
+            }
 
             return machine_response_payload
 
@@ -703,7 +775,7 @@ async def execute_rooms(
     return None
 
 # =========================================================
-# 🚀 APRIL CENTRAL EXECUTOR
+# 🚀 APRIL EXECUTOR
 # =========================================================
 
 async def execute(
@@ -715,14 +787,13 @@ async def execute(
     callback_data=None
 ):
 
-    """
-    MAIN APRIL EXECUTION ENTRYPOINT.
+    print(
+        "🧠 APRIL GOLDEN EXECUTOR ACTIVE"
+    )
 
-    This is the central orchestration brain
-    of the entire April system.
-    """
-
-    print("🧠 APRIL CENTRAL BRAIN ACTIVE")
+    text = normalize_text(
+        text
+    )
 
     state = get_state(
         user_id
@@ -733,7 +804,7 @@ async def execute(
     )
 
     # =====================================================
-    # 🧠 SEMANTIC ANALYSIS
+    # 🔥 SEMANTIC
     # =====================================================
 
     semantic = semantic_analyze(
@@ -766,6 +837,10 @@ async def execute(
         semantic=semantic
     )
 
+    # =====================================================
+    # 🔥 REASONING
+    # =====================================================
+
     reasoning = build_reasoning_state(
 
         text=text,
@@ -774,6 +849,10 @@ async def execute(
 
         semantic=semantic
     )
+
+    # =====================================================
+    # 🔥 COGNITION
+    # =====================================================
 
     cognition = analyze_cognition(
 
@@ -787,7 +866,7 @@ async def execute(
     )
 
     # =====================================================
-    # 🧠 APRIL PERSONALITY
+    # 🔥 PERSONALITY
     # =====================================================
 
     cognition = apply_april_personality(
@@ -804,7 +883,7 @@ async def execute(
     )
 
     # =====================================================
-    # 🧠 VISUAL + RESPONSE DECISION
+    # 🔥 VISUAL REFERENCE
     # =====================================================
 
     visual_reference = (
@@ -821,6 +900,10 @@ async def execute(
         )
     )
 
+    # =====================================================
+    # 🔥 RESPONSE DECISION
+    # =====================================================
+
     response_decision = (
 
         build_response_decision(
@@ -834,6 +917,10 @@ async def execute(
             state=state
         )
     )
+
+    # =====================================================
+    # 🔥 AUTHORITY
+    # =====================================================
 
     authority_decision = (
 
@@ -857,36 +944,42 @@ async def execute(
     )
 
     # =====================================================
-    # 🧠 MEMORY UPDATE
+    # 🔥 MEMORY
     # =====================================================
 
     add_dialog(
 
         user_id,
+
         "user",
+
         text
     )
 
     update_memory_summary(
 
-        user_id,
-        text
+        state,
+
+        text,
+
+        ""
     )
 
     # =====================================================
-    # 🧠 TASK DETECTION
+    # 🔥 TASK TYPE
     # =====================================================
 
-    task_type = semantic.get(
-        "intent"
-    ) or detect_task_type(text)
+    task_type = detect_task_type(
 
-    track_task(
-        task_type
+        semantic,
+
+        cognition,
+
+        state
     )
 
     # =====================================================
-    # 🧠 EXECUTOR CONTEXT
+    # 🔥 EXECUTOR CONTEXT
     # =====================================================
 
     context = build_executor_context(
@@ -913,7 +1006,7 @@ async def execute(
     )
 
     # =====================================================
-    # 🧠 ROOM EXECUTION
+    # 🔥 ROOM EXECUTION
     # =====================================================
 
     room_response = await execute_rooms(
@@ -930,24 +1023,27 @@ async def execute(
 
         response_decision=response_decision,
 
+        state=state,
+
         run_with_activity=run_with_activity
     )
 
     # =====================================================
-    # 🧠 SUCCESS RESPONSE
+    # 🔥 ROOM SUCCESS
     # =====================================================
 
     if room_response:
 
         result = room_response.get(
-            "result"
+            "result",
+            {}
         )
 
-        output_text = str(
-            result.get("data", "")
+        result_payload = result.get(
+            "data"
         )
 
-        if output_text.strip():
+        if result_payload:
 
             add_dialog(
 
@@ -955,30 +1051,34 @@ async def execute(
 
                 "assistant",
 
-                output_text
+                str(result_payload)[:1200]
             )
 
             update_memory_summary(
 
-                user_id,
+                state,
 
-                output_text
+                text,
+
+                str(result_payload)[:500]
             )
 
         return result
 
     # =====================================================
-    # 🧠 SAFE FALLBACK
+    # 🔥 FALLBACK
     # =====================================================
 
     energy = get_energy(
         user_id
     )
 
-    context_text = build_context_text(
+    context_text = build_deephub_context(
 
         user_id,
+
         text,
+
         state
     )
 
@@ -998,6 +1098,10 @@ async def execute(
         )
     )
 
+    # =====================================================
+    # 🔥 FORMAT
+    # =====================================================
+
     if (
 
         fallback_result
@@ -1006,17 +1110,21 @@ async def execute(
         )
     ):
 
-        fallback_content = (
+        formatted = (
 
             format_response_presentation(
 
-                text=fallback_result["content"],
+                text=fallback_result[
+                    "content"
+                ],
 
                 user_text=text,
 
                 semantic=semantic,
 
                 cognition=cognition,
+
+                response_decision=response_decision,
 
                 visual_reference=visual_reference
             )
@@ -1028,25 +1136,27 @@ async def execute(
 
             "assistant",
 
-            fallback_content
+            str(formatted)[:1200]
         )
 
         update_memory_summary(
 
-            user_id,
+            state,
 
-            fallback_content
+            text,
+
+            str(formatted)[:500]
         )
 
         return {
 
             "type": "text",
 
-            "data": fallback_content
+            "data": formatted
         }
 
     # =====================================================
-    # 🧠 FINAL SAFETY RETURN
+    # 🔥 FINAL SAFETY
     # =====================================================
 
     return {
@@ -1054,5 +1164,5 @@ async def execute(
         "type": "text",
 
         "data":
-            "⚠️ April temporarily could not stabilize the request."
+            "⚠️ April temporarily could not stabilize this trajectory."
     }
