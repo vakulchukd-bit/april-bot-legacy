@@ -3,109 +3,128 @@
 # =====================================================
 
 """
-APRIL RESPONSE DECISION SYSTEM
-WEB-SPACE EXECUTION ARCHITECTURE
+APRIL_FILE_ID: APRIL_RESPONSE_DECISION_ORCHESTRATOR
 
-=====================================================
-ROLE
-=====================================================
+ROLE:
+response_decision_machine_layer
 
-Этот файл является:
+PURPOSE:
+- response modality selection
+- trajectory-safe orchestration
+- renderer-first routing
+- execution stabilization
+- machine decision packaging
+- continuation-safe coordination
 
-- lightweight orchestration layer;
-- response modality selector;
-- execution stabilizer;
-- renderer-first decision coordinator;
-- continuity-safe action router;
-- machine decision bridge.
+INPUT:
+- semantic_state
+- cognition_state
+- visual_reference
+- active_flow
+- trajectory_state
 
-=====================================================
-🔥 MAIN PURPOSE
-=====================================================
+OUTPUT:
+- response_decision
+- machine_routing
+- execution_mode
+- renderer_mode
+- continuation_strategy
 
-Система отвечает за:
+DEPENDENCIES:
+- executor_core
+- semantic_core
+- cognition
+- excrouter
+- rooms_router
+- renderer_space
 
-- выбор response modality;
-- стабилизацию trajectory;
-- renderer-first behavior;
-- execution/guidance balancing;
-- continuation-safe routing;
-- anti-chaos orchestration;
-- machine decision packaging.
-
-=====================================================
-🧠 GOLDEN APRIL CONCEPT
-=====================================================
-
-Executor НЕ принимает
-финальное решение напрямую.
-
-Executor:
-- анализирует;
-- координирует;
-- собирает сигналы.
-
-Response Decision:
-- выбирает действие;
-- определяет modality;
-- стабилизирует поведение;
-- подготавливает machine routing.
-
-=====================================================
-🔥 MACHINE CHANNEL ARCHITECTURE
-=====================================================
-
-INPUT MACHINE CHANNEL:
-Executor → Decision Layer
-
-OUTPUT MACHINE CHANNEL:
-Decision Layer → Rooms Router
-
-=====================================================
-🔥 IMPORTANT
-=====================================================
-
-Этот слой НЕ:
-
-- authority engine;
-- renderer engine;
-- cognition core;
-- semantic analyzer;
-- room executor;
-- image generator;
-- web formatter.
-
-=====================================================
-🌐 WEB-FIRST APRIL
-=====================================================
-
-Система подготовлена под:
-
-- web orchestration;
-- BotRU web pipeline;
-- multimodal UI;
-- renderer-safe routing;
-- future cognitive rooms;
-- spatial architecture.
-
-=====================================================
-🔥 GOLDEN RULE
-=====================================================
-
-Decision Layer
-НЕ смешивает:
-
-- machine routing;
-- human formatting;
-- renderer payloads;
-- execution output.
-
-Только routing logic.
-Только orchestration.
-Только decision signals.
-
-=====================================================
+GOLDEN RULE:
+Decision layer selects modality.
+Executor executes.
+Presentation formats.
 """
+
+print("🧠 APRIL RESPONSE DECISION LOADED")
+
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+DECISION_PATCH_LOG = []
+
+
+def decision_log(msg):
+
+    try:
+
+        print(
+            "APRIL DECISION:",
+            msg
+        )
+
+        DECISION_PATCH_LOG.append(
+            str(msg)
+        )
+
+    except Exception:
+        pass
+
+
+# =====================================================
+# 🔥 ENTRY / EXIT
+# =====================================================
+
+def decision_enter():
+
+    decision_log(
+        "ENTER DECISION LAYER"
+    )
+
+    return {
+
+        "decision_active": True,
+
+        "machine_isolation": True,
+
+        "trajectory_safe": True
+    }
+
+
+def decision_exit(result):
+
+    decision_log(
+        f"EXIT DECISION: "
+        f"{result.get('final_action')}"
+    )
+
+    return {
+
+        "decision_complete": True,
+
+        "final_action":
+            result.get(
+                "final_action"
+            ),
+
+        "response_mode":
+            result.get(
+                "response_mode"
+            )
+    }
+
+
+# =====================================================
+# 🔥 FUTURE PLACEHOLDER
+# =====================================================
+
+def decision_future(
+    *args,
+    **kwargs
+):
+
+    return None
+
 
 # =====================================================
 # 🔥 MACHINE CHANNELS
@@ -144,6 +163,7 @@ DECISION_MODES = [
     "generate"
 ]
 
+
 # =====================================================
 # 🔥 RESPONSE DECISION
 # =====================================================
@@ -168,6 +188,8 @@ def build_response_decision(
     Без recursive chaos.
     Без duplicated logic.
     """
+
+    decision_enter()
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -496,6 +518,13 @@ def build_response_decision(
     result = {
 
         # =================================================
+        # 🔥 APRIL FILE
+        # =====================================================
+
+        "decision_id":
+            "APRIL_RESPONSE_DECISION_ORCHESTRATOR",
+
+        # =================================================
         # 🔥 MACHINE ROUTING
         # =====================================================
 
@@ -742,5 +771,9 @@ def build_response_decision(
         "goal_stage":
             goal_stage
     }
+
+    decision_exit(
+        result
+    )
 
     return result
