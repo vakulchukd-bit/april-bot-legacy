@@ -3,103 +3,115 @@
 # =====================================================
 
 """
-APRIL WEB CONTEXT CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+APRIL_FILE_ID:
+APRIL_SCENE_CONTEXT_COORDINATION_SYSTEM
 
 ROLE:
-Этот файл — НЕ cognition engine
-и НЕ reasoning system.
+SCENE_CONTEXT_COORDINATOR
 
-Этот файл выполняет только:
+ROOM:
+CONTEXT_ROOM
 
-- scene context coordination;
-- trajectory synchronization;
-- machine-context preparation;
-- continuity stabilization;
-- web renderer context support;
-- internal routing context assembly.
+INPUT:
+USER_TEXT
+STATE
+ACTIVE_FLOW
+SCENE_STATE
+VISUAL_SCENE
+EXECUTOR_CONTEXT
 
-=====================================================
-🧠 GOLDEN APRIL ARCHITECTURE
-=====================================================
+OUTPUT:
+MACHINE_CONTEXT
+SCENE_COORDINATION
+TRAJECTORY_SYNCHRONIZATION
+CONTEXT_PAYLOAD
+ANALYZER_TELEMETRY
 
-Данный файл работает ТОЛЬКО как:
+DEPENDENCIES:
+EXECUTOR
+SCENE_STATE
+ACTIVE_FLOW_SYSTEM
+VISUAL_CONTINUITY_SYSTEM
 
-INPUT MACHINE CHANNEL:
-BotRU → Executor → Context System
+CRITICAL:
+TRUE
 
-OUTPUT MACHINE CHANNEL:
-Context System → Executor Rooms
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 GOLDEN RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-=====================================================
-🔥 MAIN PRINCIPLES
-=====================================================
+This file NEVER:
+- makes cognition decisions
+- performs orchestration
+- formats frontend output
+- answers users
 
-Context System НЕ:
-
-- принимает решения;
-- анализирует personality;
-- управляет authority;
-- управляет cognition;
-- форматирует output;
-- отвечает пользователю.
-
-Context System только:
-
-- собирает scene_state;
-- удерживает trajectory;
-- синхронизирует active flows;
-- уменьшает noise;
-- уменьшает recursive reload;
-- подготавливает machine-context.
-
-=====================================================
-🌐 WEB-FIRST ARCHITECTURE
-=====================================================
-
-Система полностью адаптирована под:
-
-- April Web Space;
-- renderer continuity;
-- multimedia orchestration;
-- structured block rendering;
-- multi-question dialogs;
-- visual continuity.
-
-Telegram architecture полностью исключена.
-
-=====================================================
-🧠 APRIL MEMORY PHILOSOPHY
-=====================================================
-
-Главный источник истины:
-scene_state
-
-НЕ:
-- history;
-- message spam;
-- recursive dialog;
-- keyword memory.
-
-Память хранит:
-- trajectories;
-- execution direction;
-- visual continuity;
-- scene synchronization.
-
-=====================================================
-🔥 INTERNAL CHANNEL ISOLATION
-=====================================================
-
-INPUT MACHINE CHANNEL:
-получает machine-context от Executor.
-
-OUTPUT MACHINE CHANNEL:
-передаёт только чистый structured context.
-
-Human output сюда НЕ попадает.
-
-=====================================================
+This file ONLY:
+- coordinates scene context
+- synchronizes trajectories
+- stabilizes continuity
+- prepares machine context
+- protects renderer continuity
 """
+
+# =====================================================
+# 🔥 APRIL TRACE LOGS
+# =====================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_SCENE_CONTEXT_COORDINATION_SYSTEM",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_SCENE_CONTEXT_COORDINATION_SYSTEM",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
 
 # =====================================================
 # 🔥 SYSTEM LIMITS
@@ -148,6 +160,58 @@ OUTPUT_MACHINE_CHANNEL = {
 }
 
 # =====================================================
+# 🔥 ANALYZER TELEMETRY
+# =====================================================
+
+def build_context_telemetry():
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_context_telemetry"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_SCENE_CONTEXT_COORDINATION_SYSTEM",
+
+        "room":
+            "CONTEXT_ROOM",
+
+        "continuity_safe":
+            True,
+
+        "trajectory_sync":
+            True,
+
+        "renderer_continuity":
+            True,
+
+        "machine_context_active":
+            True,
+
+        "executor_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "telemetry":
+                "ready"
+        }
+    )
+
+    return payload
+
+# =====================================================
 # 🔥 HELPERS
 # =====================================================
 
@@ -189,7 +253,17 @@ def build_machine_context_payload(
 
 ):
 
-    return {
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_machine_context_payload"
+        }
+    )
+
+    payload = {
 
         "trajectory": trajectory,
 
@@ -204,8 +278,23 @@ def build_machine_context_payload(
 
         "machine_only": True,
 
-        "human_visible": False
+        "human_visible": False,
+
+        "telemetry":
+            build_context_telemetry()
     }
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "payload":
+                "machine_context_ready"
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🔥 TOPIC SHIFT DETECTION
@@ -219,9 +308,30 @@ def detect_topic_shift(
 
 ):
 
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "detect_topic_shift"
+        }
+    )
+
     text = normalize_lower(text)
 
     if not active_flow:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "topic_shift":
+                    False
+            }
+        )
+
         return False
 
     flow_type = active_flow.get(
@@ -229,6 +339,17 @@ def detect_topic_shift(
     )
 
     if not flow_type:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "topic_shift":
+                    False
+            }
+        )
+
         return False
 
     trajectory = scene_state.get(
@@ -238,6 +359,17 @@ def detect_topic_shift(
     if trajectory:
 
         if trajectory.lower() in text:
+
+            APRIL_LOG_OUT(
+
+                "CONTEXT_ROOM",
+
+                {
+                    "topic_shift":
+                        False
+                }
+            )
+
             return False
 
     math_unrelated = [
@@ -264,6 +396,16 @@ def detect_topic_shift(
             math_unrelated
         ):
 
+            APRIL_LOG_OUT(
+
+                "CONTEXT_ROOM",
+
+                {
+                    "topic_shift":
+                        True
+                }
+            )
+
             return True
 
     if flow_type == "image":
@@ -273,7 +415,27 @@ def detect_topic_shift(
             image_unrelated
         ):
 
+            APRIL_LOG_OUT(
+
+                "CONTEXT_ROOM",
+
+                {
+                    "topic_shift":
+                        True
+                }
+            )
+
             return True
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "topic_shift":
+                False
+        }
+    )
 
     return False
 
@@ -288,7 +450,28 @@ def archive_completed_flow(
 
 ):
 
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "archive_completed_flow"
+        }
+    )
+
     if not active_flow:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "archive":
+                    "empty_flow"
+            }
+        )
+
         return
 
     memory = state.get(
@@ -339,13 +522,44 @@ def archive_completed_flow(
         "passive_memory"
     ] = memory
 
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "archive":
+                "stored"
+        }
+    )
+
 # =====================================================
 # 🔥 SCENE BLOCK
 # =====================================================
 
 def build_scene_block(scene_state):
 
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_scene_block"
+        }
+    )
+
     if not scene_state:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "scene":
+                    "empty"
+            }
+        )
+
         return ""
 
     lines = []
@@ -404,13 +618,36 @@ def build_scene_block(scene_state):
         )
 
     if not lines:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "scene":
+                    "no_lines"
+            }
+        )
+
         return ""
 
-    return (
+    payload = (
 
         "\nSCENE STATE:\n"
         + "\n".join(lines)
     )
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "scene":
+                "built"
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🔥 VISUAL SCENE BLOCK
@@ -420,7 +657,28 @@ def build_visual_scene_block(
     active_visual_scene
 ):
 
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_visual_scene_block"
+        }
+    )
+
     if not active_visual_scene:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "visual_scene":
+                    "empty"
+            }
+        )
+
         return ""
 
     lines = [
@@ -461,7 +719,19 @@ def build_visual_scene_block(
             + ", ".join(objects)
         )
 
-    return "\n".join(lines)
+    payload = "\n".join(lines)
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "visual_scene":
+                "built"
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🔥 RELEVANT DIALOG
@@ -475,6 +745,16 @@ def build_relevant_dialog(
     scene_state
 
 ):
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_relevant_dialog"
+        }
+    )
 
     text = normalize_lower(text)
 
@@ -559,7 +839,19 @@ def build_relevant_dialog(
         )
     )
 
-    return "\n".join(relevant)
+    payload = "\n".join(relevant)
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "dialog":
+                "relevant_built"
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🔥 BASE MACHINE CONTEXT
@@ -567,7 +859,17 @@ def build_relevant_dialog(
 
 def build_base_context():
 
-    return """
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_base_context"
+        }
+    )
+
+    payload = """
 
 APRIL MACHINE CONTEXT
 
@@ -587,6 +889,18 @@ RULES:
 
 """
 
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "base_context":
+                "ready"
+        }
+    )
+
+    return payload
+
 # =====================================================
 # 🔥 CURRENT REQUEST
 # =====================================================
@@ -595,6 +909,16 @@ def build_current_request(
     text,
     scene_state
 ):
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_current_request"
+        }
+    )
 
     trajectory = scene_state.get(
         "trajectory"
@@ -616,7 +940,19 @@ def build_current_request(
             f"{trajectory}"
         ])
 
-    return "\n".join(lines)
+    payload = "\n".join(lines)
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "request":
+                "built"
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🔥 FLOW STABILIZATION
@@ -627,11 +963,32 @@ def stabilize_active_flow(
     scene_state
 ):
 
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "stabilize_active_flow"
+        }
+    )
+
     active_flow = state.get(
         "active_flow"
     )
 
     if not active_flow:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "active_flow":
+                    "empty"
+            }
+        )
+
         return
 
     trajectory = scene_state.get(
@@ -639,6 +996,17 @@ def stabilize_active_flow(
     )
 
     if not trajectory:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "trajectory":
+                    "empty"
+            }
+        )
+
         return
 
     active_flow[
@@ -653,6 +1021,16 @@ def stabilize_active_flow(
         "continuity_priority"
     ] = True
 
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "active_flow":
+                "stabilized"
+        }
+    )
+
 # =====================================================
 # 🔥 CONTEXT BUILD
 # =====================================================
@@ -664,6 +1042,19 @@ def build_context_text(
     state
 
 ):
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_context_text",
+
+            "user_id":
+                user_id
+        }
+    )
 
     text = normalize_text(text)
 
@@ -854,6 +1245,16 @@ RELEVANT DIALOG:
 
 """
 
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "context":
+                "built"
+        }
+    )
+
     return full_context
 
 # =====================================================
@@ -867,6 +1268,16 @@ def update_memory_summary(
     bot_reply
 
 ):
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "update_memory_summary"
+        }
+    )
 
     old = state.get(
         "memory_summary",
@@ -889,6 +1300,16 @@ def update_memory_summary(
 
         or len(user_text) <= 2
     ):
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "summary":
+                    "ignored_low_value"
+            }
+        )
 
         return
 
@@ -914,6 +1335,17 @@ def update_memory_summary(
     )
 
     if chunk in old:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "summary":
+                    "duplicate"
+            }
+        )
+
         return
 
     scene_state = state.get(
@@ -949,6 +1381,16 @@ def update_memory_summary(
         "memory_summary"
     ] = combined
 
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "summary":
+                "updated"
+        }
+    )
+
 # =====================================================
 # 🔥 SCENE SYNCHRONIZATION
 # =====================================================
@@ -956,6 +1398,16 @@ def update_memory_summary(
 def synchronize_scene_state(
     state
 ):
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "synchronize_scene_state"
+        }
+    )
 
     scene_state = state.get(
         "scene_state",
@@ -967,6 +1419,17 @@ def synchronize_scene_state(
     )
 
     if not scene_state:
+
+        APRIL_LOG_OUT(
+
+            "CONTEXT_ROOM",
+
+            {
+                "scene_sync":
+                    "empty"
+            }
+        )
+
         return
 
     if active_flow:
@@ -1001,6 +1464,16 @@ def synchronize_scene_state(
             "visual_mode"
         ] = visual_mode
 
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "scene_sync":
+                "complete"
+        }
+    )
+
 # =====================================================
 # 🔥 MAIN ENTRY
 # =====================================================
@@ -1012,6 +1485,19 @@ def build_deephub_context(
     state
 
 ):
+
+    APRIL_LOG_IN(
+
+        "CONTEXT_ROOM",
+
+        {
+            "action":
+                "build_deephub_context",
+
+            "user_id":
+                user_id
+        }
+    )
 
     synchronize_scene_state(
         state
@@ -1045,9 +1531,21 @@ def build_deephub_context(
         "_machine_context"
     ] = machine_payload
 
-    return build_context_text(
+    payload = build_context_text(
 
         user_id,
         text,
         state
     )
+
+    APRIL_LOG_OUT(
+
+        "CONTEXT_ROOM",
+
+        {
+            "deephub_context":
+                "ready"
+        }
+    )
+
+    return payload
