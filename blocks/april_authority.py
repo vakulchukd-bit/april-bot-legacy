@@ -1,30 +1,86 @@
-# =====================================================
-# 🧠 APRIL SUPREME AUTHORITY SYSTEM
-# =====================================================
+# =========================================================
+# 🧠 APRIL GOVERNANCE AUTHORITY CORE
+# =========================================================
 
 """
-APRIL FINAL COGNITIVE AUTHORITY
+APRIL GOVERNANCE AUTHORITY CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-UNIFIED EXECUTIVE INTELLIGENCE LAYER
+ROLE IN APRIL:
+This file is the GOVERNANCE,
+VALIDATION and COGNITIVE STABILIZATION core of April.
 
-Authority layer теперь:
-- governance layer;
-- stabilizer;
-- validator;
-- trajectory protector;
-- orchestration supervisor;
-- continuity guard;
-- capability coordinator.
+This helper core protects April from:
+- execution chaos
+- recursive instability
+- broken continuity
+- modality conflicts
+- system leakage
+- unstable cognition
+- orchestration corruption
 
-Authority больше НЕ:
-- aggressive override layer;
-- recursive retry source;
-- hidden rerouting engine;
-- forced execution trigger;
-- second executor;
-- chaos escalation system.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 WHAT THIS FILE IS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-APRIL AUTHORITY PRINCIPLES:
+This file IS:
+- governance layer
+- cognition validator
+- continuity protector
+- orchestration supervisor
+- modality validator
+- trajectory stabilizer
+- anti-chaos system
+- execution sanity checker
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 WHAT THIS FILE IS NOT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file is NOT:
+- second Executor
+- orchestration engine
+- routing authority
+- response formatter
+- renderer
+- frontend system
+- Telegram system
+- override chaos layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 APRIL ARCHITECTURE POSITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BotRoot
+ ↓
+Executor
+ ↓
+Governance Authority Core (THIS FILE)
+ ↓
+Execution Rooms
+
+Executor thinks.
+Rooms execute.
+This helper core validates stability.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 GOLDEN MACHINE CHANNEL RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file uses TWO isolated channels.
+
+1. GOVERNANCE TASK CHANNEL
+Executor → Governance Core
+
+2. GOVERNANCE RESPONSE CHANNEL
+Governance Core → Executor
+
+Human-layer NEVER mixes with
+internal cognition governance.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 GOLDEN APRIL PRINCIPLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. continuation before override
 2. renderer before generation
@@ -33,125 +89,146 @@ APRIL AUTHORITY PRINCIPLES:
 5. governance before force
 6. anti-recursive behavior
 7. no hidden escalation
-8. no forced personality leakage
+8. no personality leakage
+9. no cognitive duplication
+10. no orchestration conflict
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 IMPORTANT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DO NOT RE-ADD:
+- Telegram logic
+- recursive retries
+- hidden rerouting
+- second orchestration
+- aggressive overrides
+- frontend rendering
+- transport formatting
+- duplicated governance systems
+
+This file must remain:
+- calm
+- lightweight
+- validator-focused
+- Executor-connected
+- cognition-safe
 """
 
-# =====================================================
-# 🔥 CAPABILITY REGISTRY
-# =====================================================
+# =========================================================
+# 🧠 MACHINE CHANNELS
+# =========================================================
+
+GOVERNANCE_TASK_CHANNEL = {
+
+    "channel":
+        "governance_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+GOVERNANCE_RESPONSE_CHANNEL = {
+
+    "channel":
+        "governance_machine_response_channel",
+
+    "isolated":
+        True
+}
+
+# =========================================================
+# 🧠 APRIL CAPABILITY REGISTRY
+# =========================================================
+
+"""
+Central April capability awareness.
+
+This registry helps Executor understand:
+- what April can do
+- which helper cores exist
+- which modality paths are valid
+"""
 
 APRIL_CAPABILITIES = {
+
+    # =====================================================
+    # 🧠 CORE COGNITION
+    # =====================================================
 
     "conversation": True,
     "continuation": True,
     "trajectory_tracking": True,
-    "dialog_analysis": True,
-    "psychology": True,
-    "memory": True,
     "reasoning": True,
     "guidance": True,
     "execution": True,
 
-    # =================================================
-    # VISUAL
+    # =====================================================
+    # 🧠 VISUAL
     # =====================================================
 
     "renderer_space": True,
-
     "scene_rendering": True,
-
     "graph_generation": True,
-
-    "graph_analysis": True,
-
     "diagram_generation": True,
-
-    "diagram_analysis": True,
-
     "formula_rendering": True,
-
     "table_rendering": True,
-
-    "primitive_scene_objects": True,
-
-    "visual_guidance": True,
-
     "visual_continuity": True,
-
-    "screenshot_analysis": True,
-
     "image_analysis": True,
 
-    # =================================================
-    # HEAVY VISUAL
+    # =====================================================
+    # 🧠 HEAVY VISUAL
     # =====================================================
 
     "image_generation": True,
-
     "image_edit": True,
 
-    # =================================================
-    # KNOWLEDGE
+    # =====================================================
+    # 🧠 KNOWLEDGE
     # =====================================================
 
     "web_search": True,
-
     "external_knowledge": True,
-
     "references": True,
 
-    "live_information": True,
-
-    # =================================================
-    # SCIENCE
+    # =====================================================
+    # 🧠 SCIENCE
     # =====================================================
 
     "science": True,
-
     "math": True,
-
-    "geometry": True,
-
     "engineering": True,
-
     "code": True,
 
-    # =================================================
-    # AUTHORITY
+    # =====================================================
+    # 🧠 GOVERNANCE
     # =====================================================
 
-    "governance": True,
-
     "validation": True,
-
     "trajectory_protection": True,
-
-    "modality_supervision": True,
-
     "continuity_validation": True,
-
-    "completion_validation": True,
-
     "result_validation": True,
-
     "usefulness_validation": True,
 
-    # =================================================
-    # SAFETY
+    # =====================================================
+    # 🧠 SAFETY
     # =====================================================
 
     "anti_loop_protection": True,
-
     "anti_escalation": True,
-
     "anti_personality_leak": True,
-
     "anti_recursive_generation": True
 }
 
-# =====================================================
-# 🔥 TRUST LEVELS
-# =====================================================
+# =========================================================
+# 🧠 TRUST LEVELS
+# =========================================================
+
+"""
+Trust stabilization between helper cores.
+
+Prevents orchestration conflicts.
+"""
 
 DEFAULT_TRUST_LEVELS = {
 
@@ -169,8 +246,8 @@ DEFAULT_TRUST_LEVELS = {
 
     "code": 1.0,
 
-    # =================================================
-    # 🔥 HEAVY VISUAL
+    # =====================================================
+    # 🧠 HEAVY VISUAL
     # =====================================================
 
     "image_generation": 0.82,
@@ -178,9 +255,9 @@ DEFAULT_TRUST_LEVELS = {
     "image_edit": 0.82
 }
 
-# =====================================================
-# 🔥 HELPERS
-# =====================================================
+# =========================================================
+# 🧠 HELPERS
+# =========================================================
 
 def clamp(
     value,
@@ -197,9 +274,7 @@ def clamp(
     return value
 
 
-def safe_output(
-    result
-):
+def safe_output(result):
 
     if not result:
         return ""
@@ -211,10 +286,51 @@ def safe_output(
         )
     ).strip()
 
+# =========================================================
+# 🧠 SYSTEM LEAK DETECTION
+# =========================================================
 
-def is_renderer_result(
-    result
-):
+def contains_system_leak(output):
+
+    """
+    Prevents internal machine leakage
+    into human-layer output.
+    """
+
+    if not output:
+        return False
+
+    lowered = output.lower()
+
+    leak_patterns = [
+
+        "response_decision",
+        "execution_pressure",
+        "cognition",
+        "semantic",
+        "internal_noise",
+        "trajectory_tracking",
+        "system prompt"
+    ]
+
+    hits = 0
+
+    for pattern in leak_patterns:
+
+        if pattern in lowered:
+            hits += 1
+
+    return hits >= 2
+
+# =========================================================
+# 🧠 RENDERER DETECTION
+# =========================================================
+
+def is_renderer_result(result):
+
+    """
+    Detects renderer-safe outputs.
+    """
 
     if not result:
         return False
@@ -223,10 +339,6 @@ def is_renderer_result(
         "type",
         "text"
     )
-
-    # =================================================
-    # 🔥 APRIL RENDERER TYPES
-    # =====================================================
 
     if result_type in [
 
@@ -258,239 +370,60 @@ def is_renderer_result(
         for x in renderer_patterns
     )
 
-
-def contains_system_leak(
-    output
-):
-
-    if not output:
-        return False
-
-    lowered = output.lower()
-
-    leak_patterns = [
-
-        "personality_active",
-        "response_decision",
-        "execution_pressure",
-        "cognition",
-        "semantic",
-        "internal_noise",
-        "assistant_restraint",
-        "trajectory_tracking",
-        "continuity tracking",
-        "system prompt",
-        "ты calm mobile-first ai assistant"
-    ]
-
-    hits = 0
-
-    for pattern in leak_patterns:
-
-        if pattern in lowered:
-            hits += 1
-
-    return hits >= 2
-
-
-def is_soft_visual_request(
-    semantic,
-    cognition
-):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        return True
-
-    if semantic.get(
-        "prefer_renderer"
-    ):
-
-        return True
-
-    continuation_target = semantic.get(
-        "continuation_target"
-    )
-
-    if continuation_target == "math":
-
-        return True
-
-    wants_visual = cognition.get(
-        "wants_visual",
-        0.0
-    )
-
-    ambiguity = semantic.get(
-        "ambiguity_level",
-        0.0
-    )
-
-    if (
-        wants_visual >= 0.72
-        and ambiguity <= 0.45
-    ):
-
-        return True
-
-    return False
-
-
-# =====================================================
-# 🔥 AUTHORITY STATE
-# =====================================================
+# =========================================================
+# 🧠 AUTHORITY STATE
+# =========================================================
 
 def build_authority_state():
+
+    """
+    Global governance stabilization state.
+    """
 
     return {
 
         "authority_active": True,
+
         "governance_active": True,
+
         "validation_active": True,
-        "final_validation": True,
 
-        "trajectory_tracking": True,
-        "completion_tracking": True,
-        "visual_tracking": True,
-        "dialog_tracking": True,
-        "continuation_tracking": True,
-        "psychology_tracking": True,
-        "usefulness_tracking": True,
-        "satisfaction_tracking": True,
-        "humanity_tracking": True,
-
-        "governance_mode": "calm",
-
-        "continuity_priority": 1.0,
-        "renderer_priority": 1.0,
+        "continuity_protection": True,
 
         "calm_orchestration": True,
 
-        "modality_supervision": True,
-        "execution_supervision": True,
+        "anti_recursive_behavior": True,
 
-        "allow_execution_guidance": True,
-        "allow_renderer_guidance": True,
-        "allow_web_guidance": True,
-        "allow_reasoning_guidance": True,
-
-        "avoid_force_execution": True,
-        "avoid_hidden_retry": True,
-        "avoid_recursive_override": True,
-
-        "anti_recursive_retry": True,
-        "anti_escalation": True,
         "anti_hidden_generation": True,
 
-        "anti_system_leak": True,
+        "anti_personality_leak": True,
+
+        "avoid_force_execution": True,
+
+        "avoid_aggressive_override": True,
 
         "trust_levels":
             DEFAULT_TRUST_LEVELS.copy(),
 
-        "last_override": None,
-        "last_completion": None,
-        "last_failure": None,
-        "last_success": None,
-        "last_capability": None,
-        "last_user_goal": None,
-        "last_visual_request": None,
-        "last_dialog_mode": None
+        "machine_channel":
+            GOVERNANCE_RESPONSE_CHANNEL
     }
 
-# =====================================================
-# 🔥 INTENTION ANALYSIS
-# =====================================================
-
-def analyze_user_intention(
-
-    semantic,
-    cognition,
-    state
-
-):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-    state = state or {}
-
-    return {
-
-        "wants_result":
-            cognition.get(
-                "wants_result",
-                0.0
-            ),
-
-        "wants_visual":
-            cognition.get(
-                "wants_visual",
-                0.0
-            ),
-
-        "needs_execution":
-            semantic.get(
-                "should_execute",
-                False
-            ),
-
-        "ambiguity":
-            semantic.get(
-                "ambiguity_level",
-                0.0
-            ),
-
-        "goal_stage":
-            semantic.get(
-                "goal_stage",
-                "exploration"
-            ),
-
-        "continuation_target":
-            semantic.get(
-                "continuation_target"
-            ),
-
-        "active_flow":
-            state.get(
-                "active_flow"
-            )
-    }
-
-# =====================================================
-# 🔥 VISUAL OBLIGATION
-# =====================================================
-
-def is_visual_obligatory(
-
-    semantic,
-    cognition
-
-):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-
-    return is_soft_visual_request(
-        semantic,
-        cognition
-    )
-
-# =====================================================
-# 🔥 COMPLETION ANALYSIS
-# =====================================================
+# =========================================================
+# 🧠 COMPLETION ANALYSIS
+# =========================================================
 
 def analyze_completion(
 
     result,
     semantic,
     cognition
-
 ):
+
+    """
+    Validates whether execution
+    completed successfully.
+    """
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -516,6 +449,10 @@ def analyze_completion(
 
     lowered = output.lower()
 
+    # =====================================================
+    # 🧠 RENDERER SUCCESS
+    # =====================================================
+
     if result_type in [
 
         "function",
@@ -534,6 +471,10 @@ def analyze_completion(
                 "renderer_completed"
         }
 
+    # =====================================================
+    # 🧠 EMPTY OUTPUT
+    # =====================================================
+
     if len(output) <= 5:
 
         return {
@@ -543,6 +484,10 @@ def analyze_completion(
             "reason":
                 "empty_output"
         }
+
+    # =====================================================
+    # 🧠 SYSTEM LEAK
+    # =====================================================
 
     if contains_system_leak(
         output
@@ -556,13 +501,15 @@ def analyze_completion(
                 "system_leak"
         }
 
+    # =====================================================
+    # 🧠 REFUSAL DETECTION
+    # =====================================================
+
     refusal_patterns = [
 
         "я не могу",
         "не умею",
-        "не поддерживается",
-        "представь себе",
-        "нет возможности"
+        "не поддерживается"
     ]
 
     for pattern in refusal_patterns:
@@ -577,79 +524,6 @@ def analyze_completion(
                     "refusal"
             }
 
-    # =================================================
-    # 🔥 VISUAL VALIDATION
-    # =====================================================
-
-    if is_visual_obligatory(
-
-        semantic,
-        cognition
-
-    ):
-
-        renderer_allowed = is_renderer_result(
-            result
-        )
-
-        visual_allowed = result_type in [
-
-            "function",
-            "image",
-            "image_task",
-            "graph",
-            "diagram",
-            "scene"
-        ]
-
-        if (
-
-            not renderer_allowed
-            and not visual_allowed
-
-        ):
-
-            if result_type == "text":
-
-                if len(output) >= 80:
-
-                    return {
-
-                        "completed": True,
-
-                        "reason":
-                            "textual_visual_guidance"
-                    }
-
-            return {
-
-                "completed": False,
-
-                "reason":
-                    "visual_missing"
-            }
-
-    if semantic.get(
-        "should_execute"
-    ):
-
-        if result_type == "text":
-
-            if cognition.get(
-                "wants_result",
-                0.0
-            ) >= 0.7:
-
-                if len(output) < 20:
-
-                    return {
-
-                        "completed": False,
-
-                        "reason":
-                            "weak_execution"
-                    }
-
     return {
 
         "completed": True,
@@ -658,84 +532,21 @@ def analyze_completion(
             "success"
     }
 
-# =====================================================
-# 🔥 CAPABILITY GOVERNANCE
-# =====================================================
-
-def choose_best_capability_path(
-
-    semantic,
-    cognition,
-    state
-
-):
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-    state = state or {}
-
-    if semantic.get(
-        "prefer_renderer"
-    ):
-
-        return "renderer_space"
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        return "renderer_space"
-
-    if cognition.get(
-        "wants_visual",
-        0.0
-    ) >= 0.72:
-
-        if semantic.get(
-            "explicit_image_generation_only"
-        ):
-
-            if state.get("image"):
-
-                return "image_edit"
-
-            return "image_generation"
-
-        return "renderer_space"
-
-    if semantic.get(
-        "internet_context_needed"
-    ):
-
-        return "web"
-
-    continuation_target = semantic.get(
-        "continuation_target"
-    )
-
-    if continuation_target == "math":
-
-        return "science"
-
-    if semantic.get(
-        "should_execute"
-    ):
-
-        return "execution"
-
-    return "text"
-
-# =====================================================
-# 🔥 USEFULNESS
-# =====================================================
+# =========================================================
+# 🧠 USEFULNESS ANALYSIS
+# =========================================================
 
 def evaluate_usefulness(
 
     result,
     semantic,
     cognition
-
 ):
+
+    """
+    Measures practical usefulness
+    of execution output.
+    """
 
     if not result:
 
@@ -749,9 +560,12 @@ def evaluate_usefulness(
 
     lowered = output.lower()
 
+    # =====================================================
+    # 🧠 VISUAL BONUS
+    # =====================================================
+
     if result.get("type") in [
 
-        "function",
         "graph",
         "diagram",
         "formula",
@@ -760,13 +574,25 @@ def evaluate_usefulness(
 
         usefulness += 0.25
 
+    # =====================================================
+    # 🧠 WEAK OUTPUT
+    # =====================================================
+
     if len(output) < 15:
 
         usefulness -= 0.4
 
+    # =====================================================
+    # 🧠 REFUSAL PENALTY
+    # =====================================================
+
     if "не могу" in lowered:
 
         usefulness -= 0.5
+
+    # =====================================================
+    # 🧠 SYSTEM LEAK PENALTY
+    # =====================================================
 
     if contains_system_leak(
         output
@@ -774,43 +600,13 @@ def evaluate_usefulness(
 
         usefulness -= 0.7
 
-    if semantic.get(
-        "prefer_renderer"
-    ):
-
-        if result.get(
-            "type"
-        ) == "text":
-
-            if len(output) < 80:
-
-                usefulness -= 0.35
-
-    if (
-
-        cognition.get(
-            "wants_visual",
-            0.0
-        ) >= 0.7
-
-        and not semantic.get(
-            "explicit_image_generation_only"
-        )
-    ):
-
-        if result.get(
-            "type"
-        ) == "image":
-
-            usefulness -= 0.25
-
     return clamp(
         usefulness
     )
 
-# =====================================================
-# 🔥 FINAL VALIDATION
-# =====================================================
+# =========================================================
+# 🧠 FINAL VALIDATION
+# =========================================================
 
 def validate_final_response(
 
@@ -818,8 +614,11 @@ def validate_final_response(
     semantic,
     cognition,
     state=None
-
 ):
+
+    """
+    Final cognition stability validation.
+    """
 
     completion = analyze_completion(
 
@@ -847,9 +646,9 @@ def validate_final_response(
 
     return True
 
-# =====================================================
-# 🔥 OVERRIDE
-# =====================================================
+# =========================================================
+# 🧠 OVERRIDE VALIDATION
+# =========================================================
 
 def should_override(
 
@@ -857,8 +656,14 @@ def should_override(
     semantic,
     cognition,
     state=None
-
 ):
+
+    """
+    Calm override validation.
+
+    NOT aggressive.
+    NOT recursive.
+    """
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -875,6 +680,10 @@ def should_override(
 
         return True
 
+    # =====================================================
+    # 🧠 RENDERER PRIORITY
+    # =====================================================
+
     if semantic.get(
         "prefer_renderer"
     ):
@@ -885,34 +694,60 @@ def should_override(
 
             return True
 
-    if is_visual_obligatory(
-
-        semantic,
-        cognition
-
-    ):
-
-        result_type = result.get(
-            "type"
-        )
-
-        if result_type == "text":
-
-            output = safe_output(
-                result
-            )
-
-            if len(output) >= 80:
-
-                return False
-
-            return True
-
     return False
 
-# =====================================================
-# 🔥 EXECUTIVE DECISION
-# =====================================================
+# =========================================================
+# 🧠 CAPABILITY PATH GOVERNANCE
+# =========================================================
+
+def choose_best_capability_path(
+
+    semantic,
+    cognition,
+    state
+):
+
+    """
+    Governance-level capability coordination.
+
+    Prevents helper-core conflicts.
+    """
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    state = state or {}
+
+    if semantic.get(
+        "prefer_renderer"
+    ):
+
+        return "renderer_space"
+
+    if semantic.get(
+        "internet_context_needed"
+    ):
+
+        return "web"
+
+    if semantic.get(
+        "should_execute"
+    ):
+
+        return "execution"
+
+    continuation_target = semantic.get(
+        "continuation_target"
+    )
+
+    if continuation_target == "math":
+
+        return "science"
+
+    return "text"
+
+# =========================================================
+# 🧠 EXECUTIVE GOVERNANCE DECISION
+# =========================================================
 
 def build_authority_decision(
 
@@ -921,8 +756,14 @@ def build_authority_decision(
     cognition,
     response_decision,
     state=None
-
 ):
+
+    """
+    Final governance payload for Executor.
+
+    This helper core NEVER orchestrates.
+    It only validates and stabilizes.
+    """
 
     completion = analyze_completion(
 
@@ -956,42 +797,13 @@ def build_authority_decision(
         )
     )
 
-    governance_signals = {
-
-        "preferred_modality":
-            capability_path,
-
-        "prefer_renderer":
-            capability_path == "renderer_space",
-
-        "prefer_web":
-            capability_path == "web",
-
-        "prefer_science":
-            capability_path == "science",
-
-        "prefer_execution":
-            capability_path == "execution",
-
-        "heavy_generation_allowed":
-
-            semantic.get(
-                "explicit_image_generation_only",
-                False
-            ),
-
-        "continuity_priority": 1.0,
-
-        "calm_orchestration": True,
-
-        "avoid_recursive_retry": True,
-
-        "avoid_hidden_generation": True
-    }
-
     return {
 
-        "override": override,
+        "channel":
+            GOVERNANCE_RESPONSE_CHANNEL,
+
+        "override":
+            override,
 
         "allow_response":
             not override,
@@ -1010,76 +822,36 @@ def build_authority_decision(
         "usefulness":
             usefulness,
 
-        "visual_obligation":
-            is_visual_obligatory(
-
-                semantic,
-                cognition
-            ),
-
         "best_capability":
             capability_path,
-
-        "governance_signals":
-            governance_signals,
-
-        "execution_mismatch_detected":
-            override,
-
-        "response_quality_low":
-
-            usefulness < 0.45,
-
-        "modality_mismatch_detected":
-
-            completion.get(
-                "reason"
-            ) == "visual_missing",
 
         "preferred_modality":
             capability_path,
 
-        "preferred_renderer":
-            capability_path == "renderer_space",
+        "governance_mode":
+            "calm",
 
-        "preferred_visual":
-            capability_path in [
+        "avoid_recursive_retry":
+            True,
 
-                "image_generation",
-                "image_edit"
-            ],
+        "avoid_hidden_generation":
+            True,
 
-        "preferred_web":
-            capability_path == "web",
+        "avoid_personality_leak":
+            True,
 
-        "preferred_science":
-            capability_path == "science",
+        "avoid_double_orchestration":
+            True,
 
-        "avoid_recursive_retry": True,
+        "maintain_continuity":
+            True,
 
-        "avoid_hidden_generation": True,
+        "maintain_humanity":
+            True,
 
-        "avoid_personality_leak": True,
+        "maintain_dialog_flow":
+            True,
 
-        "avoid_system_prompt_exposure": True,
-
-        "avoid_aggressive_override": True,
-
-        "avoid_force_execution": True,
-
-        "avoid_double_orchestration": True,
-
-        "maintain_humanity": True,
-
-        "maintain_continuity": True,
-
-        "maintain_psychology": True,
-
-        "maintain_visual_quality": True,
-
-        "maintain_user_goal": True,
-
-        "maintain_dialog_flow": True,
-
-        "authority_confident": True
+        "authority_confident":
+            True
     }
