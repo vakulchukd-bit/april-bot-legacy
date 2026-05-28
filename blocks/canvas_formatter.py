@@ -3,122 +3,57 @@
 # =========================================================
 
 """
-APRIL SPACE RENDER BRIDGE CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the render bridge layer
-between April cognition and April Web Space.
+APRIL_FILE_ID:
+APRIL_SPACE_RENDER_BRIDGE_CORE
 
-This helper core transforms:
-- cognitive objects
-- semantic structures
-- scene payloads
-- renderer blocks
-- execution visuals
+ROLE:
+RENDER_BRIDGE_AND_WEB_SPACE_PACKAGER
 
-into:
-- stable Web render objects
-- renderer-safe structures
-- multi-block layouts
-- continuity-safe scene payloads
+ROOM:
+RENDER_BRIDGE_ROOM
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INPUT:
+EXECUTOR_RENDER_REQUEST
+ROOM_RENDER_PAYLOAD
+SEMANTIC_VISUAL_STRUCTURE
+CONTINUITY_RENDER_STATE
+MULTI_BLOCK_RESPONSE
 
-This file IS:
-- render bridge core
-- scene packaging layer
-- renderer object formatter
-- Web-space preparation system
-- semantic visual formatter
-- continuity-safe visual packaging layer
+OUTPUT:
+RENDERER_SAFE_PAYLOAD
+WEB_RENDER_OBJECT
+CONTINUITY_SAFE_RENDER_STRUCTURE
+ANALYZER_RENDER_TELEMETRY
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS NOT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPENDENCIES:
+EXECUTOR
+WEB_RENDERER
+SPACE_RENDER_SYSTEM
+CONTINUITY_SYSTEM
+ANALYZER_SYSTEM
 
-This file is NOT:
-- renderer engine
-- frontend renderer
-- Telegram formatter
-- personality system
-- orchestration layer
-- governance system
-- routing system
-- analytics system
-- cognition engine
+CRITICAL:
+TRUE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
+🧠 GOLDEN RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-BotRoot
- ↓
-Executor
- ↓
-Execution Rooms
- ↓
-Render Bridge Core (THIS FILE)
- ↓
-Web Renderer Space
+This file NEVER:
+- performs orchestration
+- performs cognition
+- formats frontend UI
+- executes renderer logic
 
-Executor thinks.
-Rooms generate cognition.
-This file packages cognition into render structures.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN MACHINE CHANNEL RULE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file uses TWO isolated channels.
-
-1. RENDER TASK CHANNEL
-Executor/Rooms → Render Bridge
-
-2. RENDER RESPONSE CHANNEL
-Render Bridge → BotRoot/Web Renderer
-
-Human-facing rendering NEVER mixes
-with internal cognition orchestration.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN APRIL RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. cognition before rendering
-2. renderer before heavy visuals
-3. continuity before fragmentation
-4. semantic structure before beautification
-5. Web-space first
-6. multi-block stability
-7. renderer-safe payloads
-8. no cognition leakage
-9. no system leakage
-10. no renderer chaos
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram formatting
-- aiogram logic
-- personality narration
-- orchestration logic
-- frontend rendering logic
-- cognition logic
-- analytics logic
-- governance logic
-
-This file must remain:
-- lightweight
-- renderer-safe
-- structure-focused
-- Web-oriented
-- continuity-safe
-- Executor-compatible
+This file ONLY:
+- packages render structures
+- stabilizes visual continuity
+- protects renderer payloads
+- prepares Web-space objects
 """
 
 # =========================================================
@@ -144,6 +79,61 @@ RENDER_RESPONSE_CHANNEL = {
 }
 
 # =========================================================
+# 🔥 APRIL TRACE LOGS
+# =========================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_SPACE_RENDER_BRIDGE_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_SPACE_RENDER_BRIDGE_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+# =========================================================
 # 🧠 SAFE HELPERS
 # =========================================================
 
@@ -159,19 +149,86 @@ def safe_text(value):
     return str(value).strip()
 
 # =========================================================
+# 🧠 RENDER TELEMETRY
+# =========================================================
+
+def build_render_bridge_telemetry():
+
+    APRIL_LOG_IN(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "build_render_bridge_telemetry"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_SPACE_RENDER_BRIDGE_CORE",
+
+        "room":
+            "RENDER_BRIDGE_ROOM",
+
+        "renderer_safe":
+            True,
+
+        "continuity_safe":
+            True,
+
+        "multi_block_supported":
+            True,
+
+        "executor_connected":
+            True,
+
+        "web_space_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "telemetry":
+                "ready"
+        }
+    )
+
+    return payload
+
+# =========================================================
 # 🧠 TEXT BLOCK
 # =========================================================
 
 def format_text(content):
 
-    """
-    Lightweight text normalization.
+    APRIL_LOG_IN(
 
-    Does NOT beautify.
-    Does NOT narrate.
-    """
+        "RENDER_BRIDGE_ROOM",
 
-    return safe_text(content)
+        {
+            "action":
+                "format_text"
+        }
+    )
+
+    result = safe_text(content)
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "text":
+                "formatted"
+        }
+    )
+
+    return result
 
 # =========================================================
 # 🧠 CODE BLOCK
@@ -184,10 +241,15 @@ def format_code_block(
     block_name=None
 ):
 
-    """
-    Packages structured code blocks
-    for Web-space rendering.
-    """
+    APRIL_LOG_IN(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "format_code_block"
+        }
+    )
 
     content = safe_text(content)
 
@@ -207,7 +269,7 @@ def format_code_block(
             f"{block_name} ===\n\n"
         )
 
-    return {
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
@@ -215,10 +277,25 @@ def format_code_block(
         "type":
             "code_block",
 
+        "renderer_safe":
+            True,
+
         "payload": (
             f"{header}{content}"
         )
     }
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "code_block":
+                "ready"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 FORMULA BLOCK
@@ -230,10 +307,15 @@ def format_formula_block(
     label="FORMULA"
 ):
 
-    """
-    Packages renderer-safe formulas
-    for Web-space rendering.
-    """
+    APRIL_LOG_IN(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "format_formula_block"
+        }
+    )
 
     formula = safe_text(formula)
 
@@ -241,13 +323,16 @@ def format_formula_block(
 
         return None
 
-    return {
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
 
         "type":
             "formula",
+
+        "renderer_safe":
+            True,
 
         "payload": {
 
@@ -259,6 +344,18 @@ def format_formula_block(
         }
     }
 
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "formula":
+                "ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 GRAPH BLOCK
 # =========================================================
@@ -269,10 +366,15 @@ def format_graph_block(
     title="GRAPH"
 ):
 
-    """
-    Packages graph objects
-    for Web renderer space.
-    """
+    APRIL_LOG_IN(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "format_graph_block"
+        }
+    )
 
     graph = safe_text(graph)
 
@@ -280,13 +382,16 @@ def format_graph_block(
 
         return None
 
-    return {
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
 
         "type":
             "graph",
+
+        "renderer_safe":
+            True,
 
         "payload": {
 
@@ -298,6 +403,18 @@ def format_graph_block(
         }
     }
 
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "graph":
+                "ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 TABLE BLOCK
 # =========================================================
@@ -308,20 +425,28 @@ def format_table_block(
     title="TABLE"
 ):
 
-    """
-    Packages structured table payloads
-    for Web rendering.
-    """
+    APRIL_LOG_IN(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "format_table_block"
+        }
+    )
 
     rows = rows or []
 
-    return {
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
 
         "type":
             "table",
+
+        "renderer_safe":
+            True,
 
         "payload": {
 
@@ -332,6 +457,18 @@ def format_table_block(
                 rows
         }
     }
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "table":
+                "ready"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 SCENE OBJECT
@@ -344,10 +481,15 @@ def format_scene_object(
     meta=None
 ):
 
-    """
-    Packages semantic scene objects
-    for April Space continuity rendering.
-    """
+    APRIL_LOG_IN(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "format_scene_object"
+        }
+    )
 
     object_type = safe_text(
         object_type
@@ -363,13 +505,16 @@ def format_scene_object(
 
         return None
 
-    return {
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
 
         "type":
             "scene_object",
+
+        "renderer_safe":
+            True,
 
         "payload": {
 
@@ -384,6 +529,18 @@ def format_scene_object(
         }
     }
 
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "scene_object":
+                object_type
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 MULTI-BLOCK RESPONSE
 # =========================================================
@@ -394,20 +551,19 @@ def build_multi_block_response(
     continuity_id=None
 ):
 
-    """
-    Packages ordered multi-block
-    Web-space render structures.
+    APRIL_LOG_IN(
 
-    Used for:
-    - complex responses
-    - multi-question dialogs
-    - renderer continuity
-    - structured Web presentation
-    """
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "build_multi_block_response"
+        }
+    )
 
     blocks = blocks or []
 
-    return {
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
@@ -418,9 +574,24 @@ def build_multi_block_response(
         "continuity_id":
             continuity_id,
 
+        "renderer_safe":
+            True,
+
         "blocks":
             blocks
     }
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "blocks":
+                len(blocks)
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 RENDERER SAFE PAYLOAD
@@ -433,17 +604,20 @@ def build_renderer_payload(
     continuity=None
 ):
 
-    """
-    Unified renderer-safe payload builder.
+    APRIL_LOG_IN(
 
-    Prevents:
-    - renderer fragmentation
-    - structure chaos
-    - cognition leakage
-    - inconsistent rendering
-    """
+        "RENDER_BRIDGE_ROOM",
 
-    return {
+        {
+            "action":
+                "build_renderer_payload",
+
+            "payload_type":
+                payload_type
+        }
+    )
+
+    result = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
@@ -458,8 +632,23 @@ def build_renderer_payload(
             continuity,
 
         "payload":
-            payload
+            payload,
+
+        "telemetry":
+            build_render_bridge_telemetry()
     }
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "payload":
+                payload_type
+        }
+    )
+
+    return result
 
 # =========================================================
 # 🧠 CONTINUITY RENDER STATE
@@ -472,12 +661,17 @@ def build_continuity_render_state(
     active_scene=None
 ):
 
-    """
-    Continuity-safe render state
-    for stable Web-space scenes.
-    """
+    APRIL_LOG_IN(
 
-    return {
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "action":
+                "build_continuity_render_state"
+        }
+    )
+
+    payload = {
 
         "channel":
             RENDER_RESPONSE_CHANNEL,
@@ -494,3 +688,15 @@ def build_continuity_render_state(
         "continuity_active":
             True
     }
+
+    APRIL_LOG_OUT(
+
+        "RENDER_BRIDGE_ROOM",
+
+        {
+            "continuity":
+                continuity_id
+        }
+    )
+
+    return payload
