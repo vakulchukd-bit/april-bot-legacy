@@ -2070,6 +2070,132 @@ async def execute(
                     )
 
                     continue
+                       result = await room.handle(
+
+    user_id,
+
+    text,
+
+    context,
+
+    run_with_activity
+)
+
+if not result:
+    continue
+
+quality = (
+    evaluate_response_quality(
+
+        result,
+
+        semantic,
+
+        cognition
+    )
+)
+
+if not quality.get(
+    "helpful"
+):
+
+    continue
+
+override = should_override(
+
+    result=result,
+
+    semantic=semantic,
+
+    cognition=cognition,
+
+    state=state
+)
+
+if override:
+
+    print(
+        "🧠 AUTHORITY OVERRIDE"
+    )
+
+    continue
+
+result = safely_format_result(
+
+    result=result,
+
+    text=text,
+
+    semantic=semantic,
+
+    cognition=cognition,
+
+    visual_reference=visual_reference
+)
+
+result = assemble_room_response(
+
+    result=result,
+
+    room_name=room.name,
+
+    state=state
+)
+
+result_type = result.get(
+    "type",
+    "text"
+)
+
+output_text = str(
+    result.get("data", "")
+)
+
+if output_text.strip():
+
+    add_dialog(
+
+        user_id,
+
+        "assistant",
+
+        output_text
+    )
+
+    update_memory_summary(
+
+        user_id,
+
+        output_text
+    )
+
+    extract_and_store_semantics(
+
+        state,
+
+        output_text,
+
+        result_type
+    )
+
+best_result = result
+
+scene_results.append(result)
+
+break
+
+except Exception as e:
+
+    print(
+        f"ROOM ERROR [{room.name}]",
+        e
+    )
+
+    traceback.print_exc()
+
+if best_result:
+
+    return best_result
 
 # =====================================================
 # 🧠 RESPONSE QUALITY
