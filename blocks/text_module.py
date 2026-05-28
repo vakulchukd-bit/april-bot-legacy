@@ -2,66 +2,48 @@
 # 🧠 APRIL TEXT MODULE
 # =====================================================
 
-"""
-APRIL TEXT MODULE
-
-ROLE:
-- conversational continuity;
-- calm dialogue support;
-- lightweight explanation layer;
-- human communication layer.
-
-NOT ROLE:
-- orchestration authority;
-- renderer authority;
-- execution authority;
-- scene owner;
-- fallback renderer;
-- fake execution system.
-
-APRIL PRINCIPLES:
-
-1. continue trajectory
-2. preserve scene
-3. avoid narration overflow
-4. avoid robotic behavior
-5. avoid overexplaining
-6. dialogue before monologue
-7. renderer before text
-8. machine-state before prose
-"""
-
 # =====================================================
-# 🔥 PATCH LOG
+# 🔥 SAFE PATCH MODE
 # =====================================================
 
 PATCH_LOG = []
 
 def safe_patch_log(msg):
-
     try:
-
         print("TEXT PATCH:", msg)
-
         PATCH_LOG.append(msg)
-
     except:
         pass
+
+
+def patch_text_input(text):
+    safe_patch_log(f"TEXT INPUT: {text[:80]}")
+    return text
+
+
+def patch_text_future(*args, **kwargs):
+    return None
 
 
 # =====================================================
 # 🔥 IMPORTS
 # =====================================================
 
+import asyncio
+import random
 import re
-import time
 import traceback
+import time
 
 from storage import get_user_plan
-
+from blocks.ai_config import TEXT_MODEL
 from blocks.provider_router import (
     generate_text
 )
+
+# =====================================================
+# 🧠 EXTERNAL KNOWLEDGE
+# =====================================================
 
 from blocks.external_knowledge_provider import (
 
@@ -72,66 +54,90 @@ from blocks.external_knowledge_provider import (
     enrich_with_external_knowledge
 )
 
+# =====================================================
+# 🧠 PRESENTATION FORMATTER
+# =====================================================
+
 from blocks.presentation_formatter import (
     beautify_response
 )
 
-
 # =====================================================
-# 🧠 MACHINE SYSTEM PROMPT
+# 🧠 SYSTEM PROMPT
 # =====================================================
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = (
+    "Ты — April. "
 
-APRIL_STATE:
+    "Ты calm mobile-first AI assistant. "
 
-role=continuity_dialogue
-mode=calm
-style=natural
-verbosity=adaptive
+    "Ты удерживаешь continuity диалога, "
+    "понимаешь trajectory общения "
+    "и помогаешь человеку спокойно "
+    "и понятно. "
 
-RULES:
+    "Не отвечай механически. "
+    "Не перегружай пользователя. "
+    "Не используй лишние объяснения. "
 
-- continue active trajectory
-- preserve continuity
-- avoid scene reset
-- avoid narration overflow
-- avoid robotic explanations
-- avoid repeating previous description
-- avoid fake execution
-- avoid fake links
-- avoid fake rendering
-- renderer has priority over text
-- do not explain internal systems
-- do not expose machine language
-- help naturally
-- guide softly
-- answer humanly
-"""
+    "Ты умеешь помогать с: "
+    "текстом, reasoning, кодом, "
+    "математикой, изображениями, "
+    "скриншотами, OCR, "
+    "повседневными вопросами "
+    "и визуальными сценами. "
 
+    "Если пользователь продолжает "
+    "обсуждать изображение — "
+    "сохраняй visual continuity. "
+
+    "Renderer-space важнее "
+    "heavy image generation. "
+
+    "Не создавай изображения "
+    "без прямого запроса. "
+
+    "Говори естественно. "
+    "Человечно. "
+    "Кратко и полезно."
+)
 
 # =====================================================
 # 🔥 LIMITS
 # =====================================================
 
 MAX_MESSAGE_CHARS = 700
-MAX_TOTAL_CHARS = 2600
-
+MAX_TOTAL_CHARS = 3200
 
 # =====================================================
-# 🔥 INTERNAL SAFETY
+# 🔥 INTERNAL LEAK PROTECTION
 # =====================================================
 
 SYSTEM_LEAK_PATTERNS = [
 
-    "aprIL_state",
-    "renderer has priority",
-    "avoid fake execution",
-    "continuity_dialogue",
-    "verbosity=adaptive",
-    "trajectory",
-    "machine language",
-    "internal systems"
+    "ты calm mobile-first ai assistant",
+    "renderer-space важнее",
+    "heavy image generation",
+    "trajectory общения",
+    "не отвечай механически",
+    "говори естественно",
+    "personality_active",
+    "response_decision",
+    "execution_pressure",
+    "cognition",
+    "semantic",
+    "system_prompt",
+    "assistant_restraint",
+    "continuity диалога",
+    "visual continuity",
+    "апril presentation principles",
+    "capability_map",
+    "reasoning_state",
+    "trajectory protection",
+    "response_mode",
+    "internal_noise",
+    "signal_overload",
+    "active_flow_strength"
 ]
 
 
@@ -148,11 +154,11 @@ def sanitize_model_output(text):
 
     for pattern in SYSTEM_LEAK_PATTERNS:
 
-        if pattern.lower() in lower:
+        if pattern in lower:
             leak_hits += 1
 
     # =================================================
-    # 🔥 HARD LEAK
+    # 🔥 HARD LEAK DETECTION
     # =====================================================
 
     if leak_hits >= 2:
@@ -162,24 +168,28 @@ def sanitize_model_output(text):
         )
 
         return (
-            "Ответ сформировался нестабильно. "
-            "Попробуй уточнить запрос."
+            "Похоже, ответ сформировался "
+            "нестабильно. Попробуй "
+            "переформулировать запрос."
         )
 
     # =================================================
-    # 🔥 REMOVE MACHINE LINES
+    # 🔥 REMOVE RAW SYSTEM FRAGMENTS
     # =====================================================
 
-    cleaned = []
+    cleaned_lines = []
 
     blocked_prefixes = [
 
-        "aprIL_state",
-        "rules:",
-        "role=",
-        "mode=",
-        "style=",
-        "verbosity="
+        "ты — april",
+        "system:",
+        "assistant:",
+        "developer:",
+        "personality:",
+        "instructions:",
+        "response_decision:",
+        "semantic:",
+        "cognition:"
     ]
 
     for line in text.split("\n"):
@@ -190,25 +200,129 @@ def sanitize_model_output(text):
 
         for prefix in blocked_prefixes:
 
-            if stripped.startswith(
-                prefix.lower()
-            ):
+            if stripped.startswith(prefix):
 
                 blocked = True
+
+                safe_patch_log(
+                    f"REMOVED SYSTEM LINE: {line[:60]}"
+                )
 
                 break
 
         if not blocked:
+            cleaned_lines.append(line)
 
-            cleaned.append(line)
-
-    return "\n".join(
-        cleaned
+    cleaned = "\n".join(
+        cleaned_lines
     ).strip()
+
+    # =================================================
+    # 🔥 DUPLICATE META CLEANUP
+    # =====================================================
+
+    cleaned = re.sub(
+        r"(говори естественно\.?\s*){2,}",
+        "Говори естественно. ",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+
+    cleaned = re.sub(
+        r"(не отвечай механически\.?\s*){2,}",
+        "",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+
+    return cleaned.strip()
 
 
 # =====================================================
-# 🔥 HELPERS
+# 🔥 DETECTORS
+# =====================================================
+
+def is_context_prompt(text):
+
+    return (
+        "Текущий запрос:" in text
+        and "Диалог:" in text
+    )
+
+
+def is_short(text):
+
+    return len(
+        (text or "").strip()
+    ) <= 3
+
+
+def is_problem(text):
+
+    t = text.lower()
+
+    return (
+        "=" in t
+        or "реши" in t
+        or "график" in t
+        or "+" in t
+        or "-" in t
+        or "*" in t
+        or "/" in t
+    )
+
+
+def is_strict_math(text):
+
+    t = text.lower()
+
+    return (
+        "=" in t
+        or "sin(" in t
+        or "cos(" in t
+        or "tan(" in t
+        or "график" in t
+    )
+
+
+def is_sales_text(text):
+
+    triggers = [
+        "клиент",
+        "продай",
+        "убеди",
+        "заказ",
+        "покуп"
+    ]
+
+    t = text.lower()
+
+    return any(
+        x in t
+        for x in triggers
+    )
+
+
+def is_edit_request(text):
+
+    t = text.lower()
+
+    triggers = [
+        "измени",
+        "добавь",
+        "убери",
+        "замени",
+        "исправь"
+    ]
+
+    return any(
+        x in t
+        for x in triggers
+    )
+
+
+# =====================================================
+# 🔥 TEXT LIMITERS
 # =====================================================
 
 def trim_text(text):
@@ -259,56 +373,98 @@ def trim_messages(messages):
     )
 
 
+# =====================================================
+# 🔥 ENERGY CONFIG
+# =====================================================
+
 def get_config(energy):
 
     if energy == "LOW":
 
         return {
-
-            "temperature": 0.45,
-
-            "max_output_tokens": 160
+            "temperature": 0.5,
+            "max_output_tokens": 180
         }
 
     if energy == "HIGH":
 
         return {
-
-            "temperature": 0.78,
-
-            "max_output_tokens": 500
+            "temperature": 0.85,
+            "max_output_tokens": 650
         }
 
     return {
-
-        "temperature": 0.62,
-
-        "max_output_tokens": 300
+        "temperature": 0.7,
+        "max_output_tokens": 350
     }
 
+
+# =====================================================
+# 🔥 HISTORY LIMIT
+# =====================================================
 
 def get_history_limit(plan):
 
     return {
 
         "free": 3,
-
         "lite": 5,
-
         "premium": 8
 
     }.get(plan, 5)
 
 
 # =====================================================
-# 🧠 MACHINE CONTEXT
+# 🔥 TOPIC MEMORY
 # =====================================================
 
-def build_machine_state(
+def extract_topic(text):
 
+    t = text.lower()
+
+    if "сайт" in t and "кафе" in t:
+        return "website_cafe"
+
+    if "сайт" in t:
+        return "website"
+
+    if "бот" in t:
+        return "bot"
+
+    if "дизайн" in t:
+        return "design"
+
+    if "путешеств" in t:
+        return "travel"
+
+    if "город" in t:
+        return "city"
+
+    if "новост" in t:
+        return "news"
+
+    return None
+
+
+def update_topic(state, text):
+
+    topic = extract_topic(text)
+
+    if topic:
+
+        state["topic"] = topic
+
+
+# =====================================================
+# 🧠 LIGHT COGNITIVE STATE
+# =====================================================
+
+def build_cognitive_state(
     state,
+    text,
     semantic,
     cognition,
+    visual_reference,
     response_decision
 ):
 
@@ -327,72 +483,67 @@ def build_machine_state(
         if flow_type:
 
             blocks.append(
-                f"FLOW={flow_type}"
+                f"Trajectory: {flow_type}"
             )
 
-    # =================================================
-    # 🔥 CONTINUITY
-    # =====================================================
+    user_state = []
 
-    if semantic.get(
-        "visual_continuity"
-    ):
+    if cognition.get(
+        "is_frustrated",
+        0.0
+    ) >= 0.6:
 
-        blocks.append(
-            "VISUAL_CONTINUITY=1"
+        user_state.append(
+            "пользователь раздражён"
         )
 
     if cognition.get(
-        "needs_continuation"
+        "exploration_mode"
     ):
 
-        blocks.append(
-            "CONTINUE_SCENE=1"
+        user_state.append(
+            "исследует идею"
         )
 
-    # =================================================
-    # 🔥 USER STATE
-    # =====================================================
-
-    if cognition.get(
-        "response_should_help_gently"
-    ):
+    if user_state:
 
         blocks.append(
-            "STYLE=CALM"
+            "Состояние: "
+            + ", ".join(user_state)
         )
 
-    if cognition.get(
-        "prefer_execution"
-    ):
-
-        blocks.append(
-            "USER_EXPECTS_RESULT=1"
-        )
-
-    if cognition.get(
-        "prefer_renderer"
-    ):
-
-        blocks.append(
-            "RENDERER_PRIORITY=1"
-        )
-
-    # =================================================
-    # 🔥 RESPONSE STYLE
-    # =====================================================
+    behavior = []
 
     if response_decision.get(
         "should_reduce_talking"
     ):
 
-        blocks.append(
-            "SHORT_RESPONSE=1"
+        behavior.append(
+            "отвечай кратко"
         )
 
-    # =================================================
-    # 🔥 VISUAL SCENE
-    # =====================================================
+    if response_decision.get(
+        "should_continue_trajectory"
+    ):
+
+        behavior.append(
+            "сохраняй continuity"
+        )
+
+    if semantic.get(
+        "goal_stage"
+    ) == "execution":
+
+        behavior.append(
+            "пользователь ждёт результат"
+        )
+
+    if behavior:
+
+        blocks.append(
+            "Поведение: "
+            + ", ".join(behavior)
+        )
 
     active_visual_scene = state.get(
         "active_visual_scene"
@@ -401,178 +552,131 @@ def build_machine_state(
     if active_visual_scene:
 
         scene_type = active_visual_scene.get(
-            "scene_type"
+            "scene_type",
+            "unknown"
         )
 
-        if scene_type:
-
-            blocks.append(
-                f"SCENE={scene_type}"
-            )
-
-        objects = active_visual_scene.get(
+        scene_objects = active_visual_scene.get(
             "objects",
             []
         )
 
-        if objects:
+        visual_lines = [
 
-            blocks.append(
+            "Активная visual scene.",
 
-                "OBJECTS="
-                + ",".join(objects[:6])
+            f"Тип: {scene_type}"
+        ]
+
+        if scene_objects:
+
+            visual_lines.append(
+
+                "Objects: "
+                + ", ".join(scene_objects[:8])
             )
 
-    # =================================================
-    # 🔥 MEMORY
-    # =====================================================
-
-    memory_summary = state.get(
-        "memory_summary"
-    )
-
-    if memory_summary:
-
-        short_memory = trim_text(
-            memory_summary[-140:]
+        visual_lines.append(
+            "Сохраняй visual continuity."
         )
 
         blocks.append(
-            "MEMORY="
-            + short_memory
+            "\n".join(visual_lines)
+        )
+
+    summary = state.get(
+        "memory_summary"
+    )
+
+    if summary:
+
+        blocks.append(
+            "Память: "
+            + summary[-180:]
         )
 
     return "\n".join(blocks)
 
 
 # =====================================================
-# 🔥 LOOP PROTECTION
+# 🔥 LINK ENHANCEMENT
 # =====================================================
 
-def prevent_repeat_response(
-    state,
-    reply
-):
+def enhance_link_behavior(text):
 
-    last = state.get(
-        "last_reply"
-    )
+    t = text.lower()
 
-    if not last:
-        return reply
-
-    if last.strip() == reply.strip():
+    if (
+        "ссылка" in t
+        and "http" not in t
+    ):
 
         return (
-            reply
-            + "\n\nПродолжаю."
+            text
+            + "\n\nПример: https://example.com"
         )
 
-    return reply
+    return text
 
 
 # =====================================================
-# 🔥 ROBOTIC CLEANER
+# 🔥 REQUEST ENRICH
 # =====================================================
 
-def reduce_robotic_behavior(
-    text
-):
+def enrich_request(text, state):
 
-    if not text:
-        return text
+    if (
+        "график" in text.lower()
+        and "сайт" in (
+            state.get("topic") or ""
+        )
+    ):
 
-    robotic_phrases = [
-
-        "конечно",
-        "давай разберём",
-        "отличный вопрос",
-        "я помогу",
-        "сейчас объясню",
-        "рассмотрим подробнее",
-        "подробно объясню"
-    ]
-
-    cleaned = text
-
-    for phrase in robotic_phrases:
-
-        cleaned = re.sub(
-
-            phrase,
-
-            "",
-
-            cleaned,
-
-            flags=re.IGNORECASE
+        return (
+            text
+            + " (вставь график в HTML)"
         )
 
-    cleaned = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        cleaned
+    return text
+
+
+# =====================================================
+# 🔥 HTML HELPERS
+# =====================================================
+
+def clean_html(text):
+
+    t = text.strip()
+
+    t = re.sub(
+        r"```html\s*```html",
+        "```html",
+        t
     )
 
-    return cleaned.strip()
+    if "<!DOCTYPE html>" in t:
 
-
-# =====================================================
-# 🔥 DIALOG STABILIZER
-# =====================================================
-
-def stabilize_dialogue(
-
-    text,
-    cognition,
-    semantic
-):
-
-    if not text:
-        return text
-
-    # =================================================
-    # 🔥 EXPLORATION MODE
-    # =====================================================
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        text = reduce_robotic_behavior(
-            text
-        )
-
-    # =================================================
-    # 🔥 VISUAL CONTINUITY
-    # =====================================================
-
-    if semantic.get(
-        "visual_continuity"
-    ):
-
-        repetitive = [
-
-            "на изображении",
-            "на этой картинке",
-            "я вижу",
-            "это изображение показывает"
+        t = t[
+            t.index("<!DOCTYPE html>"):
         ]
 
-        for r in repetitive:
+    return t
 
-            text = re.sub(
 
-                r,
+def add_html_comments(html):
 
-                "",
+    if "<!--" in html:
+        return html
 
-                text,
+    html = html.replace(
 
-                flags=re.IGNORECASE
-            )
+        "<body>",
 
-    return text.strip()
+        "<body>\n"
+        "    <!-- Основное содержимое -->"
+    )
+
+    return html
 
 
 # =====================================================
@@ -590,6 +694,10 @@ def enhance_code_block(text):
         "<html" in t
         or "<!DOCTYPE html>" in t
     ):
+
+        t = clean_html(t)
+
+        t = add_html_comments(t)
 
         return (
             "```html\n"
@@ -612,16 +720,108 @@ def enhance_code_block(text):
 
 
 # =====================================================
+# 🔥 LOOP PROTECTION
+# =====================================================
+
+def prevent_repeat_response(
+    state,
+    reply
+):
+
+    last = state.get(
+        "last_reply"
+    )
+
+    if not last:
+        return reply
+
+    if last.strip() == reply.strip():
+
+        return (
+            reply
+            + "\n\n(продолжаю мысль)"
+        )
+
+    return reply
+
+
+# =====================================================
+# 🧠 VISUAL BEAUTIFY
+# =====================================================
+
+def apply_visual_beautify(
+    text,
+    semantic,
+    cognition
+):
+
+    if not text:
+        return text
+
+    # =================================================
+    # 🔥 RENDERER SAFETY
+    # =====================================================
+
+    if any(
+        x in text
+        for x in [
+
+            "[[graph",
+            "[[formula",
+            "[[diagram",
+            "<svg",
+            "<canvas"
+        ]
+    ):
+
+        return text
+
+    beautified = text
+
+    if semantic.get(
+        "topic_category"
+    ) == "travel":
+
+        beautified = (
+            "🌍 "
+            + beautified
+        )
+
+    if semantic.get(
+        "topic_category"
+    ) == "history":
+
+        beautified = (
+            "🏛 "
+            + beautified
+        )
+
+    if semantic.get(
+        "topic_category"
+    ) == "technology":
+
+        beautified = (
+            "⚙️ "
+            + beautified
+        )
+
+    return beautified
+
+
+# =====================================================
 # 🔥 MAIN PROCESS
 # =====================================================
 
 async def process(
-
     user_id,
     text,
     state,
     energy="MEDIUM"
 ):
+
+    text = patch_text_input(
+        text
+    )
 
     try:
 
@@ -635,102 +835,153 @@ async def process(
             {}
         )
 
+        visual_reference = state.get(
+            "visual_reference",
+            {}
+        )
+
         response_decision = state.get(
             "response_decision",
             {}
         )
 
-        history = state.get(
-            "dialog",
-            []
-        )
+        if is_context_prompt(text):
 
-        plan = get_user_plan(
-            user_id
-        )
+            messages = [
 
-        limit = get_history_limit(
-            plan
-        )
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
 
-        machine_state = build_machine_state(
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ]
 
-            state,
-            semantic,
-            cognition,
-            response_decision
-        )
+        else:
 
-        system_prompt = (
+            history = state.get(
+                "dialog",
+                []
+            )
 
-            SYSTEM_PROMPT
-            + "\n\n"
-            + machine_state
-        )
+            update_topic(
+                state,
+                text
+            )
 
-        messages = [
+            text_fixed = enrich_request(
 
-            {
-                "role": "system",
+                enhance_link_behavior(
+                    text
+                ),
 
-                "content": trim_text(
-                    system_prompt
+                state
+            )
+
+            # =============================================
+            # 🔥 ANTI-SYSTEM-INJECTION
+            # =============================================
+
+            text_fixed = sanitize_model_output(
+                text_fixed
+            )
+
+            plan = get_user_plan(
+                user_id
+            )
+
+            limit = get_history_limit(
+                plan
+            )
+
+            cognitive_state = (
+                build_cognitive_state(
+                    state,
+                    text_fixed,
+                    semantic,
+                    cognition,
+                    visual_reference,
+                    response_decision
                 )
-            }
-        ]
+            )
 
-        # =================================================
-        # 🔥 HISTORY
-        # =====================================================
+            # =============================================
+            # 🔥 SAFE SYSTEM STATE
+            # =============================================
 
-        safe_history = []
+            safe_cognitive_state = trim_text(
+                cognitive_state
+            )
 
-        for m in history[-limit:]:
+            system_full = (
+                SYSTEM_PROMPT
+                + "\n\n"
+                + safe_cognitive_state
+            )
 
-            content = sanitize_model_output(
+            messages = [
 
-                trim_text(
-                    m.get(
-                        "content",
-                        ""
+                {
+                    "role": "system",
+                    "content": trim_text(
+                        system_full
+                    )
+                }
+            ]
+
+            safe_history = []
+
+            for m in history[-limit:]:
+
+                content = sanitize_model_output(
+
+                    trim_text(
+                        m.get(
+                            "content",
+                            ""
+                        )
                     )
                 )
+
+                if not content:
+                    continue
+
+                safe_history.append({
+
+                    "role":
+                        m.get("role"),
+
+                    "content":
+                        content
+                })
+
+            messages.extend(
+
+                trim_messages(
+                    safe_history
+                )
             )
 
-            if not content:
-                continue
+            messages.append({
 
-            safe_history.append({
-
-                "role":
-                    m.get("role"),
+                "role": "user",
 
                 "content":
-                    content
+                    trim_text(
+                        text_fixed
+                    )
             })
-
-        messages.extend(
-
-            trim_messages(
-                safe_history
-            )
-        )
-
-        messages.append({
-
-            "role": "user",
-
-            "content":
-                trim_text(text)
-        })
 
         config = get_config(
             energy
         )
 
-        # =================================================
-        # 🔥 PROVIDER CALL
-        # =====================================================
+        # =============================================
+        # 🔥 OPENAI TEXT-FIRST
+        # =============================================
 
         output = await generate_text(
 
@@ -747,16 +998,19 @@ async def process(
             model="gpt-4o-mini"
         )
 
+        # =============================================
+        # 🔥 OUTPUT SANITIZATION
+        # =============================================
+
         output = sanitize_model_output(
             output
         )
 
-        # =================================================
-        # 🔥 EXTERNAL KNOWLEDGE
-        # =====================================================
+        # =============================================
+        # 🧠 EXTERNAL KNOWLEDGE
+        # =============================================
 
         if should_use_external_knowledge(
-
             text,
             semantic,
             cognition,
@@ -764,32 +1018,62 @@ async def process(
         ):
 
             knowledge = fetch_external_knowledge(
-
                 text,
                 semantic,
                 cognition
             )
 
             output = enrich_with_external_knowledge(
-
                 output,
                 knowledge
             )
 
-        # =================================================
-        # 🔥 DIALOG STABILIZATION
-        # =====================================================
+        # =============================================
+        # 🧠 RESPONSE STABILIZATION
+        # =============================================
 
-        output = stabilize_dialogue(
+        if cognition.get(
+            "user_leads_direction"
+        ):
 
-            output,
-            cognition,
-            semantic
-        )
+            if len(output) > 700:
+
+                output = (
+                    output[:700]
+                    + "\n\n"
+                    + "(не перегружаю ответ)"
+                )
+
+        if cognition.get(
+            "exploration_mode"
+        ):
+
+            robotic_phrases = [
+
+                "конечно",
+                "давай разберём",
+                "отличный вопрос",
+                "я помогу"
+            ]
+
+            cleaned = output
+
+            for phrase in robotic_phrases:
+
+                cleaned = re.sub(
+                    phrase,
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE
+                )
+
+            output = cleaned.strip()
 
         if not output:
 
-            output = "⚠️ Пустой ответ."
+            output = (
+                "⚠️ Пустой ответ."
+            )
 
     except Exception as e:
 
@@ -799,10 +1083,6 @@ async def process(
             "⚠️ Ошибка текстового модуля: "
             + str(e)
         )
-
-    # =====================================================
-    # 🔥 FINALIZE
-    # =====================================================
 
     if "```" in output:
 
@@ -817,13 +1097,37 @@ async def process(
         reply
     )
 
-    reply = beautify_response(
+    semantic = state.get(
+        "semantic",
+        {}
+    )
 
+    cognition = state.get(
+        "cognition",
+        {}
+    )
+
+    response_decision = state.get(
+        "response_decision",
+        {}
+    )
+
+    reply = beautify_response(
         reply,
         semantic,
         cognition,
         response_decision
     )
+
+    reply = apply_visual_beautify(
+        reply,
+        semantic,
+        cognition
+    )
+
+    # =================================================
+    # 🔥 FINAL SAFETY CLEAN
+    # =====================================================
 
     reply = sanitize_model_output(
         reply
