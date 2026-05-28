@@ -1,3 +1,127 @@
+# =====================================================
+# 🧠 APRIL RESPONSE MODE DETECTOR
+# =====================================================
+#
+# APRIL_FILE_ID:
+# APRIL_RESPONSE_MODE_DETECTOR
+#
+# ROLE:
+# LIGHTWEIGHT_MODALITY_CLASSIFIER
+#
+# INPUT:
+# USER_TEXT
+# STATE
+# SEMANTIC_SIGNALS
+# COGNITION_SIGNALS
+#
+# OUTPUT:
+# RESPONSE_MODE
+# RENDERER_MODE
+# CONTINUATION_MODE
+# ROUTING_HINT
+#
+# DEPENDENCIES:
+# semantic_core
+# cognition
+# response_decision
+# excrouter
+# renderer_space
+#
+# =====================================================
+#
+# APRIL RESPONSE MODE DETECTOR
+#
+# Lightweight orchestration detector.
+#
+# Этот слой:
+# - НЕ authority;
+# - НЕ executor;
+# - НЕ router override.
+#
+# Этот слой:
+# - помогает orchestration;
+# - удерживает continuity;
+# - stabilizes renderer routing;
+# - разделяет visual/render/generate;
+# - уменьшает routing chaos.
+#
+# =====================================================
+
+print(
+    "🧠 APRIL RESPONSE MODE DETECTOR LOADED"
+)
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+MODE_PATCH_LOG = []
+
+def safe_mode_log(*args):
+
+    try:
+
+        print(
+            "APRIL MODE DETECTOR:",
+            *args
+        )
+
+        MODE_PATCH_LOG.append(
+            " ".join(
+                [str(x) for x in args]
+            )
+        )
+
+    except:
+        pass
+
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "semantic_reasoning",
+
+    "target":
+        "response_mode_detector",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "response_mode_detector",
+
+    "target":
+        "response_decision",
+
+    "isolated":
+        True
+}
+
+
+# =====================================================
+# 🔥 SAFE HELPERS
+# =====================================================
+
+def normalize_text(
+    text: str
+):
+
+    return (
+        text or ""
+    ).lower().strip()
+
+
+# =====================================================
+# 🔥 MAIN DETECTOR
+# =====================================================
+
 def detect_response_mode(
     text: str,
     state: dict = None,
@@ -23,9 +147,11 @@ def detect_response_mode(
     - уменьшает routing chaos.
     """
 
-    t = (
-        text or ""
-    ).lower().strip()
+    safe_mode_log(
+        "MODE DETECTION START"
+    )
+
+    t = normalize_text(text)
 
     state = state or {}
     semantic = semantic or {}
@@ -39,6 +165,11 @@ def detect_response_mode(
     active_visual_scene = state.get(
         "active_visual_scene",
         {}
+    )
+
+    safe_mode_log(
+        "INPUT:",
+        t[:120]
     )
 
     # =====================================================
@@ -96,10 +227,24 @@ def detect_response_mode(
 
     if t in continuation_triggers:
 
+        safe_mode_log(
+            "CONTINUATION DETECTED"
+        )
+
         if active_visual_scene:
+
+            safe_mode_log(
+                "VISUAL CONTINUATION"
+            )
+
             return "visual_continuation"
 
         if active_flow:
+
+            safe_mode_log(
+                "FLOW CONTINUATION"
+            )
+
             return "continuation"
 
         return "casual"
@@ -116,6 +261,10 @@ def detect_response_mode(
     )
 
     if renderer_lock:
+
+        safe_mode_log(
+            "RENDERER LOCK ACTIVE"
+        )
 
         semantic[
             "renderer_scene_locked"
@@ -157,6 +306,11 @@ def detect_response_mode(
                 "confirmed_renderer_artifact"
             ] = artifact
 
+            safe_mode_log(
+                "RENDER ARTIFACT:",
+                artifact
+            )
+
             return artifact_map[
                 artifact
             ]
@@ -166,6 +320,10 @@ def detect_response_mode(
             semantic[
                 "multi_scene_response"
             ] = True
+
+            safe_mode_log(
+                "MULTI RENDERER MODE"
+            )
 
             return "renderer_multi"
 
@@ -293,6 +451,11 @@ def detect_response_mode(
             for word in words
         ):
 
+            safe_mode_log(
+                "MODE DETECTED:",
+                mode
+            )
+
             return mode
 
     # =====================================================
@@ -316,6 +479,11 @@ def detect_response_mode(
 
             if len(t) <= 40:
 
+                safe_mode_log(
+                    "ACTIVE FLOW CONTINUATION:",
+                    flow_type
+                )
+
                 return "continuation"
 
     # =====================================================
@@ -326,16 +494,28 @@ def detect_response_mode(
         "internet_context_needed"
     ):
 
+        safe_mode_log(
+            "WEB OVERRIDE"
+        )
+
         return "web"
 
     if cognition.get(
         "exploration_mode"
     ):
 
+        safe_mode_log(
+            "EXPLORATION OVERRIDE"
+        )
+
         return "exploration"
 
     # =====================================================
     # 🔥 DEFAULT
     # =====================================================
+
+    safe_mode_log(
+        "DEFAULT NORMAL MODE"
+    )
 
     return "normal"
