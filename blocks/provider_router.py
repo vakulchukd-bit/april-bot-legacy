@@ -2,6 +2,51 @@
 # 🧠 APRIL PROVIDER ROUTER
 # =====================================================
 
+"""
+APRIL_FILE_ID: APRIL_PROVIDER_ROUTER
+
+ROLE:
+provider_orchestration_layer
+
+PURPOSE:
+- provider coordination
+- multimodal routing
+- fallback stabilization
+- provider recovery control
+- visual provider balancing
+- continuity-safe provider behavior
+
+INPUT:
+- text_requests
+- image_requests
+- voice_requests
+- provider_state
+- orchestration_signals
+
+OUTPUT:
+- normalized_provider_response
+- provider_safe_output
+- multimodal_response
+
+DEPENDENCIES:
+- openai
+- gemini
+- cognition
+- semantic_core
+- excrouter
+- visual_system
+
+GOLDEN RULE:
+Providers generate.
+April orchestrates.
+"""
+
+print("🧠 APRIL PROVIDER ROUTER LOADED")
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
 import os
 import time
 
@@ -20,6 +65,97 @@ openai_client = OpenAI(
 gemini_client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY")
 )
+
+
+# =====================================================
+# 🔥 SAFE PATCH MODE
+# =====================================================
+
+PROVIDER_PATCH_LOG = []
+
+
+def provider_patch_log(msg):
+
+    try:
+
+        print(
+            "APRIL PROVIDER:",
+            msg
+        )
+
+        PROVIDER_PATCH_LOG.append(
+            str(msg)
+        )
+
+    except Exception:
+        pass
+
+
+# =====================================================
+# 🔥 ENTRY / EXIT LOGGING
+# =====================================================
+
+def provider_enter(
+    provider_type,
+    payload=None
+):
+
+    provider_patch_log(
+
+        f"ENTER PROVIDER: "
+        f"{provider_type}"
+    )
+
+    if payload:
+
+        provider_patch_log(
+            str(payload)[:120]
+        )
+
+    return {
+
+        "provider_active": True,
+
+        "provider_type":
+            provider_type,
+
+        "continuity_safe": True
+    }
+
+
+def provider_exit(
+    provider_type,
+    success=True
+):
+
+    provider_patch_log(
+
+        f"EXIT PROVIDER: "
+        f"{provider_type} "
+        f"SUCCESS={success}"
+    )
+
+    return {
+
+        "provider_complete": success,
+
+        "provider_type":
+            provider_type,
+
+        "response_ready": True
+    }
+
+
+# =====================================================
+# 🔥 FUTURE PLACEHOLDER
+# =====================================================
+
+def provider_future(
+    *args,
+    **kwargs
+):
+
+    return None
 
 
 # =====================================================
@@ -70,7 +206,7 @@ def provider_log(*args):
 
         print(*args)
 
-    except:
+    except Exception:
         pass
 
 
@@ -264,6 +400,11 @@ async def generate_text(
     model="gpt-4o-mini"
 ):
 
+    provider_enter(
+        "openai_text",
+        messages
+    )
+
     try:
 
         update_provider_behavior()
@@ -306,12 +447,22 @@ async def generate_text(
                 "🔥 OPENAI EMPTY RESPONSE"
             )
 
+            provider_exit(
+                "openai_text",
+                False
+            )
+
             return build_overload_response(
                 "Dialogue-space"
             )
 
         provider_log(
             "🧠 OPENAI TEXT SUCCESS"
+        )
+
+        provider_exit(
+            "openai_text",
+            True
         )
 
         return text
@@ -321,6 +472,11 @@ async def generate_text(
         provider_log(
             "🔥 OPENAI TEXT ERROR:",
             e
+        )
+
+        provider_exit(
+            "openai_text",
+            False
         )
 
         return build_overload_response(
@@ -335,6 +491,11 @@ async def generate_text(
 async def transcribe_voice(
     file_path
 ):
+
+    provider_enter(
+        "voice_transcription",
+        file_path
+    )
 
     try:
 
@@ -377,7 +538,17 @@ async def transcribe_voice(
                 "🧠 OPENAI VOICE SUCCESS"
             )
 
+            provider_exit(
+                "voice_transcription",
+                True
+            )
+
             return text
+
+        provider_exit(
+            "voice_transcription",
+            False
+        )
 
         return ""
 
@@ -386,6 +557,11 @@ async def transcribe_voice(
         provider_log(
             "🔥 OPENAI VOICE ERROR:",
             e
+        )
+
+        provider_exit(
+            "voice_transcription",
+            False
         )
 
         return ""
@@ -399,6 +575,11 @@ async def analyze_image_with_fallback(
     path,
     prompt
 ):
+
+    provider_enter(
+        "image_analysis",
+        path
+    )
 
     update_provider_behavior()
 
@@ -462,6 +643,11 @@ async def analyze_image_with_fallback(
             if text:
 
                 mark_gemini_success()
+
+                provider_exit(
+                    "gemini_image",
+                    True
+                )
 
                 return text
 
@@ -535,7 +721,17 @@ async def analyze_image_with_fallback(
 
         if text:
 
+            provider_exit(
+                "openai_image_fallback",
+                True
+            )
+
             return text
+
+        provider_exit(
+            "openai_image_fallback",
+            False
+        )
 
         return build_overload_response(
             "Visual-space"
@@ -546,6 +742,11 @@ async def analyze_image_with_fallback(
         provider_log(
             "🔥 OPENAI IMAGE ERROR:",
             e
+        )
+
+        provider_exit(
+            "openai_image_fallback",
+            False
         )
 
         return build_overload_response(
