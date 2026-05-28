@@ -2197,6 +2197,10 @@ async def execute(
 
                 continue
 
+            result = sanitize_executor_output(
+                result
+            )
+
             result = safely_format_result(
 
                 result=result,
