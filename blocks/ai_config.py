@@ -3,107 +3,73 @@
 # =========================================================
 
 """
-APRIL AI POLICY CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the CENTRAL AI POLICY
-and PROVIDER NERVOUS SYSTEM of April.
+APRIL_FILE_ID:
+APRIL_AI_POLICY_CORE
 
-This file does NOT think instead of Executor.
+ROLE:
+CENTRAL_AI_POLICY_SYSTEM
 
-Executor = central brain.
-This file = execution regulation layer.
+ROOM:
+POLICY_ROOM
+
+INPUT:
+EXECUTOR_POLICY_REQUEST
+PROVIDER_ROUTE_REQUEST
+CONTINUITY_POLICY_REQUEST
+IMAGE_POLICY_REQUEST
+COGNITION_POLICY_SIGNAL
+
+OUTPUT:
+POLICY_PAYLOAD
+PROVIDER_ROUTE
+CONTINUITY_POLICY
+EXECUTION_STABILIZATION
+ANALYZER_TELEMETRY
+
+DEPENDENCIES:
+EXECUTOR
+RENDERER_ROOMS
+COGNITIVE_ROOMS
+TOOL_ROOMS
+ADMIN_MONITOR_CORE
+
+CRITICAL:
+TRUE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 MAIN RESPONSIBILITIES
+🧠 GOLDEN RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-This helper core controls:
-
-- provider priorities
-- AI execution policies
-- renderer-first safety
-- model routing logic
-- escalation prevention
-- execution stabilization
-- continuity behavior
-- lightweight orchestration
-- cognition pressure balancing
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-BotRoot
- ↓
-Executor
- ↓
-AI Policy Core (THIS FILE)
- ↓
-Cognitive / Tool / Render Rooms
-
-This file NEVER:
-- formats frontend output
-- controls transport
-- performs orchestration
-- replaces Executor authority
+This file NEVER performs cognition.
 
 This file ONLY:
 - regulates
 - stabilizes
 - routes providers
-- defines execution policies
+- protects renderer-first execution
+- preserves continuity policy
+- exposes telemetry-safe diagnostics
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 MACHINE CHANNEL SYSTEM
+🧠 ANALYZER VISIBILITY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-This file operates through TWO isolated channels.
+Analyzer may observe:
+- provider routing
+- policy states
+- escalation blocking
+- continuity stabilization
+- renderer-first protection
+- orchestration pressure
 
-1. POLICY TASK CHANNEL
-Executor → AI Policy Core
-
-2. POLICY RESPONSE CHANNEL
-AI Policy Core → Executor
-
-Human-layer logic NEVER mixes with
-internal machine execution routing.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN APRIL PRINCIPLES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-- renderer-first architecture
-- continuation before generation
-- explicit image generation only
-- no hidden escalation
-- no fallback chaos
-- stable cognition pressure
-- lightweight orchestration
-- provider-aware execution
-- unified April intelligence
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram logic
-- UI systems
-- frontend rendering
-- transport logic
-- admin systems
-- subscriptions
-- premium systems
-- orchestration duplication
-
-This file must remain:
-- lightweight
-- centralized
-- policy-oriented
-- Executor-connected
-- future-expandable
+Analyzer may NEVER:
+- alter policy
+- inject cognition
+- override Executor authority
 """
 
 # =========================================================
@@ -129,15 +95,148 @@ POLICY_RESPONSE_CHANNEL = {
 }
 
 # =========================================================
-# 🧠 PROVIDER PRIORITIES
+# 🔥 APRIL TRACE LOGS
 # =========================================================
 
-"""
-Provider routing authority.
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
 
-Executor consults this core
-before model escalation.
-"""
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_AI_POLICY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_AI_POLICY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+# =========================================================
+# 🔥 ANALYZER TELEMETRY
+# =========================================================
+
+def build_policy_telemetry_payload():
+
+    APRIL_LOG_IN(
+
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "build_policy_telemetry_payload"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_AI_POLICY_CORE",
+
+        "room":
+            "POLICY_ROOM",
+
+        "renderer_first":
+            RENDERER_FIRST,
+
+        "visual_continuity":
+            VISUAL_CONTINUITY_ENABLED,
+
+        "text_continuity":
+            TEXT_CONTINUITY_ENABLED,
+
+        "scene_memory":
+            SCENE_MEMORY_ENABLED,
+
+        "lightweight_execution":
+            LIGHTWEIGHT_EXECUTION_PRIORITY,
+
+        "calm_orchestration":
+            CALM_ORCHESTRATION_MODE,
+
+        "provider_escalation":
+            ALLOW_PROVIDER_ESCALATION,
+
+        "recursive_generation":
+            ALLOW_RECURSIVE_GENERATION,
+
+        "heavy_fallbacks":
+            ALLOW_HEAVY_FALLBACK_CHAINS,
+
+        "text_provider":
+            TEXT_PROVIDER,
+
+        "vision_provider":
+            VISION_PROVIDER,
+
+        "voice_provider":
+            VOICE_PROVIDER,
+
+        "text_model":
+            TEXT_MODEL,
+
+        "vision_model":
+            VISION_FALLBACK_MODEL,
+
+        "voice_model":
+            VOICE_MODEL,
+
+        "image_model":
+            IMAGE_MODEL
+    }
+
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "policy_telemetry_ready"
+        }
+    )
+
+    return payload
+
+# =========================================================
+# 🧠 PROVIDER PRIORITIES
+# =========================================================
 
 TEXT_PROVIDER = "openai"
 
@@ -148,10 +247,6 @@ VOICE_PROVIDER = "openai"
 # =========================================================
 # 🧠 PRIMARY MODELS
 # =========================================================
-
-"""
-Main cognitive execution models.
-"""
 
 TEXT_MODEL = "gpt-4o-mini"
 
@@ -164,10 +259,6 @@ IMAGE_MODEL = "gpt-image-1"
 # =========================================================
 # 🧠 EXECUTION LIMITS
 # =========================================================
-
-"""
-Lightweight execution stabilization.
-"""
 
 MAX_OUTPUT_TOKENS = {
 
@@ -191,13 +282,6 @@ TEMPERATURE = {
 # 🧠 VISUAL EXECUTION POLICY
 # =========================================================
 
-"""
-Renderer-first architecture.
-
-Heavy image generation is NOT
-the default execution path.
-"""
-
 IMAGE_SIZE = "512x512"
 
 IMAGE_QUALITY = "low"
@@ -214,10 +298,6 @@ BLOCK_AUTO_IMAGE_FALLBACKS = True
 # 🧠 CONTINUITY POLICY
 # =========================================================
 
-"""
-April continuity stabilization.
-"""
-
 VISUAL_CONTINUITY_ENABLED = True
 
 TEXT_CONTINUITY_ENABLED = True
@@ -227,10 +307,6 @@ SCENE_MEMORY_ENABLED = True
 # =========================================================
 # 🧠 EXECUTION STABILIZATION POLICY
 # =========================================================
-
-"""
-Global execution safety rules.
-"""
 
 LIGHTWEIGHT_EXECUTION_PRIORITY = True
 
@@ -248,13 +324,17 @@ ALLOW_HEAVY_FALLBACK_CHAINS = False
 
 def build_provider_policy_payload():
 
-    """
-    Central provider routing payload.
+    APRIL_LOG_IN(
 
-    Used internally by Executor.
-    """
+        "POLICY_ROOM",
 
-    return {
+        {
+            "action":
+                "build_provider_policy_payload"
+        }
+    )
+
+    payload = {
 
         "channel":
             POLICY_RESPONSE_CHANNEL,
@@ -287,20 +367,35 @@ def build_provider_policy_payload():
         }
     }
 
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "provider_policy_ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 EXECUTION POLICY PAYLOAD
 # =========================================================
 
 def build_execution_policy_payload():
 
-    """
-    Internal execution policy payload.
+    APRIL_LOG_IN(
 
-    Prevents policy duplication across
-    cognitive helper cores.
-    """
+        "POLICY_ROOM",
 
-    return {
+        {
+            "action":
+                "build_execution_policy_payload"
+        }
+    )
+
+    payload = {
 
         "channel":
             POLICY_RESPONSE_CHANNEL,
@@ -324,23 +419,35 @@ def build_execution_policy_payload():
             CALM_ORCHESTRATION_MODE
     }
 
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "execution_policy_ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 CONTINUITY POLICY PAYLOAD
 # =========================================================
 
 def build_continuity_policy_payload():
 
-    """
-    Continuity stabilization payload.
+    APRIL_LOG_IN(
 
-    Shared internally across:
-    - Executor
-    - renderer rooms
-    - memory systems
-    - visual systems
-    """
+        "POLICY_ROOM",
 
-    return {
+        {
+            "action":
+                "build_continuity_policy_payload"
+        }
+    )
+
+    payload = {
 
         "channel":
             POLICY_RESPONSE_CHANNEL,
@@ -355,6 +462,18 @@ def build_continuity_policy_payload():
             SCENE_MEMORY_ENABLED
     }
 
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "continuity_policy_ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 IMAGE EXECUTION AUTHORITY
 # =========================================================
@@ -366,13 +485,27 @@ def should_allow_image_generation(
     response_decision
 ):
 
-    """
-    Centralized image escalation authority.
+    APRIL_LOG_IN(
 
-    Prevents hidden generation chaos.
-    """
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "should_allow_image_generation"
+        }
+    )
 
     if not EXPLICIT_IMAGE_GENERATION_ONLY:
+
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "result":
+                    "allowed_global"
+            }
+        )
 
         return True
 
@@ -380,11 +513,31 @@ def should_allow_image_generation(
         "render_intent"
     ):
 
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "blocked":
+                    "render_intent"
+            }
+        )
+
         return False
 
     if response_decision.get(
         "should_render"
     ):
+
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "blocked":
+                    "should_render"
+            }
+        )
 
         return False
 
@@ -392,17 +545,49 @@ def should_allow_image_generation(
         "avoid_heavy_generation"
     ):
 
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "blocked":
+                    "heavy_generation"
+            }
+        )
+
         return False
 
     if cognition.get(
         "exploration_mode"
     ):
 
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "blocked":
+                    "exploration_mode"
+            }
+        )
+
         return False
 
     explicit_request = semantic.get(
+
         "explicit_image_generation",
+
         False
+    )
+
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "explicit_request":
+                explicit_request
+        }
     )
 
     return explicit_request
@@ -418,24 +603,26 @@ def resolve_provider_route(
     cognition=None
 ):
 
-    """
-    Central provider routing authority.
+    APRIL_LOG_IN(
 
-    Executor asks this helper core
-    which provider path should be used.
-    """
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "resolve_provider_route",
+
+            "task_type":
+                task_type
+        }
+    )
 
     semantic = semantic or {}
 
     cognition = cognition or {}
 
-    # =====================================================
-    # 🧠 TEXT TASKS
-    # =====================================================
-
     if task_type == "text":
 
-        return {
+        route = {
 
             "channel":
                 POLICY_RESPONSE_CHANNEL,
@@ -447,9 +634,20 @@ def resolve_provider_route(
                 TEXT_MODEL
         }
 
-    # =====================================================
-    # 🧠 VISION TASKS
-    # =====================================================
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "provider":
+                    TEXT_PROVIDER,
+
+                "model":
+                    TEXT_MODEL
+            }
+        )
+
+        return route
 
     if task_type in [
 
@@ -458,7 +656,7 @@ def resolve_provider_route(
         "analyze_image"
     ]:
 
-        return {
+        route = {
 
             "channel":
                 POLICY_RESPONSE_CHANNEL,
@@ -470,13 +668,24 @@ def resolve_provider_route(
                 VISION_FALLBACK_MODEL
         }
 
-    # =====================================================
-    # 🧠 VOICE TASKS
-    # =====================================================
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "provider":
+                    VISION_PROVIDER,
+
+                "model":
+                    VISION_FALLBACK_MODEL
+            }
+        )
+
+        return route
 
     if task_type == "voice":
 
-        return {
+        route = {
 
             "channel":
                 POLICY_RESPONSE_CHANNEL,
@@ -488,9 +697,20 @@ def resolve_provider_route(
                 VOICE_MODEL
         }
 
-    # =====================================================
-    # 🧠 IMAGE GENERATION
-    # =====================================================
+        APRIL_LOG_OUT(
+
+            "POLICY_ROOM",
+
+            {
+                "provider":
+                    VOICE_PROVIDER,
+
+                "model":
+                    VOICE_MODEL
+            }
+        )
+
+        return route
 
     if task_type == "image_generate":
 
@@ -505,6 +725,16 @@ def resolve_provider_route(
 
         if not allow:
 
+            APRIL_LOG_OUT(
+
+                "POLICY_ROOM",
+
+                {
+                    "blocked":
+                        "image_generation_policy"
+                }
+            )
+
             return {
 
                 "channel":
@@ -517,7 +747,7 @@ def resolve_provider_route(
                     "image_generation_policy"
             }
 
-        return {
+        route = {
 
             "channel":
                 POLICY_RESPONSE_CHANNEL,
@@ -529,11 +759,22 @@ def resolve_provider_route(
                 IMAGE_MODEL
         }
 
-    # =====================================================
-    # 🧠 DEFAULT
-    # =====================================================
+        APRIL_LOG_OUT(
 
-    return {
+            "POLICY_ROOM",
+
+            {
+                "provider":
+                    TEXT_PROVIDER,
+
+                "model":
+                    IMAGE_MODEL
+            }
+        )
+
+        return route
+
+    route = {
 
         "channel":
             POLICY_RESPONSE_CHANNEL,
@@ -545,21 +786,41 @@ def resolve_provider_route(
             TEXT_MODEL
     }
 
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "provider":
+                TEXT_PROVIDER,
+
+            "model":
+                TEXT_MODEL,
+
+            "fallback":
+                True
+        }
+    )
+
+    return route
+
 # =========================================================
 # 🧠 EXECUTOR POLICY BRIDGE
 # =========================================================
 
 def build_executor_policy_bridge():
 
-    """
-    Unified policy bridge payload
-    for April Executor.
+    APRIL_LOG_IN(
 
-    Prevents duplicate policy logic
-    across helper cores.
-    """
+        "POLICY_ROOM",
 
-    return {
+        {
+            "action":
+                "build_executor_policy_bridge"
+        }
+    )
+
+    payload = {
 
         "channel":
             POLICY_RESPONSE_CHANNEL,
@@ -573,6 +834,9 @@ def build_executor_policy_bridge():
         "continuity_policy":
             build_continuity_policy_payload(),
 
+        "policy_telemetry":
+            build_policy_telemetry_payload(),
+
         "renderer_first":
             True,
 
@@ -582,3 +846,15 @@ def build_executor_policy_bridge():
         "stable_orchestration":
             True
     }
+
+    APRIL_LOG_OUT(
+
+        "POLICY_ROOM",
+
+        {
+            "action":
+                "executor_policy_bridge_ready"
+        }
+    )
+
+    return payload
