@@ -1,39 +1,108 @@
-# blocks/context_system.py
-
 # =====================================================
-# 🧠 APRIL DEEPHUB CONTEXT SYSTEM
+# 🧠 APRIL SCENE CONTEXT COORDINATION SYSTEM
 # =====================================================
 
 """
-DeepHub Context Architecture
+APRIL WEB CONTEXT CORE
 
-Главная идея:
-context больше НЕ строится
-через тупое накопление dialog/history.
+ROLE:
+Этот файл — НЕ cognition engine
+и НЕ reasoning system.
 
-Теперь главный источник:
-scene_state.
+Этот файл выполняет только:
 
-Это:
-- уменьшает шум;
-- уменьшает повторный анализ;
+- scene context coordination;
+- trajectory synchronization;
+- machine-context preparation;
+- continuity stabilization;
+- web renderer context support;
+- internal routing context assembly.
+
+=====================================================
+🧠 GOLDEN APRIL ARCHITECTURE
+=====================================================
+
+Данный файл работает ТОЛЬКО как:
+
+INPUT MACHINE CHANNEL:
+BotRU → Executor → Context System
+
+OUTPUT MACHINE CHANNEL:
+Context System → Executor Rooms
+
+=====================================================
+🔥 MAIN PRINCIPLES
+=====================================================
+
+Context System НЕ:
+
+- принимает решения;
+- анализирует personality;
+- управляет authority;
+- управляет cognition;
+- форматирует output;
+- отвечает пользователю.
+
+Context System только:
+
+- собирает scene_state;
 - удерживает trajectory;
-- стабилизирует continuity;
-- снижает fragmentation;
-- уменьшает cognitive reload.
+- синхронизирует active flows;
+- уменьшает noise;
+- уменьшает recursive reload;
+- подготавливает machine-context.
 
-DeepHub direction:
-- scene-first;
-- continuity-heavy;
-- low-noise orchestration;
-- calm routing;
-- rooms coordination;
-- stable trajectory;
-- minimal recursive reasoning.
+=====================================================
+🌐 WEB-FIRST ARCHITECTURE
+=====================================================
+
+Система полностью адаптирована под:
+
+- April Web Space;
+- renderer continuity;
+- multimedia orchestration;
+- structured block rendering;
+- multi-question dialogs;
+- visual continuity.
+
+Telegram architecture полностью исключена.
+
+=====================================================
+🧠 APRIL MEMORY PHILOSOPHY
+=====================================================
+
+Главный источник истины:
+scene_state
+
+НЕ:
+- history;
+- message spam;
+- recursive dialog;
+- keyword memory.
+
+Память хранит:
+- trajectories;
+- execution direction;
+- visual continuity;
+- scene synchronization.
+
+=====================================================
+🔥 INTERNAL CHANNEL ISOLATION
+=====================================================
+
+INPUT MACHINE CHANNEL:
+получает machine-context от Executor.
+
+OUTPUT MACHINE CHANNEL:
+передаёт только чистый structured context.
+
+Human output сюда НЕ попадает.
+
+=====================================================
 """
 
 # =====================================================
-# 🔥 CONSTANTS
+# 🔥 SYSTEM LIMITS
 # =====================================================
 
 LOW_VALUE_MESSAGES = [
@@ -42,77 +111,57 @@ LOW_VALUE_MESSAGES = [
     "ага",
     "понял",
     "да",
-    "хорошо",
     "ясно",
-    "окей",
     "угу"
 ]
 
-MATH_UNRELATED = [
+MAX_RELEVANT_MESSAGES = 5
+MAX_DIALOG_SCAN = 8
+MAX_PASSIVE_MEMORY = 10
+MAX_SUMMARY_LENGTH = 1200
 
-    "кафе",
-    "одежда",
-    "фото",
-    "кофе",
-    "дизайн",
-    "ресторан"
-]
+MAX_USER_MEMORY = 140
+MAX_BOT_MEMORY = 180
 
-IMAGE_UNRELATED = [
-
-    "python",
-    "сервер",
-    "код",
-    "ошибка",
-    "уравнение"
-]
+MAX_IMAGE_HINT = 180
+MAX_MATH_EXPR = 120
+MAX_GOAL_LENGTH = 300
 
 MIN_KEYWORD_LENGTH = 4
 
-MAX_RELEVANT_MESSAGES = 5
+# =====================================================
+# 🔥 INTERNAL MACHINE CHANNELS
+# =====================================================
 
-MAX_DIALOG_SCAN = 8
+INPUT_MACHINE_CHANNEL = {
 
-MAX_PASSIVE_MEMORY = 10
+    "source": "executor",
+    "type": "machine_context_input",
+    "isolated": True
+}
 
-MAX_SUMMARY_LENGTH = 1200
+OUTPUT_MACHINE_CHANNEL = {
 
-MAX_GOAL_LENGTH = 300
-
-MAX_IMAGE_HINT = 180
-
-MAX_MATH_EXPR = 120
-
-MAX_USER_MEMORY = 140
-
-MAX_BOT_MEMORY = 180
+    "target": "executor_rooms",
+    "type": "machine_context_output",
+    "isolated": True
+}
 
 # =====================================================
 # 🔥 HELPERS
 # =====================================================
 
-def normalize_text(
-    text
-):
+def normalize_text(text):
 
-    return (
-        text or ""
-    ).strip()
+    return (text or "").strip()
 
 
-def normalize_lower(
-    text
-):
+def normalize_lower(text):
 
-    return normalize_text(
-        text
-    ).lower()
+    return normalize_text(text).lower()
 
 
-def safe_slice(
-    value,
-    limit
-):
+def safe_slice(value, limit):
 
     if not value:
         return ""
@@ -120,44 +169,57 @@ def safe_slice(
     return str(value)[:limit]
 
 
-def contains_any(
-    text,
-    words
-):
+def contains_any(text, words):
 
     return any(
-        w in text
-        for w in words
+        word in text
+        for word in words
     )
 
+# =====================================================
+# 🔥 MACHINE CONTEXT BUILDERS
+# =====================================================
+
+def build_machine_context_payload(
+
+    trajectory=None,
+    scene_state=None,
+    active_flow=None,
+    visual_scene=None
+
+):
+
+    return {
+
+        "trajectory": trajectory,
+
+        "scene_state":
+            scene_state or {},
+
+        "active_flow":
+            active_flow or {},
+
+        "visual_scene":
+            visual_scene or {},
+
+        "machine_only": True,
+
+        "human_visible": False
+    }
 
 # =====================================================
-# 🔥 TOPIC SHIFT
+# 🔥 TOPIC SHIFT DETECTION
 # =====================================================
 
 def detect_topic_shift(
+
     text,
     active_flow,
     scene_state
+
 ):
 
-    """
-    DeepHub philosophy:
-
-    topic shift detection
-    должен быть спокойным.
-
-    Мы не пытаемся
-    агрессивно перескакивать
-    между trajectories.
-
-    Мы проверяем:
-    реально ли сцена сменилась.
-    """
-
-    text = normalize_lower(
-        text
-    )
+    text = normalize_lower(text)
 
     if not active_flow:
         return False
@@ -169,64 +231,62 @@ def detect_topic_shift(
     if not flow_type:
         return False
 
-    # =================================================
-    # 🔥 SCENE PRIORITY
-    # =================================================
-
-    scene_trajectory = scene_state.get(
+    trajectory = scene_state.get(
         "trajectory"
     )
 
-    if scene_trajectory:
+    if trajectory:
 
-        if scene_trajectory in text:
-
+        if trajectory.lower() in text:
             return False
 
-    # =================================================
-    # 🔥 MATH SHIFT
-    # =================================================
+    math_unrelated = [
+
+        "кафе",
+        "доставка",
+        "погода",
+        "кофе",
+        "ресторан"
+    ]
+
+    image_unrelated = [
+
+        "код",
+        "python",
+        "ошибка",
+        "сервер"
+    ]
 
     if flow_type == "math":
 
         if contains_any(
             text,
-            MATH_UNRELATED
+            math_unrelated
         ):
 
             return True
-
-    # =================================================
-    # 🔥 IMAGE SHIFT
-    # =================================================
 
     if flow_type == "image":
 
         if contains_any(
             text,
-            IMAGE_UNRELATED
+            image_unrelated
         ):
 
             return True
 
     return False
 
-
 # =====================================================
 # 🔥 PASSIVE MEMORY
 # =====================================================
 
 def archive_completed_flow(
+
     state,
     active_flow
+
 ):
-
-    """
-    DeepHub passive memory:
-
-    сохраняем trajectory,
-    а не мусор history.
-    """
 
     if not active_flow:
         return
@@ -241,13 +301,13 @@ def archive_completed_flow(
         "unknown"
     )
 
+    trajectory = active_flow.get(
+        "trajectory"
+    )
+
     original = active_flow.get(
         "original",
         ""
-    )
-
-    trajectory = active_flow.get(
-        "trajectory"
     )
 
     compressed = (
@@ -279,21 +339,11 @@ def archive_completed_flow(
         "passive_memory"
     ] = memory
 
-
 # =====================================================
 # 🔥 SCENE BLOCK
 # =====================================================
 
-def build_scene_block(
-    scene_state
-):
-
-    """
-    Scene-first architecture.
-
-    Главный источник истины:
-    scene_state.
-    """
+def build_scene_block(scene_state):
 
     if not scene_state:
         return ""
@@ -308,22 +358,6 @@ def build_scene_block(
         "goal"
     )
 
-    user_intent = scene_state.get(
-        "user_intent"
-    )
-
-    confirmed_direction = scene_state.get(
-        "confirmed_direction"
-    )
-
-    visual_mode = scene_state.get(
-        "visual_mode"
-    )
-
-    execution_mode = scene_state.get(
-        "execution_mode"
-    )
-
     active_room = scene_state.get(
         "active_room"
     )
@@ -336,23 +370,11 @@ def build_scene_block(
         "continuity_mode"
     )
 
-    scene_priority = scene_state.get(
-        "scene_priority"
-    )
-
-    # =================================================
-    # 🔥 TRAJECTORY
-    # =================================================
-
     if trajectory:
 
         lines.append(
             f"Trajectory: {trajectory}"
         )
-
-    # =================================================
-    # 🔥 GOAL
-    # =================================================
 
     if goal:
 
@@ -361,61 +383,11 @@ def build_scene_block(
             f"{safe_slice(goal, MAX_GOAL_LENGTH)}"
         )
 
-    # =================================================
-    # 🔥 INTENT
-    # =================================================
-
-    if user_intent:
-
-        lines.append(
-            f"Intent: {user_intent}"
-        )
-
-    # =================================================
-    # 🔥 DIRECTION
-    # =================================================
-
-    if confirmed_direction:
-
-        lines.append(
-            f"Direction: "
-            f"{confirmed_direction}"
-        )
-
-    # =================================================
-    # 🔥 VISUAL
-    # =================================================
-
-    if visual_mode:
-
-        lines.append(
-            "Visual continuity active"
-        )
-
-    # =================================================
-    # 🔥 EXECUTION
-    # =================================================
-
-    if execution_mode:
-
-        lines.append(
-            "Execution mode active"
-        )
-
-    # =================================================
-    # 🔥 ROOM
-    # =================================================
-
     if active_room:
 
         lines.append(
-            f"Coordinator room: "
-            f"{active_room}"
+            f"Room: {active_room}"
         )
-
-    # =================================================
-    # 🔥 ORCHESTRATION
-    # =================================================
 
     if orchestration_mode:
 
@@ -424,10 +396,6 @@ def build_scene_block(
             f"{orchestration_mode}"
         )
 
-    # =================================================
-    # 🔥 CONTINUITY
-    # =================================================
-
     if continuity_mode:
 
         lines.append(
@@ -435,54 +403,80 @@ def build_scene_block(
             f"{continuity_mode}"
         )
 
-    # =================================================
-    # 🔥 PRIORITY
-    # =================================================
-
-    if scene_priority:
-
-        lines.append(
-            f"Scene priority: "
-            f"{scene_priority}"
-        )
-
-    # =================================================
-    # 🔥 EMPTY
-    # =================================================
-
     if not lines:
         return ""
 
     return (
 
         "\nSCENE STATE:\n"
-
         + "\n".join(lines)
     )
 
+# =====================================================
+# 🔥 VISUAL SCENE BLOCK
+# =====================================================
+
+def build_visual_scene_block(
+    active_visual_scene
+):
+
+    if not active_visual_scene:
+        return ""
+
+    lines = [
+
+        "\nVISUAL CONTINUITY:"
+    ]
+
+    scene_type = active_visual_scene.get(
+        "scene_type"
+    )
+
+    if scene_type:
+
+        lines.append(
+            f"Scene: {scene_type}"
+        )
+
+    summary = active_visual_scene.get(
+        "summary"
+    )
+
+    if summary:
+
+        lines.append(
+            f"Summary: "
+            f"{safe_slice(summary, 300)}"
+        )
+
+    objects = active_visual_scene.get(
+        "objects",
+        []
+    )
+
+    if objects:
+
+        lines.append(
+            "Objects: "
+            + ", ".join(objects)
+        )
+
+    return "\n".join(lines)
 
 # =====================================================
 # 🔥 RELEVANT DIALOG
 # =====================================================
 
 def build_relevant_dialog(
+
     dialog,
     text,
     active_flow,
-    scene_state=None
+    scene_state
+
 ):
 
-    """
-    DeepHub philosophy:
-
-    relevant_dialog —
-    это support layer,
-    а НЕ главный источник context.
-    """
-
-    text = normalize_lower(
-        text
-    )
+    text = normalize_lower(text)
 
     keywords = []
 
@@ -494,25 +488,20 @@ def build_relevant_dialog(
 
     relevant = []
 
-    trajectory = None
-
-    if scene_state:
-
-        trajectory = scene_state.get(
-            "trajectory"
-        )
-
-    # =================================================
-    # 🔥 LAST IMPORTANT
-    # =================================================
+    trajectory = scene_state.get(
+        "trajectory"
+    )
 
     for msg in reversed(
         dialog[-MAX_DIALOG_SCAN:]
     ):
 
-        content = (
-            msg.get("content")
-            or ""
+        content = str(
+
+            msg.get(
+                "content",
+                ""
+            )
         ).strip()
 
         role = msg.get(
@@ -527,45 +516,15 @@ def build_relevant_dialog(
 
         priority = 0
 
-        # =================================================
-        # 🔥 RECENT
-        # =================================================
-
         if msg in dialog[-3:]:
 
             priority += 3
 
-        # =================================================
-        # 🔥 KEYWORDS
-        # =================================================
+        for keyword in keywords:
 
-        for kw in keywords:
-
-            if kw in lowered:
+            if keyword in lowered:
 
                 priority += 2
-
-        # =================================================
-        # 🔥 FLOW
-        # =================================================
-
-        if active_flow:
-
-            flow_type = active_flow.get(
-                "type"
-            )
-
-            if (
-
-                flow_type
-                and flow_type in lowered
-            ):
-
-                priority += 3
-
-        # =================================================
-        # 🔥 TRAJECTORY
-        # =================================================
 
         if trajectory:
 
@@ -573,22 +532,14 @@ def build_relevant_dialog(
 
                 priority += 4
 
-        # =================================================
-        # 🔥 EXECUTION SIGNAL
-        # =================================================
-
         if (
 
             "сделай" in lowered
-            or "исправь" in lowered
             or "продолжай" in lowered
+            or "исправь" in lowered
         ):
 
             priority += 2
-
-        # =================================================
-        # 🔥 STORE
-        # =================================================
 
         if priority >= 2:
 
@@ -610,209 +561,35 @@ def build_relevant_dialog(
 
     return "\n".join(relevant)
 
-
 # =====================================================
-# 🔥 CONTEXT LAYERS
+# 🔥 BASE MACHINE CONTEXT
 # =====================================================
 
 def build_base_context():
 
     return """
 
-Ты — April.
+APRIL MACHINE CONTEXT
 
-Главное:
-- удерживать trajectory;
-- понимать намерение;
-- помогать;
-- сохранять continuity;
-- избегать болтологии;
-- двигаться к результату.
-
-DeepHub principles:
+MODE:
 - scene-first;
 - continuity-heavy;
-- low-noise;
-- calm orchestration;
-- no recursive overthinking;
-- no repeated analysis;
-- no trajectory fragmentation.
+- low-noise orchestration;
+- web-first routing;
+- renderer continuity active.
 
-Rooms architecture:
-- комнаты выполняют задачи;
-- April координирует;
-- trajectory важнее history;
-- continuity важнее болтовни.
+RULES:
+- preserve trajectory;
+- avoid recursive reload;
+- avoid duplicated reasoning;
+- avoid scene fragmentation;
+- maintain machine routing clarity.
 
-Не повторяйся.
-Не анализируй одно и то же повторно.
-Не ломай continuity сцены.
 """
 
-
-def build_summary_block(
-    summary
-):
-
-    if not summary:
-        return ""
-
-    return (
-
-        "\nMemory summary:\n"
-
-        + safe_slice(
-            summary,
-            500
-        )
-    )
-
-
-def build_passive_memory_block(
-    passive_memory
-):
-
-    if not passive_memory:
-        return ""
-
-    compressed = "\n".join(
-
-        passive_memory[-4:]
-    )
-
-    return (
-
-        "\nArchived trajectories:\n"
-
-        + compressed
-    )
-
-
-def build_image_block(
-    image_context
-):
-
-    if (
-        not image_context
-        or not isinstance(
-            image_context,
-            dict
-        )
-    ):
-
-        return ""
-
-    hint = (
-
-        image_context.get(
-            "hint"
-        )
-
-        or
-
-        image_context.get(
-            "prompt"
-        )
-    )
-
-    if not hint:
-        return ""
-
-    return (
-
-        "\nVisual context:\n"
-
-        + safe_slice(
-            hint,
-            MAX_IMAGE_HINT
-        )
-    )
-
-
-def build_math_block(
-    last_math
-):
-
-    if not last_math:
-        return ""
-
-    expr = last_math.get(
-        "expr"
-    )
-
-    if not expr:
-        return ""
-
-    return (
-
-        "\nMath context:\n"
-
-        + safe_slice(
-            expr,
-            MAX_MATH_EXPR
-        )
-    )
 # =====================================================
-# 🔥 VISUAL SCENE BLOCK
+# 🔥 CURRENT REQUEST
 # =====================================================
-
-def build_visual_scene_block(
-    active_visual_scene
-):
-
-    if (
-        not active_visual_scene
-        or not isinstance(
-            active_visual_scene,
-            dict
-        )
-    ):
-
-        return ""
-
-    scene_type = active_visual_scene.get(
-        "scene_type",
-        "unknown"
-    )
-
-    summary = active_visual_scene.get(
-        "summary",
-        ""
-    )
-
-    objects = active_visual_scene.get(
-        "objects",
-        []
-    )
-
-    lines = [
-
-        "\nVisual scene continuity:",
-
-        f"Scene type: {scene_type}"
-    ]
-
-    if objects:
-
-        lines.append(
-
-            "Objects: "
-            + ", ".join(objects)
-        )
-
-    if summary:
-
-        lines.append(
-
-            "Summary: "
-            + safe_slice(
-                summary,
-                300
-            )
-        )
-
-    return "\n".join(lines)
-
 
 def build_current_request(
     text,
@@ -823,29 +600,10 @@ def build_current_request(
         "trajectory"
     )
 
-    continuity = scene_state.get(
-        "continuity_mode"
-    )
-
     lines = [
 
-        "Current user request:",
-
-        text,
-
-        "",
-
-        "Важно:",
-
-        "если trajectory продолжается —",
-
-        "сохраняй continuity.",
-
-        "",
-
-        "Если trajectory завершён —",
-
-        "не тащи старую сцену."
+        "CURRENT REQUEST:",
+        text
     ]
 
     if trajectory:
@@ -854,22 +612,11 @@ def build_current_request(
 
             "",
 
-            f"Current trajectory: "
+            f"ACTIVE TRAJECTORY: "
             f"{trajectory}"
         ])
 
-    if continuity:
-
-        lines.extend([
-
-            "",
-
-            f"Continuity mode: "
-            f"{continuity}"
-        ])
-
     return "\n".join(lines)
-
 
 # =====================================================
 # 🔥 FLOW STABILIZATION
@@ -879,13 +626,6 @@ def stabilize_active_flow(
     state,
     scene_state
 ):
-
-    """
-    Active flow теперь
-    должен быть связан
-    с scene_state,
-    а не жить отдельно.
-    """
 
     active_flow = state.get(
         "active_flow"
@@ -913,24 +653,19 @@ def stabilize_active_flow(
         "continuity_priority"
     ] = True
 
-
 # =====================================================
 # 🔥 CONTEXT BUILD
 # =====================================================
 
 def build_context_text(
+
     user_id,
     text,
     state
+
 ):
 
-    text = normalize_text(
-        text
-    )
-
-    # =================================================
-    # 🔥 STATE
-    # =================================================
+    text = normalize_text(text)
 
     dialog = state.get(
         "dialog",
@@ -954,13 +689,6 @@ def build_context_text(
     image_context = state.get(
         "image_context"
     )
-    # =================================================
-    # 🔥 ACTIVE VISUAL SCENE
-    # =================================================
-
-    active_visual_scene = state.get(
-        "active_visual_scene"
-    )
 
     last_math = state.get(
         "last_math"
@@ -971,40 +699,27 @@ def build_context_text(
         {}
     )
 
-    # =================================================
-    # 🔥 FLOW STABILIZATION
-    # =====================================================
-
-    stabilize_active_flow(
-
-        state,
-
-        scene_state
+    active_visual_scene = state.get(
+        "active_visual_scene"
     )
 
-    # =================================================
-    # 🔥 TOPIC SHIFT
-    # =====================================================
+    stabilize_active_flow(
+        state,
+        scene_state
+    )
 
     topic_shift = detect_topic_shift(
 
         text,
-
         active_flow,
-
         scene_state
     )
-
-    # =================================================
-    # 🔥 FLOW CLEANUP
-    # =====================================================
 
     if topic_shift:
 
         archive_completed_flow(
 
             state,
-
             active_flow
         )
 
@@ -1014,46 +729,11 @@ def build_context_text(
 
         active_flow = None
 
-    # =================================================
-    # 🔥 BASE
-    # =====================================================
-
     base = build_base_context()
-
-    # =================================================
-    # 🔥 SCENE
-    # =====================================================
 
     scene_block = build_scene_block(
         scene_state
     )
-
-    # =================================================
-    # 🔥 SUMMARY
-    # =====================================================
-
-    summary_block = build_summary_block(
-        summary
-    )
-
-    # =================================================
-    # 🔥 PASSIVE
-    # =====================================================
-
-    passive_block = build_passive_memory_block(
-        passive_memory
-    )
-
-    # =================================================
-    # 🔥 IMAGE
-    # =====================================================
-
-    image_block = build_image_block(
-        image_context
-    )
-    # =================================================
-    # 🔥 VISUAL SCENE
-    # =====================================================
 
     visual_scene_block = (
         build_visual_scene_block(
@@ -1061,49 +741,103 @@ def build_context_text(
         )
     )
 
-    # =================================================
-    # 🔥 MATH
-    # =====================================================
-
-    math_block = build_math_block(
-        last_math
-    )
-
-    # =================================================
-    # 🔥 RELEVANT DIALOG
-    # =====================================================
-
     relevant_dialog = build_relevant_dialog(
 
         dialog,
-
         text,
-
         active_flow,
-
         scene_state
     )
-
-    # =================================================
-    # 🔥 REQUEST
-    # =====================================================
 
     current_request = build_current_request(
 
         text,
-
         scene_state
     )
 
-    # =================================================
-    # 🔥 FINAL
-    # =====================================================
+    image_block = ""
 
-    full = f"""
+    if image_context:
+
+        hint = (
+
+            image_context.get(
+                "hint"
+            )
+
+            or
+
+            image_context.get(
+                "prompt"
+            )
+        )
+
+        if hint:
+
+            image_block = (
+
+                "\nIMAGE CONTEXT:\n"
+
+                + safe_slice(
+                    hint,
+                    MAX_IMAGE_HINT
+                )
+            )
+
+    math_block = ""
+
+    if last_math:
+
+        expr = last_math.get(
+            "expr"
+        )
+
+        if expr:
+
+            math_block = (
+
+                "\nMATH CONTEXT:\n"
+
+                + safe_slice(
+                    expr,
+                    MAX_MATH_EXPR
+                )
+            )
+
+    passive_block = ""
+
+    if passive_memory:
+
+        passive_block = (
+
+            "\nARCHIVED TRAJECTORIES:\n"
+
+            + "\n".join(
+                passive_memory[-4:]
+            )
+        )
+
+    summary_block = ""
+
+    if summary:
+
+        summary_block = (
+
+            "\nMEMORY SUMMARY:\n"
+
+            + safe_slice(
+                summary,
+                500
+            )
+        )
+
+    full_context = f"""
 
 {base}
 
 {scene_block}
+
+{visual_scene_block}
 
 {summary_block}
 
@@ -1111,42 +845,28 @@ def build_context_text(
 
 {image_block}
 
-{visual_scene_block}
-
 {math_block}
 
-Relevant dialog:
+RELEVANT DIALOG:
 {relevant_dialog}
 
 {current_request}
 
 """
 
-    return full
-
+    return full_context
 
 # =====================================================
-# 🔥 SMART MEMORY SUMMARY
+# 🔥 MEMORY SUMMARY
 # =====================================================
 
 def update_memory_summary(
+
     state,
     user_text,
     bot_reply
+
 ):
-
-    """
-    DeepHub memory philosophy:
-
-    хранить trajectory,
-    а не мусор history.
-
-    Summary теперь:
-    - мягче;
-    - спокойнее;
-    - без recursive duplication;
-    - без cognitive overload.
-    """
 
     old = state.get(
         "memory_summary",
@@ -1161,10 +881,6 @@ def update_memory_summary(
         bot_reply
     )
 
-    # =================================================
-    # 🔥 LOW VALUE
-    # =====================================================
-
     if (
 
         normalize_lower(
@@ -1176,27 +892,17 @@ def update_memory_summary(
 
         return
 
-    # =================================================
-    # 🔥 CLEANUP
-    # =====================================================
-
     user_text = safe_slice(
 
         user_text,
-
         MAX_USER_MEMORY
     )
 
     bot_reply = safe_slice(
 
         bot_reply,
-
         MAX_BOT_MEMORY
     )
-
-    # =================================================
-    # 🔥 BUILD
-    # =====================================================
 
     chunk = (
 
@@ -1207,16 +913,8 @@ def update_memory_summary(
         f"{bot_reply}"
     )
 
-    # =================================================
-    # 🔥 DUPLICATE PROTECTION
-    # =====================================================
-
     if chunk in old:
         return
-
-    # =================================================
-    # 🔥 TRAJECTORY PRIORITY
-    # =====================================================
 
     scene_state = state.get(
         "scene_state",
@@ -1234,10 +932,6 @@ def update_memory_summary(
             + chunk
         )
 
-    # =================================================
-    # 🔥 COMBINE
-    # =====================================================
-
     combined = (
 
         old
@@ -1245,24 +939,15 @@ def update_memory_summary(
         + chunk
     ).strip()
 
-    # =================================================
-    # 🔥 OVERLOAD CONTROL
-    # =====================================================
-
     if len(combined) > MAX_SUMMARY_LENGTH:
 
         combined = combined[
             -MAX_SUMMARY_LENGTH:
         ]
 
-    # =================================================
-    # 🔥 SAVE
-    # =====================================================
-
     state[
         "memory_summary"
     ] = combined
-
 
 # =====================================================
 # 🔥 SCENE SYNCHRONIZATION
@@ -1271,17 +956,6 @@ def update_memory_summary(
 def synchronize_scene_state(
     state
 ):
-
-    """
-    DeepHub synchronization layer.
-
-    Scene_state —
-    главный источник истины.
-
-    Не dialog.
-    Не summary.
-    Не keywords.
-    """
 
     scene_state = state.get(
         "scene_state",
@@ -1295,10 +969,6 @@ def synchronize_scene_state(
     if not scene_state:
         return
 
-    # =================================================
-    # 🔥 FLOW SYNC
-    # =====================================================
-
     if active_flow:
 
         trajectory = scene_state.get(
@@ -1311,10 +981,6 @@ def synchronize_scene_state(
                 "trajectory"
             ] = trajectory
 
-    # =================================================
-    # 🔥 EXECUTION SYNC
-    # =====================================================
-
     execution_mode = scene_state.get(
         "execution_mode"
     )
@@ -1324,10 +990,6 @@ def synchronize_scene_state(
         state[
             "execution_mode"
         ] = execution_mode
-
-    # =================================================
-    # 🔥 VISUAL SYNC
-    # =====================================================
 
     visual_mode = scene_state.get(
         "visual_mode"
@@ -1339,45 +1001,53 @@ def synchronize_scene_state(
             "visual_mode"
         ] = visual_mode
 
-    # =================================================
-    # 🔥 CONTINUITY
-    # =====================================================
-
-    continuity_mode = scene_state.get(
-        "continuity_mode"
-    )
-
-    if continuity_mode:
-
-        state[
-            "continuity_mode"
-        ] = continuity_mode
-
-
 # =====================================================
-# 🔥 CONTEXT ENTRY
+# 🔥 MAIN ENTRY
 # =====================================================
 
 def build_deephub_context(
+
     user_id,
     text,
     state
-):
 
-    """
-    Главная точка входа
-    DeepHub context system.
-    """
+):
 
     synchronize_scene_state(
         state
     )
 
+    machine_payload = (
+
+        build_machine_context_payload(
+
+            trajectory=state.get(
+                "scene_state",
+                {}
+            ).get("trajectory"),
+
+            scene_state=state.get(
+                "scene_state",
+                {}
+            ),
+
+            active_flow=state.get(
+                "active_flow"
+            ),
+
+            visual_scene=state.get(
+                "active_visual_scene"
+            )
+        )
+    )
+
+    state[
+        "_machine_context"
+    ] = machine_payload
+
     return build_context_text(
 
         user_id,
-
         text,
-
         state
     )
