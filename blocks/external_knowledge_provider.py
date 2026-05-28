@@ -1,47 +1,172 @@
 # =====================================================
-# 🧠 APRIL EXTERNAL KNOWLEDGE PROVIDER
+# 🧠 APRIL EXTERNAL KNOWLEDGE PROVIDER CORE
 # =====================================================
 
 """
-DeepHub / April upgrade:
+APRIL EXTERNAL KNOWLEDGE PROVIDER CORE
 
-Этот слой больше НЕ:
-- trigger-based internet router;
-- keyword escalation layer;
-- aggressive external lookup detector;
-- text-trigger execution switch.
+APRIL_FILE_ID:
+APRIL_EXTERNAL_KNOWLEDGE_PROVIDER_CORE
 
-Теперь это:
-- semantic support layer;
-- machine-state enrichment provider;
-- execution-safe contextual helper;
-- renderer-safe external context layer.
+ROLE:
+SEMANTIC_EXTERNAL_CONTEXT_AND_EXECUTION_SUPPORT
 
-Главное:
-- НЕ ломать renderer-first;
-- НЕ перехватывать orchestration;
-- НЕ ломать graph/formula/table pipeline;
-- НЕ вмешиваться в scene routing;
-- НЕ эскалировать без semantic signal.
+INPUT:
+USER_REQUEST
+SEMANTIC_STATE
+COGNITION_STATE
+RESPONSE_DECISION
 
-External knowledge —
-это helper capability,
-а НЕ authority layer.
+OUTPUT:
+EXTERNAL_CONTEXT
+VERIFIED_WEB_CONTEXT
+SEMANTIC_ENRICHMENT
+EXECUTION_SUPPORT_CONTEXT
+
+THIS FILE IS:
+- semantic support layer
+- machine-state enrichment provider
+- execution-safe contextual helper
+- renderer-safe external context layer
+- verified web context helper
+
+THIS FILE IS NOT:
+- orchestration authority
+- routing engine
+- renderer authority
+- trigger-based escalation layer
+- fallback chaos system
+
+GOLDEN APRIL PRINCIPLES:
+- renderer-first protection
+- continuity before escalation
+- semantic lookup only
+- lightweight enrichment
+- verified context priority
+- no orchestration interception
 """
 
 # =====================================================
 # 🔥 IMPORTS
 # =====================================================
 
+from datetime import datetime
+
 from openai import OpenAI
 
 from blocks.web_search_system import (
+
     search_web,
+
     build_search_summary,
+
     detect_live_lookup_intent
 )
 
 client = OpenAI()
+
+# =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = (
+    "APRIL_EXTERNAL_KNOWLEDGE_PROVIDER_CORE"
+)
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+EXTERNAL_KNOWLEDGE_TASK_CHANNEL = {
+
+    "channel":
+        "external_knowledge_task_channel",
+
+    "isolated":
+        True
+}
+
+EXTERNAL_KNOWLEDGE_RESPONSE_CHANNEL = {
+
+    "channel":
+        "external_knowledge_response_channel",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGGING
+# =====================================================
+
+def build_external_input_log():
+
+    """
+    INPUT MACHINE TRACE
+
+    Used internally by:
+    - Executor
+    - Governance
+    - analytics
+    - semantic diagnostics
+    """
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "external_knowledge_input",
+
+        "channel":
+            EXTERNAL_KNOWLEDGE_TASK_CHANNEL,
+
+        "timestamp":
+            datetime.utcnow().isoformat(),
+
+        "machine_only":
+            True
+    }
+
+
+def build_external_output_log(
+    enabled,
+    source
+):
+
+    """
+    OUTPUT MACHINE TRACE
+
+    Used internally by:
+    - Executor
+    - analytics
+    - semantic monitoring
+    """
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "external_knowledge_output",
+
+        "channel":
+            EXTERNAL_KNOWLEDGE_RESPONSE_CHANNEL,
+
+        "enabled":
+            enabled,
+
+        "source":
+            source,
+
+        "timestamp":
+            datetime.utcnow().isoformat(),
+
+        "machine_only":
+            True
+    }
 
 # =====================================================
 # 🧠 MACHINE SEMANTIC STATES
@@ -50,6 +175,7 @@ client = OpenAI()
 SEMANTIC_EXECUTION_STATES = {
 
     "renderer_safe": [
+
         "graph",
         "formula",
         "table",
@@ -59,6 +185,7 @@ SEMANTIC_EXECUTION_STATES = {
     ],
 
     "knowledge_safe": [
+
         "knowledge",
         "travel",
         "internet",
@@ -69,6 +196,7 @@ SEMANTIC_EXECUTION_STATES = {
     ],
 
     "blocked_modes": [
+
         "renderer_first",
         "lightweight_visual",
         "scene_render",
@@ -82,31 +210,52 @@ SEMANTIC_EXECUTION_STATES = {
 
 WEB_CAPABILITIES = {
 
-    "real_time_search": True,
-    "verified_links": True,
-    "live_internet_access": True,
+    "real_time_search":
+        True,
 
-    "contextual_enrichment": True,
-    "semantic_lookup": True,
-    "execution_support": True,
+    "verified_links":
+        True,
 
-    "renderer_safe": True,
-    "provider_aware": True,
-    "continuity_safe": True,
+    "live_internet_access":
+        True,
 
-    "hallucination_risk": False,
-    "requires_verification": True
+    "contextual_enrichment":
+        True,
+
+    "semantic_lookup":
+        True,
+
+    "execution_support":
+        True,
+
+    "renderer_safe":
+        True,
+
+    "provider_aware":
+        True,
+
+    "continuity_safe":
+        True,
+
+    "hallucination_risk":
+        False,
+
+    "requires_verification":
+        True
 }
 
 # =====================================================
-# 🔥 SEMANTIC HELPERS
+# 🔥 HELPERS
 # =====================================================
 
 def _safe_lower(value):
 
     return (
+
         str(value or "")
+
         .strip()
+
         .lower()
     )
 
@@ -131,6 +280,10 @@ def should_block_external_lookup(
     response_decision: dict
 ):
 
+    """
+    Renderer-first protection layer.
+    """
+
     semantic = semantic or {}
     cognition = cognition or {}
     response_decision = response_decision or {}
@@ -142,26 +295,31 @@ def should_block_external_lookup(
     if semantic.get(
         "prefer_renderer"
     ):
+
         return True
 
     if semantic.get(
         "renderer_space_active"
     ):
+
         return True
 
     if semantic.get(
         "renderer_first"
     ):
+
         return True
 
     if semantic.get(
         "scene_render_active"
     ):
+
         return True
 
     if semantic.get(
         "lightweight_visual_mode"
     ):
+
         return True
 
     # =================================================
@@ -173,10 +331,12 @@ def should_block_external_lookup(
     )
 
     if expected_output in (
+
         SEMANTIC_EXECUTION_STATES[
             "renderer_safe"
         ]
     ):
+
         return True
 
     # =================================================
@@ -186,11 +346,13 @@ def should_block_external_lookup(
     if response_decision.get(
         "avoid_external_escalation"
     ):
+
         return True
 
     if response_decision.get(
         "avoid_heavy_generation"
     ):
+
         return True
 
     # =================================================
@@ -200,6 +362,7 @@ def should_block_external_lookup(
     if cognition.get(
         "renderer_space_active"
     ):
+
         return True
 
     return False
@@ -212,6 +375,10 @@ def detect_realtime_need(
     text: str,
     semantic: dict
 ):
+
+    """
+    Detects realtime internet need.
+    """
 
     text = _safe_lower(
         text
@@ -226,21 +393,25 @@ def detect_realtime_need(
     if semantic.get(
         "realtime_lookup"
     ):
+
         return True
 
     if semantic.get(
         "internet_required"
     ):
+
         return True
 
     if semantic.get(
         "live_context_required"
     ):
+
         return True
 
     if semantic.get(
         "geo_lookup"
     ):
+
         return True
 
     # =================================================
@@ -250,6 +421,7 @@ def detect_realtime_need(
     if detect_live_lookup_intent(
         text
     ):
+
         return True
 
     return False
@@ -263,6 +435,11 @@ def should_support_execution(
     cognition: dict
 ):
 
+    """
+    Determines whether external context
+    can safely support execution.
+    """
+
     semantic = semantic or {}
     cognition = cognition or {}
 
@@ -273,16 +450,19 @@ def should_support_execution(
     if semantic.get(
         "execution_support_required"
     ):
+
         return True
 
     if semantic.get(
         "knowledge_enrichment"
     ):
+
         return True
 
     if semantic.get(
         "internet_assistance"
     ):
+
         return True
 
     # =================================================
@@ -292,11 +472,13 @@ def should_support_execution(
     if cognition.get(
         "needs_guidance"
     ):
+
         return True
 
     if cognition.get(
         "needs_external_context"
     ):
+
         return True
 
     return False
@@ -312,9 +494,15 @@ def should_use_external_knowledge(
     response_decision: dict
 ):
 
+    """
+    Main semantic knowledge decision layer.
+    """
+
     semantic = semantic or {}
     cognition = cognition or {}
     response_decision = response_decision or {}
+
+    build_external_input_log()
 
     # =================================================
     # 🔥 BLOCKED
@@ -337,6 +525,7 @@ def should_use_external_knowledge(
         text,
         semantic
     ):
+
         return True
 
     # =================================================
@@ -347,6 +536,7 @@ def should_use_external_knowledge(
         semantic,
         cognition
     ):
+
         return True
 
     # =================================================
@@ -356,21 +546,25 @@ def should_use_external_knowledge(
     if semantic.get(
         "requires_external_knowledge"
     ):
+
         return True
 
     if semantic.get(
         "knowledge_lookup"
     ):
+
         return True
 
     if semantic.get(
         "travel_lookup"
     ):
+
         return True
 
     if semantic.get(
         "reference_lookup"
     ):
+
         return True
 
     # =================================================
@@ -403,6 +597,10 @@ def build_external_prompt(
     semantic: dict,
     cognition: dict
 ):
+
+    """
+    Safe external enrichment prompt.
+    """
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -446,6 +644,10 @@ def fetch_external_knowledge(
     cognition: dict
 ):
 
+    """
+    Safe external knowledge fetch layer.
+    """
+
     try:
 
         # =================================================
@@ -462,29 +664,41 @@ def fetch_external_knowledge(
 
         if summary:
 
+            build_external_output_log(
+                True,
+                "real_web_search"
+            )
+
             return {
 
-                "success": True,
+                "success":
+                    True,
 
-                "content": summary,
+                "content":
+                    summary,
 
-                "source": "real_web_search",
+                "source":
+                    "real_web_search",
 
-                "verified": True,
+                "verified":
+                    True,
 
                 "results":
+
                     web_results.get(
                         "results",
                         []
                     ),
 
                 "live_intent":
+
                     web_results.get(
                         "live_intent",
                         False
                     ),
 
-                "used_real_web": True
+                "used_real_web":
+                    True
             }
 
         # =================================================
@@ -516,24 +730,41 @@ def fetch_external_knowledge(
 
         if not output:
 
+            build_external_output_log(
+                False,
+                "empty_output"
+            )
+
             return {
 
-                "success": False,
+                "success":
+                    False,
 
-                "content": ""
+                "content":
+                    ""
             }
+
+        build_external_output_log(
+            True,
+            "safe_contextual_fallback"
+        )
 
         return {
 
-            "success": True,
+            "success":
+                True,
 
-            "content": output,
+            "content":
+                output,
 
-            "source": "safe_contextual_fallback",
+            "source":
+                "safe_contextual_fallback",
 
-            "verified": False,
+            "verified":
+                False,
 
-            "used_real_web": False
+            "used_real_web":
+                False
         }
 
     except Exception as e:
@@ -543,13 +774,21 @@ def fetch_external_knowledge(
             e
         )
 
+        build_external_output_log(
+            False,
+            "exception"
+        )
+
         return {
 
-            "success": False,
+            "success":
+                False,
 
-            "content": "",
+            "content":
+                "",
 
-            "error": str(e)
+            "error":
+                str(e)
         }
 
 # =====================================================
@@ -561,12 +800,18 @@ def enrich_with_external_knowledge(
     knowledge_result: dict
 ):
 
+    """
+    Safe response enrichment.
+    """
+
     if not knowledge_result:
+
         return base_response
 
     if not knowledge_result.get(
         "success"
     ):
+
         return base_response
 
     knowledge = knowledge_result.get(
@@ -575,15 +820,19 @@ def enrich_with_external_knowledge(
     ).strip()
 
     if not knowledge:
+
         return base_response
 
     if not base_response:
+
         return knowledge
 
     return (
 
         base_response.strip()
+
         + "\n\n"
+
         + knowledge
     )
 
@@ -598,6 +847,10 @@ def build_external_context(
     response_decision: dict
 ):
 
+    """
+    Main external context builder.
+    """
+
     if not should_use_external_knowledge(
 
         text,
@@ -606,14 +859,24 @@ def build_external_context(
         response_decision
     ):
 
+        build_external_output_log(
+            False,
+            "blocked_or_not_required"
+        )
+
         return {
 
-            "enabled": False,
+            "enabled":
+                False,
 
-            "content": "",
+            "content":
+                "",
 
             "web_capabilities":
-                WEB_CAPABILITIES
+                WEB_CAPABILITIES,
+
+            "channel":
+                EXTERNAL_KNOWLEDGE_RESPONSE_CHANNEL
         }
 
     result = fetch_external_knowledge(
@@ -629,48 +892,68 @@ def build_external_context(
 
         return {
 
-            "enabled": False,
+            "enabled":
+                False,
 
-            "content": "",
+            "content":
+                "",
 
             "web_capabilities":
-                WEB_CAPABILITIES
+                WEB_CAPABILITIES,
+
+            "channel":
+                EXTERNAL_KNOWLEDGE_RESPONSE_CHANNEL
         }
 
     return {
 
-        "enabled": True,
+        "enabled":
+            True,
 
         "content":
+
             result.get(
                 "content",
                 ""
             ),
 
         "verified":
+
             result.get(
                 "verified",
                 False
             ),
 
         "results":
+
             result.get(
                 "results",
                 []
             ),
 
         "live_intent":
+
             result.get(
                 "live_intent",
                 False
             ),
 
         "used_real_web":
+
             result.get(
                 "used_real_web",
                 False
             ),
 
         "web_capabilities":
-            WEB_CAPABILITIES
+            WEB_CAPABILITIES,
+
+        "channel":
+            EXTERNAL_KNOWLEDGE_RESPONSE_CHANNEL,
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "machine_only":
+            True
     }
