@@ -10,17 +10,13 @@ Executor теперь:
 - renderer-first coordinator;
 - continuity-safe executor;
 - provider-aware router;
-- scene-bound stabilizer;
-- room synchronization layer;
-- semantic orchestration bridge.
+- scene-bound stabilizer.
 
 Executor больше НЕ:
 - Telegram-first pipeline;
 - legacy image authority;
 - recursive execution source;
-- visual fallback chaos layer;
-- trigger-based dispatcher;
-- text-authority suppressor.
+- visual fallback chaos layer.
 
 APRIL SPACE PHILOSOPHY:
 
@@ -30,9 +26,6 @@ APRIL SPACE PHILOSOPHY:
 4. provider-aware execution
 5. calm orchestration
 6. scene continuity protection
-7. room equality
-8. semantic coordination
-9. stable response assembly
 """
 
 # =====================================================
@@ -55,6 +48,10 @@ from blocks.intent_system import (
 
 from blocks.intent_ai import (
     detect_intent_ai
+)
+
+from blocks.router import (
+    route_request
 )
 
 from blocks.router import (
@@ -281,11 +278,7 @@ EMAPS = {
 
     "files_roles": {},
 
-    "last_execution": {},
-
-    "room_order": [],
-
-    "assembly_history": []
+    "last_execution": {}
 }
 
 
@@ -316,16 +309,6 @@ def emaps_track_room(name):
             EMAPS[
                 "active_rooms"
             ].add(name)
-
-            EMAPS[
-                "room_order"
-            ].append(name)
-
-            EMAPS[
-                "room_order"
-            ] = EMAPS[
-                "room_order"
-            ][-20:]
 
     except Exception as e:
 
@@ -462,192 +445,6 @@ def get_scene_authority_mode(
 
 
 # =====================================================
-# 🧠 ROOM ORCHESTRATION
-# =====================================================
-
-def build_room_execution_plan(
-
-    semantic: dict,
-    cognition: dict,
-    response_decision: dict,
-    task_type: str
-):
-
-    return {
-
-        "task_type": task_type,
-
-        "renderer_space":
-            semantic.get(
-                "renderer_space_request",
-                False
-            ),
-
-        "visual_continuity":
-            semantic.get(
-                "visual_continuity",
-                False
-            ),
-
-        "response_mode":
-            semantic.get(
-                "response_mode",
-                "talk"
-            ),
-
-        "goal_stage":
-            semantic.get(
-                "goal_stage",
-                "exploration"
-            ),
-
-        "allow_heavy_generation":
-            not response_decision.get(
-                "avoid_heavy_generation",
-                False
-            ),
-
-        "prefer_visual":
-            cognition.get(
-                "prefer_visual",
-                False
-            ),
-
-        "prefer_execution":
-            cognition.get(
-                "prefer_execution",
-                False
-            )
-    }
-
-
-def stabilize_room_sequence(
-    scored_rooms
-):
-
-    stable_order = []
-
-    seen = set()
-
-    for score, room in scored_rooms:
-
-        if room.name in seen:
-            continue
-
-        seen.add(room.name)
-
-        stable_order.append(
-            (score, room)
-        )
-
-    return stable_order
-
-
-def build_room_machine_context(
-
-    room_name: str,
-    semantic: dict,
-    cognition: dict,
-    response_decision: dict,
-    task_type: str
-):
-
-    return {
-
-        "room": room_name,
-
-        "task_type": task_type,
-
-        "goal_stage":
-            semantic.get(
-                "goal_stage",
-                "exploration"
-            ),
-
-        "response_mode":
-            semantic.get(
-                "response_mode",
-                "talk"
-            ),
-
-        "render_intent":
-            semantic.get(
-                "render_intent",
-                False
-            ),
-
-        "renderer_space":
-            semantic.get(
-                "renderer_space_request",
-                False
-            ),
-
-        "visual_continuity":
-            semantic.get(
-                "visual_continuity",
-                False
-            ),
-
-        "prefer_visual":
-            cognition.get(
-                "prefer_visual",
-                False
-            ),
-
-        "prefer_execution":
-            cognition.get(
-                "prefer_execution",
-                False
-            ),
-
-        "avoid_heavy_generation":
-            response_decision.get(
-                "avoid_heavy_generation",
-                False
-            )
-    }
-
-
-# =====================================================
-# 🧠 RESPONSE ASSEMBLY
-# =====================================================
-
-def assemble_room_response(
-    result: dict,
-    room_name: str,
-    state: dict
-):
-
-    if not result:
-        return result
-
-    EMAPS[
-        "assembly_history"
-    ].append({
-
-        "room": room_name,
-
-        "type":
-            result.get(
-                "type",
-                "text"
-            )
-    })
-
-    EMAPS[
-        "assembly_history"
-    ] = EMAPS[
-        "assembly_history"
-    ][-25:]
-
-    state[
-        "last_room"
-    ] = room_name
-
-    return result
-
-
-# =====================================================
 # 🧠 CONTINUITY STABILIZATION
 # =====================================================
 
@@ -774,6 +571,10 @@ def should_block_heavy_generation(
     response_decision: dict
 ):
 
+    # =============================================
+    # 🔥 ABSOLUTE RENDERER-FIRST LOCK
+    # =============================================
+
     if semantic.get(
         "render_intent"
     ):
@@ -880,6 +681,10 @@ def evaluate_response_quality(
         "text"
     )
 
+    # =============================================
+    # 🔥 RENDERER TYPES ALWAYS VALID
+    # =============================================
+
     if result_type in [
 
         "graph",
@@ -928,6 +733,21 @@ def evaluate_response_quality(
 
         helpful = False
 
+    if result_type == "text":
+
+        if semantic.get(
+            "should_execute"
+        ):
+
+            if cognition.get(
+                "wants_result",
+                0.0
+            ) >= 0.7:
+
+                if len(output) < 25:
+
+                    helpful = False
+
     return {
 
         "success": True,
@@ -944,110 +764,6 @@ def evaluate_response_quality(
 # =====================================================
 # 🔥 SAFE FORMAT RESPONSE
 # =====================================================
-
-# =====================================================
-# 🧠 EXECUTOR OUTPUT SANITIZER
-# =====================================================
-
-def sanitize_executor_output(
-    result: dict
-):
-
-    if not result:
-        return result
-
-    result_type = result.get(
-        "type",
-        "text"
-    )
-
-    # =================================================
-    # 🔥 VISUAL OBJECTS
-    # =====================================================
-
-    if result_type in [
-
-        "graph",
-        "formula",
-        "diagram",
-        "scene",
-        "image",
-        "gallery",
-        "table",
-        "function"
-    ]:
-
-        return result
-
-    output = str(
-        result.get("data", "")
-    )
-
-    if not output.strip():
-
-        return result
-
-    # =================================================
-    # 🔥 MACHINE LEAK PATTERNS
-    # =====================================================
-
-    blocked_lines = [
-
-        "FLOW=",
-        "MEMORY=",
-        "OBJECTS=",
-        "SCENE=",
-        "STYLE=",
-        "APRIL_STATE",
-        "RULES:",
-        "verbosity=",
-        "role=",
-        "mode=",
-        "renderer priority",
-        "continuity_dialogue",
-        "machine_orchestration",
-        "renderer_space_request",
-        "visual_continuity"
-    ]
-
-    cleaned = []
-
-    for line in output.split("\n"):
-
-        stripped = line.strip()
-
-        should_block = False
-
-        for pattern in blocked_lines:
-
-            if pattern.lower() in stripped.lower():
-
-                should_block = True
-                break
-
-        if should_block:
-            continue
-
-        cleaned.append(line)
-
-    cleaned_output = "\n".join(
-        cleaned
-    ).strip()
-
-    # =================================================
-    # 🔥 EMPTY AFTER CLEAN
-    # =====================================================
-
-    if not cleaned_output:
-
-        cleaned_output = (
-            "⚠️ Ответ сформировался "
-            "нестабильно."
-        )
-
-    result["data"] = cleaned_output
-
-    return result
 
 def safely_format_result(
 
@@ -1076,6 +792,10 @@ def safely_format_result(
         "scene",
         "function"
     ]
+
+    # =============================================
+    # 🔥 ABSOLUTE VISUAL BYPASS
+    # =============================================
 
     if result_type in VISUAL_TYPES:
 
@@ -1361,6 +1081,7 @@ def detect_task_type(
 
     return "text"
 
+
 # =====================================================
 # 🔥 OUTPUT MODE
 # =====================================================
@@ -1464,6 +1185,10 @@ def stabilize_room_score(
         "stable"
     )
 
+    # =============================================
+    # 🔥 PERSONALITY STABILIZATION
+    # =============================================
+
     if cognition.get(
         "reduce_talking"
     ):
@@ -1499,6 +1224,10 @@ def stabilize_room_score(
         ]:
 
             score += 0.6
+
+    # =============================================
+    # 🔥 RENDERER-FIRST AUTHORITY
+    # =============================================
 
     if semantic.get(
         "render_intent"
@@ -1586,18 +1315,6 @@ def stabilize_room_score(
 
                 score += 1.8
 
-    if semantic.get(
-        "machine_orchestration"
-    ):
-
-        if room.name == "text":
-
-            score += 0.4
-
-        if room.name == "science":
-
-            score += 0.4
-
     return clamp(
         score,
         -5.0,
@@ -1635,19 +1352,6 @@ def build_executor_context(
 
     scene_state = safe_get_scene_state(
         state
-    )
-
-    orchestration_plan = (
-        build_room_execution_plan(
-
-            semantic=semantic,
-
-            cognition=cognition,
-
-            response_decision=response_decision,
-
-            task_type=task_type
-        )
     )
 
     return {
@@ -1711,10 +1415,7 @@ def build_executor_context(
             build_capability_awareness(),
 
         "external_context":
-            external_context,
-
-        "orchestration_plan":
-            orchestration_plan
+            external_context
     }
 
 
@@ -1771,9 +1472,9 @@ async def execute(
         )
     )
 
-    semantic[
-        "machine_orchestration"
-    ] = True
+    # =============================================
+    # 🔥 HARD RENDERER LOCK
+    # =============================================
 
     if semantic.get(
         "render_intent"
@@ -1790,6 +1491,10 @@ async def execute(
         semantic[
             "avoid_image_generation_fallback"
         ] = True
+
+    # =============================================
+    # 🧠 CONTINUITY STABILIZATION
+    # =============================================
 
     semantic = stabilize_visual_continuity(
 
@@ -1842,6 +1547,8 @@ async def execute(
         semantic=semantic
     )
 
+    print("DEBUG: REASONING OK")
+
     cognition = analyze_cognition(
 
         text=text,
@@ -1852,6 +1559,12 @@ async def execute(
 
         reasoning=reasoning
     )
+
+    print("DEBUG: COGNITION OK")
+
+    # =============================================
+    # 🧠 PERSONALITY INTEGRATION
+    # =============================================
 
     cognition = apply_april_personality(
 
@@ -1893,6 +1606,12 @@ async def execute(
             state=state
         )
     )
+
+    print("DEBUG: RESPONSE DECISION OK")
+
+    # =============================================
+    # 🧠 AUTHORITY DECISION
+    # =============================================
 
     authority_decision = (
 
@@ -1945,6 +1664,8 @@ async def execute(
         ] = True
 
     external_context = ""
+
+    print("EXTERNAL CONTEXT DISABLED")
 
     state["semantic"] = semantic
     state["reasoning"] = reasoning
@@ -2026,6 +1747,10 @@ async def execute(
         text=text
     )
 
+    # =============================================
+    # 🧠 AUTHORITY CONTEXT
+    # =============================================
+
     context[
         "authority_decision"
     ] = authority_decision
@@ -2055,6 +1780,10 @@ async def execute(
 
                 response_decision=response_decision
             )
+
+            # =========================================
+            # 🧠 AUTHORITY ROOM STABILIZATION
+            # =========================================
 
             forced_room = (
                 authority_decision.get(
@@ -2094,10 +1823,6 @@ async def execute(
         reverse=True
     )
 
-    scored_rooms = stabilize_room_sequence(
-        scored_rooms
-    )
-
     best_result = None
     scene_results = []
 
@@ -2109,24 +1834,9 @@ async def execute(
                 room.name
             )
 
-            room_machine_context = (
-                build_room_machine_context(
-
-                    room_name=room.name,
-
-                    semantic=semantic,
-
-                    cognition=cognition,
-
-                    response_decision=response_decision,
-
-                    task_type=task_type
-                )
-            )
-
-            context[
-                "room_machine_context"
-            ] = room_machine_context
+            # =============================================
+            # 🔥 HARD IMAGE GENERATION BLOCK
+            # =============================================
 
             if should_block_heavy_generation(
 
@@ -2178,6 +1888,10 @@ async def execute(
 
                 continue
 
+            # =============================================
+            # 🧠 AUTHORITY VALIDATION
+            # =============================================
+
             override = should_override(
 
                 result=result,
@@ -2197,10 +1911,6 @@ async def execute(
 
                 continue
 
-            result = sanitize_executor_output(
-                result
-            )
-
             result = safely_format_result(
 
                 result=result,
@@ -2212,15 +1922,6 @@ async def execute(
                 cognition=cognition,
 
                 visual_reference=visual_reference
-            )
-
-            result = assemble_room_response(
-
-                result=result,
-
-                room_name=room.name,
-
-                state=state
             )
 
             result_type = result.get(
@@ -2263,6 +1964,10 @@ async def execute(
 
             scene_results.append(result)
 
+            # =============================================
+            # 🔥 ABSOLUTE SINGLE RESPONSE LOCK
+            # =============================================
+
             break
 
         except Exception as e:
@@ -2274,9 +1979,17 @@ async def execute(
 
             traceback.print_exc()
 
+    # =============================================
+    # 🔥 SAFE RETURN
+    # =============================================
+
     if best_result:
 
         return best_result
+
+    # =================================================
+    # 🔥 TEXT FALLBACK
+    # =====================================================
 
     context_text = build_context_text(
 
