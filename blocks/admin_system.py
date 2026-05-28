@@ -1,28 +1,68 @@
-# =========================================================
-# 🧠 APRIL ADMIN MONITOR CORE
-# =========================================================
+=========================================================
+
+🧠 APRIL ADMIN MONITOR CORE
+
+=========================================================
 
 """
 APRIL ADMIN MONITOR CORE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the FUTURE PRIVATE WEB ADMIN CORE
-for the creator-level administration space of April.
+APRIL_FILE_ID:
+APRIL_ADMIN_MONITOR_CORE
 
-This is NOT:
-- Telegram admin panel
-- user dashboard
-- subscription authority
-- monetization controller
-- public analytics layer
+ROLE:
+PRIVATE_SUPERADMIN_MONITOR
 
-This file IS:
-- private Web admin support core
-- executor monitoring helper
-- internal diagnostics system
-- system awareness layer
-- future admin orchestration bridge
+ROOM:
+ADMIN_MONITOR_ROOM
+
+INPUT:
+
+- EXECUTOR_STATE
+- SYSTEM_HEALTH
+- ERROR_PRESSURE
+- ACTIVE_USERS
+- ROOM_TELEMETRY
+- ANALYZER_EVENTS
+
+OUTPUT:
+
+- ADMIN_DASHBOARD_PAYLOAD
+- EXECUTOR_SUPPORT_PAYLOAD
+- TELEMETRY_EXPORT
+- ANALYZER_EXPORT
+
+DEPENDENCIES:
+
+- storage
+- error_handler
+- executor
+- analyzer
+- telemetry
+
+CRITICAL:
+TRUE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 GOLDEN RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file NEVER:
+
+- controls cognition
+- replaces executor
+- mutates routing
+- owns orchestration
+
+This file ONLY:
+
+- monitors
+- analyzes
+- reports
+- stabilizes telemetry
+- exports diagnostics
+- supports superadmin awareness
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🧠 FUTURE PURPOSE
@@ -51,15 +91,18 @@ Users will NEVER access this system.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 BotRoot
- ↓
+↓
 Executor
- ↓
+↓
 Admin Monitor Core (THIS FILE)
+↓
+Private Web Admin
 
 This file NEVER controls users directly.
 This file NEVER replaces Executor authority.
 
 It only:
+
 - monitors
 - analyzes
 - reports
@@ -72,10 +115,10 @@ It only:
 This file operates using TWO isolated channels.
 
 1. ADMIN TASK CHANNEL
-Executor → Admin Core
+   Executor → Admin Core
 
 2. ADMIN RESPONSE CHANNEL
-Admin Core → Executor
+   Admin Core → Executor
 
 Human-layer data NEVER mixes with
 internal machine orchestration.
@@ -85,6 +128,7 @@ internal machine orchestration.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 DO NOT RE-ADD:
+
 - Telegram admin systems
 - aiogram
 - premium systems
@@ -95,16 +139,19 @@ DO NOT RE-ADD:
 - transport logic
 
 This file must remain:
+
 - lightweight
 - executor-connected
 - Web-oriented
 - diagnostics-focused
 - future-expandable
-"""
+  """
 
-# =========================================================
-# 🔥 STORAGE ACCESS
-# =========================================================
+=========================================================
+
+🔥 STORAGE ACCESS
+
+=========================================================
 
 """
 Only lightweight monitoring-safe
@@ -112,26 +159,44 @@ storage access remains active here.
 """
 
 from storage import (
-    get_all_users
+get_all_users
 )
 
-# =========================================================
-# 🧠 ERROR OBSERVER
-# =========================================================
+=========================================================
+
+🧠 ERROR OBSERVER
+
+=========================================================
 
 from blocks.error_handler import (
-    get_errors
+get_errors
 )
 
-# =========================================================
-# 🧠 SYSTEM CONFIG
-# =========================================================
+=========================================================
+
+🧠 CORE IMPORTS
+
+=========================================================
+
+from datetime import datetime
+
+=========================================================
+
+🧠 SYSTEM CONFIG
+
+=========================================================
 
 ADMIN_CORE_VERSION = "APRIL_WEB_ADMIN_CORE"
 
-# =========================================================
-# 🧠 MACHINE CHANNELS
-# =========================================================
+APRIL_FILE_ID = (
+"APRIL_ADMIN_MONITOR_CORE"
+)
+
+=========================================================
+
+🧠 MACHINE CHANNELS
+
+=========================================================
 
 """
 This helper core communicates only through
@@ -140,273 +205,531 @@ isolated internal machine channels.
 
 ADMIN_TASK_CHANNEL = {
 
-    "channel":
-        "admin_machine_task_channel",
+"channel":
+    "admin_machine_task_channel",
 
-    "isolated":
-        True
+"isolated":
+    True
+
 }
 
 ADMIN_RESPONSE_CHANNEL = {
 
-    "channel":
-        "admin_machine_response_channel",
+"channel":
+    "admin_machine_response_channel",
 
-    "isolated":
-        True
+"isolated":
+    True
+
 }
 
-# =========================================================
-# 👥 USER REGISTRY STABILIZER
-# =========================================================
+=========================================================
+
+🔥 TRACE LOGGER
+
+=========================================================
+
+def APRIL_LOG_IN(
+room,
+metadata=None
+):
+
+try:
+
+    print(
+        "🟢 APRIL_LOG_IN",
+        {
+            "room":
+                room,
+
+            "file":
+                APRIL_FILE_ID,
+
+            "timestamp":
+                datetime.utcnow().isoformat(),
+
+            **(
+                metadata or {}
+            )
+        }
+    )
+
+except Exception:
+    pass
+
+def APRIL_LOG_OUT(
+room,
+metadata=None
+):
+
+try:
+
+    print(
+        "🔵 APRIL_LOG_OUT",
+        {
+            "room":
+                room,
+
+            "file":
+                APRIL_FILE_ID,
+
+            "timestamp":
+                datetime.utcnow().isoformat(),
+
+            **(
+                metadata or {}
+            )
+        }
+    )
+
+except Exception:
+    pass
+
+=========================================================
+
+👥 USER REGISTRY STABILIZER
+
+=========================================================
 
 def register_user(user_id):
 
-    """
-    Legacy Telegram registration removed.
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "register_user",
 
-    User lifecycle now belongs to:
-    - Executor
-    - Web identity systems
-    - Web authentication systems
-
-    This function remains only for
-    compatibility stabilization.
-    """
-
-    return {
-
-        "success": True,
-
-        "user_id": user_id
+        "user_id":
+            user_id
     }
+)
 
-# =========================================================
-# 📋 EVENT OBSERVER
-# =========================================================
+result = {
+
+    "success": True,
+
+    "user_id": user_id
+}
+
+APRIL_LOG_OUT(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "register_user_complete"
+    }
+)
+
+return result
+
+=========================================================
+
+📋 EVENT OBSERVER
+
+=========================================================
 
 def log_event(
-    user_id,
-    event_type
+user_id,
+event_type
 ):
 
-    """
-    Future Web analytics bridge.
-
-    This module may later feed:
-    - admin analytics
-    - execution statistics
-    - room diagnostics
-    - orchestration timelines
-    """
-
-    return {
-
-        "success": True,
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "log_event",
 
         "event_type":
-            event_type,
-
-        "channel":
-            ADMIN_RESPONSE_CHANNEL
+            event_type
     }
+)
 
-# =========================================================
-# 👥 ACTIVE USER ANALYSIS
-# =========================================================
+result = {
+
+    "success": True,
+
+    "event_type":
+        event_type,
+
+    "channel":
+        ADMIN_RESPONSE_CHANNEL
+}
+
+APRIL_LOG_OUT(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "event_logged"
+    }
+)
+
+return result
+
+=========================================================
+
+👥 ACTIVE USER ANALYSIS
+
+=========================================================
 
 def get_active_users():
 
-    """
-    Lightweight active user estimation.
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "active_users_scan"
+    }
+)
 
-    No subscription systems.
-    No monetization authority.
-    """
+try:
 
-    try:
+    users = get_all_users()
 
-        users = get_all_users()
+    total = len(users)
 
-        return len(users)
+    APRIL_LOG_OUT(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "active_users":
+                total
+        }
+    )
 
-    except Exception as e:
+    return total
 
-        print(
+except Exception as e:
 
-            "🔥 ACTIVE USERS ERROR:",
+    print(
+        "🔥 ACTIVE USERS ERROR:",
+        e
+    )
 
-            e
-        )
+    return 0
 
-        return 0
+=========================================================
 
-# =========================================================
-# ⚠️ ERROR PRESSURE ANALYSIS
-# =========================================================
+⚠️ ERROR PRESSURE ANALYSIS
+
+=========================================================
 
 def get_errors_count():
 
-    """
-    Internal execution error pressure.
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "error_pressure_scan"
+    }
+)
 
-    Used by:
-    - Executor
-    - Admin monitoring
-    - future recovery systems
-    """
+try:
 
-    try:
+    errors = get_errors()
 
-        errors = get_errors()
+    total = len(errors)
 
-        return len(errors)
+    APRIL_LOG_OUT(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "error_pressure":
+                total
+        }
+    )
 
-    except Exception:
+    return total
 
-        return 0
+except Exception:
 
-# =========================================================
-# 🧠 SYSTEM HEALTH ANALYSIS
-# =========================================================
+    return 0
+
+=========================================================
+
+🧠 SYSTEM HEALTH ANALYSIS
+
+=========================================================
 
 def get_system_health():
 
-    """
-    Core health snapshot for:
-    - private admin panel
-    - Executor awareness
-    - orchestration diagnostics
-    """
-
-    users = get_active_users()
-
-    errors = get_errors_count()
-
-    # =====================================================
-    # 🧠 HEALTH STATUS
-    # =====================================================
-
-    if errors > 25:
-
-        status = "OVERLOAD"
-
-    elif errors > 10:
-
-        status = "WARNING"
-
-    else:
-
-        status = "STABLE"
-
-    return {
-
-        "system":
-            "APRIL",
-
-        "version":
-            ADMIN_CORE_VERSION,
-
-        "status":
-            status,
-
-        "active_users":
-            users,
-
-        "error_pressure":
-            errors,
-
-        "web_mode":
-            True,
-
-        "telegram_mode":
-            False
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "health_analysis"
     }
+)
 
-# =========================================================
-# 🧠 EXECUTOR SUPPORT PAYLOAD
-# =========================================================
+users = get_active_users()
+
+errors = get_errors_count()
+
+# =====================================================
+# 🧠 HEALTH STATUS
+# =====================================================
+
+if errors > 25:
+
+    status = "offline"
+
+elif errors > 10:
+
+    status = "warning"
+
+else:
+
+    status = "online"
+
+payload = {
+
+    "system":
+        "APRIL",
+
+    "version":
+        ADMIN_CORE_VERSION,
+
+    "status":
+        status,
+
+    "active_users":
+        users,
+
+    "error_pressure":
+        errors,
+
+    "web_mode":
+        True,
+
+    "telegram_mode":
+        False,
+
+    "analyzer_ready":
+        True,
+
+    "telemetry_ready":
+        True
+}
+
+APRIL_LOG_OUT(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "status":
+            status
+    }
+)
+
+return payload
+
+=========================================================
+
+🧠 EXECUTOR SUPPORT PAYLOAD
+
+=========================================================
 
 def build_executor_support_payload():
 
-    """
-    Internal machine payload for Executor.
-
-    This payload NEVER goes directly
-    to frontend or users.
-    """
-
-    health = get_system_health()
-
-    return {
-
-        "channel":
-            ADMIN_RESPONSE_CHANNEL,
-
-        "payload_type":
-            "executor_support",
-
-        "system":
-            health.get(
-                "system"
-            ),
-
-        "status":
-            health.get(
-                "status"
-            ),
-
-        "active_users":
-            health.get(
-                "active_users"
-            ),
-
-        "error_pressure":
-            health.get(
-                "error_pressure"
-            ),
-
-        "web_mode":
-            True
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "executor_payload_build"
     }
+)
 
-# =========================================================
-# 🧠 FUTURE ADMIN PANEL PAYLOAD
-# =========================================================
+health = get_system_health()
+
+payload = {
+
+    "channel":
+        ADMIN_RESPONSE_CHANNEL,
+
+    "payload_type":
+        "executor_support",
+
+    "system":
+        health.get(
+            "system"
+        ),
+
+    "status":
+        health.get(
+            "status"
+        ),
+
+    "active_users":
+        health.get(
+            "active_users"
+        ),
+
+    "error_pressure":
+        health.get(
+            "error_pressure"
+        ),
+
+    "web_mode":
+        True
+}
+
+APRIL_LOG_OUT(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "payload":
+            "executor_support"
+    }
+)
+
+return payload
+
+=========================================================
+
+🧠 ADMIN TELEMETRY EXPORT
+
+=========================================================
+
+def build_admin_telemetry_export():
+
+"""
+Safe telemetry export for:
+- Web superadmin
+- diagnostics
+- analyzer
+- monitoring widgets
+"""
+
+health = get_system_health()
+
+return {
+
+    "system_status":
+        health.get(
+            "status"
+        ),
+
+    "online_users":
+        health.get(
+            "active_users"
+        ),
+
+    "error_pressure":
+        health.get(
+            "error_pressure"
+        ),
+
+    "voice_status":
+        "online",
+
+    "render_status":
+        "online",
+
+    "trace_status":
+        "online",
+
+    "memory_status":
+        "online",
+
+    "multimodal_status":
+        "online",
+
+    "session_status":
+        "online"
+}
+
+=========================================================
+
+🧠 ANALYZER EXPORT
+
+=========================================================
+
+def build_analyzer_payload():
+
+"""
+Reserved analyzer bridge.
+
+Future analyzer:
+- room scanning
+- continuity checks
+- render diagnostics
+- telemetry verification
+- executor tracing
+"""
+
+health = get_system_health()
+
+return {
+
+    "analyzer":
+        True,
+
+    "status":
+        health.get(
+            "status"
+        ),
+
+    "active_users":
+        health.get(
+            "active_users"
+        ),
+
+    "error_pressure":
+        health.get(
+            "error_pressure"
+        ),
+
+    "continuity":
+        "stable",
+
+    "render":
+        "stable",
+
+    "trace":
+        "stable"
+}
+
+=========================================================
+
+🧠 FUTURE ADMIN PANEL PAYLOAD
+
+=========================================================
 
 def build_admin_dashboard_payload():
 
-    """
-    Reserved future payload builder
-    for the creator Web admin panel.
-
-    Future expansion examples:
-    - room activity
-    - execution graphs
-    - orchestration pressure
-    - cognitive room diagnostics
-    - memory pressure
-    - active flows
-    - recovery tools
-    - execution tracing
-    """
-
-    health = get_system_health()
-
-    return {
-
-        "channel":
-            ADMIN_RESPONSE_CHANNEL,
-
-        "dashboard_type":
-            "private_creator_admin",
-
-        "system_health":
-            health,
-
-        "executor_connected":
-            True,
-
-        "future_expansion":
-            True
+APRIL_LOG_IN(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "action":
+            "dashboard_payload_build"
     }
+)
+
+health = get_system_health()
+
+payload = {
+
+    "channel":
+        ADMIN_RESPONSE_CHANNEL,
+
+    "dashboard_type":
+        "private_creator_admin",
+
+    "system_health":
+        health,
+
+    "telemetry":
+        build_admin_telemetry_export(),
+
+    "analyzer":
+        build_analyzer_payload(),
+
+    "executor_connected":
+        True,
+
+    "future_expansion":
+        True
+}
+
+APRIL_LOG_OUT(
+    "ADMIN_MONITOR_ROOM",
+    {
+        "payload":
+            "dashboard_payload"
+    }
+)
+
+return payload
