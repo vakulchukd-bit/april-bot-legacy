@@ -1,7 +1,77 @@
 # blocks/semantic_core.py
 
-from blocks.interpretation_layer import interpret_request
+from blocks.interpretation_layer import (
+    interpret_request
+)
 
+# =====================================================
+# 🧠 APRIL SEMANTIC CORE
+# =====================================================
+
+"""
+APRIL SEMANTIC CORE
+
+ROLE:
+- lightweight semantic analysis
+- renderer-first semantic hints
+- continuity-safe interpretation
+- machine-safe orchestration support
+- execution pressure estimation
+
+SEMANTIC CORE НЕ:
+- authority system
+- hard router
+- renderer executor
+- generation trigger
+- orchestration owner
+"""
+
+# =====================================================
+# 🔥 MACHINE IDENTITY
+# =====================================================
+
+APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
+
+SEMANTIC_MACHINE_CHANNEL = {
+
+    "type": "semantic_core",
+
+    "mode": "machine_understanding",
+
+    "isolated": True,
+
+    "continuity_safe": True,
+
+    "renderer_safe": True,
+
+    "web_safe": True
+}
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+SEMANTIC_PATCH_LOG = []
+
+def safe_semantic_log(msg):
+
+    try:
+
+        print(
+            "SEMANTIC CORE:",
+            msg
+        )
+
+        SEMANTIC_PATCH_LOG.append(
+            str(msg)
+        )
+
+    except:
+        pass
+
+safe_semantic_log(
+    "SEMANTIC CORE INITIALIZED"
+)
 
 # =====================================================
 # 🔥 HELPERS
@@ -41,7 +111,6 @@ def safe_probability(
     return clamp(
         value + boost
     )
-
 
 # =====================================================
 # 🔥 MACHINE SIGNALS
@@ -167,7 +236,6 @@ def detect_execution_probability(
 
     return clamp(probability)
 
-
 # =====================================================
 # 🔥 ANALYZE
 # =====================================================
@@ -188,6 +256,10 @@ def analyze(
     history = history or []
     active_flow = active_flow or {}
     dialog_state = dialog_state or {}
+
+    safe_semantic_log(
+        f"INPUT: {t[:80]}"
+    )
 
     # =====================================================
     # 🔥 MACHINE PROBABILITIES
@@ -214,6 +286,25 @@ def analyze(
     # =====================================================
 
     result = {
+
+        # =================================================
+        # 🧠 MACHINE
+        # =====================================================
+
+        "machine_channel":
+            SEMANTIC_MACHINE_CHANNEL,
+
+        "semantic_core_active":
+            True,
+
+        "web_safe":
+            True,
+
+        "renderer_safe":
+            True,
+
+        "provider_safe":
+            True,
 
         # =================================================
         # 🧠 CORE
@@ -362,7 +453,17 @@ def analyze(
     # 🔥 INTERPRETATION
     # =====================================================
 
-    interpreted = interpret_request(text)
+    interpreted = interpret_request(
+
+        text,
+
+        cognition=state.get(
+            "cognition",
+            {}
+        ),
+
+        semantic=result
+    )
 
     if interpreted:
 
@@ -377,6 +478,60 @@ def analyze(
         )
 
         result["confidence"] = 0.82
+
+        result[
+            "possible_scene_type"
+        ] = interpreted.get(
+            "scene_type"
+        )
+
+        # ================================================
+        # 🔥 CONTINUATION
+        # ================================================
+
+        if interpreted.get(
+            "continuation"
+        ):
+
+            result[
+                "continuation"
+            ] = True
+
+        # ================================================
+        # 🔥 RENDERER
+        # ================================================
+
+        if interpreted.get(
+            "prefer_renderer"
+        ):
+
+            result[
+                "prefer_renderer"
+            ] = True
+
+            result[
+                "render_intent"
+            ] = True
+
+            result[
+                "renderer_scene_object"
+            ] = True
+
+        # ================================================
+        # 🔥 IMAGE
+        # ================================================
+
+        if interpreted.get(
+            "explicit_image_generation"
+        ):
+
+            result[
+                "visual_generation_needed"
+            ] = True
+
+            result[
+                "explicit_image_generation_only"
+            ] = True
 
     # =====================================================
     # 🔥 ACTIVE FLOW
@@ -600,5 +755,13 @@ def analyze(
         result[key] = clamp(
             result.get(key, 0.0)
         )
+
+    safe_semantic_log(
+        f"INTENT: {result['intent']}"
+    )
+
+    safe_semantic_log(
+        f"ROOM: {result['possible_room']}"
+    )
 
     return result
