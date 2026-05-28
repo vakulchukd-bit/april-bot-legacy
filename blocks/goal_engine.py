@@ -1,8 +1,151 @@
+# =====================================================
+# 🧠 APRIL GOAL & TRAJECTORY STABILIZATION CORE
+# =====================================================
+
+"""
+APRIL GOAL STABILIZATION CORE
+
+APRIL_FILE_ID:
+APRIL_GOAL_TRAJECTORY_STABILIZATION_CORE
+
+ROLE:
+GOAL_CONTINUITY_COORDINATOR
+
+INPUT:
+USER_TEXT
+STATE
+SEMANTIC_CONTEXT
+
+OUTPUT:
+GOAL_STATE
+TRAJECTORY_STATE
+CONTINUATION_STATE
+EXECUTION_DECISION
+
+THIS FILE IS:
+- goal stabilization layer
+- trajectory continuity helper
+- execution pacing system
+- semantic continuation coordinator
+- dialog flow protector
+
+THIS FILE IS NOT:
+- executor
+- orchestration authority
+- renderer engine
+- response formatter
+- cognition narrator
+- memory authority
+
+GOLDEN APRIL PRINCIPLES:
+- continuation before escalation
+- execution only on confidence
+- preserve trajectory
+- lightweight continuity
+- no forced execution
+- calm semantic routing
+"""
+
+# =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = (
+    "APRIL_GOAL_TRAJECTORY_STABILIZATION_CORE"
+)
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+GOAL_TASK_CHANNEL = {
+
+    "channel":
+        "goal_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+GOAL_RESPONSE_CHANNEL = {
+
+    "channel":
+        "goal_machine_response_channel",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGGING
+# =====================================================
+
+def build_goal_input_log():
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "goal_input",
+
+        "channel":
+            GOAL_TASK_CHANNEL,
+
+        "machine_only":
+            True
+    }
+
+
+def build_goal_output_log(
+    goal,
+    mode
+):
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "goal_output",
+
+        "goal":
+            goal,
+
+        "response_mode":
+            mode,
+
+        "channel":
+            GOAL_RESPONSE_CHANNEL,
+
+        "machine_only":
+            True
+    }
+
+# =====================================================
+# 🔥 MAIN GOAL DETECTION
+# =====================================================
+
 def detect_goal(
+
     text: str,
     state: dict,
     semantic: dict
 ):
+
+    """
+    Main trajectory stabilization layer.
+
+    Responsible ONLY for:
+    - goal continuity
+    - semantic pacing
+    - execution escalation control
+    - trajectory preservation
+    """
+
+    build_goal_input_log()
 
     semantic = semantic or {}
 
@@ -21,15 +164,17 @@ def detect_goal(
 
     # =================================================
     # 🔥 LAST USER MESSAGE
-    # =================================================
+    # =====================================================
 
     for msg in reversed(dialog):
 
         if msg.get("role") == "user":
 
             content = (
+
                 msg.get("content")
                 or ""
+
             ).strip()
 
             if content != text:
@@ -39,7 +184,7 @@ def detect_goal(
 
     # =================================================
     # 🔥 SEMANTIC VALUES
-    # =================================================
+    # =====================================================
 
     execution_pressure = semantic.get(
         "execution_pressure",
@@ -76,7 +221,7 @@ def detect_goal(
 
     # =================================================
     # 🔥 TRAJECTORY DEFAULT
-    # =================================================
+    # =====================================================
 
     semantic["trajectory_active"] = True
 
@@ -94,11 +239,18 @@ def detect_goal(
 
     semantic["response_requires_reflection"] = True
 
+    semantic["goal_machine_channel"] = (
+        GOAL_RESPONSE_CHANNEL
+    )
+
+    semantic["goal_stabilization_active"] = True
+
     # =================================================
     # 🔥 EXPLORATION PROTECTION
-    # =================================================
+    # =====================================================
 
     exploration_words = [
+
         "примерно",
         "идея",
         "вариант",
@@ -111,6 +263,7 @@ def detect_goal(
     ]
 
     exploration_detected = any(
+
         w in t
         for w in exploration_words
     )
@@ -135,12 +288,16 @@ def detect_goal(
 
     # =================================================
     # 🔥 EXECUTION ESCALATION
-    # =================================================
+    # =====================================================
 
     if (
+
         should_execute
+
         and capability_confidence >= 0.72
+
         and ambiguity_level < 0.45
+
         and not semantic.get(
             "capability_should_wait",
             False
@@ -159,7 +316,7 @@ def detect_goal(
 
     # =================================================
     # 🔥 ACTIVE FLOW
-    # =================================================
+    # =====================================================
 
     if active:
 
@@ -175,12 +332,13 @@ def detect_goal(
 
         # =================================================
         # 🖼 IMAGE TRAJECTORY
-        # =================================================
+        # =====================================================
 
         if flow_type == "image":
 
             # 🔥 image continuation authority
             if semantic_room in [
+
                 "image_generate",
                 "image_edit"
             ]:
@@ -207,11 +365,21 @@ def detect_goal(
                     "conversation_alive"
                 ] = True
 
+                build_goal_output_log(
+                    "continue_image",
+                    semantic.get(
+                        "response_mode",
+                        "guide"
+                    )
+                )
+
                 return semantic
 
             # 🔥 lightweight continuation
             if (
+
                 execution_pressure >= 0.45
+
                 or len(t) <= 50
             ):
 
@@ -228,10 +396,12 @@ def detect_goal(
 
                     "confidence":
                         max(
+
                             semantic.get(
                                 "confidence",
                                 0.5
                             ),
+
                             0.82
                         ),
 
@@ -260,8 +430,9 @@ def detect_goal(
                         True
                 })
 
-                # 🔥 only explicit edit escalates
+                # 🔥 explicit edit escalates
                 explicit_edit_words = [
+
                     "измени",
                     "убери",
                     "добавь",
@@ -269,6 +440,7 @@ def detect_goal(
                 ]
 
                 if any(
+
                     w in t
                     for w in explicit_edit_words
                 ):
@@ -281,11 +453,19 @@ def detect_goal(
                         "should_execute"
                     ] = True
 
+                build_goal_output_log(
+                    "continue_image",
+                    semantic.get(
+                        "response_mode",
+                        "guide"
+                    )
+                )
+
                 return semantic
 
         # =================================================
         # 📈 MATH TRAJECTORY
-        # =================================================
+        # =====================================================
 
         if flow_type == "math":
 
@@ -313,10 +493,20 @@ def detect_goal(
                     "conversation_alive"
                 ] = True
 
+                build_goal_output_log(
+                    "continue_math",
+                    semantic.get(
+                        "response_mode",
+                        "guide"
+                    )
+                )
+
                 return semantic
 
             if (
+
                 execution_pressure >= 0.4
+
                 or len(t) <= 50
             ):
 
@@ -333,10 +523,12 @@ def detect_goal(
 
                     "confidence":
                         max(
+
                             semantic.get(
                                 "confidence",
                                 0.5
                             ),
+
                             0.82
                         ),
 
@@ -367,6 +559,7 @@ def detect_goal(
 
                 # 🔥 explicit math execution only
                 explicit_math_words = [
+
                     "реши",
                     "посчитай",
                     "построй",
@@ -374,6 +567,7 @@ def detect_goal(
                 ]
 
                 if any(
+
                     w in t
                     for w in explicit_math_words
                 ):
@@ -386,19 +580,29 @@ def detect_goal(
                         "should_execute"
                     ] = True
 
+                build_goal_output_log(
+                    "continue_math",
+                    semantic.get(
+                        "response_mode",
+                        "guide"
+                    )
+                )
+
                 return semantic
 
     # =================================================
     # 🔥 DIALOG FATIGUE
-    # =================================================
+    # =====================================================
 
     if len(dialog) >= 12:
 
         semantic["conversation_value"] = min(
+
             semantic.get(
                 "conversation_value",
                 1.0
             ),
+
             0.45
         )
 
@@ -411,7 +615,7 @@ def detect_goal(
 
     # =================================================
     # 🔥 GOAL STABILITY
-    # =================================================
+    # =====================================================
 
     if dialog_state == "exploration":
 
@@ -423,7 +627,7 @@ def detect_goal(
 
     # =================================================
     # 🔥 FINAL SAFETY
-    # =================================================
+    # =====================================================
 
     if semantic.get(
         "capability_should_wait"
@@ -434,7 +638,24 @@ def detect_goal(
         semantic["response_mode"] = "guide"
 
     # =================================================
-    # 🔥 DEFAULT
+    # 🔥 OUTPUT LOG
+    # =====================================================
+
+    build_goal_output_log(
+
+        semantic.get(
+            "goal",
+            "unknown"
+        ),
+
+        semantic.get(
+            "response_mode",
+            "guide"
+        )
+    )
+
     # =================================================
+    # 🔥 DEFAULT
+    # =====================================================
 
     return semantic
