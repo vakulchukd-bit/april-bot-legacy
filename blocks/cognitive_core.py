@@ -3,125 +3,59 @@
 # =========================================================
 
 """
-APRIL COGNITION STABILIZATION CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the cognitive interpretation
-and behavioral stabilization layer of April.
+APRIL_FILE_ID:
+APRIL_COGNITION_STABILIZATION_CORE
 
-This helper core analyzes:
-- user intent
-- dialog continuity
-- user pressure
-- trajectory state
-- render needs
-- human interaction flow
+ROLE:
+COGNITION_AND_TRAJECTORY_STABILIZER
 
-It helps Executor understand:
-HOW April should think,
-focus,
-continue,
-and respond.
+ROOM:
+COGNITION_ROOM
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INPUT:
+USER_TEXT
+STATE
+SEMANTIC_PAYLOAD
+REASONING_PAYLOAD
+ACTIVE_FLOW
+VISUAL_MEMORY
 
-This file IS:
-- cognition stabilization layer
-- continuity analyzer
-- dialog flow analyzer
-- render intent detector
-- human interaction analyzer
-- trajectory stabilization helper
-- behavioral cognition helper
+OUTPUT:
+COGNITION_STATE
+TRAJECTORY_ANALYSIS
+CONTINUITY_ANALYSIS
+RENDER_INTENT_ANALYSIS
+ANALYZER_TELEMETRY
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS NOT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPENDENCIES:
+EXECUTOR
+VISUAL_MEMORY_LIBRARY
+CONTINUITY_SYSTEM
+ANALYZER_SYSTEM
 
-This file is NOT:
-- Executor
-- orchestration engine
-- router
-- frontend renderer
-- governance system
-- memory authority
-- personality narrator
-- Telegram logic
-- response formatter
+CRITICAL:
+TRUE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
+🧠 GOLDEN RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-BotRoot
- ↓
-Executor
- ↓
-Cognition Stabilization Core (THIS FILE)
- ↓
-Execution Rooms
+This file NEVER:
+- orchestrates execution
+- routes providers
+- renders frontend
+- formats responses
 
-Executor routes.
-This file helps Executor understand:
-- user state
-- continuity
-- trajectory
-- render needs
-- behavioral pacing
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN MACHINE CHANNEL RULE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file uses TWO isolated channels.
-
-1. COGNITION TASK CHANNEL
-Executor → Cognition Core
-
-2. COGNITION RESPONSE CHANNEL
-Cognition Core → Executor
-
-Human-facing responses NEVER mix
-with cognition analysis structures.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN APRIL RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. continuity before fragmentation
-2. cognition before generation
-3. renderer before heavy visuals
-4. human understanding before performance
-5. dialog trajectory protection
-6. anti-chaos cognition
-7. no internal leakage
-8. no cognitive narration
-9. no duplicated orchestration
-10. Web-space first
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram logic
-- frontend rendering
-- orchestration duplication
-- governance duplication
-- personality narration
-- analytics logic
-- routing logic
-- execution logic
-
-This file must remain:
-- cognitive
-- lightweight
-- continuity-focused
-- Executor-compatible
-- behaviorally stable
+This file ONLY:
+- stabilizes cognition
+- analyzes trajectory
+- protects continuity
+- detects render intent
+- stabilizes dialog behavior
 """
 
 # =========================================================
@@ -153,6 +87,61 @@ COGNITION_RESPONSE_CHANNEL = {
     "isolated":
         True
 }
+
+# =========================================================
+# 🔥 APRIL TRACE LOGS
+# =========================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_COGNITION_STABILIZATION_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_COGNITION_STABILIZATION_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
 
 # =========================================================
 # 🧠 SAFE HELPERS
@@ -210,6 +199,58 @@ def _contains_any(
         w in text
         for w in words
     )
+
+# =========================================================
+# 🧠 ANALYZER TELEMETRY
+# =========================================================
+
+def build_cognition_telemetry():
+
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "build_cognition_telemetry"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_COGNITION_STABILIZATION_CORE",
+
+        "room":
+            "COGNITION_ROOM",
+
+        "continuity_safe":
+            True,
+
+        "trajectory_tracking":
+            True,
+
+        "render_detection":
+            True,
+
+        "dialog_analysis":
+            True,
+
+        "executor_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "telemetry":
+                "ready"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 SEMANTIC SIGNALS
@@ -271,10 +312,15 @@ def detect_meta_ai_behavior(
     text: str
 ):
 
-    """
-    Prevents meta-AI loops
-    and system-trigger behavior.
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "detect_meta_ai_behavior"
+        }
+    )
 
     t = (text or "").lower()
 
@@ -287,10 +333,22 @@ def detect_meta_ai_behavior(
         "как chatgpt"
     ]
 
-    return any(
+    result = any(
         x in t
         for x in meta_words
     )
+
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "meta_detected":
+                result
+        }
+    )
+
+    return result
 
 # =========================================================
 # 🧠 DIALOG CONTINUITY
@@ -300,10 +358,15 @@ def build_dialog_continuity(
     dialog: list
 ):
 
-    """
-    Builds lightweight continuity state
-    for Executor trajectory stabilization.
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "build_dialog_continuity"
+        }
+    )
 
     continuity = {
 
@@ -334,6 +397,17 @@ def build_dialog_continuity(
     }
 
     if not dialog:
+
+        APRIL_LOG_OUT(
+
+            "COGNITION_ROOM",
+
+            {
+                "continuity":
+                    "empty_dialog"
+            }
+        )
+
         return continuity
 
     recent_messages = dialog[-12:]
@@ -381,10 +455,6 @@ def build_dialog_continuity(
             unresolved.append(
                 content[:280]
             )
-
-        # =================================================
-        # 🧠 HUMAN DEPTH
-        # =====================================================
 
         if (
 
@@ -457,6 +527,16 @@ def build_dialog_continuity(
         ]
     )
 
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "continuity":
+                "built"
+        }
+    )
+
     return continuity
 
 # =========================================================
@@ -468,11 +548,28 @@ def stabilize_trajectory(
     active_flow
 ):
 
-    """
-    Preserves user trajectory continuity.
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "stabilize_trajectory"
+        }
+    )
 
     if not active_flow:
+
+        APRIL_LOG_OUT(
+
+            "COGNITION_ROOM",
+
+            {
+                "trajectory":
+                    "inactive"
+            }
+        )
+
         return cognition
 
     cognition[
@@ -509,6 +606,16 @@ def stabilize_trajectory(
         0.3
     )
 
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "trajectory":
+                "stabilized"
+        }
+    )
+
     return cognition
 
 # =========================================================
@@ -519,9 +626,15 @@ def detect_render_intent(
     text: str
 ):
 
-    """
-    Detects renderer-space requests.
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "detect_render_intent"
+        }
+    )
 
     t = text.lower()
 
@@ -534,7 +647,7 @@ def detect_render_intent(
 
         render_score += 0.85
 
-    return {
+    payload = {
 
         "render_score":
             _clamp(render_score),
@@ -542,6 +655,18 @@ def detect_render_intent(
         "prefer_renderer":
             render_score >= 0.6
     }
+
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "render_score":
+                payload["render_score"]
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 VISUAL MODE
@@ -552,9 +677,15 @@ def build_visual_mode(
     visual_memory: dict
 ):
 
-    """
-    Lightweight visual continuity mode.
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "build_visual_mode"
+        }
+    )
 
     mode = {
 
@@ -585,6 +716,16 @@ def build_visual_mode(
             "lightweight"
         ] = True
 
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "visual_mode":
+                mode["enabled"]
+        }
+    )
+
     return mode
 
 # =========================================================
@@ -595,13 +736,15 @@ def stabilize_dialog_behavior(
     cognition: dict
 ):
 
-    """
-    Prevents:
-    - robotic responses
-    - meta leakage
-    - personality overflow
-    - fragmented behavior
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "stabilize_dialog_behavior"
+        }
+    )
 
     if cognition.get(
         "understands_user_goal"
@@ -659,6 +802,16 @@ def stabilize_dialog_behavior(
             0.15
         )
 
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "dialog":
+                "stabilized"
+        }
+    )
+
     return cognition
 
 # =========================================================
@@ -669,10 +822,15 @@ def stabilize_cognition_state(
     cognition: dict
 ):
 
-    """
-    Reduces cognition chaos
-    during long dialog flows.
-    """
+    APRIL_LOG_IN(
+
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "stabilize_cognition_state"
+        }
+    )
 
     stability = cognition.get(
         "scene_stability",
@@ -714,6 +872,16 @@ def stabilize_cognition_state(
         "signal_overload"
     ] = _clamp(overload)
 
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "stability":
+                cognition["scene_stability"]
+        }
+    )
+
     return cognition
 
 # =========================================================
@@ -728,16 +896,15 @@ def analyze_cognition(
     reasoning: dict
 ):
 
-    """
-    Main cognition analysis layer.
+    APRIL_LOG_IN(
 
-    Executor uses this helper to understand:
-    - user state
-    - continuity
-    - render needs
-    - pacing
-    - trajectory
-    """
+        "COGNITION_ROOM",
+
+        {
+            "action":
+                "analyze_cognition"
+        }
+    )
 
     t = (
         text or ""
@@ -771,10 +938,6 @@ def analyze_cognition(
 
     cognition = {
 
-        # =================================================
-        # 🧠 USER INTENT
-        # =====================================================
-
         "wants_action":
             0.0,
 
@@ -786,10 +949,6 @@ def analyze_cognition(
 
         "wants_dialog":
             0.0,
-
-        # =================================================
-        # 🧠 STABILITY
-        # =====================================================
 
         "execution_pressure":
             0.0,
@@ -803,10 +962,6 @@ def analyze_cognition(
         "signal_overload":
             0.05,
 
-        # =================================================
-        # 🧠 EXECUTION
-        # =====================================================
-
         "prefer_execution":
             False,
 
@@ -818,10 +973,6 @@ def analyze_cognition(
 
         "renderer_space_active":
             False,
-
-        # =================================================
-        # 🧠 CONTINUITY
-        # =====================================================
 
         "needs_guidance":
             False,
@@ -838,10 +989,6 @@ def analyze_cognition(
         "dialogue_still_alive":
             True,
 
-        # =================================================
-        # 🧠 HUMAN FLOW
-        # =====================================================
-
         "response_should_feel_human":
             False,
 
@@ -853,10 +1000,6 @@ def analyze_cognition(
 
         "response_should_reduce_robotic_tone":
             True,
-
-        # =================================================
-        # 🧠 DIALOG
-        # =====================================================
 
         "tracks_multiple_topics":
             False,
@@ -870,10 +1013,6 @@ def analyze_cognition(
         "avoid_topic_loss":
             True,
 
-        # =================================================
-        # 🧠 MEMORY
-        # =====================================================
-
         "continuity_state":
             continuity,
 
@@ -883,20 +1022,15 @@ def analyze_cognition(
         "visual_mode":
             visual_mode,
 
-        # =================================================
-        # 🧠 CHANNELS
-        # =====================================================
-
         "machine_task_channel":
             COGNITION_TASK_CHANNEL,
 
         "machine_response_channel":
-            COGNITION_RESPONSE_CHANNEL
-    }
+            COGNITION_RESPONSE_CHANNEL,
 
-    # =====================================================
-    # 🧠 META SUPPRESSION
-    # =====================================================
+        "telemetry":
+            build_cognition_telemetry()
+    }
 
     if detect_meta_ai_behavior(t):
 
@@ -914,10 +1048,6 @@ def analyze_cognition(
             0.25
         )
 
-    # =====================================================
-    # 🧠 ACTION UNDERSTANDING
-    # =====================================================
-
     if _contains_any(
         t,
         ACTION_WORDS
@@ -932,10 +1062,6 @@ def analyze_cognition(
         cognition[
             "prefer_execution"
         ] = True
-
-    # =====================================================
-    # 🧠 HELP UNDERSTANDING
-    # =====================================================
 
     if _contains_any(
         t,
@@ -952,10 +1078,6 @@ def analyze_cognition(
             "needs_guidance"
         ] = True
 
-    # =====================================================
-    # 🧠 VISUAL UNDERSTANDING
-    # =====================================================
-
     if _contains_any(
         t,
         VISUAL_WORDS
@@ -970,10 +1092,6 @@ def analyze_cognition(
         cognition[
             "prefer_visual"
         ] = True
-
-    # =====================================================
-    # 🧠 RENDER UNDERSTANDING
-    # =====================================================
 
     if render_analysis.get(
         "prefer_renderer"
@@ -991,10 +1109,6 @@ def analyze_cognition(
             "prefer_visual"
         ] = False
 
-    # =====================================================
-    # 🧠 WEB CONTEXT
-    # =====================================================
-
     if _contains_any(
         t,
         TRAVEL_WORDS
@@ -1004,18 +1118,10 @@ def analyze_cognition(
             "internet_context_needed"
         ] = True
 
-    # =====================================================
-    # 🧠 CONTINUITY
-    # =====================================================
-
     cognition = stabilize_trajectory(
         cognition,
         active_flow
     )
-
-    # =====================================================
-    # 🧠 REASONING INHERITANCE
-    # =====================================================
 
     if reasoning:
 
@@ -1034,10 +1140,6 @@ def analyze_cognition(
             cognition[
                 "prefer_execution"
             ] = True
-
-    # =====================================================
-    # 🧠 GOAL UNDERSTANDING
-    # =====================================================
 
     if (
 
@@ -1059,10 +1161,6 @@ def analyze_cognition(
             "understands_user_goal"
         ] = True
 
-    # =====================================================
-    # 🧠 STABILIZATION
-    # =====================================================
-
     cognition = stabilize_dialog_behavior(
         cognition
     )
@@ -1070,10 +1168,6 @@ def analyze_cognition(
     cognition = stabilize_cognition_state(
         cognition
     )
-
-    # =====================================================
-    # 🧠 FINAL NORMALIZATION
-    # =====================================================
 
     for key, value in cognition.items():
 
@@ -1086,8 +1180,14 @@ def analyze_cognition(
                 value
             )
 
-    # =====================================================
-    # 🧠 FINAL
-    # =====================================================
+    APRIL_LOG_OUT(
+
+        "COGNITION_ROOM",
+
+        {
+            "analysis":
+                "complete"
+        }
+    )
 
     return cognition
