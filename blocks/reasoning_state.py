@@ -1,3 +1,142 @@
+# =====================================================
+# 🧠 APRIL REASONING STATE
+# =====================================================
+
+"""
+APRIL_FILE_ID: APRIL_REASONING_STATE
+
+ROLE:
+trajectory_reasoning_layer
+
+PURPOSE:
+- lightweight reasoning state
+- continuity stabilization
+- trajectory preservation
+- execution readiness tracking
+- scene continuity support
+- reflection minimization
+
+INPUT:
+- user_text
+- semantic_state
+- scene_state
+- dialog_state
+- active_flow
+
+OUTPUT:
+- reasoning_state
+- trajectory_state
+- execution_readiness
+- continuity_snapshot
+
+DEPENDENCIES:
+- semantic_core
+- cognition
+- scene_state
+- active_flow
+- executor
+- excrouter
+
+GOLDEN RULE:
+Reasoning tracks direction.
+Cognition decides.
+"""
+
+print("🧠 APRIL REASONING STATE LOADED")
+
+
+# =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+REASONING_PATCH_LOG = []
+
+
+def reasoning_log(msg):
+
+    try:
+
+        print(
+            "APRIL REASONING:",
+            msg
+        )
+
+        REASONING_PATCH_LOG.append(
+            str(msg)
+        )
+
+    except Exception:
+        pass
+
+
+# =====================================================
+# 🔥 ENTRY / EXIT
+# =====================================================
+
+def reasoning_enter(
+    text
+):
+
+    reasoning_log(
+
+        f"ENTER REASONING: "
+        f"{str(text)[:80]}"
+    )
+
+    return {
+
+        "reasoning_active": True,
+
+        "continuity_safe": True,
+
+        "trajectory_tracking": True
+    }
+
+
+def reasoning_exit(
+    reasoning_state
+):
+
+    reasoning_log(
+        "EXIT REASONING"
+    )
+
+    return {
+
+        "reasoning_complete": True,
+
+        "trajectory_active":
+
+            reasoning_state.get(
+                "trajectory_active",
+                False
+            ),
+
+        "execution_ready":
+
+            reasoning_state.get(
+                "execution_ready",
+                False
+            )
+    }
+
+
+# =====================================================
+# 🔥 FUTURE PLACEHOLDER
+# =====================================================
+
+def reasoning_future(
+    *args,
+    **kwargs
+):
+
+    return None
+
+
+# =====================================================
+# 🔥 MAIN REASONING STATE
+# =====================================================
+
 def build_reasoning_state(
     text: str,
     state: dict,
@@ -27,7 +166,13 @@ def build_reasoning_state(
     - over-monitoring system
     """
 
+    reasoning_enter(
+        text
+    )
+
     semantic = semantic or {}
+
+    state = state or {}
 
     # =================================================
     # 🔥 STATE
@@ -233,15 +378,18 @@ def build_reasoning_state(
 
         # =================================================
         # 🔥 CORE
-        # =================================================
+        # =====================================================
 
         "input": text,
 
         "conversation_alive": True,
 
+        "reasoning_id":
+            "APRIL_REASONING_STATE",
+
         # =================================================
         # 🔥 TRAJECTORY
-        # =================================================
+        # =====================================================
 
         "trajectory_active":
             trajectory_active,
@@ -261,7 +409,7 @@ def build_reasoning_state(
 
         # =================================================
         # 🔥 SCENE
-        # =================================================
+        # =====================================================
 
         "scene_goal":
             scene_goal,
@@ -277,7 +425,7 @@ def build_reasoning_state(
 
         # =================================================
         # 🔥 EXECUTION
-        # =================================================
+        # =====================================================
 
         "should_execute":
             should_execute,
@@ -296,7 +444,7 @@ def build_reasoning_state(
 
         # =================================================
         # 🔥 STABILIZATION
-        # =================================================
+        # =====================================================
 
         "needs_reflection":
             needs_reflection,
@@ -318,7 +466,7 @@ def build_reasoning_state(
 
         # =================================================
         # 🔥 MEMORY
-        # =================================================
+        # =====================================================
 
         "last_user":
             last_user,
@@ -328,7 +476,7 @@ def build_reasoning_state(
 
         # =================================================
         # 🔥 INTERNAL MACHINE MODES
-        # =================================================
+        # =====================================================
 
         "state_mode":
             "trajectory_reasoning",
@@ -346,7 +494,25 @@ def build_reasoning_state(
             False,
 
         "reflection_mode":
-            "minimal"
+            "minimal",
+
+        # =================================================
+        # 🔥 APRIL WEB STABILIZATION
+        # =====================================================
+
+        "web_ready": True,
+
+        "machine_context_safe": True,
+
+        "renderer_safe": True,
+
+        "provider_safe": True,
+
+        "continuity_safe": True
     }
+
+    reasoning_exit(
+        reasoning
+    )
 
     return reasoning
