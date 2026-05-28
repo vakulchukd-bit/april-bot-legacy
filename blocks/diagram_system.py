@@ -7,36 +7,158 @@
 """
 APRIL SPATIAL / DIAGRAM UNDERSTANDING
 
-Этот слой:
+APRIL_FILE_ID:
+APRIL_DIAGRAM_SYSTEM_CORE
 
-✅ помогает executor понимать
-   spatial / structural intent
+ROLE:
+SPATIAL_SEMANTIC_ANALYZER
 
-✅ помогает renderer-space
+INPUT:
+EXECUTOR_MACHINE_CONTEXT
+SEMANTIC_TEXT
+SCENE_CONTEXT
+RENDERER_REQUEST
 
-✅ помогает scene orchestration
+OUTPUT:
+SPATIAL_ANALYSIS
+DIAGRAM_SEMANTICS
+RENDERER_CANDIDATE_STATE
+SPATIAL_RENDER_PROMPT
 
-✅ понимает:
-- geometry
-- relations
-- structure
-- layouts
-- diagrams
-- technical schemes
-- blueprint logic
+LOGIC:
+- spatial semantic understanding
+- geometry interpretation
+- renderer candidate detection
+- engineering semantic analysis
+- scene relation understanding
+- diagram continuity support
 
-✅ работает как semantic helper
+THIS FILE IS:
+- semantic helper core
+- renderer-space assistant
+- spatial cognition helper
+- engineering semantic bridge
 
-❌ НЕ force-trigger layer
-❌ НЕ telegram-style detector
-❌ НЕ final renderer authority
-❌ НЕ payload formatter
-❌ НЕ output layer
+THIS FILE IS NOT:
+- orchestration engine
+- renderer authority
+- frontend formatter
+- telegram trigger layer
+- cognition override system
 
-Главная задача:
-semantic spatial understanding,
-а не поиск слов.
+GOLDEN APRIL RULES:
+- renderer-first
+- semantic-before-trigger
+- continuity-safe
+- no orchestration duplication
+- no renderer chaos
+- no system leakage
 """
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+DIAGRAM_TASK_CHANNEL = {
+
+    "channel":
+        "diagram_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+DIAGRAM_RESPONSE_CHANNEL = {
+
+    "channel":
+        "diagram_machine_response_channel",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 ANALYZER LOGGING
+# =====================================================
+
+def log_diagram_input(
+
+    text,
+    context=None
+):
+
+    """
+    INPUT MACHINE TRACE
+
+    Used by:
+    - analyzer
+    - admin diagnostics
+    - renderer tracing
+    - execution observability
+    """
+
+    return {
+
+        "file_id":
+            "APRIL_DIAGRAM_SYSTEM_CORE",
+
+        "event":
+            "diagram_input",
+
+        "channel":
+            DIAGRAM_TASK_CHANNEL,
+
+        "text_length":
+            len(text or ""),
+
+        "context":
+            context or {},
+
+        "machine_only":
+            True
+    }
+
+
+def log_diagram_output(
+    analysis
+):
+
+    """
+    OUTPUT MACHINE TRACE
+
+    Used by:
+    - analyzer
+    - renderer diagnostics
+    - semantic observability
+    - execution tracing
+    """
+
+    return {
+
+        "file_id":
+            "APRIL_DIAGRAM_SYSTEM_CORE",
+
+        "event":
+            "diagram_output",
+
+        "channel":
+            DIAGRAM_RESPONSE_CHANNEL,
+
+        "renderer_candidate":
+            analysis.get(
+                "renderer_candidate",
+                False
+            ),
+
+        "spatial_score":
+            analysis.get(
+                "spatial_score",
+                0.0
+            ),
+
+        "machine_only":
+            True
+    }
 
 # =====================================================
 # 🔥 HELPERS
@@ -58,7 +180,6 @@ def contains_any(
         w in text
         for w in words
     )
-
 
 # =====================================================
 # 🔥 SPATIAL SIGNALS
@@ -133,6 +254,8 @@ def analyze_diagram_semantics(
     text
 ):
 
+    log_diagram_input(text)
+
     t = normalize_text(text)
 
     analysis = {
@@ -151,7 +274,10 @@ def analyze_diagram_semantics(
 
         "geometry_detected": False,
 
-        "spatial_score": 0.0
+        "spatial_score": 0.0,
+
+        "machine_channel":
+            DIAGRAM_RESPONSE_CHANNEL
     }
 
     score = 0.0
@@ -246,8 +372,9 @@ def analyze_diagram_semantics(
             "renderer_candidate"
         ] = True
 
-    return analysis
+    log_diagram_output(analysis)
 
+    return analysis
 
 # =====================================================
 # 🔥 LEGACY COMPATIBILITY
@@ -275,7 +402,6 @@ def is_diagram_request(
         "renderer_candidate",
         False
     )
-
 
 # =====================================================
 # 🔥 DIAGRAM PROMPT
@@ -357,9 +483,16 @@ def build_diagram_prompt(
 
     style = ", ".join(style_parts)
 
+    payload = (
+
+        f"{style}\n\n"
+
+        f"{text}"
+    )
+
     if hidden_context:
 
-        return (
+        payload = (
 
             f"{style}\n\n"
 
@@ -368,9 +501,20 @@ def build_diagram_prompt(
             f"{text}"
         )
 
-    return (
+    return {
 
-        f"{style}\n\n"
+        "channel":
+            DIAGRAM_RESPONSE_CHANNEL,
 
-        f"{text}"
-    )
+        "file_id":
+            "APRIL_DIAGRAM_SYSTEM_CORE",
+
+        "renderer_safe":
+            True,
+
+        "prompt":
+            payload,
+
+        "machine_only":
+            True
+    }
