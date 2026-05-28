@@ -15,10 +15,31 @@ GOALS:
 - no eval
 - no execution
 - no payload inflation
+- web-first orchestration
+- machine-safe renderer bridge
 """
 
 import re
 
+
+# =====================================================
+# 🔥 MACHINE IDENTITY
+# =====================================================
+
+APRIL_FILE_ID = "APRIL_SCIENCE_INTERPRETER"
+
+SCIENCE_MACHINE_CHANNEL = {
+
+    "type": "science_interpreter",
+
+    "mode": "renderer_first",
+
+    "isolated": True,
+
+    "continuity_safe": True,
+
+    "web_safe": True
+}
 
 # =====================================================
 # 🔥 SHARED FLAGS
@@ -30,9 +51,36 @@ RENDER_FLAGS = {
     "lightweight_render": True,
     "avoid_generation": True,
     "continuity_safe": True,
-    "scene_ready": True
+    "scene_ready": True,
+    "web_safe": True,
+    "machine_safe": True
 }
 
+# =====================================================
+# 🔥 LOGGING
+# =====================================================
+
+SCIENCE_PATCH_LOG = []
+
+def safe_science_log(msg):
+
+    try:
+
+        print(
+            "APRIL SCIENCE:",
+            msg
+        )
+
+        SCIENCE_PATCH_LOG.append(
+            str(msg)
+        )
+
+    except:
+        pass
+
+safe_science_log(
+    "SCIENCE INTERPRETER INITIALIZED"
+)
 
 # =====================================================
 # 🔥 NORMALIZATION
@@ -59,7 +107,6 @@ def contains_any(text, words):
         w in text
         for w in words
     )
-
 
 # =====================================================
 # 🔥 SIGNALS
@@ -103,7 +150,6 @@ SCENE_SIGNALS = [
     "пространство"
 ]
 
-
 # =====================================================
 # 🔥 SPATIAL INTENT
 # =====================================================
@@ -118,11 +164,13 @@ def has_spatial_intent(
     if cognition.get(
         "prefer_renderer"
     ):
+
         return True
 
     if cognition.get(
         "renderer_space_active"
     ):
+
         return True
 
     lower = normalize_lower(
@@ -141,7 +189,6 @@ def has_spatial_intent(
         lower,
         all_signals
     )
-
 
 # =====================================================
 # 🔥 GRAPH NORMALIZATION
@@ -214,10 +261,14 @@ def normalize_graph_expression(
     )
 
     if not allowed:
+
+        safe_science_log(
+            "GRAPH EXPRESSION BLOCKED"
+        )
+
         return None
 
     return expr
-
 
 # =====================================================
 # 🔥 GRAPH DETECTION
@@ -260,7 +311,6 @@ def detect_graph_expression(
 
     return None
 
-
 # =====================================================
 # 🔥 SCENE TYPE
 # =====================================================
@@ -287,27 +337,30 @@ def detect_scene_type(
         lower,
         TABLE_SIGNALS
     ):
+
         return "table"
 
     if contains_any(
         lower,
         FORMULA_SIGNALS
     ):
+
         return "formula"
 
     if contains_any(
         lower,
         SCENE_SIGNALS
     ):
+
         return "scene"
 
     if cognition.get(
         "renderer_space_active"
     ):
+
         return "scene"
 
     return None
-
 
 # =====================================================
 # 🔥 PAYLOAD BUILDERS
@@ -320,9 +373,15 @@ def build_graph_payload(
     payload = {
 
         "type": "graph",
+
         "graph": expression,
+
         "renderer": "graph",
-        "scene_type": "graph"
+
+        "scene_type": "graph",
+
+        "machine_channel":
+            SCIENCE_MACHINE_CHANNEL
     }
 
     payload.update(
@@ -339,9 +398,15 @@ def build_formula_payload(
     payload = {
 
         "type": "formula",
+
         "formula": formula,
+
         "renderer": "formula",
-        "scene_type": "formula"
+
+        "scene_type": "formula",
+
+        "machine_channel":
+            SCIENCE_MACHINE_CHANNEL
     }
 
     payload.update(
@@ -356,8 +421,13 @@ def build_table_payload():
     payload = {
 
         "type": "table",
+
         "renderer": "table",
-        "scene_type": "table"
+
+        "scene_type": "table",
+
+        "machine_channel":
+            SCIENCE_MACHINE_CHANNEL
     }
 
     payload.update(
@@ -374,9 +444,15 @@ def build_scene_payload(
     payload = {
 
         "type": "scene",
+
         "content": content,
+
         "renderer": "scene",
-        "scene_type": "generic"
+
+        "scene_type": "generic",
+
+        "machine_channel":
+            SCIENCE_MACHINE_CHANNEL
     }
 
     payload.update(
@@ -384,7 +460,6 @@ def build_scene_payload(
     )
 
     return payload
-
 
 # =====================================================
 # 🔥 MAIN INTERPRETER
@@ -402,6 +477,10 @@ def interpret_graph_request(
 
     cognition = cognition or {}
     semantic = semantic or {}
+
+    safe_science_log(
+        f"INPUT: {text[:80]}"
+    )
 
     if not text:
         return None
@@ -446,6 +525,14 @@ def interpret_graph_request(
                 "confirmed_renderer_artifact"
             ] = "graph"
 
+            semantic[
+                "renderer_first"
+            ] = True
+
+            safe_science_log(
+                "GRAPH PAYLOAD BUILT"
+            )
+
             return build_graph_payload(
                 expr
             )
@@ -470,6 +557,14 @@ def interpret_graph_request(
                 "confirmed_renderer_artifact"
             ] = "formula"
 
+            semantic[
+                "renderer_first"
+            ] = True
+
+            safe_science_log(
+                "FORMULA PAYLOAD BUILT"
+            )
+
             return build_formula_payload(
                 expr
             )
@@ -488,6 +583,14 @@ def interpret_graph_request(
             "confirmed_renderer_artifact"
         ] = "table"
 
+        semantic[
+            "renderer_first"
+        ] = True
+
+        safe_science_log(
+            "TABLE PAYLOAD BUILT"
+        )
+
         return build_table_payload()
 
     # =================================================
@@ -503,6 +606,14 @@ def interpret_graph_request(
         semantic[
             "confirmed_renderer_artifact"
         ] = "scene"
+
+        semantic[
+            "renderer_first"
+        ] = True
+
+        safe_science_log(
+            "SCENE PAYLOAD BUILT"
+        )
 
         return build_scene_payload(
             text
