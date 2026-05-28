@@ -1,33 +1,172 @@
 # =====================================================
-# 🧠 APRIL RESPONSE DECISION SYSTEM
+# 🧠 APRIL RESPONSE DECISION ORCHESTRATOR
+# =====================================================
+
+"""
+APRIL RESPONSE DECISION SYSTEM
+WEB-SPACE EXECUTION ARCHITECTURE
+
+=====================================================
+ROLE
+=====================================================
+
+Этот файл является:
+
+- lightweight orchestration layer;
+- response modality selector;
+- execution stabilizer;
+- renderer-first decision coordinator;
+- continuity-safe action router;
+- machine decision bridge.
+
+=====================================================
+🔥 MAIN PURPOSE
+=====================================================
+
+Система отвечает за:
+
+- выбор response modality;
+- стабилизацию trajectory;
+- renderer-first behavior;
+- execution/guidance balancing;
+- continuation-safe routing;
+- anti-chaos orchestration;
+- machine decision packaging.
+
+=====================================================
+🧠 GOLDEN APRIL CONCEPT
+=====================================================
+
+Executor НЕ принимает
+финальное решение напрямую.
+
+Executor:
+- анализирует;
+- координирует;
+- собирает сигналы.
+
+Response Decision:
+- выбирает действие;
+- определяет modality;
+- стабилизирует поведение;
+- подготавливает machine routing.
+
+=====================================================
+🔥 MACHINE CHANNEL ARCHITECTURE
+=====================================================
+
+INPUT MACHINE CHANNEL:
+Executor → Decision Layer
+
+OUTPUT MACHINE CHANNEL:
+Decision Layer → Rooms Router
+
+=====================================================
+🔥 IMPORTANT
+=====================================================
+
+Этот слой НЕ:
+
+- authority engine;
+- renderer engine;
+- cognition core;
+- semantic analyzer;
+- room executor;
+- image generator;
+- web formatter.
+
+=====================================================
+🌐 WEB-FIRST APRIL
+=====================================================
+
+Система подготовлена под:
+
+- web orchestration;
+- BotRU web pipeline;
+- multimodal UI;
+- renderer-safe routing;
+- future cognitive rooms;
+- spatial architecture.
+
+=====================================================
+🔥 GOLDEN RULE
+=====================================================
+
+Decision Layer
+НЕ смешивает:
+
+- machine routing;
+- human formatting;
+- renderer payloads;
+- execution output.
+
+Только routing logic.
+Только orchestration.
+Только decision signals.
+
+=====================================================
+"""
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source": "executor_core",
+    "target": "response_decision",
+
+    "mode": "machine_input",
+
+    "isolated": True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "source": "response_decision",
+    "target": "rooms_router",
+
+    "mode": "machine_output",
+
+    "isolated": True
+}
+
+# =====================================================
+# 🔥 DECISION MODES
+# =====================================================
+
+DECISION_MODES = [
+
+    "talk",
+    "guide",
+    "execute",
+    "render",
+    "generate"
+]
+
+# =====================================================
+# 🔥 RESPONSE DECISION
 # =====================================================
 
 def build_response_decision(
+
     semantic: dict,
     cognition: dict,
     visual_reference: dict,
     state: dict
+
 ):
 
     """
     LIGHTWEIGHT RESPONSE DECISION
 
-    Новый decision-layer:
-
-    - меньше giant flags
-    - меньше duplicated logic
-    - меньше orchestration noise
-    - меньше token expansion
-
     Главная задача:
     выбрать спокойное
-    и trajectory-safe действие.
+    trajectory-safe действие.
 
-    Decision layer больше НЕ:
-    - giant authority system
-    - recursive analyzer
-    - overcontrolled dispatcher
-    - heavy scene simulator
+    Без giant orchestration.
+    Без recursive chaos.
+    Без duplicated logic.
     """
 
     semantic = semantic or {}
@@ -122,7 +261,7 @@ def build_response_decision(
     )
 
     # =================================================
-    # 🔥 EXECUTION SIGNAL
+    # 🔥 EXECUTION DETECTION
     # =====================================================
 
     should_execute = False
@@ -134,15 +273,19 @@ def build_response_decision(
         should_execute = True
 
     if (
+
         execution_pressure >= 0.78
         and ambiguity <= 0.35
+
     ):
 
         should_execute = True
 
     if (
+
         wants_result >= 0.82
         and ambiguity <= 0.35
+
     ):
 
         should_execute = True
@@ -152,6 +295,7 @@ def build_response_decision(
     # =====================================================
 
     if (
+
         cognition.get(
             "user_leads_direction"
         )
@@ -211,8 +355,10 @@ def build_response_decision(
         should_render = True
 
     if (
+
         lightweight_visual
         and not should_generate
+
     ):
 
         should_render = True
@@ -296,7 +442,7 @@ def build_response_decision(
         response_mode = "guidance"
 
     # =================================================
-    # 🔥 DIALOG MODE
+    # 🔥 COMPACT MODE
     # =====================================================
 
     if cognition.get(
@@ -310,16 +456,51 @@ def build_response_decision(
     # =====================================================
 
     exploration_active = bool(
+
         cognition.get(
             "exploration_mode"
         )
     )
 
     # =================================================
+    # 🔥 MACHINE ROUTING
+    # =====================================================
+
+    machine_routing = {
+
+        "input_channel":
+
+            INPUT_MACHINE_CHANNEL,
+
+        "output_channel":
+
+            OUTPUT_MACHINE_CHANNEL,
+
+        "routing_mode":
+            "isolated_machine_logic",
+
+        "human_layer_allowed":
+            False,
+
+        "renderer_safe":
+            True,
+
+        "presentation_mutation_allowed":
+            False
+    }
+
+    # =================================================
     # 🔥 FINAL MACHINE STATE
     # =====================================================
 
     result = {
+
+        # =================================================
+        # 🔥 MACHINE ROUTING
+        # =====================================================
+
+        "machine_routing":
+            machine_routing,
 
         # =================================================
         # 🔥 ACTION
@@ -398,18 +579,21 @@ def build_response_decision(
         # =====================================================
 
         "understands_user_goal":
+
             (
                 wants_result >= 0.5
                 or wants_visual >= 0.5
             ),
 
         "understands_user_direction":
+
             cognition.get(
                 "user_leads_direction",
                 False
             ),
 
         "should_follow_user":
+
             cognition.get(
                 "user_leads_direction",
                 False
@@ -420,18 +604,21 @@ def build_response_decision(
         # =====================================================
 
         "should_reduce_talking":
+
             cognition.get(
                 "reduce_talking",
                 False
             ),
 
         "should_wait_for_user":
+
             cognition.get(
                 "generation_should_wait",
                 False
             ),
 
         "should_offer_reference":
+
             cognition.get(
                 "prefer_reference_over_generation",
                 False
@@ -470,6 +657,7 @@ def build_response_decision(
             False,
 
         "scene_practical_goal_alive":
+
             (
                 wants_result >= 0.45
                 or execution_pressure >= 0.45
@@ -483,11 +671,11 @@ def build_response_decision(
         # =====================================================
 
         "needs_reflection":
-            (
-                ambiguity >= 0.45
-            ),
+
+            ambiguity >= 0.45,
 
         "needs_post_action_analysis":
+
             (
                 should_execute
                 or should_generate
@@ -511,6 +699,22 @@ def build_response_decision(
             True,
 
         "provider_safe_rendering":
+            True,
+
+        # =================================================
+        # 🔥 WEB SPACE
+        # =====================================================
+
+        "web_space_ready":
+            True,
+
+        "botru_compatible":
+            True,
+
+        "renderer_payload_safe":
+            True,
+
+        "presentation_layer_separated":
             True,
 
         # =================================================
