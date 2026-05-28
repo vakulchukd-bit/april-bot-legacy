@@ -4,140 +4,40 @@
 
 """
 APRIL WEB-TEXT EXECUTION LAYER
+STABILIZED WEB-FIRST EDITION
 
-=====================================================
-🔥 ROLE
-=====================================================
+ROLE:
+- text orchestration layer
+- provider-safe executor
+- continuity-aware response builder
+- renderer-safe coordinator
+- web-first dialog processor
+- TXT-config compatible executor
+- admin-aware response layer
+- multimodal-safe text transport
 
-Этот файл теперь:
-
-- text orchestration layer;
-- provider-safe text executor;
-- continuity-aware response builder;
-- renderer-safe text coordinator;
-- web-first dialog processor;
-- response stabilization layer.
-
-=====================================================
-🔥 WHAT THIS MODULE DOES
-=====================================================
-
-Модуль отвечает за:
-
-- text generation;
-- provider execution;
-- dialog continuity;
-- safe response assembly;
-- anti-system leakage;
-- response stabilization;
-- web-space compatible formatting;
-- renderer-safe output.
-
-=====================================================
-🔥 WHAT THIS MODULE DOES NOT DO
-=====================================================
-
+IMPORTANT:
 Этот слой НЕ:
+- orchestration authority
+- cognition engine
+- semantic analyzer
+- renderer engine
+- room router
 
-- authority system;
-- cognition engine;
-- semantic analyzer;
-- presentation engine;
-- renderer engine;
-- room router;
-- visual executor.
-
-=====================================================
-🔥 GOLDEN APRIL ARCHITECTURE
-=====================================================
-
-Теперь логика разделена:
-
-Semantic →
-Cognition →
-Decision →
-Rooms →
-Text Module →
-Presentation Layer →
-BotRU UI
-
-=====================================================
-🔥 MACHINE CHANNELS
-=====================================================
-
-INPUT:
-rooms_router → text_module
-
-OUTPUT:
-text_module → presentation_formatter
-
-=====================================================
-🔥 IMPORTANT
-=====================================================
-
-Text module НЕ:
-
-- форматирует renderer payload;
-- мутирует scene objects;
-- вмешивается в visual routing;
-- принимает orchestration decisions.
-
-Он только:
-- генерирует;
-- стабилизирует;
-- безопасно передаёт текст дальше.
-
-=====================================================
-🔥 WEB-FIRST READY
-=====================================================
-
-Подготовлено под:
-
-- BotRU web architecture;
-- multimodal web UI;
-- renderer-space;
-- future rooms;
-- provider scaling;
-- cognitive routing.
-
-=====================================================
+Этот слой:
+- генерирует текст
+- стабилизирует output
+- сохраняет continuity
+- безопасно передаёт результат
 """
 
 # =====================================================
-# 🔥 SAFE PATCH MODE
+# 🔥 FILE ID
 # =====================================================
 
-PATCH_LOG = []
+APRIL_FILE_ID = "APRIL_TEXT_ORCHESTRATION_MODULE"
 
-
-def safe_patch_log(msg):
-
-    try:
-
-        print(
-            "TEXT MODULE:",
-            msg
-        )
-
-        PATCH_LOG.append(msg)
-
-    except:
-        pass
-
-
-def patch_text_input(text):
-
-    safe_patch_log(
-        f"TEXT INPUT: {str(text)[:80]}"
-    )
-
-    return text
-
-
-def patch_text_future(*args, **kwargs):
-
-    return None
-
+APRIL_VERSION = "WEB_STABILIZED"
 
 # =====================================================
 # 🔥 IMPORTS
@@ -157,10 +57,6 @@ from blocks.provider_router import (
     generate_text
 )
 
-# =====================================================
-# 🔥 EXTERNAL KNOWLEDGE
-# =====================================================
-
 from blocks.external_knowledge_provider import (
 
     should_use_external_knowledge,
@@ -169,10 +65,6 @@ from blocks.external_knowledge_provider import (
 
     enrich_with_external_knowledge
 )
-
-# =====================================================
-# 🔥 PRESENTATION
-# =====================================================
 
 from blocks.presentation_formatter import (
     beautify_response
@@ -203,6 +95,71 @@ TEXT_OUTPUT_CHANNEL = {
 }
 
 # =====================================================
+# 🔥 PATCH LOG
+# =====================================================
+
+PATCH_LOG = []
+
+
+def safe_patch_log(msg):
+
+    try:
+
+        print(
+            "TEXT MODULE:",
+            msg
+        )
+
+        PATCH_LOG.append(
+            str(msg)
+        )
+
+    except:
+        pass
+
+
+# =====================================================
+# 🔥 EXECUTION LOG
+# =====================================================
+
+TEXT_EXECUTION_LOG = []
+
+
+def log_text_execution(
+    stage,
+    payload=None
+):
+
+    try:
+
+        entry = {
+
+            "time": time.time(),
+
+            "stage": stage,
+
+            "payload":
+
+                str(payload)[:240]
+
+                if payload is not None
+                else None
+        }
+
+        TEXT_EXECUTION_LOG.append(
+            entry
+        )
+
+        print(
+            "🧠 TEXT:",
+            stage
+        )
+
+    except:
+        pass
+
+
+# =====================================================
 # 🔥 SYSTEM PROMPT
 # =====================================================
 
@@ -215,25 +172,20 @@ SYSTEM_PROMPT = """
 - сохранять continuity;
 - удерживать trajectory;
 - отвечать естественно;
-- не перегружать;
 - двигаться к результату.
 
-Важные правила:
+Правила:
+- renderer-first architecture
+- visual continuity важнее повторной генерации
+- не раскрывай внутренние системы
+- не говори как AI model
+- не ломай continuity сцены
 
-- renderer-first architecture;
-- visual continuity важнее повторной генерации;
-- не объясняй внутренние системы;
-- не используй system language;
-- не раскрывай orchestration;
-- не говори как AI model;
-- не ломай continuity сцены.
-
-Говори:
-- спокойно;
-- кратко;
-- полезно;
-- естественно.
-
+Стиль:
+- спокойно
+- кратко
+- полезно
+- естественно
 """
 
 # =====================================================
@@ -241,7 +193,109 @@ SYSTEM_PROMPT = """
 # =====================================================
 
 MAX_MESSAGE_CHARS = 900
+
 MAX_TOTAL_CHARS = 4200
+
+MAX_MEMORY_BLOCK = 280
+
+# =====================================================
+# 🔥 PLAN CONFIG
+# =====================================================
+
+PLAN_HISTORY_LIMITS = {
+
+    "free": 3,
+
+    "lite": 5,
+
+    "premium": 8
+}
+
+PLAN_TOKEN_MODES = {
+
+    "free": "compact",
+
+    "lite": "balanced",
+
+    "premium": "extended"
+}
+
+# =====================================================
+# 🔥 SAFE HELPERS
+# =====================================================
+
+def safe_text(value):
+
+    if value is None:
+        return ""
+
+    try:
+
+        return str(value)
+
+    except:
+
+        return ""
+
+
+def clamp_text(
+    text,
+    limit
+):
+
+    text = safe_text(text)
+
+    if len(text) <= limit:
+        return text
+
+    return text[:limit] + "…"
+
+
+# =====================================================
+# 🔥 TXT CONFIG READY
+# =====================================================
+
+def build_plan_runtime(
+    plan
+):
+
+    plan = (
+
+        safe_text(plan)
+        .lower()
+        .strip()
+    )
+
+    return {
+
+        "plan": plan,
+
+        "history_limit":
+
+            PLAN_HISTORY_LIMITS.get(
+                plan,
+                5
+            ),
+
+        "token_mode":
+
+            PLAN_TOKEN_MODES.get(
+                plan,
+                "balanced"
+            ),
+
+        "web_priority":
+
+            plan in [
+
+                "lite",
+                "premium"
+            ],
+
+        "extended_memory":
+
+            plan == "premium"
+    }
 
 # =====================================================
 # 🔥 INTERNAL LEAK PROTECTION
@@ -253,17 +307,10 @@ SYSTEM_LEAK_PATTERNS = [
     "response_decision",
     "cognition",
     "semantic",
-    "assistant_restraint",
     "trajectory protection",
-    "signal_overload",
-    "internal_noise",
-    "renderer-first architecture",
-    "continuity диалога",
-    "calm mobile-first ai assistant",
-    "provider routing",
     "machine channel",
-    "response_mode",
-    "active_flow_strength"
+    "provider routing",
+    "renderer-first architecture"
 ]
 
 
@@ -272,7 +319,7 @@ def sanitize_model_output(text):
     if not text:
         return ""
 
-    text = str(text)
+    text = safe_text(text)
 
     lowered = text.lower()
 
@@ -281,17 +328,12 @@ def sanitize_model_output(text):
     for pattern in SYSTEM_LEAK_PATTERNS:
 
         if pattern in lowered:
-
             hits += 1
-
-    # =================================================
-    # 🔥 HARD LEAK BLOCK
-    # =====================================================
 
     if hits >= 2:
 
-        safe_patch_log(
-            "SYSTEM LEAK DETECTED"
+        log_text_execution(
+            "SYSTEM_LEAK_BLOCKED"
         )
 
         return (
@@ -300,18 +342,13 @@ def sanitize_model_output(text):
             "Попробуй уточнить запрос."
         )
 
-    # =================================================
-    # 🔥 RAW SYSTEM CLEANUP
-    # =====================================================
-
     blocked_prefixes = [
 
         "system:",
         "developer:",
         "assistant:",
         "semantic:",
-        "cognition:",
-        "response_decision:"
+        "cognition:"
     ]
 
     cleaned = []
@@ -319,7 +356,9 @@ def sanitize_model_output(text):
     for line in text.split("\n"):
 
         lowered_line = (
-            line.strip().lower()
+
+            line.strip()
+            .lower()
         )
 
         blocked = False
@@ -331,10 +370,6 @@ def sanitize_model_output(text):
             ):
 
                 blocked = True
-
-                safe_patch_log(
-                    f"REMOVED: {line[:50]}"
-                )
 
                 break
 
@@ -352,7 +387,11 @@ def sanitize_model_output(text):
 
 def is_renderer_payload(text):
 
-    if not isinstance(text, str):
+    if not isinstance(
+        text,
+        str
+    ):
+
         return False
 
     checks = [
@@ -370,46 +409,35 @@ def is_renderer_payload(text):
     )
 
 
-def is_code_payload(text):
+def is_structured_payload(value):
 
-    if not isinstance(text, str):
-        return False
+    if isinstance(
+        value,
+        dict
+    ):
 
-    checks = [
+        return True
 
-        "```",
-        "def ",
-        "import ",
-        "const ",
-        "function ",
-        "<!DOCTYPE html>",
-        "<html"
-    ]
+    if isinstance(
+        value,
+        list
+    ):
 
-    return any(
-        x in text
-        for x in checks
-    )
+        return True
+
+    return False
+
 
 # =====================================================
-# 🔥 TEXT LIMITERS
+# 🔥 MESSAGE TRIMMING
 # =====================================================
 
 def trim_text(text):
 
-    if not text:
-        return ""
-
-    text = str(text)
-
-    if len(text) > MAX_MESSAGE_CHARS:
-
-        return (
-            text[:MAX_MESSAGE_CHARS]
-            + "…"
-        )
-
-    return text
+    return clamp_text(
+        text,
+        MAX_MESSAGE_CHARS
+    )
 
 
 def trim_messages(messages):
@@ -436,6 +464,7 @@ def trim_messages(messages):
         result.append({
 
             "role":
+
                 msg.get(
                     "role",
                     "user"
@@ -460,6 +489,7 @@ def get_config(energy):
         return {
 
             "temperature": 0.45,
+
             "max_output_tokens": 180
         }
 
@@ -468,28 +498,16 @@ def get_config(energy):
         return {
 
             "temperature": 0.82,
+
             "max_output_tokens": 700
         }
 
     return {
 
         "temperature": 0.68,
+
         "max_output_tokens": 420
     }
-
-# =====================================================
-# 🔥 HISTORY LIMIT
-# =====================================================
-
-def get_history_limit(plan):
-
-    return {
-
-        "free": 3,
-        "lite": 5,
-        "premium": 8
-
-    }.get(plan, 5)
 
 # =====================================================
 # 🔥 TOPIC MEMORY
@@ -497,9 +515,7 @@ def get_history_limit(plan):
 
 def extract_topic(text):
 
-    t = (
-        text or ""
-    ).lower()
+    t = safe_text(text).lower()
 
     if "сайт" in t:
         return "website"
@@ -510,16 +526,16 @@ def extract_topic(text):
     if "дизайн" in t:
         return "design"
 
-    if "новост" in t:
-        return "news"
-
     if "код" in t:
         return "code"
 
     return None
 
 
-def update_topic(state, text):
+def update_topic(
+    state,
+    text
+):
 
     topic = extract_topic(
         text
@@ -539,14 +555,9 @@ def build_cognitive_state(
     semantic,
     cognition,
     response_decision
-
 ):
 
     blocks = []
-
-    # =================================================
-    # 🔥 FLOW
-    # =====================================================
 
     active_flow = state.get(
         "active_flow"
@@ -565,10 +576,6 @@ def build_cognitive_state(
                 f"Trajectory: "
                 f"{flow_type}"
             )
-
-    # =================================================
-    # 🔥 RESPONSE STYLE
-    # =====================================================
 
     behavior = []
 
@@ -604,10 +611,6 @@ def build_cognitive_state(
             + ", ".join(behavior)
         )
 
-    # =================================================
-    # 🔥 VISUAL CONTINUITY
-    # =====================================================
-
     active_visual_scene = state.get(
         "active_visual_scene"
     )
@@ -625,10 +628,6 @@ def build_cognitive_state(
             f"{scene_type}"
         )
 
-    # =================================================
-    # 🔥 MEMORY
-    # =====================================================
-
     summary = state.get(
         "memory_summary"
     )
@@ -638,53 +637,15 @@ def build_cognitive_state(
         blocks.append(
 
             "Память: "
-            + summary[-180:]
+            + clamp_text(
+                summary,
+                MAX_MEMORY_BLOCK
+            )
         )
 
-    return "\n".join(blocks)
-
-# =====================================================
-# 🔥 CODE ENHANCE
-# =====================================================
-
-def enhance_code_block(text):
-
-    if not text:
-        return text
-
-    stripped = text.strip()
-
-    if is_renderer_payload(
-        stripped
-    ):
-
-        return stripped
-
-    if (
-        "<!DOCTYPE html>" in stripped
-        or "<html" in stripped
-    ):
-
-        return (
-
-            "```html\n"
-            + stripped
-            + "\n```"
-        )
-
-    if (
-        "def " in stripped
-        or "import " in stripped
-    ):
-
-        return (
-
-            "```python\n"
-            + stripped
-            + "\n```"
-        )
-
-    return stripped
+    return "\n".join(
+        blocks
+    )
 
 # =====================================================
 # 🔥 REPEAT PROTECTION
@@ -739,11 +700,44 @@ def apply_visual_beautify(
 
         return "🌍 " + text
 
-    if topic == "history":
-
-        return "🏛 " + text
-
     return text
+
+# =====================================================
+# 🔥 SAFE MESSAGE STACK
+# =====================================================
+
+def build_message_stack(
+
+    system_state,
+    history,
+    user_text
+):
+
+    messages = [
+
+        {
+            "role": "system",
+
+            "content": system_state
+        }
+    ]
+
+    messages.extend(
+
+        trim_messages(
+            history
+        )
+    )
+
+    messages.append({
+
+        "role": "user",
+
+        "content":
+            trim_text(user_text)
+    })
+
+    return messages
 
 # =====================================================
 # 🔥 MAIN PROCESS
@@ -755,10 +749,10 @@ async def process(
     text,
     state,
     energy="MEDIUM"
-
 ):
 
-    text = patch_text_input(
+    log_text_execution(
+        "TEXT_MODULE_ENTER",
         text
     )
 
@@ -780,6 +774,26 @@ async def process(
         )
 
         # =================================================
+        # 🔥 PAYLOAD SAFETY
+        # =====================================================
+
+        if is_structured_payload(
+            text
+        ):
+
+            log_text_execution(
+                "STRUCTURED_BYPASS"
+            )
+
+            return {
+
+                "type": "text",
+
+                "content":
+                    "⚠️ Structured payload bypassed."
+            }
+
+        # =================================================
         # 🔥 TOPIC
         # =====================================================
 
@@ -796,15 +810,20 @@ async def process(
             user_id
         )
 
-        history_limit = get_history_limit(
+        runtime = build_plan_runtime(
             plan
         )
+
+        history_limit = runtime[
+            "history_limit"
+        ]
 
         # =================================================
         # 🔥 COGNITIVE STATE
         # =====================================================
 
         cognitive_state = (
+
             build_cognitive_state(
 
                 state,
@@ -851,6 +870,7 @@ async def process(
             safe_history.append({
 
                 "role":
+
                     item.get(
                         "role",
                         "user"
@@ -861,36 +881,17 @@ async def process(
             })
 
         # =================================================
-        # 🔥 FINAL MESSAGE STACK
+        # 🔥 MESSAGE STACK
         # =====================================================
 
-        messages = [
+        messages = build_message_stack(
 
-            {
-                "role": "system",
-                "content": system_state
-            }
-        ]
-
-        messages.extend(
-
-            trim_messages(
-                safe_history
+            system_state,
+            safe_history,
+            sanitize_model_output(
+                text
             )
         )
-
-        messages.append({
-
-            "role": "user",
-
-            "content":
-
-                trim_text(
-                    sanitize_model_output(
-                        text
-                    )
-                )
-        })
 
         # =================================================
         # 🔥 PROVIDER CONFIG
@@ -900,8 +901,12 @@ async def process(
             energy
         )
 
+        log_text_execution(
+            "PROVIDER_EXECUTION"
+        )
+
         # =================================================
-        # 🔥 PROVIDER EXECUTION
+        # 🔥 GENERATION
         # =====================================================
 
         output = await generate_text(
@@ -918,10 +923,6 @@ async def process(
 
             model=TEXT_MODEL
         )
-
-        # =================================================
-        # 🔥 SANITIZATION
-        # =====================================================
 
         output = sanitize_model_output(
             output
@@ -952,19 +953,18 @@ async def process(
                 knowledge
             )
 
-        # =================================================
-        # 🔥 EMPTY OUTPUT
-        # =====================================================
-
         if not output:
 
-            output = (
-                "⚠️ Пустой ответ."
-            )
+            output = "⚠️ Пустой ответ."
 
     except Exception as e:
 
         traceback.print_exc()
+
+        log_text_execution(
+            "TEXT_MODULE_ERROR",
+            e
+        )
 
         output = (
 
@@ -973,28 +973,12 @@ async def process(
         )
 
     # =================================================
-    # 🔥 CODE
-    # =====================================================
-
-    if "```" in output:
-
-        state["last_code"] = output
-
-    # =================================================
-    # 🔥 CODE ENHANCE
-    # =====================================================
-
-    reply = enhance_code_block(
-        output
-    )
-
-    # =================================================
     # 🔥 REPEAT PROTECTION
     # =====================================================
 
     reply = prevent_repeat_response(
         state,
-        reply
+        output
     )
 
     # =================================================
@@ -1036,8 +1020,12 @@ async def process(
 
     state["last_text_time"] = time.time()
 
+    log_text_execution(
+        "TEXT_MODULE_SUCCESS"
+    )
+
     # =================================================
-    # 🔥 MACHINE OUTPUT
+    # 🔥 FINAL RESULT
     # =====================================================
 
     return {
@@ -1055,11 +1043,30 @@ async def process(
                 TEXT_OUTPUT_CHANNEL
         },
 
+        "runtime": {
+
+            "plan":
+                runtime.get(
+                    "plan"
+                ),
+
+            "token_mode":
+                runtime.get(
+                    "token_mode"
+                )
+        },
+
         "renderer_safe": True,
 
         "presentation_safe": True,
 
+        "continuity_safe": True,
+
         "web_ready": True,
 
-        "botru_compatible": True
+        "botru_compatible": True,
+
+        "txt_config_ready": True,
+
+        "admin_panel_ready": True
     }
