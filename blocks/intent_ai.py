@@ -1,15 +1,32 @@
 from openai import OpenAI
 import asyncio
-
-client = OpenAI()
-
+import time
 
 # =====================================================
-# 🧠 APRIL INTENT AI
+# 🧠 APRIL INTENT AI SYSTEM
 # =====================================================
 
 """
 APRIL MULTI-SIGNAL INTENT SYSTEM
+
+APRIL_FILE_ID:
+APRIL_INTENT_AI_SYSTEM
+
+ROLE:
+MULTIMODAL_INTENT_SIGNAL_ANALYZER
+
+INPUT:
+USER_TEXT
+SESSION_STATE
+VISUAL_CONTINUITY_STATE
+ACTIVE_FLOW
+
+OUTPUT:
+INTENT_SIGNAL_PAYLOAD
+SEMANTIC_HINTS
+ORCHESTRATION_SUPPORT_SIGNALS
+
+=====================================================
 
 Intent AI теперь:
 - НЕ single-intent dispatcher;
@@ -23,11 +40,96 @@ Intent AI теперь:
 - renderer-aware signal composer;
 - capability hint provider.
 
+=====================================================
+
 Главная идея:
+
 Intent НЕ принимает решение.
 Intent помогает orchestration layer
 понять направление пользователя.
+
+=====================================================
+
+GOLDEN APRIL RULE:
+
+Executor decides.
+Intent AI assists.
 """
+
+# =====================================================
+# 🔥 OPENAI
+# =====================================================
+
+client = OpenAI()
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "executor_input_pipeline",
+
+    "type":
+        "intent_signal_request",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target":
+        "executor_semantic_pipeline",
+
+    "type":
+        "intent_signal_payload",
+
+    "isolated":
+        True
+}
+
+# =====================================================
+# 🔥 MACHINE LOGS
+# =====================================================
+
+INTENT_AI_LOGS = []
+
+MAX_INTENT_AI_LOGS = 100
+
+
+def log_intent_event(
+    event,
+    payload=None
+):
+
+    try:
+
+        INTENT_AI_LOGS.append({
+
+            "timestamp":
+                time.time(),
+
+            "event":
+                event,
+
+            "payload":
+                payload or {},
+
+            "file_id":
+                "APRIL_INTENT_AI_SYSTEM",
+
+            "machine_only":
+                True
+        })
+
+        if len(INTENT_AI_LOGS) > MAX_INTENT_AI_LOGS:
+
+            INTENT_AI_LOGS.pop(0)
+
+    except:
+        pass
 
 # =====================================================
 # 🧠 HELPERS
@@ -51,7 +153,6 @@ def contains_any(
         w in text
         for w in words
     )
-
 
 # =====================================================
 # 🧠 SAFE SIGNAL BUILDER
@@ -79,13 +180,14 @@ def build_signal_response(
 
     capability_hints = capability_hints or []
 
-    return {
+    payload = {
 
         # =================================================
         # 🔥 LEGACY COMPATIBILITY
         # =====================================================
 
-        "intent": primary_intent,
+        "intent":
+            primary_intent,
 
         # =================================================
         # 🔥 NEW ARCHITECTURE
@@ -141,15 +243,47 @@ def build_signal_response(
         # 🔥 STABILIZATION
         # =====================================================
 
-        "orchestration_ready": True,
+        "orchestration_ready":
+            True,
 
-        "renderer_first_safe": True,
+        "renderer_first_safe":
+            True,
 
-        "provider_aware": True,
+        "provider_aware":
+            True,
 
-        "single_route_forbidden": True
+        "single_route_forbidden":
+            True,
+
+        # =================================================
+        # 🔥 MACHINE FLAGS
+        # =====================================================
+
+        "machine_only":
+            True,
+
+        "semantic_signal":
+            True
     }
 
+    log_intent_event(
+
+        "signal_response_created",
+
+        {
+
+            "primary_intent":
+                primary_intent,
+
+            "source":
+                source,
+
+            "confidence":
+                confidence
+        }
+    )
+
+    return payload
 
 # =====================================================
 # 🧠 LOCAL SAFE DETECTION
@@ -172,6 +306,16 @@ def detect_intent_local(
     active_visual_scene = state.get(
         "active_visual_scene",
         {}
+    )
+
+    log_intent_event(
+
+        "local_detection_started",
+
+        {
+            "text":
+                t[:120]
+        }
     )
 
     # =================================================
@@ -205,6 +349,16 @@ def detect_intent_local(
 
             flow_type = active_flow.get(
                 "type"
+            )
+
+            log_intent_event(
+
+                "continuation_detected",
+
+                {
+                    "flow_type":
+                        flow_type
+                }
             )
 
             if flow_type in [
@@ -284,6 +438,10 @@ def detect_intent_local(
         math_words
     ):
 
+        log_intent_event(
+            "science_detected"
+        )
+
         return build_signal_response(
 
             primary_intent="science",
@@ -325,6 +483,10 @@ def detect_intent_local(
         strong_generate_words
     ):
 
+        log_intent_event(
+            "image_generation_detected"
+        )
+
         return build_signal_response(
 
             primary_intent="generate_image",
@@ -365,6 +527,10 @@ def detect_intent_local(
         if state.get(
             "image_context"
         ) or active_flow:
+
+            log_intent_event(
+                "image_edit_detected"
+            )
 
             return build_signal_response(
 
@@ -412,6 +578,10 @@ def detect_intent_local(
             or active_visual_scene
         ):
 
+            log_intent_event(
+                "image_analysis_detected"
+            )
+
             return build_signal_response(
 
                 primary_intent="analyze_image",
@@ -450,6 +620,10 @@ def detect_intent_local(
         t,
         web_words
     ):
+
+        log_intent_event(
+            "web_detected"
+        )
 
         return build_signal_response(
 
@@ -491,6 +665,10 @@ def detect_intent_local(
         exploration_words
     ):
 
+        log_intent_event(
+            "exploration_detected"
+        )
+
         return build_signal_response(
 
             primary_intent="exploration",
@@ -515,7 +693,6 @@ def detect_intent_local(
 
     return None
 
-
 # =====================================================
 # 🧠 SAFE AI INTENT
 # =====================================================
@@ -531,6 +708,16 @@ async def detect_intent_ai(
         text or ""
     ).strip()
 
+    log_intent_event(
+
+        "intent_ai_started",
+
+        {
+            "text":
+                t[:120]
+        }
+    )
+
     # =================================================
     # 🔥 LOCAL FIRST
     # =====================================================
@@ -541,6 +728,11 @@ async def detect_intent_ai(
     )
 
     if local:
+
+        log_intent_event(
+            "local_result_returned"
+        )
+
         return local
 
     # =================================================
@@ -592,6 +784,10 @@ async def detect_intent_ai(
     def run():
 
         try:
+
+            log_intent_event(
+                "openai_fallback_started"
+            )
 
             prompt = f"""
 Ты — multimodal signal analyzer для April.
@@ -678,6 +874,16 @@ async def detect_intent_ai(
             elif "exploration" in lowered:
                 primary = "exploration"
 
+            log_intent_event(
+
+                "openai_result_received",
+
+                {
+                    "primary":
+                        primary
+                }
+            )
+
             return build_signal_response(
 
                 primary_intent=primary,
@@ -733,6 +939,16 @@ async def detect_intent_ai(
                 e
             )
 
+            log_intent_event(
+
+                "intent_ai_error",
+
+                {
+                    "error":
+                        str(e)
+                }
+            )
+
             return build_signal_response(
 
                 primary_intent="text",
@@ -747,4 +963,12 @@ async def detect_intent_ai(
                 ]
             )
 
-    return await asyncio.to_thread(run)
+    result = await asyncio.to_thread(
+        run
+    )
+
+    log_intent_event(
+        "intent_ai_complete"
+    )
+
+    return result
