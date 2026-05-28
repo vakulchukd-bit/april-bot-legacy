@@ -1,74 +1,260 @@
-from storage import (
-    get_admin_stats,
-    get_all_users,
-    check_subscription
-)
+# =========================================================
+# 🧠 APRIL ADMIN MONITOR CORE
+# =========================================================
 
-from blocks.error_handler import get_errors
+"""
+APRIL ADMIN MONITOR CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ADMIN_ID = 2016592532
+ROLE IN APRIL:
+This file is the FUTURE PRIVATE WEB ADMIN CORE
+for the creator-level administration space of April.
 
+This is NOT:
+- Telegram admin panel
+- user dashboard
+- subscription authority
+- monetization controller
+- public analytics layer
+
+This file IS:
+- private Web admin support core
+- executor monitoring helper
+- internal diagnostics system
+- system awareness layer
+- future admin orchestration bridge
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 FUTURE PURPOSE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file is intentionally preserved
+for future expansion of:
+
+- private creator admin panel
+- system diagnostics
+- execution analytics
+- room monitoring
+- orchestration observation
+- execution pressure tracking
+- cognitive room health
+- system recovery tools
+- Web admin controls
+
+This file is reserved for:
+OWNER / CREATOR ADMINISTRATION ONLY.
+
+Users will NEVER access this system.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 APRIL ARCHITECTURE POSITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BotRoot
+ ↓
+Executor
+ ↓
+Admin Monitor Core (THIS FILE)
+
+This file NEVER controls users directly.
+This file NEVER replaces Executor authority.
+
+It only:
+- monitors
+- analyzes
+- reports
+- assists orchestration awareness
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 MACHINE CHANNEL RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file operates using TWO isolated channels.
+
+1. ADMIN TASK CHANNEL
+Executor → Admin Core
+
+2. ADMIN RESPONSE CHANNEL
+Admin Core → Executor
+
+Human-layer data NEVER mixes with
+internal machine orchestration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 IMPORTANT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DO NOT RE-ADD:
+- Telegram admin systems
+- aiogram
+- premium systems
+- subscriptions
+- inline keyboards
+- Telegram commands
+- public dashboards
+- transport logic
+
+This file must remain:
+- lightweight
+- executor-connected
+- Web-oriented
+- diagnostics-focused
+- future-expandable
+"""
 
 # =========================================================
-# 👥 REGISTER USER
+# 🔥 STORAGE ACCESS
+# =========================================================
+
+"""
+Only lightweight monitoring-safe
+storage access remains active here.
+"""
+
+from storage import (
+    get_all_users
+)
+
+# =========================================================
+# 🧠 ERROR OBSERVER
+# =========================================================
+
+from blocks.error_handler import (
+    get_errors
+)
+
+# =========================================================
+# 🧠 SYSTEM CONFIG
+# =========================================================
+
+ADMIN_CORE_VERSION = "APRIL_WEB_ADMIN_CORE"
+
+# =========================================================
+# 🧠 MACHINE CHANNELS
+# =========================================================
+
+"""
+This helper core communicates only through
+isolated internal machine channels.
+"""
+
+ADMIN_TASK_CHANNEL = {
+
+    "channel":
+        "admin_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+ADMIN_RESPONSE_CHANNEL = {
+
+    "channel":
+        "admin_machine_response_channel",
+
+    "isolated":
+        True
+}
+
+# =========================================================
+# 👥 USER REGISTRY STABILIZER
 # =========================================================
 
 def register_user(user_id):
 
-    # теперь user создаётся через storage.py
-    # ensure_user_db вызывается в bot.py
+    """
+    Legacy Telegram registration removed.
 
-    return True
+    User lifecycle now belongs to:
+    - Executor
+    - Web identity systems
+    - Web authentication systems
 
+    This function remains only for
+    compatibility stabilization.
+    """
+
+    return {
+
+        "success": True,
+
+        "user_id": user_id
+    }
 
 # =========================================================
-# 📋 EVENTS
+# 📋 EVENT OBSERVER
 # =========================================================
 
-def log_event(user_id, event_type):
+def log_event(
+    user_id,
+    event_type
+):
 
-    # пока оставляем заглушку
-    # позже подключим analytics db
+    """
+    Future Web analytics bridge.
 
-    return True
+    This module may later feed:
+    - admin analytics
+    - execution statistics
+    - room diagnostics
+    - orchestration timelines
+    """
 
+    return {
+
+        "success": True,
+
+        "event_type":
+            event_type,
+
+        "channel":
+            ADMIN_RESPONSE_CHANNEL
+    }
 
 # =========================================================
-# 💳 ACTIVE SUBSCRIPTIONS
+# 👥 ACTIVE USER ANALYSIS
 # =========================================================
 
-def get_active_subscriptions():
+def get_active_users():
+
+    """
+    Lightweight active user estimation.
+
+    No subscription systems.
+    No monetization authority.
+    """
 
     try:
 
         users = get_all_users()
 
-        active = 0
-
-        for uid in users:
-
-            try:
-
-                if check_subscription(uid):
-                    active += 1
-
-            except:
-                pass
-
-        return active
+        return len(users)
 
     except Exception as e:
 
-        print("🔥 SUB ERROR:", e)
+        print(
+
+            "🔥 ACTIVE USERS ERROR:",
+
+            e
+        )
 
         return 0
 
-
 # =========================================================
-# ⚠️ ERRORS
+# ⚠️ ERROR PRESSURE ANALYSIS
 # =========================================================
 
 def get_errors_count():
+
+    """
+    Internal execution error pressure.
+
+    Used by:
+    - Executor
+    - Admin monitoring
+    - future recovery systems
+    """
 
     try:
 
@@ -76,119 +262,151 @@ def get_errors_count():
 
         return len(errors)
 
-    except:
+    except Exception:
 
         return 0
 
-
 # =========================================================
-# ⚙️ SYSTEM STATUS
+# 🧠 SYSTEM HEALTH ANALYSIS
 # =========================================================
 
-def get_system_status():
+def get_system_health():
 
-    try:
+    """
+    Core health snapshot for:
+    - private admin panel
+    - Executor awareness
+    - orchestration diagnostics
+    """
 
-        stats = get_admin_stats()
-
-        users = stats.get("users", 0)
-        subs = stats.get("subs", 0)
-
-        income_total = stats.get(
-            "income_total",
-            0
-        )
-
-        income_today = stats.get(
-            "income_today",
-            0
-        )
-
-    except Exception as e:
-
-        print("🔥 SYSTEM STATUS ERROR:", e)
-
-        users = 0
-        subs = 0
-        income_total = 0
-        income_today = 0
+    users = get_active_users()
 
     errors = get_errors_count()
 
-    db_status = "ONLINE"
+    # =====================================================
+    # 🧠 HEALTH STATUS
+    # =====================================================
 
-    if errors > 10:
-        system_status = "WARNING"
+    if errors > 25:
+
+        status = "OVERLOAD"
+
+    elif errors > 10:
+
+        status = "WARNING"
 
     else:
-        system_status = "STABLE"
 
-    return f'''
-⚙️ СИСТЕМА APRIL
+        status = "STABLE"
 
-🟢 PostgreSQL: {db_status}
-🟢 Core: ONLINE
-🟢 Dispatcher: ACTIVE
+    return {
 
-━━━━━━━━━━━━━━━
+        "system":
+            "APRIL",
 
-👥 Пользователи: {users}
-💳 Подписки: {subs}
+        "version":
+            ADMIN_CORE_VERSION,
 
-💰 Доход всего: ${income_total}
-📅 Сегодня: ${income_today}
+        "status":
+            status,
 
-⚠️ Ошибки: {errors}
+        "active_users":
+            users,
 
-━━━━━━━━━━━━━━━
+        "error_pressure":
+            errors,
 
-🔥 STATUS: {system_status}
-'''
+        "web_mode":
+            True,
 
+        "telegram_mode":
+            False
+    }
 
 # =========================================================
-# ⚙️ ADMIN PANEL
+# 🧠 EXECUTOR SUPPORT PAYLOAD
 # =========================================================
 
-def get_admin_panel():
+def build_executor_support_payload():
 
-    try:
+    """
+    Internal machine payload for Executor.
 
-        stats = get_admin_stats()
+    This payload NEVER goes directly
+    to frontend or users.
+    """
 
-        users = stats.get("users", 0)
+    health = get_system_health()
 
-        subs = stats.get("subs", 0)
+    return {
 
-        income_total = stats.get(
-            "income_total",
-            0
-        )
+        "channel":
+            ADMIN_RESPONSE_CHANNEL,
 
-        income_today = stats.get(
-            "income_today",
-            0
-        )
+        "payload_type":
+            "executor_support",
 
-    except Exception as e:
+        "system":
+            health.get(
+                "system"
+            ),
 
-        print("🔥 ADMIN PANEL ERROR:", e)
+        "status":
+            health.get(
+                "status"
+            ),
 
-        users = 0
-        subs = 0
-        income_total = 0
-        income_today = 0
+        "active_users":
+            health.get(
+                "active_users"
+            ),
 
-    errors = get_errors_count()
+        "error_pressure":
+            health.get(
+                "error_pressure"
+            ),
 
-    return f"""
-⚙️ АДМИН
+        "web_mode":
+            True
+    }
 
-👥 Пользователи: {users}
-💳 Подписки: {subs}
+# =========================================================
+# 🧠 FUTURE ADMIN PANEL PAYLOAD
+# =========================================================
 
-💰 Доход всего: ${income_total}
-📅 Сегодня: ${income_today}
+def build_admin_dashboard_payload():
 
-⚠️ Ошибки: {errors}
-"""
+    """
+    Reserved future payload builder
+    for the creator Web admin panel.
+
+    Future expansion examples:
+    - room activity
+    - execution graphs
+    - orchestration pressure
+    - cognitive room diagnostics
+    - memory pressure
+    - active flows
+    - recovery tools
+    - execution tracing
+    """
+
+    health = get_system_health()
+
+    return {
+
+        "channel":
+            ADMIN_RESPONSE_CHANNEL,
+
+        "dashboard_type":
+            "private_creator_admin",
+
+        "system_health":
+            health,
+
+        "executor_connected":
+            True,
+
+        "future_expansion":
+            True
+    }
