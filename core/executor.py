@@ -2072,54 +2072,117 @@ async def execute(
                     continue
                        result = await room.handle(
 
-    user_id,
+                        user_id,
 
-    text,
+                        text,
 
-    context,
+                        context,
 
-    run_with_activity
-)
+                        run_with_activity
+                    )
 
-if not result:
-    continue
+                    if not result:
+                        continue
 
-quality = (
-    evaluate_response_quality(
+                    quality = (
+                        evaluate_response_quality(
 
-        result,
+                            result,
 
-        semantic,
+                            semantic,
 
-        cognition
-    )
-)
+                            cognition
+                        )
+                    )
 
-if not quality.get(
-    "helpful"
-):
+                    if not quality.get(
+                        "helpful"
+                    ):
 
-    continue
+                        continue
 
-override = should_override(
+                    override = should_override(
 
-    result=result,
+                        result=result,
 
-    semantic=semantic,
+                        semantic=semantic,
 
-    cognition=cognition,
+                        cognition=cognition,
 
-    state=state
-)
+                        state=state
+                    )
 
-if override:
+                    if override:
 
-    print(
-        "🧠 AUTHORITY OVERRIDE"
-    )
+                        print(
+                            "🧠 AUTHORITY OVERRIDE"
+                        )
 
-    continue
+                        continue
 
+                    result = safely_format_result(
+
+                        result=result,
+
+                        text=text,
+
+                        semantic=semantic,
+
+                        cognition=cognition,
+
+                        visual_reference=visual_reference
+                    )
+
+                    result = assemble_room_response(
+
+                        result=result,
+
+                        room_name=room.name,
+
+                        state=state
+                    )
+
+                    result_type = result.get(
+                        "type",
+                        "text"
+                    )
+
+                    output_text = str(
+                        result.get("data", "")
+                    )
+
+                    if output_text.strip():
+
+                        add_dialog(
+
+                            user_id,
+
+                            "assistant",
+
+                            output_text
+                        )
+
+                        update_memory_summary(
+
+                            user_id,
+
+                            output_text
+                        )
+
+                        extract_and_store_semantics(
+
+                            state,
+
+                            output_text,
+
+                            result_type
+                        )
+
+                    best_result = result
+
+                    scene_results.append(result)
+
+                    break
 
 
 # =====================================================
