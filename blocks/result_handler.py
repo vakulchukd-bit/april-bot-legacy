@@ -1,24 +1,55 @@
 # =========================================================
 # 🧠 APRIL RESULT HANDLER
 # =========================================================
+#
+# APRIL_FILE_ID:
+# APRIL_RESULT_HANDLER
+#
+# ROLE:
+# UNIFIED_TRANSPORT_LAYER
+#
+# INPUT:
+# EXECUTOR_RESULT
+# RENDERER_PAYLOAD
+# MACHINE_RESPONSE
+# WEB_MESSAGE
+# TELEGRAM_MESSAGE
+#
+# OUTPUT:
+# WEB_PAYLOAD
+# TELEGRAM_RESPONSE
+# STRUCTURED_RENDER_RESULT
+#
+# DEPENDENCIES:
+# image_module
+# canvas_formatter
+# renderer_space
+# response_decision
+# presentation_layer
+#
+# =========================================================
+#
+# APRIL RESULT HANDLER
+#
+# Lightweight unified transport layer.
+#
+# Этот слой:
+# - transport only;
+# - renderer-safe;
+# - payload-safe;
+# - continuity-safe.
+#
+# Этот слой НЕ:
+# - renderer authority;
+# - fallback renderer;
+# - fake serializer;
+# - telegram-first core.
+#
+# =========================================================
 
-"""
-APRIL RESULT HANDLER
-
-Lightweight unified transport layer.
-
-Этот слой:
-- transport only;
-- renderer-safe;
-- payload-safe;
-- continuity-safe.
-
-Этот слой НЕ:
-- renderer authority;
-- fallback renderer;
-- fake serializer;
-- telegram-first core.
-"""
+print(
+    "🧠 APRIL RESULT HANDLER LOADED"
+)
 
 # =========================================================
 # 🔥 IMPORTS
@@ -34,6 +65,34 @@ from blocks.canvas_formatter import (
     format_code_block,
     format_text
 )
+
+# =========================================================
+# 🔥 MACHINE CHANNELS
+# =========================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "executor",
+
+    "target":
+        "result_handler",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "result_handler",
+
+    "target":
+        "botru_web_ui",
+
+    "isolated":
+        True
+}
 
 # =========================================================
 # 🔥 CONSTANTS
@@ -65,11 +124,13 @@ def safe_result_log(msg):
     try:
 
         print(
-            "RESULT HANDLER:",
+            "APRIL RESULT HANDLER:",
             msg
         )
 
-        RESULT_PATCH_LOG.append(msg)
+        RESULT_PATCH_LOG.append(
+            str(msg)
+        )
 
     except:
         pass
@@ -84,6 +145,7 @@ def is_renderer_result(result):
     try:
 
         if not isinstance(result, dict):
+
             return False
 
         r_type = result.get(
@@ -91,6 +153,7 @@ def is_renderer_result(result):
         )
 
         if r_type in SAFE_RENDER_TYPES:
+
             return True
 
         structured_keys = {
@@ -104,15 +167,16 @@ def is_renderer_result(result):
         }
 
         return any(
+
             result.get(key) is not None
+
             for key in structured_keys
         )
 
     except Exception as e:
 
-        print(
-            "RENDER DETECTION ERROR:",
-            e
+        safe_result_log(
+            f"RENDER DETECTION ERROR: {e}"
         )
 
         return False
@@ -123,6 +187,7 @@ def is_web_message(message):
     try:
 
         if message is None:
+
             return False
 
         web_flags = [
@@ -137,9 +202,11 @@ def is_web_message(message):
         for flag in web_flags:
 
             if getattr(
+
                 message,
                 flag,
                 False
+
             ):
 
                 return True
@@ -158,10 +225,30 @@ def is_web_message(message):
 
     except Exception as e:
 
-        print(
-            "WEB DETECTION ERROR:",
-            e
+        safe_result_log(
+            f"WEB DETECTION ERROR: {e}"
         )
+
+        return False
+
+
+def is_machine_payload(result):
+
+    try:
+
+        if not isinstance(
+            result,
+            dict
+        ):
+
+            return False
+
+        return result.get(
+            "machine_only",
+            False
+        )
+
+    except:
 
         return False
 
@@ -171,6 +258,10 @@ def is_web_message(message):
 # =========================================================
 
 def normalize_result(result):
+
+    safe_result_log(
+        "NORMALIZE RESULT START"
+    )
 
     if not result:
 
@@ -205,6 +296,18 @@ def normalize_result(result):
 
         safe_result_log(
             f"STRUCTURED: {result_type}"
+        )
+
+        return result
+
+    # =====================================================
+    # 🔥 MACHINE PASS
+    # =====================================================
+
+    if is_machine_payload(result):
+
+        safe_result_log(
+            "MACHINE PAYLOAD PRESERVED"
         )
 
         return result
@@ -337,13 +440,33 @@ def build_web_payload(result):
         "text"
     )
 
+    safe_result_log(
+        f"WEB PAYLOAD BUILD: {result_type}"
+    )
+
+    # =====================================================
+    # 🔥 MACHINE SAFE
+    # =====================================================
+
+    if is_machine_payload(result):
+
+        return result
+
+    # =====================================================
+    # 🔥 RENDER SAFE
+    # =====================================================
+
     if result_type in SAFE_RENDER_TYPES:
 
         safe_result_log(
-            f"WEB PAYLOAD: {result_type}"
+            f"WEB STRUCTURED: {result_type}"
         )
 
         return result
+
+    # =====================================================
+    # 🔥 TEXT
+    # =====================================================
 
     if result_type == "text":
 
@@ -413,6 +536,10 @@ async def send_text(
     keyboard=None
 ):
 
+    safe_result_log(
+        "SEND TEXT"
+    )
+
     content = format_text(
 
         result.get(
@@ -439,6 +566,10 @@ async def send_code(
     keyboard=None
 ):
 
+    safe_result_log(
+        "SEND CODE"
+    )
+
     code = format_code_block(
 
         result.get("code"),
@@ -460,6 +591,10 @@ async def send_file(
     message,
     result
 ):
+
+    safe_result_log(
+        "SEND FILE"
+    )
 
     code = result.get(
         "data",
@@ -489,6 +624,10 @@ async def send_image(
     result,
     keyboard=None
 ):
+
+    safe_result_log(
+        "SEND IMAGE"
+    )
 
     if not result.get("data"):
 
@@ -526,6 +665,10 @@ async def send_result(
     keyboard=None
 ):
 
+    safe_result_log(
+        "SEND RESULT START"
+    )
+
     result = normalize_result(
         result
     )
@@ -535,6 +678,10 @@ async def send_result(
         "text"
     )
 
+    safe_result_log(
+        f"RESULT TYPE: {result_type}"
+    )
+
     # =====================================================
     # 🔥 WEB MODE
     # =====================================================
@@ -542,7 +689,7 @@ async def send_result(
     if is_web_message(message):
 
         safe_result_log(
-            "WEB MODE"
+            "WEB MODE ACTIVE"
         )
 
         return build_web_payload(
@@ -554,7 +701,7 @@ async def send_result(
     # =====================================================
 
     safe_result_log(
-        "TELEGRAM MODE"
+        "TELEGRAM MODE ACTIVE"
     )
 
     # =====================================================
@@ -679,9 +826,8 @@ async def send_result(
 
         except Exception as e:
 
-            print(
-                "IMAGE TASK ERROR:",
-                e
+            safe_result_log(
+                f"IMAGE TASK ERROR: {e}"
             )
 
             await message.answer(
@@ -718,4 +864,8 @@ async def send_result(
         "⚠️ Неизвестный тип результата",
 
         reply_markup=keyboard
+    )
+
+    safe_result_log(
+        "SEND RESULT COMPLETE"
     )
