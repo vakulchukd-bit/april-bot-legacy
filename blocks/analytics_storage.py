@@ -3,97 +3,75 @@
 # =========================================================
 
 """
-APRIL ANALYTICS MEMORY CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the lightweight analytics
-and activity observation core of April.
+APRIL_FILE_ID:
+APRIL_ANALYTICS_MEMORY_CORE
 
-This is NOT:
-- Telegram analytics
-- admin authority
-- memory authority
-- orchestration system
-- payment analytics
-- subscription tracking
+ROLE:
+LIGHTWEIGHT_ANALYTICS_MEMORY_SYSTEM
 
-This file IS:
-- Web analytics helper core
-- activity observation system
-- execution statistics layer
-- usage pattern observer
-- lightweight analytics memory layer
+ROOM:
+ANALYTICS_ROOM
+
+INPUT:
+EXECUTOR_ANALYTICS_SIGNAL
+USER_ACTIVITY_SIGNAL
+SESSION_ACTIVITY_SIGNAL
+VOICE_ACTIVITY_SIGNAL
+IMAGE_ACTIVITY_SIGNAL
+ADMIN_ANALYTICS_REQUEST
+
+OUTPUT:
+ANALYTICS_PAYLOAD
+EXECUTION_STATISTICS
+ACTIVITY_OBSERVATION
+ADMIN_TELEMETRY
+ANALYZER_DATA
+
+DEPENDENCIES:
+EXECUTOR
+ADMIN_MONITOR_CORE
+WEB_ADMIN_SPACE
+ANALYZER_SYSTEM
+
+CRITICAL:
+TRUE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 MAIN PURPOSE
+🧠 GOLDEN RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-This helper core helps April understand:
+This file NEVER:
+- performs cognition
+- replaces memory systems
+- controls orchestration
+- formats frontend output
+
+This file ONLY:
+- tracks activity
+- stabilizes analytics
+- exposes telemetry-safe statistics
+- preserves lightweight analytics continuity
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 ANALYZER VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Analyzer may observe:
 - execution activity
 - usage pressure
 - interaction statistics
-- media activity
-- cognitive workload patterns
-- future Web analytics
+- activity growth
+- analytics continuity
+- workload stabilization
 
-It supports:
-- Executor
-- Admin Monitor Core
-- future Web admin systems
-- future analytics dashboards
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-BotRoot
- ↓
-Executor
- ↓
-Analytics Memory Core (THIS FILE)
-
-This file NEVER:
-- responds to users
-- formats frontend output
-- routes execution
-- replaces memory systems
-- replaces monitoring systems
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN CHANNEL RULE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file uses TWO isolated machine channels.
-
-1. ANALYTICS TASK CHANNEL
-Executor → Analytics Core
-
-2. ANALYTICS RESPONSE CHANNEL
-Analytics Core → Executor
-
-Human-layer responses NEVER enter
-internal analytics execution.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram analytics
-- aiogram
-- admin panels
-- subscriptions
-- payment systems
-- frontend rendering
-- orchestration logic
-
-This file must remain:
-- lightweight
-- analytics-focused
-- Web-oriented
-- Executor-connected
-- future-expandable
+Analyzer may NEVER:
+- alter analytics
+- inject orchestration
+- replace Executor authority
 """
 
 # =========================================================
@@ -102,21 +80,67 @@ This file must remain:
 
 import json
 import os
+
 from datetime import datetime
+
+# =========================================================
+# 🔥 APRIL TRACE LOGS
+# =========================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_ANALYTICS_MEMORY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_ANALYTICS_MEMORY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
 
 # =========================================================
 # 🧠 STORAGE CONFIG
 # =========================================================
-
-"""
-Lightweight local analytics storage.
-
-Can later migrate to:
-- PostgreSQL
-- Redis
-- cloud analytics
-- distributed telemetry
-"""
 
 DATA_FILE = "data/april_web_analytics.json"
 
@@ -148,11 +172,15 @@ ANALYTICS_RESPONSE_CHANNEL = {
 
 def ensure_file():
 
-    """
-    Creates analytics storage safely.
+    APRIL_LOG_IN(
 
-    Lightweight structure only.
-    """
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "ensure_file"
+        }
+    )
 
     if not os.path.exists(DATA_FILE):
 
@@ -183,15 +211,31 @@ def ensure_file():
 
             }, f, indent=2)
 
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "storage_ready"
+        }
+    )
+
 # =========================================================
 # 🧠 LOAD ANALYTICS
 # =========================================================
 
 def load_data():
 
-    """
-    Safe analytics loading.
-    """
+    APRIL_LOG_IN(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "load_data"
+        }
+    )
 
     ensure_file()
 
@@ -205,7 +249,19 @@ def load_data():
 
     ) as f:
 
-        return json.load(f)
+        data = json.load(f)
+
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "data_loaded"
+        }
+    )
+
+    return data
 
 # =========================================================
 # 🧠 SAVE ANALYTICS
@@ -213,9 +269,15 @@ def load_data():
 
 def save_data(data):
 
-    """
-    Safe analytics saving.
-    """
+    APRIL_LOG_IN(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "save_data"
+        }
+    )
 
     os.makedirs(
         "data",
@@ -245,18 +307,34 @@ def save_data(data):
             indent=2
         )
 
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "data_saved"
+        }
+    )
+
 # =========================================================
 # 🧠 USER ACTIVITY TRACKING
 # =========================================================
 
 def add_user(user_id):
 
-    """
-    Lightweight activity registration.
+    APRIL_LOG_IN(
 
-    NOT identity authority.
-    NOT authentication system.
-    """
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "add_user",
+
+            "user_id":
+                user_id
+        }
+    )
 
     data = load_data()
 
@@ -273,6 +351,16 @@ def add_user(user_id):
 
         save_data(data)
 
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "user_registered"
+        }
+    )
+
 # =========================================================
 # 🧠 EXECUTION EVENT TRACKING
 # =========================================================
@@ -283,23 +371,22 @@ def add_event(
     event_type
 ):
 
-    """
-    Tracks lightweight execution activity.
+    APRIL_LOG_IN(
 
-    Future integrations:
-    - Web admin analytics
-    - execution statistics
-    - cognitive workload analysis
-    - room activity insights
-    """
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "add_event",
+
+            "event_type":
+                event_type
+        }
+    )
 
     add_user(user_id)
 
     data = load_data()
-
-    # =====================================================
-    # 🧠 EVENT ANALYTICS
-    # =====================================================
 
     if event_type == "text":
 
@@ -319,24 +406,38 @@ def add_event(
 
     save_data(data)
 
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "event_saved",
+
+            "event_type":
+                event_type
+        }
+    )
+
 # =========================================================
 # 🧠 ANALYTICS SNAPSHOT
 # =========================================================
 
 def get_stats():
 
-    """
-    Lightweight analytics snapshot.
+    APRIL_LOG_IN(
 
-    Used internally by:
-    - Executor
-    - Admin Monitor Core
-    - future Web analytics systems
-    """
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "get_stats"
+        }
+    )
 
     data = load_data()
 
-    return {
+    stats = {
 
         "users":
             len(
@@ -376,22 +477,112 @@ def get_stats():
             )
     }
 
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "stats_ready"
+        }
+    )
+
+    return stats
+
+# =========================================================
+# 🧠 ANALYZER TELEMETRY
+# =========================================================
+
+def build_analytics_telemetry_payload():
+
+    APRIL_LOG_IN(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "build_analytics_telemetry_payload"
+        }
+    )
+
+    stats = get_stats()
+
+    payload = {
+
+        "file_id":
+            "APRIL_ANALYTICS_MEMORY_CORE",
+
+        "room":
+            "ANALYTICS_ROOM",
+
+        "users":
+            stats.get(
+                "users"
+            ),
+
+        "messages":
+            stats.get(
+                "messages"
+            ),
+
+        "images":
+            stats.get(
+                "images"
+            ),
+
+        "voice":
+            stats.get(
+                "voice"
+            ),
+
+        "sessions":
+            stats.get(
+                "sessions"
+            ),
+
+        "last_update":
+            stats.get(
+                "last_update"
+            ),
+
+        "analytics_active":
+            True,
+
+        "executor_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "analytics_telemetry_ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 EXECUTOR ANALYTICS PAYLOAD
 # =========================================================
 
 def build_executor_analytics_payload():
 
-    """
-    Internal analytics payload
-    for Executor stabilization awareness.
+    APRIL_LOG_IN(
 
-    NEVER exposed directly to users.
-    """
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "build_executor_analytics_payload"
+        }
+    )
 
     stats = get_stats()
 
-    return {
+    payload = {
 
         "channel":
             ANALYTICS_RESPONSE_CHANNEL,
@@ -428,26 +619,37 @@ def build_executor_analytics_payload():
         }
     }
 
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "executor_analytics_ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 WEB ADMIN ANALYTICS PAYLOAD
 # =========================================================
 
 def build_admin_analytics_payload():
 
-    """
-    Future private Web admin analytics payload.
+    APRIL_LOG_IN(
 
-    Reserved for:
-    - creator admin panel
-    - execution insights
-    - room analytics
-    - activity statistics
-    - workload analysis
-    """
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "build_admin_analytics_payload"
+        }
+    )
 
     stats = get_stats()
 
-    return {
+    payload = {
 
         "channel":
             ANALYTICS_RESPONSE_CHANNEL,
@@ -458,9 +660,24 @@ def build_admin_analytics_payload():
         "analytics":
             stats,
 
+        "telemetry":
+            build_analytics_telemetry_payload(),
+
         "executor_connected":
             True,
 
         "future_expandable":
             True
     }
+
+    APRIL_LOG_OUT(
+
+        "ANALYTICS_ROOM",
+
+        {
+            "action":
+                "admin_analytics_ready"
+        }
+    )
+
+    return payload
