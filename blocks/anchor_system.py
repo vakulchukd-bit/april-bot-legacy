@@ -3,119 +3,76 @@
 # =========================================================
 
 """
-APRIL COGNITIVE ANCHOR CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the cognitive continuity
-and trajectory stabilization core of April.
+APRIL_FILE_ID:
+APRIL_COGNITIVE_ANCHOR_CORE
 
-This helper core helps April:
-- hold attention
-- maintain continuity
-- stabilize active flows
-- preserve execution direction
-- track conversational trajectory
-- connect multi-step reasoning
+ROLE:
+COGNITIVE_CONTINUITY_STABILIZER
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROOM:
+ANCHOR_ROOM
 
-This file IS:
-- continuity anchor system
-- cognitive focus holder
-- active trajectory tracker
-- scene continuation stabilizer
-- execution continuity helper
-- multi-step flow anchor
+INPUT:
+EXECUTOR_CONTINUITY_REQUEST
+TRAJECTORY_UPDATE
+SCENE_CONTINUATION_SIGNAL
+FLOW_STABILIZATION_SIGNAL
+ANCHOR_ANALYSIS_REQUEST
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS NOT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT:
+ANCHOR_PAYLOAD
+CONTINUITY_STATE
+TRAJECTORY_STATE
+FLOW_STABILIZATION
+ANALYZER_CONTINUITY_DATA
 
-This file is NOT:
-- memory system
-- orchestration engine
-- response formatter
-- frontend renderer
-- Telegram logic
-- analytics system
-- personality core
-- routing authority
+DEPENDENCIES:
+EXECUTOR
+RENDERER_ROOMS
+MEMORY_SYSTEMS
+MULTIMODAL_ROOMS
+ANALYZER_SYSTEM
+
+CRITICAL:
+TRUE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHY THIS FILE EXISTS
+🧠 GOLDEN RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Executor distributes tasks across rooms.
+This file NEVER:
+- performs cognition
+- replaces memory systems
+- controls orchestration
+- formats responses
 
-This helper core helps April:
-- understand what is currently active
-- preserve execution direction
-- continue scenes correctly
-- maintain cognitive focus
-- avoid execution confusion
-- stabilize multi-room execution
-
-Without this system:
-- scenes can break
-- continuation can drift
-- flows can mix together
-- April can lose active focus
+This file ONLY:
+- stabilizes continuity
+- preserves active trajectory
+- maintains execution focus
+- protects multi-room continuation
+- exposes continuity telemetry
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
+🧠 ANALYZER VISIBILITY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-BotRoot
- ↓
-Executor
- ↓
-Cognitive Anchor Core (THIS FILE)
- ↓
-Execution Rooms
+Analyzer may observe:
+- active trajectories
+- continuity pressure
+- flow stabilization
+- active cognitive anchors
+- multi-room continuation
+- scene continuity state
 
-Executor asks this helper core:
-- what is currently active?
-- what trajectory is ongoing?
-- what scene should continue?
-- what flow is stabilized?
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN MACHINE CHANNEL RULE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file operates using TWO isolated channels.
-
-1. ANCHOR TASK CHANNEL
-Executor → Anchor Core
-
-2. ANCHOR RESPONSE CHANNEL
-Anchor Core → Executor
-
-Human-layer responses NEVER enter
-internal continuity orchestration.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram logic
-- frontend rendering
-- response formatting
-- subscriptions
-- admin systems
-- analytics logic
-- orchestration duplication
-
-This file must remain:
-- lightweight
-- continuity-focused
-- Executor-connected
-- Web-oriented
-- cognition-safe
+Analyzer may NEVER:
+- alter trajectories
+- inject cognition
+- replace Executor authority
 """
 
 # =========================================================
@@ -141,20 +98,63 @@ ANCHOR_RESPONSE_CHANNEL = {
 }
 
 # =========================================================
-# 🧠 ACTIVE COGNITIVE ANCHORS
+# 🔥 APRIL TRACE LOGS
 # =========================================================
 
-"""
-Active continuity anchors.
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
 
-Stores ONLY:
-- current focus
-- active trajectory
-- continuation targets
-- execution stabilization references
+    try:
 
-This is NOT long-term memory.
-"""
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_COGNITIVE_ANCHOR_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_COGNITIVE_ANCHOR_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+# =========================================================
+# 🧠 ACTIVE COGNITIVE ANCHORS
+# =========================================================
 
 anchors = {}
 
@@ -169,15 +169,21 @@ def create_anchor(
     base
 ):
 
-    """
-    Creates active cognitive anchor.
+    APRIL_LOG_IN(
 
-    Example:
-    - active scene
-    - active reasoning flow
-    - active visual trajectory
-    - active execution branch
-    """
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "create_anchor",
+
+            "user_id":
+                user_id,
+
+            "anchor_type":
+                anchor_type
+        }
+    )
 
     anchors[user_id] = {
 
@@ -200,6 +206,16 @@ def create_anchor(
             ANCHOR_RESPONSE_CHANNEL
     }
 
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "anchor_created"
+        }
+    )
+
     return {
 
         "success": True,
@@ -214,22 +230,36 @@ def create_anchor(
 
 def get_anchor(user_id):
 
-    """
-    Returns active cognitive focus state.
+    APRIL_LOG_IN(
 
-    Executor uses this to:
-    - stabilize continuity
-    - continue scenes
-    - maintain reasoning direction
-    """
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "get_anchor",
+
+            "user_id":
+                user_id
+        }
+    )
 
     anchor = anchors.get(user_id)
 
     if not anchor:
 
+        APRIL_LOG_OUT(
+
+            "ANCHOR_ROOM",
+
+            {
+                "anchor":
+                    "not_found"
+            }
+        )
+
         return None
 
-    return {
+    payload = {
 
         "channel":
             ANCHOR_RESPONSE_CHANNEL,
@@ -237,6 +267,18 @@ def get_anchor(user_id):
         "anchor":
             anchor
     }
+
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "anchor":
+                "active"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 UPDATE ANCHOR
@@ -248,17 +290,30 @@ def update_anchor(
     new_value
 ):
 
-    """
-    Updates active continuity state.
+    APRIL_LOG_IN(
 
-    Used when:
-    - trajectory changes
-    - scene evolves
-    - reasoning expands
-    - execution flow continues
-    """
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "update_anchor",
+
+            "user_id":
+                user_id
+        }
+    )
 
     if user_id not in anchors:
+
+        APRIL_LOG_OUT(
+
+            "ANCHOR_ROOM",
+
+            {
+                "error":
+                    "anchor_not_found"
+            }
+        )
 
         return {
 
@@ -271,6 +326,16 @@ def update_anchor(
     anchors[user_id][
         "current"
     ] = new_value
+
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "anchor_updated"
+        }
+    )
 
     return {
 
@@ -286,19 +351,32 @@ def update_anchor(
 
 def clear_anchor(user_id):
 
-    """
-    Clears active continuity focus.
+    APRIL_LOG_IN(
 
-    Used when:
-    - flow ends
-    - trajectory resets
-    - scene closes
-    - execution completes
-    """
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "clear_anchor",
+
+            "user_id":
+                user_id
+        }
+    )
 
     if user_id in anchors:
 
         del anchors[user_id]
+
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "anchor_cleared"
+        }
+    )
 
     return {
 
@@ -314,16 +392,24 @@ def clear_anchor(user_id):
 
 def analyze_continuity_state(user_id):
 
-    """
-    Lightweight continuity diagnostics
-    for Executor awareness.
-    """
+    APRIL_LOG_IN(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "analyze_continuity_state",
+
+            "user_id":
+                user_id
+        }
+    )
 
     anchor = anchors.get(user_id)
 
     if not anchor:
 
-        return {
+        payload = {
 
             "channel":
                 ANCHOR_RESPONSE_CHANNEL,
@@ -332,7 +418,19 @@ def analyze_continuity_state(user_id):
                 False
         }
 
-    return {
+        APRIL_LOG_OUT(
+
+            "ANCHOR_ROOM",
+
+            {
+                "continuity":
+                    "inactive"
+            }
+        )
+
+        return payload
+
+    payload = {
 
         "channel":
             ANCHOR_RESPONSE_CHANNEL,
@@ -356,24 +454,94 @@ def analyze_continuity_state(user_id):
             )
     }
 
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "continuity":
+                "active"
+        }
+    )
+
+    return payload
+
+# =========================================================
+# 🧠 ANALYZER TELEMETRY
+# =========================================================
+
+def build_anchor_telemetry_payload():
+
+    APRIL_LOG_IN(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "build_anchor_telemetry_payload"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_COGNITIVE_ANCHOR_CORE",
+
+        "room":
+            "ANCHOR_ROOM",
+
+        "active_anchors":
+            len(anchors),
+
+        "continuity_engine":
+            True,
+
+        "trajectory_stabilization":
+            True,
+
+        "multi_room_support":
+            True,
+
+        "executor_connected":
+            True
+    }
+
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "anchor_telemetry_ready"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 EXECUTOR CONTINUITY PAYLOAD
 # =========================================================
 
 def build_executor_anchor_payload(user_id):
 
-    """
-    Internal continuity payload
-    for Executor stabilization.
+    APRIL_LOG_IN(
 
-    NEVER exposed directly to users.
-    """
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "build_executor_anchor_payload",
+
+            "user_id":
+                user_id
+        }
+    )
 
     continuity = analyze_continuity_state(
         user_id
     )
 
-    return {
+    payload = {
 
         "channel":
             ANCHOR_RESPONSE_CHANNEL,
@@ -382,8 +550,23 @@ def build_executor_anchor_payload(user_id):
             "executor_continuity",
 
         "continuity":
-            continuity
+            continuity,
+
+        "telemetry":
+            build_anchor_telemetry_payload()
     }
+
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "executor_anchor_payload_ready"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 MULTI-ROOM FLOW SUPPORT
@@ -396,16 +579,18 @@ def stabilize_execution_trajectory(
     target
 ):
 
-    """
-    Helps Executor stabilize
-    multi-room execution flows.
+    APRIL_LOG_IN(
 
-    Example:
-    - renderer continuation
-    - visual continuation
-    - reasoning continuation
-    - multi-block response flow
-    """
+        "ANCHOR_ROOM",
+
+        {
+            "action":
+                "stabilize_execution_trajectory",
+
+            "trajectory":
+                trajectory_type
+        }
+    )
 
     if user_id not in anchors:
 
@@ -427,6 +612,19 @@ def stabilize_execution_trajectory(
         anchors[user_id][
             "current"
         ] = target
+
+    APRIL_LOG_OUT(
+
+        "ANCHOR_ROOM",
+
+        {
+            "trajectory":
+                trajectory_type,
+
+            "stabilized":
+                True
+        }
+    )
 
     return {
 
