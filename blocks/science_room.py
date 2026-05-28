@@ -12,13 +12,35 @@ ROLE:
 - formula support
 - equation solving
 - renderer-safe math handling
+- continuity-safe science routing
+- web-first renderer bridge
 
 NOT ROLE:
 - orchestration
 - routing authority
 - scene ownership
 - fallback control
+- provider escalation
 """
+
+# ===============================
+# 🔥 MACHINE IDENTITY
+# ===============================
+
+APRIL_FILE_ID = "APRIL_SCIENCE_ROOM"
+
+SCIENCE_ROOM_CHANNEL = {
+
+    "type": "science_room",
+
+    "mode": "renderer_first",
+
+    "isolated": True,
+
+    "continuity_safe": True,
+
+    "web_safe": True
+}
 
 # ===============================
 # 🔥 PATCH LOG
@@ -26,18 +48,22 @@ NOT ROLE:
 
 PATCH_LOG = []
 
-
 def safe_patch_log(msg):
 
     try:
 
         print("SCIENCE:", msg)
 
-        PATCH_LOG.append(msg)
+        PATCH_LOG.append(
+            str(msg)
+        )
 
     except:
         pass
 
+safe_patch_log(
+    "SCIENCE ROOM INITIALIZED"
+)
 
 # ===============================
 # 🔥 IMPORTS
@@ -56,7 +82,6 @@ from blocks.science_interpreter import (
     interpret_graph_request
 )
 
-
 # ===============================
 # 🔥 HELPERS
 # ===============================
@@ -67,7 +92,6 @@ def safe_lower(text):
         return str(text).lower()
     except:
         return ""
-
 
 # ===============================
 # 🔥 CODE DETECTION
@@ -106,7 +130,6 @@ def detect_code_signal(text):
             hits += 1
 
     return hits >= 2
-
 
 # ===============================
 # 🔥 MATH DETECTION
@@ -151,7 +174,6 @@ def detect_math_signal(text):
 
     return equation is not None
 
-
 # ===============================
 # 🔥 GRAPH INTENT
 # ===============================
@@ -174,7 +196,6 @@ def detect_graph_intent(text):
         w in t
         for w in graph_words
     )
-
 
 # ===============================
 # 🔥 SCIENCE ROOM
@@ -296,9 +317,38 @@ class ScienceRoom:
             {}
         )
 
+        reasoning = context.get(
+            "reasoning",
+            {}
+        )
+
         safe_patch_log(
             f"SCIENCE ENTER: {t[:60]}"
         )
+
+        # ======================================
+        # 🔥 MACHINE FLAGS
+        # ======================================
+
+        semantic[
+            "science_room_active"
+        ] = True
+
+        semantic[
+            "renderer_first"
+        ] = True
+
+        semantic[
+            "continuity_safe"
+        ] = True
+
+        semantic[
+            "web_safe"
+        ] = True
+
+        semantic[
+            "provider_safe"
+        ] = True
 
         # ======================================
         # 🔥 CODE SAFETY
@@ -311,6 +361,22 @@ class ScienceRoom:
             )
 
             return None
+
+        # ======================================
+        # 🔥 CONTINUITY
+        # ======================================
+
+        if reasoning.get(
+            "continuation"
+        ):
+
+            semantic[
+                "math_continuation"
+            ] = True
+
+            semantic[
+                "preserve_math_scene"
+            ] = True
 
         # ======================================
         # 🔥 RENDERER PAYLOAD
@@ -337,6 +403,17 @@ class ScienceRoom:
                     renderer_payload
             }
 
+            state[
+                "active_flow"
+            ] = {
+
+                "type": "math",
+
+                "room": "science",
+
+                "renderer": True
+            }
+
             safe_patch_log(
                 "RENDERER PAYLOAD"
             )
@@ -353,11 +430,22 @@ class ScienceRoom:
 
         if solution:
 
+            safe_patch_log(
+                "EQUATION SOLVED"
+            )
+
             return {
 
                 "type": "text",
 
-                "data": solution
+                "data": solution,
+
+                "machine_channel":
+                    SCIENCE_ROOM_CHANNEL,
+
+                "renderer_safe": True,
+
+                "continuity_safe": True
             }
 
         # ======================================
