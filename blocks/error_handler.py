@@ -1,3 +1,59 @@
+# =====================================================
+# 🧠 APRIL ERROR ORCHESTRATION CORE
+# =====================================================
+
+"""
+APRIL ERROR ORCHESTRATION CORE
+
+APRIL_FILE_ID:
+APRIL_ERROR_ORCHESTRATION_CORE
+
+ROLE:
+SAFE_DELIVERY_AND_ERROR_STABILIZATION
+
+INPUT:
+EXECUTOR_RESULTS
+RENDERER_RESULTS
+IMAGE_PIPELINE_RESULTS
+EXCEPTION_OBJECTS
+DELIVERY_CONTEXT
+
+OUTPUT:
+SAFE_USER_RESPONSE
+ADMIN_ERROR_REPORT
+PIPELINE_DIAGNOSTICS
+STABILIZED_DELIVERY
+
+THIS FILE IS:
+- unified error orchestration layer
+- safe delivery stabilizer
+- renderer continuity protector
+- image pipeline recovery layer
+- admin diagnostics bridge
+- execution stabilization helper
+
+THIS FILE IS NOT:
+- orchestration router
+- hidden fallback engine
+- recursive retry system
+- frontend renderer
+- trigger layer
+- Telegram-only system
+
+GOLDEN APRIL RULES:
+- safe delivery first
+- renderer continuity preservation
+- no hidden rerouting
+- no recursive chaos
+- stable modality recovery
+- structured diagnostics
+- admin-safe observability
+"""
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
 import traceback
 import time
 
@@ -7,35 +63,31 @@ from blocks.image_module import (
     process as image_generate
 )
 
-# =====================================================
-# 🧠 APRIL ERROR ORCHESTRATION
-# =====================================================
-
-"""
-Unified error handling layer.
-
-Этот слой:
-
-✅ удерживает stable delivery
-✅ удерживает renderer continuity
-✅ удерживает image pipeline
-✅ удерживает structured result flow
-✅ помогает executor recovery
-
-❌ НЕ telegram-only layer
-❌ НЕ trigger router
-❌ НЕ fallback chaos system
-❌ НЕ hidden rerouting engine
-
-Главная задача:
-безопасная delivery orchestration.
-"""
+from blocks.tariffs_config import (
+    ADMIN_ID
+)
 
 # =====================================================
-# 🔥 ADMIN
+# 🔥 MACHINE CHANNELS
 # =====================================================
 
-ADMIN_ID = 2016592532
+ERROR_TASK_CHANNEL = {
+
+    "channel":
+        "error_machine_task_channel",
+
+    "isolated":
+        True
+}
+
+ERROR_RESPONSE_CHANNEL = {
+
+    "channel":
+        "error_machine_response_channel",
+
+    "isolated":
+        True
+}
 
 # =====================================================
 # 🔥 ERROR STORAGE
@@ -85,6 +137,88 @@ ERROR_CONTEXT_RENDERER = "renderer"
 ERROR_CONTEXT_UNKNOWN = "unknown"
 
 # =====================================================
+# 🔥 PIPELINE LOGGING
+# =====================================================
+
+def log_error_input(
+
+    context,
+    modality,
+    user_id=None
+):
+
+    """
+    INPUT MACHINE TRACE
+
+    Used by:
+    - admin diagnostics
+    - analyzer
+    - recovery tracing
+    - pipeline observability
+    """
+
+    return {
+
+        "file_id":
+            "APRIL_ERROR_ORCHESTRATION_CORE",
+
+        "event":
+            "error_input",
+
+        "channel":
+            ERROR_TASK_CHANNEL,
+
+        "context":
+            context,
+
+        "modality":
+            modality,
+
+        "user_id":
+            user_id,
+
+        "machine_only":
+            True
+    }
+
+
+def log_error_output(
+
+    handled,
+    context
+):
+
+    """
+    OUTPUT MACHINE TRACE
+
+    Used internally by:
+    - analyzer
+    - governance
+    - admin monitoring
+    """
+
+    return {
+
+        "file_id":
+            "APRIL_ERROR_ORCHESTRATION_CORE",
+
+        "event":
+            "error_output",
+
+        "channel":
+            ERROR_RESPONSE_CHANNEL,
+
+        "handled":
+            handled,
+
+        "context":
+            context,
+
+        "machine_only":
+            True
+    }
+
+# =====================================================
 # 🔥 HELPERS
 # =====================================================
 
@@ -112,7 +246,6 @@ def contains_any(
         for w in words
     )
 
-
 # =====================================================
 # 🔥 ERROR STORAGE
 # =====================================================
@@ -130,8 +263,17 @@ def log_error(error_text):
 
 def get_errors():
 
-    return error_log
+    return {
 
+        "channel":
+            ERROR_RESPONSE_CHANNEL,
+
+        "errors":
+            error_log,
+
+        "machine_only":
+            True
+    }
 
 # =====================================================
 # 🔥 RESULT ANALYSIS
@@ -167,7 +309,6 @@ def is_visual_result(
     )
 
     return result_type in VISUAL_MODALITIES
-
 
 # =====================================================
 # 🔥 SAFE USER ERROR
@@ -225,11 +366,11 @@ def build_user_error_message(
     # =====================================================
 
     return (
+
         "⚠️ Не получилось "
         "выполнить запрос. "
         "Попробуй ещё раз."
     )
-
 
 # =====================================================
 # 🔥 SAFE IMAGE TASK
@@ -239,6 +380,15 @@ async def process_image_task(
     message,
     result
 ):
+
+    """
+    Safe image pipeline execution.
+
+    Preserves:
+    - renderer continuity
+    - visual modality stability
+    - delivery structure
+    """
 
     print(
         "🖼 IMAGE TASK START"
@@ -306,7 +456,6 @@ async def process_image_task(
         )
     )
 
-
 # =====================================================
 # 🔥 RESULT DELIVERY
 # =====================================================
@@ -316,6 +465,16 @@ async def send_result(
     result,
     keyboard=None
 ):
+
+    """
+    Unified stabilized delivery layer.
+
+    Supports:
+    - text
+    - image
+    - renderer payloads
+    - visual tasks
+    """
 
     try:
 
@@ -447,7 +606,6 @@ async def send_result(
             )
         )
 
-
 # =====================================================
 # 🔥 ERROR HANDLER
 # =====================================================
@@ -466,13 +624,13 @@ async def handle_error(
 ):
 
     """
-    Unified error handling.
+    Unified safe error handling.
 
-    Пользователь:
-    - получает safe response.
+    User:
+    - receives safe response.
 
     Admin:
-    - получает structured traceback.
+    - receives structured traceback.
     """
 
     user_id = getattr(
@@ -488,6 +646,15 @@ async def handle_error(
         user_message,
         "text",
         None
+    )
+
+    log_error_input(
+
+        context=context,
+
+        modality=modality,
+
+        user_id=user_id
     )
 
     # =================================================
@@ -582,3 +749,10 @@ async def handle_error(
 
     except:
         pass
+
+    log_error_output(
+
+        handled=True,
+
+        context=context
+    )
