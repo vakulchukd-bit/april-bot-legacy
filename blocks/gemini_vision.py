@@ -1,14 +1,112 @@
+# =====================================================
+# 🧠 APRIL VISUAL SEMANTIC ORCHESTRATOR
+# =====================================================
+
+"""
+APRIL VISUAL ORCHESTRATION CORE
+
+ROLE:
+Этот файл является
+центральным visual-semantic coordinator
+пространства April.
+
+=====================================================
+🔥 MAIN PURPOSE
+=====================================================
+
+Система отвечает за:
+
+- visual scene extraction;
+- semantic visual routing;
+- visual continuity;
+- provider coordination;
+- multimodal scene stabilization;
+- renderer-oriented visual analysis;
+- visual memory synchronization;
+- machine-level visual orchestration.
+
+=====================================================
+🧠 GOLDEN APRIL ARCHITECTURE
+=====================================================
+
+INPUT MACHINE CHANNEL:
+Executor → Visual Semantic Core
+
+OUTPUT MACHINE CHANNEL:
+Visual Semantic Core → Executor Rooms
+
+=====================================================
+🔥 IMPORTANT
+=====================================================
+
+Этот файл НЕ:
+
+- telegram image handler;
+- user-facing image responder;
+- personality engine;
+- output formatter;
+- visual chat layer.
+
+=====================================================
+🌐 WEB-FIRST VISUAL ARCHITECTURE
+=====================================================
+
+Система полностью адаптирована под:
+
+- April Web Space;
+- renderer-first architecture;
+- scene continuity;
+- structured visual blocks;
+- multimedia orchestration;
+- visual trajectories.
+
+=====================================================
+🧠 VISUAL MEMORY PHILOSOPHY
+=====================================================
+
+Главная цель:
+НЕ распознавание картинки.
+
+Главная цель:
+semantic visual continuity.
+
+Система хранит:
+
+- scene trajectories;
+- semantic focus;
+- object continuity;
+- visual environment;
+- renderer context.
+
+=====================================================
+🔥 INTERNAL CHANNEL ISOLATION
+=====================================================
+
+Machine visual context
+никогда НЕ должен попадать:
+
+- напрямую пользователю;
+- в BotRU output;
+- в raw renderer output.
+
+Только через Executor orchestration.
+
+=====================================================
+"""
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
 import os
 import time
 import json
 
 from google import genai
-from google.genai import errors as gemini_errors
-
 from openai import OpenAI
 
 # =====================================================
-# 🔥 SHARED PROVIDER STATE
+# 🔥 PROVIDER ROUTER
 # =====================================================
 
 from blocks.provider_router import (
@@ -29,30 +127,55 @@ from blocks.provider_router import (
 # =====================================================
 
 gemini_client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+    api_key=os.getenv(
+        "GEMINI_API_KEY"
+    )
 )
 
 openai_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv(
+        "OPENAI_API_KEY"
+    )
 )
 
 # =====================================================
-# 🔥 VISUAL PROVIDER MODE
+# 🔥 ACTIVE VISUAL PROVIDER
 # =====================================================
 
 ACTIVE_PROVIDER = "gemini"
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source": "executor",
+    "type": "visual_machine_input",
+    "isolated": True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target": "executor_visual_pipeline",
+    "type": "visual_machine_output",
+    "isolated": True
+}
 
 # =====================================================
 # 🔥 VISUAL MEMORY CONFIG
 # =====================================================
 
 MAX_OBJECTS = 12
+
 MAX_VISIBLE_TEXT = 10
+
 MAX_SCENE_SUMMARY = 320
+
 MAX_PASSIVE_SCENES = 6
 
 # =====================================================
-# 🔥 PROVIDER SWITCH
+# 🔥 PROVIDER SWITCHING
 # =====================================================
 
 def set_provider(name: str):
@@ -62,7 +185,8 @@ def set_provider(name: str):
     ACTIVE_PROVIDER = name
 
     provider_log(
-        f"🧠 ACTIVE VISUAL PROVIDER: "
+
+        f"🧠 VISUAL PROVIDER: "
         f"{ACTIVE_PROVIDER}"
     )
 
@@ -72,7 +196,7 @@ def get_provider():
     return ACTIVE_PROVIDER
 
 # =====================================================
-# 🔥 SAFE GEMINI RECOVERY
+# 🔥 PROVIDER RECOVERY
 # =====================================================
 
 def can_try_gemini():
@@ -82,6 +206,29 @@ def can_try_gemini():
         return should_restore_gemini()
 
     return False
+
+# =====================================================
+# 🔥 MACHINE VISUAL PAYLOAD
+# =====================================================
+
+def build_visual_machine_payload(
+    visual_scene: dict
+):
+
+    return {
+
+        "machine_only": True,
+
+        "human_visible": False,
+
+        "scene":
+            visual_scene,
+
+        "provider":
+            ACTIVE_PROVIDER,
+
+        "visual_pipeline_active": True
+    }
 
 # =====================================================
 # 🔥 VISUAL SCENE NORMALIZATION
@@ -105,25 +252,36 @@ def normalize_visual_scene(
 
     normalized = {
 
+        # =================================================
+        # 🔥 CORE SEMANTICS
+        # =====================================================
+
         "scene_type":
+
             raw_scene.get(
                 "scene_type",
                 "unknown"
             ),
 
         "semantic_focus":
+
             raw_scene.get(
                 "semantic_focus",
                 "general"
             ),
 
         "summary":
+
             str(
                 raw_scene.get(
                     "summary",
                     ""
                 )
             )[:MAX_SCENE_SUMMARY],
+
+        # =================================================
+        # 🔥 OBJECTS
+        # =====================================================
 
         "objects":
             objects[:MAX_OBJECTS],
@@ -132,28 +290,36 @@ def normalize_visual_scene(
             visible_text[:MAX_VISIBLE_TEXT],
 
         "environment":
+
             raw_scene.get(
                 "environment",
                 {}
             ),
 
         "colors":
+
             raw_scene.get(
                 "colors",
                 []
             ),
 
         "brands":
+
             raw_scene.get(
                 "brands",
                 []
             ),
 
         "positions":
+
             raw_scene.get(
                 "positions",
                 []
             ),
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
 
         "continuity_active": True,
 
@@ -161,11 +327,23 @@ def normalize_visual_scene(
 
         "lifecycle_state": "ACTIVE",
 
+        # =================================================
+        # 🔥 PROVIDER
+        # =====================================================
+
         "provider":
             ACTIVE_PROVIDER,
 
         "timestamp":
-            time.time()
+            time.time(),
+
+        # =================================================
+        # 🔥 MACHINE FLAGS
+        # =====================================================
+
+        "machine_only": True,
+
+        "human_visible": False
     }
 
     return normalized
@@ -217,7 +395,9 @@ def compress_visual_scene(
             )[:5],
 
         "lifecycle_state":
-            "PASSIVE"
+            "PASSIVE",
+
+        "machine_only": True
     }
 
 # =====================================================
@@ -242,7 +422,7 @@ def update_visual_memory(
     )
 
     # =================================================
-    # 🔥 ARCHIVE PREVIOUS
+    # 🔥 ARCHIVE PREVIOUS SCENE
     # =====================================================
 
     if previous_scene:
@@ -256,13 +436,14 @@ def update_visual_memory(
         )
 
         passive_memory = (
+
             passive_memory[
                 -MAX_PASSIVE_SCENES:
             ]
         )
 
     # =================================================
-    # 🔥 STORE ACTIVE
+    # 🔥 STORE ACTIVE SCENE
     # =====================================================
 
     state[
@@ -273,8 +454,33 @@ def update_visual_memory(
         "passive_visual_memory"
     ] = passive_memory
 
+    # =================================================
+    # 🔥 EXECUTOR SYNCHRONIZATION
+    # =====================================================
+
+    scene_state = state.get(
+        "scene_state",
+        {}
+    )
+
+    scene_state[
+        "visual_mode"
+    ] = True
+
+    scene_state[
+        "visual_continuity"
+    ] = True
+
+    scene_state[
+        "active_visual_provider"
+    ] = ACTIVE_PROVIDER
+
+    state[
+        "scene_state"
+    ] = scene_state
+
 # =====================================================
-# 🔥 GEMINI VISUAL EXTRACTION
+# 🔥 GEMINI VISUAL ANALYSIS
 # =====================================================
 
 async def analyze_with_gemini(
@@ -285,72 +491,53 @@ async def analyze_with_gemini(
         "🧠 GEMINI VISUAL START"
     )
 
-    uploaded_file = gemini_client.files.upload(
-        file=path
+    uploaded_file = (
+        gemini_client.files.upload(
+            file=path
+        )
     )
 
-    provider_log(
-        "🧠 GEMINI FILE UPLOADED"
-    )
+    response = (
 
-    response = gemini_client.models.generate_content(
+        gemini_client.models.generate_content(
 
-        model="gemini-2.5-flash",
+            model="gemini-2.5-flash",
 
-        contents=[
+            contents=[
 
-            uploaded_file,
+                uploaded_file,
 
-            """
-Ты visual semantic extractor внутри April.
+                """
+Extract semantic visual scene.
 
-Твоя задача:
-НЕ писать человеческий ответ.
+Return ONLY JSON.
 
-Нужно извлечь semantic visual scene.
+No markdown.
+No explanations.
+No human response.
 
-Верни JSON:
+Required structure:
 
 {
   "scene_type": "...",
   "semantic_focus": "...",
   "summary": "...",
 
-  "objects": [
-    {
-      "type": "...",
-      "brand": "...",
-      "model": "...",
-      "color": "...",
-      "position": "..."
-    }
-  ],
-
+  "objects": [],
   "visible_text": [],
   "colors": [],
   "brands": [],
   "positions": [],
 
-  "environment": {
-    "location_type": "...",
-    "lighting": "...",
-    "atmosphere": "..."
-  }
+  "environment": {}
 }
-
-Правила:
-- НЕ roleplay;
-- НЕ объясняй;
-- НЕ говори как AI;
-- НЕ добавляй markdown;
-- только JSON;
-- кратко;
-- semantic continuity priority.
 """
-        ]
+            ]
+        )
     )
 
     raw_text = (
+
         response.text
         if response.text
         else "{}"
@@ -379,7 +566,7 @@ async def analyze_with_gemini(
     mark_gemini_success()
 
     provider_log(
-        "🧠 GEMINI VISUAL SUCCESS"
+        "🧠 GEMINI SUCCESS"
     )
 
     return normalize_visual_scene(
@@ -402,39 +589,38 @@ async def analyze_with_openai(
 
         image_bytes = image_file.read()
 
-    response = openai_client.responses.create(
+    response = (
 
-        model="gpt-4.1-mini",
+        openai_client.responses.create(
 
-        input=[
+            model="gpt-4.1-mini",
 
-            {
-                "role": "user",
+            input=[
 
-                "content": [
+                {
+                    "role": "user",
 
-                    {
-                        "type": "input_text",
+                    "content": [
 
-                        "text": """
-Extract visual semantic scene.
+                        {
+                            "type": "input_text",
+
+                            "text": """
+Extract semantic visual scene.
 
 Return ONLY JSON.
-
-No markdown.
-No explanations.
-No AI phrases.
 """
-                    },
+                        },
 
-                    {
-                        "type": "input_image",
+                        {
+                            "type": "input_image",
 
-                        "image_data": image_bytes
-                    }
-                ]
-            }
-        ]
+                            "image_data": image_bytes
+                        }
+                    ]
+                }
+            ]
+        )
     )
 
     raw_text = getattr(
@@ -464,7 +650,7 @@ No AI phrases.
         }
 
     provider_log(
-        "🧠 OPENAI VISUAL SUCCESS"
+        "🧠 OPENAI SUCCESS"
     )
 
     return normalize_visual_scene(
@@ -472,12 +658,14 @@ No AI phrases.
     )
 
 # =====================================================
-# 🔥 MAIN VISUAL SYSTEM
+# 🔥 MAIN VISUAL EXECUTION
 # =====================================================
 
 async def analyze_image_gemini(
+
     path: str,
     state: dict = None
+
 ):
 
     global ACTIVE_PROVIDER
@@ -494,21 +682,39 @@ async def analyze_image_gemini(
 
             try:
 
-                visual_scene = await analyze_with_gemini(
-                    path
+                visual_scene = (
+
+                    await analyze_with_gemini(
+                        path
+                    )
                 )
 
                 update_visual_memory(
+
                     state,
                     visual_scene
                 )
+
+                machine_payload = (
+
+                    build_visual_machine_payload(
+                        visual_scene
+                    )
+                )
+
+                state[
+                    "_visual_machine_payload"
+                ] = machine_payload
 
                 return visual_scene
 
             except Exception as gemini_error:
 
                 provider_log(
-                    "🔥 GEMINI VISUAL ERROR:",
+                    "🔥 GEMINI ERROR"
+                )
+
+                provider_log(
                     gemini_error
                 )
 
@@ -522,14 +728,29 @@ async def analyze_image_gemini(
         # 🔥 OPENAI FALLBACK
         # =====================================================
 
-        visual_scene = await analyze_with_openai(
-            path
+        visual_scene = (
+
+            await analyze_with_openai(
+                path
+            )
         )
 
         update_visual_memory(
+
             state,
             visual_scene
         )
+
+        machine_payload = (
+
+            build_visual_machine_payload(
+                visual_scene
+            )
+        )
+
+        state[
+            "_visual_machine_payload"
+        ] = machine_payload
 
         # =================================================
         # 🔥 GEMINI RECOVERY
@@ -562,9 +783,10 @@ async def analyze_image_gemini(
     except Exception as e:
 
         provider_log(
-            "🔥 VISUAL SYSTEM ERROR:",
-            e
+            "🔥 VISUAL SYSTEM ERROR"
         )
+
+        provider_log(e)
 
         return {
 
@@ -577,5 +799,7 @@ async def analyze_image_gemini(
 
             "objects": [],
 
-            "continuity_active": False
+            "continuity_active": False,
+
+            "machine_only": True
         }
