@@ -1,8 +1,28 @@
-# ===============================
+# =====================================================
 # 🧠 APRIL INTENT SYSTEM
-# ===============================
+# =====================================================
 
 """
+APRIL_FILE_ID:
+APRIL_INTENT_SYSTEM
+
+ROLE:
+SEMANTIC_INTENT_SIGNAL_LAYER
+
+INPUT:
+USER_TEXT
+SESSION_STATE
+ACTIVE_FLOW
+VISUAL_CONTEXT
+
+OUTPUT:
+INTENT_SIGNAL_PAYLOAD
+TRAJECTORY_HINTS
+RENDERER_PREFERENCES
+ORCHESTRATION_SAFE_STATE
+
+=====================================================
+
 APRIL ORCHESTRATION INTENT SYSTEM
 
 Intent system теперь:
@@ -19,6 +39,8 @@ Intent system НЕ:
 - Telegram-era dispatcher;
 - aggressive escalation layer.
 
+=====================================================
+
 APRIL PRINCIPLES:
 
 1. continuation before coercion
@@ -30,11 +52,43 @@ APRIL PRINCIPLES:
 7. no Telegram assumptions
 """
 
-# ===============================
+import time
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source":
+        "executor_input_pipeline",
+
+    "type":
+        "intent_signal_input",
+
+    "isolated":
+        True
+}
+
+OUTPUT_MACHINE_CHANNEL = {
+
+    "target":
+        "semantic_orchestration_pipeline",
+
+    "type":
+        "intent_signal_output",
+
+    "isolated":
+        True
+}
+
+# =====================================================
 # 🔥 SAFE PATCH MODE
-# ===============================
+# =====================================================
 
 PATCH_LOG = []
+
+MAX_PATCH_LOGS = 120
 
 
 def safe_patch_log(msg):
@@ -46,11 +100,27 @@ def safe_patch_log(msg):
             msg
         )
 
-        PATCH_LOG.append(msg)
+        PATCH_LOG.append({
+
+            "timestamp":
+                time.time(),
+
+            "message":
+                msg,
+
+            "file_id":
+                "APRIL_INTENT_SYSTEM",
+
+            "machine_only":
+                True
+        })
+
+        if len(PATCH_LOG) > MAX_PATCH_LOGS:
+
+            PATCH_LOG.pop(0)
 
     except Exception:
         pass
-
 
 # =====================================================
 # 🧠 PATCH HELPERS
@@ -71,7 +141,6 @@ def patch_intent_future(
 ):
 
     return None
-
 
 # =====================================================
 # 🧠 HELPERS
@@ -95,7 +164,6 @@ def contains_any(
         w in text
         for w in words
     )
-
 
 # =====================================================
 # 🧠 CONTINUATION DETECTION
@@ -139,6 +207,10 @@ def is_continuation(
 
     if t in continuation_words:
 
+        safe_patch_log(
+            "CONTINUATION DETECTED"
+        )
+
         return True
 
     if len(t) <= 36:
@@ -148,10 +220,13 @@ def is_continuation(
             continuation_words
         ):
 
+            safe_patch_log(
+                "SOFT CONTINUATION DETECTED"
+            )
+
             return True
 
     return False
-
 
 # =====================================================
 # 🧠 QUESTION DETECTION
@@ -196,7 +271,6 @@ def is_real_question(
         question_triggers
     )
 
-
 # =====================================================
 # 🧠 EDIT DETECTION
 # =====================================================
@@ -228,7 +302,6 @@ def is_edit_request(
         t,
         edit_triggers
     )
-
 
 # =====================================================
 # 🧠 HEAVY GENERATION DETECTION
@@ -263,7 +336,6 @@ def is_generate_request(
         generate_triggers
     )
 
-
 # =====================================================
 # 🧠 LIGHTWEIGHT VISUAL
 # =====================================================
@@ -295,7 +367,6 @@ def is_lightweight_visual_request(
         t,
         lightweight_words
     )
-
 
 # =====================================================
 # 🧠 RENDERER DETECTION
@@ -374,7 +445,6 @@ def is_renderer_request(
         renderer_words
     )
 
-
 # =====================================================
 # 🧠 SPATIAL SCENE DETECTION
 # =====================================================
@@ -403,7 +473,6 @@ def is_spatial_request(
         t,
         spatial_words
     )
-
 
 # =====================================================
 # 🧠 WEB DETECTION
@@ -437,7 +506,6 @@ def is_web_request(
         web_words
     )
 
-
 # =====================================================
 # 🧠 TEXT DETECTION
 # =====================================================
@@ -464,7 +532,6 @@ def is_text_request(
         text_triggers
     )
 
-
 # =====================================================
 # 🧠 LINK DETECTION
 # =====================================================
@@ -489,7 +556,6 @@ def is_link_request(
         t,
         link_triggers
     )
-
 
 # =====================================================
 # 🧠 EXPLORATION DETECTION
@@ -518,6 +584,117 @@ def is_exploration_request(
         exploration_words
     )
 
+# =====================================================
+# 🧠 MACHINE RESULT PACKAGE
+# =====================================================
+
+def build_intent_result():
+
+    return {
+
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
+
+        "intent":
+            "chat",
+
+        "confidence":
+            0.5,
+
+        "source":
+            "default",
+
+        # =================================================
+        # 🔥 ORCHESTRATION
+        # =====================================================
+
+        "prefer_renderer":
+            False,
+
+        "prefer_lightweight":
+            False,
+
+        "prefer_guidance":
+            False,
+
+        "prefer_execution":
+            False,
+
+        "prefer_continuation":
+            False,
+
+        "prefer_web":
+            False,
+
+        # =================================================
+        # 🔥 VISUAL
+        # =====================================================
+
+        "renderer_subtype":
+            None,
+
+        "lightweight_visual":
+            False,
+
+        "spatial_scene":
+            False,
+
+        "explicit_image_generation":
+            False,
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
+
+        "continuation":
+            False,
+
+        "trajectory_safe":
+            True,
+
+        "trajectory_priority":
+            0.5,
+
+        # =================================================
+        # 🔥 EXPLORATION
+        # =====================================================
+
+        "exploration":
+            False,
+
+        # =================================================
+        # 🔥 SAFETY
+        # =====================================================
+
+        "avoid_heavy_generation":
+            True,
+
+        "avoid_hidden_escalation":
+            True,
+
+        "avoid_telegram_behavior":
+            True,
+
+        "provider_safe":
+            True,
+
+        # =================================================
+        # 🔥 MACHINE FLAGS
+        # =====================================================
+
+        "machine_only":
+            True,
+
+        "orchestration_ready":
+            True,
+
+        "renderer_first_safe":
+            True,
+
+        "continuity_preserved":
+            True
+    }
 
 # =====================================================
 # 🧠 MAIN DETECTOR
@@ -544,78 +721,7 @@ def detect_intent(
 
     patch_intent_detect(t)
 
-    # =================================================
-    # 🔥 BASE RESULT
-    # =====================================================
-
-    result = {
-
-        # =================================================
-        # 🔥 CORE
-        # =====================================================
-
-        "intent": "chat",
-
-        "confidence": 0.5,
-
-        "source": "default",
-
-        # =================================================
-        # 🔥 ORCHESTRATION
-        # =====================================================
-
-        "prefer_renderer": False,
-
-        "prefer_lightweight": False,
-
-        "prefer_guidance": False,
-
-        "prefer_execution": False,
-
-        "prefer_continuation": False,
-
-        "prefer_web": False,
-
-        # =================================================
-        # 🔥 VISUAL
-        # =====================================================
-
-        "renderer_subtype": None,
-
-        "lightweight_visual": False,
-
-        "spatial_scene": False,
-
-        "explicit_image_generation": False,
-
-        # =================================================
-        # 🔥 CONTINUITY
-        # =====================================================
-
-        "continuation": False,
-
-        "trajectory_safe": True,
-
-        "trajectory_priority": 0.5,
-
-        # =================================================
-        # 🔥 EXPLORATION
-        # =====================================================
-
-        "exploration": False,
-
-        # =================================================
-        # 🔥 SAFETY
-        # =====================================================
-
-        "avoid_heavy_generation": True,
-
-        "avoid_hidden_escalation": True,
-
-        "avoid_telegram_behavior": True,
-
-        "provider_safe": True
-    }
+    result = build_intent_result()
 
     # =================================================
     # 🔥 CONTINUATION PRIORITY
@@ -649,6 +755,10 @@ def detect_intent(
                 "source"
             ] = "continuation"
 
+            safe_patch_log(
+                "ACTIVE FLOW CONTINUATION"
+            )
+
             return result
 
         if active_visual_scene:
@@ -668,6 +778,10 @@ def detect_intent(
             result[
                 "prefer_renderer"
             ] = True
+
+            safe_patch_log(
+                "VISUAL CONTINUATION"
+            )
 
             return result
 
@@ -728,6 +842,10 @@ def detect_intent(
             "avoid_heavy_generation"
         ] = True
 
+        safe_patch_log(
+            "WEB INTENT DETECTED"
+        )
+
         return result
 
     # =================================================
@@ -747,6 +865,10 @@ def detect_intent(
         result[
             "source"
         ] = "link"
+
+        safe_patch_log(
+            "LINK INTENT DETECTED"
+        )
 
         return result
 
@@ -771,6 +893,10 @@ def detect_intent(
         result[
             "prefer_execution"
         ] = True
+
+        safe_patch_log(
+            "EDIT INTENT DETECTED"
+        )
 
         return result
 
@@ -803,6 +929,10 @@ def detect_intent(
         result[
             "renderer_subtype"
         ] = "scene"
+
+        safe_patch_log(
+            "SPATIAL INTENT DETECTED"
+        )
 
         return result
 
@@ -838,6 +968,10 @@ def detect_intent(
             "avoid_heavy_generation"
         ] = True
 
+        safe_patch_log(
+            "RENDERER INTENT DETECTED"
+        )
+
         return result
 
     # =================================================
@@ -870,6 +1004,10 @@ def detect_intent(
             "avoid_heavy_generation"
         ] = True
 
+        safe_patch_log(
+            "LIGHTWEIGHT VISUAL DETECTED"
+        )
+
         return result
 
     # =================================================
@@ -898,6 +1036,10 @@ def detect_intent(
             "avoid_heavy_generation"
         ] = False
 
+        safe_patch_log(
+            "HEAVY GENERATION DETECTED"
+        )
+
         return result
 
     # =================================================
@@ -922,6 +1064,10 @@ def detect_intent(
             "prefer_guidance"
         ] = True
 
+        safe_patch_log(
+            "TEXT INTENT DETECTED"
+        )
+
         return result
 
     # =================================================
@@ -945,6 +1091,10 @@ def detect_intent(
         result[
             "prefer_guidance"
         ] = True
+
+        safe_patch_log(
+            "QUESTION DETECTED"
+        )
 
         return result
 
@@ -1008,8 +1158,16 @@ def detect_intent(
                     "prefer_renderer"
                 ] = True
 
+            safe_patch_log(
+                f"TRAJECTORY PROTECTION: {flow_type}"
+            )
+
     # =================================================
     # 🔥 FINAL DEFAULT
     # =====================================================
+
+    safe_patch_log(
+        "DEFAULT CHAT INTENT"
+    )
 
     return result
