@@ -537,3 +537,69 @@ WEB_ADMIN_CAPABILITIES = {
 
     "plan_activation_toggle": True
 }
+# =========================================================
+# 🔥 LEGACY COMPATIBILITY LAYER
+# =========================================================
+
+"""
+Temporary compatibility layer.
+
+Нужен для модулей,
+которые ещё используют
+старые Telegram-era импорты.
+
+После полной миграции
+на WEB_ADMIN_READY
+может быть удалён.
+"""
+
+# =========================================================
+# 🔥 LEGACY PLAN NAMES
+# =========================================================
+
+FREE_PLAN = FREE_PLAN_ID
+
+LITE_PLAN = LITE_PLAN_ID
+
+PREMIUM_PLAN = PREMIUM_PLAN_ID
+
+# =========================================================
+# 🔥 LEGACY DURATIONS
+# =========================================================
+
+LITE_DAYS = LITE_DURATION_DAYS
+
+PREMIUM_DAYS = PREMIUM_DURATION_DAYS
+
+# =========================================================
+# 🔥 LEGACY TITLES
+# =========================================================
+
+FREE_NAME = FREE_TITLE
+
+LITE_NAME = LITE_TITLE
+
+PREMIUM_NAME = PREMIUM_TITLE
+
+# =========================================================
+# 🔥 LEGACY ADMIN IMPORT
+# =========================================================
+
+"""
+Старые файлы всё ещё могут делать:
+
+from blocks.tariffs_config import ADMIN_ID
+
+В web-архитектуре ADMIN_ID больше
+не хранится в тарифах.
+
+Но импорт не должен падать.
+"""
+
+ADMIN_ID = None
+
+# =========================================================
+# 🔥 LEGACY FLAG
+# =========================================================
+
+LEGACY_COMPATIBILITY_ENABLED = True
