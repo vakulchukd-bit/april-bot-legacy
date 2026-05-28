@@ -3,95 +3,52 @@
 # =====================================================
 
 """
-APRIL WEB PRESENTATION SYSTEM
+APRIL_FILE_ID: APRIL_WEB_PRESENTATION_ORCHESTRATOR
 
 ROLE:
-Этот файл является
-финальным presentation coordinator
-между machine routing
-и human-visible web response.
+final_presentation_coordinator
 
-=====================================================
-🔥 MAIN PURPOSE
-=====================================================
+PURPOSE:
+- calm response formatting
+- semantic pacing
+- renderer-safe presentation
+- behavioral stabilization
+- dialogue density control
+- anti-robotic cleanup
+- continuity-safe output
+- web-space presentation adaptation
 
-Система отвечает за:
+INPUT:
+- executor_response
+- semantic
+- cognition
+- response_decision
+- renderer_payloads
+- machine_payloads
 
-- calm response formatting;
-- semantic pacing;
-- renderer-safe presentation;
-- behavioral stabilization;
-- dialogue density control;
-- anti-robotic cleanup;
-- continuity-safe output;
-- web-space presentation adaptation.
+OUTPUT:
+- human_visible_response
+- renderer_safe_output
+- web_ui_ready_payload
 
-=====================================================
-🧠 GOLDEN APRIL ARCHITECTURE
-=====================================================
+DEPENDENCIES:
+- executor
+- excrouter
+- cognition
+- semantic_core
+- personality_core
+- web_ui
+- botru
 
-INPUT MACHINE CHANNEL:
-Executor / ExcRouter → Presentation Layer
-
-OUTPUT HUMAN CHANNEL:
-Presentation Layer → BotRU → Web UI
-
-=====================================================
-🔥 IMPORTANT
-=====================================================
-
-Этот слой НЕ:
-
-- personality engine;
-- cognition engine;
-- semantic analyzer;
-- renderer executor;
-- scene mutator;
-- markdown beautifier;
-- Telegram formatter.
-
-=====================================================
-🌐 WEB-FIRST ARCHITECTURE
-=====================================================
-
-Система адаптирована под:
-
-- web admin panel;
-- web assistant UI;
-- renderer-safe payloads;
-- multimodal blocks;
-- spatial architecture;
-- future visual interfaces.
-
-=====================================================
-🔥 GOLDEN RULE
-=====================================================
-
-Presentation Layer
-НИКОГДА НЕ:
-
-- мутирует renderer payload;
-- ломает visual blocks;
-- сериализует machine objects;
-- вмешивается в execution routing;
-- смешивает machine/output каналы.
-
-=====================================================
-🧠 CHANNEL ISOLATION
-=====================================================
-
-Machine routing:
-internal only.
-
-Human presentation:
-output only.
-
-Никаких пересечений.
-Никаких утечек.
-Никакой каши.
-
-=====================================================
+GOLDEN RULE:
+Presentation layer NEVER mutates:
+- renderer payloads
+- machine payloads
+- execution routing
+- orchestration state
 """
+
+print("🧠 APRIL PRESENTATION ORCHESTRATOR LOADED")
 
 # =====================================================
 # 🔥 IMPORTS
@@ -101,28 +58,11 @@ import re
 import json
 
 # =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
-
-INPUT_MACHINE_CHANNEL = {
-
-    "source": "executor",
-    "type": "presentation_machine_input",
-    "isolated": True
-}
-
-OUTPUT_HUMAN_CHANNEL = {
-
-    "target": "botru_web_output",
-    "type": "human_response_output",
-    "isolated": True
-}
-
-# =====================================================
-# 🔥 LOGGING
+# 🔥 SAFE PATCH MODE
 # =====================================================
 
 FORMAT_PATCH_LOG = []
+
 
 def safe_format_log(msg):
 
@@ -137,8 +77,95 @@ def safe_format_log(msg):
             str(msg)
         )
 
-    except:
+    except Exception:
         pass
+
+
+# =====================================================
+# 🔥 ENTRY / EXIT LOGGING
+# =====================================================
+
+def presentation_enter(
+    response,
+    semantic=None
+):
+
+    semantic = semantic or {}
+
+    safe_format_log(
+
+        f"ENTER PRESENTATION: "
+        f"{str(response)[:80]}"
+    )
+
+    return {
+
+        "presentation_active": True,
+
+        "renderer_safe":
+
+            semantic.get(
+                "prefer_renderer",
+                False
+            ),
+
+        "machine_isolation": True
+    }
+
+
+def presentation_exit(
+    final_response
+):
+
+    safe_format_log(
+
+        f"EXIT PRESENTATION: "
+        f"{str(final_response)[:80]}"
+    )
+
+    return {
+
+        "presentation_complete": True,
+
+        "human_output_ready": True,
+
+        "continuity_preserved": True
+    }
+
+
+# =====================================================
+# 🔥 FUTURE PLACEHOLDER
+# =====================================================
+
+def presentation_future(
+    *args,
+    **kwargs
+):
+
+    return None
+
+
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
+
+INPUT_MACHINE_CHANNEL = {
+
+    "source": "executor",
+
+    "type": "presentation_machine_input",
+
+    "isolated": True
+}
+
+OUTPUT_HUMAN_CHANNEL = {
+
+    "target": "botru_web_output",
+
+    "type": "human_response_output",
+
+    "isolated": True
+}
 
 # =====================================================
 # 🔥 SAFE HELPERS
@@ -159,6 +186,7 @@ def clamp(
         return maximum
 
     return value
+
 
 # =====================================================
 # 🔥 RENDERER TYPES
@@ -234,6 +262,7 @@ def is_renderer_payload(value):
 
     return False
 
+
 # =====================================================
 # 🔥 MACHINE PAYLOAD DETECTION
 # =====================================================
@@ -251,6 +280,7 @@ def is_machine_payload(value):
         "machine_only",
         False
     )
+
 
 # =====================================================
 # 🔥 NORMALIZATION
@@ -315,9 +345,10 @@ def normalize_text_payload(value):
 
         return str(value)
 
-    except:
+    except Exception:
 
         return ""
+
 
 # =====================================================
 # 🔥 JSON DETECTION
@@ -352,9 +383,10 @@ def looks_like_json(text):
 
         return True
 
-    except:
+    except Exception:
 
         return False
+
 
 # =====================================================
 # 🔥 CODE DETECTION
@@ -403,6 +435,7 @@ def is_code_payload(text):
         x in text
         for x in checks
     )
+
 
 # =====================================================
 # 🔥 BEHAVIOR EXTRACTION
@@ -457,6 +490,7 @@ def extract_behavior_field(
             )
     }
 
+
 # =====================================================
 # 🔥 CLEANUP
 # =====================================================
@@ -497,6 +531,7 @@ def cleanup_markdown(text):
 
     return text.strip()
 
+
 # =====================================================
 # 🔥 SECTION SPLITTER
 # =====================================================
@@ -531,6 +566,7 @@ def split_into_sections(text):
             )
 
     return result
+
 
 # =====================================================
 # 🔥 DIALOG BLOAT SUPPRESSION
@@ -580,6 +616,7 @@ def suppress_dialog_bloat(
 
     return text.strip()
 
+
 # =====================================================
 # 🔥 ROBOTIC SUPPRESSION
 # =====================================================
@@ -628,6 +665,7 @@ def suppress_robotic_phrasing(
         )
 
     return text.strip()
+
 
 # =====================================================
 # 🔥 LATENT GUIDANCE
@@ -687,6 +725,7 @@ def stabilize_latent_guidance(
 
     return "\n\n".join(final)
 
+
 # =====================================================
 # 🔥 SEMANTIC PACING
 # =====================================================
@@ -737,6 +776,7 @@ def stabilize_semantic_flow(
         stabilized
     ).strip()
 
+
 # =====================================================
 # 🔥 VISUAL ENRICHMENT
 # =====================================================
@@ -785,6 +825,7 @@ def detect_primary_emoji(text):
 
     return None
 
+
 def apply_visual_enrichment(
 
     text,
@@ -830,6 +871,7 @@ def apply_visual_enrichment(
         return text
 
     return f"{emoji} {text}"
+
 
 # =====================================================
 # 🔥 BYPASS RULES
@@ -929,6 +971,7 @@ def should_skip_formatting(
 
     return False
 
+
 # =====================================================
 # 🔥 FINAL VOICE STABILIZATION
 # =====================================================
@@ -962,6 +1005,7 @@ def apply_april_final_voice(
     )
 
     return text.strip()
+
 
 # =====================================================
 # 🔥 BEAUTIFY RESPONSE
@@ -1035,6 +1079,7 @@ def beautify_response(
 
     return text
 
+
 # =====================================================
 # 🔥 FINAL PRESENTATION ENTRY
 # =====================================================
@@ -1050,6 +1095,11 @@ def format_response_presentation(
     visual_reference=None
 
 ):
+
+    presentation_enter(
+        response or text,
+        semantic
+    )
 
     semantic = semantic or {}
 
@@ -1134,7 +1184,7 @@ def format_response_presentation(
     # 🔥 FINAL HUMAN PRESENTATION
     # =====================================================
 
-    return beautify_response(
+    result = beautify_response(
 
         final_text,
 
@@ -1144,3 +1194,9 @@ def format_response_presentation(
 
         user_text
     )
+
+    presentation_exit(
+        result
+    )
+
+    return result
