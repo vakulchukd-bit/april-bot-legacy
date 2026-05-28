@@ -1,97 +1,50 @@
 # =====================================================
-# 🧠 APRIL VISUAL SEMANTIC ORCHESTRATOR
+# 🧠 APRIL VISUAL SEMANTIC ORCHESTRATOR CORE
 # =====================================================
 
 """
-APRIL VISUAL ORCHESTRATION CORE
+APRIL VISUAL ORCHESTRATOR CORE
+
+APRIL_FILE_ID:
+APRIL_VISUAL_SEMANTIC_ORCHESTRATOR_CORE
 
 ROLE:
-Этот файл является
-центральным visual-semantic coordinator
-пространства April.
+CENTRAL_VISUAL_SEMANTIC_COORDINATOR
 
-=====================================================
-🔥 MAIN PURPOSE
-=====================================================
+INPUT:
+IMAGE_PATH
+EXECUTOR_MACHINE_CONTEXT
+VISUAL_STATE
+SCENE_STATE
 
-Система отвечает за:
+OUTPUT:
+VISUAL_SCENE
+SEMANTIC_VISUAL_CONTEXT
+VISUAL_MACHINE_PAYLOAD
+RENDERER_SAFE_VISUAL_STATE
 
-- visual scene extraction;
-- semantic visual routing;
-- visual continuity;
-- provider coordination;
-- multimodal scene stabilization;
-- renderer-oriented visual analysis;
-- visual memory synchronization;
-- machine-level visual orchestration.
+THIS FILE IS:
+- visual semantic coordinator
+- renderer-oriented visual analyzer
+- multimodal scene stabilizer
+- provider coordination layer
+- visual continuity system
+- visual memory synchronization layer
 
-=====================================================
-🧠 GOLDEN APRIL ARCHITECTURE
-=====================================================
+THIS FILE IS NOT:
+- telegram image handler
+- user-facing response layer
+- personality system
+- renderer authority
+- orchestration engine
 
-INPUT MACHINE CHANNEL:
-Executor → Visual Semantic Core
-
-OUTPUT MACHINE CHANNEL:
-Visual Semantic Core → Executor Rooms
-
-=====================================================
-🔥 IMPORTANT
-=====================================================
-
-Этот файл НЕ:
-
-- telegram image handler;
-- user-facing image responder;
-- personality engine;
-- output formatter;
-- visual chat layer.
-
-=====================================================
-🌐 WEB-FIRST VISUAL ARCHITECTURE
-=====================================================
-
-Система полностью адаптирована под:
-
-- April Web Space;
-- renderer-first architecture;
-- scene continuity;
-- structured visual blocks;
-- multimedia orchestration;
-- visual trajectories.
-
-=====================================================
-🧠 VISUAL MEMORY PHILOSOPHY
-=====================================================
-
-Главная цель:
-НЕ распознавание картинки.
-
-Главная цель:
-semantic visual continuity.
-
-Система хранит:
-
-- scene trajectories;
-- semantic focus;
-- object continuity;
-- visual environment;
-- renderer context.
-
-=====================================================
-🔥 INTERNAL CHANNEL ISOLATION
-=====================================================
-
-Machine visual context
-никогда НЕ должен попадать:
-
-- напрямую пользователю;
-- в BotRU output;
-- в raw renderer output.
-
-Только через Executor orchestration.
-
-=====================================================
+GOLDEN APRIL PRINCIPLES:
+- renderer-first architecture
+- semantic continuity
+- multimodal stability
+- provider-safe execution
+- no raw visual leakage
+- scene continuity first
 """
 
 # =====================================================
@@ -101,6 +54,8 @@ Machine visual context
 import os
 import time
 import json
+
+from datetime import datetime
 
 from google import genai
 from openai import OpenAI
@@ -123,16 +78,26 @@ from blocks.provider_router import (
 )
 
 # =====================================================
+# 🔥 FILE ID
+# =====================================================
+
+APRIL_FILE_ID = (
+    "APRIL_VISUAL_SEMANTIC_ORCHESTRATOR_CORE"
+)
+
+# =====================================================
 # 🔥 PROVIDERS
 # =====================================================
 
 gemini_client = genai.Client(
+
     api_key=os.getenv(
         "GEMINI_API_KEY"
     )
 )
 
 openai_client = OpenAI(
+
     api_key=os.getenv(
         "OPENAI_API_KEY"
     )
@@ -150,17 +115,92 @@ ACTIVE_PROVIDER = "gemini"
 
 INPUT_MACHINE_CHANNEL = {
 
-    "source": "executor",
-    "type": "visual_machine_input",
-    "isolated": True
+    "source":
+        "executor",
+
+    "type":
+        "visual_machine_input",
+
+    "isolated":
+        True
 }
 
 OUTPUT_MACHINE_CHANNEL = {
 
-    "target": "executor_visual_pipeline",
-    "type": "visual_machine_output",
-    "isolated": True
+    "target":
+        "executor_visual_pipeline",
+
+    "type":
+        "visual_machine_output",
+
+    "isolated":
+        True
 }
+
+# =====================================================
+# 🔥 MACHINE LOGGING
+# =====================================================
+
+def build_visual_input_log():
+
+    """
+    INPUT MACHINE TRACE
+    """
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "visual_input",
+
+        "channel":
+            INPUT_MACHINE_CHANNEL,
+
+        "provider":
+            ACTIVE_PROVIDER,
+
+        "timestamp":
+            datetime.utcnow().isoformat(),
+
+        "machine_only":
+            True
+    }
+
+
+def build_visual_output_log(
+    scene_type,
+    provider
+):
+
+    """
+    OUTPUT MACHINE TRACE
+    """
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "visual_output",
+
+        "channel":
+            OUTPUT_MACHINE_CHANNEL,
+
+        "scene_type":
+            scene_type,
+
+        "provider":
+            provider,
+
+        "timestamp":
+            datetime.utcnow().isoformat(),
+
+        "machine_only":
+            True
+    }
 
 # =====================================================
 # 🔥 VISUAL MEMORY CONFIG
@@ -178,7 +218,9 @@ MAX_PASSIVE_SCENES = 6
 # 🔥 PROVIDER SWITCHING
 # =====================================================
 
-def set_provider(name: str):
+def set_provider(
+    name: str
+):
 
     global ACTIVE_PROVIDER
 
@@ -187,9 +229,13 @@ def set_provider(name: str):
     provider_log(
 
         f"🧠 VISUAL PROVIDER: "
+
         f"{ACTIVE_PROVIDER}"
     )
 
+# =====================================================
+# 🔥 PROVIDER GETTER
+# =====================================================
 
 def get_provider():
 
@@ -215,11 +261,23 @@ def build_visual_machine_payload(
     visual_scene: dict
 ):
 
+    """
+    Renderer-safe machine payload.
+    """
+
     return {
 
-        "machine_only": True,
+        "file_id":
+            APRIL_FILE_ID,
 
-        "human_visible": False,
+        "channel":
+            OUTPUT_MACHINE_CHANNEL,
+
+        "machine_only":
+            True,
+
+        "human_visible":
+            False,
 
         "scene":
             visual_scene,
@@ -227,7 +285,11 @@ def build_visual_machine_payload(
         "provider":
             ACTIVE_PROVIDER,
 
-        "visual_pipeline_active": True
+        "visual_pipeline_active":
+            True,
+
+        "continuity_safe":
+            True
     }
 
 # =====================================================
@@ -237,6 +299,10 @@ def build_visual_machine_payload(
 def normalize_visual_scene(
     raw_scene: dict
 ):
+
+    """
+    Safe visual normalization layer.
+    """
 
     raw_scene = raw_scene or {}
 
@@ -321,11 +387,14 @@ def normalize_visual_scene(
         # 🔥 CONTINUITY
         # =====================================================
 
-        "continuity_active": True,
+        "continuity_active":
+            True,
 
-        "scene_alive": True,
+        "scene_alive":
+            True,
 
-        "lifecycle_state": "ACTIVE",
+        "lifecycle_state":
+            "ACTIVE",
 
         # =================================================
         # 🔥 PROVIDER
@@ -341,9 +410,14 @@ def normalize_visual_scene(
         # 🔥 MACHINE FLAGS
         # =====================================================
 
-        "machine_only": True,
+        "file_id":
+            APRIL_FILE_ID,
 
-        "human_visible": False
+        "machine_only":
+            True,
+
+        "human_visible":
+            False
     }
 
     return normalized
@@ -356,39 +430,50 @@ def compress_visual_scene(
     scene: dict
 ):
 
+    """
+    Passive continuity compression.
+    """
+
     if not scene:
+
         return {}
 
     return {
 
         "scene_type":
+
             scene.get(
                 "scene_type"
             ),
 
         "semantic_focus":
+
             scene.get(
                 "semantic_focus"
             ),
 
         "summary":
+
             scene.get(
                 "summary"
             ),
 
         "objects":
+
             scene.get(
                 "objects",
                 []
             )[:5],
 
         "brands":
+
             scene.get(
                 "brands",
                 []
             )[:5],
 
         "colors":
+
             scene.get(
                 "colors",
                 []
@@ -397,7 +482,8 @@ def compress_visual_scene(
         "lifecycle_state":
             "PASSIVE",
 
-        "machine_only": True
+        "machine_only":
+            True
     }
 
 # =====================================================
@@ -409,7 +495,12 @@ def update_visual_memory(
     visual_scene: dict
 ):
 
+    """
+    Visual continuity synchronization.
+    """
+
     if not state:
+
         return
 
     previous_scene = state.get(
@@ -475,6 +566,10 @@ def update_visual_memory(
         "active_visual_provider"
     ] = ACTIVE_PROVIDER
 
+    scene_state[
+        "visual_orchestrator_active"
+    ] = True
+
     state[
         "scene_state"
     ] = scene_state
@@ -487,11 +582,16 @@ async def analyze_with_gemini(
     path: str
 ):
 
+    """
+    Primary Gemini semantic analysis.
+    """
+
     provider_log(
         "🧠 GEMINI VISUAL START"
     )
 
     uploaded_file = (
+
         gemini_client.files.upload(
             file=path
         )
@@ -553,14 +653,17 @@ Required structure:
 
         parsed = {
 
-            "scene_type": "unknown",
+            "scene_type":
+                "unknown",
 
-            "semantic_focus": "general",
+            "semantic_focus":
+                "general",
 
             "summary":
                 raw_text[:220],
 
-            "objects": []
+            "objects":
+                []
         }
 
     mark_gemini_success()
@@ -569,9 +672,19 @@ Required structure:
         "🧠 GEMINI SUCCESS"
     )
 
-    return normalize_visual_scene(
+    normalized = normalize_visual_scene(
         parsed
     )
+
+    build_visual_output_log(
+        normalized.get(
+            "scene_type",
+            "unknown"
+        ),
+        "gemini"
+    )
+
+    return normalized
 
 # =====================================================
 # 🔥 OPENAI FALLBACK
@@ -580,6 +693,10 @@ Required structure:
 async def analyze_with_openai(
     path: str
 ):
+
+    """
+    OpenAI fallback analysis.
+    """
 
     provider_log(
         "⚠️ OPENAI VISUAL FALLBACK"
@@ -603,9 +720,11 @@ async def analyze_with_openai(
                     "content": [
 
                         {
-                            "type": "input_text",
+                            "type":
+                                "input_text",
 
-                            "text": """
+                            "text":
+"""
 Extract semantic visual scene.
 
 Return ONLY JSON.
@@ -613,9 +732,11 @@ Return ONLY JSON.
                         },
 
                         {
-                            "type": "input_image",
+                            "type":
+                                "input_image",
 
-                            "image_data": image_bytes
+                            "image_data":
+                                image_bytes
                         }
                     ]
                 }
@@ -639,23 +760,36 @@ Return ONLY JSON.
 
         parsed = {
 
-            "scene_type": "unknown",
+            "scene_type":
+                "unknown",
 
-            "semantic_focus": "general",
+            "semantic_focus":
+                "general",
 
             "summary":
                 raw_text[:220],
 
-            "objects": []
+            "objects":
+                []
         }
 
     provider_log(
         "🧠 OPENAI SUCCESS"
     )
 
-    return normalize_visual_scene(
+    normalized = normalize_visual_scene(
         parsed
     )
+
+    build_visual_output_log(
+        normalized.get(
+            "scene_type",
+            "unknown"
+        ),
+        "openai"
+    )
+
+    return normalized
 
 # =====================================================
 # 🔥 MAIN VISUAL EXECUTION
@@ -668,9 +802,15 @@ async def analyze_image_gemini(
 
 ):
 
+    """
+    Main visual semantic execution pipeline.
+    """
+
     global ACTIVE_PROVIDER
 
     state = state or {}
+
+    build_visual_input_log()
 
     try:
 
@@ -788,18 +928,31 @@ async def analyze_image_gemini(
 
         provider_log(e)
 
+        build_visual_output_log(
+            "error",
+            ACTIVE_PROVIDER
+        )
+
         return {
 
-            "scene_type": "error",
+            "scene_type":
+                "error",
 
-            "semantic_focus": "error",
+            "semantic_focus":
+                "error",
 
             "summary":
                 "visual analysis failed",
 
-            "objects": [],
+            "objects":
+                [],
 
-            "continuity_active": False,
+            "continuity_active":
+                False,
 
-            "machine_only": True
+            "file_id":
+                APRIL_FILE_ID,
+
+            "machine_only":
+                True
         }
