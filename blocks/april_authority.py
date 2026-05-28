@@ -3,116 +3,79 @@
 # =========================================================
 
 """
-APRIL GOVERNANCE AUTHORITY CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APRIL FILE ID
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROLE IN APRIL:
-This file is the GOVERNANCE,
-VALIDATION and COGNITIVE STABILIZATION core of April.
+APRIL_FILE_ID:
+APRIL_GOVERNANCE_AUTHORITY_CORE
 
-This helper core protects April from:
-- execution chaos
-- recursive instability
-- broken continuity
+ROLE:
+COGNITIVE_GOVERNANCE_AND_VALIDATION_SYSTEM
+
+ROOM:
+GOVERNANCE_ROOM
+
+INPUT:
+EXECUTOR_VALIDATION_REQUEST
+COGNITIVE_RESULT
+SEMANTIC_STATE
+RESPONSE_DECISION
+CONTINUITY_STATE
+TRAJECTORY_STATE
+
+OUTPUT:
+GOVERNANCE_DECISION
+VALIDATION_RESULT
+USEFULNESS_ANALYSIS
+CAPABILITY_COORDINATION
+ANALYZER_GOVERNANCE_PAYLOAD
+
+DEPENDENCIES:
+EXECUTOR
+RENDERER_SPACE
+COGNITIVE_ROOMS
+ANCHOR_SYSTEM
+POLICY_CORE
+ANALYZER_SYSTEM
+
+CRITICAL:
+TRUE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 GOLDEN RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file NEVER:
+- performs cognition
+- replaces Executor
+- performs orchestration
+- formats frontend output
+
+This file ONLY:
+- validates stability
+- protects continuity
+- blocks orchestration chaos
+- validates cognition sanity
+- coordinates governance safety
+- exposes governance telemetry
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 ANALYZER VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Analyzer may observe:
+- governance stability
+- validation pressure
 - modality conflicts
-- system leakage
-- unstable cognition
-- orchestration corruption
+- continuity protection
+- recursive protection
+- orchestration safety
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file IS:
-- governance layer
-- cognition validator
-- continuity protector
-- orchestration supervisor
-- modality validator
-- trajectory stabilizer
-- anti-chaos system
-- execution sanity checker
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 WHAT THIS FILE IS NOT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file is NOT:
-- second Executor
-- orchestration engine
-- routing authority
-- response formatter
-- renderer
-- frontend system
-- Telegram system
-- override chaos layer
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 APRIL ARCHITECTURE POSITION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-BotRoot
- ↓
-Executor
- ↓
-Governance Authority Core (THIS FILE)
- ↓
-Execution Rooms
-
-Executor thinks.
-Rooms execute.
-This helper core validates stability.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN MACHINE CHANNEL RULE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file uses TWO isolated channels.
-
-1. GOVERNANCE TASK CHANNEL
-Executor → Governance Core
-
-2. GOVERNANCE RESPONSE CHANNEL
-Governance Core → Executor
-
-Human-layer NEVER mixes with
-internal cognition governance.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN APRIL PRINCIPLES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. continuation before override
-2. renderer before generation
-3. usefulness before capability
-4. calm orchestration
-5. governance before force
-6. anti-recursive behavior
-7. no hidden escalation
-8. no personality leakage
-9. no cognitive duplication
-10. no orchestration conflict
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 IMPORTANT RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DO NOT RE-ADD:
-- Telegram logic
-- recursive retries
-- hidden rerouting
-- second orchestration
-- aggressive overrides
-- frontend rendering
-- transport formatting
-- duplicated governance systems
-
-This file must remain:
-- calm
-- lightweight
-- validator-focused
-- Executor-connected
-- cognition-safe
+Analyzer may NEVER:
+- override governance
+- alter cognition
+- replace Executor authority
 """
 
 # =========================================================
@@ -138,23 +101,65 @@ GOVERNANCE_RESPONSE_CHANNEL = {
 }
 
 # =========================================================
+# 🔥 APRIL TRACE LOGS
+# =========================================================
+
+def APRIL_LOG_IN(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_IN",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_GOVERNANCE_AUTHORITY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+
+def APRIL_LOG_OUT(
+    room,
+    metadata=None
+):
+
+    try:
+
+        print({
+
+            "type":
+                "APRIL_LOG_OUT",
+
+            "room":
+                room,
+
+            "file":
+                "APRIL_GOVERNANCE_AUTHORITY_CORE",
+
+            "metadata":
+                metadata or {}
+        })
+
+    except Exception:
+        pass
+
+# =========================================================
 # 🧠 APRIL CAPABILITY REGISTRY
 # =========================================================
 
-"""
-Central April capability awareness.
-
-This registry helps Executor understand:
-- what April can do
-- which helper cores exist
-- which modality paths are valid
-"""
-
 APRIL_CAPABILITIES = {
-
-    # =====================================================
-    # 🧠 CORE COGNITION
-    # =====================================================
 
     "conversation": True,
     "continuation": True,
@@ -162,10 +167,6 @@ APRIL_CAPABILITIES = {
     "reasoning": True,
     "guidance": True,
     "execution": True,
-
-    # =====================================================
-    # 🧠 VISUAL
-    # =====================================================
 
     "renderer_space": True,
     "scene_rendering": True,
@@ -176,43 +177,23 @@ APRIL_CAPABILITIES = {
     "visual_continuity": True,
     "image_analysis": True,
 
-    # =====================================================
-    # 🧠 HEAVY VISUAL
-    # =====================================================
-
     "image_generation": True,
     "image_edit": True,
-
-    # =====================================================
-    # 🧠 KNOWLEDGE
-    # =====================================================
 
     "web_search": True,
     "external_knowledge": True,
     "references": True,
-
-    # =====================================================
-    # 🧠 SCIENCE
-    # =====================================================
 
     "science": True,
     "math": True,
     "engineering": True,
     "code": True,
 
-    # =====================================================
-    # 🧠 GOVERNANCE
-    # =====================================================
-
     "validation": True,
     "trajectory_protection": True,
     "continuity_validation": True,
     "result_validation": True,
     "usefulness_validation": True,
-
-    # =====================================================
-    # 🧠 SAFETY
-    # =====================================================
 
     "anti_loop_protection": True,
     "anti_escalation": True,
@@ -223,12 +204,6 @@ APRIL_CAPABILITIES = {
 # =========================================================
 # 🧠 TRUST LEVELS
 # =========================================================
-
-"""
-Trust stabilization between helper cores.
-
-Prevents orchestration conflicts.
-"""
 
 DEFAULT_TRUST_LEVELS = {
 
@@ -245,10 +220,6 @@ DEFAULT_TRUST_LEVELS = {
     "web": 1.0,
 
     "code": 1.0,
-
-    # =====================================================
-    # 🧠 HEAVY VISUAL
-    # =====================================================
 
     "image_generation": 0.82,
 
@@ -292,12 +263,28 @@ def safe_output(result):
 
 def contains_system_leak(output):
 
-    """
-    Prevents internal machine leakage
-    into human-layer output.
-    """
+    APRIL_LOG_IN(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "contains_system_leak"
+        }
+    )
 
     if not output:
+
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            {
+                "result":
+                    False
+            }
+        )
+
         return False
 
     lowered = output.lower()
@@ -320,7 +307,19 @@ def contains_system_leak(output):
         if pattern in lowered:
             hits += 1
 
-    return hits >= 2
+    result = hits >= 2
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "system_leak":
+                result
+        }
+    )
+
+    return result
 
 # =========================================================
 # 🧠 RENDERER DETECTION
@@ -328,11 +327,28 @@ def contains_system_leak(output):
 
 def is_renderer_result(result):
 
-    """
-    Detects renderer-safe outputs.
-    """
+    APRIL_LOG_IN(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "is_renderer_result"
+        }
+    )
 
     if not result:
+
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            {
+                "renderer":
+                    False
+            }
+        )
+
         return False
 
     result_type = result.get(
@@ -350,6 +366,16 @@ def is_renderer_result(result):
         "scene"
     ]:
 
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            {
+                "renderer":
+                    True
+            }
+        )
+
         return True
 
     output = safe_output(
@@ -365,10 +391,22 @@ def is_renderer_result(result):
         "<canvas"
     ]
 
-    return any(
+    detected = any(
         x in output
         for x in renderer_patterns
     )
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "renderer":
+                detected
+        }
+    )
+
+    return detected
 
 # =========================================================
 # 🧠 AUTHORITY STATE
@@ -376,11 +414,17 @@ def is_renderer_result(result):
 
 def build_authority_state():
 
-    """
-    Global governance stabilization state.
-    """
+    APRIL_LOG_IN(
 
-    return {
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "build_authority_state"
+        }
+    )
+
+    payload = {
 
         "authority_active": True,
 
@@ -409,6 +453,18 @@ def build_authority_state():
             GOVERNANCE_RESPONSE_CHANNEL
     }
 
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "authority":
+                "active"
+        }
+    )
+
+    return payload
+
 # =========================================================
 # 🧠 COMPLETION ANALYSIS
 # =========================================================
@@ -420,23 +476,37 @@ def analyze_completion(
     cognition
 ):
 
-    """
-    Validates whether execution
-    completed successfully.
-    """
+    APRIL_LOG_IN(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "analyze_completion"
+        }
+    )
 
     semantic = semantic or {}
     cognition = cognition or {}
 
     if not result:
 
-        return {
+        payload = {
 
             "completed": False,
 
             "reason":
                 "empty_result"
         }
+
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            payload
+        )
+
+        return payload
 
     result_type = result.get(
         "type",
@@ -449,10 +519,6 @@ def analyze_completion(
 
     lowered = output.lower()
 
-    # =====================================================
-    # 🧠 RENDERER SUCCESS
-    # =====================================================
-
     if result_type in [
 
         "function",
@@ -463,7 +529,7 @@ def analyze_completion(
         "table"
     ]:
 
-        return {
+        payload = {
 
             "completed": True,
 
@@ -471,13 +537,18 @@ def analyze_completion(
                 "renderer_completed"
         }
 
-    # =====================================================
-    # 🧠 EMPTY OUTPUT
-    # =====================================================
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            payload
+        )
+
+        return payload
 
     if len(output) <= 5:
 
-        return {
+        payload = {
 
             "completed": False,
 
@@ -485,15 +556,20 @@ def analyze_completion(
                 "empty_output"
         }
 
-    # =====================================================
-    # 🧠 SYSTEM LEAK
-    # =====================================================
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            payload
+        )
+
+        return payload
 
     if contains_system_leak(
         output
     ):
 
-        return {
+        payload = {
 
             "completed": False,
 
@@ -501,9 +577,14 @@ def analyze_completion(
                 "system_leak"
         }
 
-    # =====================================================
-    # 🧠 REFUSAL DETECTION
-    # =====================================================
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            payload
+        )
+
+        return payload
 
     refusal_patterns = [
 
@@ -516,7 +597,7 @@ def analyze_completion(
 
         if pattern in lowered:
 
-            return {
+            payload = {
 
                 "completed": False,
 
@@ -524,13 +605,31 @@ def analyze_completion(
                     "refusal"
             }
 
-    return {
+            APRIL_LOG_OUT(
+
+                "GOVERNANCE_ROOM",
+
+                payload
+            )
+
+            return payload
+
+    payload = {
 
         "completed": True,
 
         "reason":
             "success"
     }
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        payload
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 USEFULNESS ANALYSIS
@@ -543,12 +642,27 @@ def evaluate_usefulness(
     cognition
 ):
 
-    """
-    Measures practical usefulness
-    of execution output.
-    """
+    APRIL_LOG_IN(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "evaluate_usefulness"
+        }
+    )
 
     if not result:
+
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            {
+                "usefulness":
+                    0.0
+            }
+        )
 
         return 0.0
 
@@ -560,10 +674,6 @@ def evaluate_usefulness(
 
     lowered = output.lower()
 
-    # =====================================================
-    # 🧠 VISUAL BONUS
-    # =====================================================
-
     if result.get("type") in [
 
         "graph",
@@ -574,25 +684,13 @@ def evaluate_usefulness(
 
         usefulness += 0.25
 
-    # =====================================================
-    # 🧠 WEAK OUTPUT
-    # =====================================================
-
     if len(output) < 15:
 
         usefulness -= 0.4
 
-    # =====================================================
-    # 🧠 REFUSAL PENALTY
-    # =====================================================
-
     if "не могу" in lowered:
 
         usefulness -= 0.5
-
-    # =====================================================
-    # 🧠 SYSTEM LEAK PENALTY
-    # =====================================================
 
     if contains_system_leak(
         output
@@ -600,9 +698,21 @@ def evaluate_usefulness(
 
         usefulness -= 0.7
 
-    return clamp(
+    usefulness = clamp(
         usefulness
     )
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "usefulness":
+                usefulness
+        }
+    )
+
+    return usefulness
 
 # =========================================================
 # 🧠 FINAL VALIDATION
@@ -616,9 +726,15 @@ def validate_final_response(
     state=None
 ):
 
-    """
-    Final cognition stability validation.
-    """
+    APRIL_LOG_IN(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "validate_final_response"
+        }
+    )
 
     completion = analyze_completion(
 
@@ -631,6 +747,16 @@ def validate_final_response(
         "completed"
     ):
 
+        APRIL_LOG_OUT(
+
+            "GOVERNANCE_ROOM",
+
+            {
+                "validated":
+                    False
+            }
+        )
+
         return False
 
     usefulness = evaluate_usefulness(
@@ -640,11 +766,19 @@ def validate_final_response(
         cognition
     )
 
-    if usefulness < 0.45:
+    valid = usefulness >= 0.45
 
-        return False
+    APRIL_LOG_OUT(
 
-    return True
+        "GOVERNANCE_ROOM",
+
+        {
+            "validated":
+                valid
+        }
+    )
+
+    return valid
 
 # =========================================================
 # 🧠 OVERRIDE VALIDATION
@@ -658,12 +792,15 @@ def should_override(
     state=None
 ):
 
-    """
-    Calm override validation.
+    APRIL_LOG_IN(
 
-    NOT aggressive.
-    NOT recursive.
-    """
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "should_override"
+        }
+    )
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -678,11 +815,17 @@ def should_override(
 
     if not valid:
 
-        return True
+        APRIL_LOG_OUT(
 
-    # =====================================================
-    # 🧠 RENDERER PRIORITY
-    # =====================================================
+            "GOVERNANCE_ROOM",
+
+            {
+                "override":
+                    True
+            }
+        )
+
+        return True
 
     if semantic.get(
         "prefer_renderer"
@@ -692,7 +835,27 @@ def should_override(
             "type"
         ) == "image":
 
+            APRIL_LOG_OUT(
+
+                "GOVERNANCE_ROOM",
+
+                {
+                    "override":
+                        True
+                }
+            )
+
             return True
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "override":
+                False
+        }
+    )
 
     return False
 
@@ -707,11 +870,15 @@ def choose_best_capability_path(
     state
 ):
 
-    """
-    Governance-level capability coordination.
+    APRIL_LOG_IN(
 
-    Prevents helper-core conflicts.
-    """
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "choose_best_capability_path"
+        }
+    )
 
     semantic = semantic or {}
     cognition = cognition or {}
@@ -721,29 +888,105 @@ def choose_best_capability_path(
         "prefer_renderer"
     ):
 
-        return "renderer_space"
+        result = "renderer_space"
 
-    if semantic.get(
+    elif semantic.get(
         "internet_context_needed"
     ):
 
-        return "web"
+        result = "web"
 
-    if semantic.get(
+    elif semantic.get(
         "should_execute"
     ):
 
-        return "execution"
+        result = "execution"
 
-    continuation_target = semantic.get(
-        "continuation_target"
+    else:
+
+        continuation_target = semantic.get(
+            "continuation_target"
+        )
+
+        if continuation_target == "math":
+
+            result = "science"
+
+        else:
+
+            result = "text"
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "capability":
+                result
+        }
     )
 
-    if continuation_target == "math":
+    return result
 
-        return "science"
+# =========================================================
+# 🧠 ANALYZER GOVERNANCE PAYLOAD
+# =========================================================
 
-    return "text"
+def build_governance_telemetry_payload():
+
+    APRIL_LOG_IN(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "build_governance_telemetry_payload"
+        }
+    )
+
+    payload = {
+
+        "file_id":
+            "APRIL_GOVERNANCE_AUTHORITY_CORE",
+
+        "room":
+            "GOVERNANCE_ROOM",
+
+        "governance_active":
+            True,
+
+        "validation_active":
+            True,
+
+        "anti_recursive_protection":
+            True,
+
+        "continuity_protection":
+            True,
+
+        "renderer_priority":
+            True,
+
+        "executor_connected":
+            True,
+
+        "registered_capabilities":
+            len(
+                APRIL_CAPABILITIES
+            )
+    }
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "telemetry":
+                "ready"
+        }
+    )
+
+    return payload
 
 # =========================================================
 # 🧠 EXECUTIVE GOVERNANCE DECISION
@@ -758,12 +1001,15 @@ def build_authority_decision(
     state=None
 ):
 
-    """
-    Final governance payload for Executor.
+    APRIL_LOG_IN(
 
-    This helper core NEVER orchestrates.
-    It only validates and stabilizes.
-    """
+        "GOVERNANCE_ROOM",
+
+        {
+            "action":
+                "build_authority_decision"
+        }
+    )
 
     completion = analyze_completion(
 
@@ -797,7 +1043,7 @@ def build_authority_decision(
         )
     )
 
-    return {
+    payload = {
 
         "channel":
             GOVERNANCE_RESPONSE_CHANNEL,
@@ -853,5 +1099,20 @@ def build_authority_decision(
             True,
 
         "authority_confident":
-            True
+            True,
+
+        "telemetry":
+            build_governance_telemetry_payload()
     }
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "authority_decision":
+                "ready"
+        }
+    )
+
+    return payload
