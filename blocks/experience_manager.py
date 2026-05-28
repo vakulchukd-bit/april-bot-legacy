@@ -1,40 +1,88 @@
+# =====================================================
+# 🧠 APRIL EXECUTION STABILIZER CORE
+# =====================================================
+
+"""
+APRIL EXECUTION STABILIZER CORE
+
+APRIL_FILE_ID:
+APRIL_EXECUTION_STABILIZER_CORE_V2
+
+ROLE:
+TEMPORARY_EXECUTION_CONTINUITY_AND_ANTI_LOOP_SUPPORT
+
+INPUT:
+EXECUTION_STATE
+LAST_ACTION
+EXECUTION_RESULT
+MODALITY_CONTEXT
+RETRY_CONTEXT
+
+OUTPUT:
+TEMPORARY_EXECUTION_BUFFER
+ANTI_LOOP_STABILIZATION
+RETRY_SUPPRESSION_STATE
+EXECUTION_CONTINUITY_SUPPORT
+
+THIS FILE IS:
+- temporary execution continuity layer
+- anti-loop stabilizer
+- retry suppression helper
+- renderer stabilization support
+- modality cooldown helper
+- lightweight execution continuity layer
+
+THIS FILE IS NOT:
+- execution memory
+- routing memory
+- cognition engine
+- orchestration authority
+- trajectory memory
+- retry chaos system
+
+GOLDEN APRIL PRINCIPLES:
+- lightweight before heavy
+- stabilization before retry
+- continuity before recursion
+- executor-safe architecture
+- no orchestration duplication
+- no execution noise accumulation
+"""
+
 import json
 import os
 import time
+from datetime import datetime
 
 # =====================================================
-# 🧠 APRIL EXECUTION STABILIZER
+# 🔥 FILE ID
 # =====================================================
 
-"""
-APRIL EXECUTION STABILIZER
+APRIL_FILE_ID = (
+    "APRIL_EXECUTION_STABILIZER_CORE_V2"
+)
 
-Modern DeepHub version.
+# =====================================================
+# 🔥 MACHINE CHANNELS
+# =====================================================
 
-Этот слой:
+EXECUTION_STABILIZER_TASK_CHANNEL = {
 
-✅ temporary execution continuity
-✅ anti-loop protection
-✅ retry suppression
-✅ renderer stabilization
-✅ modality cooldown support
-✅ lightweight execution continuity
+    "channel":
+        "execution_stabilizer_task_channel",
 
-❌ НЕ execution memory
-❌ НЕ routing memory
-❌ НЕ trajectory memory
-❌ НЕ cognition helper
-❌ НЕ orchestration authority
-❌ НЕ retry chaos system
+    "isolated":
+        True
+}
 
-Главная задача:
+EXECUTION_STABILIZER_RESPONSE_CHANNEL = {
 
-не мешать executor,
-не копить noise,
-не дублировать orchestration,
-не хранить history,
-а помогать calm execution continuity.
-"""
+    "channel":
+        "execution_stabilizer_response_channel",
+
+    "isolated":
+        True
+}
 
 # =====================================================
 # 🔥 CONFIG
@@ -66,6 +114,79 @@ VISUAL_MODALITIES = {
 }
 
 # =====================================================
+# 🔥 MACHINE LOGGING
+# =====================================================
+
+def build_input_log():
+
+    """
+    INPUT MACHINE TRACE
+
+    Used internally by:
+    - Executor
+    - Governance
+    - diagnostics
+    - retry stabilization
+    """
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "execution_stabilizer_input",
+
+        "channel":
+            EXECUTION_STABILIZER_TASK_CHANNEL,
+
+        "timestamp":
+            datetime.utcnow().isoformat(),
+
+        "machine_only":
+            True
+    }
+
+
+def build_output_log(
+    user_id,
+    execution_state
+):
+
+    """
+    OUTPUT MACHINE TRACE
+
+    Used internally by:
+    - Executor
+    - analytics
+    - anti-loop diagnostics
+    """
+
+    return {
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "event":
+            "execution_stabilizer_output",
+
+        "channel":
+            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
+
+        "user_id":
+            str(user_id),
+
+        "execution_state":
+            execution_state,
+
+        "timestamp":
+            datetime.utcnow().isoformat(),
+
+        "machine_only":
+            True
+    }
+
+# =====================================================
 # 🔥 HELPERS
 # =====================================================
 
@@ -86,12 +207,15 @@ def normalize_lower(
         value
     ).lower()
 
-
 # =====================================================
 # 🔥 LOAD
 # =====================================================
 
 def load_experience():
+
+    """
+    Safe stabilization loading.
+    """
 
     if not os.path.exists(
         DATA_FILE
@@ -108,6 +232,7 @@ def load_experience():
             "r",
 
             encoding="utf-8"
+
         ) as f:
 
             return json.load(f)
@@ -129,6 +254,10 @@ def save_experience(
     data
 ):
 
+    """
+    Safe stabilization saving.
+    """
+
     try:
 
         with open(
@@ -138,6 +267,7 @@ def save_experience(
             "w",
 
             encoding="utf-8"
+
         ) as f:
 
             json.dump(
@@ -169,12 +299,13 @@ def cleanup_old_actions(
     """
     DeepHub cleanup philosophy:
 
-    НЕ копим history.
-    НЕ копим old retries.
-    НЕ копим execution noise.
+    DO NOT:
+    - store long execution history
+    - preserve retry loops
+    - accumulate orchestration noise
 
-    Храним только
-    короткий stabilization window.
+    ONLY:
+    - maintain short stabilization window
     """
 
     if not isinstance(
@@ -218,6 +349,10 @@ def detect_modality(
     last
 ):
 
+    """
+    Detects execution modality.
+    """
+
     action_type = normalize_lower(
 
         last.get(
@@ -243,9 +378,8 @@ def build_execution_state(
     """
     Machine-readable stabilization state.
 
-    ВАЖНО:
-    state НЕ должен
-    превращаться в cognition memory.
+    IMPORTANT:
+    This is NOT cognition memory.
     """
 
     action_type = normalize_lower(
@@ -333,6 +467,87 @@ def build_execution_state(
     }
 
 # =====================================================
+# 🔥 EXECUTION ANALYSIS
+# =====================================================
+
+def analyze_execution_pressure(
+    actions
+):
+
+    """
+    Lightweight anti-loop analysis.
+    """
+
+    if not actions:
+
+        return {
+
+            "retry_pressure":
+                0.0,
+
+            "loop_risk":
+                False
+        }
+
+    failures = 0
+
+    retries = 0
+
+    action_classes = []
+
+    for action in actions[-3:]:
+
+        if action.get(
+            "failed"
+        ):
+
+            failures += 1
+
+        if action.get(
+            "retry"
+        ):
+
+            retries += 1
+
+        action_class = action.get(
+            "action_class"
+        )
+
+        if action_class:
+
+            action_classes.append(
+                action_class
+            )
+
+    repeated_flow = (
+
+        len(set(action_classes)) == 1
+        and len(action_classes) >= 3
+    )
+
+    pressure = min(
+
+        (
+            failures * 0.35
+            + retries * 0.2
+        ),
+
+        1.0
+    )
+
+    return {
+
+        "retry_pressure":
+            round(
+                pressure,
+                3
+            ),
+
+        "loop_risk":
+            repeated_flow and failures >= 2
+    }
+
+# =====================================================
 # 🔥 EXECUTION UPDATE
 # =====================================================
 
@@ -352,8 +567,10 @@ def update_experience(
         ↓
     anti-loop continuity
         ↓
-    short temporary buffer
+    temporary execution buffer
     """
+
+    build_input_log()
 
     data = load_experience()
 
@@ -378,7 +595,16 @@ def update_experience(
             "⚠️ last_action отсутствует"
         )
 
-        return
+        return {
+
+            "success": False,
+
+            "reason":
+                "missing_last_action",
+
+            "channel":
+                EXECUTION_STABILIZER_RESPONSE_CHANNEL
+        }
 
     # =================================================
     # 🔥 EXECUTION STATE
@@ -425,3 +651,126 @@ def update_experience(
     save_experience(
         data
     )
+
+    # =================================================
+    # 🔥 ANALYTICS
+    # =====================================================
+
+    analytics = analyze_execution_pressure(
+
+        data[user_id][
+            "actions"
+        ]
+    )
+
+    build_output_log(
+
+        user_id,
+
+        execution_state
+    )
+
+    # =================================================
+    # 🔥 RESPONSE
+    # =====================================================
+
+    return {
+
+        "success":
+            True,
+
+        "channel":
+            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
+
+        "stabilization_active":
+            True,
+
+        "temporary_memory":
+            True,
+
+        "retry_pressure":
+            analytics.get(
+                "retry_pressure",
+                0.0
+            ),
+
+        "loop_risk":
+            analytics.get(
+                "loop_risk",
+                False
+            ),
+
+        "stored_actions":
+            len(
+                data[user_id][
+                    "actions"
+                ]
+            ),
+
+        "machine_only":
+            True
+    }
+
+# =====================================================
+# 🔥 EXECUTOR SNAPSHOT
+# =====================================================
+
+def build_executor_stabilization_snapshot(
+    user_id
+):
+
+    """
+    Executor stabilization snapshot.
+
+    Used internally by:
+    - Executor
+    - Governance
+    - retry suppression
+    - diagnostics
+    """
+
+    data = load_experience()
+
+    user_id = str(user_id)
+
+    actions = data.get(
+        user_id,
+        {}
+    ).get(
+        "actions",
+        []
+    )
+
+    analytics = analyze_execution_pressure(
+        actions
+    )
+
+    return {
+
+        "channel":
+            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
+
+        "file_id":
+            APRIL_FILE_ID,
+
+        "actions":
+            actions,
+
+        "retry_pressure":
+            analytics.get(
+                "retry_pressure",
+                0.0
+            ),
+
+        "loop_risk":
+            analytics.get(
+                "loop_risk",
+                False
+            ),
+
+        "temporary_memory":
+            True,
+
+        "machine_only":
+            True
+    }
