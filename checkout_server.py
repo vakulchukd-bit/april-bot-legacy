@@ -514,6 +514,17 @@ def voice_chat():
 
         print("FILES:", request.files)
 
+        audio_file = request.files.get(
+            "audio"
+        )
+
+        if audio_file:
+
+            print(
+                "VOICE FILE:",
+                audio_file.filename
+            )
+
         print("FORM:", request.form)
 
         print(
