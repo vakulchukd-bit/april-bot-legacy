@@ -1064,43 +1064,69 @@ async def execute(
             )
 
         return result
+        
+    # =====================================================
+    # 🔥 FALLBACK
+    # =====================================================
 
-# =====================================================
-# 🔥 FALLBACK
-# =====================================================
+    energy = get_energy(
+        user_id
+    )
 
-print(
-    "🔥 EXECUTOR FALLBACK START"
-)
+    context_text = build_deephub_context(
 
-print(
-    "🔥 run_with_activity:",
-    type(run_with_activity)
-)
+        user_id,
 
-print(
-    "🔥 energy:",
-    energy
-)
+        text,
 
-print(
-    "🔥 context_text:",
-    str(context_text)[:300]
-)
+        state
+    )
 
-try:
+    print(
+        "🔥 EXECUTOR FALLBACK START"
+    )
 
-    if run_with_activity:
+    print(
+        "🔥 run_with_activity:",
+        type(run_with_activity)
+    )
 
-        print(
-            "🔥 USING ACTIVITY WRAPPER"
-        )
+    print(
+        "🔥 energy:",
+        energy
+    )
 
-        fallback_result = await run_with_activity(
+    try:
 
-            chat_id,
+        if run_with_activity:
 
-            text_process(
+            print(
+                "🔥 USING ACTIVITY WRAPPER"
+            )
+
+            fallback_result = await run_with_activity(
+
+                chat_id,
+
+                text_process(
+
+                    user_id,
+
+                    context_text,
+
+                    state,
+
+                    energy
+                )
+            )
+
+        else:
+
+            print(
+                "🔥 NO ACTIVITY WRAPPER"
+            )
+
+            fallback_result = await text_process(
 
                 user_id,
 
@@ -1110,51 +1136,33 @@ try:
 
                 energy
             )
-        )
-
-    else:
 
         print(
-            "🔥 NO ACTIVITY WRAPPER"
+            "🔥 FALLBACK RESULT TYPE:",
+            type(fallback_result)
         )
 
-        fallback_result = await text_process(
-
-            user_id,
-
-            context_text,
-
-            state,
-
-            energy
+        print(
+            "🔥 FALLBACK RESULT:",
+            fallback_result
         )
 
-    print(
-        "🔥 FALLBACK RESULT TYPE:",
-        type(fallback_result)
-    )
+    except Exception as e:
 
-    print(
-        "🔥 FALLBACK RESULT:",
-        fallback_result
-    )
+        print(
+            "🔥 FALLBACK CRASH:",
+            e
+        )
 
-except Exception as e:
+        traceback.print_exc()
 
-    print(
-        "🔥 FALLBACK CRASH:",
-        e
-    )
+        return {
 
-    traceback.print_exc()
+            "type": "text",
 
-    return {
-
-        "type": "text",
-
-        "data":
-            f"⚠️ FALLBACK ERROR: {e}"
-    }
+            "data":
+                f"⚠️ FALLBACK ERROR: {e}"
+        }
     
     # =====================================================
     # 🔥 FORMAT
