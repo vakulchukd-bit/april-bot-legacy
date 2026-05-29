@@ -516,8 +516,10 @@ def voice_chat():
 
         print("FORM:", request.form)
 
-        print("JSON:", request.json)
-
+        print(
+            "CONTENT TYPE:",
+            request.content_type
+        )
         return jsonify({
 
             "success": True,
