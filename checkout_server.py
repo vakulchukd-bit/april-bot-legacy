@@ -497,7 +497,7 @@ def checkout(plan, user_id):
 
         user_id=user_id
     )
-    
+
 # =========================================================
 # 🎤 APRIL VOICE
 # =========================================================
@@ -510,33 +510,73 @@ def voice_chat():
 
     try:
 
-        print("🎤 VOICE REQUEST RECEIVED")
-
-        print("FILES:", request.files)
+        print(
+            "🎤 VOICE REQUEST RECEIVED"
+        )
 
         audio_file = request.files.get(
             "audio"
         )
 
-        if audio_file:
+        if not audio_file:
 
-            print(
-                "VOICE FILE:",
-                audio_file.filename
-            )
+            return jsonify({
 
-        print("FORM:", request.form)
+                "success": False,
+
+                "error":
+                    "audio file missing"
+
+            }), 400
 
         print(
-            "CONTENT TYPE:",
-            request.content_type
+            "VOICE FILE:",
+            audio_file.filename
         )
+
+        temp_path = "voice.webm"
+
+        audio_file.save(
+            temp_path
+        )
+
+        print(
+            "VOICE SAVED:",
+            temp_path
+        )
+
+        transcript = asyncio.run(
+
+            transcribe_voice(
+                temp_path
+            )
+        )
+
+        print(
+            "TRANSCRIPT:",
+            transcript
+        )
+
+        result = asyncio.run(
+
+            process_web_message(
+
+                user_id="web_voice",
+
+                text=transcript
+            )
+        )
+
         return jsonify({
 
             "success": True,
 
-            "message":
-                "VOICE ROUTE ONLINE"
+            "transcript":
+                transcript,
+
+            "response":
+                result
+
         })
 
     except Exception as e:
@@ -550,7 +590,9 @@ def voice_chat():
 
             "success": False,
 
-            "error": str(e)
+            "error":
+                str(e)
+
         }), 500
 
 
