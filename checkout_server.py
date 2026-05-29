@@ -512,6 +512,12 @@ def voice_chat():
 
         print("🎤 VOICE REQUEST RECEIVED")
 
+        print("FILES:", request.files)
+
+        print("FORM:", request.form)
+
+        print("JSON:", request.json)
+
         return jsonify({
 
             "success": True,
