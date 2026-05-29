@@ -564,37 +564,56 @@ def get_last_prompt(user_id):
 # =====================================================
 
 def update_memory_summary(
-    user_id,
-    new_text
+    state_obj,
+    user_text="",
+    assistant_text=""
 ):
 
-    state_obj = get_state(user_id)
+    try:
 
-    current = state_obj.get(
-        "memory_summary",
-        ""
-    )
-
-    combined = (
-
-        current
-        + " | "
-        + safe_trim_text(
-            new_text,
-            240
+        current = state_obj.get(
+            "memory_summary",
+            ""
         )
 
-    ).strip()
+        entry = " | ".join(
 
-    if len(combined) > SESSION_MEMORY_LIMIT:
+            x for x in [
 
-        combined = combined[
-            -SESSION_MEMORY_LIMIT:
-        ]
+                safe_trim_text(
+                    user_text,
+                    240
+                ),
 
-    state_obj[
-        "memory_summary"
-    ] = combined
+                safe_trim_text(
+                    assistant_text,
+                    240
+                )
+
+            ]
+
+            if x
+        )
+
+        combined = (
+            current + " | " + entry
+        ).strip()
+
+        if len(combined) > SESSION_MEMORY_LIMIT:
+
+            combined = combined[
+                -SESSION_MEMORY_LIMIT:
+            ]
+
+        state_obj[
+            "memory_summary"
+        ] = combined
+
+    except Exception as e:
+
+        safe_state_log(
+            f"MEMORY ERROR: {e}"
+        )
 
 # =====================================================
 # 🔥 VISUAL SUMMARY
