@@ -300,7 +300,7 @@ async def process_web_message(
 
         chat_id=user_id,
 
-        run_with_activity=lambda *args, **kwargs: None
+        run_with_activity=None
     )
 
     # =====================================================
