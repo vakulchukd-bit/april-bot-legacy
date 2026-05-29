@@ -69,6 +69,9 @@ from storage import (
 )
 
 from core.executor import execute
+from blocks.provider_router import (
+    transcribe_voice
+)
 
 
 # =========================================================
@@ -494,6 +497,42 @@ def checkout(plan, user_id):
 
         user_id=user_id
     )
+    
+# =========================================================
+# 🎤 APRIL VOICE
+# =========================================================
+
+@app.route(
+    "/voice",
+    methods=["POST"]
+)
+def voice_chat():
+
+    try:
+
+        print("🎤 VOICE REQUEST RECEIVED")
+
+        return jsonify({
+
+            "success": True,
+
+            "message":
+                "VOICE ROUTE ONLINE"
+        })
+
+    except Exception as e:
+
+        print(
+            "VOICE ERROR:",
+            e
+        )
+
+        return jsonify({
+
+            "success": False,
+
+            "error": str(e)
+        }), 500
 
 
 # =========================================================
