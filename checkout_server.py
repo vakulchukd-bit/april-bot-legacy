@@ -690,12 +690,32 @@ def image_chat():
             "🧠 VISUAL STATE READY"
         )
 
+        analysis_payload = safe_json(result)
+
+        response_text = ""
+
+        if isinstance(result, dict):
+
+            response_text = (
+                result.get("response")
+                or result.get("analysis")
+                or result.get("description")
+                or result.get("content")
+                or str(analysis_payload)
+            )
+
+        else:
+            response_text = str(analysis_payload)
+
         return jsonify({
 
             "success": True,
 
+            "response":
+                response_text,
+
             "analysis":
-                safe_json(result),
+                analysis_payload,
 
             "renderer_mode":
                 WEB_RENDERER_MODE,
