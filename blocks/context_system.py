@@ -276,6 +276,9 @@ def build_machine_context_payload(
         "visual_scene":
             visual_scene or {},
 
+        "visual_focus":
+            scene_state.get("visual_focus", {}) if scene_state else {},
+
         "machine_only": True,
 
         "human_visible": False,
@@ -733,6 +736,35 @@ def build_visual_scene_block(
 
     return payload
 
+
+# =====================================================
+# 🔥 VISUAL FOCUS BLOCK
+# =====================================================
+
+def build_visual_focus_block(state):
+
+    focus = state.get("visual_focus", {})
+
+    if not focus:
+        return ""
+
+    lines = ["\nACTIVE VISUAL FOCUS:"]
+
+    obj = focus.get("focused_object")
+    if obj:
+        lines.append(f"Focused Object: {obj}")
+
+    qtype = focus.get("question_type")
+    if qtype:
+        lines.append(f"Question Type: {qtype}")
+
+    confidence = focus.get("confidence")
+    if confidence is not None:
+        lines.append(f"Confidence: {confidence}")
+
+    return "\\n".join(lines)
+
+
 # =====================================================
 # 🔥 RELEVANT DIALOG
 # =====================================================
@@ -1132,6 +1164,12 @@ def build_context_text(
         )
     )
 
+    visual_focus_block = (
+        build_visual_focus_block(
+            state
+        )
+    )
+
     relevant_dialog = build_relevant_dialog(
 
         dialog,
@@ -1229,6 +1267,8 @@ def build_context_text(
 {scene_block}
 
 {visual_scene_block}
+
+{visual_focus_block}
 
 {summary_block}
 
