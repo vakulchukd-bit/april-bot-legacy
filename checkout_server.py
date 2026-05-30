@@ -43,6 +43,7 @@ Web gateway должен:
 import os
 import json
 import asyncio
+import time
 
 from flask import (
     Flask,
@@ -671,7 +672,7 @@ def image_chat():
         )
 
         temp_path = (
-            f"image_{user_id}.jpg"
+            f"image_{user_id}_{int(time.time()*1000)}.jpg"
         )
 
         image_file.save(
