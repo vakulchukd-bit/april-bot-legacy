@@ -1,3 +1,4 @@
+
 # =========================================================
 # 🌐 APRIL WEB GATEWAY
 # =========================================================
@@ -71,6 +72,10 @@ from storage import (
 from core.executor import execute
 from blocks.provider_router import (
     transcribe_voice
+)
+
+from blocks.image_system import (
+    analyze_image
 )
 
 
@@ -583,6 +588,126 @@ def voice_chat():
 
         print(
             "VOICE ERROR:",
+            e
+        )
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+                str(e)
+
+        }), 500
+
+
+
+
+# =========================================================
+# 🖼️ APRIL IMAGE
+# =========================================================
+
+"""
+APRIL IMAGE ENTRYPOINT
+
+ROLE:
+WEB_VISUAL_ENTRYPOINT
+
+PURPOSE:
+- receive image from April Web
+- activate visual analysis
+- create visual continuity
+- bridge image understanding into April
+"""
+
+@app.route(
+    "/image",
+    methods=["POST"]
+)
+def image_chat():
+
+    try:
+
+        print(
+            "🖼️ IMAGE REQUEST RECEIVED"
+        )
+
+        image_file = request.files.get(
+            "image"
+        )
+
+        user_id = request.form.get(
+            "user_id",
+            "web_image"
+        )
+
+        if not image_file:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                    "image file missing"
+
+            }), 400
+
+        print(
+            "🖼️ IMAGE FILE:",
+            image_file.filename
+        )
+
+        temp_path = (
+            f"image_{user_id}.jpg"
+        )
+
+        image_file.save(
+            temp_path
+        )
+
+        print(
+            "🖼️ IMAGE SAVED:",
+            temp_path
+        )
+
+        print(
+            "🧠 IMAGE ANALYSIS START"
+        )
+
+        result = asyncio.run(
+
+            analyze_image(
+                temp_path,
+                state={}
+            )
+        )
+
+        print(
+            "🧠 IMAGE ANALYSIS COMPLETE"
+        )
+
+        print(
+            "🧠 VISUAL STATE READY"
+        )
+
+        return jsonify({
+
+            "success": True,
+
+            "analysis":
+                safe_json(result),
+
+            "renderer_mode":
+                WEB_RENDERER_MODE,
+
+            "scene_mode":
+                WEB_SCENE_MODE
+        })
+
+    except Exception as e:
+
+        print(
+            "IMAGE ERROR:",
             e
         )
 
