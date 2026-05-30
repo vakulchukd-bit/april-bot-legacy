@@ -70,6 +70,9 @@ from storage import (
 )
 
 from core.executor import execute
+from blocks.state_manager import (
+    get_state
+)
 from blocks.provider_router import (
     transcribe_voice
 )
@@ -674,11 +677,19 @@ def image_chat():
             "🧠 IMAGE ANALYSIS START"
         )
 
+        # =====================================================
+        # 🧠 REAL USER STATE
+        # =====================================================
+
+        user_state = get_state(
+            user_id
+        )
+
         result = asyncio.run(
 
             analyze_image(
                 temp_path,
-                state={}
+                state=user_state
             )
         )
 
