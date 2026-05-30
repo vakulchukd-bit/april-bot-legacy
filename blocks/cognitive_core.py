@@ -884,6 +884,43 @@ def stabilize_cognition_state(
 
     return cognition
 
+
+# =========================================================
+# 🧠 VISUAL FOCUS ANALYSIS
+# =========================================================
+
+VISUAL_OBJECT_WORDS = [
+    "объект","предмет","элемент","человек",
+    "мужчина","женщина","кот","собака",
+    "машина","дом","дерево"
+]
+
+VISUAL_ATTRIBUTE_WORDS = [
+    "цвет","цвета","какого цвета",
+    "размер","форма","выглядит"
+]
+
+VISUAL_ACTION_WORDS = [
+    "делает","занимается","смотрит",
+    "держит","идет","сидит","стоит"
+]
+
+def build_visual_focus_analysis(text):
+
+    t = (text or "").lower()
+
+    return {
+        "visual_focus_request":
+            any(x in t for x in ["этот","эта","это","справа","слева","объект","предмет"]),
+        "visual_attribute_request":
+            any(x in t for x in VISUAL_ATTRIBUTE_WORDS),
+        "visual_action_request":
+            any(x in t for x in VISUAL_ACTION_WORDS),
+        "visual_object_reference":
+            any(x in t for x in VISUAL_OBJECT_WORDS)
+    }
+
+
 # =========================================================
 # 🧠 CORE ANALYZER
 # =========================================================
@@ -935,6 +972,11 @@ def analyze_cognition(
     render_analysis = detect_render_intent(
         t
     )
+
+    visual_focus = build_visual_focus_analysis(
+        t
+    )
+
 
     cognition = {
 
@@ -1029,7 +1071,10 @@ def analyze_cognition(
             COGNITION_RESPONSE_CHANNEL,
 
         "telemetry":
-            build_cognition_telemetry()
+            build_cognition_telemetry(),
+
+        "visual_focus":
+            visual_focus
     }
 
     if detect_meta_ai_behavior(t):
