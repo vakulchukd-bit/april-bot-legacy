@@ -703,27 +703,24 @@ def image_chat():
 
         analysis_payload = safe_json(result)
 
-        response_text = ""
+        # =====================================================
+        # 🧠 APRIL THINKING ROUTE
+        # =====================================================
 
-        if isinstance(result, dict):
+        april_result = asyncio.run(
 
-            response_text = (
-                result.get("response")
-                or result.get("analysis")
-                or result.get("description")
-                or result.get("content")
-                or str(analysis_payload)
+            process_web_message(
+                user_id=user_id,
+                text="[IMAGE_CONTEXT_UPDATED]"
             )
-
-        else:
-            response_text = str(analysis_payload)
+        )
 
         return jsonify({
 
             "success": True,
 
-            "response":
-                response_text,
+            "space_response":
+                safe_json(april_result),
 
             "analysis":
                 analysis_payload,
