@@ -191,9 +191,19 @@ def normalize_executor_response(
             ),
 
         "content":
-            result.get(
-                "content",
-                ""
+            (
+                result.get(
+                    "content",
+                    ""
+                )
+                or result.get(
+                    "response",
+                    ""
+                )
+                or result.get(
+                    "data",
+                    ""
+                )
             ),
 
         # =================================================
