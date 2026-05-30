@@ -715,6 +715,15 @@ def image_chat():
             )
         )
 
+        print(
+            "APRIL RESULT:",
+            json.dumps(
+                safe_json(april_result),
+                indent=2,
+                ensure_ascii=False
+            )
+        )
+
         return jsonify({
 
             "success": True,
