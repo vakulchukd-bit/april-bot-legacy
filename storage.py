@@ -1135,3 +1135,88 @@ def generate_april_id():
 # STEP-04:
 # auth.ts вызывает backend endpoint:
 # POST /api/users/find-or-create
+
+
+# =========================================================
+# STEP-05 PERSISTENT MEMORY
+# =========================================================
+
+def init_memory_tables():
+    conn = get_conn()
+    if not conn:
+        return
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS memory_states (
+                user_id TEXT PRIMARY KEY,
+                memory_json TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+
+def save_memory(user_id, memory_data):
+    conn = get_conn()
+    if not conn:
+        return False
+
+    payload = json.dumps(memory_data, ensure_ascii=False)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO memory_states (
+                user_id,
+                memory_json,
+                updated_at
+            )
+            VALUES (%s,%s,CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                memory_json = EXCLUDED.memory_json,
+                updated_at = CURRENT_TIMESTAMP
+            """, (
+                str(user_id),
+                payload
+            ))
+    return True
+
+def load_memory(user_id):
+    conn = get_conn()
+    if not conn:
+        return None
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            SELECT memory_json
+            FROM memory_states
+            WHERE user_id = %s
+            """, (str(user_id),))
+
+            row = cur.fetchone()
+
+            if not row:
+                return None
+
+            try:
+                return json.loads(
+                    row["memory_json"]
+                )
+            except Exception:
+                return None
+
+def delete_memory(user_id):
+    conn = get_conn()
+    if not conn:
+        return False
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            DELETE FROM memory_states
+            WHERE user_id = %s
+            """, (str(user_id),))
+
+    return True
