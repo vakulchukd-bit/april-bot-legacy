@@ -1220,3 +1220,158 @@ def delete_memory(user_id):
             """, (str(user_id),))
 
     return True
+
+
+# =========================================================
+# APRIL USER MIGRATION V1
+# =========================================================
+
+def migrate_users_table_v1():
+    conn = get_conn()
+    if not conn:
+        return
+
+    with conn:
+        with conn.cursor() as cur:
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS april_id TEXT
+            """)
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS email TEXT
+            """)
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS name TEXT
+            """)
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS provider TEXT
+            """)
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS provider_user_id TEXT
+            """)
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            """)
+
+            cur.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            """)
+
+
+def find_user_by_email(email):
+    conn = get_conn()
+    if not conn:
+        return None
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM users WHERE email = %s",
+                ((email or "").lower(),)
+            )
+            return cur.fetchone()
+
+
+def get_user_by_april_id(april_id):
+    conn = get_conn()
+    if not conn:
+        return None
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM users WHERE april_id = %s",
+                (april_id,)
+            )
+            return cur.fetchone()
+
+
+def update_last_login(user_id):
+    conn = get_conn()
+    if not conn:
+        return
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET last_login_at = CURRENT_TIMESTAMP
+                WHERE user_id = %s
+                """,
+                (str(user_id),)
+            )
+
+
+def create_user(email, name="", provider="google", provider_user_id=None):
+
+    conn = get_conn()
+    if not conn:
+        return None
+
+    april_id = generate_april_id()
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO users (
+                user_id,
+                april_id,
+                email,
+                name,
+                provider,
+                provider_user_id,
+                plan,
+                subscription_until,
+                warned,
+                messages_today,
+                images_today,
+                last_reset
+            )
+            VALUES (
+                %s,%s,%s,%s,%s,%s,
+                'free',0,FALSE,0,0,%s
+            )
+            """, (
+                april_id,
+                april_id,
+                (email or "").lower(),
+                name,
+                provider,
+                provider_user_id,
+                today()
+            ))
+
+    return get_user_by_april_id(april_id)
+
+
+def find_or_create_user(
+    email,
+    name="",
+    provider="google",
+    provider_user_id=None
+):
+    existing = find_user_by_email(email)
+
+    if existing:
+        update_last_login(existing["user_id"])
+        return existing
+
+    return create_user(
+        email=email,
+        name=name,
+        provider=provider,
+        provider_user_id=provider_user_id
+    )
