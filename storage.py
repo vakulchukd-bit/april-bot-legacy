@@ -1107,3 +1107,31 @@ def get_all_users():
                 ]
 
     return []
+
+
+# =========================================================
+# APRIL UPGRADE PATCHES (STEP-02 + STEP-03)
+# =========================================================
+
+# Добавить в init_db()/migration:
+# april_id, email, name, provider,
+# provider_user_id, created_at, last_login_at
+
+import random
+
+def generate_april_id():
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    def part(size):
+        return "".join(random.choice(alphabet) for _ in range(size))
+    return f"APR-{part(4)}-{part(4)}"
+
+# Далее добавить:
+# find_user_by_email()
+# get_user_by_april_id()
+# update_last_login()
+# create_user()
+# find_or_create_user()
+
+# STEP-04:
+# auth.ts вызывает backend endpoint:
+# POST /api/users/find-or-create
