@@ -1079,16 +1079,15 @@ def paypal_webhook():
 
 
 
-
 # =========================================================
-# 👤 USER BRIDGE
+# 👤 APRIL USER REGISTRY
 # =========================================================
 
 @app.route(
     "/api/users/find-or-create",
     methods=["POST"]
 )
-def api_find_or_create_user():
+def find_or_create_user_route():
 
     try:
 
@@ -1096,11 +1095,7 @@ def api_find_or_create_user():
 
         email = data.get("email")
         name = data.get("name", "")
-        provider = data.get(
-            "provider",
-            "google"
-        )
-
+        provider = data.get("provider", "google")
         provider_user_id = data.get(
             "provider_user_id"
         )
@@ -1121,10 +1116,21 @@ def api_find_or_create_user():
 
         return jsonify({
             "success": True,
-            "user": user
+            "user": {
+                "aprilId": user.get("april_id")
+                    or user.get("user_id"),
+                "plan": user.get("plan", "free"),
+                "email": user.get("email"),
+                "name": user.get("name"),
+            }
         })
 
     except Exception as e:
+
+        print(
+            "USER REGISTRY ERROR:",
+            e
+        )
 
         return jsonify({
             "success": False,
