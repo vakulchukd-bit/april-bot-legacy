@@ -1160,6 +1160,7 @@ def init_memory_tables():
             """)
 
 def save_memory(user_id, memory_data):
+    init_memory_tables()
     conn = get_conn()
     if not conn:
         return False
@@ -1186,6 +1187,7 @@ def save_memory(user_id, memory_data):
     return True
 
 def load_memory(user_id):
+    init_memory_tables()
     conn = get_conn()
     if not conn:
         return None
