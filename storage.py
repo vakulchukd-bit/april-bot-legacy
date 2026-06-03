@@ -84,6 +84,9 @@ def init_db():
 
     conn.close()
 
+    # APRIL MEMORY INIT
+    init_memory_tables()
+
 
 # =========================================================
 # 🔥 KNOWLEDGE FUNCTIONS
