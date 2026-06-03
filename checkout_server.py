@@ -67,7 +67,8 @@ from blocks.paypal_module import (
 
 from storage import (
     set_subscription,
-    save_payment
+    save_payment,
+    find_or_create_user
 )
 
 from core.executor import execute
@@ -1075,6 +1076,60 @@ def paypal_webhook():
 
             "status": "error"
         }
+
+
+
+
+# =========================================================
+# 👤 USER BRIDGE
+# =========================================================
+
+@app.route(
+    "/api/users/find-or-create",
+    methods=["POST"]
+)
+def api_find_or_create_user():
+
+    try:
+
+        data = request.json or {}
+
+        email = data.get("email")
+        name = data.get("name", "")
+        provider = data.get(
+            "provider",
+            "google"
+        )
+
+        provider_user_id = data.get(
+            "provider_user_id"
+        )
+
+        if not email:
+
+            return jsonify({
+                "success": False,
+                "error": "email required"
+            }), 400
+
+        user = find_or_create_user(
+            email=email,
+            name=name,
+            provider=provider,
+            provider_user_id=provider_user_id
+        )
+
+        return jsonify({
+            "success": True,
+            "user": user
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 # =========================================================
