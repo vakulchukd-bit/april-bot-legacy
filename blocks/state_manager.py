@@ -1107,3 +1107,76 @@ def get_last_entity(user_id):
     ).get(
         "last_entity"
     )
+
+
+# =====================================================
+# 🔥 PERSISTENT MEMORY BRIDGE
+# =====================================================
+
+from storage import (
+    load_memory,
+    save_memory
+)
+
+def persist_state(user_id):
+    try:
+        state_obj = get_state(user_id)
+        save_memory(user_id, state_obj)
+    except Exception as e:
+        safe_state_log(f"PERSIST ERROR: {e}")
+
+
+# =====================================================
+# 🔥 DB-AWARE STATE LOADER
+# =====================================================
+
+_original_get_state = get_state
+
+def get_state(user_id):
+
+    if user_id not in state:
+
+        db_state = load_memory(user_id)
+
+        if isinstance(db_state, dict):
+
+            state[user_id] = db_state
+
+            safe_state_log(
+                f"STATE RESTORED: {user_id}"
+            )
+
+        else:
+
+            state[user_id] = (
+                build_default_state()
+            )
+
+            safe_state_log(
+                f"NEW STATE: {user_id}"
+            )
+
+    state_obj = state[user_id]
+
+    defaults = build_default_state()
+
+    for key, value in defaults.items():
+
+        if key not in state_obj:
+            state_obj[key] = value
+
+    if "scene_state" not in state_obj:
+
+        state_obj["scene_state"] = (
+            build_default_scene()
+        )
+
+    return state_obj
+
+# Call persist_state(user_id) after:
+# add_dialog()
+# set_image_context()
+# update_scene_state()
+# clear_scene_state()
+# set_active_flow()
+# clear_active_flow()
