@@ -84,6 +84,10 @@ def init_db():
 
     conn.close()
 
+    # APRIL USER MIGRATION
+    migrate_users_table_v1()
+    backfill_april_ids()
+
     # APRIL MEMORY INIT
     init_memory_tables()
 
@@ -1128,6 +1132,36 @@ def generate_april_id():
         return "".join(random.choice(alphabet) for _ in range(size))
     return f"APR-{part(4)}-{part(4)}"
 
+
+def backfill_april_ids():
+    conn = get_conn()
+
+    if not conn:
+        return
+
+    with conn:
+        with conn.cursor() as cur:
+
+            cur.execute("""
+            SELECT user_id
+            FROM users
+            WHERE april_id IS NULL
+               OR april_id = ''
+            """)
+
+            rows = cur.fetchall()
+
+            for row in rows:
+
+                cur.execute("""
+                UPDATE users
+                SET april_id = %s
+                WHERE user_id = %s
+                """, (
+                    generate_april_id(),
+                    row["user_id"]
+                ))
+
 # Далее добавить:
 # find_user_by_email()
 # get_user_by_april_id()
@@ -1275,6 +1309,19 @@ def migrate_users_table_v1():
             """)
 
 
+            cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_users_april_id
+            ON users(april_id)
+            """)
+
+            cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_users_email
+            ON users(email)
+            """)
+
+
 def find_user_by_email(email):
     conn = get_conn()
     if not conn:
@@ -1327,6 +1374,9 @@ def create_user(email, name="", provider="google", provider_user_id=None):
         return None
 
     april_id = generate_april_id()
+
+    while get_user_by_april_id(april_id):
+        april_id = generate_april_id()
 
     with conn:
         with conn.cursor() as cur:
