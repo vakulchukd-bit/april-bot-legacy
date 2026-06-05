@@ -13,6 +13,10 @@ ROLE:
 - visual scene persistence
 - renderer continuity support
 - active flow stabilization
+- dynamic memory hierarchy
+- focus persistence
+- open-loop tracking
+- trajectory memory core
 
 SYSTEM DOES NOT:
 - perform orchestration
@@ -245,6 +249,18 @@ def build_default_state():
         "dialog": [],
 
         "memory_summary": "",
+
+        # =================================================
+        # 🔥 GOLDEN MEMORY
+        # =====================================================
+
+        "dynamic_focus": {},
+
+        "goal_hierarchy": {},
+
+        "open_loops": [],
+
+        "memory_signals": {},
 
         # =================================================
         # 🔥 IMAGE
@@ -1180,3 +1196,41 @@ def get_state(user_id):
 # clear_scene_state()
 # set_active_flow()
 # clear_active_flow()
+
+
+# =====================================================
+# 🧠 GOLDEN MEMORY LAYER
+# =====================================================
+
+def build_golden_memory_state():
+    return {
+        "dynamic_focus": {},
+        "goal_hierarchy": {},
+        "open_loops": [],
+        "memory_signals": {}
+    }
+
+def update_dynamic_focus(user_id, focus_payload):
+    state_obj = get_state(user_id)
+    state_obj["dynamic_focus"] = focus_payload or {}
+
+def update_goal_hierarchy(user_id, goal_payload):
+    state_obj = get_state(user_id)
+    state_obj["goal_hierarchy"] = goal_payload or {}
+
+def update_open_loops(user_id, loops_payload):
+    state_obj = get_state(user_id)
+    state_obj["open_loops"] = loops_payload or []
+
+def update_memory_signals(user_id, signals_payload):
+    state_obj = get_state(user_id)
+    state_obj["memory_signals"] = signals_payload or {}
+
+def build_memory_bridge(user_id):
+    state_obj = get_state(user_id)
+    return {
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {})
+    }
