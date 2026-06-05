@@ -13,6 +13,7 @@ APRIL SEMANTIC CORE
 
 ROLE:
 - lightweight semantic analysis
+- memory-aware semantic analysis
 - renderer-first semantic hints
 - continuity-safe interpretation
 - machine-safe orchestration support
@@ -257,6 +258,20 @@ def analyze(
     active_flow = active_flow or {}
     dialog_state = dialog_state or {}
 
+    # =====================================================
+    # 🔥 GOLDEN MEMORY INPUT
+    # =====================================================
+
+    cognition_state = state.get("cognition", {})
+
+    dynamic_focus = cognition_state.get("dynamic_focus", {})
+
+    goal_hierarchy = cognition_state.get("goal_hierarchy", {})
+
+    open_loops = cognition_state.get("open_loops", {})
+
+    memory_signals = cognition_state.get("memory_signals", {})
+
     safe_semantic_log(
         f"INPUT: {t[:80]}"
     )
@@ -446,7 +461,23 @@ def analyze(
 
         "anti_room_wars": True,
 
-        "anti_hidden_escalation": True
+        "anti_hidden_escalation": True,
+
+        # =================================================
+        # 🧠 MEMORY AWARENESS
+        # =====================================================
+
+        "dynamic_focus":
+            dynamic_focus,
+
+        "goal_hierarchy":
+            goal_hierarchy,
+
+        "open_loops":
+            open_loops,
+
+        "memory_signals":
+            memory_signals
     }
 
     # =====================================================
@@ -732,6 +763,23 @@ def analyze(
         result[
             "response_economy"
         ] = "expanded"
+
+
+    # =====================================================
+    # 🔥 MEMORY REINFORCEMENT
+    # =====================================================
+
+    if memory_signals.get("memory_priority", 0) >= 0.7:
+        result["trajectory_strength"] = safe_probability(
+            result["trajectory_strength"],
+            0.15
+        )
+
+    if open_loops.get("has_open_loops"):
+        result["continuation"] = True
+
+    if goal_hierarchy.get("strategic_goal"):
+        result["trajectory_active"] = True
 
     # =====================================================
     # 🔥 FINAL MACHINE NORMALIZATION
