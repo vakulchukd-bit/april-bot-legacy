@@ -68,7 +68,8 @@ from blocks.paypal_module import (
 from storage import (
     set_subscription,
     save_payment,
-    find_or_create_user
+    find_or_create_user,
+    init_db
 )
 
 from core.executor import execute
