@@ -201,6 +201,30 @@ def build_response_decision(
     )
 
     # =================================================
+    # 🔥 GOLDEN MEMORY DECISION INPUT
+    # =====================================================
+
+    dynamic_focus = cognition.get(
+        "dynamic_focus",
+        {}
+    )
+
+    goal_hierarchy = cognition.get(
+        "goal_hierarchy",
+        {}
+    )
+
+    open_loops = cognition.get(
+        "open_loops",
+        {}
+    )
+
+    memory_signals = cognition.get(
+        "memory_signals",
+        {}
+    )
+
+    # =================================================
     # 🔥 CORE SIGNALS
     # =====================================================
 
@@ -418,6 +442,22 @@ def build_response_decision(
     if active_flow:
 
         should_continue = True
+
+
+    # =================================================
+    # 🔥 MEMORY TRAJECTORY PRIORITY
+    # =====================================================
+
+    if open_loops.get("has_open_loops"):
+        should_continue = True
+
+    if memory_signals.get("memory_priority", 0) >= 0.7:
+        should_execute = should_execute or bool(
+            goal_hierarchy.get("strategic_goal")
+        )
+
+    if dynamic_focus.get("focus_locked"):
+        should_guide = False
 
     # =================================================
     # 🔥 FINAL ACTION
@@ -769,7 +809,16 @@ def build_response_decision(
             exploration_active,
 
         "goal_stage":
-            goal_stage
+            goal_stage,
+
+        "memory_priority":
+            memory_signals.get("memory_priority", 0),
+
+        "focus_locked":
+            dynamic_focus.get("focus_locked", False),
+
+        "has_open_loops":
+            open_loops.get("has_open_loops", False)
     }
 
     decision_exit(
