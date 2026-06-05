@@ -500,7 +500,19 @@ def build_executor_context(
         # =====================================================
 
         "state":
-            state
+            state,
+
+        "memory_routing":
+            {
+                "dynamic_focus":
+                    cognition.get("dynamic_focus", {}),
+                "goal_hierarchy":
+                    cognition.get("goal_hierarchy", {}),
+                "open_loops":
+                    cognition.get("open_loops", {}),
+                "memory_signals":
+                    cognition.get("memory_signals", {})
+            }
     }
 
 # =========================================================
@@ -917,6 +929,25 @@ async def execute(
             state=state
         )
     )
+
+    # =====================================================
+    # 🔥 GOLDEN MEMORY ROUTING LAYER
+    # =====================================================
+
+    memory_routing = {
+
+        "dynamic_focus":
+            cognition.get("dynamic_focus", {}),
+
+        "goal_hierarchy":
+            cognition.get("goal_hierarchy", {}),
+
+        "open_loops":
+            cognition.get("open_loops", {}),
+
+        "memory_signals":
+            cognition.get("memory_signals", {})
+    }
 
     # =====================================================
     # 🔥 AUTHORITY
