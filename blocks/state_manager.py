@@ -1198,6 +1198,52 @@ def get_state(user_id):
 # clear_active_flow()
 
 
+
+# =====================================================
+# 🧠 MEMORY ENGINE HELPERS
+# =====================================================
+
+MEMORY_ENGINE_VERSION = "2.0"
+
+def get_active_focus(user_id):
+    state_obj = get_state(user_id)
+    focus = state_obj.get("dynamic_focus", {})
+
+    if not isinstance(focus, dict):
+        return {}
+
+    return focus
+
+def build_memory_snapshot(user_id):
+    state_obj = get_state(user_id)
+
+    return {
+        "memory_version": MEMORY_ENGINE_VERSION,
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "active_flow": state_obj.get("active_flow"),
+        "scene_state": state_obj.get("scene_state", {})
+    }
+
+def cleanup_closed_loops(user_id):
+    state_obj = get_state(user_id)
+
+    loops = state_obj.get("open_loops", [])
+
+    if not isinstance(loops, list):
+        loops = []
+
+    state_obj["open_loops"] = [
+        loop for loop in loops
+        if not (
+            isinstance(loop, dict)
+            and loop.get("status") == "closed"
+        )
+    ]
+    
+
 # =====================================================
 # 🧠 GOLDEN MEMORY LAYER
 # =====================================================
