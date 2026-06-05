@@ -984,6 +984,29 @@ def analyze_cognition(
         t
     )
 
+    # =========================================================
+    # 🧠 GOLDEN MEMORY BUILD
+    # =========================================================
+
+    dynamic_focus = build_dynamic_focus(
+        text,
+        continuity
+    )
+
+    goal_hierarchy = build_goal_hierarchy(
+        text,
+        active_flow
+    )
+
+    open_loops = build_open_loops(
+        continuity
+    )
+
+    memory_signals = build_memory_signals(
+        text,
+        continuity
+    )
+
 
     cognition = {
 
@@ -1081,7 +1104,23 @@ def analyze_cognition(
             build_cognition_telemetry(),
 
         "visual_focus":
-            visual_focus
+            visual_focus,
+
+        # =====================================================
+        # 🧠 GOLDEN MEMORY
+        # =====================================================
+
+        "dynamic_focus":
+            dynamic_focus,
+
+        "goal_hierarchy":
+            goal_hierarchy,
+
+        "open_loops":
+            open_loops,
+
+        "memory_signals":
+            memory_signals
     }
 
     if detect_meta_ai_behavior(t):
