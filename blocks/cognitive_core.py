@@ -56,6 +56,13 @@ This file ONLY:
 - protects continuity
 - detects render intent
 - stabilizes dialog behavior
+
+This file ALSO:
+- builds dynamic focus
+- tracks open loops
+- analyzes memory relevance
+- stabilizes user goals
+- prepares memory signals
 """
 
 # =========================================================
@@ -1236,3 +1243,44 @@ def analyze_cognition(
     )
 
     return cognition
+
+
+# =========================================================
+# 🧠 GOLDEN MEMORY LAYER
+# =========================================================
+
+def build_dynamic_focus(text, continuity):
+    requests = continuity.get("recent_user_requests", [])
+    primary = requests[-1] if requests else (text or "")[:120]
+    secondary = requests[-2] if len(requests) >= 2 else None
+    return {
+        "primary_focus": primary,
+        "secondary_focus": secondary,
+        "focus_strength": 0.85 if primary else 0.25
+    }
+
+def build_goal_hierarchy(text, active_flow):
+    return {
+        "strategic_goal": active_flow.get("trajectory") if isinstance(active_flow, dict) else None,
+        "active_goal": (text or "")[:180],
+        "local_task": (text or "")[:120]
+    }
+
+def build_open_loops(continuity):
+    unresolved = continuity.get("unresolved_questions", [])
+    return {
+        "unfinished_tasks": unresolved[-5:],
+        "open_loops_count": len(unresolved),
+        "has_open_loops": bool(unresolved)
+    }
+
+def build_memory_signals(text, continuity):
+    relevance = 0.5
+    if continuity.get("user_waiting_answer"):
+        relevance += 0.3
+    return {
+        "memory_priority": min(relevance, 1.0),
+        "memory_relevance": min(relevance, 1.0),
+        "memory_weight": min(relevance + 0.1, 1.0),
+        "forget_candidate": relevance < 0.35
+    }
