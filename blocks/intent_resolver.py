@@ -798,3 +798,43 @@ def resolve_input(
         "machine_only":
             True
     }
+
+
+# =====================================================
+# 🧠 DYNAMIC FOCUS INTENT UPGRADE
+# =====================================================
+
+def detect_focus_shift(text, state):
+
+    focus = state.get("dynamic_focus", {})
+
+    primary = str(
+        focus.get("primary_focus", "")
+    ).lower()
+
+    current = normalize(text)
+
+    if not primary:
+        return False
+
+    overlap = 0
+
+    for word in primary.split():
+        if len(word) >= 4 and word in current:
+            overlap += 1
+
+    return overlap == 0
+
+
+def build_focus_intent_state(text, state):
+
+    shifted = detect_focus_shift(
+        text,
+        state or {}
+    )
+
+    return {
+        "focus_shift_detected": shifted,
+        "focus_priority": not shifted,
+        "requires_focus_refresh": shifted
+    }
