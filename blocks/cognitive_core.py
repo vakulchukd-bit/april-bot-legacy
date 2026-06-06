@@ -1323,3 +1323,59 @@ def build_memory_signals(text, continuity):
         "memory_weight": min(relevance + 0.1, 1.0),
         "forget_candidate": relevance < 0.35
     }
+
+
+# =========================================================
+# 🧠 APRIL FOCUS EVOLUTION UPGRADE
+# =========================================================
+
+FOCUS_INTENT_WORDS = [
+    "сделай","исправь","апгрейд","анализ","проверь","найди","объясни"
+]
+
+def build_abcde_focus(text, continuity, visual_focus=None):
+
+    t = (text or "").strip()
+
+    topic = t[:120]
+
+    scene = "dialog"
+
+    if visual_focus and any(visual_focus.values()):
+        scene = "visual"
+
+    obj = None
+
+    words = [w for w in t.split() if len(w) > 3]
+
+    if words:
+        obj = words[-1][:80]
+
+    intent = "discussion"
+
+    if any(x in t.lower() for x in FOCUS_INTENT_WORDS):
+        intent = "action"
+
+    focus_strength = 0.85
+
+    if continuity.get("user_waiting_answer"):
+        focus_strength = 1.0
+
+    return {
+        "topic": topic,
+        "scene": scene,
+        "object": obj,
+        "focus": topic,
+        "intent": intent,
+        "focus_strength": focus_strength
+    }
+
+
+def build_focus_memory_priority(abcde, continuity):
+
+    weight = abcde.get("focus_strength", 0.5)
+
+    if continuity.get("user_waiting_answer"):
+        weight += 0.15
+
+    return min(weight, 1.0)
