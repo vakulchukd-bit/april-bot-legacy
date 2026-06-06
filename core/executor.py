@@ -786,6 +786,88 @@ async def execute_rooms(
 
     return None
 
+
+# =========================================================
+# 🧠 APRIL ANSWER SYNTHESIS LAYER
+# =========================================================
+
+def synthesize_final_answer(
+    result,
+    cognition,
+    response_decision,
+    state
+):
+
+    if not result:
+        if (
+            result.get("type") == "text"
+        ):
+            formatted = (
+                format_response_presentation(
+                    text=
+                        result.get("data")
+                        or result.get("content")
+                        or "",
+                    user_text=text,
+                    semantic=semantic,
+                    cognition=cognition,
+                    response_decision=response_decision,
+                    visual_reference=visual_reference
+                )
+            )
+
+            result["data"] = formatted
+
+        return result
+
+    if not isinstance(result, dict):
+        return result
+
+    result_type = result.get("type")
+
+    if result_type != "text":
+        return result
+
+    dynamic_focus = cognition.get(
+        "dynamic_focus",
+        {}
+    )
+
+    open_loops = cognition.get(
+        "open_loops",
+        {}
+    )
+
+    memory_signals = cognition.get(
+        "memory_signals",
+        {}
+    )
+
+    result["trajectory_safe"] = True
+
+    result["focus_context"] = (
+        dynamic_focus.get(
+            "primary_focus"
+        )
+    )
+
+    result["continuity_priority"] = (
+        memory_signals.get(
+            "memory_priority",
+            0
+        )
+    )
+
+    result["open_loops_present"] = (
+        open_loops.get(
+            "has_open_loops",
+            False
+        )
+    )
+
+    return result
+
+
 # =========================================================
 # 🚀 APRIL EXECUTOR
 # =========================================================
@@ -1068,6 +1150,13 @@ async def execute(
         result = room_response.get(
             "result",
             {}
+        )
+
+        result = synthesize_final_answer(
+            result=result,
+            cognition=cognition,
+            response_decision=response_decision,
+            state=state
         )
 
         result_payload = result.get(
