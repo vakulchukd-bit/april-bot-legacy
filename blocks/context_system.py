@@ -1627,3 +1627,66 @@ def detect_context_refresh_needed(text, state):
             overlap += 1
 
     return overlap == 0
+
+
+# =====================================================
+# 🚀 APRIL CONTEXT UPGRADE EXTENSION
+# =====================================================
+
+ABCDE_CONTEXT_PROFILES = {
+    "A": {"dialog_scan": 8, "relevant_messages": 5},
+    "B": {"dialog_scan": 15, "relevant_messages": 8},
+    "C": {"dialog_scan": 30, "relevant_messages": 12},
+    "D": {"dialog_scan": 60, "relevant_messages": 20},
+    "E": {"dialog_scan": 120, "relevant_messages": 40}
+}
+
+
+def build_dynamic_focus_block(state):
+
+    focus = state.get("dynamic_focus", {})
+
+    if not focus:
+        return ""
+
+    lines = ["\\nDYNAMIC FOCUS:"]
+
+    primary = focus.get("primary_focus")
+    secondary = focus.get("secondary_focus")
+    strength = focus.get("focus_strength")
+
+    if primary:
+        lines.append(f"Primary Focus: {primary}")
+
+    if secondary:
+        lines.append(f"Secondary Focus: {secondary}")
+
+    if strength is not None:
+        lines.append(f"Focus Strength: {strength}")
+
+    return "\\n".join(lines)
+
+
+def build_visual_anchors_block(state):
+
+    scene = state.get("active_visual_scene") or {}
+    focus = state.get("visual_focus") or {}
+
+    lines = []
+
+    subject = focus.get("focused_object")
+
+    if subject:
+        lines.append(f"Primary Subject: {subject}")
+
+    objects = scene.get("objects", [])
+
+    if objects:
+        lines.append(
+            "Scene Objects: " + ", ".join(objects[:10])
+        )
+
+    if not lines:
+        return ""
+
+    return "\\nVISUAL ANCHORS:\\n" + "\\n".join(lines)
