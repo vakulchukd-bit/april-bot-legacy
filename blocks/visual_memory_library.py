@@ -352,6 +352,34 @@ def detect_emotional_visual_state(text: str):
 
 # =====================================================
 
+
+# =====================================================
+# 🧠 VISUAL FOCUS MEMORY UPGRADE
+# =====================================================
+
+def build_visual_focus_snapshot(text: str):
+
+    t = (text or "").lower()
+
+    focus_object = None
+
+    candidates = [
+        "объект","предмет","человек","машина",
+        "дом","кот","собака","график","схема"
+    ]
+
+    for item in candidates:
+        if item in t:
+            focus_object = item
+            break
+
+    return {
+        "focus_object": focus_object,
+        "focus_active": focus_object is not None,
+        "visual_context_refresh": focus_object is not None
+    }
+
+
 def build_visual_memory_response(text: str):
 
     atmosphere = detect_visual_atmosphere(text)
@@ -360,6 +388,8 @@ def build_visual_memory_response(text: str):
 
     exploration = detect_visual_exploration(text)
 
+    focus_snapshot = build_visual_focus_snapshot(text)
+
     return {
 
         "atmosphere": atmosphere,
@@ -367,6 +397,8 @@ def build_visual_memory_response(text: str):
         "emotion": emotion,
 
         "exploration": exploration,
+
+        "visual_focus": focus_snapshot,
 
         "lightweight_mode":
             LIGHTWEIGHT_VISUAL_SUPPORT[
@@ -378,3 +410,4 @@ def build_visual_memory_response(text: str):
                 "prefer_references_over_generation"
             ]
     }
+
