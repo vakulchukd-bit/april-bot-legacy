@@ -516,3 +516,23 @@ def build_reasoning_state(
     )
 
     return reasoning
+
+
+# =====================================================
+# 🧠 DYNAMIC FOCUS REASONING UPGRADE
+# =====================================================
+
+def build_reasoning_focus_state(state):
+
+    focus = state.get("dynamic_focus", {})
+
+    return {
+        "active_focus":
+            focus.get("primary_focus"),
+
+        "secondary_focus":
+            focus.get("secondary_focus"),
+
+        "focus_strength":
+            focus.get("focus_strength", 0.0)
+    }
