@@ -1280,3 +1280,66 @@ def build_memory_bridge(user_id):
         "open_loops": state_obj.get("open_loops", []),
         "memory_signals": state_obj.get("memory_signals", {})
     }
+
+
+# =====================================================
+# 🧠 DYNAMIC MEMORY FOCUS UPGRADE
+# =====================================================
+
+def update_focus_snapshot(
+    user_id,
+    abcde_payload
+):
+
+    state_obj = get_state(user_id)
+
+    state_obj["focus_snapshot"] = {
+
+        "topic":
+            abcde_payload.get("topic"),
+
+        "scene":
+            abcde_payload.get("scene"),
+
+        "object":
+            abcde_payload.get("object"),
+
+        "focus":
+            abcde_payload.get("focus"),
+
+        "intent":
+            abcde_payload.get("intent")
+    }
+
+    return state_obj["focus_snapshot"]
+
+
+def get_focus_snapshot(user_id):
+
+    return get_state(user_id).get(
+        "focus_snapshot",
+        {}
+    )
+
+
+def build_context_memory_bridge(user_id):
+
+    state_obj = get_state(user_id)
+
+    return {
+
+        "dynamic_focus":
+            state_obj.get("dynamic_focus", {}),
+
+        "focus_snapshot":
+            state_obj.get("focus_snapshot", {}),
+
+        "goal_hierarchy":
+            state_obj.get("goal_hierarchy", {}),
+
+        "memory_signals":
+            state_obj.get("memory_signals", {}),
+
+        "active_flow":
+            state_obj.get("active_flow")
+    }
