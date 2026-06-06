@@ -1589,3 +1589,41 @@ def build_deephub_context(
     )
 
     return payload
+
+
+# =====================================================
+# 🧠 DYNAMIC FOCUS CONTEXT UPGRADE
+# =====================================================
+
+def build_context_focus_snapshot(text, state):
+
+    focus = state.get("dynamic_focus", {})
+
+    return {
+        "active_topic": focus.get("primary_focus"),
+        "secondary_topic": focus.get("secondary_focus"),
+        "focus_strength": focus.get("focus_strength", 0.0),
+        "current_request": safe_slice(text, 180)
+    }
+
+
+def detect_context_refresh_needed(text, state):
+
+    focus = state.get("dynamic_focus", {})
+
+    active_topic = str(
+        focus.get("primary_focus", "")
+    ).lower()
+
+    current = normalize_lower(text)
+
+    if not active_topic:
+        return False
+
+    overlap = 0
+
+    for word in active_topic.split():
+        if len(word) >= 4 and word in current:
+            overlap += 1
+
+    return overlap == 0
