@@ -779,108 +779,53 @@ def build_relevant_dialog(
 ):
 
     APRIL_LOG_IN(
-
         "CONTEXT_ROOM",
-
-        {
-            "action":
-                "build_relevant_dialog"
-        }
+        {"action": "build_relevant_dialog"}
     )
 
     text = normalize_lower(text)
 
-    keywords = []
-
-    for word in text.split():
-
-        if len(word) >= MIN_KEYWORD_LENGTH:
-
-            keywords.append(word)
-
     relevant = []
 
-    trajectory = scene_state.get(
-        "trajectory"
-    )
+    trajectory = scene_state.get("trajectory")
+    dynamic_focus = scene_state.get("dynamic_focus", {})
+    visual_focus = scene_state.get("visual_focus", {})
 
-    for msg in reversed(
-        dialog[-MAX_DIALOG_SCAN:]
-    ):
+    for msg in reversed(dialog[-MAX_DIALOG_SCAN:]):
 
-        content = str(
-
-            msg.get(
-                "content",
-                ""
-            )
-        ).strip()
-
-        role = msg.get(
-            "role",
-            "user"
-        )
+        content = str(msg.get("content", "")).strip()
 
         if not content:
             continue
 
         lowered = content.lower()
 
-        priority = 0
+        priority = calculate_context_priority(
+            lowered,
+            dynamic_focus,
+            visual_focus,
+            trajectory
+        )
 
         if msg in dialog[-3:]:
-
-            priority += 3
-
-        for keyword in keywords:
-
-            if keyword in lowered:
-
-                priority += 2
-
-        if trajectory:
-
-            if trajectory.lower() in lowered:
-
-                priority += 4
-
-        if (
-
-            "сделай" in lowered
-            or "продолжай" in lowered
-            or "исправь" in lowered
-        ):
-
             priority += 2
 
-        if priority >= 2:
-
+        if priority >= 4:
             relevant.append(
-
-                f"{role}: "
-
-                f"{safe_slice(content, 220)}"
+                f"{msg.get('role','user')}: {safe_slice(content,220)}"
             )
 
     relevant = list(
-
         reversed(
-            relevant[
-                -MAX_RELEVANT_MESSAGES:
-            ]
+            relevant[-MAX_RELEVANT_MESSAGES:]
         )
     )
 
     payload = "\n".join(relevant)
 
     APRIL_LOG_OUT(
-
         "CONTEXT_ROOM",
-
-        {
-            "dialog":
-                "relevant_built"
-        }
+        {"dialog": "focus_first_built"}
     )
 
     return payload
@@ -1630,17 +1575,8 @@ def detect_context_refresh_needed(text, state):
 
 
 # =====================================================
-# 🚀 APRIL CONTEXT UPGRADE EXTENSION
+# 🚀 APRIL FOCUS-FIRST CONTEXT UPGRADE
 # =====================================================
-
-ABCDE_CONTEXT_PROFILES = {
-    "A": {"dialog_scan": 8, "relevant_messages": 5},
-    "B": {"dialog_scan": 15, "relevant_messages": 8},
-    "C": {"dialog_scan": 30, "relevant_messages": 12},
-    "D": {"dialog_scan": 60, "relevant_messages": 20},
-    "E": {"dialog_scan": 120, "relevant_messages": 40}
-}
-
 
 def build_dynamic_focus_block(state):
 
@@ -1649,11 +1585,10 @@ def build_dynamic_focus_block(state):
     if not focus:
         return ""
 
-    lines = ["\\nDYNAMIC FOCUS:"]
+    lines = ["\nDYNAMIC FOCUS:"]
 
     primary = focus.get("primary_focus")
     secondary = focus.get("secondary_focus")
-    strength = focus.get("focus_strength")
 
     if primary:
         lines.append(f"Primary Focus: {primary}")
@@ -1661,10 +1596,12 @@ def build_dynamic_focus_block(state):
     if secondary:
         lines.append(f"Secondary Focus: {secondary}")
 
+    strength = focus.get("focus_strength")
+
     if strength is not None:
         lines.append(f"Focus Strength: {strength}")
 
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def build_visual_anchors_block(state):
@@ -1672,12 +1609,12 @@ def build_visual_anchors_block(state):
     scene = state.get("active_visual_scene") or {}
     focus = state.get("visual_focus") or {}
 
-    lines = []
+    lines = ["\nVISUAL ANCHORS:"]
 
-    subject = focus.get("focused_object")
+    focused = focus.get("focused_object")
 
-    if subject:
-        lines.append(f"Primary Subject: {subject}")
+    if focused:
+        lines.append(f"Focused Object: {focused}")
 
     objects = scene.get("objects", [])
 
@@ -1686,7 +1623,66 @@ def build_visual_anchors_block(state):
             "Scene Objects: " + ", ".join(objects[:10])
         )
 
-    if not lines:
+    if len(lines) == 1:
         return ""
 
-    return "\\nVISUAL ANCHORS:\\n" + "\\n".join(lines)
+    return "\n".join(lines)
+
+
+def build_focus_priority_score(
+    lowered,
+    dynamic_focus,
+    visual_focus,
+    trajectory
+):
+
+    score = 0
+
+    primary = str(
+        dynamic_focus.get("primary_focus", "")
+    ).lower()
+
+    secondary = str(
+        dynamic_focus.get("secondary_focus", "")
+    ).lower()
+
+    focused_object = str(
+        visual_focus.get("focused_object", "")
+    ).lower()
+
+    if primary and primary in lowered:
+        score += 8
+
+    if secondary and secondary in lowered:
+        score += 4
+
+    if focused_object and focused_object in lowered:
+        score += 6
+
+    if trajectory and trajectory.lower() in lowered:
+        score += 6
+
+    return score
+
+
+# =====================================================
+# 🚀 FOCUS-FIRST RELEVANCE STRATEGY
+# =====================================================
+
+FOCUS_FIRST_MODE = True
+
+def calculate_context_priority(
+    lowered,
+    dynamic_focus,
+    visual_focus,
+    trajectory
+):
+
+    score = build_focus_priority_score(
+        lowered,
+        dynamic_focus,
+        visual_focus,
+        trajectory
+    )
+
+    return score
