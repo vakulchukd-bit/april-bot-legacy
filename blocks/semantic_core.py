@@ -272,6 +272,41 @@ def analyze(
 
     memory_signals = cognition_state.get("memory_signals", {})
 
+    # =====================================================
+    # 🧠 TOPIC MEMORY INPUT
+    # =====================================================
+
+    visual_topic_registry = state.get(
+        "visual_topic_registry",
+        []
+    )
+
+    task_context_storage = state.get(
+        "task_context_storage",
+        []
+    )
+
+    continuity_context_storage = state.get(
+        "continuity_context_storage",
+        []
+    )
+
+    memory_anchor_storage = state.get(
+        "memory_anchor_storage",
+        []
+    )
+
+    active_topic_slot = state.get(
+        "active_topic_slot",
+        "A"
+    )
+
+    if not isinstance(open_loops, dict):
+
+        open_loops = {
+            "has_open_loops": bool(open_loops)
+        }
+
     safe_semantic_log(
         f"INPUT: {t[:80]}"
     )
@@ -477,7 +512,22 @@ def analyze(
             open_loops,
 
         "memory_signals":
-            memory_signals
+            memory_signals,
+
+        "visual_topic_registry":
+            visual_topic_registry,
+
+        "task_context_storage":
+            task_context_storage,
+
+        "continuity_context_storage":
+            continuity_context_storage,
+
+        "memory_anchor_storage":
+            memory_anchor_storage,
+
+        "active_topic_slot":
+            active_topic_slot
     }
 
     # =====================================================
@@ -780,6 +830,37 @@ def analyze(
 
     if goal_hierarchy.get("strategic_goal"):
         result["trajectory_active"] = True
+
+    # =====================================================
+    # 🧠 TOPIC CONTINUITY SUPPORT
+    # =====================================================
+
+    if continuity_context_storage:
+
+        result[
+            "continuation"
+        ] = True
+
+        result[
+            "trajectory_strength"
+        ] = safe_probability(
+            result[
+                "trajectory_strength"
+            ],
+            0.10
+        )
+
+    if memory_anchor_storage:
+
+        result[
+            "trajectory_active"
+        ] = True
+
+    if active_topic_slot:
+
+        result[
+            "active_topic_slot"
+        ] = active_topic_slot
 
     # =====================================================
     # 🔥 FINAL MACHINE NORMALIZATION
