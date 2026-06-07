@@ -210,7 +210,11 @@ MAX_OBJECTS = 12
 
 MAX_VISIBLE_TEXT = 10
 
-MAX_SCENE_SUMMARY = 320
+MAX_SCENE_SUMMARY = 1200
+
+MAX_TASK_SUMMARY = 800
+
+MAX_CONTINUITY_SUMMARY = 600
 
 MAX_PASSIVE_SCENES = 6
 
@@ -317,6 +321,124 @@ def normalize_visual_scene(
     )
 
     normalized = {
+        # =================================================
+        # 🔥 TASK CONTEXT
+        # =====================================================
+
+        "task_context": {
+
+            "task_type":
+
+                raw_scene.get(
+                    "task_type",
+                    ""
+                ),
+
+            "problem_detected":
+
+                raw_scene.get(
+                    "problem_detected",
+                    ""
+                ),
+
+            "goal":
+
+                raw_scene.get(
+                    "goal",
+                    ""
+                ),
+
+            "current_step":
+
+                raw_scene.get(
+                    "current_step",
+                    ""
+                ),
+
+            "next_expected_step":
+
+                raw_scene.get(
+                    "next_expected_step",
+                    ""
+                ),
+
+            "resolution_status":
+
+                raw_scene.get(
+                    "resolution_status",
+                    ""
+                )
+        },
+
+        # =================================================
+        # 🔥 CONTINUITY CONTEXT
+        # =====================================================
+
+        "continuity_context": {
+
+            "topic_signature":
+
+                raw_scene.get(
+                    "topic_signature",
+                    ""
+                ),
+
+            "scene_hash":
+
+                raw_scene.get(
+                    "scene_hash",
+                    ""
+                ),
+
+            "related_previous_scene":
+
+                raw_scene.get(
+                    "related_previous_scene",
+                    False
+                ),
+
+            "is_followup_candidate":
+
+                raw_scene.get(
+                    "is_followup_candidate",
+                    False
+                )
+        },
+
+        # =================================================
+        # 🔥 MEMORY ANCHOR
+        # =====================================================
+
+        "memory_anchor": {
+
+            "topic":
+
+                raw_scene.get(
+                    "topic",
+                    ""
+                ),
+
+            "focus":
+
+                raw_scene.get(
+                    "focus",
+                    ""
+                ),
+
+            "object":
+
+                raw_scene.get(
+                    "object",
+                    ""
+                ),
+
+            "intent":
+
+                raw_scene.get(
+                    "intent",
+                    ""
+                )
+        },
 
         # =================================================
         # 🔥 CORE SEMANTICS
@@ -479,6 +601,27 @@ def compress_visual_scene(
                 []
             )[:5],
 
+        "task_context":
+
+            scene.get(
+                "task_context",
+                {}
+            ),
+
+        "continuity_context":
+
+            scene.get(
+                "continuity_context",
+                {}
+            ),
+
+        "memory_anchor":
+
+            scene.get(
+                "memory_anchor",
+                {}
+            ),
+
         "lifecycle_state":
             "PASSIVE",
 
@@ -619,9 +762,27 @@ No human response.
 Required structure:
 
 {
-  "scene_type": "...",
-  "semantic_focus": "...",
-  "summary": "...",
+  "scene_type": "",
+  "semantic_focus": "",
+  "summary": "",
+
+  "task_type": "",
+  "problem_detected": "",
+  "goal": "",
+  "current_step": "",
+  "next_expected_step": "",
+  "resolution_status": "",
+
+  "topic_signature": "",
+  "scene_hash": "",
+
+  "related_previous_scene": false,
+  "is_followup_candidate": false,
+
+  "topic": "",
+  "focus": "",
+  "object": "",
+  "intent": "",
 
   "objects": [],
   "visible_text": [],
@@ -723,9 +884,28 @@ async def analyze_with_openai(
                             "type":
                                 "input_text",
 
-                            "text":
-"""
+                            "text": """
 Extract semantic visual scene.
+
+Detect:
+
+- task_type
+- problem_detected
+- goal
+- current_step
+- next_expected_step
+- resolution_status
+
+- topic_signature
+- scene_hash
+
+- related_previous_scene
+- is_followup_candidate
+
+- topic
+- focus
+- object
+- intent
 
 Return ONLY JSON.
 """
