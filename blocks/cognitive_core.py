@@ -928,6 +928,59 @@ def build_visual_focus_analysis(text):
     }
 
 
+
+# =========================================================
+# 🧠 VISUAL SCENE BRIDGE
+# =========================================================
+
+def build_visual_scene_bridge(state):
+
+    active_visual_scene = state.get(
+        "active_visual_scene",
+        {}
+    )
+
+    return {
+
+        "scene_active":
+            bool(active_visual_scene),
+
+        "scene_type":
+            active_visual_scene.get(
+                "scene_type"
+            ),
+
+        "semantic_focus":
+            active_visual_scene.get(
+                "semantic_focus"
+            ),
+
+        "visual_topic":
+            active_visual_scene.get(
+                "memory_anchor",
+                {}
+            ).get(
+                "topic"
+            ),
+
+        "visual_object":
+            active_visual_scene.get(
+                "memory_anchor",
+                {}
+            ).get(
+                "object"
+            ),
+
+        "visual_intent":
+            active_visual_scene.get(
+                "memory_anchor",
+                {}
+            ).get(
+                "intent"
+            )
+    }
+
+
 # =========================================================
 # 🧠 CORE ANALYZER
 # =========================================================
@@ -988,10 +1041,53 @@ def analyze_cognition(
     # 🧠 GOLDEN MEMORY BUILD
     # =========================================================
 
-    dynamic_focus = build_dynamic_focus(
-        text,
-        continuity
+    visual_scene_bridge = build_visual_scene_bridge(
+        state
     )
+
+    abcde_focus = build_abcde_focus(
+        text,
+        continuity,
+        visual_focus
+    )
+
+    if visual_scene_bridge.get(
+        "scene_active"
+    ):
+
+        if (
+            not abcde_focus.get(
+                "object"
+            )
+        ):
+
+            abcde_focus[
+                "object"
+            ] = visual_scene_bridge.get(
+                "visual_object"
+            )
+
+    dynamic_focus = {
+
+        "primary_focus":
+            abcde_focus.get(
+                "focus"
+            ),
+
+        "secondary_focus":
+            abcde_focus.get(
+                "object"
+            ),
+
+        "focus_strength":
+            abcde_focus.get(
+                "focus_strength",
+                0.5
+            ),
+
+        "abcde":
+            abcde_focus
+    }
 
     goal_hierarchy = build_goal_hierarchy(
         text,
@@ -1006,6 +1102,28 @@ def analyze_cognition(
         text,
         continuity
     )
+
+    if visual_scene_bridge.get(
+        "scene_active"
+    ):
+
+        memory_signals[
+            "visual_priority"
+        ] = 1.0
+
+        memory_signals[
+            "visual_scene_alive"
+        ] = True
+
+        memory_signals[
+            "memory_weight"
+        ] = min(
+            memory_signals.get(
+                "memory_weight",
+                0.5
+            ) + 0.2,
+            1.0
+        )
 
 
     cognition = {
@@ -1105,6 +1223,9 @@ def analyze_cognition(
 
         "visual_focus":
             visual_focus,
+
+        "visual_scene_bridge":
+            visual_scene_bridge,
 
         # =====================================================
         # 🧠 GOLDEN MEMORY
