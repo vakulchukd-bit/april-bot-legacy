@@ -557,6 +557,12 @@ def build_result(
         "prefer_continuation":
             False,
 
+        "active_topic_slot":
+            None,
+
+        "topic_continuity":
+            False,
+
         # =================================================
         # 🔥 SAFETY
         # =====================================================
@@ -613,6 +619,24 @@ def interpret_request(
     cognition = cognition or {}
 
     semantic = semantic or {}
+
+    # =====================================================
+    # 🧠 TOPIC MEMORY INPUT
+    # =====================================================
+
+    active_topic_slot = cognition.get(
+        "active_topic_slot"
+    )
+
+    continuity_context_storage = cognition.get(
+        "continuity_context_storage",
+        []
+    )
+
+    memory_anchor_storage = cognition.get(
+        "memory_anchor_storage",
+        []
+    )
 
     if not text:
 
@@ -906,6 +930,32 @@ def interpret_request(
         result[
             "scene_aware"
         ] = True
+
+    # =====================================================
+    # 🧠 TOPIC CONTINUITY SUPPORT
+    # =====================================================
+
+    if continuity_context_storage:
+
+        result[
+            "continuation"
+        ] = True
+
+        result[
+            "topic_continuity"
+        ] = True
+
+    if memory_anchor_storage:
+
+        result[
+            "continuity_aware"
+        ] = True
+
+    if active_topic_slot:
+
+        result[
+            "active_topic_slot"
+        ] = active_topic_slot
 
     # =====================================================
     # 🔥 FINAL STABILIZATION
