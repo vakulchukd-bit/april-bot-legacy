@@ -107,6 +107,8 @@ VISUAL_HISTORY_LIMIT = 8
 
 IMAGE_MEMORY_LIMIT = 5
 
+TOPIC_MEMORY_LIMIT = 5
+
 # =====================================================
 # 🔥 DIALOG LIMITS
 # =====================================================
@@ -277,6 +279,16 @@ def build_default_state():
         "active_visual_scene": None,
 
         "visual_scene_history": [],
+        
+        "visual_topic_registry": [],
+        
+        "task_context_storage": [],
+        
+        "continuity_context_storage": [],
+        
+        "memory_anchor_storage": [],
+        
+        "active_topic_slot": "A",
 
         # =================================================
         # 🔥 FLOW
@@ -912,6 +924,10 @@ def add_dialog(
     trim_visual_history(
         state_obj
     )
+    
+    trim_topic_memory(
+        state_obj
+    ) 
 
 # =====================================================
 # 🔥 DIALOG STATE
@@ -1343,3 +1359,35 @@ def build_context_memory_bridge(user_id):
         "active_flow":
             state_obj.get("active_flow")
     }
+    
+# =====================================================
+# 🧠 TOPIC MEMORY TRIMMER
+# =====================================================
+
+def trim_topic_memory(state_obj):
+
+    for key in [
+
+        "visual_topic_registry",
+
+        "task_context_storage",
+
+        "continuity_context_storage",
+
+        "memory_anchor_storage"
+
+    ]:
+
+        value = state_obj.get(
+            key,
+            []
+        )
+
+        if isinstance(
+            value,
+            list
+        ):
+
+            state_obj[key] = value[
+                -TOPIC_MEMORY_LIMIT:
+            ]
