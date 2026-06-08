@@ -178,6 +178,58 @@ def unlock_image(state):
 
 
 # =====================================================
+# 🔥 SAFE EXECUTOR CONTEXT
+# =====================================================
+
+def get_executor_context(context):
+
+    if not isinstance(context, dict):
+
+        return {}
+
+    return context.get(
+        "context",
+        context
+    )
+
+
+def get_chat_id(context):
+
+    executor_context = get_executor_context(
+        context
+    )
+
+    return executor_context.get(
+        "chat_id"
+    )
+
+
+def get_state(context):
+
+    executor_context = get_executor_context(
+        context
+    )
+
+    return executor_context.get(
+        "state",
+        {}
+    )
+
+
+def get_cognition(context):
+
+    executor_context = get_executor_context(
+        context
+    )
+
+    return executor_context.get(
+        "cognition",
+        {}
+    )
+
+
+
+# =====================================================
 # 🔥 APRIL MODALITY UNDERSTANDING
 # =====================================================
 
@@ -362,9 +414,8 @@ class ImageGenerateRoom(Room):
             "IMAGE GENERATE START"
         )
 
-        state = context.get(
-            "state",
-            {}
+        state = get_state(
+            context
         )
 
         if is_image_locked(
@@ -387,7 +438,9 @@ class ImageGenerateRoom(Room):
 
             result = await run(
 
-                context["chat_id"],
+                get_chat_id(
+    context
+),
 
                 image_generate(
 
@@ -489,9 +542,8 @@ class ImageEditRoom(Room):
             "IMAGE EDIT START"
         )
 
-        state = context.get(
-            "state",
-            {}
+        state = get_state(
+            context
         )
 
         ctx = state.get(
@@ -536,7 +588,9 @@ class ImageEditRoom(Room):
 
         result = await run(
 
-            context["chat_id"],
+            get_chat_id(
+    context
+),
 
             image_edit_engine(
 
@@ -717,9 +771,8 @@ class TextRoom(Room):
             process as text_process
         )
 
-        cognition = context.get(
-            "cognition",
-            {}
+        cognition = get_cognition(
+            context
         )
 
         text_input = text
@@ -737,7 +790,9 @@ class TextRoom(Room):
 
         result = await run(
 
-            context["chat_id"],
+            get_chat_id(
+    context
+),
 
             text_process(
 
