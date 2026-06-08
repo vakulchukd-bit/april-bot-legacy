@@ -721,6 +721,14 @@ async def execute_rooms(
                     context
             }
 
+            print("🔥 ROOM:", room.name)
+            print("🔥 SCORE:", score)
+            print("🔥 RUN:", run_with_activity)
+            print("🔥 RUN TYPE:", type(run_with_activity))
+            print("🔥 PAYLOAD KEYS:", list(machine_task_payload.keys()))
+            print("🔥 INNER CONTEXT KEYS:", list(context.keys()))
+            print("🔥 CALLING ROOM:", room.name)
+
             result = await room.handle(
 
                 user_id,
@@ -755,6 +763,9 @@ async def execute_rooms(
             if override:
 
                 continue
+
+            print("🔥 ROOM SUCCESS:", room.name)
+            print("🔥 RESULT TYPE:", result.get("type"))
 
             machine_response_payload = {
 
@@ -884,6 +895,11 @@ async def execute(
     print(
         "🧠 APRIL GOLDEN EXECUTOR ACTIVE"
     )
+
+    print("🔥 EXECUTOR USER:", user_id)
+    print("🔥 EXECUTOR CHAT:", chat_id)
+    print("🔥 EXECUTOR RUN:", run_with_activity)
+    print("🔥 EXECUTOR RUN TYPE:", type(run_with_activity))
 
     text = normalize_text(
         text
@@ -1121,6 +1137,11 @@ async def execute(
     # =====================================================
     # 🔥 ROOM EXECUTION
     # =====================================================
+
+    print("🔥 EXECUTOR CONTEXT READY")
+    print("🔥 CONTEXT CHAT:", context.get("chat_id"))
+    print("🔥 CONTEXT USER:", context.get("user_id"))
+    print("🔥 TASK TYPE:", task_type)
 
     room_response = await execute_rooms(
 
