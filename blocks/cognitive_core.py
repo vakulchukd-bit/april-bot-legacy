@@ -936,9 +936,8 @@ def build_visual_focus_analysis(text):
 def build_visual_scene_bridge(state):
 
     active_visual_scene = state.get(
-        "active_visual_scene",
-        {}
-    )
+        "active_visual_scene"
+    ) or {}
 
     return {
 
