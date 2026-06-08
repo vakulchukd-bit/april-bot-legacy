@@ -798,31 +798,13 @@ def synthesize_final_answer(
     state
 ):
 
-    if not result:
-        if (
-            result.get("type") == "text"
-        ):
-            formatted = (
-                format_response_presentation(
-                    text=
-                        result.get("data")
-                        or result.get("content")
-                        or "",
-                    user_text=text,
-                    semantic=semantic,
-                    cognition=cognition,
-                    response_decision=response_decision,
-                    visual_reference=visual_reference
-                )
-            )
-
-            result["data"] = formatted
-
-        return result
+    if result is None:
+        return None
 
     if not isinstance(result, dict):
         return result
 
+    
     result_type = result.get("type")
 
     if result_type != "text":
