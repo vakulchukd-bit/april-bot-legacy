@@ -1156,6 +1156,20 @@ async def execute(
             state=state
         )
 
+        if result is None:
+
+            return {
+                "type": "text",
+                "data": "⚠️ Empty synthesized result"
+            }
+
+        if not isinstance(result, dict):
+
+            return {
+                "type": "text",
+                "data": str(result)
+            }
+
         result_payload = result.get(
             "data"
         )
