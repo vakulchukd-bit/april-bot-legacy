@@ -237,6 +237,45 @@ def detect_execution_probability(
 
     return clamp(probability)
 
+
+# =====================================================
+# 🧠 REPRESENTATION ANALYSIS
+# =====================================================
+
+def detect_representation_request(text):
+
+    t = (text or "").lower()
+
+    graph_words = [
+        "покажи",
+        "визуально",
+        "график",
+        "построй"
+    ]
+
+    table_words = [
+        "таблица",
+        "значения",
+        "сравни"
+    ]
+
+    link_words = [
+        "источник",
+        "ссылка",
+        "документация"
+    ]
+
+    if any(w in t for w in graph_words):
+        return "graph"
+
+    if any(w in t for w in table_words):
+        return "table"
+
+    if any(w in t for w in link_words):
+        return "link"
+
+    return None
+
 # =====================================================
 # 🔥 ANALYZE
 # =====================================================
@@ -423,6 +462,24 @@ def analyze(
         "preserve_flow": True,
 
         "conversation_alive": True,
+
+        # =================================================
+        # 🧠 REPRESENTATION CONTEXT
+        # =====================================================
+
+        "current_topic": None,
+
+        "current_object": None,
+
+        "current_representation": "text",
+
+        "requested_representation": None,
+
+        "same_task": False,
+
+        "representation_shift": False,
+
+        "context_visual_followup": False,
 
         "unresolved_intent": True,
 
@@ -639,7 +696,31 @@ def analyze(
             )
         )
 
+    
     # =====================================================
+    # 🧠 REPRESENTATION CONTINUITY
+    # =====================================================
+
+    requested_representation = detect_representation_request(text)
+
+    result["requested_representation"] = requested_representation
+
+    last_math = state.get("last_math", {})
+
+    if last_math:
+
+        result["same_task"] = True
+
+        result["current_object"] = last_math.get("type")
+
+        if requested_representation:
+
+            result["representation_shift"] = True
+            result["context_visual_followup"] = True
+            result["render_intent"] = True
+            result["prefer_renderer"] = True
+
+# =====================================================
     # 🔥 VISUAL CONTINUITY
     # =====================================================
 
