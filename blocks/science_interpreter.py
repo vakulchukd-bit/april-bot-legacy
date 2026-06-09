@@ -482,18 +482,6 @@ def interpret_graph_request(
         f"INPUT: {text[:80]}"
     )
 
-    safe_science_log(
-        f"SEMANTIC_RENDER_INTENT={semantic.get('render_intent')}"
-    )
-
-    safe_science_log(
-        f"SEMANTIC_PREFER_RENDERER={semantic.get('prefer_renderer')}"
-    )
-
-    safe_science_log(
-        f"SEMANTIC_RENDERER_EXPECTED={semantic.get('renderer_payload_expected')}"
-    )
-
     if not text:
         return None
 
@@ -501,20 +489,10 @@ def interpret_graph_request(
     # 🔥 SPATIAL CHECK
     # =====================================================
 
-    spatial_intent = has_spatial_intent(
+    if not has_spatial_intent(
         text,
         cognition
-    )
-
-    safe_science_log(
-        f"SPATIAL_INTENT={spatial_intent}"
-    )
-
-    if not spatial_intent:
-
-        safe_science_log(
-            "EXIT:NO_SPATIAL_INTENT"
-        )
+    ):
 
         return None
 
@@ -527,10 +505,6 @@ def interpret_graph_request(
         cognition
     )
 
-    safe_science_log(
-        f"SCENE_TYPE={scene_type}"
-    )
-
     # =================================================
     # 🔥 GRAPH
     # =====================================================
@@ -539,10 +513,6 @@ def interpret_graph_request(
 
         expr = detect_graph_expression(
             text
-        )
-
-        safe_science_log(
-            f"GRAPH_EXPR={expr}"
         )
 
         if expr:
@@ -575,10 +545,6 @@ def interpret_graph_request(
 
         expr = detect_graph_expression(
             text
-        )
-
-        safe_science_log(
-            f"GRAPH_EXPR={expr}"
         )
 
         if expr:
@@ -652,9 +618,5 @@ def interpret_graph_request(
         return build_scene_payload(
             text
         )
-
-    safe_science_log(
-        "NO_RENDERER_PAYLOAD_CREATED"
-    )
 
     return None
