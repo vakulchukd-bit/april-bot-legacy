@@ -238,6 +238,40 @@ def normalize_executor_response(
             ),
 
         # =================================================
+        # 🔥 SCIENCE RENDERERS
+        # =================================================
+
+        "graph":
+            safe_json(
+                result.get("graph")
+            ),
+
+        "formula":
+            safe_json(
+                result.get("formula")
+            ),
+
+        "table":
+            safe_json(
+                result.get("table")
+            ),
+
+        "gallery":
+            safe_json(
+                result.get("gallery")
+            ),
+
+        "layout":
+            safe_json(
+                result.get("layout")
+            ),
+
+        "visual":
+            safe_json(
+                result.get("visual")
+            ),
+
+        # =================================================
         # 🔥 CONTINUITY
         # =================================================
 
@@ -300,6 +334,12 @@ def normalize_executor_response(
         normalized[
             "preserve_render_space"
         ] = True
+
+    print("🌐 EXECUTOR RAW:")
+    print(result)
+
+    print("🌐 NORMALIZED:")
+    print(normalized)
 
     return normalized
 
@@ -813,6 +853,30 @@ def web_chat():
 
             "space_response":
                 safe_json(result),
+
+            "type":
+                result.get("type"),
+
+            "graph":
+                result.get("graph"),
+
+            "formula":
+                result.get("formula"),
+
+            "table":
+                result.get("table"),
+
+            "gallery":
+                result.get("gallery"),
+
+            "layout":
+                result.get("layout"),
+
+            "visual":
+                result.get("visual"),
+
+            "blocks":
+                result.get("render_blocks", []),
 
             "renderer_mode":
                 WEB_RENDERER_MODE,
