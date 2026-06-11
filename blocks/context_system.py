@@ -127,8 +127,8 @@ LOW_VALUE_MESSAGES = [
     "угу"
 ]
 
-MAX_RELEVANT_MESSAGES = 5
-MAX_DIALOG_SCAN = 8
+MAX_RELEVANT_MESSAGES = 20
+MAX_DIALOG_SCAN = 40
 MAX_PASSIVE_MEMORY = 10
 MAX_SUMMARY_LENGTH = 1200
 
@@ -138,6 +138,21 @@ MAX_BOT_MEMORY = 180
 MAX_IMAGE_HINT = 180
 MAX_MATH_EXPR = 120
 MAX_GOAL_LENGTH = 300
+
+def build_scene_focus_snapshot(state):
+    try:
+        scene = state.get("active_scene", {})
+        goal = scene.get("active_goal", "")
+        topic = scene.get("active_topic", "")
+        visual = scene.get("visual_summary", "")
+        return {
+            "goal": goal,
+            "topic": topic,
+            "visual": visual
+        }
+    except Exception:
+        return {}
+
 
 MIN_KEYWORD_LENGTH = 4
 
