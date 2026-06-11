@@ -1015,6 +1015,16 @@ def analyze_cognition(
         "active_flow"
     )
 
+    active_scene = state.get(
+        "active_scene",
+        {}
+    )
+
+    visual_continuity = state.get(
+        "visual_continuity_summary",
+        {}
+    )
+
     continuity = build_dialog_continuity(
         dialog
     )
@@ -1240,7 +1250,16 @@ def analyze_cognition(
             open_loops,
 
         "memory_signals":
-            memory_signals
+            memory_signals,
+
+        "active_scene":
+            active_scene,
+
+        "visual_continuity":
+            visual_continuity,
+
+        "scene_cognition_active":
+            True
     }
 
     if detect_meta_ai_behavior(t):
