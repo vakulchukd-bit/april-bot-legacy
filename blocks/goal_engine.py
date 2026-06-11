@@ -155,6 +155,16 @@ def detect_goal(
         "active_flow"
     )
 
+    active_scene = state.get(
+        "active_scene",
+        {}
+    )
+
+    visual_continuity = state.get(
+        "visual_continuity_summary",
+        {}
+    )
+
     dialog = state.get(
         "dialog",
         []
@@ -636,6 +646,21 @@ def detect_goal(
         semantic["should_execute"] = False
 
         semantic["response_mode"] = "guide"
+
+    semantic["active_scene_goal"] = (
+        active_scene.get("scene_state", {})
+        .get("goal")
+    )
+
+    semantic["visual_goal"] = (
+        visual_continuity.get("active_goal")
+    )
+
+    semantic["goal_continuity_active"] = True
+
+    semantic["goal_persistence_mode"] = (
+        "scene_first"
+    )
 
     # =================================================
     # 🔥 OUTPUT LOG
