@@ -424,6 +424,16 @@ def build_executor_context(
         "active_flow"
     )
 
+    visual_continuity_summary = state.get(
+        "visual_continuity_summary",
+        {}
+    )
+
+    active_visual_scene = state.get(
+        "active_visual_scene",
+        {}
+    )
+
     return {
 
         # =================================================
@@ -486,6 +496,17 @@ def build_executor_context(
         "continuity_mode":
             scene_state.get(
                 "continuity_mode"
+            ),
+
+        "visual_continuity_summary":
+            visual_continuity_summary,
+
+        "active_visual_scene":
+            active_visual_scene,
+
+        "visual_goal":
+            visual_continuity_summary.get(
+                "active_goal"
             ),
 
         # =================================================
@@ -963,6 +984,19 @@ async def execute(
         response_decision={},
 
         state=state
+    )
+
+    # =====================================================
+    # 🔥 VISUAL CONTINUITY INTEGRATION
+    # =====================================================
+
+    visual_continuity = state.get(
+        "visual_continuity_summary",
+        {}
+    )
+
+    cognition["visual_continuity"] = (
+        visual_continuity
     )
 
     # =====================================================
