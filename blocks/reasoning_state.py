@@ -192,6 +192,21 @@ def build_reasoning_state(
         {}
     )
 
+    active_scene = state.get(
+        "active_scene",
+        {}
+    )
+
+    visual_continuity = state.get(
+        "visual_continuity_summary",
+        {}
+    )
+
+    focus_snapshot = state.get(
+        "focus_snapshot",
+        {}
+    )
+
     # =================================================
     # 🔥 SCENE
     # =================================================
@@ -422,6 +437,18 @@ def build_reasoning_state(
 
         "scene_continuity":
             scene_continuity,
+
+        "active_scene":
+            active_scene,
+
+        "visual_continuity":
+            visual_continuity,
+
+        "focus_snapshot":
+            focus_snapshot,
+
+        "scene_awareness":
+            True,
 
         # =================================================
         # 🔥 EXECUTION
