@@ -252,6 +252,8 @@ def build_default_state():
 
         "memory_summary": "",
 
+        "active_scene": {},
+
         # =================================================
         # 🔥 GOLDEN MEMORY
         # =====================================================
@@ -927,7 +929,9 @@ def add_dialog(
     
     trim_topic_memory(
         state_obj
-    ) 
+    )
+
+    state_obj["active_scene"] = build_active_scene(user_id) 
 
 # =====================================================
 # 🔥 DIALOG STATE
@@ -1213,6 +1217,53 @@ def get_state(user_id):
 # set_active_flow()
 # clear_active_flow()
 
+
+
+
+# =====================================================
+# 🧠 ACTIVE SCENE ENGINE
+# =====================================================
+
+def build_active_scene(user_id):
+
+    state_obj = get_state(user_id)
+
+    return {
+
+        "dialog_summary":
+            state_obj.get("memory_summary", ""),
+
+        "visual_context":
+            state_obj.get("visual_continuity_summary", {}),
+
+        "active_visual_scene":
+            state_obj.get("active_visual_scene"),
+
+        "active_flow":
+            state_obj.get("active_flow"),
+
+        "scene_state":
+            state_obj.get("scene_state", {}),
+
+        "focus_snapshot":
+            state_obj.get("focus_snapshot", {}),
+
+        "goal_hierarchy":
+            state_obj.get("goal_hierarchy", {}),
+
+        "dynamic_focus":
+            state_obj.get("dynamic_focus", {})
+    }
+
+def refresh_active_scene(user_id):
+
+    state_obj = get_state(user_id)
+
+    state_obj["active_scene"] = (
+        build_active_scene(user_id)
+    )
+
+    return state_obj["active_scene"]
 
 
 # =====================================================
