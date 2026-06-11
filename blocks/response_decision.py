@@ -200,6 +200,16 @@ def build_response_decision(
         "active_flow"
     )
 
+    active_scene = state.get(
+        "active_scene",
+        {}
+    )
+
+    visual_continuity = state.get(
+        "visual_continuity_summary",
+        {}
+    )
+
     # =================================================
     # 🔥 GOLDEN MEMORY DECISION INPUT
     # =====================================================
@@ -818,7 +828,19 @@ def build_response_decision(
             dynamic_focus.get("focus_locked", False),
 
         "has_open_loops":
-            open_loops.get("has_open_loops", False)
+            open_loops.get("has_open_loops", False),
+
+        "active_scene":
+            active_scene,
+
+        "visual_continuity":
+            visual_continuity,
+
+        "scene_driven_response":
+            True,
+
+        "renderer_intelligence_enabled":
+            True
     }
 
     decision_exit(
