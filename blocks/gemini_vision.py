@@ -216,7 +216,7 @@ MAX_TASK_SUMMARY = 800
 
 MAX_CONTINUITY_SUMMARY = 600
 
-MAX_PASSIVE_SCENES = 6
+MAX_PASSIVE_SCENES = 24
 
 # =====================================================
 # 🔥 PROVIDER SWITCHING
@@ -629,6 +629,31 @@ def compress_visual_scene(
             True
     }
 
+
+# =====================================================
+# 🔥 VISUAL CONTINUITY SUMMARY
+# =====================================================
+
+def build_visual_continuity_summary(state: dict):
+
+    active = state.get("active_visual_scene", {}) or {}
+    passive = state.get("passive_visual_memory", []) or {}
+
+    task = active.get("task_context", {})
+    anchor = active.get("memory_anchor", {})
+
+    return {
+
+        "active_goal": task.get("goal", ""),
+        "current_step": task.get("current_step", ""),
+        "next_expected_step": task.get("next_expected_step", ""),
+        "focus": anchor.get("focus", ""),
+        "topic": anchor.get("topic", ""),
+        "recent_visual_scenes": len(state.get("passive_visual_memory", [])),
+        "visual_continuity_active": True
+    }
+
+
 # =====================================================
 # 🔥 VISUAL MEMORY UPDATE
 # =====================================================
@@ -716,6 +741,14 @@ def update_visual_memory(
     state[
         "scene_state"
     ] = scene_state
+
+    state["visual_continuity_summary"] = (
+        build_visual_continuity_summary(state)
+    )
+
+    scene_state["visual_continuity_summary"] = (
+        state["visual_continuity_summary"]
+    )
 
 # =====================================================
 # 🔥 GEMINI VISUAL ANALYSIS
