@@ -204,11 +204,11 @@ MAX_MEMORY_BLOCK = 280
 
 PLAN_HISTORY_LIMITS = {
 
-    "free": 3,
+    "free": 12,
 
-    "lite": 5,
+    "lite": 24,
 
-    "premium": 8
+    "premium": 40
 }
 
 PLAN_TOKEN_MODES = {
