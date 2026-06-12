@@ -238,6 +238,75 @@ def detect_execution_probability(
     return clamp(probability)
 
 
+
+# =====================================================
+# 🔥 DIALOGUE AWARENESS
+# =====================================================
+
+def detect_discussion_probability(text):
+
+    t = (text or "").lower()
+
+    words = [
+        "давай обсудим",
+        "как думаешь",
+        "что думаешь",
+        "поговорим",
+        "обсудим"
+    ]
+
+    probability = 0.0
+
+    for word in words:
+        if word in t:
+            probability += 0.18
+
+    return clamp(probability)
+
+
+def detect_reflection_probability(text):
+
+    t = (text or "").lower()
+
+    words = [
+        "почему",
+        "объясни",
+        "рассуждай",
+        "размышляй",
+        "как ты пришла"
+    ]
+
+    probability = 0.0
+
+    for word in words:
+        if word in t:
+            probability += 0.15
+
+    return clamp(probability)
+
+
+def detect_space_discussion_probability(text):
+
+    t = (text or "").lower()
+
+    words = [
+        "пространство",
+        "scene",
+        "renderer",
+        "блок",
+        "галерея",
+        "график"
+    ]
+
+    probability = 0.0
+
+    for word in words:
+        if word in t:
+            probability += 0.12
+
+    return clamp(probability)
+
+
 # =====================================================
 # 🧠 REPRESENTATION ANALYSIS
 # =====================================================
@@ -370,6 +439,18 @@ def analyze(
         detect_execution_probability(text)
     )
 
+    discussion_probability = (
+        detect_discussion_probability(text)
+    )
+
+    reflection_probability = (
+        detect_reflection_probability(text)
+    )
+
+    space_discussion_probability = (
+        detect_space_discussion_probability(text)
+    )
+
     # =====================================================
     # 🔥 BASE RESULT
     # =====================================================
@@ -434,6 +515,15 @@ def analyze(
 
         "execution_probability":
             execution_probability,
+        
+        "discussion_probability":
+            discussion_probability,
+
+        "reflection_probability":
+            reflection_probability,
+
+        "space_discussion_probability":
+            space_discussion_probability,
 
         # =================================================
         # 🧠 SOFT HINTS
