@@ -350,6 +350,18 @@ def build_response_decision(
         False
     )
 
+    dialog_priority_active = bool(
+
+        discussion_mode
+        or reflection_mode
+        or space_discussion
+        or tool_discussion
+        or self_action_discussion
+        or explanation_mode
+
+    )
+
+
     # =================================================
     # 🔥 EXECUTION DETECTION
     # =====================================================
