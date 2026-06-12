@@ -584,6 +584,64 @@ def is_exploration_request(
         exploration_words
     )
 
+
+# =====================================================
+# 🧠 DIALOGUE INTENT SIGNALS
+# =====================================================
+
+def is_discussion_request(text: str):
+
+    t = normalize(text)
+
+    words = [
+        "обсудим",
+        "поговорим",
+        "как думаешь",
+        "что думаешь"
+    ]
+
+    return contains_any(t, words)
+
+
+def is_reflection_request(text: str):
+
+    t = normalize(text)
+
+    words = [
+        "почему",
+        "объясни",
+        "рассуждай",
+        "размышляй"
+    ]
+
+    return contains_any(t, words)
+
+
+def is_space_discussion_request(text: str):
+
+    t = normalize(text)
+
+    discussion_words = [
+        "обсудим",
+        "как думаешь",
+        "почему"
+    ]
+
+    space_words = [
+        "пространство",
+        "scene",
+        "renderer",
+        "график",
+        "таблица",
+        "формула"
+    ]
+
+    return (
+        contains_any(t, discussion_words)
+        and contains_any(t, space_words)
+    )
+
+
 # =====================================================
 # 🧠 MACHINE RESULT PACKAGE
 # =====================================================
@@ -662,6 +720,16 @@ def build_intent_result():
 
         "exploration":
             False,
+
+        "discussion_intent":
+            False,
+
+        "reflection_intent":
+            False,
+
+        "space_discussion_intent":
+            False,
+
 
         # =================================================
         # 🔥 SAFETY
@@ -812,7 +880,27 @@ def detect_intent(
             0.72
         )
 
+    
     # =================================================
+    # 🔥 DISCUSSION AWARENESS
+    # =====================================================
+
+    if is_discussion_request(t):
+
+        result["discussion_intent"] = True
+        result["prefer_guidance"] = True
+
+    if is_reflection_request(t):
+
+        result["reflection_intent"] = True
+        result["prefer_guidance"] = True
+
+    if is_space_discussion_request(t):
+
+        result["space_discussion_intent"] = True
+        result["prefer_guidance"] = True
+
+# =================================================
     # 🔥 WEB
     # =====================================================
 
