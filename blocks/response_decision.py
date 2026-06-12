@@ -317,6 +317,40 @@ def build_response_decision(
     )
 
     # =================================================
+    # 🔥 DIALOGUE AWARENESS
+    # =====================================================
+
+    discussion_mode = semantic.get(
+        "discussion_mode",
+        False
+    )
+
+    reflection_mode = semantic.get(
+        "reflection_mode",
+        False
+    )
+
+    space_discussion = semantic.get(
+        "space_discussion",
+        False
+    )
+
+    tool_discussion = semantic.get(
+        "tool_discussion",
+        False
+    )
+
+    self_action_discussion = semantic.get(
+        "self_action_discussion",
+        False
+    )
+
+    explanation_mode = semantic.get(
+        "explanation_mode",
+        False
+    )
+
+    # =================================================
     # 🔥 EXECUTION DETECTION
     # =====================================================
 
@@ -406,7 +440,7 @@ def build_response_decision(
 
     should_render = False
 
-    if renderer_lock:
+    if renderer_lock and not dialog_priority_active:
 
         should_render = True
 
@@ -414,6 +448,7 @@ def build_response_decision(
 
         lightweight_visual
         and not should_generate
+        and not dialog_priority_active
 
     ):
 
@@ -813,7 +848,25 @@ def build_response_decision(
             True,
 
         "dialog_priority":
-            False,
+            dialog_priority_active,
+
+        "discussion_mode":
+            discussion_mode,
+
+        "reflection_mode":
+            reflection_mode,
+
+        "space_discussion":
+            space_discussion,
+
+        "tool_discussion":
+            tool_discussion,
+
+        "self_action_discussion":
+            self_action_discussion,
+
+        "explanation_mode":
+            explanation_mode,
 
         "exploration_active":
             exploration_active,
