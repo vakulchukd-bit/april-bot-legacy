@@ -303,6 +303,35 @@ INFORMATIONAL_WORDS = [
     "что можешь сказать"
 ]
 
+
+# =====================================================
+# 🔥 DIALOGUE UNDERSTANDING
+# =====================================================
+
+DISCUSSION_WORDS = [
+    "поговорим","обсудим","как думаешь","мнение",
+    "рассуждение","рассуждаем","объясни","почему"
+]
+
+ACTION_WORDS = [
+    "создай","сделай","построй","отрендери",
+    "нарисуй","покажи","сгенерируй"
+]
+
+def detect_discussion_mode(text):
+    return contains_any(
+        normalize_lower(text),
+        DISCUSSION_WORDS
+    )
+
+def detect_space_discussion(text):
+    lower = normalize_lower(text)
+    return (
+        contains_any(lower, ["пространство","scene","renderer","render","блок"])
+        and detect_discussion_mode(lower)
+    )
+
+
 # =====================================================
 # 🔥 SAFE DETECTORS
 # =====================================================
@@ -321,10 +350,22 @@ def detect_renderer_intent(
     text
 ):
 
-    return contains_any(
-        normalize_lower(text),
+    lower = normalize_lower(text)
+
+    has_renderer_topic = contains_any(
+        lower,
         RENDERER_WORDS
     )
+
+    has_action = contains_any(
+        lower,
+        ACTION_WORDS
+    )
+
+    if detect_space_discussion(lower):
+        return False
+
+    return has_renderer_topic and has_action
 
 
 def detect_lightweight_visual(
@@ -510,6 +551,12 @@ def build_result(
         "renderer_intent":
             False,
 
+        "discussion_mode":
+            False,
+
+        "space_discussion":
+            False,
+
         "lightweight_visual":
             False,
 
@@ -653,6 +700,14 @@ def interpret_request(
     result = build_result(
         text
     )
+
+    if detect_discussion_mode(t):
+        result["discussion_mode"] = True
+        result["prefer_guidance"] = True
+
+    if detect_space_discussion(t):
+        result["space_discussion"] = True
+
 
     # =====================================================
     # 🔥 CONTINUATION
