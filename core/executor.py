@@ -475,6 +475,27 @@ def build_executor_context(
         "response_decision":
             response_decision,
 
+        "executor_awareness":
+            {
+                "discussion_mode":
+                    response_decision.get("discussion_mode", False),
+
+                "reflection_mode":
+                    response_decision.get("reflection_mode", False),
+
+                "space_discussion":
+                    response_decision.get("space_discussion", False),
+
+                "tool_discussion":
+                    response_decision.get("tool_discussion", False),
+
+                "self_action_discussion":
+                    response_decision.get("self_action_discussion", False),
+
+                "explanation_mode":
+                    response_decision.get("explanation_mode", False)
+            },
+
         "visual_reference":
             visual_reference,
 
@@ -739,7 +760,13 @@ async def execute_rooms(
                     ),
 
                 "context":
-                    context
+                    context,
+
+                "awareness":
+                    context.get(
+                        "executor_awareness",
+                        {}
+                    )
             }
 
             result = await room.handle(
@@ -865,6 +892,27 @@ def synthesize_final_answer(
         open_loops.get(
             "has_open_loops",
             False
+        )
+    )
+
+    result["discussion_context"] = (
+        response_decision.get(
+            "discussion_mode",
+            False
+        )
+    )
+
+    result["space_context"] = (
+        response_decision.get(
+            "space_discussion",
+            False
+        )
+    )
+
+    result["action_reason"] = (
+        response_decision.get(
+            "final_action",
+            "dialogue"
         )
     )
 
