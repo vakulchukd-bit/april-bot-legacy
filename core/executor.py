@@ -544,6 +544,8 @@ def build_executor_context(
         "state":
             state,
 
+        "task_resolution": {},
+
         "memory_routing":
             {
                 "dynamic_focus":
@@ -697,8 +699,22 @@ def build_task_resolution(
         "missing_information": task.get(
             "missing_information",
             []
-        )
+        ),
+        "target_room": None
     }
+
+    if semantic.get("render_intent"):
+        resolution["target_room"] = "graph"
+
+    if semantic.get("math_intent"):
+        resolution["target_room"] = "formula"
+
+    if semantic.get("link_intent"):
+        resolution["target_room"] = "link"
+
+    if semantic.get("table_intent"):
+        resolution["target_room"] = "table"
+
 
     if clarification_required:
         resolution["mode"] = "clarify"
@@ -1282,6 +1298,8 @@ async def execute(
 
         state=state
     )
+
+    context["task_resolution"] = task_resolution
 
     guidance_response = build_guidance_response(
         task_resolution
