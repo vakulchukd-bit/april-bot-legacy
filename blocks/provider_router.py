@@ -371,7 +371,7 @@ def normalize_response_text(text):
         "\n\n"
     )
 
-    return text.strip()
+    return sanitize_internal_reasoning(text).strip()
 
 
 # =====================================================
@@ -387,6 +387,60 @@ def build_overload_response(
         f"временно перегружен."
     )
 
+
+
+# =====================================================
+# 🧠 ASSISTANT-AWARE PROVIDER ROUTING
+# =====================================================
+
+def build_provider_task_state(
+    cognition=None,
+    response_decision=None
+):
+
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+
+    return {
+        "assistant_next_step":
+            cognition.get("assistant_next_step"),
+        "task_understanding":
+            cognition.get("task_understanding", {}),
+        "scene_confidence":
+            cognition.get("scene_confidence", 1.0),
+        "clarification_required":
+            response_decision.get(
+                "task_requires_clarification",
+                False
+            ),
+        "internal_reasoning_only":
+            response_decision.get(
+                "internal_reasoning_only",
+                False
+            )
+    }
+
+
+def sanitize_internal_reasoning(text):
+
+    if not text:
+        return text
+
+    blocked = [
+        "possibly",
+        "perhaps",
+        "internal reasoning",
+        "chain of thought",
+        "I think",
+        "I am reasoning"
+    ]
+
+    result = str(text)
+
+    for item in blocked:
+        result = result.replace(item, "")
+
+    return result.strip()
 
 # =====================================================
 # 🔥 TEXT GENERATION
