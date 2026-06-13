@@ -492,6 +492,60 @@ def extract_behavior_field(
 
 
 # =====================================================
+# 🧠 ASSISTANT PRESENTATION FILTERS
+# =====================================================
+
+def suppress_internal_reasoning(text):
+
+    if not isinstance(text, str):
+        return text
+
+    blocked = [
+        "возможно",
+        "предположительно",
+        "скорее всего",
+        "я думаю",
+        "мне кажется",
+        "вероятно"
+    ]
+
+    result = text
+
+    for item in blocked:
+        result = result.replace(item, "")
+
+    return result.strip()
+
+
+def inject_guidance_context(
+    text,
+    cognition=None,
+    response_decision=None
+):
+
+    cognition = cognition or {}
+
+    if not isinstance(text, str):
+        return text
+
+    next_step = cognition.get(
+        "assistant_next_step",
+        "ready_to_help"
+    )
+
+    if next_step == "request_image":
+        return text
+
+    if next_step == "request_formula":
+        return text
+
+    if next_step == "request_error_details":
+        return text
+
+    return text
+
+
+# =====================================================
 # 🔥 CLEANUP
 # =====================================================
 
@@ -1045,6 +1099,16 @@ def beautify_response(
 
     text = cleanup_markdown(
         text
+    )
+
+    text = suppress_internal_reasoning(
+        text
+    )
+
+    text = inject_guidance_context(
+        text,
+        cognition,
+        response_decision
     )
 
     text = suppress_robotic_phrasing(
