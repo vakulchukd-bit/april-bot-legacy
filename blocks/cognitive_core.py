@@ -1628,3 +1628,8 @@ def build_assistant_next_step(task_understanding):
         return "request_error_details"
 
     return "ready_to_help"
+
+
+# APRIL PATCH V3
+# assistant_next_step is INTERNAL ONLY.
+# Never return to user directly.
