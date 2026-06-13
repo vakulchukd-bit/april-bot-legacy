@@ -253,6 +253,9 @@ def build_default_state():
         "memory_summary": "",
 
         "active_scene": {},
+        "scene_history": [],
+        "scene_stack": [],
+        "scene_relation": {},
 
         # =================================================
         # 🔥 GOLDEN MEMORY
@@ -1442,3 +1445,36 @@ def trim_topic_memory(state_obj):
             state_obj[key] = value[
                 -TOPIC_MEMORY_LIMIT:
             ]
+
+
+# =====================================================
+# 🧠 SCENE MEMORY API
+# =====================================================
+
+def update_scene_relation(user_id, relation):
+    get_state(user_id)["scene_relation"] = relation or {}
+
+def push_scene_history(user_id, scene):
+    state_obj = get_state(user_id)
+    history = state_obj.get("scene_history", [])
+    history.append(scene)
+    state_obj["scene_history"] = history[-20:]
+
+
+# =====================================================
+# 🧠 UNIFIED SCENE STORAGE
+# =====================================================
+
+def refresh_unified_scene(user_id):
+    state_obj = get_state(user_id)
+
+    state_obj["active_scene"] = {
+        "scene_state": state_obj.get("scene_state", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "active_flow": state_obj.get("active_flow")
+    }
+
+    return state_obj["active_scene"]
