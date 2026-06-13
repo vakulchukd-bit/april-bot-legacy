@@ -1633,3 +1633,54 @@ def build_assistant_next_step(task_understanding):
 # APRIL PATCH V3
 # assistant_next_step is INTERNAL ONLY.
 # Never return to user directly.
+
+
+# =========================================================
+# 🧠 SCENE RELATION ENGINE
+# =========================================================
+
+def build_scene_relation(text, active_scene, dynamic_focus):
+
+    text = (text or "").lower()
+
+    relation = {
+        "continue_scene": False,
+        "temporary_branch": False,
+        "return_to_previous_scene": False,
+        "new_scene": False,
+        "scene_confidence": 0.5
+    }
+
+    previous_focus = str(
+        dynamic_focus.get("primary_focus", "")
+    ).lower()
+
+    if previous_focus and any(
+        token in text for token in previous_focus.split()[:3]
+    ):
+        relation["continue_scene"] = True
+        relation["scene_confidence"] = 0.9
+    else:
+        relation["new_scene"] = True
+
+    return relation
+
+
+# =========================================================
+# 🧠 UNIFIED SCENE COGNITION BRIDGE
+# =========================================================
+
+def build_unified_scene_state(
+    active_scene,
+    dynamic_focus,
+    goal_hierarchy,
+    open_loops,
+    memory_signals
+):
+    return {
+        "active_scene": active_scene or {},
+        "dynamic_focus": dynamic_focus or {},
+        "goal_hierarchy": goal_hierarchy or {},
+        "open_loops": open_loops or [],
+        "memory_signals": memory_signals or {}
+    }
