@@ -656,6 +656,85 @@ def stabilize_room_score(
         20.0
     )
 
+
+# =========================================================
+# 🧠 TASK RESOLUTION LAYER
+# =========================================================
+
+def build_task_resolution(
+    cognition,
+    response_decision,
+    semantic,
+    state
+):
+
+    task = cognition.get(
+        "task_understanding",
+        {}
+    )
+
+    next_step = cognition.get(
+        "assistant_next_step",
+        "ready_to_help"
+    )
+
+    confusion = cognition.get(
+        "user_confusion",
+        0.0
+    )
+
+    clarification_required = (
+        response_decision.get(
+            "task_requires_clarification",
+            False
+        )
+    )
+
+    resolution = {
+        "mode": "execute",
+        "next_step": next_step,
+        "guidance_priority": False,
+        "missing_information": task.get(
+            "missing_information",
+            []
+        )
+    }
+
+    if clarification_required:
+        resolution["mode"] = "clarify"
+        resolution["guidance_priority"] = True
+
+    if confusion >= 0.5:
+        resolution["guidance_priority"] = True
+
+    return resolution
+
+
+def build_guidance_response(
+    task_resolution
+):
+
+    step = task_resolution.get(
+        "next_step"
+    )
+
+    messages = {
+        "request_image":
+            "Чтобы помочь точнее, пришли скриншот или изображение того, что ты видишь сейчас.",
+        "request_formula":
+            "Напиши формулу или опиши задачу своими словами. Если формулу не знаешь, я помогу её подобрать.",
+        "request_error_details":
+            "Покажи текст ошибки или пришли скриншот окна с ошибкой, и я проведу тебя дальше."
+    }
+
+    if step not in messages:
+        return None
+
+    return {
+        "type": "text",
+        "data": messages[step]
+    }
+
 # =========================================================
 # 🔥 ROOM EXECUTION
 # =========================================================
@@ -1188,6 +1267,28 @@ async def execute(
 
         text=text
     )
+
+    # =====================================================
+    # 🧠 TASK RESOLUTION
+    # =====================================================
+
+    task_resolution = build_task_resolution(
+
+        cognition=cognition,
+
+        response_decision=response_decision,
+
+        semantic=semantic,
+
+        state=state
+    )
+
+    guidance_response = build_guidance_response(
+        task_resolution
+    )
+
+    if guidance_response:
+        return guidance_response
 
     # =====================================================
     # 🔥 ROOM EXECUTION
