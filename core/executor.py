@@ -900,6 +900,31 @@ async def execute_rooms(
 
                 continue
 
+            # ================================================
+            # INTERNAL SIGNALS ARE NOT USER ANSWERS
+            # ================================================
+
+            result_type = result.get("type")
+
+            if result_type in [
+                "internal_guidance",
+                "internal_reasoning",
+                "internal_state",
+                "task_resolution"
+            ]:
+
+                state.setdefault(
+                    "internal_signals",
+                    []
+                ).append(result)
+
+                print(
+                    f"🔥 INTERNAL SIGNAL [{room.name}]",
+                    result_type
+                )
+
+                continue
+
             machine_response_payload = {
 
                 "channel":
