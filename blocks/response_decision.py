@@ -361,6 +361,47 @@ def build_response_decision(
 
     )
 
+    # =================================================
+    # 🔥 ASSISTANT TASK AWARENESS
+    # =====================================================
+
+    scene_has_visual = bool(
+        visual_reference
+        or visual_continuity
+    )
+
+    scene_has_active_objects = bool(
+        active_scene
+    )
+
+    task_requires_clarification = False
+    missing_information_type = None
+
+    if semantic.get("needs_image") and not scene_has_visual:
+        task_requires_clarification = True
+        missing_information_type = "image"
+
+    if semantic.get("needs_formula") and not semantic.get("formula_present"):
+        task_requires_clarification = True
+        missing_information_type = "formula"
+
+    if semantic.get("needs_comparison") and not semantic.get("comparison_ready"):
+        task_requires_clarification = True
+        missing_information_type = "comparison_source"
+
+    scene_confidence = 1.0
+
+    if not scene_has_visual and wants_visual >= 0.5:
+        scene_confidence = 0.35
+
+    if ambiguity >= 0.45:
+        scene_confidence = min(scene_confidence, 0.5)
+
+    internal_reasoning_only = bool(
+        reflection_mode
+        or tool_discussion
+        or self_action_discussion
+    )
 
     # =================================================
     # 🔥 EXECUTION DETECTION
@@ -905,7 +946,28 @@ def build_response_decision(
             True,
 
         "renderer_intelligence_enabled":
-            True
+            True,
+
+        "task_requires_clarification":
+            task_requires_clarification,
+
+        "missing_information_type":
+            missing_information_type,
+
+        "scene_confidence":
+            scene_confidence,
+
+        "scene_has_visual":
+            scene_has_visual,
+
+        "scene_has_active_objects":
+            scene_has_active_objects,
+
+        "internal_reasoning_only":
+            internal_reasoning_only,
+
+        "assistant_guidance_priority":
+            task_requires_clarification or should_guide
     }
 
     decision_exit(
