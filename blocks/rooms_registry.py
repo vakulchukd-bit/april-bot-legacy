@@ -839,10 +839,7 @@ class GuidanceRoom(Room):
 
         cognition = get_cognition(context)
 
-        return {
-            "type": "text",
-            "data": f"Следующий шаг: {cognition.get('assistant_next_step','уточнение данных')}"
-        }
+        return {"type":"internal_guidance","data":{"next_step": cognition.get("assistant_next_step")}}
 
 
 class GraphRoom(Room):
