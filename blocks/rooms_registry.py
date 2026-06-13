@@ -852,8 +852,15 @@ class GraphRoom(Room):
 
     def evaluate(self, text, context):
 
-        if "график" in normalize_text(text):
-            return 0.96
+        executor_context = get_executor_context(context)
+        trajectory = executor_context.get("trajectory")
+        active_flow = executor_context.get("active_flow")
+
+        if trajectory == "graph":
+            return 8.0
+
+        if isinstance(active_flow, dict) and active_flow.get("type") == "graph":
+            return 7.0
 
         return 0.0
 
@@ -874,10 +881,10 @@ class FormulaRoom(Room):
 
     def evaluate(self, text, context):
 
-        t = normalize_text(text)
+        executor_context = get_executor_context(context)
 
-        if "формул" in t:
-            return 0.94
+        if executor_context.get("trajectory") == "formula":
+            return 8.0
 
         return 0.0
 
@@ -896,10 +903,10 @@ class FunctionRoom(Room):
 
     def evaluate(self, text, context):
 
-        t = normalize_text(text)
+        executor_context = get_executor_context(context)
 
-        if "функц" in t or "f(x)" in t:
-            return 0.93
+        if executor_context.get("trajectory") == "function":
+            return 8.0
 
         return 0.0
 
@@ -918,8 +925,10 @@ class TableRoom(Room):
 
     def evaluate(self, text, context):
 
-        if "таблиц" in normalize_text(text):
-            return 0.92
+        executor_context = get_executor_context(context)
+
+        if executor_context.get("trajectory") == "table":
+            return 8.0
 
         return 0.0
 
@@ -938,8 +947,10 @@ class LinkRoom(Room):
 
     def evaluate(self, text, context):
 
-        if detect_link_signal(text):
-            return 0.91
+        executor_context = get_executor_context(context)
+
+        if executor_context.get("trajectory") == "link":
+            return 8.0
 
         return 0.0
 
