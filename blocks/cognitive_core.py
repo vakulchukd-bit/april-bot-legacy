@@ -1103,6 +1103,20 @@ def analyze_cognition(
         active_flow
     )
 
+    task_understanding = build_task_understanding(
+        text,
+        continuity,
+        visual_scene_bridge
+    )
+
+    user_confusion = build_user_confusion(
+        text
+    )
+
+    assistant_next_step = build_assistant_next_step(
+        task_understanding
+    )
+
     open_loops = build_open_loops(
         continuity
     )
@@ -1259,7 +1273,22 @@ def analyze_cognition(
             visual_continuity,
 
         "scene_cognition_active":
-            True
+            True,
+
+        "task_understanding":
+            task_understanding,
+
+        "user_confusion":
+            user_confusion,
+
+        "assistant_next_step":
+            assistant_next_step,
+
+        "guidance_priority":
+            user_confusion >= 0.5,
+
+        "scene_confidence":
+            1.0 if visual_scene_bridge.get("scene_active") else 0.45
     }
 
     if detect_meta_ai_behavior(t):
@@ -1518,3 +1547,84 @@ def build_focus_memory_priority(abcde, continuity):
         weight += 0.15
 
     return min(weight, 1.0)
+
+
+
+# =========================================================
+# 🧠 ASSISTANT TASK UNDERSTANDING UPGRADE
+# =========================================================
+
+def build_task_understanding(text, continuity, visual_scene_bridge):
+
+    t = (text or "").lower()
+
+    goal = "discussion"
+
+    if "ошиб" in t:
+        goal = "fix_error"
+    elif "график" in t:
+        goal = "build_graph"
+    elif "формул" in t:
+        goal = "work_with_formula"
+    elif "таблиц" in t:
+        goal = "build_table"
+    elif "скрин" in t or "изображ" in t:
+        goal = "analyze_visual"
+
+    missing_information = []
+
+    if goal == "fix_error":
+        missing_information.append("error_context")
+
+    if goal == "build_graph":
+        missing_information.append("formula")
+
+    if goal == "analyze_visual" and not visual_scene_bridge.get("scene_active"):
+        missing_information.append("image")
+
+    return {
+        "user_goal": goal,
+        "goal_known": goal != "discussion",
+        "missing_information": missing_information,
+        "task_complete": len(missing_information) == 0
+    }
+
+
+def build_user_confusion(text):
+
+    t = (text or "").lower()
+
+    confusion_words = [
+        "не понимаю",
+        "запутался",
+        "не получается",
+        "ошибка",
+        "не работает"
+    ]
+
+    score = 0.0
+
+    for word in confusion_words:
+        if word in t:
+            score += 0.25
+
+    return min(score, 1.0)
+
+
+def build_assistant_next_step(task_understanding):
+
+    missing = task_understanding.get(
+        "missing_information",
+        []
+    )
+
+    if "image" in missing:
+        return "request_image"
+
+    if "formula" in missing:
+        return "request_formula"
+
+    if "error_context" in missing:
+        return "request_error_details"
+
+    return "ready_to_help"
