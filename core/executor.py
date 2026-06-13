@@ -1598,3 +1598,29 @@ async def execute(
         "data":
             "⚠️ April temporarily could not stabilize this trajectory."
     }
+
+
+# =========================================================
+# 🧠 SCENE-AWARE ROUTING NOTES
+# =========================================================
+# Executor should consume:
+# state["scene_relation"]
+# state["scene_history"]
+# state["dynamic_focus"]
+# and preserve continuity before room switching.
+
+
+# =========================================================
+# 🧠 UNIFIED SCENE ROUTING CONTRACT
+# =========================================================
+#
+# Routing priority order:
+# 1. scene_relation
+# 2. active_scene
+# 3. dynamic_focus
+# 4. goal_hierarchy
+# 5. open_loops
+#
+# Rooms receive unified cognition context.
+# Internal cognition never becomes renderer output.
+#
