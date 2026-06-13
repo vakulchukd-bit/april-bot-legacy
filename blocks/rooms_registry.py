@@ -816,11 +816,157 @@ class TextRoom(Room):
         }
 
 
+
+# =====================================================
+# 🧠 GUIDANCE ROOM
+# =====================================================
+
+class GuidanceRoom(Room):
+
+    name = "guidance"
+    room_type = "assistant_guidance"
+
+    def evaluate(self, text, context):
+
+        cognition = get_cognition(context)
+
+        if cognition.get("assistant_next_step"):
+            return 0.95
+
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+
+        cognition = get_cognition(context)
+
+        return {
+            "type": "text",
+            "data": f"Следующий шаг: {cognition.get('assistant_next_step','уточнение данных')}"
+        }
+
+
+class GraphRoom(Room):
+
+    name = "graph"
+    room_type = "graph_renderer"
+
+    def evaluate(self, text, context):
+
+        if "график" in normalize_text(text):
+            return 0.96
+
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+
+        return {
+            "type": "graph",
+            "data": {
+                "source": text
+            }
+        }
+
+
+class FormulaRoom(Room):
+
+    name = "formula"
+    room_type = "formula_renderer"
+
+    def evaluate(self, text, context):
+
+        t = normalize_text(text)
+
+        if "формул" in t:
+            return 0.94
+
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+
+        return {
+            "type": "formula",
+            "data": text
+        }
+
+
+class FunctionRoom(Room):
+
+    name = "function"
+    room_type = "function_renderer"
+
+    def evaluate(self, text, context):
+
+        t = normalize_text(text)
+
+        if "функц" in t or "f(x)" in t:
+            return 0.93
+
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+
+        return {
+            "type": "function",
+            "data": text
+        }
+
+
+class TableRoom(Room):
+
+    name = "table"
+    room_type = "table_renderer"
+
+    def evaluate(self, text, context):
+
+        if "таблиц" in normalize_text(text):
+            return 0.92
+
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+
+        return {
+            "type": "table",
+            "data": text
+        }
+
+
+class LinkRoom(Room):
+
+    name = "link"
+    room_type = "link_renderer"
+
+    def evaluate(self, text, context):
+
+        if detect_link_signal(text):
+            return 0.91
+
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+
+        return {
+            "type": "link",
+            "data": text
+        }
+
 # =====================================================
 # 🚀 ROOMS
 # =====================================================
 
 ROOMS = [
+
+    GuidanceRoom(),
+
+    GraphRoom(),
+
+    FormulaRoom(),
+
+    FunctionRoom(),
+
+    TableRoom(),
+
+    LinkRoom(),
 
     SafeScienceRoom(),
 
