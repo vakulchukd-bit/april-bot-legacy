@@ -1304,10 +1304,18 @@ async def execute(
         task_resolution
     )
 
-    if guidance_response:
-        return guidance_response
-
+    # =====================================================
+    # 🔥 INTERNAL GUIDANCE ONLY
+    # =====================================================
+    #
+    # Guidance is executor metadata.
+    # It must help routing and rooms.
+    # It must NOT become a user response.
+    #
     state["task_resolution"] = task_resolution
+
+    if guidance_response:
+        state["guidance_response"] = guidance_response
 
     # =====================================================
     # 🔥 ROOM EXECUTION
