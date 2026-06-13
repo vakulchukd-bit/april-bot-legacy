@@ -1264,3 +1264,18 @@ def format_response_presentation(
     )
 
     return result
+
+# APRIL PATCH
+def suppress_internal_status(text):
+    if not isinstance(text, str):
+        return text
+    blocked = [
+        "Следующий шаг:",
+        "ready_to_help",
+        "request_formula",
+        "request_image",
+        "request_error_details"
+    ]
+    for b in blocked:
+        text = text.replace(b, "")
+    return text
