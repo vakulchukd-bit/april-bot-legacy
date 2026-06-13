@@ -975,3 +975,5 @@ def build_response_decision(
     )
 
     return result
+
+# APRIL PATCH: internal reasoning never becomes final answer.
