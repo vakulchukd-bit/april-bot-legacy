@@ -769,6 +769,8 @@ async def execute_rooms(
 ):
 
     scored_rooms = []
+    collected_results = []
+    max_results = 2
 
     # =====================================================
     # 🔥 EVALUATION
@@ -942,7 +944,16 @@ async def execute_rooms(
                     result
             }
 
-            return machine_response_payload
+            print(f"🔥 ROOM COLLECTED [{room.name}]")
+
+            collected_results.append(
+                machine_response_payload
+            )
+
+            if len(collected_results) >= max_results:
+                break
+
+            continue
 
         except Exception as e:
 
@@ -952,6 +963,22 @@ async def execute_rooms(
             )
 
             traceback.print_exc()
+
+    if collected_results:
+
+        print(
+            f"🔥 COLLECTED ROOMS: {len(collected_results)}"
+        )
+
+        return {
+            "channel": RESPONSE_CHANNEL,
+            "room": "multi_room",
+            "trajectory": context.get("trajectory"),
+            "result": {
+                "type": "multi_room",
+                "rooms": collected_results
+            }
+        }
 
     return None
 
