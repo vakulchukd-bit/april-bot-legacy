@@ -252,7 +252,18 @@ def detect_discussion_probability(text):
         "как думаешь",
         "что думаешь",
         "поговорим",
-        "обсудим"
+        "обсудим",
+        "подскажи",
+        "посоветуй",
+        "объясни",
+        "расскажи",
+        "помоги понять",
+        "можешь показать",
+        "интересно",
+        "хочу понять",
+        "какой лучше",
+        "какой график",
+        "какая функция"
     ]
 
     probability = 0.0
@@ -344,6 +355,34 @@ def detect_representation_request(text):
         return "link"
 
     return None
+
+# =====================================================
+# 🧠 GRAPH ACTION DETECTION
+# =====================================================
+
+def detect_graph_action(text):
+
+    t = (text or "").lower()
+
+    if "почему" in t:
+        return "explain"
+
+    if "исправ" in t:
+        return "fix"
+
+    if "анализ" in t:
+        return "analyze"
+
+    if "сравни" in t:
+        return "compare"
+
+    if (
+        "построй" in t
+        or "нарисуй" in t
+    ):
+        return "build"
+
+    return "unknown"
 
 # =====================================================
 # 🔥 ANALYZE
@@ -795,6 +834,8 @@ def analyze(
 
     result["requested_representation"] = requested_representation
 
+    result["graph_action"] = detect_graph_action(text)
+
     last_math = state.get("last_math", {})
 
     if last_math:
@@ -851,7 +892,15 @@ def analyze(
     # 🔥 RENDERER MACHINE LOGIC
     # =====================================================
 
-    if renderer_probability >= 0.35:
+    if (
+
+        renderer_probability >= 0.45
+
+        and not discussion_probability >= 0.25
+
+        and not reflection_probability >= 0.25
+
+    ):
 
         result["render_intent"] = True
 
