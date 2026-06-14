@@ -217,7 +217,10 @@ def normalize_executor_response(
             safe_json(
                 result.get(
                     "render_blocks",
-                    []
+                    result.get(
+                        "blocks",
+                        []
+                    )
                 )
             ),
 
