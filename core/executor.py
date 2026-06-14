@@ -970,13 +970,22 @@ async def execute_rooms(
             f"🔥 COLLECTED ROOMS: {len(collected_results)}"
         )
 
+        blocks = []
+
+        for item in collected_results:
+
+            result = item.get("result", {})
+
+            if isinstance(result, dict):
+                blocks.append(result)
+
         return {
             "channel": RESPONSE_CHANNEL,
-            "room": "multi_room",
+            "room": "scene",
             "trajectory": context.get("trajectory"),
             "result": {
-                "type": "multi_room",
-                "rooms": collected_results
+                "type": "scene",
+                "blocks": blocks
             }
         }
 
