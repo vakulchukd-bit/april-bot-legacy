@@ -361,6 +361,13 @@ def build_response_decision(
 
     )
 
+    # APRIL PATCH
+    if unresolved_intent:
+        dialog_priority_active = True
+
+    if scene_confidence < 0.6:
+        dialog_priority_active = True
+
     # =================================================
     # 🔥 ASSISTANT TASK AWARENESS
     # =====================================================
@@ -493,7 +500,10 @@ def build_response_decision(
 
     should_render = False
 
-    if renderer_lock and not dialog_priority_active:
+    if task_requires_clarification:
+        should_render = False
+
+    elif renderer_lock and not dialog_priority_active:
 
         should_render = True
 
