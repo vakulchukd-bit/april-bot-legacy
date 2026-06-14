@@ -365,9 +365,6 @@ def build_response_decision(
     if unresolved_intent:
         dialog_priority_active = True
 
-    if scene_confidence < 0.6:
-        dialog_priority_active = True
-
     # =================================================
     # 🔥 ASSISTANT TASK AWARENESS
     # =====================================================
