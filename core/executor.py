@@ -1012,6 +1012,25 @@ def synthesize_final_answer(
     
     result_type = result.get("type")
 
+    # =====================================================
+    # 🔥 EXPLANATION-FIRST STABILIZATION
+    # =====================================================
+    #
+    # If cognition determined that the user wants an
+    # explanation of a graph/formula/table, preserve
+    # dialogue format and do not force renderer output.
+    #
+    explanation_pref = (
+        cognition.get("representation_understanding", {})
+        .get("prefer_text_explanation", False)
+    )
+
+    if explanation_pref and result_type == "scene":
+        return {
+            "type": "text",
+            "data": ""
+        }
+
     if result_type != "text":
         return result
 
