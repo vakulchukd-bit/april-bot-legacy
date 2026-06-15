@@ -604,6 +604,22 @@ def analyze(
 
         "requested_representation": None,
 
+        # =================================================
+        # 🧠 SCENE COMPOSITION
+        # =====================================================
+
+        "content_role": None,
+
+        "contains_object": False,
+
+        "contains_explanation": False,
+
+        "contains_analysis": False,
+
+        "contains_legend": False,
+
+        "scene_composition_ready": False,
+
         "same_task": False,
 
         "representation_shift": False,
@@ -799,6 +815,39 @@ def analyze(
             result[
                 "explicit_image_generation_only"
             ] = True
+
+        # ================================================
+        # 🔥 SCENE COMPOSITION HINTS
+        # ================================================
+
+        result["content_role"] = interpreted.get(
+            "content_role"
+        )
+
+        result["contains_object"] = interpreted.get(
+            "contains_object",
+            False
+        )
+
+        result["contains_explanation"] = interpreted.get(
+            "contains_explanation",
+            False
+        )
+
+        result["contains_analysis"] = interpreted.get(
+            "contains_analysis",
+            False
+        )
+
+        result["contains_legend"] = interpreted.get(
+            "contains_legend",
+            False
+        )
+
+        result["scene_composition_ready"] = interpreted.get(
+            "scene_composition_ready",
+            False
+        )
 
     # =====================================================
     # 🔥 ACTIVE FLOW
