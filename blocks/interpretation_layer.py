@@ -545,6 +545,28 @@ def build_result(
             text,
 
         # =================================================
+        # 🔥 SCENE COMPOSITION HINTS
+        # =====================================================
+
+        "content_role":
+            None,
+
+        "contains_object":
+            False,
+
+        "contains_explanation":
+            False,
+
+        "contains_analysis":
+            False,
+
+        "contains_legend":
+            False,
+
+        "scene_composition_ready":
+            True,
+
+        # =================================================
         # 🔥 SEMANTIC HINTS
         # =====================================================
 
@@ -648,6 +670,63 @@ def build_result(
         "continuity_preserved":
             True
     }
+
+
+# =====================================================
+# 🔥 CONTENT ROLE ANALYSIS
+# =====================================================
+
+def detect_explanation_content(text):
+
+    lower = normalize_lower(text)
+
+    markers = [
+        "объясни",
+        "объяснение",
+        "пояснение",
+        "расшифровка",
+        "что означает",
+        "что значит"
+    ]
+
+    return contains_any(lower, markers)
+
+
+def detect_analysis_content(text):
+
+    lower = normalize_lower(text)
+
+    markers = [
+        "анализ",
+        "вывод",
+        "заключение",
+        "интерпретация"
+    ]
+
+    return contains_any(lower, markers)
+
+
+def detect_legend_content(text):
+
+    lower = normalize_lower(text)
+
+    markers = [
+        "обозначение",
+        "обозначения",
+        "легенда",
+        "расшифровка"
+    ]
+
+    return contains_any(lower, markers)
+
+
+def detect_object_content(text):
+
+    return (
+        detect_math_expression(text)
+        or detect_renderer_intent(text)
+    )
+
 
 # =====================================================
 # 🔥 MAIN INTERPRETER
@@ -1011,6 +1090,35 @@ def interpret_request(
         result[
             "active_topic_slot"
         ] = active_topic_slot
+
+
+    # =====================================================
+    # 🔥 SCENE COMPOSITION HINTS
+    # =====================================================
+
+    if detect_object_content(t):
+
+        result["contains_object"] = True
+
+    if detect_explanation_content(t):
+
+        result["contains_explanation"] = True
+        result["content_role"] = "explanation"
+
+    if detect_analysis_content(t):
+
+        result["contains_analysis"] = True
+
+        if not result.get("content_role"):
+            result["content_role"] = "analysis"
+
+    if detect_legend_content(t):
+
+        result["contains_legend"] = True
+
+        if not result.get("content_role"):
+            result["content_role"] = "legend"
+
 
     # =====================================================
     # 🔥 FINAL STABILIZATION
