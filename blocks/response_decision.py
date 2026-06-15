@@ -272,6 +272,29 @@ def build_response_decision(
         "goal_stage",
         "exploration"
     )
+    
+    # =================================================
+    # 🔥 REPRESENTATION UNDERSTANDING
+    # =====================================================
+
+    representation = cognition.get(
+        "representation_understanding",
+        {}
+    ) or semantic.get(
+        "representation_understanding",
+        {}
+    )
+
+    prefer_text_explanation = representation.get(
+        "prefer_text_explanation",
+        False
+    )
+
+    interaction_mode = representation.get(
+        "interaction_mode"
+    )
+
+
 
     # =================================================
     # 🔥 RENDERER SIGNALS
@@ -466,6 +489,9 @@ def build_response_decision(
         or render_type
     )
 
+    if prefer_text_explanation:
+        renderer_lock = False
+
     # =================================================
     # 🔥 GENERATION LOCK
     # =====================================================
@@ -570,7 +596,11 @@ def build_response_decision(
 
     final_action = "talk"
 
-    if should_render:
+    if prefer_text_explanation:
+
+        final_action = "talk"
+
+    elif should_render:
 
         final_action = "render"
 
