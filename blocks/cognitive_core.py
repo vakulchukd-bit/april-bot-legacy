@@ -1736,3 +1736,158 @@ def build_unified_scene_state(
         "open_loops": open_loops or [],
         "memory_signals": memory_signals or {}
     }
+
+
+
+# =========================================================
+# 🧠 APRIL COGNITIVE MEMORY V2 UPGRADE
+# =========================================================
+
+def build_cognitive_memory_bridge(state):
+
+    return {
+
+        "focus_state":
+            state.get("focus_state", {}),
+
+        "memory_timeline":
+            state.get("memory_timeline", {}),
+
+        "memory_cycle":
+            state.get("memory_cycle", {}),
+
+        "dynamic_focus":
+            state.get("dynamic_focus", {}),
+
+        "goal_hierarchy":
+            state.get("goal_hierarchy", {}),
+
+        "open_loops":
+            state.get("open_loops", []),
+
+        "memory_signals":
+            state.get("memory_signals", {})
+    }
+
+
+def build_timeline_awareness(state):
+
+    timeline = state.get(
+        "memory_timeline",
+        {}
+    )
+
+    cycle = state.get(
+        "memory_cycle",
+        {}
+    )
+
+    return {
+
+        "utc_enabled":
+            bool(cycle),
+
+        "current_memory_day":
+            cycle.get(
+                "current_day",
+                "day_0"
+            ),
+
+        "timeline_available":
+            bool(timeline),
+
+        "day0_active":
+            bool(
+                timeline.get(
+                    "day_0"
+                )
+            ),
+
+        "day1_available":
+            bool(
+                timeline.get(
+                    "day_1"
+                )
+            )
+    }
+
+
+def build_focus_evolution_v2(
+    abcde_focus,
+    focus_state
+):
+
+    merged = dict(
+        abcde_focus or {}
+    )
+
+    if not focus_state:
+        return merged
+
+    merged["priority_score"] = (
+        focus_state.get(
+            "priority_score",
+            0
+        )
+    )
+
+    merged["intent_freshness"] = (
+        focus_state.get(
+            "intent_freshness",
+            0
+        )
+    )
+
+    merged["active_topic"] = (
+        focus_state.get(
+            "active_topic"
+        )
+    )
+
+    return merged
+
+
+def build_executor_guidance(
+
+    task_understanding,
+    goal_hierarchy,
+    memory_signals,
+    timeline_awareness
+
+):
+
+    return {
+
+        "primary_goal":
+            goal_hierarchy.get(
+                "active_goal"
+            ),
+
+        "task_type":
+            task_understanding.get(
+                "user_goal"
+            ),
+
+        "goal_known":
+            task_understanding.get(
+                "goal_known"
+            ),
+
+        "memory_priority":
+            memory_signals.get(
+                "memory_priority",
+                0.5
+            ),
+
+        "utc_memory_active":
+            timeline_awareness.get(
+                "utc_enabled",
+                False
+            ),
+
+        "executor_should_preserve_continuity":
+            True,
+
+        "executor_should_use_memory":
+            True
+    }
