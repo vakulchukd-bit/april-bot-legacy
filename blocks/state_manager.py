@@ -1478,3 +1478,219 @@ def refresh_unified_scene(user_id):
     }
 
     return state_obj["active_scene"]
+
+
+
+# =====================================================
+# 🧠 APRIL MEMORY ENGINE V4
+# =====================================================
+
+from datetime import datetime, timezone
+
+MEMORY_DAYS = 7
+TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
+
+def utc_day_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+def build_memory_day():
+    return {
+        "A": [],
+        "B": [],
+        "C": [],
+        "D": [],
+        "E": [],
+        "visual_scenes": [],
+        "topics": [],
+        "objects": [],
+        "intent_signals": [],
+        "created_at": time.time()
+    }
+
+def build_memory_timeline():
+    return {f"day_{i}": build_memory_day() for i in range(MEMORY_DAYS)}
+
+def ensure_memory_engine(state_obj):
+
+    if "memory_timeline" not in state_obj:
+        state_obj["memory_timeline"] = build_memory_timeline()
+
+    if "memory_cycle" not in state_obj:
+        state_obj["memory_cycle"] = {
+            "last_day_key": utc_day_key(),
+            "last_rollover": time.time()
+        }
+
+    if "focus_state" not in state_obj:
+        state_obj["focus_state"] = {
+            "active_topic": None,
+            "active_scene": None,
+            "active_object": None,
+            "active_goal": None,
+            "priority_score": 0.0,
+            "intent_freshness": 0.0
+        }
+
+def memory_rollover_if_needed(user_id):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    today = utc_day_key()
+
+    if state_obj["memory_cycle"]["last_day_key"] == today:
+        return False
+
+    timeline = state_obj["memory_timeline"]
+
+    for i in range(MEMORY_DAYS - 1, 0, -1):
+        timeline[f"day_{i}"] = timeline.get(
+            f"day_{i-1}",
+            build_memory_day()
+        )
+
+    timeline["day_0"] = build_memory_day()
+
+    state_obj["memory_cycle"] = {
+        "last_day_key": today,
+        "last_rollover": time.time()
+    }
+
+    safe_state_log(f"MEMORY_DAY_SHIFT: {user_id}")
+    return True
+
+def update_focus_state(user_id, payload):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    state_obj["focus_state"] = {
+        "active_topic": payload.get("topic"),
+        "active_scene": payload.get("scene"),
+        "active_object": payload.get("object"),
+        "active_goal": payload.get("goal"),
+        "priority_score": payload.get("priority_score", 0.0),
+        "intent_freshness": payload.get("intent_freshness", 0.0)
+    }
+
+def register_topic(user_id, topic, slot="A", score=1.0):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    slot = slot if slot in TOPIC_CLASSES else "C"
+
+    timeline = state_obj["memory_timeline"]
+    today = timeline["day_0"]
+
+    today[slot].append({
+        "topic": topic,
+        "score": score,
+        "timestamp": time.time()
+    })
+
+def bind_visual_scene_to_memory(user_id, scene_payload):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    state_obj["memory_timeline"]["day_0"]["visual_scenes"].append(
+        scene_payload
+    )
+
+def build_memory_context(user_id):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    return {
+        "focus_state": state_obj.get("focus_state", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "active_flow": state_obj.get("active_flow")
+    }
+
+def build_executor_memory_bridge(user_id):
+
+    memory = build_memory_context(user_id)
+
+    return {
+        "active_topic": memory.get("focus_state", {}).get("active_topic"),
+        "active_goal": memory.get("focus_state", {}).get("active_goal"),
+        "priority_score": memory.get("focus_state", {}).get("priority_score"),
+        "intent_freshness": memory.get("focus_state", {}).get("intent_freshness"),
+        "today": memory.get("memory_timeline", {}).get("day_0", {}),
+        "yesterday": memory.get("memory_timeline", {}).get("day_1", {}),
+        "open_loops": memory.get("open_loops", [])
+    }
+
+
+# =====================================================
+# 🧠 APRIL MEMORY ENGINE V5 INTEGRATION
+# =====================================================
+
+def ensure_memory_runtime(user_id):
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+    memory_rollover_if_needed(user_id)
+    return state_obj
+
+def build_unified_memory_bridge(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    return {
+        "focus_state": state_obj.get("focus_state", {}),
+        "focus_snapshot": state_obj.get("focus_snapshot", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {})
+    }
+
+def sync_focus_layers(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    focus_state = state_obj.get("focus_state", {})
+
+    state_obj["focus_snapshot"] = {
+        "topic": focus_state.get("active_topic"),
+        "scene": focus_state.get("active_scene"),
+        "object": focus_state.get("active_object"),
+        "focus": focus_state.get("priority_score"),
+        "intent": focus_state.get("intent_freshness")
+    }
+
+    if not state_obj.get("dynamic_focus"):
+        state_obj["dynamic_focus"] = state_obj["focus_snapshot"]
+
+def bind_current_visual_scene(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    visual = state_obj.get("active_visual_scene")
+
+    if visual:
+        bind_visual_scene_to_memory(user_id, visual)
+
+def build_memory_snapshot_v3(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    return {
+        "memory_version": "3.0",
+        "focus_state": state_obj.get("focus_state", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {}),
+        "active_flow": state_obj.get("active_flow")
+    }
