@@ -1701,3 +1701,129 @@ def calculate_context_priority(
     )
 
     return score
+
+
+
+# =====================================================
+# 🧠 APRIL CONTEXT SYSTEM V2 MEMORY INTEGRATION
+# =====================================================
+
+def build_memory_timeline_block(state):
+
+    timeline = state.get("memory_timeline", {})
+
+    if not timeline:
+        return ""
+
+    lines = ["\nMEMORY RECALL:"]
+
+    day0 = timeline.get("day_0", {})
+    day1 = timeline.get("day_1", {})
+
+    if day0:
+        lines.append("Today Memory Active")
+
+        for slot in ["A", "B"]:
+            entries = day0.get(slot, [])
+            if entries:
+                lines.append(
+                    f"{slot}: {len(entries)} active topics"
+                )
+
+    if day1:
+        lines.append("Yesterday Memory Available")
+
+    return "\n".join(lines)
+
+
+def build_unified_focus_block(state):
+
+    focus_state = state.get("focus_state", {})
+
+    if focus_state:
+
+        lines = ["\nFOCUS STATE:"]
+
+        if focus_state.get("active_topic"):
+            lines.append(
+                f"Active Topic: {focus_state.get('active_topic')}"
+            )
+
+        if focus_state.get("active_goal"):
+            lines.append(
+                f"Active Goal: {focus_state.get('active_goal')}"
+            )
+
+        if focus_state.get("priority_score") is not None:
+            lines.append(
+                f"Priority: {focus_state.get('priority_score')}"
+            )
+
+        if focus_state.get("intent_freshness") is not None:
+            lines.append(
+                f"Intent Freshness: {focus_state.get('intent_freshness')}"
+            )
+
+        return "\n".join(lines)
+
+    return build_dynamic_focus_block(state)
+
+
+def calculate_context_priority_v2(
+    lowered,
+    dynamic_focus,
+    visual_focus,
+    trajectory,
+    focus_state=None
+):
+
+    score = calculate_context_priority(
+        lowered,
+        dynamic_focus,
+        visual_focus,
+        trajectory
+    )
+
+    focus_state = focus_state or {}
+
+    active_topic = str(
+        focus_state.get("active_topic", "")
+    ).lower()
+
+    if active_topic and active_topic in lowered:
+        score += 10
+
+    score += int(
+        focus_state.get(
+            "priority_score",
+            0
+        )
+    )
+
+    return score
+
+
+def build_context_memory_bridge(state):
+
+    return {
+        "focus_state":
+            state.get("focus_state", {}),
+
+        "memory_timeline":
+            state.get("memory_timeline", {}),
+
+        "memory_cycle":
+            state.get("memory_cycle", {}),
+
+        "dynamic_focus":
+            state.get("dynamic_focus", {}),
+
+        "goal_hierarchy":
+            state.get("goal_hierarchy", {}),
+
+        "open_loops":
+            state.get("open_loops", []),
+
+        "memory_signals":
+            state.get("memory_signals", {})
+    }
