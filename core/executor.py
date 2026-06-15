@@ -979,10 +979,6 @@ async def execute_rooms(
             if isinstance(result, dict):
                 blocks.append(result)
 
-        blocks = normalize_scene_blocks(
-            blocks
-        )
-
         return {
             "channel": RESPONSE_CHANNEL,
             "room": "scene",
@@ -994,89 +990,6 @@ async def execute_rooms(
         }
 
     return None
-
-
-
-# =========================================================
-# 🧠 SCENE COMPOSER
-# =========================================================
-
-def normalize_scene_blocks(
-    blocks
-):
-
-    if not isinstance(blocks, list):
-        return blocks
-
-    normalized = []
-
-    for block in blocks:
-
-        if not isinstance(block, dict):
-            normalized.append(block)
-            continue
-
-        block_type = str(
-            block.get("type", "")
-        ).lower()
-
-        # ================================================
-        # FORMULA NORMALIZATION
-        # ================================================
-
-        if block_type == "formula":
-
-            formula_value = str(
-                block.get("formula")
-                or block.get("content")
-                or ""
-            )
-
-            lines = [
-                x.rstrip()
-                for x in formula_value.splitlines()
-            ]
-
-            formula_lines = []
-            explanation_lines = []
-
-            for line in lines:
-
-                stripped = line.strip()
-
-                if not stripped:
-                    continue
-
-                if (
-                    "=" in stripped
-                    or "\\frac" in stripped
-                    or "\\sqrt" in stripped
-                    or "\\int" in stripped
-                    or "\\sum" in stripped
-                ):
-                    formula_lines.append(stripped)
-                else:
-                    explanation_lines.append(stripped)
-
-            if formula_lines:
-
-                normalized.append({
-                    **block,
-                    "formula": "\n".join(formula_lines)
-                })
-
-                if explanation_lines:
-
-                    normalized.append({
-                        "type": "text",
-                        "content": "\n".join(explanation_lines)
-                    })
-
-                continue
-
-        normalized.append(block)
-
-    return normalized
 
 
 # =========================================================
