@@ -980,6 +980,51 @@ def build_visual_scene_bridge(state):
     }
 
 
+
+# =========================================================
+# 🧠 REPRESENTATION UNDERSTANDING LAYER
+# =========================================================
+
+EXPLANATION_WORDS = [
+    "объясни","почему","разбери","расскажи",
+    "как работает","что означает","анализ"
+]
+
+def build_representation_understanding(text):
+
+    t = (text or "").lower()
+
+    subject_type = "text"
+
+    if "формул" in t:
+        subject_type = "formula"
+    elif "график" in t:
+        subject_type = "graph"
+    elif "таблиц" in t:
+        subject_type = "table"
+
+    interaction_mode = "discussion"
+
+    if any(x in t for x in EXPLANATION_WORDS):
+        interaction_mode = "explanation"
+    elif any(x in t for x in ["построй","нарисуй","создай"]):
+        interaction_mode = "construction"
+
+    renderer_required = (
+        interaction_mode == "construction"
+        and subject_type in ["formula","graph","table"]
+    )
+
+    return {
+        "subject_type": subject_type,
+        "interaction_mode": interaction_mode,
+        "renderer_required": renderer_required,
+        "renderer_candidate": subject_type != "text",
+        "prefer_text_explanation":
+            interaction_mode == "explanation"
+    }
+
+
 # =========================================================
 # 🧠 CORE ANALYZER
 # =========================================================
@@ -1044,6 +1089,10 @@ def analyze_cognition(
 
     visual_focus = build_visual_focus_analysis(
         t
+    )
+
+    representation_understanding = (
+        build_representation_understanding(text)
     )
 
     # =========================================================
@@ -1249,6 +1298,9 @@ def analyze_cognition(
 
         "visual_scene_bridge":
             visual_scene_bridge,
+
+        "representation_understanding":
+            representation_understanding,
 
         # =====================================================
         # 🧠 GOLDEN MEMORY
