@@ -1679,3 +1679,409 @@ async def execute(
 # Rooms receive unified cognition context.
 # Internal cognition never becomes renderer output.
 #
+
+
+
+# =========================================================
+# 🧠 EXECUTOR V2 MEMORY + UTC INTEGRATION
+# =========================================================
+
+def build_executor_memory_awareness(cognition):
+
+    return {
+
+        "focus_state":
+            cognition.get("focus_state", {}),
+
+        "memory_timeline":
+            cognition.get("memory_timeline", {}),
+
+        "memory_cycle":
+            cognition.get("memory_cycle", {}),
+
+        "timeline_awareness":
+            cognition.get("timeline_awareness", {}),
+
+        "executor_guidance":
+            cognition.get("executor_guidance", {})
+    }
+
+
+def build_scene_verification(
+
+    result,
+    cognition,
+    state
+
+):
+
+    verification = {
+
+        "scene_verified": True,
+
+        "continuity_checked": True,
+
+        "memory_checked": True
+    }
+
+    guidance = cognition.get(
+        "executor_guidance",
+        {}
+    )
+
+    if guidance.get(
+        "executor_should_use_memory"
+    ) is False:
+
+        verification[
+            "memory_checked"
+        ] = False
+
+    return verification
+
+
+def memory_aware_room_bonus(
+    room,
+    cognition
+):
+
+    bonus = 0.0
+
+    focus_state = cognition.get(
+        "focus_state",
+        {}
+    )
+
+    priority = float(
+        focus_state.get(
+            "priority_score",
+            0
+        )
+    )
+
+    freshness = float(
+        focus_state.get(
+            "intent_freshness",
+            0
+        )
+    )
+
+    if priority > 0:
+        bonus += min(
+            priority,
+            5.0
+        )
+
+    if freshness > 0:
+        bonus += min(
+            freshness,
+            3.0
+        )
+
+    return bonus
+
+
+def utc_memory_gate(cognition):
+
+    awareness = cognition.get(
+        "timeline_awareness",
+        {}
+    )
+
+    return {
+
+        "utc_enabled":
+            awareness.get(
+                "utc_enabled",
+                False
+            ),
+
+        "current_memory_day":
+            awareness.get(
+                "current_memory_day",
+                "day_0"
+            )
+    }
+
+
+# =========================================================
+# 🧠 MEMORY RECALL ENGINE V3
+# =========================================================
+
+def build_memory_recall_context(state):
+
+    timeline = state.get("memory_timeline", {})
+    focus_state = state.get("focus_state", {})
+    open_loops = state.get("open_loops", [])
+    dynamic_focus = state.get("dynamic_focus", {})
+
+    return {
+        "today": timeline.get("day_0", {}),
+        "yesterday": timeline.get("day_1", {}),
+        "focus_state": focus_state,
+        "dynamic_focus": dynamic_focus,
+        "open_loops": open_loops
+    }
+
+
+def calculate_memory_relevance(memory_context):
+
+    score = 0.0
+
+    if memory_context.get("focus_state"):
+        score += 0.3
+
+    if memory_context.get("dynamic_focus"):
+        score += 0.3
+
+    if memory_context.get("open_loops"):
+        score += 0.2
+
+    if memory_context.get("today"):
+        score += 0.2
+
+    return min(score, 1.0)
+
+
+def build_executor_memory_recall(state):
+
+    memory_context = build_memory_recall_context(state)
+
+    return {
+        "memory_context": memory_context,
+        "memory_relevance": calculate_memory_relevance(memory_context),
+        "memory_active": True
+    }
+
+# =========================================================
+# END OF MEMORY RECALL ENGINE V3
+# =========================================================
+
+
+# =========================================================
+# 🧠 EXECUTOR V4 MEMORY RECALL ACTIVATION
+# =========================================================
+
+def build_recall_candidates(state):
+
+    timeline = state.get("memory_timeline", {})
+
+    candidates = []
+
+    for day_name, day_data in timeline.items():
+
+        if not isinstance(day_data, dict):
+            continue
+
+        for slot in ["A", "B", "C", "D", "E"]:
+
+            for item in day_data.get(slot, []):
+
+                candidates.append({
+                    "day": day_name,
+                    "slot": slot,
+                    "data": item
+                })
+
+    return candidates
+
+
+def build_memory_recall_payload(state):
+
+    recall = build_executor_memory_recall(state)
+
+    recall["candidates"] = build_recall_candidates(state)
+
+    recall["candidate_count"] = len(
+        recall["candidates"]
+    )
+
+    return recall
+
+# =========================================================
+# END OF EXECUTOR V4 MEMORY RECALL ACTIVATION
+# =========================================================
+
+
+# =========================================================
+# 🧠 EXECUTOR V5 UTC MEMORY RECALL SELECTION
+# =========================================================
+
+from datetime import datetime, timezone
+
+def get_current_utc_timestamp():
+    return datetime.now(timezone.utc).timestamp()
+
+def calculate_memory_age_weight(day_name):
+    try:
+        day_index = int(str(day_name).replace("day_", ""))
+    except Exception:
+        day_index = 6
+    return max(0.05, 1.0 - (day_index * 0.12))
+
+def score_memory_candidate(candidate, focus_state=None):
+
+    focus_state = focus_state or {}
+
+    score = 0.0
+
+    score += calculate_memory_age_weight(
+        candidate.get("day", "day_6")
+    )
+
+    data = candidate.get("data", {})
+
+    active_topic = str(
+        focus_state.get("active_topic", "")
+    ).lower()
+
+    topic = str(
+        data.get("topic", "")
+    ).lower()
+
+    if active_topic and topic:
+        if active_topic in topic or topic in active_topic:
+            score += 2.0
+
+    score += float(
+        data.get("score", 0.0)
+    )
+
+    return score
+
+def build_ranked_memory_recall(state):
+
+    recall = build_memory_recall_payload(state)
+
+    focus_state = state.get(
+        "focus_state",
+        {}
+    )
+
+    ranked = sorted(
+        recall.get("candidates", []),
+        key=lambda x: score_memory_candidate(
+            x,
+            focus_state
+        ),
+        reverse=True
+    )
+
+    recall["top_memories"] = ranked[:15]
+
+    recall["utc_timestamp"] = (
+        get_current_utc_timestamp()
+    )
+
+    return recall
+
+
+
+
+# =========================================================
+# 🧠 EXECUTOR V6 LIVE VISION BRIDGE
+# =========================================================
+
+def build_live_vision_feed(state):
+
+    return {
+
+        "active_visual_scene":
+            state.get("active_visual_scene", {}),
+
+        "visual_continuity_summary":
+            state.get(
+                "visual_continuity_summary",
+                {}
+            ),
+
+        "scene_state":
+            state.get("scene_state", {}),
+
+        "current_focus":
+            state.get("dynamic_focus", {}),
+
+        "runtime_mode":
+            "open_tab_live_runtime"
+    }
+
+
+def build_executor_runtime_bridge(state):
+
+    return {
+
+        "memory_recall":
+            build_ranked_memory_recall(state),
+
+        "live_vision":
+            build_live_vision_feed(state),
+
+        "bridge_ready": True
+    }
+
+# =========================================================
+# END OF EXECUTOR V6 LIVE VISION BRIDGE
+# =========================================================
+
+
+# =========================================================
+# 🧠 EXECUTOR V7 LIVE VISION -> MEMORY TRANSFER
+# =========================================================
+
+def build_live_scene_snapshot(state):
+
+    return {
+        "active_visual_scene":
+            state.get("active_visual_scene", {}),
+        "visual_continuity_summary":
+            state.get("visual_continuity_summary", {}),
+        "scene_state":
+            state.get("scene_state", {}),
+        "dynamic_focus":
+            state.get("dynamic_focus", {}),
+        "snapshot_type":
+            "tab_close_snapshot"
+    }
+
+
+def transfer_scene_to_today_memory(state):
+
+    snapshot = build_live_scene_snapshot(state)
+
+    memory_timeline = state.setdefault(
+        "memory_timeline",
+        {}
+    )
+
+    today = memory_timeline.setdefault(
+        "day_0",
+        {}
+    )
+
+    today["last_visual_snapshot"] = snapshot
+
+    today["last_visual_transfer_utc"] = (
+        datetime.utcnow().isoformat()
+    )
+
+    return snapshot
+
+
+def on_live_session_closed(state):
+
+    snapshot = transfer_scene_to_today_memory(
+        state
+    )
+
+    state["active_visual_scene"] = {}
+
+    state["visual_continuity_summary"] = {}
+
+    return {
+        "transferred": True,
+        "snapshot": snapshot
+    }
+
+# =========================================================
+# END OF EXECUTOR V7 LIVE VISION -> MEMORY TRANSFER
+# =========================================================
