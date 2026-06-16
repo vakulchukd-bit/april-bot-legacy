@@ -674,6 +674,65 @@ def stabilize_room_score(
     )
 
 
+
+# =====================================================
+# 🧠 ARTIFACT SCENE PLANNER
+# =====================================================
+
+def build_scene_plan(response_decision, semantic=None):
+
+    semantic = semantic or {}
+
+    artifact_scene = response_decision.get(
+        "artifact_scene",
+        []
+    )
+
+    artifact_bundle = response_decision.get(
+        "artifact_bundle",
+        semantic.get("artifact_bundle", {})
+    )
+
+    primary = artifact_bundle.get(
+        "primary",
+        []
+    )
+
+    secondary = artifact_bundle.get(
+        "secondary",
+        []
+    )
+
+    scene_order = []
+
+    scene_order.extend(primary)
+    scene_order.extend(secondary)
+
+    return {
+
+        "goal":
+            semantic.get(
+                "intent",
+                "dialogue"
+            ),
+
+        "primary_artifacts":
+            primary,
+
+        "secondary_artifacts":
+            secondary,
+
+        "artifact_scene":
+            artifact_scene,
+
+        "scene_order":
+            scene_order,
+
+        "composition_strategy":
+            "artifact_first_scene_composition"
+    }
+
+
 # =========================================================
 # 🧠 TASK RESOLUTION LAYER
 # =========================================================
@@ -970,6 +1029,20 @@ async def execute_rooms(
             f"🔥 COLLECTED ROOMS: {len(collected_results)}"
         )
 
+        # ================================================
+        # 🔥 ARTIFACT SCENE COMPOSITION
+        # ================================================
+
+        artifact_scene = response_decision.get(
+            "artifact_scene",
+            []
+        )
+
+        scene_plan = build_scene_plan(
+            response_decision,
+            semantic
+        )
+
         blocks = []
 
         for item in collected_results:
@@ -985,7 +1058,10 @@ async def execute_rooms(
             "trajectory": context.get("trajectory"),
             "result": {
                 "type": "scene",
-                "blocks": blocks
+                "blocks": blocks,
+                "artifact_scene": artifact_scene,
+                "scene_plan": scene_plan,
+                "scene_composition_ready": len(artifact_scene) > 0
             }
         }
 
