@@ -1206,7 +1206,7 @@ def analyze(
     result["artifact_bundle"] = artifact_bundle
 
 
-safe_semantic_log(
+    safe_semantic_log(
         f"INTENT: {result['intent']}"
     )
 
