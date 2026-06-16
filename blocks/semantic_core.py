@@ -384,6 +384,43 @@ def detect_graph_action(text):
 
     return "unknown"
 
+
+# =====================================================
+# 🔥 ARTIFACT UNDERSTANDING
+# =====================================================
+
+def build_artifact_bundle():
+
+    return {
+
+        "domain": "general",
+
+        "primary": [],
+
+        "secondary": []
+    }
+
+
+def enrich_artifact_bundle(
+    bundle,
+    semantic_result
+):
+
+    if semantic_result.get("contains_object"):
+        bundle["primary"].append("artifact")
+
+    if semantic_result.get("contains_explanation"):
+        bundle["secondary"].append("explanation")
+
+    if semantic_result.get("contains_analysis"):
+        bundle["secondary"].append("analysis")
+
+    if semantic_result.get("contains_legend"):
+        bundle["secondary"].append("legend")
+
+    return bundle
+
+
 # =====================================================
 # 🔥 ANALYZE
 # =====================================================
@@ -1154,7 +1191,22 @@ def analyze(
             result.get(key, 0.0)
         )
 
-    safe_semantic_log(
+    
+    # =====================================================
+    # 🔥 ARTIFACT BUNDLE
+    # =====================================================
+
+    artifact_bundle = build_artifact_bundle()
+
+    artifact_bundle = enrich_artifact_bundle(
+        artifact_bundle,
+        result
+    )
+
+    result["artifact_bundle"] = artifact_bundle
+
+
+safe_semantic_log(
         f"INTENT: {result['intent']}"
     )
 
