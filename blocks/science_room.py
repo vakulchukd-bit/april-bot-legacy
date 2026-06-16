@@ -93,6 +93,87 @@ def safe_lower(text):
     except:
         return ""
 
+
+# ===============================
+# 🔥 ARTIFACT UNDERSTANDING
+# ===============================
+
+ARTIFACT_TYPES = {
+
+    "PRIMARY": [
+        "formula","graph","code","table",
+        "link","image","gallery","scene"
+    ],
+
+    "SECONDARY": [
+        "explanation","analysis","application",
+        "description","commentary","comparison",
+        "summary","usage","reference","instruction"
+    ]
+}
+
+def build_artifact_bundle(
+    domain,
+    primary=None,
+    secondary=None,
+    confidence=1.0
+):
+
+    return {
+
+        "artifact_bundle": True,
+
+        "domain": domain,
+
+        "primary": primary or [],
+
+        "secondary": secondary or [],
+
+        "confidence": confidence
+    }
+
+def detect_science_artifacts(text):
+
+    t = safe_lower(text)
+
+    primary = []
+    secondary = []
+
+    if any(x in t for x in [
+        "формула","уравнение","equation"
+    ]):
+        primary.append("formula")
+
+    if any(x in t for x in [
+        "график","plot","graph","функция"
+    ]):
+        primary.append("graph")
+
+    if any(x in t for x in [
+        "объясни","объяснение",
+        "что означает","расскажи"
+    ]):
+        secondary.append("explanation")
+
+    if any(x in t for x in [
+        "применение","где используется",
+        "используется"
+    ]):
+        secondary.append("application")
+
+    if any(x in t for x in [
+        "сравни","отличие","разница"
+    ]):
+        secondary.append("comparison")
+
+    return build_artifact_bundle(
+        "science",
+        primary,
+        secondary,
+        0.95
+    )
+
+
 # ===============================
 # 🔥 CODE DETECTION
 # ===============================
@@ -325,6 +406,8 @@ class ScienceRoom:
         safe_patch_log(
             f"SCIENCE ENTER: {t[:60]}"
         )
+
+        semantic["artifact_bundle"] = detect_science_artifacts(text)
 
         # ======================================
         # 🔥 MACHINE FLAGS
