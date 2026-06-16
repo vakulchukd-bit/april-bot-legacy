@@ -294,6 +294,34 @@ def build_response_decision(
         "interaction_mode"
     )
 
+    # =================================================
+    # 🔥 ARTIFACT UNDERSTANDING
+    # =====================================================
+
+    artifact_bundle = semantic.get(
+        "artifact_bundle",
+        {}
+    )
+
+    primary_artifacts = artifact_bundle.get(
+        "primary",
+        []
+    )
+
+    secondary_artifacts = artifact_bundle.get(
+        "secondary",
+        []
+    )
+
+    artifact_scene = []
+
+    for artifact in primary_artifacts:
+        artifact_scene.append(artifact)
+
+    for artifact in secondary_artifacts:
+        artifact_scene.append(artifact)
+
+
 
 
     # =================================================
@@ -1004,7 +1032,20 @@ def build_response_decision(
             internal_reasoning_only,
 
         "assistant_guidance_priority":
-            task_requires_clarification or should_guide
+            task_requires_clarification or should_guide,
+
+        # =================================================
+        # 🔥 ARTIFACT SYSTEM
+        # =====================================================
+
+        "artifact_bundle":
+            artifact_bundle,
+
+        "artifact_scene":
+            artifact_scene,
+
+        "scene_composition_ready":
+            len(artifact_scene) > 0
     }
 
     decision_exit(
