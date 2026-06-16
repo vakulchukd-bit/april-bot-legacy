@@ -703,37 +703,6 @@ def build_scene_plan(response_decision, semantic=None):
         []
     )
 
-    # ==========================================
-    # GRAPH PRIORITY PATCH
-    # ==========================================
-
-    intent = str(
-        semantic.get("intent", "")
-    ).lower()
-
-    if (
-        semantic.get("math_intent")
-        or "graph" in intent
-        or "plot" in intent
-    ):
-
-        primary = [
-            x for x in primary
-            if str(x).lower() != "formula"
-        ]
-
-        if "graph" not in [
-            str(x).lower()
-            for x in primary
-        ]:
-            primary.insert(0, "graph")
-
-        if "text" not in [
-            str(x).lower()
-            for x in secondary
-        ]:
-            secondary.append("text")
-
     scene_order = []
 
     scene_order.extend(primary)
