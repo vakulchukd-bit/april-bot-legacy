@@ -1026,6 +1026,40 @@ def should_skip_formatting(
     return False
 
 
+
+# =====================================================
+# 🔥 MATH NORMALIZATION
+# =====================================================
+
+def normalize_math_explanations(text):
+
+    if not isinstance(text, str):
+        return text
+
+    normalized = []
+
+    for line in text.splitlines():
+
+        line = re.sub(r"`([^`]+)`", r"\1", line)
+        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+
+        line = re.sub(
+            r"^\s*[-•]\s*([A-Za-zА-Яа-яα-ωΑ-Ω0-9_ρλωθπΩΣμν]+)\s*[:–-]\s*",
+            r"\1 — ",
+            line
+        )
+
+        line = re.sub(
+            r"^\s*([A-Za-zА-Яа-яα-ωΑ-Ω0-9_ρλωθπΩΣμν]+)\s*[:–-]\s*",
+            r"\1 — ",
+            line
+        )
+
+        normalized.append(line)
+
+    return "\n".join(normalized)
+
+
 # =====================================================
 # 🔥 FINAL VOICE STABILIZATION
 # =====================================================
@@ -1129,6 +1163,10 @@ def beautify_response(
     text = stabilize_semantic_flow(
         text,
         behavior
+    )
+
+    text = normalize_math_explanations(
+        text
     )
 
     text = apply_visual_enrichment(
