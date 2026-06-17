@@ -356,6 +356,18 @@ async def process_web_message(
     text
 ):
 
+    async def run_with_activity(chat_id, coro):
+
+        print("🔥 ACTIVITY WRAPPER START")
+        print("🔥 CHAT:", chat_id)
+
+        result = await coro
+
+        print("🔥 ACTIVITY WRAPPER END")
+        print("🔥 RESULT TYPE:", type(result))
+
+        return result
+
     result = await execute(
 
         user_id=user_id,
@@ -364,7 +376,7 @@ async def process_web_message(
 
         chat_id=user_id,
 
-        run_with_activity=None
+        run_with_activity=run_with_activity
     )
 
     # =====================================================
