@@ -1145,6 +1145,50 @@ def extract_table_payload(text):
     }
 
 
+
+# =====================================================
+# 🚀 PROFESSIONAL ROOM REGISTRY V1
+# =====================================================
+
+PROFESSIONAL_ROOMS = {
+
+    "graph": {
+        "artifact": "GraphArtifact",
+        "web_block": "GraphBlock",
+        "quality_target": 0.95
+    },
+
+    "formula": {
+        "artifact": "FormulaArtifact",
+        "web_block": "FormulaBlock",
+        "quality_target": 0.95
+    },
+
+    "table": {
+        "artifact": "TableArtifact",
+        "web_block": "TableBlock",
+        "quality_target": 0.95
+    },
+
+    "diagram": {
+        "artifact": "DiagramArtifact",
+        "web_block": "DiagramBlock",
+        "quality_target": 0.95
+    },
+
+    "code": {
+        "artifact": "CodeArtifact",
+        "web_block": "CodeBlock",
+        "quality_target": 0.95
+    },
+
+    "link": {
+        "artifact": "LinkArtifact",
+        "web_block": "LinkCard",
+        "quality_target": 0.95
+    }
+}
+
 # =====================================================
 # 🚀 ROOMS
 # =====================================================
