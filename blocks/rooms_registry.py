@@ -368,6 +368,60 @@ def detect_image_signal(text):
     )
 
 
+
+# =====================================================
+# 🔥 ROOM INTENT VECTOR
+# =====================================================
+
+def build_room_intent_vector(text, context):
+
+    vector = {
+        "graph": 0.0,
+        "formula": 0.0,
+        "function": 0.0,
+        "table": 0.0,
+        "link": 0.0
+    }
+
+    executor_context = get_executor_context(context)
+
+    trajectory = executor_context.get("trajectory")
+    cognition = executor_context.get("cognition", {})
+    semantic = executor_context.get("semantic", {})
+
+    if trajectory == "graph":
+        vector["graph"] += 5.0
+
+    if trajectory == "formula":
+        vector["formula"] += 5.0
+
+    if trajectory == "function":
+        vector["function"] += 5.0
+
+    if detect_visual_math_signal(text):
+        vector["graph"] += 2.0
+        vector["formula"] += 1.0
+
+    active_focus = str(
+        cognition.get("dynamic_focus", {})
+    ).lower()
+
+    render_intent = semantic.get("render_intent", False)
+
+    if render_intent:
+        vector["graph"] += 1.5
+        vector["formula"] += 1.5
+        vector["function"] += 1.5
+
+    if "graph" in active_focus:
+        vector["graph"] += 2.0
+
+    if "formula" in active_focus:
+        vector["formula"] += 2.0
+
+    return vector
+
+
 # =====================================================
 # 🔥 IMAGE GENERATE
 # =====================================================
@@ -859,7 +913,8 @@ class GraphRoom(Room):
         if isinstance(active_flow, dict) and active_flow.get("type") == "graph":
             return 7.0
 
-        return 0.0
+        vector = build_room_intent_vector(text, context)
+        return max(vector.get("graph", 0.0), 0.0)
 
     async def handle(self, user_id, text, context, run):
 
@@ -883,7 +938,8 @@ class FormulaRoom(Room):
         if executor_context.get("trajectory") == "formula":
             return 8.0
 
-        return 0.0
+        vector = build_room_intent_vector(text, context)
+        return max(vector.get("formula", 0.0), 0.0)
 
     async def handle(self, user_id, text, context, run):
 
