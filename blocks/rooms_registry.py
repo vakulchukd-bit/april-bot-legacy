@@ -921,7 +921,7 @@ class GraphRoom(Room):
         return build_artifact(
             "graph",
             data={
-                "formula": text,
+                "formula": extract_graph_formula(text),
                 "title":"Graph",
                 "source": text
             },
@@ -953,7 +953,7 @@ class FormulaRoom(Room):
         return build_artifact(
             "formula",
             data={
-                "formula": text,
+                "formula": extract_formula_candidate(text) or text,
                 "title":"Formula"
             },
             view={
@@ -1006,8 +1006,7 @@ class TableRoom(Room):
             data={
                 "title":"Table",
                 "source": text,
-                "columns":[],
-                "rows":[]
+                **extract_table_payload(text)
             },
             view={
                 "spreadsheet":True
@@ -1114,6 +1113,36 @@ class CodeRoom(Room):
                 "line_numbers":True
             }
         )
+
+
+
+# =====================================================
+# 🚀 ARTIFACT EXTRACTORS V4
+# =====================================================
+
+def extract_formula_candidate(text):
+    patterns = [
+        r"y\s*=\s*[^\n,;]+",
+        r"f\(x\)\s*=\s*[^\n,;]+",
+        r"[A-Za-zА-Яа-я]+\s*=\s*[^\n,;]+"
+    ]
+    for p in patterns:
+        m = re.search(p, text or "")
+        if m:
+            return m.group(0).strip()
+    return ""
+
+def extract_graph_formula(text):
+    formula = extract_formula_candidate(text)
+    if formula:
+        return formula
+    return "y=x"
+
+def extract_table_payload(text):
+    return {
+        "columns":["Column 1","Column 2"],
+        "rows":[["Value 1","Value 2"]]
+    }
 
 
 # =====================================================
