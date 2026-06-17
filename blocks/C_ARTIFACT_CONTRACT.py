@@ -1,107 +1,51 @@
 # =====================================================
-# APRIL C_ARTIFACT_CONTRACT
+# FACTORY ROOM MAP
 # =====================================================
 
-from dataclasses import dataclass, field
-from typing import Any, Dict
-import uuid
-import time
+FACTORY_ROOM_MAP = {
 
+    # VISUAL
 
-@dataclass
-class ArtifactMetadata:
+    "graph": "C_GRAPH_ROOM",
+    "formula": "C_FORMULA_ROOM",
+    "table": "C_TABLE_ROOM",
+    "diagram": "C_DIAGRAM_ROOM",
+    "code": "C_CODE_ROOM",
+    "link": "C_LINK_ROOM",
+    "gallery": "C_GALLERY_ROOM",
+    "function": "C_FUNCTION_ROOM",
 
-    artifact_id: str = field(
-        default_factory=lambda: str(uuid.uuid4())
-    )
+    # SCIENCE
 
-    artifact_type: str = ""
+    "mathematics": "C_MATHEMATICS_ROOM",
+    "trigonometry": "C_TRIGONOMETRY_ROOM",
+    "physics": "C_PHYSICS_ROOM",
+    "chemistry": "C_CHEMISTRY_ROOM",
+    "biology": "C_BIOLOGY_ROOM",
 
-    room_source: str = ""
+    # KNOWLEDGE
 
-    created_at: float = field(
-        default_factory=time.time
-    )
+    "literature": "C_LITERATURE_ROOM",
+    "web": "C_WEB_ROOM",
+    "utc": "C_UTC_ROOM",
 
+    # PROFESSIONAL
 
-@dataclass
-class ArtifactQuality:
-
-    quality_score: float = 0.0
-
-    confidence_score: float = 0.0
-
-    completeness_score: float = 0.0
-
-    validation_passed: bool = False
-
-
-@dataclass
-class ArtifactRenderContract:
-
-    web_block: str = ""
-
-
-@dataclass
-class BaseArtifact:
-
-    metadata: ArtifactMetadata
-
-    quality: ArtifactQuality
-
-    render: ArtifactRenderContract
-
-    data: Dict[str, Any]
-
-
-ARTIFACT_BLOCK_MAP = {
-
-    "graph": "GraphBlock",
-
-    "formula": "FormulaBlock",
-
-    "table": "TableBlock",
-
-    "diagram": "DiagramBlock",
-
-    "code": "CodeBlock",
-
-    "link": "LinkCard",
-
-    "gallery": "GalleryBlock",
-
-    "function": "FunctionBlock"
+    "engineering": "C_ENGINEERING_ROOM",
+    "politics": "C_POLITICS_ROOM",
+    "news": "C_NEWS_ROOM",
+    "social": "C_SOCIAL_ROOM",
+    "it": "C_IT_ROOM"
 }
 
+# =====================================================
+# FACTORY STATUS
+# =====================================================
 
-def create_artifact(
+FACTORY_STATUS = {
 
-    artifact_type: str,
-
-    room_source: str,
-
-    data: Dict[str, Any]
-
-):
-
-    return BaseArtifact(
-
-        metadata=ArtifactMetadata(
-
-            artifact_type=artifact_type,
-
-            room_source=room_source
-        ),
-
-        quality=ArtifactQuality(),
-
-        render=ArtifactRenderContract(
-
-            web_block=ARTIFACT_BLOCK_MAP.get(
-                artifact_type,
-                ""
-            )
-        ),
-
-        data=data
-    )
+    "visual_rooms": True,
+    "science_rooms": True,
+    "knowledge_rooms": True,
+    "professional_rooms": True
+}
