@@ -483,6 +483,55 @@ def build_engineering_prompt(
         + code
     )
 
+
+# =====================================================
+# 🚀 APRIL PROFESSIONAL ENGINEERING CONTRACT
+# =====================================================
+
+class WorkOrder:
+
+    def __init__(
+        self,
+        goal=None,
+        purpose=None,
+        role=None,
+        dependencies=None,
+        expected_artifact=None,
+        quality_target=0.95,
+        active_scene=None
+    ):
+        self.goal = goal
+        self.purpose = purpose
+        self.role = role
+        self.dependencies = dependencies or []
+        self.expected_artifact = expected_artifact
+        self.quality_target = quality_target
+        self.active_scene = active_scene
+
+    def to_dict(self):
+
+        return {
+            "goal": self.goal,
+            "purpose": self.purpose,
+            "role": self.role,
+            "dependencies": self.dependencies,
+            "expected_artifact": self.expected_artifact,
+            "quality_target": self.quality_target,
+            "active_scene": self.active_scene
+        }
+
+
+PROFESSIONAL_ARTIFACT_TARGETS = {
+
+    "graph": "GraphArtifact",
+    "formula": "FormulaArtifact",
+    "table": "TableArtifact",
+    "diagram": "DiagramArtifact",
+    "code": "CodeArtifact",
+    "link": "LinkArtifact"
+}
+
+
 # =====================================================
 # 🔥 MAIN API
 # =====================================================
