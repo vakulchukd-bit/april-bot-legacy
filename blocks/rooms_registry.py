@@ -918,12 +918,19 @@ class GraphRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return {
-            "type": "graph",
-            "data": {
+        return build_artifact(
+            "graph",
+            data={
+                "formula": text,
+                "title":"Graph",
                 "source": text
+            },
+            view={
+                "grid":True,
+                "legend":True,
+                "zoom":True
             }
-        }
+        )
 
 
 class FormulaRoom(Room):
@@ -943,10 +950,17 @@ class FormulaRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return {
-            "type": "formula",
-            "data": text
-        }
+        return build_artifact(
+            "formula",
+            data={
+                "formula": text,
+                "title":"Formula"
+            },
+            view={
+                "latex":True,
+                "variables":True
+            }
+        )
 
 
 class FunctionRoom(Room):
@@ -987,10 +1001,18 @@ class TableRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return {
-            "type": "table",
-            "data": text
-        }
+        return build_artifact(
+            "table",
+            data={
+                "title":"Table",
+                "source": text,
+                "columns":[],
+                "rows":[]
+            },
+            view={
+                "spreadsheet":True
+            }
+        )
 
 
 class LinkRoom(Room):
@@ -1014,6 +1036,86 @@ class LinkRoom(Room):
             "data": text
         }
 
+
+# =====================================================
+# 🚀 APRIL V3 ARTIFACT HELPERS
+# =====================================================
+
+def build_artifact(
+    artifact_type,
+    data=None,
+    view=None,
+    edit=None,
+    responsive=None,
+    viewer=None
+):
+    return {
+        "type": artifact_type,
+        "data": data or {},
+        "view": view or {},
+        "edit": edit or {"editable": True},
+        "responsive": responsive or {
+            "desktop": True,
+            "tablet": True,
+            "mobile": True
+        },
+        "viewer": viewer or {}
+    }
+
+
+class DiagramRoom(Room):
+
+    name = "diagram"
+    room_type = "diagram_renderer"
+
+    def evaluate(self, text, context):
+        t = (text or "").lower()
+        if any(x in t for x in [
+            "схема","diagram","flow","архитектура",
+            "pipeline","mindmap","маршрут"
+        ]):
+            return 7.5
+        return 0.0
+
+    async def handle(self, user_id, text, context, run):
+        return build_artifact(
+            "diagram",
+            data={
+                "title":"Diagram",
+                "nodes":[],
+                "edges":[],
+                "source":text
+            },
+            view={
+                "layout":"vertical",
+                "zoom":True,
+                "pan":True
+            }
+        )
+
+
+class CodeRoom(Room):
+
+    name = "code"
+    room_type = "code_renderer"
+
+    def evaluate(self, text, context):
+        return 8.0 if detect_code_signal(text) else 0.0
+
+    async def handle(self, user_id, text, context, run):
+        return build_artifact(
+            "code",
+            data={
+                "language":"auto",
+                "filename":"generated.txt",
+                "source":text
+            },
+            view={
+                "line_numbers":True
+            }
+        )
+
+
 # =====================================================
 # 🚀 ROOMS
 # =====================================================
@@ -1029,6 +1131,10 @@ ROOMS = [
     FunctionRoom(),
 
     TableRoom(),
+
+    DiagramRoom(),
+
+    CodeRoom(),
 
     LinkRoom(),
 
