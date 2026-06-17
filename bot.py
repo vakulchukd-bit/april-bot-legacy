@@ -724,6 +724,11 @@ async def process_april_request(
     # 🔥 EXECUTOR
     # =====================================================
 
+    # APRIL STABILIZATION PATCH
+    # Do not pass None into Executor rooms pipeline.
+    async def run_with_activity(chat_id, coro):
+        return await coro
+
     result = await execute(
 
         user_id=user_id,
@@ -734,7 +739,7 @@ async def process_april_request(
 
         chat_id=0,
 
-        run_with_activity=None
+        run_with_activity=run_with_activity
     )
 
     # =====================================================
