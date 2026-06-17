@@ -1102,10 +1102,12 @@ def synthesize_final_answer(
     )
 
     if explanation_pref and result_type == "scene":
-        return {
-            "type": "text",
-            "data": ""
-        }
+
+        result["prefer_text_explanation"] = True
+
+        result["scene_preserved"] = True
+
+        return result
 
     if result_type != "text":
         return result
@@ -1535,6 +1537,38 @@ async def execute(
                 "type": "text",
                 "data": str(result)
             }
+
+        # =====================================================
+        # APRIL RESPONSE STABILIZATION
+        # =====================================================
+
+        if result.get("type") == "text":
+
+            original_text = (
+                result.get("data")
+                or result.get("content")
+                or ""
+            )
+
+            if isinstance(original_text, str):
+
+                formatted = format_response_presentation(
+
+                    text=original_text,
+
+                    user_text=text,
+
+                    semantic=semantic,
+
+                    cognition=cognition,
+
+                    response_decision=response_decision,
+
+                    visual_reference=visual_reference
+                )
+
+                result["data"] = formatted
+
 
         result_payload = result.get(
             "data"
