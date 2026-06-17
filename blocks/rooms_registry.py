@@ -84,6 +84,25 @@ import time
 import re
 
 # =====================================================
+# 🔥 C ROOMS
+# =====================================================
+
+from blocks.C_MATHEMATICS_ROOM import ROOM as MATHEMATICS_ROOM
+from blocks.C_TRIGONOMETRY_ROOM import ROOM as TRIGONOMETRY_ROOM
+from blocks.C_PHYSICS_ROOM import ROOM as PHYSICS_ROOM
+from blocks.C_CHEMISTRY_ROOM import ROOM as CHEMISTRY_ROOM
+from blocks.C_BIOLOGY_ROOM import ROOM as BIOLOGY_ROOM
+from blocks.C_LITERATURE_ROOM import ROOM as LITERATURE_ROOM
+from blocks.C_WEB_ROOM import ROOM as WEB_ROOM
+from blocks.C_UTC_ROOM import ROOM as UTC_ROOM
+from blocks.C_ENGINEERING_ROOM import ROOM as ENGINEERING_ROOM
+from blocks.C_POLITICS_ROOM import ROOM as POLITICS_ROOM
+from blocks.C_NEWS_ROOM import ROOM as NEWS_ROOM
+from blocks.C_SOCIAL_ROOM import ROOM as SOCIAL_ROOM
+from blocks.C_IT_ROOM import ROOM as IT_ROOM
+
+
+# =====================================================
 # 🔥 MACHINE CHANNELS
 # =====================================================
 
@@ -1187,6 +1206,21 @@ PROFESSIONAL_ROOMS = {
         "web_block": "LinkCard",
         "quality_target": 0.95
     }
+,
+    "mathematics": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "trigonometry": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "physics": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "chemistry": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "biology": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "literature": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "web": {"artifact":"LinkArtifact","web_block":"LinkCard","quality_target":0.95},
+    "utc": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "engineering": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "politics": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "news": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "social": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
+    "it": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95}
+
 }
 
 # =====================================================
@@ -1216,6 +1250,20 @@ ROOMS = [
     ImageEditRoom(),
 
     ImageGenerateRoom(),
+
+    MATHEMATICS_ROOM,
+    TRIGONOMETRY_ROOM,
+    PHYSICS_ROOM,
+    CHEMISTRY_ROOM,
+    BIOLOGY_ROOM,
+    LITERATURE_ROOM,
+    WEB_ROOM,
+    UTC_ROOM,
+    ENGINEERING_ROOM,
+    POLITICS_ROOM,
+    NEWS_ROOM,
+    SOCIAL_ROOM,
+    IT_ROOM,
 
     TextRoom(),
 ]
