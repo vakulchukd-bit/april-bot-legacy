@@ -569,3 +569,34 @@ def analyze_code(
     )
 
     return r.output_text
+
+
+
+# =====================================================
+# 🚀 APRIL EXPERT ROOM TARGETS
+# =====================================================
+
+EXPERT_ROOM_TARGETS = {
+
+    "mathematics": "FunctionArtifact",
+    "trigonometry": "FunctionArtifact",
+    "physics": "FunctionArtifact",
+    "chemistry": "FunctionArtifact",
+    "biology": "FunctionArtifact",
+
+    "literature": "FunctionArtifact",
+
+    "web": "LinkArtifact",
+
+    "utc": "FunctionArtifact",
+
+    "engineering": "FunctionArtifact",
+    "politics": "FunctionArtifact",
+    "news": "FunctionArtifact",
+    "social": "FunctionArtifact",
+    "it": "FunctionArtifact"
+}
+
+PROFESSIONAL_ARTIFACT_TARGETS.update(
+    EXPERT_ROOM_TARGETS
+)
