@@ -1,58 +1,58 @@
-# =====================================================
-# 🏭 APRIL C_MATHEMATICS_ROOM
-# =====================================================
+=====================================================
+
+🏭 APRIL C_MATHEMATICS_ROOM
+
+=====================================================
 
 from typing import Dict, Any
 
-from C_ARTIFACT_CONTRACT import create_artifact
-
+from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 class MathematicsRoom:
 
-    ROOM_ID = "MATHEMATICS_ROOM"
+ROOM_ID = "MATHEMATICS_ROOM"
 
-    ARTIFACT_TYPE = "function"
+ARTIFACT_TYPE = "function"
 
-    def process(
-        self,
-        task: Dict[str, Any]
-    ):
+def process(
+    self,
+    task: Dict[str, Any]
+):
 
-        topic = task.get(
-            "topic",
-            ""
-        )
+    topic = task.get(
+        "topic",
+        ""
+    )
 
-        artifact = create_artifact(
+    artifact = create_artifact(
 
-            artifact_type=
-                self.ARTIFACT_TYPE,
+        artifact_type=
+            self.ARTIFACT_TYPE,
 
-            room_source=
-                self.ROOM_ID,
+        room_source=
+            self.ROOM_ID,
 
-            data={
+        data={
 
-                "domain":
-                    "mathematics",
+            "domain":
+                "mathematics",
 
-                "topic":
-                    topic,
+            "topic":
+                topic,
 
-                "analysis":
-                    {}
-            }
-        )
+            "analysis":
+                {}
+        }
+    )
 
-        artifact.quality.validation_passed = True
+    artifact.quality.validation_passed = True
 
-        artifact.quality.quality_score = 1.0
+    artifact.quality.quality_score = 1.0
 
-        artifact.quality.confidence_score = 1.0
+    artifact.quality.confidence_score = 1.0
 
-        artifact.quality.completeness_score = 1.0
+    artifact.quality.completeness_score = 1.0
 
-        return artifact
-
+    return artifact
 
 ROOM = MathematicsRoom()
