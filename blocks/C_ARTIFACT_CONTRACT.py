@@ -1,141 +1,107 @@
 # =====================================================
-# 🏭 FACTORY ROOM MAP
+# APRIL C_ARTIFACT_CONTRACT
 # =====================================================
 
-FACTORY_ROOM_MAP = {
+from dataclasses import dataclass, field
+from typing import Any, Dict
+import uuid
+import time
 
-    # -------------------------------------------------
-    # VISUAL FACTORY
-    # -------------------------------------------------
 
-    "graph":
-        "C_GRAPH_ROOM",
+@dataclass
+class ArtifactMetadata:
 
-    "formula":
-        "C_FORMULA_ROOM",
+    artifact_id: str = field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
 
-    "table":
-        "C_TABLE_ROOM",
+    artifact_type: str = ""
 
-    "diagram":
-        "C_DIAGRAM_ROOM",
+    room_source: str = ""
 
-    "code":
-        "C_CODE_ROOM",
+    created_at: float = field(
+        default_factory=time.time
+    )
 
-    "link":
-        "C_LINK_ROOM",
 
-    "gallery":
-        "C_GALLERY_ROOM",
+@dataclass
+class ArtifactQuality:
 
-    "function":
-        "C_FUNCTION_ROOM",
+    quality_score: float = 0.0
 
-    # -------------------------------------------------
-    # SCIENCE FACTORY
-    # -------------------------------------------------
+    confidence_score: float = 0.0
 
-    "mathematics":
-        "C_MATHEMATICS_ROOM",
+    completeness_score: float = 0.0
 
-    "trigonometry":
-        "C_TRIGONOMETRY_ROOM",
+    validation_passed: bool = False
 
-    "physics":
-        "C_PHYSICS_ROOM",
 
-    "chemistry":
-        "C_CHEMISTRY_ROOM",
+@dataclass
+class ArtifactRenderContract:
 
-    "biology":
-        "C_BIOLOGY_ROOM",
+    web_block: str = ""
 
-    # -------------------------------------------------
-    # KNOWLEDGE FACTORY
-    # -------------------------------------------------
 
-    "literature":
-        "C_LITERATURE_ROOM",
+@dataclass
+class BaseArtifact:
 
-    "web":
-        "C_WEB_ROOM",
+    metadata: ArtifactMetadata
 
-    "utc":
-        "C_UTC_ROOM",
+    quality: ArtifactQuality
 
-    # -------------------------------------------------
-    # PROFESSIONAL FACTORY
-    # -------------------------------------------------
+    render: ArtifactRenderContract
 
-    "engineering":
-        "C_ENGINEERING_ROOM",
+    data: Dict[str, Any]
 
-    "politics":
-        "C_POLITICS_ROOM",
 
-    "news":
-        "C_NEWS_ROOM",
+ARTIFACT_BLOCK_MAP = {
 
-    "social":
-        "C_SOCIAL_ROOM",
+    "graph": "GraphBlock",
 
-    "it":
-        "C_IT_ROOM"
+    "formula": "FormulaBlock",
+
+    "table": "TableBlock",
+
+    "diagram": "DiagramBlock",
+
+    "code": "CodeBlock",
+
+    "link": "LinkCard",
+
+    "gallery": "GalleryBlock",
+
+    "function": "FunctionBlock"
 }
 
-# =====================================================
-# 🏭 FACTORY ROADMAP
-# =====================================================
 
-FACTORY_ROADMAP = {
+def create_artifact(
 
-    "foundation": [
+    artifact_type: str,
 
-        "room_protocol",
-        "rooms_registry",
-        "engineering_system"
-    ],
+    room_source: str,
 
-    "factory": [
+    data: Dict[str, Any]
 
-        "C_ARTIFACT_CONTRACT"
-    ],
+):
 
-    "visual_rooms": [
+    return BaseArtifact(
 
-        "C_GRAPH_ROOM",
-        "C_FORMULA_ROOM",
-        "C_TABLE_ROOM",
-        "C_DIAGRAM_ROOM",
-        "C_CODE_ROOM",
-        "C_LINK_ROOM",
-        "C_GALLERY_ROOM",
-        "C_FUNCTION_ROOM"
-    ],
+        metadata=ArtifactMetadata(
 
-    "science_rooms": [
+            artifact_type=artifact_type,
 
-        "C_MATHEMATICS_ROOM",
-        "C_TRIGONOMETRY_ROOM",
-        "C_PHYSICS_ROOM",
-        "C_CHEMISTRY_ROOM",
-        "C_BIOLOGY_ROOM"
-    ],
+            room_source=room_source
+        ),
 
-    "knowledge_rooms": [
+        quality=ArtifactQuality(),
 
-        "C_LITERATURE_ROOM",
-        "C_WEB_ROOM",
-        "C_UTC_ROOM"
-    ],
+        render=ArtifactRenderContract(
 
-    "professional_rooms": [
+            web_block=ARTIFACT_BLOCK_MAP.get(
+                artifact_type,
+                ""
+            )
+        ),
 
-        "C_ENGINEERING_ROOM",
-        "C_POLITICS_ROOM",
-        "C_NEWS_ROOM",
-        "C_SOCIAL_ROOM",
-        "C_IT_ROOM"
-    ]
-}
+        data=data
+    )
