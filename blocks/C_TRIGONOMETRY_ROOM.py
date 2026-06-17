@@ -1,10 +1,10 @@
 # =====================================================
-# 🏭 APRIL C_TRIGONOMETRY_ROOM
+# APRIL C_TRIGONOMETRY_ROOM
 # =====================================================
 
 from typing import Dict, Any
 
-from C_ARTIFACT_CONTRACT import create_artifact
+from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
 class TrigonometryRoom:
