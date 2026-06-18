@@ -864,6 +864,24 @@ def detect_object_content(text):
     )
 
 
+
+
+# =====================================================
+# 🔥 APRIL DOMAIN INFERENCE BOOST
+# =====================================================
+
+def build_domain_confidence(text):
+
+    candidates = detect_domain_candidates(text)
+
+    confidence = {}
+
+    for domain in candidates:
+        confidence[domain] = 0.85
+
+    return confidence
+
+
 # =====================================================
 # 🔥 MAIN INTERPRETER
 # =====================================================
@@ -920,7 +938,7 @@ def interpret_request(
     representation_candidates = detect_representation_candidates(t)
 
     result["candidate_domains"] = domain_candidates
-    result["required_domains"] = list(domain_candidates)
+    result["required_domains"] = list(domain_candidates)\n    result["domain_confidence"] = build_domain_confidence(t)
 
     result["candidate_representations"] = representation_candidates
     result["required_representations"] = list(representation_candidates)
