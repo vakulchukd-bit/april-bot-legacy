@@ -864,15 +864,25 @@ class TextRoom(Room):
         result = await run(
 
             get_chat_id(
-    context
-),
+                context
+            ),
 
             text_process(
 
                 user_id,
+
                 text_input,
-                context.get("state"),
-                context.get("energy")
+
+                get_state(
+                    context
+                ),
+
+                get_executor_context(
+                    context
+                ).get(
+                    "energy",
+                    "MEDIUM"
+                )
             )
         )
 
