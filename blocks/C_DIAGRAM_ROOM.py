@@ -1,36 +1,62 @@
 # =====================================================
-# 🏭 APRIL C_DIAGRAM_ROOM
+# APRIL C_DIAGRAM_ROOM
 # =====================================================
-
-"""
-APRIL_FILE_ID:
-C_DIAGRAM_ROOM
-
-ROLE:
-PROFESSIONAL_DIAGRAM_WORKSHOP
-
-INPUT:
-
-- user_request
-- memory_context
-- active_scene
-- engineering_task
-- diagram_description
-
-OUTPUT:
-
-- DiagramArtifact
-"""
 
 from typing import Dict, Any, List
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class DiagramRoom:
+
+class DiagramRoom(Room):
+
+    name = "diagram"
+
+    room_type = "visual"
 
     ROOM_ID = "DIAGRAM_ROOM"
 
     ARTIFACT_TYPE = "diagram"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("DIAGRAM ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "diagram": text,
+
+            "goal":
+                context.get("goal"),
+
+            "purpose":
+                context.get("purpose"),
+
+            "active_scene":
+                context.get("active_scene")
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "DIAGRAM ROOM ACTIVE"
+        }
 
     # =================================================
     # WORK ORDER
@@ -234,8 +260,11 @@ class DiagramRoom:
         )
 
         artifact.quality.validation_passed = True
+
         artifact.quality.quality_score = 1.0
+
         artifact.quality.confidence_score = 1.0
+
         artifact.quality.completeness_score = 1.0
 
         return artifact
