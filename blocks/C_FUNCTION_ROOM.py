@@ -1,16 +1,61 @@
 # =====================================================
-# 🏭 APRIL C_FUNCTION_ROOM
+# APRIL C_FUNCTION_ROOM
 # =====================================================
 
 from typing import Dict, Any
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class FunctionRoom:
+
+class FunctionRoom(Room):
+
+    name = "function"
+
+    room_type = "visual"
 
     ROOM_ID = "FUNCTION_ROOM"
 
     ARTIFACT_TYPE = "function"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("FUNCTION ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "function": text,
+
+            "description": text,
+
+            "goal":
+                context.get("goal"),
+
+            "purpose":
+                context.get("purpose")
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "FUNCTION ROOM ACTIVE"
+        }
 
     # =================================================
     # WORK ORDER
