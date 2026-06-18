@@ -4,13 +4,55 @@
 
 from typing import Dict, Any
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class TrigonometryRoom:
+
+class TrigonometryRoom(Room):
+
+    name = "trigonometry"
+
+    room_type = "science"
 
     ROOM_ID = "TRIGONOMETRY_ROOM"
 
     ARTIFACT_TYPE = "function"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("TRIGONOMETRY ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "topic": text
+
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "TRIGONOMETRY ROOM ACTIVE"
+        }
+
+    # =================================================
+    # ARTIFACT FACTORY
+    # =================================================
 
     def process(
         self,
