@@ -18,29 +18,9 @@ class BiologyRoom(Room):
 
     ARTIFACT_TYPE = "function"
 
-    # =================================================
-    # ROOM EVALUATION
-    # =================================================
-
-    def evaluate(
-        self,
-        text,
-        context
-    ):
-
-        semantic = context.get(
-            "semantic",
-            {}
-        )
-
-        room = semantic.get(
-            "room"
-        )
-
-        if room == "biology":
-            return 10.0
-
-        return 0.1
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
 
     # =================================================
     # ROOM EXECUTION
@@ -65,7 +45,7 @@ class BiologyRoom(Room):
             "type": "text",
 
             "data":
-                f"BIOLOGY ROOM ACTIVE: {artifact.data.get('topic', '')}"
+                f"BIOLOGY ROOM ACTIVE: {text}"
         }
 
     # =================================================
@@ -104,13 +84,21 @@ class BiologyRoom(Room):
                 "sections": [
 
                     "cell_biology",
+
                     "genetics",
+
                     "anatomy",
+
                     "physiology",
+
                     "ecology",
+
                     "evolution",
+
                     "microbiology",
+
                     "botany",
+
                     "zoology"
                 ]
             }
