@@ -22,7 +22,7 @@ OUTPUT:
 
 from typing import Dict, Any, List
 
-from C_ARTIFACT_CONTRACT import create_artifact
+from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
 class FormulaRoom:
