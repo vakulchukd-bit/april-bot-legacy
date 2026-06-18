@@ -1,15 +1,65 @@
 # =====================================================
-# 🏭 APRIL C_LINK_ROOM
+# APRIL C_LINK_ROOM
 # =====================================================
 
 from typing import Dict, Any
+
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class LinkRoom:
+
+class LinkRoom(Room):
+
+    name = "link"
+
+    room_type = "visual"
 
     ROOM_ID = "LINK_ROOM"
 
     ARTIFACT_TYPE = "link"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("LINK ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "url": text,
+
+            "title":
+                text,
+
+            "description":
+                text,
+
+            "goal":
+                context.get("goal"),
+
+            "purpose":
+                context.get("purpose")
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "LINK ROOM ACTIVE"
+        }
 
     # =================================================
     # WORK ORDER
