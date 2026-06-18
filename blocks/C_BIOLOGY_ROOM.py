@@ -1,175 +1,267 @@
-data={
+# =====================================================
+# APRIL C_BIOLOGY_ROOM
+# =====================================================
 
-    "domain":
-        "biology",
+from typing import Dict, Any
 
-    "topic":
-        topic,
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-    "analysis":
-        {},
 
-    # =====================================
-    # PROFESSIONAL IDENTITY
-    # =====================================
+class BiologyRoom(Room):
 
-    "room_identity": {
+    name = "biology"
 
-        "specialization":
-            "biological_sciences",
+    room_type = "science"
 
-        "knowledge_class":
-            "life_sciences",
+    ROOM_ID = "BIOLOGY_ROOM"
 
-        "mission":
-            (
-                "study living systems, "
-                "organisms, biological processes "
-                "and relationships between life "
-                "and environment"
-            )
-    },
+    ARTIFACT_TYPE = "function"
 
-    # =====================================
-    # KNOWLEDGE SCOPE
-    # =====================================
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
 
-    "knowledge_scope": [
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
 
-        "cell_biology",
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
 
-        "molecular_biology",
+        artifact = self.process({
 
-        "genetics",
+            "topic": text
 
-        "anatomy",
+        })
 
-        "physiology",
+        return {
 
-        "ecology",
+            "type": "text",
 
-        "evolution",
+            "data":
+                "BIOLOGY ROOM ACTIVE"
+        }
 
-        "microbiology",
+    # =================================================
+    # ARTIFACT FACTORY
+    # =================================================
 
-        "botany",
+    def process(
+        self,
+        task: Dict[str, Any]
+    ):
 
-        "zoology",
+        topic = task.get(
+            "topic",
+            ""
+        )
 
-        "biochemistry",
+        artifact = create_artifact(
 
-        "neuroscience",
+            artifact_type=
+                self.ARTIFACT_TYPE,
 
-        "immunology",
+            room_source=
+                self.ROOM_ID,
 
-        "developmental_biology",
+            data={
 
-        "marine_biology",
+                # =====================================
+                # CORE
+                # =====================================
 
-        "environmental_biology"
-    ],
+                "domain":
+                    "biology",
 
-    # =====================================
-    # PROFESSIONAL CAPABILITIES
-    # =====================================
+                "topic":
+                    topic,
 
-    "capabilities": [
+                "analysis":
+                    {},
 
-        "biological_reasoning",
+                # =====================================
+                # PROFESSIONAL IDENTITY
+                # =====================================
 
-        "scientific_reasoning",
+                "room_identity": {
 
-        "organism_analysis",
+                    "specialization":
+                        "biological_sciences",
 
-        "ecosystem_analysis",
+                    "knowledge_class":
+                        "life_sciences",
 
-        "genetics_analysis",
+                    "mission":
+                        (
+                            "study living systems, "
+                            "organisms, biological processes "
+                            "and interactions between life "
+                            "and environment"
+                        )
+                },
 
-        "evolutionary_analysis",
+                # =====================================
+                # KNOWLEDGE SCOPE
+                # =====================================
 
-        "physiology_analysis",
+                "knowledge_scope": [
 
-        "classification",
+                    "cell_biology",
 
-        "comparison",
+                    "molecular_biology",
 
-        "observation_analysis",
+                    "genetics",
 
-        "cause_effect_analysis",
+                    "anatomy",
 
-        "hypothesis_generation",
+                    "physiology",
 
-        "research_interpretation"
-    ],
+                    "ecology",
 
-    # =====================================
-    # RESEARCH CAPABILITIES
-    # =====================================
+                    "evolution",
 
-    "research_capabilities": [
+                    "microbiology",
 
-        "research_planning",
+                    "botany",
 
-        "research_structure",
+                    "zoology",
 
-        "research_summary",
+                    "biochemistry",
 
-        "observation_tracking",
+                    "neuroscience",
 
-        "data_interpretation",
+                    "immunology",
 
-        "result_analysis",
+                    "developmental_biology",
 
-        "scientific_conclusion"
-    ],
+                    "marine_biology",
 
-    # =====================================
-    # EXPERIMENT CAPABILITIES
-    # =====================================
+                    "environmental_biology"
+                ],
 
-    "experiment_capabilities": [
+                # =====================================
+                # PROFESSIONAL CAPABILITIES
+                # =====================================
 
-        "experiment_design",
+                "capabilities": [
 
-        "experiment_planning",
+                    "scientific_reasoning",
 
-        "variable_definition",
+                    "biological_reasoning",
 
-        "control_group_definition",
+                    "organism_analysis",
 
-        "observation_framework",
+                    "life_system_analysis",
 
-        "hypothesis_validation",
+                    "ecosystem_analysis",
 
-        "result_interpretation"
-    ],
+                    "genetics_analysis",
 
-    # =====================================
-    # OUTPUT TYPES
-    # =====================================
+                    "evolutionary_analysis",
 
-    "artifact_outputs": [
+                    "physiology_analysis",
 
-        "explanation",
+                    "classification",
 
-        "research_summary",
+                    "comparison",
 
-        "experiment",
+                    "observation_analysis",
 
-        "observation_report",
+                    "cause_effect_analysis",
 
-        "classification",
+                    "hypothesis_generation",
 
-        "comparison",
+                    "research_interpretation"
+                ],
 
-        "hypothesis",
+                # =====================================
+                # RESEARCH CAPABILITIES
+                # =====================================
 
-        "conclusion",
+                "research_capabilities": [
 
-        "table",
+                    "research_planning",
 
-        "diagram",
+                    "research_structure",
 
-        "graph"
-    ]
-}
+                    "research_summary",
+
+                    "observation_tracking",
+
+                    "data_interpretation",
+
+                    "result_analysis",
+
+                    "scientific_conclusion"
+                ],
+
+                # =====================================
+                # EXPERIMENT CAPABILITIES
+                # =====================================
+
+                "experiment_capabilities": [
+
+                    "experiment_design",
+
+                    "experiment_planning",
+
+                    "variable_definition",
+
+                    "control_group_definition",
+
+                    "observation_framework",
+
+                    "hypothesis_validation",
+
+                    "result_interpretation"
+                ],
+
+                # =====================================
+                # OUTPUT TYPES
+                # =====================================
+
+                "artifact_outputs": [
+
+                    "explanation",
+
+                    "research_summary",
+
+                    "experiment",
+
+                    "observation_report",
+
+                    "classification",
+
+                    "comparison",
+
+                    "hypothesis",
+
+                    "conclusion",
+
+                    "table",
+
+                    "diagram",
+
+                    "graph"
+                ]
+            }
+        )
+
+        artifact.quality.validation_passed = True
+
+        artifact.quality.quality_score = 1.0
+
+        artifact.quality.confidence_score = 1.0
+
+        artifact.quality.completeness_score = 1.0
+
+        return artifact
+
+
+ROOM = BiologyRoom()
