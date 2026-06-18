@@ -45,7 +45,7 @@ class BiologyRoom(Room):
             "type": "text",
 
             "data":
-                f"BIOLOGY ROOM ACTIVE: {text}"
+                "BIOLOGY ROOM ACTIVE"
         }
 
     # =================================================
@@ -72,6 +72,10 @@ class BiologyRoom(Room):
 
             data={
 
+                # =====================================
+                # DOMAIN
+                # =====================================
+
                 "domain":
                     "biology",
 
@@ -81,7 +85,32 @@ class BiologyRoom(Room):
                 "analysis":
                     {},
 
-                "sections": [
+                # =====================================
+                # ROOM IDENTITY
+                # =====================================
+
+                "room_identity": {
+
+                    "specialization":
+                        "biological_sciences",
+
+                    "knowledge_class":
+                        "life_sciences",
+
+                    "mission":
+                        (
+                            "understand living systems, "
+                            "biological processes and "
+                            "relationships between organisms "
+                            "and environments"
+                        )
+                },
+
+                # =====================================
+                # KNOWLEDGE SCOPE
+                # =====================================
+
+                "knowledge_scope": [
 
                     "cell_biology",
 
@@ -99,8 +128,185 @@ class BiologyRoom(Room):
 
                     "botany",
 
-                    "zoology"
-                ]
+                    "zoology",
+
+                    "biochemistry",
+
+                    "molecular_biology",
+
+                    "neuroscience",
+
+                    "immunology",
+
+                    "developmental_biology",
+
+                    "marine_biology",
+
+                    "environmental_biology"
+                ],
+
+                # =====================================
+                # REASONING CAPABILITIES
+                # =====================================
+
+                "capabilities": [
+
+                    "scientific_reasoning",
+
+                    "biological_reasoning",
+
+                    "life_system_analysis",
+
+                    "cause_effect_analysis",
+
+                    "classification",
+
+                    "comparison",
+
+                    "observation_analysis",
+
+                    "hypothesis_generation",
+
+                    "experimental_design",
+
+                    "research_interpretation",
+
+                    "ecosystem_reasoning",
+
+                    "organism_reasoning",
+
+                    "genetics_reasoning",
+
+                    "evolutionary_reasoning"
+                ],
+
+                # =====================================
+                # EXPERIMENT CAPABILITIES
+                # =====================================
+
+                "experiment_capabilities": [
+
+                    "experiment_design",
+
+                    "experiment_planning",
+
+                    "observation_tracking",
+
+                    "result_interpretation",
+
+                    "control_variable_definition",
+
+                    "hypothesis_validation",
+
+                    "research_structure_generation"
+                ],
+
+                # =====================================
+                # ARTIFACT OUTPUTS
+                # =====================================
+
+                "artifact_outputs": [
+
+                    "explanation",
+
+                    "research_summary",
+
+                    "experiment",
+
+                    "comparison",
+
+                    "classification",
+
+                    "observation_report",
+
+                    "conclusion",
+
+                    "hypothesis",
+
+                    "table",
+
+                    "diagram",
+
+                    "graph"
+                ],
+
+                # =====================================
+                # SCENE CONTRIBUTION
+                # =====================================
+
+                "scene_contribution": {
+
+                    "provides": [
+
+                        "biological_context",
+
+                        "biological_explanation",
+
+                        "living_system_analysis",
+
+                        "experimental_framework",
+
+                        "scientific_validation",
+
+                        "research_context",
+
+                        "observation_framework"
+                    ]
+                },
+
+                # =====================================
+                # COLLABORATION
+                # =====================================
+
+                "collaboration": {
+
+                    "compatible_rooms": [
+
+                        "chemistry",
+
+                        "physics",
+
+                        "mathematics",
+
+                        "engineering",
+
+                        "it",
+
+                        "web",
+
+                        "news",
+
+                        "table",
+
+                        "graph",
+
+                        "diagram",
+
+                        "formula"
+                    ]
+                },
+
+                # =====================================
+                # EXECUTOR METADATA
+                # =====================================
+
+                "executor_metadata": {
+
+                    "room_role":
+                        "domain_specialist",
+
+                    "contribution_type":
+                        "scientific_knowledge",
+
+                    "scene_role":
+                        "knowledge_provider",
+
+                    "supports_multi_room_scene":
+                        True,
+
+                    "supports_cross_domain_reasoning":
+                        True
+                }
             }
         )
 
