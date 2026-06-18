@@ -1,16 +1,69 @@
 # =====================================================
-# 🏭 APRIL C_GALLERY_ROOM
+# APRIL C_GALLERY_ROOM
 # =====================================================
 
 from typing import Dict, Any, List
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class GalleryRoom:
+
+class GalleryRoom(Room):
+
+    name = "gallery"
+
+    room_type = "visual"
 
     ROOM_ID = "GALLERY_ROOM"
 
     ARTIFACT_TYPE = "gallery"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("GALLERY ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "images":
+                context.get(
+                    "images",
+                    []
+                ),
+
+            "captions":
+                context.get(
+                    "captions",
+                    []
+                ),
+
+            "goal":
+                context.get("goal"),
+
+            "purpose":
+                context.get("purpose")
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "GALLERY ROOM ACTIVE"
+        }
 
     # =================================================
     # WORK ORDER
