@@ -6,7 +6,6 @@ from typing import Dict, Any
 
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-
 class TrigonometryRoom:
 
     ROOM_ID = "TRIGONOMETRY_ROOM"
