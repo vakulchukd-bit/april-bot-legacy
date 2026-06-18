@@ -1,16 +1,76 @@
 # =====================================================
-# 🏭 APRIL C_BIOLOGY_ROOM
+# APRIL C_BIOLOGY_ROOM
 # =====================================================
 
 from typing import Dict, Any
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class BiologyRoom:
+
+class BiologyRoom(Room):
+
+    name = "biology"
+
+    room_type = "science"
 
     ROOM_ID = "BIOLOGY_ROOM"
 
     ARTIFACT_TYPE = "function"
+
+    # =================================================
+    # ROOM EVALUATION
+    # =================================================
+
+    def evaluate(
+        self,
+        text,
+        context
+    ):
+
+        semantic = context.get(
+            "semantic",
+            {}
+        )
+
+        room = semantic.get(
+            "room"
+        )
+
+        if room == "biology":
+            return 10.0
+
+        return 0.1
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        artifact = self.process({
+
+            "topic": text
+
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                f"BIOLOGY ROOM ACTIVE: {artifact.data.get('topic', '')}"
+        }
+
+    # =================================================
+    # ARTIFACT FACTORY
+    # =================================================
 
     def process(
         self,
@@ -44,21 +104,13 @@ class BiologyRoom:
                 "sections": [
 
                     "cell_biology",
-
                     "genetics",
-
                     "anatomy",
-
                     "physiology",
-
                     "ecology",
-
                     "evolution",
-
                     "microbiology",
-
                     "botany",
-
                     "zoology"
                 ]
             }
