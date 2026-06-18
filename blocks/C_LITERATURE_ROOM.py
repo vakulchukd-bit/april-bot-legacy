@@ -1,17 +1,58 @@
 # =====================================================
-# 🏭 APRIL C_LITERATURE_ROOM
+# APRIL C_LITERATURE_ROOM
 # =====================================================
 
 from typing import Dict, Any
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
-class LiteratureRoom:
+class LiteratureRoom(Room):
+
+    name = "literature"
+
+    room_type = "knowledge"
 
     ROOM_ID = "LITERATURE_ROOM"
 
     ARTIFACT_TYPE = "function"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("LITERATURE ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "topic": text
+
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "LITERATURE ROOM ACTIVE"
+        }
+
+    # =================================================
+    # ARTIFACT FACTORY
+    # =================================================
 
     def process(
         self,
