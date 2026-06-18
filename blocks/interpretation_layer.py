@@ -304,6 +304,136 @@ INFORMATIONAL_WORDS = [
 ]
 
 
+
+# =====================================================
+# 🔥 DOMAIN COMPETENCE LAYER
+# =====================================================
+
+DOMAIN_REGISTRY = {
+
+    "biology": {
+        "description": "living systems, genetics, evolution, physiology, ecology, microbiology"
+    },
+
+    "chemistry": {
+        "description": "reactions, compounds, molecules, materials"
+    },
+
+    "physics": {
+        "description": "motion, energy, forces, fields, matter"
+    },
+
+    "engineering": {
+        "description": "systems, design, construction, optimization"
+    },
+
+    "it": {
+        "description": "software, hardware, networks, computing"
+    },
+
+    "literature": {
+        "description": "books, texts, authors, narrative analysis"
+    },
+
+    "politics": {
+        "description": "government, policy, diplomacy, political systems"
+    },
+
+    "news": {
+        "description": "recent developments and current events"
+    },
+
+    "social": {
+        "description": "society, behavior, communities, culture"
+    },
+
+    "web": {
+        "description": "internet resources, search, websites"
+    }
+}
+
+
+def detect_domain_candidates(text):
+
+    lower = normalize_lower(text)
+
+    candidates = []
+
+    domain_words = {
+
+        "biology": [
+            "биология","генетика","эволюция","клетка","организм",
+            "экология","бактерии","днк","животные","растения"
+        ],
+
+        "chemistry": [
+            "химия","реакция","молекула","атом","вещество"
+        ],
+
+        "physics": [
+            "физика","энергия","сила","ускорение","электричество"
+        ],
+
+        "engineering": [
+            "инженерия","конструкция","механизм","система","проектирование"
+        ],
+
+        "it": [
+            "программирование","алгоритм","сервер","код","разработка"
+        ],
+
+        "literature": [
+            "литература","роман","поэзия","писатель","произведение"
+        ],
+
+        "politics": [
+            "политика","государство","выборы","правительство"
+        ],
+
+        "news": [
+            "новости","события","последние новости"
+        ],
+
+        "social": [
+            "общество","социум","социальный"
+        ],
+
+        "web": [
+            "сайт","интернет","поиск","веб"
+        ]
+    }
+
+    for domain, words in domain_words.items():
+        if any(w in lower for w in words):
+            candidates.append(domain)
+
+    return candidates
+
+
+def detect_representation_candidates(text):
+
+    lower = normalize_lower(text)
+
+    reps = []
+
+    if any(x in lower for x in ["график","plot","chart"]):
+        reps.append("graph")
+
+    if any(x in lower for x in ["таблица","table"]):
+        reps.append("table")
+
+    if any(x in lower for x in ["схема","diagram"]):
+        reps.append("diagram")
+
+    if any(x in lower for x in ["формула","уравнение"]):
+        reps.append("formula")
+
+    if not reps:
+        reps.append("text")
+
+    return reps
+
+
 # =====================================================
 # 🔥 DIALOGUE UNDERSTANDING
 # =====================================================
@@ -668,7 +798,13 @@ def build_result(
             True,
 
         "continuity_preserved":
-            True
+            True,
+
+        "required_domains": [],
+        "candidate_domains": [],
+        "required_representations": [],
+        "candidate_representations": [],
+        "domain_confidence": {}
     }
 
 
@@ -779,6 +915,16 @@ def interpret_request(
     result = build_result(
         text
     )
+
+    domain_candidates = detect_domain_candidates(t)
+    representation_candidates = detect_representation_candidates(t)
+
+    result["candidate_domains"] = domain_candidates
+    result["required_domains"] = list(domain_candidates)
+
+    result["candidate_representations"] = representation_candidates
+    result["required_representations"] = list(representation_candidates)
+
 
     if detect_discussion_mode(t):
         result["discussion_mode"] = True
