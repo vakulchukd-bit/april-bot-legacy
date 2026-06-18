@@ -441,6 +441,88 @@ def build_room_intent_vector(text, context):
     return vector
 
 
+
+# =====================================================
+# 🔥 PROFESSIONAL DISCOVERY LAYER
+# =====================================================
+
+PROFESSIONAL_ROOM_CAPABILITIES = {
+
+    "biology": ["biology","genetics","ecology","physiology","microbiology","evolution","living_systems"],
+    "chemistry": ["chemistry","reactions","molecules","compounds","laboratory"],
+    "physics": ["physics","mechanics","energy","motion","waves"],
+    "engineering": ["engineering","systems","design","architecture"],
+    "it": ["software","technology","programming","architecture"],
+    "politics": ["politics","governance","policy","geopolitics"],
+    "news": ["news","events","timeline","sources"],
+    "social": ["social","community","audience","engagement"],
+    "literature": ["literature","fiction","poetry","authors"]
+}
+
+def build_professional_room_vector(context):
+
+    executor_context = get_executor_context(context)
+
+    semantic = executor_context.get("semantic", {})
+    cognition = executor_context.get("cognition", {})
+
+    vector = {
+        room: 0.0
+        for room in PROFESSIONAL_ROOM_CAPABILITIES
+    }
+
+    dynamic_focus = str(
+        cognition.get("dynamic_focus", "")
+    ).lower()
+
+    requested_domain = semantic.get("domain")
+
+    if requested_domain in vector:
+        vector[requested_domain] += 10.0
+
+    required_capabilities = semantic.get(
+        "required_capabilities",
+        []
+    )
+
+    for room_name, capabilities in PROFESSIONAL_ROOM_CAPABILITIES.items():
+
+        if room_name in dynamic_focus:
+            vector[room_name] += 3.0
+
+        for capability in required_capabilities:
+
+            if capability in capabilities:
+                vector[room_name] += 2.0
+
+    return vector
+
+
+def select_professional_rooms(context):
+
+    vector = build_professional_room_vector(
+        context
+    )
+
+    candidates = []
+
+    for room_name, score in vector.items():
+
+        if score > 0:
+
+            candidates.append({
+                "room": room_name,
+                "score": score
+            })
+
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    return candidates
+
+
 # =====================================================
 # 🔥 IMAGE GENERATE
 # =====================================================
