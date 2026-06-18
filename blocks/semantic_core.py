@@ -613,6 +613,11 @@ def analyze(
 
         "possible_capability": "text",
 
+        "required_domains": [],
+        "candidate_domains": [],
+        "required_representations": [],
+        "candidate_representations": [],
+
         # =================================================
         # 🧠 CONTINUITY
         # =====================================================
@@ -884,6 +889,26 @@ def analyze(
         result["scene_composition_ready"] = interpreted.get(
             "scene_composition_ready",
             False
+        )
+
+        result["required_domains"] = interpreted.get(
+            "required_domains",
+            []
+        )
+
+        result["candidate_domains"] = interpreted.get(
+            "candidate_domains",
+            []
+        )
+
+        result["required_representations"] = interpreted.get(
+            "required_representations",
+            []
+        )
+
+        result["candidate_representations"] = interpreted.get(
+            "candidate_representations",
+            []
         )
 
     # =====================================================
@@ -1203,6 +1228,21 @@ def analyze(
         result
     )
 
+    artifact_bundle["required_domains"] = result.get(
+        "required_domains",
+        []
+    )
+
+    artifact_bundle["candidate_domains"] = result.get(
+        "candidate_domains",
+        []
+    )
+
+    artifact_bundle["required_representations"] = result.get(
+        "required_representations",
+        []
+    )
+
     result["artifact_bundle"] = artifact_bundle
 
 
@@ -1212,6 +1252,14 @@ def analyze(
 
     safe_semantic_log(
         f"ROOM: {result['possible_room']}"
+    )
+
+    safe_semantic_log(
+        f"DOMAINS: {result.get('required_domains', [])}"
+    )
+
+    safe_semantic_log(
+        f"REPRESENTATIONS: {result.get('required_representations', [])}"
     )
 
     return result
