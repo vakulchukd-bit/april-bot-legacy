@@ -675,6 +675,55 @@ def stabilize_room_score(
 
 
 
+
+
+# =========================================================
+# 🧠 DOMAIN COMPETENCE ROUTING
+# =========================================================
+
+def build_domain_room_map():
+
+    return {
+        "biology": ["biology"],
+        "chemistry": ["chemistry"],
+        "physics": ["physics"],
+        "mathematics": ["mathematics"],
+        "trigonometry": ["trigonometry"],
+        "engineering": ["engineering"],
+        "it": ["it"],
+        "web": ["web"],
+        "politics": ["politics"],
+        "news": ["news"],
+        "social": ["social"],
+        "literature": ["literature"],
+        "utc": ["utc"]
+    }
+
+
+def domain_room_bonus(room, semantic):
+
+    required_domains = semantic.get(
+        "required_domains",
+        []
+    )
+
+    if not required_domains:
+        return 0.0
+
+    room_map = build_domain_room_map()
+
+    bonus = 0.0
+
+    for domain in required_domains:
+
+        for room_name in room_map.get(domain, []):
+
+            if room.name == room_name:
+                bonus += 6.0
+
+    return bonus
+
+
 # =====================================================
 # 🧠 ARTIFACT SCENE PLANNER
 # =====================================================
@@ -859,6 +908,11 @@ async def execute_rooms(
                 response_decision=response_decision,
 
                 state=state
+            )
+
+            score += domain_room_bonus(
+                room,
+                semantic
             )
 
             if score <= 0:
