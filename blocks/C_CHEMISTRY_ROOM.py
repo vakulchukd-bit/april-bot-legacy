@@ -1,16 +1,58 @@
 # =====================================================
-# 🏭 APRIL C_CHEMISTRY_ROOM
+# APRIL C_CHEMISTRY_ROOM
 # =====================================================
 
 from typing import Dict, Any
 
+from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-class ChemistryRoom:
+
+class ChemistryRoom(Room):
+
+    name = "chemistry"
+
+    room_type = "science"
 
     ROOM_ID = "CHEMISTRY_ROOM"
 
     ARTIFACT_TYPE = "function"
+
+    quality_score = 1.0
+    confidence_score = 1.0
+    completeness_score = 1.0
+
+    # =================================================
+    # ROOM EXECUTION
+    # =================================================
+
+    async def handle(
+        self,
+        user_id,
+        text,
+        context,
+        run
+    ):
+
+        print("CHEMISTRY ROOM HANDLE START")
+
+        artifact = self.process({
+
+            "topic": text
+
+        })
+
+        return {
+
+            "type": "text",
+
+            "data":
+                "CHEMISTRY ROOM ACTIVE"
+        }
+
+    # =================================================
+    # ARTIFACT FACTORY
+    # =================================================
 
     def process(
         self,
