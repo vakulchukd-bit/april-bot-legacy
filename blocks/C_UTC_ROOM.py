@@ -5,8 +5,7 @@
 from typing import Dict, Any
 from datetime import datetime, timezone
 
-from C_ARTIFACT_CONTRACT import create_artifact
-
+from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 class UTCRoom:
 
