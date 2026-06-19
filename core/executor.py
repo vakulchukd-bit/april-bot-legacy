@@ -724,6 +724,23 @@ def domain_room_bonus(room, semantic):
     return bonus
 
 
+
+# =========================================================
+# 🏭 FACTORY ORDER EXECUTION
+# =========================================================
+
+def get_factory_required_rooms(semantic):
+
+    factory_order = semantic.get(
+        "factory_order",
+        {}
+    )
+
+    return factory_order.get(
+        "required_rooms",
+        []
+    )
+
 # =====================================================
 # 🧠 ARTIFACT SCENE PLANNER
 # =====================================================
@@ -880,6 +897,15 @@ async def execute_rooms(
     collected_results = []
     max_results = 2
 
+    factory_required_rooms = get_factory_required_rooms(
+        semantic
+    )
+
+    print(
+        "🏭 FACTORY REQUIRED ROOMS:",
+        factory_required_rooms
+    )
+
     # =====================================================
     # 🔥 EVALUATION
     # =====================================================
@@ -887,6 +913,11 @@ async def execute_rooms(
     for room in ROOMS:
 
         try:
+
+            if factory_required_rooms:
+
+                if room.name not in factory_required_rooms:
+                    continue
 
             score = room.evaluate(
 
