@@ -250,6 +250,17 @@ def safe_output(result):
     if not result:
         return ""
 
+    if result.get("type") == "artifact":
+
+        artifact = result.get("artifact")
+
+        try:
+            return str(
+                getattr(artifact, "data", "")
+            )
+        except Exception:
+            return str(result)
+
     return str(
         result.get(
             "data",
@@ -465,6 +476,27 @@ def build_authority_state():
 
     return payload
 
+
+# =========================================================
+# 🏭 FACTORY ARTIFACT REGISTRY
+# =========================================================
+
+FACTORY_DOMAIN_ROOMS = {
+    "biology",
+    "chemistry",
+    "physics",
+    "mathematics",
+    "trigonometry",
+    "engineering",
+    "it",
+    "web",
+    "news",
+    "social",
+    "politics",
+    "literature"
+}
+
+
 # =========================================================
 # 🧠 COMPLETION ANALYSIS
 # =========================================================
@@ -521,6 +553,7 @@ def analyze_completion(
 
     if result_type in [
 
+        "artifact",
         "function",
         "graph",
         "diagram",
@@ -676,6 +709,7 @@ def evaluate_usefulness(
 
     if result.get("type") in [
 
+        "artifact",
         "graph",
         "diagram",
         "formula",
