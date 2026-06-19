@@ -806,10 +806,13 @@ def build_scene_plan(response_decision, semantic=None):
 
 def artifact_to_render_block(result):
 
+    # MACHINE PAYLOAD MUST STAY MACHINE PAYLOAD
+    # BotRU is the only human translator.
+
     if not isinstance(result, dict):
         return {
-            "type": "text",
-            "content": str(result)
+            "type": "machine_payload",
+            "payload": result
         }
 
     result_type = result.get("type")
@@ -817,17 +820,12 @@ def artifact_to_render_block(result):
     if result_type != "artifact":
         return result
 
-    artifact = result.get("artifact", {})
-
-    content = (
-        artifact.get("data")
-        if isinstance(artifact, dict)
-        else str(artifact)
-    )
+    artifact = result.get("artifact")
 
     return {
-        "type": "text",
-        "content": content
+        "type": "artifact",
+        "artifact": artifact,
+        "machine_payload": True
     }
 
 
