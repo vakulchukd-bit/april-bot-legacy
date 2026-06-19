@@ -882,6 +882,64 @@ def build_domain_confidence(text):
     return confidence
 
 
+
+# =====================================================
+# 🔥 FACTORY ORDER PROTOCOL
+# =====================================================
+
+DOMAIN_ROOM_MAP = {
+    "biology": ["biology"],
+    "chemistry": ["chemistry"],
+    "physics": ["physics"],
+    "engineering": ["engineering"],
+    "it": ["it"],
+    "literature": ["literature"],
+    "politics": ["politics"],
+    "news": ["news"],
+    "social": ["social"],
+    "web": ["web"]
+}
+
+def build_factory_order(result):
+
+    required_domains = result.get(
+        "required_domains",
+        []
+    )
+
+    required_rooms = []
+
+    for domain in required_domains:
+
+        required_rooms.extend(
+            DOMAIN_ROOM_MAP.get(
+                domain,
+                []
+            )
+        )
+
+    return {
+
+        "intent":
+            result.get("type"),
+
+        "goal":
+            result.get("subtype"),
+
+        "required_domains":
+            required_domains,
+
+        "required_rooms":
+            list(set(required_rooms)),
+
+        "required_artifacts":
+            required_domains,
+
+        "quality_target":
+            0.95
+    }
+
+
 # =====================================================
 # 🔥 MAIN INTERPRETER
 # =====================================================
@@ -943,6 +1001,14 @@ def interpret_request(
 
     result["candidate_representations"] = representation_candidates
     result["required_representations"] = list(representation_candidates)
+
+    result["factory_order"] = build_factory_order(
+        result
+    )
+
+    safe_patch_log(
+        f"FACTORY ORDER: {result['factory_order']}"
+    )
 
 
     if detect_discussion_mode(t):
