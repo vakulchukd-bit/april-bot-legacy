@@ -911,6 +911,15 @@ def analyze(
             []
         )
 
+        result["factory_order"] = interpreted.get(
+            "factory_order",
+            {}
+        )
+
+        safe_semantic_log(
+            f"FACTORY ORDER: {result['factory_order']}"
+        )
+
     # =====================================================
     # 🔥 ACTIVE FLOW
     # =====================================================
@@ -1241,6 +1250,11 @@ def analyze(
     artifact_bundle["required_representations"] = result.get(
         "required_representations",
         []
+    )
+
+    artifact_bundle["factory_order"] = result.get(
+        "factory_order",
+        {}
     )
 
     result["artifact_bundle"] = artifact_bundle
