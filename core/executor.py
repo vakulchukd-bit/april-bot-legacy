@@ -799,6 +799,38 @@ def build_scene_plan(response_decision, semantic=None):
     }
 
 
+
+# =====================================================
+# 🧠 ARTIFACT -> RENDER BLOCK RESOLVER
+# =====================================================
+
+def artifact_to_render_block(result):
+
+    if not isinstance(result, dict):
+        return {
+            "type": "text",
+            "content": str(result)
+        }
+
+    result_type = result.get("type")
+
+    if result_type != "artifact":
+        return result
+
+    artifact = result.get("artifact", {})
+
+    content = (
+        artifact.get("data")
+        if isinstance(artifact, dict)
+        else str(artifact)
+    )
+
+    return {
+        "type": "text",
+        "content": content
+    }
+
+
 # =========================================================
 # 🧠 TASK RESOLUTION LAYER
 # =========================================================
@@ -1149,7 +1181,11 @@ async def execute_rooms(
             result = item.get("result", {})
 
             if isinstance(result, dict):
-                blocks.append(result)
+                blocks.append(
+                    artifact_to_render_block(
+                        result
+                    )
+                )
 
         return {
             "channel": RESPONSE_CHANNEL,
