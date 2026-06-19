@@ -1011,6 +1011,8 @@ async def execute_rooms(
                     )
             }
 
+            print(f"🔥 HANDLE CALL [{room.name}]")
+
             result = await room.handle(
 
                 user_id,
@@ -1022,13 +1024,22 @@ async def execute_rooms(
                 run_with_activity
             )
 
+            print(f"🔥 HANDLE RESULT TYPE [{room.name}]:", type(result))
+            print(f"🔥 HANDLE RESULT [{room.name}]:", result)
+
             if not result:
+                print(f"🔥 HANDLE EMPTY [{room.name}]")
                 continue
 
-            if not validate_machine_response(
+            validation_result = validate_machine_response(
                 result
-            ):
+            )
 
+            print(f"🔥 VALIDATION [{room.name}]:", validation_result)
+
+            if not validation_result:
+
+                print(f"🔥 VALIDATION FAILED [{room.name}]")
                 continue
 
             override = should_override(
@@ -1042,8 +1053,11 @@ async def execute_rooms(
                 state=state
             )
 
+            print(f"🔥 OVERRIDE [{room.name}]:", override)
+
             if override:
 
+                print(f"🔥 OVERRIDE BLOCKED [{room.name}]")
                 continue
 
             # ================================================
