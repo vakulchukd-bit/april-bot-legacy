@@ -320,7 +320,12 @@ def normalize_executor_response(
                     "renderer_state",
                     {}
                 )
-            )
+            ),
+
+        "artifact_packet":
+            safe_json(
+                build_artifact_packet(result)
+            ) if result.get("artifact") else None
     }
 
     # =====================================================
@@ -345,6 +350,39 @@ def normalize_executor_response(
     print(normalized)
 
     return normalized
+
+
+
+# =========================================================
+# 🏭 ARTIFACT REPRESENTATION RESOLVER
+# =========================================================
+
+def build_artifact_packet(result):
+
+    artifact = result.get("artifact")
+
+    return {
+        "artifact": safe_json(artifact),
+        "artifact_type": result.get("artifact_type", "knowledge"),
+        "domain": result.get("domain"),
+        "available_representations": result.get(
+            "available_representations",
+            [
+                "markdown",
+                "graph",
+                "table",
+                "diagram",
+                "formula",
+                "timeline",
+                "gallery",
+                "link"
+            ]
+        ),
+        "preferred_representation": result.get(
+            "preferred_representation",
+            "markdown"
+        )
+    }
 
 
 # =========================================================
