@@ -8,6 +8,58 @@ from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
+
+# =================================================
+# BIOLOGY KNOWLEDGE LAYER V1
+# =================================================
+
+BIOLOGY_KNOWLEDGE = {
+
+    "dna": "DNA stores hereditary information and contains genetic instructions.",
+
+    "cell": "The cell is the fundamental structural and functional unit of life.",
+
+    "genetics": "Genetics studies genes, heredity and biological variation.",
+
+    "mitosis": "Mitosis produces two genetically similar daughter cells.",
+
+    "meiosis": "Meiosis creates reproductive cells with half the chromosome count.",
+
+    "evolution": "Evolution is change in inherited traits across generations.",
+
+    "immunity": "The immune system protects organisms from pathogens.",
+
+    "photosynthesis": "Photosynthesis converts light energy into chemical energy.",
+
+    "protein": "Proteins perform structural, catalytic and regulatory functions.",
+
+    "ecosystem": "An ecosystem is a system of organisms and environment."
+}
+
+def biology_analyze_topic(text):
+
+    text_lower = str(text).lower()
+
+    detected = []
+    context = []
+
+    for term, description in BIOLOGY_KNOWLEDGE.items():
+
+        if term in text_lower:
+
+            detected.append(term)
+            context.append(description)
+
+    return {
+
+        "detected_concepts": detected,
+
+        "knowledge_context": context,
+
+        "biology_confidence": len(detected) / max(len(BIOLOGY_KNOWLEDGE), 1)
+    }
+
+
 class BiologyRoom(Room):
 
     name = "biology"
@@ -89,7 +141,7 @@ class BiologyRoom(Room):
                     topic,
 
                 "analysis":
-                    {},
+                    biology_analyze_topic(topic),
 
                 # =====================================
                 # PROFESSIONAL IDENTITY
