@@ -42,10 +42,16 @@ class BiologyRoom(Room):
 
         return {
 
-            "type": "text",
+            "type": "artifact",
 
-            "data":
-                "BIOLOGY ROOM ACTIVE"
+            "artifact":
+                artifact,
+
+            "room":
+                self.name,
+
+            "domain":
+                "biology"
         }
 
     # =================================================
