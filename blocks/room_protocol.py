@@ -207,20 +207,50 @@ class Room:
             {}
         )
 
+        confidence = semantic.get(
+            "confidence",
+            0.5
+        )
+
+        required_domains = semantic.get(
+            "required_domains",
+            []
+        )
+
+        candidate_domains = semantic.get(
+            "candidate_domains",
+            []
+        )
+
+        if self.name in required_domains:
+
+            safe_room_log(
+                f"{self.name} DOMAIN MATCH:",
+                confidence
+            )
+
+            return confidence
+
+        if self.name in candidate_domains:
+
+            safe_room_log(
+                f"{self.name} CANDIDATE MATCH:",
+                confidence
+            )
+
+            return max(
+                confidence * 0.8,
+                0.4
+            )
+
         room = semantic.get(
             "room"
         )
 
         if room == self.name:
 
-            confidence = semantic.get(
-                "confidence",
-                0.5
-            )
-
             safe_room_log(
-
-                f"{self.name} MATCH:",
+                f"{self.name} LEGACY MATCH:",
                 confidence
             )
 
