@@ -2416,3 +2416,71 @@ def on_live_session_closed(state):
 # =========================================================
 # END OF EXECUTOR V7 LIVE VISION -> MEMORY TRANSFER
 # =========================================================
+
+
+
+# =========================================================
+# 🧠 EXECUTOR V8 ARTIFACT EXPANSION LAYER
+# =========================================================
+
+ARTIFACT_BLOCK_MAP = {
+    "knowledge_graph": "graph",
+    "knowledge_graph_v2": "graph",
+    "taxonomy": "table",
+    "comparison": "table",
+    "evidence": "research",
+    "evidence_report": "research",
+    "mechanism_chain": "diagram",
+    "research": "research"
+}
+
+def expand_artifact_payload(artifact):
+
+    blocks = []
+
+    if not isinstance(artifact, dict):
+        return blocks
+
+    for key, value in artifact.items():
+
+        if key not in ARTIFACT_BLOCK_MAP:
+            continue
+
+        blocks.append({
+            "type": ARTIFACT_BLOCK_MAP[key],
+            "source_field": key,
+            "payload": value
+        })
+
+    return blocks
+
+
+_original_artifact_to_render_block = artifact_to_render_block
+
+def artifact_to_render_block(result):
+
+    translated = _original_artifact_to_render_block(result)
+
+    try:
+
+        artifact = None
+
+        if isinstance(result, dict):
+            artifact = result.get("artifact")
+
+        if isinstance(translated, dict):
+
+            translated["expanded_blocks"] = (
+                expand_artifact_payload(artifact)
+            )
+
+            translated["artifact_expansion_ready"] = True
+
+    except Exception:
+        pass
+
+    return translated
+
+# =========================================================
+# END EXECUTOR V8
+# =========================================================
