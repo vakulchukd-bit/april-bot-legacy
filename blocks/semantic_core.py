@@ -496,6 +496,33 @@ def analyze(
     )
 
     # =====================================================
+    # 🧠 CONVERSATION VECTOR ENGINE
+    # =====================================================
+
+    conversation_vector = {
+        "focus": dynamic_focus,
+        "goal": goal_hierarchy,
+        "memory_signals": memory_signals,
+        "open_loops": open_loops,
+        "history_depth": len(history),
+        "active_flow": active_flow,
+        "active_visual_scene": state.get("active_visual_scene"),
+        "continuity_active": bool(continuity_context_storage),
+        "memory_anchor_active": bool(memory_anchor_storage),
+        "topic_slot": active_topic_slot
+    }
+
+    semantic_state = {
+        "conversation_vector": conversation_vector,
+        "active_scene": state.get("active_visual_scene"),
+        "focus": dynamic_focus,
+        "goal": goal_hierarchy,
+        "trajectory_active": bool(active_flow) or bool(continuity_context_storage),
+        "memory_alignment": bool(memory_signals)
+    }
+
+
+    # =====================================================
     # 🔥 MACHINE PROBABILITIES
     # =====================================================
 
@@ -771,7 +798,15 @@ def analyze(
             memory_anchor_storage,
 
         "active_topic_slot":
-            active_topic_slot
+            active_topic_slot,
+
+        # =====================================================
+        # 🧠 CONVERSATION VECTOR
+        # =====================================================
+
+        "conversation_vector": conversation_vector,
+        "semantic_state": semantic_state,
+        "factory_targets": []
     }
 
     # =====================================================
@@ -1201,6 +1236,27 @@ def analyze(
         result[
             "active_topic_slot"
         ] = active_topic_slot
+
+
+    # =====================================================
+    # 🧠 FACTORY AWARENESS
+    # =====================================================
+
+    factory_targets = []
+
+    if semantic_state.get("active_scene"):
+        factory_targets.append("scene_continuity")
+
+    if semantic_state.get("trajectory_active"):
+        factory_targets.append("trajectory")
+
+    if memory_signals:
+        factory_targets.append("memory")
+
+    if dynamic_focus:
+        factory_targets.append("focus")
+
+    result["factory_targets"] = factory_targets
 
     # =====================================================
     # 🔥 FINAL MACHINE NORMALIZATION
