@@ -1,6 +1,7 @@
+
 # =====================================================
-# APRIL C_BIOLOGY_ROOM V10
-# ENTITY + TAXONOMY + EVIDENCE + VIEWER PAYLOAD
+# APRIL C_BIOLOGY_ROOM V11
+# ANSWER ENGINE EDITION
 # =====================================================
 
 from typing import List
@@ -9,111 +10,90 @@ from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 ROOM_IDENTITY = {
     "specialization":"biological_sciences",
-    "knowledge_class":"life_sciences",
-    "mission":"study living systems, evolution and ecosystems"
+    "knowledge_class":"life_sciences"
 }
 
-DOMAIN_KNOWLEDGE = {
-    "genetics":["DNA","RNA","Gene","Genome","Chromosome"],
-    "cell_biology":["Cell","Nucleus","Mitochondria","Membrane"],
-    "evolution":["Selection","Adaptation","Speciation"],
-    "ecology":["Population","Community","Ecosystem","Biome"],
-    "zoology":["Mammal","Bird","Fish","Reptile"],
-    "botany":["Plant","Leaf","Root","Flower"],
-    "microbiology":["Bacteria","Virus","Fungi","Archaea"],
-    "immunology":["Antibody","Antigen","TCell","BCell"],
-    "biochemistry":["Protein","Lipid","Carbohydrate","Enzyme"],
-    "physiology":["Respiration","Circulation","NervousSystem"]
-}
+BIOLOGY_KNOWLEDGE = {
+    "dna": """ДНК — молекула наследственности. Содержит генетическую информацию,
+организована в двойную спираль, входит в состав хромосом и определяет
+синтез белков через процессы транскрипции и трансляции.""",
 
-BIOLOGY_RELATIONS = {
-    "gene":"part_of_genome",
-    "genome":"stored_in_cell",
-    "cell":"part_of_organism",
-    "organism":"member_of_population",
-    "population":"part_of_ecosystem"
-}
+    "gene": """Ген — участок ДНК, содержащий информацию о синтезе белка
+или функциональной РНК.""",
 
-TAXONOMY_LEVELS = [
-    "domain","kingdom","phylum",
-    "class","order","family",
-    "genus","species"
-]
+    "cell": """Клетка — базовая структурная и функциональная единица жизни.
+Содержит мембрану, цитоплазму и генетический материал.""",
+
+    "evolution": """Эволюция — процесс изменения популяций организмов во времени
+под действием отбора, мутаций, миграции и генетического дрейфа."""
+}
 
 def detect_operation(text:str)->str:
     t=text.lower()
-    if "сравн" in t: return "compare"
-    if "классиф" in t: return "classify"
-    if "граф" in t: return "graph"
-    if "таблиц" in t: return "table"
-    if "исслед" in t: return "research"
+    if "сравн" in t:
+        return "compare"
     return "explain"
 
 def detect_domains(text:str)->List[str]:
     t=text.lower()
     result=[]
-    for d, concepts in DOMAIN_KNOWLEDGE.items():
-        if any(c.lower() in t for c in concepts):
-            result.append(d)
+    if "днк" in t or "dna" in t:
+        result.append("genetics")
+    if "клет" in t:
+        result.append("cell_biology")
+    if "эволюц" in t:
+        result.append("evolution")
     return result
 
 def extract_entities(text:str)->List[str]:
-    return list(dict.fromkeys(text.lower().split()[:50]))
+    return text.lower().split()
 
-def build_evidence_layer(domains):
-    return [
-        {
-            "domain":d,
-            "evidence_type":"scientific_knowledge"
-        }
-        for d in domains
-    ]
+def generate_biology_answer(topic:str)->str:
+    t = topic.lower()
 
-def build_taxonomy_payload(topic):
-    return {
-        "topic":topic,
-        "levels":TAXONOMY_LEVELS
-    }
+    if "днк" in t:
+        return """
+ДНК человека — молекула, содержащая наследственную информацию организма.
 
-def build_graph_payload(topic, entities):
-    return {
-        "graph_type":"biology_relation_graph",
-        "topic":topic,
-        "nodes":entities[:20]
-    }
+Основные функции:
+• хранение генетической информации;
+• передача наследственных признаков;
+• управление синтезом белков.
 
-def build_viewer_payload(topic, operation):
-    return {
-        "viewer":"biology_viewer",
-        "topic":topic,
-        "operation":operation
-    }
+У человека геном организован в 23 пары хромосом.
+Изменения в ДНК называются мутациями и могут влиять на развитие организма.
+
+Вывод:
+ДНК является фундаментальной основой наследственности и работы клеток.
+""".strip()
+
+    if "клет" in t:
+        return BIOLOGY_KNOWLEDGE["cell"]
+
+    if "эволюц" in t:
+        return BIOLOGY_KNOWLEDGE["evolution"]
+
+    return (
+        "Запрос относится к биологии. Необходимо определить объект исследования, "
+        "его структуру, функции, механизмы и научные выводы."
+    )
 
 class BiologyReasoningEngine:
 
     def run(self, topic:str):
 
-        operation = detect_operation(topic)
-        domains = detect_domains(topic)
-        entities = extract_entities(topic)
-
         return {
-            "operation":operation,
-            "domains":domains,
-            "entities":entities,
-            "evidence":build_evidence_layer(domains),
-            "taxonomy":build_taxonomy_payload(topic),
-            "graph":build_graph_payload(topic, entities),
-            "viewer_payload":build_viewer_payload(topic, operation),
-            "answer":"Biological reasoning completed.",
-            "conclusion":"Scientific biological analysis prepared."
+            "operation": detect_operation(topic),
+            "domains": detect_domains(topic),
+            "entities": extract_entities(topic),
+            "answer": generate_biology_answer(topic),
+            "conclusion": "Biological answer generated."
         }
 
 class BiologyRoom(Room):
 
     name="biology"
     room_type="science"
-
     ROOM_ID="BIOLOGY_ROOM"
     ARTIFACT_TYPE="function"
 
@@ -128,17 +108,7 @@ class BiologyRoom(Room):
                 "domain":"biology",
                 "topic":text,
                 "room_identity":ROOM_IDENTITY,
-                **result,
-                "artifact_outputs":[
-                    "explanation",
-                    "comparison",
-                    "classification",
-                    "research_summary",
-                    "taxonomy",
-                    "graph",
-                    "viewer_payload",
-                    "conclusion"
-                ]
+                **result
             }
         )
 
