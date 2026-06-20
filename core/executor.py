@@ -192,6 +192,9 @@ from blocks.presentation_formatter import (
     format_response_presentation
 )
 
+# BOT.RU ARTIFACT TRANSLATOR
+from bot import artifact_to_human
+
 # =========================================================
 # 🧠 EXPERIENCE
 # =========================================================
@@ -838,48 +841,11 @@ def artifact_to_render_block(result):
 
 def botru_translate_artifact(artifact):
 
-    if artifact is None:
-        return {
-            "type": "artifact",
-            "content": ""
-        }
-
-    if isinstance(artifact, str):
-        return {
-            "type": "artifact",
-            "content": artifact
-        }
-
-    if isinstance(artifact, dict):
-
-        for field in [
-            "content",
-            "text",
-            "summary",
-            "analysis",
-            "description",
-            "research_summary",
-            "observation_report",
-            "topic"
-        ]:
-            value = artifact.get(field)
-            if value:
-                return {
-                    "type": "artifact",
-                    "content": str(value),
-                    "artifact": artifact
-                }
-
-        return {
-            "type": "artifact",
-            "content": str(artifact),
-            "artifact": artifact
-        }
-
-    return {
-        "type": "artifact",
-        "content": str(artifact)
-    }
+    # Single translation authority:
+    # BotRU translates machine artifacts into human scene blocks.
+    return artifact_to_human(
+        artifact
+    )
 
 
 # =========================================================
