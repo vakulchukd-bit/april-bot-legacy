@@ -306,6 +306,101 @@ def machine_to_human(
         3000
     )
 
+
+# =========================================================
+# 🔥 ARTIFACT → HUMAN
+# =========================================================
+
+ARTIFACT_PRIORITY_FIELDS = [
+
+    "answer",
+    "response",
+    "content",
+    "summary",
+    "analysis",
+    "description",
+    "result",
+    "research_summary",
+    "observation_report",
+    "topic"
+]
+
+
+def extract_artifact_payload(
+    artifact
+):
+
+    if artifact is None:
+        return {}
+
+    if isinstance(
+        artifact,
+        dict
+    ):
+        return artifact
+
+    if hasattr(
+        artifact,
+        "data"
+    ):
+        payload = getattr(
+            artifact,
+            "data",
+            {}
+        )
+
+        if isinstance(
+            payload,
+            dict
+        ):
+            return payload
+
+    return {}
+
+
+def artifact_to_human(
+    artifact
+):
+
+    payload = extract_artifact_payload(
+        artifact
+    )
+
+    for field in ARTIFACT_PRIORITY_FIELDS:
+
+        value = payload.get(field)
+
+        if value:
+
+            return {
+
+                "type":
+                    "artifact",
+
+                "content":
+                    machine_to_human(
+                        str(value)
+                    ),
+
+                "artifact":
+                    payload
+            }
+
+    return {
+
+        "type":
+            "artifact",
+
+        "content":
+            machine_to_human(
+                str(payload)
+            ),
+
+        "artifact":
+            payload
+    }
+
+
 # =========================================================
 # 🔥 HUMAN → MACHINE
 # =========================================================
