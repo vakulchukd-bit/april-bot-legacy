@@ -206,7 +206,7 @@ def resolve_scene_content(result):
     scene = result.get("scene")
 
     if scene:
-        return "[ACTIVE_SCENE]"
+        return ""
 
     blocks = result.get(
         "render_blocks",
@@ -214,7 +214,7 @@ def resolve_scene_content(result):
     )
 
     if blocks:
-        return "[RENDER_BLOCKS_PRESENT]"
+        return ""
 
     return ""
 
