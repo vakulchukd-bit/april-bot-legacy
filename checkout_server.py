@@ -162,6 +162,63 @@ def safe_json(value):
         return str(value)
 
 
+
+# =========================================================
+# 🧠 WIDESCENE CONTENT RESOLVER
+# =========================================================
+
+def resolve_scene_content(result):
+
+    content = (
+        result.get("content")
+        or result.get("response")
+        or result.get("data")
+    )
+
+    if content:
+        return content
+
+    artifact = result.get("artifact")
+
+    if artifact:
+
+        if isinstance(artifact, str):
+            return artifact
+
+        if isinstance(artifact, dict):
+
+            for field in [
+                "content",
+                "text",
+                "summary",
+                "analysis",
+                "description",
+                "research_summary",
+                "observation_report",
+                "topic"
+            ]:
+
+                value = artifact.get(field)
+
+                if value:
+                    return value
+
+    scene = result.get("scene")
+
+    if scene:
+        return "[ACTIVE_SCENE]"
+
+    blocks = result.get(
+        "render_blocks",
+        result.get("blocks", [])
+    )
+
+    if blocks:
+        return "[RENDER_BLOCKS_PRESENT]"
+
+    return ""
+
+
 # =========================================================
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
@@ -194,19 +251,24 @@ def normalize_executor_response(
             ),
 
         "content":
-            (
-                result.get(
-                    "content",
-                    ""
-                )
-                or result.get(
-                    "response",
-                    ""
-                )
-                or result.get(
-                    "data",
-                    ""
-                )
+            resolve_scene_content(
+                result
+            ),
+
+        "scene_present":
+            bool(
+                result.get("scene")
+            ),
+
+        "blocks_present":
+            bool(
+                result.get("render_blocks")
+                or result.get("blocks")
+            ),
+
+        "artifact_present":
+            bool(
+                result.get("artifact")
             ),
 
         # =================================================
@@ -342,6 +404,19 @@ def normalize_executor_response(
         normalized[
             "preserve_render_space"
         ] = True
+
+
+    print(
+        "🌐 WIDESCENE:",
+        {
+            "scene": bool(result.get("scene")),
+            "artifact": bool(result.get("artifact")),
+            "blocks": bool(
+                result.get("render_blocks")
+                or result.get("blocks")
+            )
+        }
+    )
 
     print("🌐 EXECUTOR RAW:")
     print(result)
