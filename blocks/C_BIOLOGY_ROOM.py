@@ -1,6 +1,6 @@
 # =====================================================
-# APRIL C_BIOLOGY_ROOM V12
-# BIOLOGY FACTORY FOUNDATION
+# APRIL C_BIOLOGY_ROOM V13
+# BIOLOGY FACTORY PROFESSIONAL FOUNDATION
 # =====================================================
 
 from typing import Dict, List, Any
@@ -10,143 +10,89 @@ from blocks.C_ARTIFACT_CONTRACT import create_artifact
 ROOM_IDENTITY = {
     "specialization": "biological_sciences",
     "knowledge_class": "life_sciences",
-    "architecture": "biology_factory_v12"
+    "architecture": "biology_factory_v13"
 }
-
-# -----------------------------------------------------
-# ENTITY REGISTRY
-# -----------------------------------------------------
-
-BIOLOGY_ENTITY_REGISTRY = {
-    "organism": [],
-    "species": [],
-    "population": [],
-    "ecosystem": [],
-    "gene": [],
-    "protein": [],
-    "cell": [],
-    "tissue": [],
-    "organ": [],
-    "animal": [],
-    "plant": [],
-    "fungi": [],
-    "bacteria": [],
-    "virus": []
-}
-
-# -----------------------------------------------------
-# CONCEPT GRAPH
-# -----------------------------------------------------
-
-BIOLOGY_CONCEPT_GRAPH = {
-    "gene": ["protein"],
-    "protein": ["cell"],
-    "cell": ["tissue"],
-    "tissue": ["organ"],
-    "organ": ["organism"],
-    "organism": ["population"],
-    "population": ["species"],
-    "species": ["ecosystem"]
-}
-
-# -----------------------------------------------------
-# KNOWLEDGE DOMAINS
-# -----------------------------------------------------
 
 BIOLOGY_KNOWLEDGE_BASE = {
-    "genetics": {},
-    "molecular_biology": {},
-    "cell_biology": {},
-    "anatomy": {},
-    "physiology": {},
-    "biochemistry": {},
-    "immunology": {},
-    "microbiology": {},
-    "zoology": {},
-    "botany": {},
-    "ecology": {},
-    "evolution": {},
-    "taxonomy": {},
-    "population_biology": {}
+    "genetics": "Гены, наследственность, ДНК, РНК и геном.",
+    "molecular_biology": "Молекулярные механизмы клетки.",
+    "cell_biology": "Строение и функции клеток.",
+    "evolution": "Изменение популяций и видов во времени.",
+    "ecology": "Взаимодействие организмов и среды."
 }
-
-# -----------------------------------------------------
-# OPERATION DETECTOR
-# -----------------------------------------------------
 
 class BiologyOperationDetector:
 
     def detect(self, text: str) -> str:
-
         t = text.lower()
 
         if "срав" in t:
             return "compare"
-
-        if "классиф" in t:
-            return "classify"
-
         if "граф" in t:
             return "visualize"
-
-        if "таблиц" in t:
+        if "табл" in t:
             return "tabulate"
-
-        if "исслед" in t:
-            return "research"
 
         return "analyze"
 
-# -----------------------------------------------------
-# ENTITY EXTRACTION
-# -----------------------------------------------------
 
 class BiologyEntityRegistry:
 
     def extract(self, text: str) -> List[str]:
-        return [x for x in text.lower().split() if len(x) > 2]
+        return [w.strip(".,!?()[]") for w in text.split() if len(w) > 2]
 
-# -----------------------------------------------------
-# RESPONSE PLANNER
-# -----------------------------------------------------
-
-class BiologyResponsePlanner:
-
-    def build(self, operation: str) -> Dict[str, Any]:
-
-        return {
-            "text": True,
-            "table": operation in ["compare", "tabulate"],
-            "graph": operation == "visualize",
-            "diagram": operation in ["classify", "visualize"],
-            "sources": True,
-            "comparison": operation == "compare"
-        }
-
-# -----------------------------------------------------
-# REASONING ENGINE
-# -----------------------------------------------------
 
 class BiologyReasoningEngine:
+
+    def build_answer(self, topic: str, operation: str):
+
+        q = topic.lower()
+
+        if "днк" in q:
+            return (
+                "ДНК человека — молекула, содержащая наследственную "
+                "информацию организма. Она состоит из нуклеотидов "
+                "аденина, тимина, гуанина и цитозина. Геном человека "
+                "содержит около 3 миллиардов пар оснований и организован "
+                "в 23 пары хромосом. ДНК участвует в хранении, передаче "
+                "и реализации генетической информации через синтез РНК "
+                "и белков."
+            )
+
+        if operation == "compare":
+            return (
+                "Запрос определён как сравнительный биологический анализ. "
+                "Необходимо выделить сходства, различия, общие признаки, "
+                "эволюционные связи и функциональные особенности объектов."
+            )
+
+        return (
+            "Биология изучает живые организмы, их строение, функции, "
+            "развитие, наследственность, эволюцию и взаимодействие "
+            "с окружающей средой. Для более точного анализа необходимо "
+            "уточнение объекта исследования."
+        )
 
     def run(self, topic: str):
 
         operation = BiologyOperationDetector().detect(topic)
-
         entities = BiologyEntityRegistry().extract(topic)
 
-        planner = BiologyResponsePlanner().build(operation)
+        answer = self.build_answer(topic, operation)
 
         return {
             "operation": operation,
             "entities": entities,
             "domains": list(BIOLOGY_KNOWLEDGE_BASE.keys()),
-            "answer": (
-                "Биологический запрос обработан через "
-                "Biology Factory Foundation. "
-                "Определены сущности, операция и план артефактов."
-            ),
-            "response_plan": planner,
+            "answer": answer,
+            "research_summary": answer,
+            "response_plan": {
+                "text": True,
+                "table": operation in ["compare", "tabulate"],
+                "graph": operation == "visualize",
+                "diagram": operation == "visualize",
+                "sources": True
+            },
             "table": [],
             "graph": [],
             "diagram": [],
@@ -154,9 +100,6 @@ class BiologyReasoningEngine:
             "comparison": {}
         }
 
-# -----------------------------------------------------
-# ROOM
-# -----------------------------------------------------
 
 class BiologyRoom(Room):
 
@@ -164,7 +107,6 @@ class BiologyRoom(Room):
     room_type = "science"
 
     ROOM_ID = "BIOLOGY_ROOM"
-
     ARTIFACT_TYPE = "function"
 
     async def handle(self, user_id, text, context, run):
