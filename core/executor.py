@@ -844,6 +844,41 @@ def botru_translate_artifact(artifact):
             "content": ""
         }
 
+    # BaseArtifact support
+    if hasattr(artifact, "data"):
+
+        payload = artifact.data
+
+        if isinstance(payload, dict):
+
+            for field in [
+                "answer",
+                "response",
+                "content",
+                "text",
+                "summary",
+                "analysis",
+                "description",
+                "research_summary",
+                "observation_report",
+                "topic"
+            ]:
+
+                value = payload.get(field)
+
+                if value:
+                    return {
+                        "type": "artifact",
+                        "content": str(value),
+                        "artifact": payload
+                    }
+
+            return {
+                "type": "artifact",
+                "content": str(payload),
+                "artifact": payload
+            }
+
     if isinstance(artifact, str):
         return {
             "type": "artifact",
