@@ -822,10 +822,63 @@ def artifact_to_render_block(result):
 
     artifact = result.get("artifact")
 
+    translated = botru_translate_artifact(
+        artifact
+    )
+
+    translated["machine_payload"] = True
+
+    return translated
+
+
+
+# =====================================================
+# 🧠 BOT.RU MACHINE -> HUMAN TRANSLATOR
+# =====================================================
+
+def botru_translate_artifact(artifact):
+
+    if artifact is None:
+        return {
+            "type": "artifact",
+            "content": ""
+        }
+
+    if isinstance(artifact, str):
+        return {
+            "type": "artifact",
+            "content": artifact
+        }
+
+    if isinstance(artifact, dict):
+
+        for field in [
+            "content",
+            "text",
+            "summary",
+            "analysis",
+            "description",
+            "research_summary",
+            "observation_report",
+            "topic"
+        ]:
+            value = artifact.get(field)
+            if value:
+                return {
+                    "type": "artifact",
+                    "content": str(value),
+                    "artifact": artifact
+                }
+
+        return {
+            "type": "artifact",
+            "content": str(artifact),
+            "artifact": artifact
+        }
+
     return {
         "type": "artifact",
-        "artifact": artifact,
-        "machine_payload": True
+        "content": str(artifact)
     }
 
 
