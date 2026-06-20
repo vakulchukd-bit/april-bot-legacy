@@ -1,214 +1,152 @@
 # =====================================================
-# APRIL C_BIOLOGY_ROOM V3
-# REFERENCE SCIENCE ENGINE
+# APRIL C_BIOLOGY_ROOM V10
+# ENTITY + TAXONOMY + EVIDENCE + VIEWER PAYLOAD
 # =====================================================
 
-from typing import Dict, Any
-
+from typing import List
 from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
-
-BIOLOGY_KNOWLEDGE = {
-    "genetics": {
-        "summary": "Genetics studies heredity, genes, genomes, DNA, RNA and biological variation."
-    },
-    "cell_biology": {
-        "summary": "Cell biology studies cells, organelles, division, metabolism and regulation."
-    },
-    "evolution": {
-        "summary": "Evolution explains how populations change across generations."
-    },
-    "ecology": {
-        "summary": "Ecology studies interactions among organisms and environments."
-    },
-    "zoology": {
-        "summary": "Zoology studies animals, classification, behavior and adaptation."
-    },
-    "botany": {
-        "summary": "Botany studies plants, growth, physiology and reproduction."
-    },
-    "microbiology": {
-        "summary": "Microbiology studies bacteria, archaea, fungi and microorganisms."
-    },
-    "physiology": {
-        "summary": "Physiology studies functions of living systems."
-    }
+ROOM_IDENTITY = {
+    "specialization":"biological_sciences",
+    "knowledge_class":"life_sciences",
+    "mission":"study living systems, evolution and ecosystems"
 }
 
-
-BIOLOGY_DOMAINS = {
-    "genetics": ["днк","dna","рнк","rna","ген","геном","хромосом","мутац","наслед"],
-    "cell_biology": ["клет","митоз","мейоз","ядро"],
-    "evolution": ["эволюц","отбор","адаптац","видообраз"],
-    "ecology": ["эколог","популяц","биом","экосистем"],
-    "zoology": ["животн","млекопитающ","птиц","рептили","рыб"],
-    "botany": ["растен","ботан","фотосинтез"],
-    "microbiology": ["бактер","вирус","архе","гриб"],
-    "physiology": ["орган","физиолог","кров","дыхани","нервн"]
+DOMAIN_KNOWLEDGE = {
+    "genetics":["DNA","RNA","Gene","Genome","Chromosome"],
+    "cell_biology":["Cell","Nucleus","Mitochondria","Membrane"],
+    "evolution":["Selection","Adaptation","Speciation"],
+    "ecology":["Population","Community","Ecosystem","Biome"],
+    "zoology":["Mammal","Bird","Fish","Reptile"],
+    "botany":["Plant","Leaf","Root","Flower"],
+    "microbiology":["Bacteria","Virus","Fungi","Archaea"],
+    "immunology":["Antibody","Antigen","TCell","BCell"],
+    "biochemistry":["Protein","Lipid","Carbohydrate","Enzyme"],
+    "physiology":["Respiration","Circulation","NervousSystem"]
 }
 
+BIOLOGY_RELATIONS = {
+    "gene":"part_of_genome",
+    "genome":"stored_in_cell",
+    "cell":"part_of_organism",
+    "organism":"member_of_population",
+    "population":"part_of_ecosystem"
+}
 
-def biology_analyze_topic(text):
+TAXONOMY_LEVELS = [
+    "domain","kingdom","phylum",
+    "class","order","family",
+    "genus","species"
+]
 
-    text = str(text).lower()
-
-    domains = []
-    entities = []
-
-    for domain, patterns in BIOLOGY_DOMAINS.items():
-        found = False
-
-        for pattern in patterns:
-            if pattern in text:
-                found = True
-                entities.append(pattern)
-
-        if found:
-            domains.append(domain)
-
-    return {
-        "detected_domains": domains,
-        "entities": list(set(entities)),
-        "biology_confidence": min(len(domains) / 3.0, 1.0)
-    }
-
-
-def detect_operation(text):
-
-    text = str(text).lower()
-
-    if "сравн" in text:
-        return "compare"
-
-    if "таблиц" in text:
-        return "table"
-
-    if "граф" in text:
-        return "graph"
-
-    if "исслед" in text:
-        return "research"
-
+def detect_operation(text:str)->str:
+    t=text.lower()
+    if "сравн" in t: return "compare"
+    if "классиф" in t: return "classify"
+    if "граф" in t: return "graph"
+    if "таблиц" in t: return "table"
+    if "исслед" in t: return "research"
     return "explain"
 
+def detect_domains(text:str)->List[str]:
+    t=text.lower()
+    result=[]
+    for d, concepts in DOMAIN_KNOWLEDGE.items():
+        if any(c.lower() in t for c in concepts):
+            result.append(d)
+    return result
 
-def build_biology_response(topic, analysis):
+def extract_entities(text:str)->List[str]:
+    return list(dict.fromkeys(text.lower().split()[:50]))
 
-    domains = analysis.get("detected_domains", [])
-    operation = detect_operation(topic)
+def build_evidence_layer(domains):
+    return [
+        {
+            "domain":d,
+            "evidence_type":"scientific_knowledge"
+        }
+        for d in domains
+    ]
 
-    sections = []
-
-    for domain in domains:
-        if domain in BIOLOGY_KNOWLEDGE:
-            sections.append(
-                BIOLOGY_KNOWLEDGE[domain]["summary"]
-            )
-
-    body = "\n\n".join(sections)
-
-    if not body:
-        body = (
-            "The request belongs to biology. "
-            "Provide a scientific explanation, identify biological entities, "
-            "describe mechanisms, evidence and conclusions."
-        )
-
+def build_taxonomy_payload(topic):
     return {
-        "answer": body,
-        "summary": body[:400],
-        "operation": operation
+        "topic":topic,
+        "levels":TAXONOMY_LEVELS
     }
 
+def build_graph_payload(topic, entities):
+    return {
+        "graph_type":"biology_relation_graph",
+        "topic":topic,
+        "nodes":entities[:20]
+    }
+
+def build_viewer_payload(topic, operation):
+    return {
+        "viewer":"biology_viewer",
+        "topic":topic,
+        "operation":operation
+    }
+
+class BiologyReasoningEngine:
+
+    def run(self, topic:str):
+
+        operation = detect_operation(topic)
+        domains = detect_domains(topic)
+        entities = extract_entities(topic)
+
+        return {
+            "operation":operation,
+            "domains":domains,
+            "entities":entities,
+            "evidence":build_evidence_layer(domains),
+            "taxonomy":build_taxonomy_payload(topic),
+            "graph":build_graph_payload(topic, entities),
+            "viewer_payload":build_viewer_payload(topic, operation),
+            "answer":"Biological reasoning completed.",
+            "conclusion":"Scientific biological analysis prepared."
+        }
 
 class BiologyRoom(Room):
 
-    name = "biology"
-    room_type = "science"
+    name="biology"
+    room_type="science"
 
-    ROOM_ID = "BIOLOGY_ROOM"
-    ARTIFACT_TYPE = "function"
+    ROOM_ID="BIOLOGY_ROOM"
+    ARTIFACT_TYPE="function"
 
-    async def handle(
-        self,
-        user_id,
-        text,
-        context,
-        run
-    ):
+    async def handle(self, user_id, text, context, run):
 
-        artifact = self.process({
-            "topic": text
-        })
-
-        return {
-            "type": "artifact",
-            "artifact": artifact,
-            "room": self.name,
-            "domain": "biology"
-        }
-
-    def process(
-        self,
-        task: Dict[str, Any]
-    ):
-
-        topic = task.get("topic", "")
-
-        analysis = biology_analyze_topic(topic)
-
-        response = build_biology_response(
-            topic,
-            analysis
-        )
+        result = BiologyReasoningEngine().run(text)
 
         artifact = create_artifact(
-
             artifact_type=self.ARTIFACT_TYPE,
             room_source=self.ROOM_ID,
-
             data={
-
-                "domain": "biology",
-                "topic": topic,
-
-                "subdomains":
-                    analysis["detected_domains"],
-
-                "entities":
-                    analysis["entities"],
-
-                "answer":
-                    response["answer"],
-
-                "summary":
-                    response["summary"],
-
-                "operation":
-                    response["operation"],
-
-                "analysis":
-                    analysis,
-
-                "artifact_outputs": [
+                "domain":"biology",
+                "topic":text,
+                "room_identity":ROOM_IDENTITY,
+                **result,
+                "artifact_outputs":[
                     "explanation",
                     "comparison",
+                    "classification",
                     "research_summary",
-                    "table",
+                    "taxonomy",
                     "graph",
-                    "diagram",
+                    "viewer_payload",
                     "conclusion"
                 ]
             }
         )
 
-        artifact.quality.validation_passed = True
-        artifact.quality.quality_score = 1.0
-        artifact.quality.confidence_score = 1.0
-        artifact.quality.completeness_score = 1.0
-
-        return artifact
-
+        return {
+            "type":"artifact",
+            "artifact":artifact,
+            "room":self.name,
+            "domain":"biology"
+        }
 
 ROOM = BiologyRoom()
