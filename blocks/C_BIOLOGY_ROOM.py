@@ -1,5 +1,6 @@
 # =====================================================
-# APRIL C_BIOLOGY_ROOM V2 REFERENCE ROOM
+# APRIL C_BIOLOGY_ROOM V3
+# REFERENCE SCIENCE ENGINE
 # =====================================================
 
 from typing import Dict, Any
@@ -8,125 +9,125 @@ from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
+BIOLOGY_KNOWLEDGE = {
+    "genetics": {
+        "summary": "Genetics studies heredity, genes, genomes, DNA, RNA and biological variation."
+    },
+    "cell_biology": {
+        "summary": "Cell biology studies cells, organelles, division, metabolism and regulation."
+    },
+    "evolution": {
+        "summary": "Evolution explains how populations change across generations."
+    },
+    "ecology": {
+        "summary": "Ecology studies interactions among organisms and environments."
+    },
+    "zoology": {
+        "summary": "Zoology studies animals, classification, behavior and adaptation."
+    },
+    "botany": {
+        "summary": "Botany studies plants, growth, physiology and reproduction."
+    },
+    "microbiology": {
+        "summary": "Microbiology studies bacteria, archaea, fungi and microorganisms."
+    },
+    "physiology": {
+        "summary": "Physiology studies functions of living systems."
+    }
+}
+
+
 BIOLOGY_DOMAINS = {
-
-    "genetics": [
-        "днк","dna","рнк","rna","ген","gene",
-        "геном","genome","хромосом","chromosome",
-        "мутац","mutation","наслед"
-    ],
-
-    "cell_biology": [
-        "клет","cell","митоз","mitosis",
-        "мейоз","meiosis","ядро","membrane"
-    ],
-
-    "evolution": [
-        "эволюц","evolution","отбор",
-        "адаптац","видообраз"
-    ],
-
-    "ecology": [
-        "эколог","ecosystem","популяц",
-        "биом","среда"
-    ],
-
-    "zoology": [
-        "животн","млекопитающ","птиц",
-        "рептили","рыб","амфиби"
-    ],
-
-    "botany": [
-        "растен","ботан","photosynthesis",
-        "фотосинтез"
-    ],
-
-    "microbiology": [
-        "бактер","вирус","архе",
-        "гриб","микроорганизм"
-    ],
-
-    "physiology": [
-        "орган","физиолог","кров",
-        "дыхани","нервн"
-    ]
+    "genetics": ["днк","dna","рнк","rna","ген","геном","хромосом","мутац","наслед"],
+    "cell_biology": ["клет","митоз","мейоз","ядро"],
+    "evolution": ["эволюц","отбор","адаптац","видообраз"],
+    "ecology": ["эколог","популяц","биом","экосистем"],
+    "zoology": ["животн","млекопитающ","птиц","рептили","рыб"],
+    "botany": ["растен","ботан","фотосинтез"],
+    "microbiology": ["бактер","вирус","архе","гриб"],
+    "physiology": ["орган","физиолог","кров","дыхани","нервн"]
 }
 
 
 def biology_analyze_topic(text):
 
-    text_lower = str(text).lower()
+    text = str(text).lower()
 
-    detected_domains = []
+    domains = []
     entities = []
 
     for domain, patterns in BIOLOGY_DOMAINS.items():
-
-        matched = False
+        found = False
 
         for pattern in patterns:
-
-            if pattern in text_lower:
-                matched = True
+            if pattern in text:
+                found = True
                 entities.append(pattern)
 
-        if matched:
-            detected_domains.append(domain)
-
-    confidence = min(
-        len(detected_domains) / 3.0,
-        1.0
-    )
+        if found:
+            domains.append(domain)
 
     return {
-
-        "detected_domains":
-            detected_domains,
-
-        "entities":
-            list(set(entities)),
-
-        "biology_confidence":
-            confidence
+        "detected_domains": domains,
+        "entities": list(set(entities)),
+        "biology_confidence": min(len(domains) / 3.0, 1.0)
     }
 
 
-def build_biology_answer(
-    topic,
-    analysis
-):
+def detect_operation(text):
 
-    domains = analysis.get(
-        "detected_domains",
-        []
-    )
+    text = str(text).lower()
 
-    if domains:
+    if "сравн" in text:
+        return "compare"
 
-        return (
-            "Запрос относится к биологии. "
-            f"Обнаружены разделы: {', '.join(domains)}. "
-            "Комната может выполнить объяснение, "
-            "сравнение, исследование, классификацию, "
-            "подготовку таблицы, графика или научного обзора."
+    if "таблиц" in text:
+        return "table"
+
+    if "граф" in text:
+        return "graph"
+
+    if "исслед" in text:
+        return "research"
+
+    return "explain"
+
+
+def build_biology_response(topic, analysis):
+
+    domains = analysis.get("detected_domains", [])
+    operation = detect_operation(topic)
+
+    sections = []
+
+    for domain in domains:
+        if domain in BIOLOGY_KNOWLEDGE:
+            sections.append(
+                BIOLOGY_KNOWLEDGE[domain]["summary"]
+            )
+
+    body = "\n\n".join(sections)
+
+    if not body:
+        body = (
+            "The request belongs to biology. "
+            "Provide a scientific explanation, identify biological entities, "
+            "describe mechanisms, evidence and conclusions."
         )
 
-    return (
-        "Запрос был направлен в биологическую комнату. "
-        "Даже если конкретные сущности не классифицированы, "
-        "следует выполнить биологический анализ темы "
-        "и подготовить объяснение на естественном языке."
-    )
+    return {
+        "answer": body,
+        "summary": body[:400],
+        "operation": operation
+    }
 
 
 class BiologyRoom(Room):
 
     name = "biology"
-
     room_type = "science"
 
     ROOM_ID = "BIOLOGY_ROOM"
-
     ARTIFACT_TYPE = "function"
 
     async def handle(
@@ -153,16 +154,11 @@ class BiologyRoom(Room):
         task: Dict[str, Any]
     ):
 
-        topic = task.get(
-            "topic",
-            ""
-        )
+        topic = task.get("topic", "")
 
-        analysis = biology_analyze_topic(
-            topic
-        )
+        analysis = biology_analyze_topic(topic)
 
-        answer = build_biology_answer(
+        response = build_biology_response(
             topic,
             analysis
         )
@@ -170,40 +166,30 @@ class BiologyRoom(Room):
         artifact = create_artifact(
 
             artifact_type=self.ARTIFACT_TYPE,
-
             room_source=self.ROOM_ID,
 
             data={
 
                 "domain": "biology",
-
                 "topic": topic,
 
                 "subdomains":
-                    analysis.get(
-                        "detected_domains",
-                        []
-                    ),
+                    analysis["detected_domains"],
 
                 "entities":
-                    analysis.get(
-                        "entities",
-                        []
-                    ),
+                    analysis["entities"],
 
                 "answer":
-                    answer,
+                    response["answer"],
 
                 "summary":
-                    answer,
+                    response["summary"],
+
+                "operation":
+                    response["operation"],
 
                 "analysis":
                     analysis,
-
-                "room_identity": {
-                    "specialization":
-                        "biological_sciences"
-                },
 
                 "artifact_outputs": [
                     "explanation",
