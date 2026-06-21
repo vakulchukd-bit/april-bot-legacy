@@ -129,7 +129,7 @@ class BiologyReasoningEngine:
             answer = f"{answer}\n\n{explanation}"
 
 
-        return {
+        result = {
             "answer": answer,
             "operation": operation,
             "entities": entities,
@@ -153,6 +153,13 @@ class BiologyReasoningEngine:
             "sources": [],
             "comparison": {}
         }
+
+        result = enrich_reasoning_result_with_knowledge(
+            result,
+            semantic
+        )
+
+        return result
 
 class BiologyRoom(Room):
     name = "biology"
@@ -484,3 +491,386 @@ class BiologyExplanationEngine:
             )
 
         return " ".join(explanation_parts)
+
+
+# =====================================================
+# V29 KNOWLEDGE RESOLVER ARCHITECTURE
+# =====================================================
+
+class BiologyKnowledgeProvider:
+    provider_name = "base"
+
+    def resolve(self, entities, concepts, domains):
+        return {
+            "knowledge_nodes": [],
+            "relations": [],
+            "sources": [],
+            "graph_data": [],
+            "table_data": []
+        }
+
+
+class LocalBiologyProvider(BiologyKnowledgeProvider):
+
+    provider_name = "local_biology"
+
+    def resolve(self, entities, concepts, domains):
+
+        nodes = []
+        relations = []
+
+        for entity in entities:
+
+            if entity in BIOLOGY_CONCEPT_LIBRARY:
+                nodes.append({
+                    "id": entity,
+                    **BIOLOGY_CONCEPT_LIBRARY[entity]
+                })
+
+            if entity in BIOLOGY_RELATION_LIBRARY:
+                relations.append({
+                    "entity": entity,
+                    "relations": BIOLOGY_RELATION_LIBRARY[entity]
+                })
+
+        return {
+            "knowledge_nodes": nodes,
+            "relations": relations,
+            "sources": ["local_library"],
+            "graph_data": relations,
+            "table_data": nodes
+        }
+
+
+class WikidataBiologyProvider(BiologyKnowledgeProvider):
+
+    provider_name = "wikidata"
+
+    def resolve(self, entities, concepts, domains):
+
+        return {
+            "knowledge_nodes": [],
+            "relations": [],
+            "sources": ["wikidata_placeholder"],
+            "graph_data": [],
+            "table_data": []
+        }
+
+
+class BiologyKnowledgeResolver:
+
+    def __init__(self):
+
+        self.providers = [
+            LocalBiologyProvider(),
+            WikidataBiologyProvider()
+        ]
+
+    def resolve(self, entities, concepts, domains):
+
+        result = {
+            "knowledge_nodes": [],
+            "relations": [],
+            "sources": [],
+            "graph_data": [],
+            "table_data": []
+        }
+
+        for provider in self.providers:
+
+            provider_result = provider.resolve(
+                entities,
+                concepts,
+                domains
+            )
+
+            for key in result:
+                result[key].extend(
+                    provider_result.get(key, [])
+                )
+
+        return result
+
+
+# =====================================================
+# V30 RESOLVER INTEGRATION LAYER
+# =====================================================
+
+class BiologyReasoningContextBuilder:
+
+    def build(self, semantic):
+
+        resolver = BiologyKnowledgeResolver()
+
+        knowledge = resolver.resolve(
+            entities=semantic.get("canonical_entities", []),
+            concepts=semantic.get("concepts", []),
+            domains=semantic.get("domains", [])
+        )
+
+        return {
+            "semantic": semantic,
+            "knowledge": knowledge,
+            "knowledge_nodes": knowledge.get("knowledge_nodes", []),
+            "relations": knowledge.get("relations", []),
+            "sources": knowledge.get("sources", []),
+            "graph_data": knowledge.get("graph_data", []),
+            "table_data": knowledge.get("table_data", [])
+        }
+
+
+# Suggested integration for BiologyReasoningEngine.run():
+#
+# semantic = BiologySemanticAnalyzer().analyze(topic)
+# context = BiologyReasoningContextBuilder().build(semantic)
+#
+# knowledge_nodes = context["knowledge_nodes"]
+# relations = context["relations"]
+# sources = context["sources"]
+#
+# artifact payload should expose:
+# knowledge_nodes
+# relations
+# sources
+# graph_data
+# table_data
+#
+# so Scene Builder can consume them directly.
+
+
+# =====================================================
+# V31 RESOLVER -> ENGINE INTEGRATION
+# =====================================================
+
+class BiologyKnowledgeSceneAdapter:
+
+    def build_scene_payload(self, context):
+
+        return {
+            "knowledge_nodes": context.get("knowledge_nodes", []),
+            "relations": context.get("relations", []),
+            "sources": context.get("sources", []),
+            "graph_data": context.get("graph_data", []),
+            "table_data": context.get("table_data", [])
+        }
+
+
+# Integration target for BiologyReasoningEngine.run():
+#
+# semantic = BiologySemanticAnalyzer().analyze(topic)
+#
+# context = BiologyReasoningContextBuilder().build(
+#     semantic
+# )
+#
+# scene_payload = BiologyKnowledgeSceneAdapter().build_scene_payload(
+#     context
+# )
+#
+# return {
+#     ...existing fields...,
+#     "knowledge_nodes": scene_payload["knowledge_nodes"],
+#     "relations": scene_payload["relations"],
+#     "knowledge_sources": scene_payload["sources"],
+#     "graph_data": scene_payload["graph_data"],
+#     "table_data": scene_payload["table_data"]
+# }
+#
+# This preserves compatibility while exposing
+# internal and external knowledge providers
+# to Executor and Scene Builder.
+
+
+# =====================================================
+# V32 EXTERNAL KNOWLEDGE PROVIDER CONTRACT
+# =====================================================
+
+BIOLOGY_EXTERNAL_PROVIDER_CONFIG = {
+    "wikidata": {
+        "enabled": True,
+        "provider": "WikidataBiologyProvider"
+    },
+    "gene_ontology": {
+        "enabled": False,
+        "provider": "GeneOntologyProvider"
+    },
+    "ncbi": {
+        "enabled": False,
+        "provider": "NCBIProvider"
+    },
+    "ensembl": {
+        "enabled": False,
+        "provider": "EnsemblProvider"
+    }
+}
+
+
+class GeneOntologyProvider(BiologyKnowledgeProvider):
+
+    provider_name = "gene_ontology"
+
+    def resolve(self, entities, concepts, domains):
+
+        return {
+            "knowledge_nodes": [],
+            "relations": [],
+            "sources": ["gene_ontology_placeholder"],
+            "graph_data": [],
+            "table_data": []
+        }
+
+
+class NCBIProvider(BiologyKnowledgeProvider):
+
+    provider_name = "ncbi"
+
+    def resolve(self, entities, concepts, domains):
+
+        return {
+            "knowledge_nodes": [],
+            "relations": [],
+            "sources": ["ncbi_placeholder"],
+            "graph_data": [],
+            "table_data": []
+        }
+
+
+class EnsemblProvider(BiologyKnowledgeProvider):
+
+    provider_name = "ensembl"
+
+    def resolve(self, entities, concepts, domains):
+
+        return {
+            "knowledge_nodes": [],
+            "relations": [],
+            "sources": ["ensembl_placeholder"],
+            "graph_data": [],
+            "table_data": []
+        }
+
+
+# =====================================================
+# V33 DYNAMIC PROVIDER REGISTRY
+# =====================================================
+
+class BiologyProviderRegistry:
+
+    def build_providers(self):
+
+        providers = [LocalBiologyProvider()]
+
+        cfg = BIOLOGY_EXTERNAL_PROVIDER_CONFIG
+
+        if cfg.get("wikidata", {}).get("enabled"):
+            providers.append(WikidataBiologyProvider())
+
+        if cfg.get("gene_ontology", {}).get("enabled"):
+            providers.append(GeneOntologyProvider())
+
+        if cfg.get("ncbi", {}).get("enabled"):
+            providers.append(NCBIProvider())
+
+        if cfg.get("ensembl", {}).get("enabled"):
+            providers.append(EnsemblProvider())
+
+        return providers
+
+
+class DynamicBiologyKnowledgeResolver(BiologyKnowledgeResolver):
+
+    def __init__(self):
+
+        registry = BiologyProviderRegistry()
+        self.providers = registry.build_providers()
+        
+        
+# Integration target:
+#
+# resolver = DynamicBiologyKnowledgeResolver()
+#
+# knowledge = resolver.resolve(
+#     entities=semantic["canonical_entities"],
+#     concepts=semantic["concepts"],
+#     domains=semantic["domains"]
+# )
+#
+# This removes hardcoded providers and routes
+# all knowledge access through the provider registry.
+
+
+# =====================================================
+# V34 ACTIVE RESOLVER INTEGRATION PATCH
+# =====================================================
+
+def build_biology_knowledge_context(semantic: dict):
+
+    resolver = DynamicBiologyKnowledgeResolver()
+
+    knowledge = resolver.resolve(
+        entities=semantic.get("canonical_entities", []),
+        concepts=semantic.get("concepts", []),
+        domains=semantic.get("domains", [])
+    )
+
+    return {
+        "knowledge_nodes": knowledge.get("knowledge_nodes", []),
+        "relations": knowledge.get("relations", []),
+        "knowledge_sources": knowledge.get("sources", []),
+        "graph_data": knowledge.get("graph_data", []),
+        "table_data": knowledge.get("table_data", [])
+    }
+
+# Integration target inside BiologyReasoningEngine.run():
+#
+# semantic = BiologySemanticAnalyzer().analyze(topic)
+# knowledge_context = build_biology_knowledge_context(semantic)
+#
+# result.update(knowledge_context)
+#
+# This keeps backward compatibility while exposing
+# resolver-driven knowledge to Artifact and Scene layers.
+
+
+# =====================================================
+# V35 SCRUTER VISIBILITY CONTRACT
+# =====================================================
+
+def enrich_reasoning_result_with_knowledge(result: dict, semantic: dict):
+
+    try:
+        knowledge_context = build_biology_knowledge_context(semantic)
+
+        result.update({
+            "knowledge_nodes": knowledge_context.get("knowledge_nodes", []),
+            "relations": knowledge_context.get("relations", []),
+            "knowledge_sources": knowledge_context.get("knowledge_sources", []),
+            "graph_data": knowledge_context.get("graph_data", []),
+            "table_data": knowledge_context.get("table_data", []),
+            "scene_ready": True,
+            "knowledge_provider_mode": "dynamic"
+        })
+
+    except Exception as e:
+        result["knowledge_error"] = str(e)
+
+    return result
+
+
+# PATCH TARGET INSIDE BiologyReasoningEngine.run():
+#
+# semantic = BiologySemanticAnalyzer().analyze(topic)
+# result = {...existing payload...}
+# result = enrich_reasoning_result_with_knowledge(
+#     result,
+#     semantic
+# )
+# return result
+#
+# Scruter / Scene Builder fields:
+#   knowledge_nodes
+#   relations
+#   knowledge_sources
+#   graph_data
+#   table_data
+#   scene_ready
