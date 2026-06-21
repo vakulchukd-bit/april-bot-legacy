@@ -73,6 +73,31 @@ class ArtifactContext:
         default_factory=list
     )
 
+    # =================================================
+    # COGNITIVE CONTRIBUTIONS
+    # =================================================
+
+    scene_contributions: List[Dict] = field(
+        default_factory=list
+    )
+
+    focus_contributions: List[Dict] = field(
+        default_factory=list
+    )
+
+    memory_contributions: List[Dict] = field(
+        default_factory=list
+    )
+
+    trajectory_hints: List[str] = field(
+        default_factory=list
+    )
+
+    scene_hints: List[str] = field(
+        default_factory=list
+    )
+
+
 # =====================================================
 # ARTIFACT QUALITY
 # =====================================================
@@ -277,6 +302,31 @@ def create_artifact(
 
             artifact_outputs=data.get(
                 "artifact_outputs",
+                []
+            ),
+
+            scene_contributions=data.get(
+                "scene_contributions",
+                []
+            ),
+
+            focus_contributions=data.get(
+                "focus_contributions",
+                []
+            ),
+
+            memory_contributions=data.get(
+                "memory_contributions",
+                []
+            ),
+
+            trajectory_hints=data.get(
+                "trajectory_hints",
+                []
+            ),
+
+            scene_hints=data.get(
+                "scene_hints",
                 []
             )
         ),
