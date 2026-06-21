@@ -115,10 +115,14 @@ class BiologyReasoningEngine:
             BIOLOGY_ARTIFACT_LIBRARY.keys()
         ) if 'BIOLOGY_ARTIFACT_LIBRARY' in globals() else []
 
+        semantic = BiologySemanticAnalyzer().analyze(topic)
+
         answer = (
-            f"Биологический анализ запроса: {topic}. "
-            f"Определены домены: {', '.join(resolved_domains) if resolved_domains else 'general biology'}. "
-            f"Обнаружены объекты: {', '.join(resolved_objects) if resolved_objects else 'not specified'}."
+            f"Биологический запрос обработан. "
+            f"Намерение: {semantic['intent']}. "
+            f"Сущности: {', '.join(semantic['canonical_entities']) if semantic['canonical_entities'] else 'не определены'}. "
+            f"Концепции: {', '.join(semantic['concepts']) if semantic['concepts'] else 'общая биология'}. "
+            f"Домены: {', '.join(semantic['domains']) if semantic['domains'] else 'biology'}."
         )
 
         return {
@@ -130,6 +134,11 @@ class BiologyReasoningEngine:
             "resolved_domains": resolved_domains,
             "available_artifacts": available_artifacts,
             "recommended_resources": globals().get('BIOLOGY_RESOURCE_LIBRARY', {}),
+            "semantic": semantic,
+            "intent": semantic["intent"],
+            "canonical_entities": semantic["canonical_entities"],
+            "concepts": semantic["concepts"],
+
             "response_plan": planner,
             "knowledge_graph": BIOLOGY_ENTITY_GRAPH,
             "relation_graph": BIOLOGY_RELATION_GRAPH,
@@ -258,4 +267,94 @@ def resolve_domains(text: str):
 #   "resolved_domains": resolved_domains,
 #   "available_artifacts": available_artifacts,
 #   "recommended_resources": BIOLOGY_RESOURCE_LIBRARY
+# }
+
+
+# =====================================================
+# V23 CANONICAL ENTITY RESOLUTION LAYER
+# =====================================================
+
+BIOLOGY_CANONICAL_ENTITIES = {
+    "tiger": ["tiger", "tigers", "тигр", "тигры", "тигра", "тигров"],
+    "lion": ["lion", "lions", "лев", "львы", "льва", "львов"],
+    "human": ["human", "humans", "человек", "люди", "человека"],
+    "dna": ["dna", "днк"],
+    "gene": ["gene", "ген", "гены", "генов"],
+    "photosynthesis": ["photosynthesis", "фотосинтез"]
+}
+
+def resolve_canonical_entities(text:str):
+    t = text.lower()
+    found = []
+    for canonical, aliases in BIOLOGY_CANONICAL_ENTITIES.items():
+        if any(alias in t for alias in aliases):
+            found.append(canonical)
+    return found
+
+# Integration note for BiologyReasoningEngine.run():
+# canonical_entities = resolve_canonical_entities(topic)
+# answer generation should prefer canonical_entities over raw words.
+
+
+# =====================================================
+# V24 SEMANTIC REASONING LAYER
+# =====================================================
+
+class BiologySemanticAnalyzer:
+
+    def analyze(self, text:str):
+
+        t = text.lower()
+
+        intent = "explain"
+
+        if "срав" in t:
+            intent = "compare"
+        elif "покажи" in t or "граф" in t:
+            intent = "visualize"
+        elif "таблиц" in t:
+            intent = "tabulate"
+        elif "исслед" in t:
+            intent = "research"
+
+        canonical_entities = resolve_canonical_entities(text)
+
+        concepts = []
+        domains = []
+
+        for entity in canonical_entities:
+
+            if entity == "dna":
+                concepts.append("genetic_information")
+                domains.append("genetics")
+
+            elif entity == "gene":
+                concepts.append("inheritance")
+                domains.append("genetics")
+
+            elif entity == "photosynthesis":
+                concepts.append("energy_conversion")
+                domains.append("botany")
+
+            elif entity in ["tiger", "lion", "human"]:
+                concepts.append("organism")
+                domains.append("zoology")
+
+        return {
+            "intent": intent,
+            "canonical_entities": canonical_entities,
+            "concepts": list(set(concepts)),
+            "domains": list(set(domains))
+        }
+
+# Integration target:
+#
+# semantic = BiologySemanticAnalyzer().analyze(topic)
+#
+# return {
+#     ...
+#     "semantic": semantic,
+#     "intent": semantic["intent"],
+#     "canonical_entities": semantic["canonical_entities"],
+#     "concepts": semantic["concepts"]
 # }
