@@ -96,8 +96,8 @@ class BiologyResponsePlanner:
         return {
             "text": True,
             "table": operation in ["compare","tabulate"],
-            "graph": operation=="visualize",
-            "diagram": operation in ["classify","visualize"],
+            "graph": False,
+            "diagram": False,
             "sources": True,
             "comparison": operation=="compare"
         }
@@ -155,15 +155,11 @@ class BiologyReasoningEngine:
 
         knowledge_context = build_biology_knowledge_context(semantic)
 
-        if semantic.get("intent") == "visualize":
-            answer = "Структура связей подготовлена для визуализации."
-        else:
-            answer = BiologyReasoningSynthesizer().synthesize(
-                semantic,
-                knowledge_context
-            )
-
+        answer = ""
         internal_explanation = ""
+
+        # Scene-first architecture:
+        # Biology room provides knowledge payload only.
 
         result = {
             "answer": answer,
@@ -915,3 +911,17 @@ def enrich_reasoning_result_with_knowledge(result: dict, semantic: dict):
 #   graph_data
 #   table_data
 #   scene_ready
+
+
+# =====================================================
+# V40 CANONICAL RELATION CONTRACT
+# =====================================================
+
+def build_canonical_relations():
+    canonical = []
+    for entity, rels in BIOLOGY_RELATION_LIBRARY.items():
+        canonical.append({
+            "entity": entity,
+            "relations": rels
+        })
+    return canonical
