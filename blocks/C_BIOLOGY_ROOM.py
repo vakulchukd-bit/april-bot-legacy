@@ -155,10 +155,13 @@ class BiologyReasoningEngine:
 
         knowledge_context = build_biology_knowledge_context(semantic)
 
-        answer = BiologyReasoningSynthesizer().synthesize(
-            semantic,
-            knowledge_context
-        )
+        if semantic.get("intent") == "visualize":
+            answer = "Структура связей подготовлена для визуализации."
+        else:
+            answer = BiologyReasoningSynthesizer().synthesize(
+                semantic,
+                knowledge_context
+            )
 
         internal_explanation = ""
 
