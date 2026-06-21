@@ -125,12 +125,12 @@ class BiologyReasoningEngine:
             explanation
         )
 
-        if explanation and explanation not in answer:
-            answer = f"{answer}\n\n{explanation}"
-
+        internal_explanation = explanation
 
         result = {
             "answer": answer,
+            "internal_explanation": internal_explanation,
+            "scene_mode": "knowledge_first",
             "operation": operation,
             "entities": entities,
             "domains": list(BIOLOGY_KNOWLEDGE_BASE.keys()),
@@ -848,7 +848,10 @@ def enrich_reasoning_result_with_knowledge(result: dict, semantic: dict):
             "graph_data": knowledge_context.get("graph_data", []),
             "table_data": knowledge_context.get("table_data", []),
             "scene_ready": True,
-            "knowledge_provider_mode": "dynamic"
+            "knowledge_provider_mode": "dynamic",
+            "artifact_expansion_ready": True,
+            "machine_payload": True,
+            "scene_contribution_mode": True
         })
 
     except Exception as e:
