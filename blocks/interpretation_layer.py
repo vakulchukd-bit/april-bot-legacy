@@ -940,6 +940,114 @@ def build_factory_order(result):
     }
 
 
+
+
+# =====================================================
+# 🔥 SCENE STRATEGY LAYER
+# =====================================================
+
+def build_scene_strategy(result):
+
+    role = result.get(
+        "content_role"
+    )
+
+    reps = result.get(
+        "required_representations",
+        []
+    )
+
+    strategy = {
+
+        "scene_strategy":
+            "default",
+
+        "preferred_blocks":
+            ["text"],
+
+        "scene_priority":
+            "normal",
+
+        "scene_contribution_mode":
+            True,
+
+        "scene_builder_profile":
+            "generic"
+    }
+
+    if role == "explanation":
+
+        strategy.update({
+
+            "scene_strategy":
+                "knowledge_explanation",
+
+            "preferred_blocks": [
+                "knowledge_card",
+                "relations",
+                "resources"
+            ],
+
+            "scene_priority":
+                "high",
+
+            "scene_builder_profile":
+                "knowledge"
+        })
+
+    elif role == "analysis":
+
+        strategy.update({
+
+            "scene_strategy":
+                "analysis",
+
+            "preferred_blocks": [
+                "summary",
+                "table",
+                "resources"
+            ],
+
+            "scene_builder_profile":
+                "analysis"
+        })
+
+    elif "graph" in reps:
+
+        strategy.update({
+
+            "scene_strategy":
+                "knowledge_graph",
+
+            "preferred_blocks": [
+                "graph",
+                "relations",
+                "summary"
+            ],
+
+            "scene_builder_profile":
+                "graph"
+        })
+
+    elif "table" in reps:
+
+        strategy.update({
+
+            "scene_strategy":
+                "comparison",
+
+            "preferred_blocks": [
+                "table",
+                "summary"
+            ],
+
+            "scene_builder_profile":
+                "comparison"
+        })
+
+    return strategy
+
+
 # =====================================================
 # 🔥 MAIN INTERPRETER
 # =====================================================
@@ -1349,6 +1457,11 @@ def interpret_request(
 
         if not result.get("content_role"):
             result["content_role"] = "legend"
+
+
+    result["scene_strategy"] = build_scene_strategy(
+        result
+    )
 
 
     # =====================================================
