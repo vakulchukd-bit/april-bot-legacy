@@ -1891,3 +1891,114 @@ def build_executor_guidance(
         "executor_should_use_memory":
             True
     }
+
+
+
+# =========================================================
+# 🧠 CONTRIBUTION AGGREGATOR LAYER
+# =========================================================
+
+def build_contribution_state(artifacts):
+
+    aggregated = {
+
+        "scene_contributions": [],
+        "focus_contributions": [],
+        "memory_contributions": [],
+        "trajectory_hints": [],
+        "scene_hints": []
+
+    }
+
+    if not artifacts:
+        return aggregated
+
+    for artifact in artifacts:
+
+        try:
+
+            context = artifact.get("context", {})
+
+            aggregated["scene_contributions"].extend(
+                context.get(
+                    "scene_contributions",
+                    []
+                )
+            )
+
+            aggregated["focus_contributions"].extend(
+                context.get(
+                    "focus_contributions",
+                    []
+                )
+            )
+
+            aggregated["memory_contributions"].extend(
+                context.get(
+                    "memory_contributions",
+                    []
+                )
+            )
+
+            aggregated["trajectory_hints"].extend(
+                context.get(
+                    "trajectory_hints",
+                    []
+                )
+            )
+
+            aggregated["scene_hints"].extend(
+                context.get(
+                    "scene_hints",
+                    []
+                )
+            )
+
+        except Exception:
+            continue
+
+    return aggregated
+
+
+# =========================================================
+# 🧠 CONTRIBUTION → COGNITION BRIDGE
+# =========================================================
+
+def build_contribution_cognition_bridge(artifacts):
+
+    contribution_state = build_contribution_state(
+        artifacts
+    )
+
+    return {
+
+        "contribution_state":
+            contribution_state,
+
+        "scene_contribution_count":
+            len(
+                contribution_state.get(
+                    "scene_contributions",
+                    []
+                )
+            ),
+
+        "focus_contribution_count":
+            len(
+                contribution_state.get(
+                    "focus_contributions",
+                    []
+                )
+            ),
+
+        "memory_contribution_count":
+            len(
+                contribution_state.get(
+                    "memory_contributions",
+                    []
+                )
+            ),
+
+        "contribution_pipeline_active":
+            True
+    }
