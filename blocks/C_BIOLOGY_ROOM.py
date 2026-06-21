@@ -102,6 +102,42 @@ class BiologyResponsePlanner:
             "comparison": operation=="compare"
         }
 
+
+class BiologyReasoningSynthesizer:
+
+    def synthesize(self, semantic, knowledge_context):
+
+        entities = semantic.get("canonical_entities", [])
+        concepts = semantic.get("concepts", [])
+        nodes = knowledge_context.get("knowledge_nodes", [])
+        relations = knowledge_context.get("relations", [])
+
+        parts = []
+
+        if "dna" in entities:
+            parts.append(
+                "ДНК — молекула, которая хранит наследственную информацию организма. "
+                "Она организована в гены и хромосомы и используется клетками для синтеза белков."
+            )
+
+        elif "gene" in entities:
+            parts.append(
+                "Ген представляет собой участок ДНК, содержащий инструкции для синтеза функциональных продуктов клетки."
+            )
+
+        elif nodes:
+            parts.append(
+                f"Обнаружено {len(nodes)} связанных биологических объектов и {len(relations)} связей между ними."
+            )
+
+        if concepts:
+            parts.append(
+                "Ключевые концепции: " + ", ".join(concepts)
+            )
+
+        return "\n\n".join(parts) if parts else "Недостаточно знаний для формирования ответа."
+
+
 class BiologyReasoningEngine:
     def run(self, topic:str):
         operation = BiologyOperationDetector().detect(topic)
@@ -117,15 +153,14 @@ class BiologyReasoningEngine:
 
         semantic = BiologySemanticAnalyzer().analyze(topic)
 
-        knowledge_packet = BiologyKnowledgeEngine().build_packet(semantic)
-        explanation = BiologyExplanationEngine().explain(semantic)
+        knowledge_context = build_biology_knowledge_context(semantic)
 
-        answer = knowledge_packet.get(
-            "summary",
-            explanation
+        answer = BiologyReasoningSynthesizer().synthesize(
+            semantic,
+            knowledge_context
         )
 
-        internal_explanation = explanation
+        internal_explanation = ""
 
         result = {
             "answer": answer,
