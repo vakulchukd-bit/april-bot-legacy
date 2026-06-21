@@ -117,13 +117,19 @@ class BiologyReasoningEngine:
 
         semantic = BiologySemanticAnalyzer().analyze(topic)
 
-        answer = (
-            f"Биологический запрос обработан. "
-            f"Намерение: {semantic['intent']}. "
-            f"Сущности: {', '.join(semantic['canonical_entities']) if semantic['canonical_entities'] else 'не определены'}. "
-            f"Концепции: {', '.join(semantic['concepts']) if semantic['concepts'] else 'общая биология'}. "
-            f"Домены: {', '.join(semantic['domains']) if semantic['domains'] else 'biology'}."
+        knowledge_packet = BiologyKnowledgeEngine().build_packet(semantic)
+        explanation = BiologyExplanationEngine().explain(semantic)
+
+        answer = knowledge_packet.get(
+            "summary",
+            explanation
         )
+
+        if explanation and explanation not in answer:
+            answer = f"{answer}
+
+{explanation}"
+
 
         return {
             "answer": answer,
@@ -358,3 +364,125 @@ class BiologySemanticAnalyzer:
 #     "canonical_entities": semantic["canonical_entities"],
 #     "concepts": semantic["concepts"]
 # }
+
+
+# =====================================================
+# V26 BIOLOGY KNOWLEDGE ENGINE
+# =====================================================
+
+BIOLOGY_KNOWLEDGE_PACKETS = {
+    "human_dna": {
+        "summary": "ДНК человека содержит наследственную информацию организма. Она организована в хромосомы и кодирует работу клеток, тканей и органов.",
+        "domains": ["genetics"],
+        "concepts": ["genetic_information", "inheritance"]
+    },
+    "tiger_dna": {
+        "summary": "ДНК тигра хранит генетическую информацию вида Panthera tigris и используется для изучения эволюции, популяций и сохранения вида.",
+        "domains": ["genetics", "zoology"],
+        "concepts": ["genetic_information", "species"]
+    },
+    "photosynthesis": {
+        "summary": "Фотосинтез — процесс преобразования световой энергии в химическую энергию с образованием органических веществ.",
+        "domains": ["botany"],
+        "concepts": ["energy_conversion"]
+    }
+}
+
+class BiologyKnowledgeEngine:
+
+    def build_packet(self, semantic: dict):
+
+        entities = semantic.get("canonical_entities", [])
+
+        if "human" in entities and "dna" in entities:
+            return BIOLOGY_KNOWLEDGE_PACKETS["human_dna"]
+
+        if "tiger" in entities and "dna" in entities:
+            return BIOLOGY_KNOWLEDGE_PACKETS["tiger_dna"]
+
+        if "photosynthesis" in entities:
+            return BIOLOGY_KNOWLEDGE_PACKETS["photosynthesis"]
+
+        return {
+            "summary": "Биологическая тема распознана. Требуется углублённый анализ предметной области.",
+            "domains": semantic.get("domains", []),
+            "concepts": semantic.get("concepts", [])
+        }
+
+
+# =====================================================
+# V27 CONCEPT + EXPLANATION ENGINE
+# =====================================================
+
+BIOLOGY_CONCEPT_LIBRARY = {
+    "dna": {
+        "type": "molecule",
+        "functions": [
+            "inheritance",
+            "genome_storage",
+            "protein_synthesis"
+        ]
+    },
+    "gene": {
+        "type": "genetic_unit",
+        "functions": [
+            "trait_encoding",
+            "inheritance"
+        ]
+    },
+    "photosynthesis": {
+        "type": "biological_process",
+        "functions": [
+            "energy_conversion",
+            "glucose_production",
+            "oxygen_release"
+        ]
+    }
+}
+
+BIOLOGY_RELATION_LIBRARY = {
+    "dna": ["gene", "chromosome", "cell"],
+    "gene": ["dna", "protein"],
+    "photosynthesis": ["plant", "chlorophyll", "sunlight"]
+}
+
+class BiologyExplanationEngine:
+
+    def explain(self, semantic: dict):
+
+        entities = semantic.get("canonical_entities", [])
+        concepts = semantic.get("concepts", [])
+
+        explanation_parts = []
+
+        for entity in entities:
+
+            if entity in BIOLOGY_CONCEPT_LIBRARY:
+
+                node = BIOLOGY_CONCEPT_LIBRARY[entity]
+
+                explanation_parts.append(
+                    f"{entity} является объектом типа "
+                    f"{node.get('type')}."
+                )
+
+                funcs = node.get("functions", [])
+                if funcs:
+                    explanation_parts.append(
+                        "Основные функции: " +
+                        ", ".join(funcs)
+                    )
+
+        if concepts:
+            explanation_parts.append(
+                "Связанные концепции: " +
+                ", ".join(concepts)
+            )
+
+        if not explanation_parts:
+            explanation_parts.append(
+                "Биологическая тема распознана и подготовлена "
+                "для дальнейшего анализа знаний."
+            )
+
+        return " ".join(explanation_parts)
