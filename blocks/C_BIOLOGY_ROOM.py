@@ -126,9 +126,7 @@ class BiologyReasoningEngine:
         )
 
         if explanation and explanation not in answer:
-            answer = f"{answer}
-
-{explanation}"
+            answer = f"{answer}\n\n{explanation}"
 
 
         return {
