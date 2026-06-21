@@ -1,6 +1,7 @@
 
 # =====================================================
 # APRIL C_BIOLOGY_ROOM V19
+# MERGED UPGRADE (V12 + V17 + V18 + KNOWLEDGE GRAPH)
 # =====================================================
 
 from typing import Dict, List, Any
@@ -150,3 +151,93 @@ class BiologyRoom(Room):
         }
 
 ROOM = BiologyRoom()
+
+
+# =====================================================
+# V20 KNOWLEDGE EXPANSION LAYERS
+# =====================================================
+
+BIOLOGY_OBJECT_GRAPH = {
+    "human": {
+        "type": "species",
+        "genus": "Homo",
+        "family": "Hominidae",
+        "domains": ["genetics", "physiology", "evolution"]
+    },
+    "lion": {
+        "type": "species",
+        "genus": "Panthera",
+        "family": "Felidae",
+        "domains": ["genetics", "ecology", "evolution"]
+    },
+    "tiger": {
+        "type": "species",
+        "genus": "Panthera",
+        "family": "Felidae",
+        "domains": ["genetics", "ecology", "evolution"]
+    }
+}
+
+BIOLOGY_DOMAIN_GRAPH = {
+    "genetics": ["dna", "gene", "chromosome", "genome", "mutation"],
+    "ecology": ["population", "ecosystem", "food_chain"],
+    "evolution": ["adaptation", "selection", "speciation"],
+    "zoology": ["animal", "mammal", "bird", "reptile"],
+    "botany": ["plant", "photosynthesis", "root", "leaf"]
+}
+
+BIOLOGY_ARTIFACT_LIBRARY = {
+    "population_growth": {
+        "supports_graph": True,
+        "supports_table": True,
+        "supports_comparison": True
+    },
+    "species_comparison": {
+        "supports_graph": True,
+        "supports_table": True,
+        "supports_comparison": True
+    }
+}
+
+BIOLOGY_RESOURCE_LIBRARY = {
+    "genetics": ["NCBI", "Ensembl"],
+    "ecology": ["IUCN"],
+    "evolution": ["Tree of Life"]
+}
+
+
+# =====================================================
+# V21 INTEGRATION LAYER
+# =====================================================
+
+def resolve_objects(text: str):
+    t = text.lower()
+    found = []
+    for obj in BIOLOGY_OBJECT_GRAPH.keys():
+        if obj in t:
+            found.append(obj)
+    return found
+
+def resolve_domains(text: str):
+    t = text.lower()
+    domains = []
+    for domain, concepts in BIOLOGY_DOMAIN_GRAPH.items():
+        if any(c in t for c in concepts):
+            domains.append(domain)
+    return domains
+
+# Suggested patch for BiologyReasoningEngine:
+# resolved_objects = resolve_objects(topic)
+# resolved_domains = resolve_domains(topic)
+# available_artifacts = [
+#   k for k,v in BIOLOGY_ARTIFACT_LIBRARY.items()
+#   if v.get("supports_graph") or v.get("supports_table")
+# ]
+#
+# return {
+#   ...existing fields...,
+#   "resolved_objects": resolved_objects,
+#   "resolved_domains": resolved_domains,
+#   "available_artifacts": available_artifacts,
+#   "recommended_resources": BIOLOGY_RESOURCE_LIBRARY
+# }
