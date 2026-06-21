@@ -108,10 +108,28 @@ class BiologyReasoningEngine:
         entities = BiologyEntityRegistry().extract(topic)
         planner = BiologyResponsePlanner().build(operation)
 
+        resolved_objects = resolve_objects(topic)
+        resolved_domains = resolve_domains(topic)
+
+        available_artifacts = list(
+            BIOLOGY_ARTIFACT_LIBRARY.keys()
+        ) if 'BIOLOGY_ARTIFACT_LIBRARY' in globals() else []
+
+        answer = (
+            f"Биологический анализ запроса: {topic}. "
+            f"Определены домены: {', '.join(resolved_domains) if resolved_domains else 'general biology'}. "
+            f"Обнаружены объекты: {', '.join(resolved_objects) if resolved_objects else 'not specified'}."
+        )
+
         return {
+            "answer": answer,
             "operation": operation,
             "entities": entities,
             "domains": list(BIOLOGY_KNOWLEDGE_BASE.keys()),
+            "resolved_objects": resolved_objects,
+            "resolved_domains": resolved_domains,
+            "available_artifacts": available_artifacts,
+            "recommended_resources": globals().get('BIOLOGY_RESOURCE_LIBRARY', {}),
             "response_plan": planner,
             "knowledge_graph": BIOLOGY_ENTITY_GRAPH,
             "relation_graph": BIOLOGY_RELATION_GRAPH,
