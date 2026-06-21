@@ -1267,11 +1267,22 @@ async def execute_rooms(
             result = item.get("result", {})
 
             if isinstance(result, dict):
-                blocks.append(
-                    artifact_to_render_block(
+                block = artifact_to_render_block(
                         result
                     )
-                )
+
+                if isinstance(block, dict):
+                    scene_blocks = block.get(
+                        "scene_blocks",
+                        []
+                    )
+
+                    if scene_blocks:
+                        blocks.extend(scene_blocks)
+
+                    blocks.append(block)
+                else:
+                    blocks.append(block)
 
         return {
             "channel": RESPONSE_CHANNEL,
@@ -2480,7 +2491,16 @@ def artifact_to_render_block(result):
                 expand_artifact_payload(artifact)
             )
 
+            translated["scene_blocks"] = (
+                build_scene_from_artifact(artifact)
+                if isinstance(artifact, dict)
+                else []
+            )
+
             translated["artifact_expansion_ready"] = True
+            translated["scene_ready"] = len(
+                translated.get("scene_blocks", [])
+            ) > 0
 
     except Exception:
         pass
