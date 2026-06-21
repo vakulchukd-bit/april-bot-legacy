@@ -2426,8 +2426,14 @@ def on_live_session_closed(state):
 ARTIFACT_BLOCK_MAP = {
     "knowledge_graph": "graph",
     "knowledge_graph_v2": "graph",
+    "graph_data": "graph",
+    "knowledge_nodes": "graph",
+    "relations": "graph",
+    "table_data": "table",
     "taxonomy": "table",
     "comparison": "table",
+    "resources": "research",
+    "sources": "research",
     "evidence": "research",
     "evidence_report": "research",
     "mechanism_chain": "diagram",
@@ -2480,6 +2486,46 @@ def artifact_to_render_block(result):
         pass
 
     return translated
+
+
+
+# =========================================================
+# 🧠 EXECUTOR V9 SCENE COMPOSER
+# =========================================================
+
+def build_scene_from_artifact(artifact):
+
+    scene_blocks = []
+
+    if not isinstance(artifact, dict):
+        return scene_blocks
+
+    if artifact.get("graph_data"):
+        scene_blocks.append({
+            "type": "graph",
+            "payload": artifact.get("graph_data")
+        })
+
+    if artifact.get("table_data"):
+        scene_blocks.append({
+            "type": "table",
+            "payload": artifact.get("table_data")
+        })
+
+    if artifact.get("knowledge_nodes"):
+        scene_blocks.append({
+            "type": "knowledge_graph",
+            "payload": artifact.get("knowledge_nodes")
+        })
+
+    if artifact.get("relations"):
+        scene_blocks.append({
+            "type": "relations",
+            "payload": artifact.get("relations")
+        })
+
+    return scene_blocks
+
 
 # =========================================================
 # END EXECUTOR V8
