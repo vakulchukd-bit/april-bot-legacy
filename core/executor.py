@@ -851,18 +851,6 @@ def botru_translate_artifact(artifact):
 
         if isinstance(payload, dict):
 
-            if any(payload.get(k) for k in [
-                "graph_data",
-                "table_data",
-                "knowledge_nodes",
-                "relations"
-            ]):
-                return {
-                    "type": "artifact",
-                    "content": "",
-                    "artifact": payload
-                }
-
             for field in [
                 "answer",
                 "response",
@@ -2452,6 +2440,11 @@ ARTIFACT_BLOCK_MAP = {
     "graph_data": "graph",
     "knowledge_nodes": "graph",
     "relations": "graph",
+    "relation_graph": "graph",
+    "entities": "table",
+    "canonical_entities": "table",
+    "concepts": "table",
+    "processes": "table",
     "table_data": "table",
     "taxonomy": "table",
     "comparison": "table",
@@ -2531,6 +2524,68 @@ def build_scene_from_artifact(artifact):
 
     if not isinstance(artifact, dict):
         return scene_blocks
+
+    if artifact.get("graph_data"):
+        scene_blocks.append({
+            "type": "graph",
+            "payload": artifact.get("graph_data")
+        })
+
+    if artifact.get("knowledge_graph"):
+        scene_blocks.append({
+            "type": "knowledge_graph",
+            "payload": artifact.get("knowledge_graph")
+        })
+
+    if artifact.get("relation_graph"):
+        scene_blocks.append({
+            "type": "relations",
+            "payload": artifact.get("relation_graph")
+        })
+
+    if artifact.get("knowledge_nodes"):
+        scene_blocks.append({
+            "type": "knowledge_graph",
+            "payload": artifact.get("knowledge_nodes")
+        })
+
+    if artifact.get("relations"):
+        scene_blocks.append({
+            "type": "relations",
+            "payload": artifact.get("relations")
+        })
+
+    if artifact.get("table_data"):
+        scene_blocks.append({
+            "type": "table",
+            "payload": artifact.get("table_data")
+        })
+
+    if artifact.get("entities"):
+        scene_blocks.append({
+            "type": "table",
+            "payload": artifact.get("entities")
+        })
+
+    if artifact.get("canonical_entities"):
+        scene_blocks.append({
+            "type": "table",
+            "payload": artifact.get("canonical_entities")
+        })
+
+    if artifact.get("concepts"):
+        scene_blocks.append({
+            "type": "table",
+            "payload": artifact.get("concepts")
+        })
+
+    if artifact.get("processes"):
+        scene_blocks.append({
+            "type": "table",
+            "payload": artifact.get("processes")
+        })
+
+    return scene_blocks
 
     if artifact.get("graph_data"):
         scene_blocks.append({
