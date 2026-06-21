@@ -851,6 +851,18 @@ def botru_translate_artifact(artifact):
 
         if isinstance(payload, dict):
 
+            if any(payload.get(k) for k in [
+                "graph_data",
+                "table_data",
+                "knowledge_nodes",
+                "relations"
+            ]):
+                return {
+                    "type": "artifact",
+                    "content": "",
+                    "artifact": payload
+                }
+
             for field in [
                 "answer",
                 "response",
