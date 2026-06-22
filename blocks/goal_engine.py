@@ -155,6 +155,8 @@ def detect_goal(
         "active_flow"
     )
 
+    scene_state = state.get("scene_state", {})
+
     active_scene = state.get(
         "active_scene",
         {}
@@ -647,10 +649,9 @@ def detect_goal(
 
         semantic["response_mode"] = "guide"
 
-    semantic["active_scene_goal"] = (
-        active_scene.get("scene_state", {})
-        .get("goal")
-    )
+    semantic["scene_state_goal"] = scene_state.get("goal")
+
+    semantic["active_scene_goal"] = semantic["scene_state_goal"]
 
     semantic["visual_goal"] = (
         visual_continuity.get("active_goal")
