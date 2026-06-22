@@ -200,6 +200,8 @@ def build_response_decision(
         "active_flow"
     )
 
+    scene_state = state.get("scene_state", {})
+
     active_scene = state.get(
         "active_scene",
         {}
@@ -214,24 +216,24 @@ def build_response_decision(
     # 🔥 GOLDEN MEMORY DECISION INPUT
     # =====================================================
 
-    dynamic_focus = cognition.get(
-        "dynamic_focus",
-        {}
+    focus_recommendation = cognition.get(
+        "focus_recommendation",
+        cognition.get("dynamic_focus", {})
     )
 
-    goal_hierarchy = cognition.get(
-        "goal_hierarchy",
-        {}
+    goal_analysis = cognition.get(
+        "goal_analysis",
+        cognition.get("goal_hierarchy", {})
     )
 
-    open_loops = cognition.get(
-        "open_loops",
-        {}
+    loop_analysis = cognition.get(
+        "loop_analysis",
+        cognition.get("open_loops", {})
     )
 
-    memory_signals = cognition.get(
-        "memory_signals",
-        {}
+    memory_analysis = cognition.get(
+        "memory_analysis",
+        cognition.get("memory_signals", {})
     )
 
     # =================================================
@@ -607,15 +609,15 @@ def build_response_decision(
     # 🔥 MEMORY TRAJECTORY PRIORITY
     # =====================================================
 
-    if open_loops.get("has_open_loops"):
+    if loop_analysis.get("has_open_loops"):
         should_continue = True
 
-    if memory_signals.get("memory_priority", 0) >= 0.7:
+    if memory_analysis.get("memory_priority", 0) >= 0.7:
         should_execute = should_execute or bool(
-            goal_hierarchy.get("strategic_goal")
+            goal_analysis.get("strategic_goal")
         )
 
-    if dynamic_focus.get("focus_locked"):
+    if focus_recommendation.get("focus_locked"):
         should_guide = False
 
     # =================================================
@@ -993,13 +995,13 @@ def build_response_decision(
             goal_stage,
 
         "memory_priority":
-            memory_signals.get("memory_priority", 0),
+            memory_analysis.get("memory_priority", 0),
 
         "focus_locked":
-            dynamic_focus.get("focus_locked", False),
+            focus_recommendation.get("focus_locked", False),
 
         "has_open_loops":
-            open_loops.get("has_open_loops", False),
+            loop_analysis.get("has_open_loops", False),
 
         "active_scene":
             active_scene,
