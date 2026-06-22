@@ -546,14 +546,14 @@ def build_executor_context(
 
         "memory_routing":
             {
-                "dynamic_focus":
-                    cognition.get("dynamic_focus", {}),
-                "goal_hierarchy":
-                    cognition.get("goal_hierarchy", {}),
-                "open_loops":
-                    cognition.get("open_loops", {}),
-                "memory_signals":
-                    cognition.get("memory_signals", {})
+                "focus_recommendation":
+                    cognition.get("focus_recommendation", cognition.get("dynamic_focus", {})),
+                "goal_analysis":
+                    cognition.get("goal_analysis", cognition.get("goal_hierarchy", {})),
+                "loop_analysis":
+                    cognition.get("loop_analysis", cognition.get("open_loops", {})),
+                "memory_analysis":
+                    cognition.get("memory_analysis", cognition.get("memory_signals", {}))
             }
     }
 
@@ -1575,17 +1575,17 @@ async def execute(
 
     memory_routing = {
 
-        "dynamic_focus":
-            cognition.get("dynamic_focus", {}),
+        "focus_recommendation":
+            cognition.get("focus_recommendation", cognition.get("dynamic_focus", {})),
 
-        "goal_hierarchy":
-            cognition.get("goal_hierarchy", {}),
+        "goal_analysis":
+            cognition.get("goal_analysis", cognition.get("goal_hierarchy", {})),
 
-        "open_loops":
-            cognition.get("open_loops", {}),
+        "loop_analysis":
+            cognition.get("loop_analysis", cognition.get("open_loops", {})),
 
-        "memory_signals":
-            cognition.get("memory_signals", {})
+        "memory_analysis":
+            cognition.get("memory_analysis", cognition.get("memory_signals", {}))
     }
 
     # =====================================================
@@ -2341,7 +2341,7 @@ def build_live_vision_feed(state):
             state.get("scene_state", {}),
 
         "current_focus":
-            state.get("dynamic_focus", {}),
+            state.get("focus_state", state.get("dynamic_focus", {})),
 
         "runtime_mode":
             "open_tab_live_runtime"
