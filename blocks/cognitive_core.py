@@ -1306,16 +1306,16 @@ def analyze_cognition(
         # 🧠 GOLDEN MEMORY
         # =====================================================
 
-        "dynamic_focus":
+        "focus_recommendation":
             dynamic_focus,
 
-        "goal_hierarchy":
+        "goal_analysis":
             goal_hierarchy,
 
-        "open_loops":
+        "loop_analysis":
             open_loops,
 
-        "memory_signals":
+        "memory_analysis":
             memory_signals,
 
         "active_scene":
@@ -1722,7 +1722,7 @@ def build_scene_relation(text, active_scene, dynamic_focus):
 # 🧠 UNIFIED SCENE COGNITION BRIDGE
 # =========================================================
 
-def build_unified_scene_state(
+def build_unified_scene_state_legacy(
     active_scene,
     dynamic_focus,
     goal_hierarchy,
