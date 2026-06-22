@@ -934,7 +934,7 @@ def add_dialog(
         state_obj
     )
 
-    state_obj["active_scene"] = build_active_scene(user_id) 
+    state_obj["active_scene"] = refresh_unified_scene(user_id) 
 
 # =====================================================
 # 🔥 DIALOG STATE
@@ -1224,7 +1224,7 @@ def get_state(user_id):
 
 
 # =====================================================
-# 🧠 ACTIVE SCENE ENGINE
+# 🧠 ACTIVE SCENE ENGINE (LEGACY - DeepHub Pass)
 # =====================================================
 
 def build_active_scene(user_id):
@@ -1270,7 +1270,7 @@ def refresh_active_scene(user_id):
 
 
 # =====================================================
-# 🧠 MEMORY ENGINE HELPERS
+# 🧠 MEMORY ENGINE HELPERS (LEGACY - DeepHub Pass)
 # =====================================================
 
 MEMORY_ENGINE_VERSION = "2.0"
@@ -1353,7 +1353,7 @@ def build_memory_bridge(user_id):
 
 
 # =====================================================
-# 🧠 DYNAMIC MEMORY FOCUS UPGRADE
+# 🧠 DYNAMIC MEMORY FOCUS UPGRADE (COMPATIBILITY LAYER)
 # =====================================================
 
 def update_focus_snapshot(
@@ -1386,10 +1386,20 @@ def update_focus_snapshot(
 
 def get_focus_snapshot(user_id):
 
-    return get_state(user_id).get(
-        "focus_snapshot",
-        {}
-    )
+    state_obj = get_state(user_id)
+
+    focus_state = state_obj.get("focus_state")
+
+    if isinstance(focus_state, dict) and focus_state:
+        return {
+            "topic": focus_state.get("active_topic"),
+            "scene": focus_state.get("active_scene"),
+            "object": focus_state.get("active_object"),
+            "focus": focus_state.get("priority_score"),
+            "intent": focus_state.get("intent_freshness")
+        }
+
+    return state_obj.get("focus_snapshot", {})
 
 
 def build_context_memory_bridge(user_id):
@@ -1470,10 +1480,13 @@ def refresh_unified_scene(user_id):
 
     state_obj["active_scene"] = {
         "scene_state": state_obj.get("scene_state", {}),
-        "dynamic_focus": state_obj.get("dynamic_focus", {}),
-        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "focus_state": state_obj.get("focus_state", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),  # legacy fallback
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),  # legacy fallback
         "open_loops": state_obj.get("open_loops", []),
-        "memory_signals": state_obj.get("memory_signals", {}),
+        "memory_signals": state_obj.get("memory_signals", {}),  # legacy fallback
         "active_flow": state_obj.get("active_flow")
     }
 
@@ -1606,11 +1619,12 @@ def build_memory_context(user_id):
     return {
         "focus_state": state_obj.get("focus_state", {}),
         "memory_timeline": state_obj.get("memory_timeline", {}),
-        "dynamic_focus": state_obj.get("dynamic_focus", {}),
-        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {}),
         "open_loops": state_obj.get("open_loops", []),
-        "memory_signals": state_obj.get("memory_signals", {}),
-        "active_flow": state_obj.get("active_flow")
+        "active_flow": state_obj.get("active_flow"),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),  # legacy fallback
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),  # legacy fallback
+        "memory_signals": state_obj.get("memory_signals", {})  # legacy fallback
     }
 
 def build_executor_memory_bridge(user_id):
