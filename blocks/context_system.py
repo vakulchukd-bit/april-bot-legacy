@@ -1557,7 +1557,7 @@ def build_deephub_context(
 
 def build_context_focus_snapshot(text, state):
 
-    focus = state.get("dynamic_focus", {})
+    focus = state.get("focus_state", {}) if state.get("focus_state") else state.get("dynamic_focus", {})
 
     return {
         "active_topic": focus.get("primary_focus"),
@@ -1569,7 +1569,7 @@ def build_context_focus_snapshot(text, state):
 
 def detect_context_refresh_needed(text, state):
 
-    focus = state.get("dynamic_focus", {})
+    focus = state.get("focus_state", {}) if state.get("focus_state") else state.get("dynamic_focus", {})
 
     active_topic = str(
         focus.get("primary_focus", "")
@@ -1595,7 +1595,7 @@ def detect_context_refresh_needed(text, state):
 
 def build_dynamic_focus_block(state):
 
-    focus = state.get("dynamic_focus", {})
+    focus = state.get("focus_state", {}) if state.get("focus_state") else state.get("dynamic_focus", {})
 
     if not focus:
         return ""
@@ -1766,7 +1766,7 @@ def build_unified_focus_block(state):
 
         return "\n".join(lines)
 
-    return build_dynamic_focus_block(state)
+    return build_dynamic_focus_block(state)  # compatibility fallback
 
 
 def calculate_context_priority_v2(
@@ -1815,8 +1815,8 @@ def build_context_memory_bridge(state):
         "memory_cycle":
             state.get("memory_cycle", {}),
 
-        "dynamic_focus":
-            state.get("dynamic_focus", {}),
+        # legacy dynamic_focus retained temporarily for compatibility
+        "dynamic_focus": state.get("dynamic_focus", {}),
 
         "goal_hierarchy":
             state.get("goal_hierarchy", {}),
