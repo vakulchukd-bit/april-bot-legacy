@@ -44,10 +44,9 @@ class EngineeringRoom(Room):
 
         return {
 
-            "type": "text",
+            "type": "artifact",
 
-            "data":
-                "ENGINEERING ROOM ACTIVE"
+            "artifact": artifact
         }
 
     # =================================================
