@@ -2599,34 +2599,31 @@ def build_scene_from_artifact(artifact):
     if not isinstance(artifact, dict):
         return scene_blocks
 
-    if artifact.get("graph_data"):
-        scene_blocks.append({
-            "type": "graph",
-            "payload": artifact.get("graph_data")
-        })
+    unified_graph_payload = {
+        "graph_data": artifact.get("graph_data"),
+        "knowledge_graph": artifact.get("knowledge_graph"),
+        "relation_graph": artifact.get("relation_graph"),
+        "knowledge_nodes": artifact.get("knowledge_nodes"),
+        "relations": artifact.get("relations")
+    }
 
-    if artifact.get("knowledge_graph"):
-        scene_blocks.append({
-            "type": "graph",
-            "payload": artifact.get("knowledge_graph")
-        })
+    has_graph = any(v for v in unified_graph_payload.values())
 
-    if artifact.get("relation_graph"):
-        scene_blocks.append({
-            "type": "graph",
-            "payload": artifact.get("relation_graph")
-        })
+    if has_graph:
 
-    if artifact.get("knowledge_nodes"):
-        scene_blocks.append({
-            "type": "graph",
-            "payload": artifact.get("knowledge_nodes")
-        })
+        graph_description = (
+            artifact.get("description")
+            or artifact.get("summary")
+            or artifact.get("analysis")
+            or artifact.get("content")
+            or ""
+        )
 
-    if artifact.get("relations"):
         scene_blocks.append({
             "type": "graph",
-            "payload": artifact.get("relations")
+            "graph": unified_graph_payload,
+            "description": graph_description,
+            "broadband_route": True
         })
 
     for field in [
