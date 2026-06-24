@@ -1032,7 +1032,9 @@ class GraphRoom(Room):
         return build_artifact(
             "graph",
             data={
-                "formula": extract_graph_formula(text),
+                "graph_type":"knowledge_graph",
+                "nodes":[],
+                "edges":[],
                 "title":"Graph",
                 "source": text
             },
@@ -1265,53 +1267,47 @@ PROFESSIONAL_ROOMS = {
 
     "graph": {
         "artifact": "GraphArtifact",
-        "web_block": "GraphBlock",
-        "quality_target": 0.95
+                "quality_target": 0.95
     },
 
     "formula": {
         "artifact": "FormulaArtifact",
-        "web_block": "FormulaBlock",
-        "quality_target": 0.95
+                "quality_target": 0.95
     },
 
     "table": {
         "artifact": "TableArtifact",
-        "web_block": "TableBlock",
-        "quality_target": 0.95
+                "quality_target": 0.95
     },
 
     "diagram": {
         "artifact": "DiagramArtifact",
-        "web_block": "DiagramBlock",
-        "quality_target": 0.95
+                "quality_target": 0.95
     },
 
     "code": {
         "artifact": "CodeArtifact",
-        "web_block": "CodeBlock",
-        "quality_target": 0.95
+                "quality_target": 0.95
     },
 
     "link": {
         "artifact": "LinkArtifact",
-        "web_block": "LinkCard",
-        "quality_target": 0.95
+                "quality_target": 0.95
     }
 ,
-    "mathematics": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "trigonometry": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "physics": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "chemistry": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "biology": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "literature": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "web": {"artifact":"LinkArtifact","web_block":"LinkCard","quality_target":0.95},
-    "utc": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "engineering": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "politics": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "news": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "social": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95},
-    "it": {"artifact":"FunctionArtifact","web_block":"FunctionBlock","quality_target":0.95}
+    "mathematics": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "trigonometry": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "physics": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "chemistry": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "biology": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "literature": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "web": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "utc": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "engineering": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "politics": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "news": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "social": {"artifact":"KnowledgeArtifact","quality_target":0.95},
+    "it": {"artifact":"KnowledgeArtifact","quality_target":0.95}
 
 }
 
@@ -1327,7 +1323,6 @@ ROOMS = [
 
     FormulaRoom(),
 
-    FunctionRoom(),
 
     TableRoom(),
 
