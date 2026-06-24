@@ -148,7 +148,11 @@ def build_scene_focus_snapshot(state):
         return {
             "goal": goal,
             "topic": topic,
-            "visual": visual
+            "visual": visual,
+            "last_visual_event": scene.get(
+                "last_visual_event",
+                ""
+            )
         }
     except Exception:
         return {}
@@ -737,6 +741,47 @@ def build_visual_scene_block(
             + ", ".join(objects)
         )
 
+
+    events_count = active_visual_scene.get(
+        "events_count"
+    )
+
+    if events_count is not None:
+
+        lines.append(
+            f"Events: {events_count}"
+        )
+
+    package = active_visual_scene.get(
+        "package"
+    )
+
+    if package:
+
+        lines.append(
+            f"Package: {package}"
+        )
+
+    session_started_utc = active_visual_scene.get(
+        "session_started_utc"
+    )
+
+    if session_started_utc:
+
+        lines.append(
+            f"Session UTC: {session_started_utc}"
+        )
+
+    last_event = active_visual_scene.get(
+        "last_event"
+    )
+
+    if last_event:
+
+        lines.append(
+            f"Last Event: {safe_slice(last_event, 120)}"
+        )
+
     payload = "\n".join(lines)
 
     APRIL_LOG_OUT(
@@ -1130,6 +1175,18 @@ def build_context_text(
         )
     )
 
+    visual_summary_block = (
+        build_visual_summary_block(
+            state
+        )
+    )
+
+    visual_memory_block = (
+        build_visual_memory_block(
+            state
+        )
+    )
+
     relevant_dialog = build_relevant_dialog(
 
         dialog,
@@ -1229,6 +1286,10 @@ def build_context_text(
 {visual_scene_block}
 
 {visual_focus_block}
+
+{visual_summary_block}
+
+{visual_memory_block}
 
 {summary_block}
 
@@ -1704,6 +1765,51 @@ def calculate_context_priority(
 
 
 
+
+def build_visual_summary_block(state):
+
+    visual_summary = state.get("visual_summary", {})
+
+    if not visual_summary:
+        return ""
+
+    lines = ["\nVISUAL SUMMARY:"]
+
+    if visual_summary.get("scene_events_count") is not None:
+        lines.append(
+            f"Events: {visual_summary.get('scene_events_count')}"
+        )
+
+    if visual_summary.get("package"):
+        lines.append(
+            f"Package: {visual_summary.get('package')}"
+        )
+
+    if visual_summary.get("last_event"):
+        lines.append(
+            f"Last Event: {safe_slice(visual_summary.get('last_event'),120)}"
+        )
+
+    return "\n".join(lines)
+
+
+def build_visual_memory_block(state):
+
+    memory = (
+        state.get("memory_timeline", {})
+        .get("day_0", {})
+        .get("visual_scenes", [])
+    )
+
+    if not memory:
+        return ""
+
+    return (
+        "\nVISUAL MEMORY:\n"
+        f"Snapshots: {len(memory)}"
+    )
+
+
 # =====================================================
 # 🧠 APRIL CONTEXT SYSTEM V2 MEMORY INTEGRATION
 # =====================================================
@@ -1825,5 +1931,29 @@ def build_context_memory_bridge(state):
             state.get("open_loops", []),
 
         "memory_signals":
-            state.get("memory_signals", {})
+            state.get("memory_signals", {}),
+
+        "visual_summary":
+            state.get(
+                "visual_summary",
+                {}
+            ),
+
+        "active_visual_scene":
+            state.get(
+                "active_visual_scene",
+                {}
+            ),
+
+        "today_visual_memory":
+            state.get(
+                "memory_timeline",
+                {}
+            ).get(
+                "day_0",
+                {}
+            ).get(
+                "visual_scenes",
+                []
+            )
     }
