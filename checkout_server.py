@@ -74,7 +74,8 @@ from storage import (
 
 from core.executor import execute
 from blocks.state_manager import (
-    get_state
+    get_state,
+    update_visual_summary
 )
 from blocks.provider_router import (
     transcribe_voice
@@ -884,6 +885,12 @@ def image_chat():
 
         analysis_payload = safe_json(result)
 
+        visual_summary = {
+            "image_analysis": True,
+            "user_id": user_id,
+            "timestamp": time.time()
+        }
+
         # =====================================================
         # 🧠 APRIL THINKING ROUTE
         # =====================================================
@@ -920,7 +927,12 @@ VISUAL_ANALYSIS:
                 WEB_RENDERER_MODE,
 
             "scene_mode":
-                WEB_SCENE_MODE
+                WEB_SCENE_MODE,
+
+            "visual_summary":
+                safe_json(
+                    visual_summary
+                )
         })
 
     except Exception as e:
@@ -964,6 +976,55 @@ def web_chat():
             ""
         )
 
+        visual_ledger = data.get(
+            "visual_ledger",
+            []
+        )
+
+        package = data.get(
+            "package",
+            "free"
+        )
+
+        session_started_utc = data.get(
+            "session_started_utc"
+        )
+
+        visual_summary = {
+
+            "user_id":
+                user_id,
+
+            "package":
+                package,
+
+            "session_started_utc":
+                session_started_utc,
+
+            "scene_events_count":
+                len(visual_ledger),
+
+            "last_event":
+                visual_ledger[-1]
+                if visual_ledger else None
+        }
+
+        update_visual_summary(
+            user_id,
+            visual_summary
+        )
+
+        state_after_update = get_state(
+            user_id
+        )
+
+        print(
+            "🧠 VISUAL STATE UPDATED",
+            state_after_update.get(
+                "active_visual_scene"
+            )
+        )
+
         if not user_id:
 
             return jsonify({
@@ -973,6 +1034,11 @@ def web_chat():
                 "error":
                     "user_id required"
             }), 400
+
+        print(
+            "🧠 VISUAL SUMMARY:",
+            visual_summary
+        )
 
         result = asyncio.run(
 
@@ -1017,7 +1083,12 @@ def web_chat():
                 WEB_RENDERER_MODE,
 
             "scene_mode":
-                WEB_SCENE_MODE
+                WEB_SCENE_MODE,
+
+            "visual_summary":
+                safe_json(
+                    visual_summary
+                )
         })
 
     except Exception as e:
