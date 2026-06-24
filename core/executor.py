@@ -1299,7 +1299,18 @@ async def execute_rooms(
                     if scene_blocks:
                         blocks.extend(scene_blocks)
 
-                    blocks.append(block)
+                    expanded_blocks = block.get(
+                        "expanded_blocks",
+                        []
+                    )
+
+                    if expanded_blocks:
+                        blocks.extend(expanded_blocks)
+
+                    # Avoid duplicating raw artifact blocks when
+                    # scene blocks have already been produced.
+                    if not scene_blocks:
+                        blocks.append(block)
                 else:
                     blocks.append(block)
 
