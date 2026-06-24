@@ -157,7 +157,9 @@ from blocks.state_manager import (
 
     update_memory_summary,
 
-    get_active_flow
+    get_active_flow,
+
+    build_visual_memory_bridge
 )
 
 from blocks.mode_manager import (
@@ -434,6 +436,10 @@ def build_executor_context(
         {}
     )
 
+    visual_memory_bridge = build_visual_memory_bridge(
+        user_id
+    )
+
     return {
 
         # =================================================
@@ -524,6 +530,21 @@ def build_executor_context(
 
         "active_visual_scene":
             active_visual_scene,
+
+        "visual_memory_bridge":
+            visual_memory_bridge,
+
+        "visual_summary":
+            visual_memory_bridge.get(
+                "visual_summary",
+                {}
+            ),
+
+        "today_visual_memory":
+            visual_memory_bridge.get(
+                "today_visual_memory",
+                []
+            ),
 
         "visual_goal":
             visual_continuity_summary.get(
@@ -1533,6 +1554,12 @@ async def execute(
         visual_continuity
     )
 
+    cognition["visual_memory_bridge"] = (
+        build_visual_memory_bridge(
+            user_id
+        )
+    )
+
     # =====================================================
     # 🔥 VISUAL REFERENCE
     # =====================================================
@@ -2320,6 +2347,52 @@ def build_ranked_memory_recall(state):
 
 
 
+
+# =========================================================
+# 🧠 VISUAL SUMMARY BRIDGE V1
+# =========================================================
+
+def build_visual_summary_awareness(state):
+
+    active_visual_scene = state.get(
+        "active_visual_scene",
+        {}
+    )
+
+    visual_summary = state.get(
+        "visual_summary",
+        {}
+    )
+
+    return {
+
+        "events_count":
+            visual_summary.get(
+                "scene_events_count",
+                0
+            ),
+
+        "last_event":
+            visual_summary.get(
+                "last_event"
+            ),
+
+        "package":
+            visual_summary.get(
+                "package",
+                "free"
+            ),
+
+        "session_started_utc":
+            visual_summary.get(
+                "session_started_utc"
+            ),
+
+        "active_visual_scene":
+            active_visual_scene
+    }
+
+
 # =========================================================
 # 🧠 EXECUTOR V6 LIVE VISION BRIDGE
 # =========================================================
@@ -2357,6 +2430,9 @@ def build_executor_runtime_bridge(state):
 
         "live_vision":
             build_live_vision_feed(state),
+
+        "visual_summary_awareness":
+            build_visual_summary_awareness(state),
 
         "bridge_ready": True
     }
@@ -2435,9 +2511,9 @@ def on_live_session_closed(state):
 # =========================================================
 
 ARTIFACT_BLOCK_MAP = {
+    "graph_data": "graph",
     "knowledge_graph": "graph",
     "knowledge_graph_v2": "graph",
-    "graph_data": "graph",
     "knowledge_nodes": "graph",
     "relations": "graph",
     "relation_graph": "graph",
@@ -2533,83 +2609,40 @@ def build_scene_from_artifact(artifact):
 
     if artifact.get("knowledge_graph"):
         scene_blocks.append({
-            "type": "knowledge_graph",
+            "type": "graph",
             "payload": artifact.get("knowledge_graph")
         })
 
     if artifact.get("relation_graph"):
         scene_blocks.append({
-            "type": "relations",
+            "type": "graph",
             "payload": artifact.get("relation_graph")
         })
 
     if artifact.get("knowledge_nodes"):
         scene_blocks.append({
-            "type": "knowledge_graph",
+            "type": "graph",
             "payload": artifact.get("knowledge_nodes")
         })
 
     if artifact.get("relations"):
-        scene_blocks.append({
-            "type": "relations",
-            "payload": artifact.get("relations")
-        })
-
-    if artifact.get("table_data"):
-        scene_blocks.append({
-            "type": "table",
-            "payload": artifact.get("table_data")
-        })
-
-    if artifact.get("entities"):
-        scene_blocks.append({
-            "type": "table",
-            "payload": artifact.get("entities")
-        })
-
-    if artifact.get("canonical_entities"):
-        scene_blocks.append({
-            "type": "table",
-            "payload": artifact.get("canonical_entities")
-        })
-
-    if artifact.get("concepts"):
-        scene_blocks.append({
-            "type": "table",
-            "payload": artifact.get("concepts")
-        })
-
-    if artifact.get("processes"):
-        scene_blocks.append({
-            "type": "table",
-            "payload": artifact.get("processes")
-        })
-
-    return scene_blocks
-
-    if artifact.get("graph_data"):
         scene_blocks.append({
             "type": "graph",
-            "payload": artifact.get("graph_data")
-        })
-
-    if artifact.get("table_data"):
-        scene_blocks.append({
-            "type": "table",
-            "payload": artifact.get("table_data")
-        })
-
-    if artifact.get("knowledge_nodes"):
-        scene_blocks.append({
-            "type": "knowledge_graph",
-            "payload": artifact.get("knowledge_nodes")
-        })
-
-    if artifact.get("relations"):
-        scene_blocks.append({
-            "type": "relations",
             "payload": artifact.get("relations")
         })
+
+    for field in [
+        "table_data",
+        "entities",
+        "canonical_entities",
+        "concepts",
+        "processes"
+    ]:
+        if artifact.get(field):
+            scene_blocks.append({
+                "type": "table",
+                "payload": artifact.get(field)
+            })
 
     return scene_blocks
 
