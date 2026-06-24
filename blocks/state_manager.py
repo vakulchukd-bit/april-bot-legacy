@@ -457,6 +457,8 @@ def update_scene_state(
         f"SCENE UPDATED: {user_id}"
     )
 
+    persist_state(user_id)
+
 
 def clear_scene_state(user_id):
 
@@ -489,6 +491,8 @@ def clear_scene_state(user_id):
     safe_state_log(
         f"SCENE CLEARED: {user_id}"
     )
+
+    persist_state(user_id)
 
 # =====================================================
 # 🔥 IMAGE CONTEXT
@@ -535,6 +539,8 @@ def set_image_context(
     safe_state_log(
         f"IMAGE CONTEXT: {user_id}"
     )
+
+    persist_state(user_id)
 
 
 def get_image_context(user_id):
@@ -934,7 +940,9 @@ def add_dialog(
         state_obj
     )
 
-    state_obj["active_scene"] = refresh_unified_scene(user_id) 
+    state_obj["active_scene"] = refresh_unified_scene(user_id)
+
+    persist_state(user_id) 
 
 # =====================================================
 # 🔥 DIALOG STATE
@@ -1056,6 +1064,8 @@ def set_active_flow(
         f"FLOW SET: {user_id}"
     )
 
+    persist_state(user_id)
+
 
 def get_active_flow(user_id):
 
@@ -1112,6 +1122,8 @@ def clear_active_flow(user_id):
     safe_state_log(
         f"FLOW CLEARED: {user_id}"
     )
+
+    persist_state(user_id)
 
 # =====================================================
 # 🔥 ENTITY
@@ -1483,11 +1495,16 @@ def refresh_unified_scene(user_id):
         "focus_state": state_obj.get("focus_state", {}),
         "memory_timeline": state_obj.get("memory_timeline", {}),
         "memory_cycle": state_obj.get("memory_cycle", {}),
-        "dynamic_focus": state_obj.get("dynamic_focus", {}),  # legacy fallback
-        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),  # legacy fallback
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
         "open_loops": state_obj.get("open_loops", []),
-        "memory_signals": state_obj.get("memory_signals", {}),  # legacy fallback
-        "active_flow": state_obj.get("active_flow")
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "active_flow": state_obj.get("active_flow"),
+        "active_visual_scene": state_obj.get("active_visual_scene", {}),
+        "visual_summary": state_obj.get("visual_summary", {}),
+        "today_visual_memory": state_obj.get(
+            "memory_timeline", {}
+        ).get("day_0", {}).get("visual_scenes", [])
     }
 
     return state_obj["active_scene"]
@@ -1708,3 +1725,104 @@ def build_memory_snapshot_v3(user_id):
         "memory_cycle": state_obj.get("memory_cycle", {}),
         "active_flow": state_obj.get("active_flow")
     }
+
+
+
+# =====================================================
+# 🧠 VISUAL LEDGER MEMORY BRIDGE
+# =====================================================
+
+def update_visual_summary(
+    user_id,
+    visual_summary
+):
+
+    state_obj = ensure_memory_runtime(
+        user_id
+    )
+
+    state_obj["visual_summary"] = (
+        visual_summary or {}
+    )
+
+    scene = state_obj.get(
+        "active_visual_scene"
+    ) or {}
+
+    scene["events_count"] = (
+        visual_summary.get(
+            "scene_events_count",
+            0
+        )
+    )
+
+    scene["last_event"] = (
+        visual_summary.get(
+            "last_event"
+        )
+    )
+
+    scene["package"] = (
+        visual_summary.get(
+            "package",
+            "free"
+        )
+    )
+
+    scene["session_started_utc"] = (
+        visual_summary.get(
+            "session_started_utc"
+        )
+    )
+
+    state_obj["active_visual_scene"] = scene
+
+    bind_visual_scene_to_memory(
+        user_id,
+        scene
+    )
+
+    state_obj["active_scene"] = refresh_unified_scene(
+        user_id
+    )
+
+    persist_state(user_id)
+
+    return scene
+
+
+def build_visual_memory_bridge(
+    user_id
+):
+
+    state_obj = ensure_memory_runtime(
+        user_id
+    )
+
+    return {
+
+        "user_visual_scene":
+            state_obj.get(
+                "active_visual_scene",
+                {}
+            ),
+
+        "visual_summary":
+            state_obj.get(
+                "visual_summary",
+                {}
+            ),
+
+        "today_visual_memory":
+            state_obj.get(
+                "memory_timeline",
+                {}
+            ).get(
+                "day_0",
+                {}
+            ).get(
+                "visual_scenes",
+                []
+            )
+    }
+
