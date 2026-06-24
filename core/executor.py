@@ -2620,6 +2620,18 @@ def build_scene_from_artifact(artifact):
 
     has_graph = any(v for v in unified_graph_payload.values())
 
+    if not has_graph:
+        topic = artifact.get("topic") or artifact.get("content") or ""
+        if topic:
+            unified_graph_payload = {
+                "knowledge_graph": {
+                    "nodes": [{"id":"topic","label":str(topic)}],
+                    "edges": [],
+                    "relations": []
+                }
+            }
+            has_graph = True
+
     if has_graph:
 
         graph_description = (
@@ -2627,6 +2639,7 @@ def build_scene_from_artifact(artifact):
             or artifact.get("summary")
             or artifact.get("analysis")
             or artifact.get("content")
+            or artifact.get("topic")
             or ""
         )
 
