@@ -182,9 +182,7 @@ from blocks.rooms_registry import (
 # 🧠 TEXT FALLBACK
 # =========================================================
 
-from blocks.text_module import (
-    process as text_process
-)
+# Legacy text fallback removed from unified broadband route
 
 # =========================================================
 # 🧠 PRESENTATION
@@ -453,7 +451,7 @@ def build_executor_context(
             task_type,
 
         "executor_version":
-            "golden_machine_architecture",
+            "unified_broadband_route_v1",
 
         # =================================================
         # 🔥 USER
@@ -1034,7 +1032,7 @@ async def execute_rooms(
 
     scored_rooms = []
     collected_results = []
-    max_results = 2
+    max_results = 8
 
     factory_required_rooms = get_factory_required_rooms(
         semantic
