@@ -1029,21 +1029,23 @@ class GraphRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return build_artifact(
-            "graph",
-            data={
-                "graph_type":"knowledge_graph",
-                "nodes":[],
-                "edges":[],
+        return {
+            "type":"artifact",
+            "artifact":{
+                "knowledge_graph":{
+                    "nodes":[],
+                    "edges":[],
+                    "relations":[]
+                },
+                "graph_data":{
+                    "nodes":[],
+                    "edges":[]
+                },
+                "description":"Knowledge graph generated from the current request.",
                 "title":"Graph",
-                "source": text
-            },
-            view={
-                "grid":True,
-                "legend":True,
-                "zoom":True
+                "source":text
             }
-        )
+        }
 
 
 class FormulaRoom(Room):
