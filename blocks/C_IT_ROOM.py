@@ -44,10 +44,9 @@ class ITRoom(Room):
 
         return {
 
-            "type": "text",
+            "type": "artifact",
 
-            "data":
-                "IT ROOM ACTIVE"
+            "artifact": artifact
         }
 
     # =================================================
