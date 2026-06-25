@@ -55,6 +55,12 @@ print(
 # =====================================================
 
 from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
+
 
 # =====================================================
 # 🔥 IMAGE
@@ -1381,3 +1387,28 @@ ROOM_REGISTRY_STATE = {
     "machine_isolated":
         True
 }
+
+
+# =====================================================
+# APRIL FIBER REGISTRY BRIDGE
+# =====================================================
+
+def registry_accept_request(request: MachineRequest)->MachineRequest:
+    return request
+
+def registry_collect_responses(responses):
+    mr=MachineResponse()
+    for r in responses:
+        if hasattr(r,"artifacts"):
+            mr.artifacts.extend(r.artifacts)
+    return mr
+
+def registry_export_contract(response: MachineResponse):
+    contract=UniversalArtifactContract()
+    contract.transport.origin="rooms_registry"
+    contract.transport.destination="executor"
+    contract.transport.pipeline_stage="registry_output"
+    contract.payload.artifacts=[a.data for a in response.artifacts]
+    if response.artifacts:
+        contract.artifact=response.artifacts[0]
+    return contract
