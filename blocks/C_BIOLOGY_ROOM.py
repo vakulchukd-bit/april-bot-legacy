@@ -149,7 +149,12 @@ def get_context(machine_request: MachineRequest)->Dict[str,Any]:
 
 from typing import Dict, List, Any
 import os
-from Bio import Entrez
+try:
+    from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except ImportError:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
 
 from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import (
@@ -294,7 +299,12 @@ BIOLOGY_PROVIDERS=[
 import os
 
 try:
+    try:
     from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except ImportError:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
     BIOPYTHON_AVAILABLE = True
 except Exception:
     Entrez = None
@@ -424,7 +434,12 @@ BIOLOGY_PROVIDERS=[
 import os
 
 try:
+    try:
     from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except ImportError:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
     BIOPYTHON_AVAILABLE = True
 except Exception:
     Entrez = None
@@ -590,7 +605,12 @@ BIOLOGY_PROVIDERS=[
 import os
 
 try:
+    try:
     from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except ImportError:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
     BIOPYTHON_AVAILABLE = True
 except Exception:
     Entrez = None
