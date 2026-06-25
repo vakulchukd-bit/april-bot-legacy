@@ -445,3 +445,86 @@ def artifact_can_output(
         artifact.context.artifact_outputs
         or []
     )
+
+
+# =====================================================
+# UNIVERSAL TRANSPORT CONTRACT (APRIL FIBER CHANNEL)
+# =====================================================
+
+@dataclass
+class TransportContract:
+    transport_version: str = "2.0"
+    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    origin: str = ""
+    destination: str = ""
+    pipeline_stage: str = ""
+    payload_type: str = "artifact"
+    payload_encoding: str = "machine"
+
+@dataclass
+class MachinePayload:
+    intent: Dict[str, Any] = field(default_factory=dict)
+    context: Dict[str, Any] = field(default_factory=dict)
+    knowledge: Dict[str, Any] = field(default_factory=dict)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    scene: Dict[str, Any] = field(default_factory=dict)
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
+    media: Dict[str, Any] = field(default_factory=lambda:{
+        "text":[],
+        "markdown":[],
+        "tables":[],
+        "graphs":[],
+        "formulas":[],
+        "images":[],
+        "gallery":[],
+        "files":[],
+        "audio":[],
+        "video":[],
+        "code":[],
+        "links":[],
+        "diagrams":[],
+        "actions":[]
+    })
+    executor_notes: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class UniversalArtifactContract:
+    transport: TransportContract = field(default_factory=TransportContract)
+    payload: MachinePayload = field(default_factory=MachinePayload)
+    artifact: Optional[BaseArtifact] = None
+
+
+# =====================================================
+# UNIVERSAL MACHINE PIPELINE CONTRACTS
+# =====================================================
+
+@dataclass
+class MachineRequest:
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    goal: str = ""
+    intent: Dict[str, Any] = field(default_factory=dict)
+    conversation: Dict[str, Any] = field(default_factory=dict)
+    memory: Dict[str, Any] = field(default_factory=dict)
+    visual_context: Dict[str, Any] = field(default_factory=dict)
+    available_tools: List[str] = field(default_factory=list)
+    requested_outputs: List[str] = field(default_factory=list)
+    routing: Dict[str, Any] = field(default_factory=dict)
+    constraints: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class MachineResponse:
+    artifacts: List[BaseArtifact] = field(default_factory=list)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+    quality: Dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    contributions: List[Dict[str, Any]] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
+    executor_hints: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class MachineScene:
+    scene_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    scene_version: str = "1.0"
+    active_scene: str = ""
+    blocks: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
