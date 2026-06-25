@@ -1,3 +1,10 @@
+from C_ARTIFACT_CONTRACT import (
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+    create_artifact,
+)
+
 # =====================================================
 # 🧠 APRIL BASE ROOM
 # =====================================================
@@ -422,3 +429,37 @@ class Room:
             "machine_role":
                 "execution_node"
         }
+
+
+# =====================================================
+# APRIL FIBER CHANNEL ADAPTER
+# =====================================================
+
+class FiberRoom(Room):
+    """Universal room adapter for April fiber channel."""
+
+    def accept_request(self, request: MachineRequest):
+        self.room_start()
+        return request
+
+    def build_machine_response(self, artifact_type: str, payload: dict):
+        artifact = create_artifact(
+            artifact_type=artifact_type,
+            room_source=self.name,
+            data=payload,
+        )
+        response = MachineResponse()
+        response.artifacts.append(artifact)
+        return response
+
+    def export_contract(self, response: MachineResponse):
+        contract = UniversalArtifactContract()
+        if response.artifacts:
+            contract.artifact = response.artifacts[0]
+            contract.payload.artifacts = [
+                a.data for a in response.artifacts
+            ]
+        contract.transport.origin = self.name
+        contract.transport.destination = "executor"
+        contract.transport.pipeline_stage = "room_output"
+        return contract
