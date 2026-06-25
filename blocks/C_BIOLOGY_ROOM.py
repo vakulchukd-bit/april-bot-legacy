@@ -6,7 +6,13 @@
 
 from typing import Dict, List, Any
 from blocks.room_protocol import Room
-from blocks.C_ARTIFACT_CONTRACT import create_artifact
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
+
 
 ROOM_IDENTITY = {
     "specialization": "biological_sciences",
@@ -162,8 +168,8 @@ class BiologyReasoningEngine:
         # Biology room provides knowledge payload only.
 
         result = {
-            "answer": answer,
-            "internal_explanation": internal_explanation,
+            "answer": "",  # final answer generated only by Executor,
+            "internal_explanation": "",
             "scene_mode": "knowledge_first",
             "operation": operation,
             "entities": entities,
@@ -202,7 +208,10 @@ class BiologyRoom(Room):
     ARTIFACT_TYPE = "function"
 
     async def handle(self, user_id, text, context, run):
-        result = BiologyReasoningEngine().run(text)
+        machine_request = context if isinstance(context, MachineRequest) else None
+        topic = text if machine_request is None else (machine_request.goal or text)
+
+        result = BiologyReasoningEngine().run(topic)
 
         artifact = create_artifact(
             artifact_type=self.ARTIFACT_TYPE,
@@ -215,9 +224,30 @@ class BiologyRoom(Room):
             }
         )
 
+        response = MachineResponse()
+        response.artifacts.append(artifact)
+
+        contribution = BiologyContributionBuilder().build(result)
+        response.contributions.append(contribution)
+        response.executor_hints.update(contribution.get("scene_hints", {}))
+
+
+        contract = UniversalArtifactContract()
+        contract.transport.origin=self.ROOM_ID
+        contract.transport.destination="executor"
+        contract.transport.pipeline_stage="room_output"
+        contract.artifact=artifact
+        contract.payload.artifacts=[artifact.data]
+        contract.payload.executor_notes={
+            "professional_contribution": contribution,
+            "executor_mode":"unified_prompt_builder"
+        }
+
         return {
             "type":"artifact",
             "artifact":artifact,
+            "machine_response":response,
+            "contract":contract,
             "room":self.name,
             "domain":"biology"
         }
@@ -925,3 +955,65 @@ def build_canonical_relations():
             "relations": rels
         })
     return canonical
+
+
+# =====================================================
+# V50 PROFESSIONAL CONTRIBUTION LAYER
+# =====================================================
+
+class BiologyContributionBuilder:
+
+    def build(self, result: dict):
+
+        return {
+            "room_identity": ROOM_IDENTITY,
+            "professional_domain": "biology",
+            "knowledge_nodes": result.get("knowledge_nodes", []),
+            "relations": result.get("relations", []),
+            "knowledge_packets": result.get("knowledge_sources", []),
+            "recommended_graphs": result.get("graph_data", []),
+            "recommended_tables": result.get("table_data", []),
+            "recommended_diagrams": result.get("diagram", []),
+            "recommended_gallery": [],
+            "recommended_links": result.get("sources", []),
+            "scene_hints": {
+                "scene_mode": "knowledge_first",
+                "preferred_blocks": result.get("response_plan", {})
+            },
+            "executor_prompt_fragment": {
+                "domain":"biology",
+                "intent": result.get("intent"),
+                "entities": result.get("canonical_entities", []),
+                "concepts": result.get("concepts", []),
+                "focus":"Provide only structured biological expertise for Executor. Do not generate the final user answer.",
+                "render_candidates":["table","graph","diagram","gallery","markdown","linkcard"]
+            },
+            "executor_constraints":{
+                "room_generates_final_answer":False,
+                "requires_executor":True,
+                "openai_owner":"executor",
+                "room_generates_prompt_only":True
+            },
+            "confidence":0.95,
+            "quality":0.95,
+            "missing_information":[],
+            "followup_questions":[]
+        }
+
+
+# =====================================================
+# V60 EXECUTOR PLANNING CONTRACT
+# =====================================================
+
+class BiologyExecutorPlanner:
+    """Produces only structured guidance for Executor."""
+
+    def build_prompt_fragment(self, contribution: dict):
+        return {
+            "domain": "biology",
+            "entities": contribution.get("executor_prompt_fragment", {}).get("entities", []),
+            "concepts": contribution.get("executor_prompt_fragment", {}).get("concepts", []),
+            "constraints": contribution.get("executor_constraints", {}),
+            "tool_requests": contribution.get("scene_hints", {}).get("preferred_blocks", {}),
+            "final_response_owner": "executor"
+        }
