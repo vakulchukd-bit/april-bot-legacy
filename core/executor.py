@@ -178,6 +178,13 @@ from blocks.rooms_registry import (
     ROOMS
 )
 
+from blocks.C_ARTIFACT_CONTRACT import (
+    MachineRequest,
+    MachineResponse,
+    MachineScene,
+    UniversalArtifactContract,
+)
+
 # =========================================================
 # 🧠 TEXT FALLBACK
 # =========================================================
@@ -1032,6 +1039,9 @@ async def execute_rooms(
 
     scored_rooms = []
     collected_results = []
+    machine_contracts = []
+    machine_responses = []
+
     max_results = 8
 
     factory_required_rooms = get_factory_required_rooms(
@@ -1120,10 +1130,15 @@ async def execute_rooms(
                 room.name
             )
 
+            machine_request = context.get("machine_request")
+
             machine_task_payload = {
 
                 "channel":
                     TASK_CHANNEL,
+
+                "machine_request":
+                    machine_request,
 
                 "room":
                     room.name,
@@ -1141,6 +1156,9 @@ async def execute_rooms(
                 "context":
                     context,
 
+                "machine_contract":
+                    True,
+
                 "awareness":
                     context.get(
                         "executor_awareness",
@@ -1150,13 +1168,15 @@ async def execute_rooms(
 
             print(f"🔥 HANDLE CALL [{room.name}]")
 
+            handler_payload = machine_request if machine_request is not None else machine_task_payload
+
             result = await room.handle(
 
                 user_id,
 
                 text,
 
-                machine_task_payload,
+                handler_payload,
 
                 run_with_activity
             )
@@ -1245,6 +1265,16 @@ async def execute_rooms(
                 machine_response_payload
             )
 
+            if isinstance(result, dict):
+                contract = result.get("contract")
+                response = result.get("machine_response")
+
+                if contract is not None:
+                    machine_contracts.append(contract)
+
+                if response is not None:
+                    machine_responses.append(response)
+
             if len(collected_results) >= max_results:
                 break
 
@@ -1268,6 +1298,9 @@ async def execute_rooms(
         # ================================================
         # 🔥 ARTIFACT SCENE COMPOSITION
         # ================================================
+
+        unified_machine_response = collect_machine_contract(machine_contracts)
+        unified_machine_scene = build_machine_scene(unified_machine_response)
 
         artifact_scene = response_decision.get(
             "artifact_scene",
@@ -1323,7 +1356,10 @@ async def execute_rooms(
                 "blocks": blocks,
                 "artifact_scene": artifact_scene,
                 "scene_plan": scene_plan,
-                "scene_composition_ready": len(artifact_scene) > 0
+                "scene_composition_ready": len(artifact_scene) > 0,
+                "machine_scene": unified_machine_scene,
+                "machine_contract_count": len(machine_contracts),
+                "machine_response_count": len(machine_responses)
             }
         }
 
@@ -1688,6 +1724,17 @@ async def execute(
     # 🔥 EXECUTOR CONTEXT
     # =====================================================
 
+
+    # =====================================================
+    # 🔥 UNIVERSAL MACHINE REQUEST
+    # =====================================================
+    machine_request = build_machine_request({
+        "semantic": semantic,
+        "memory_routing": memory_routing,
+        "visual_reference": visual_reference,
+        "trajectory": state.get("scene_state", {}).get("trajectory")
+    })
+
     context = build_executor_context(
 
         user_id=user_id,
@@ -1754,6 +1801,9 @@ async def execute(
     print("🔥 TASK TYPE:", task_type)
     print("🔥 RUN:", run_with_activity)
     print("🔥 RUN TYPE:", type(run_with_activity))
+
+
+    context["machine_request"] = machine_request
 
     room_response = await execute_rooms(
 
@@ -2669,3 +2719,56 @@ def build_scene_from_artifact(artifact):
 # =========================================================
 # END EXECUTOR V8
 # =========================================================
+
+
+# =========================================================
+# APRIL FIBER EXECUTOR BRIDGE
+# =========================================================
+
+def build_machine_request(context):
+    req=MachineRequest()
+    req.goal=context.get("semantic",{}).get("intent","dialog")
+    req.intent=context.get("semantic",{})
+    req.memory=context.get("memory_routing",{})
+    req.visual_context=context.get("visual_reference",{})
+    req.routing={"trajectory":context.get("trajectory")}
+    return req
+
+def collect_machine_contract(room_contracts):
+    response=MachineResponse()
+    for contract in room_contracts:
+        if hasattr(contract,"artifact") and contract.artifact:
+            response.artifacts.append(contract.artifact)
+    return response
+
+def build_machine_scene(response):
+    scene=MachineScene()
+    for art in response.artifacts:
+        scene.blocks.append({
+            "artifact_type":art.metadata.artifact_type,
+            "room":art.metadata.room_source,
+            "payload":art.data
+        })
+    return scene
+
+
+# =========================================================
+# FIBER COMPATIBILITY HELPERS
+# =========================================================
+
+def executor_extract_machine_request(context):
+    return context.get("machine_request")
+
+def executor_has_machine_contract(context):
+    return context.get("machine_request") is not None
+
+
+# =========================================================
+# UNIVERSAL ROOM PAYLOAD ADAPTER
+# =========================================================
+
+def executor_build_room_payload(context, legacy_payload):
+    machine_request = context.get("machine_request")
+    if machine_request is not None:
+        return machine_request
+    return legacy_payload
