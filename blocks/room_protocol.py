@@ -1,4 +1,4 @@
-from C_ARTIFACT_CONTRACT import (
+from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
     UniversalArtifactContract,
