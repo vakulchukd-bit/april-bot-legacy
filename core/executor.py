@@ -1917,90 +1917,43 @@ async def execute(
         return result
         
     # =====================================================
-    # 🔥 FALLBACK
+    # 🔥 BROADBAND PROVIDER ROUTE
     # =====================================================
 
-    energy = get_energy(
-        user_id
-    )
-
     context_text = build_deephub_context(
-
         user_id,
-
         text,
-
         state
     )
 
-    print(
-        "🔥 EXECUTOR FALLBACK START"
-    )
-
-    print(
-        "🔥 run_with_activity:",
-        type(run_with_activity)
-    )
-
-    print(
-        "🔥 energy:",
-        energy
-    )
+    print("🔥 EXECUTOR BROADBAND PROVIDER ROUTE")
 
     try:
 
         if run_with_activity:
-
-            print(
-                "🔥 USING BROADBAND PROVIDER ROUTE"
-            )
-
             generated_text = await run_with_activity(
                 chat_id,
                 generate_text(context_text)
             )
-
-            fallback_result = {
-                "content": generated_text
-            }
-
         else:
-
-            print(
-                "🔥 NO ACTIVITY WRAPPER"
-            )
-
             generated_text = await generate_text(context_text)
-            fallback_result = {"content": generated_text}
 
-        print(
-            "🔥 FALLBACK RESULT TYPE:",
-            type(fallback_result)
-        )
-
-        print(
-            "🔥 FALLBACK RESULT:",
-            fallback_result
-        )
+        fallback_result = {
+            "content": generated_text
+        }
 
     except Exception as e:
 
-        print(
-            "🔥 FALLBACK CRASH:",
-            e
-        )
+        print("🔥 PROVIDER ROUTE ERROR:", e)
 
         traceback.print_exc()
 
         return {
-
             "type": "text",
-
-            "data":
-                f"⚠️ FALLBACK ERROR: {e}"
+            "data": f"⚠️ PROVIDER ROUTE ERROR: {e}"
         }
-    
-    # =====================================================
+
+# =====================================================
     # 🔥 FORMAT
     # =====================================================
 
