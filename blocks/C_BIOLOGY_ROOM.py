@@ -1,10 +1,13 @@
 
+# ===== SOURCE: C_BIOLOGY_ROOM_skeleton.py =====
+
 # =====================================================
-# APRIL C_BIOLOGY_ROOM V19
-# MERGED UPGRADE (V12 + V17 + V18 + KNOWLEDGE GRAPH)
+# APRIL BIOLOGY ROOM (SKELETON)
+# Temporary placeholder after architecture reset.
 # =====================================================
 
 from typing import Dict, List, Any
+
 from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import (
     create_artifact,
@@ -14,1006 +17,710 @@ from blocks.C_ARTIFACT_CONTRACT import (
 )
 
 
-ROOM_IDENTITY = {
-    "specialization": "biological_sciences",
-    "knowledge_class": "life_sciences",
-    "architecture": "biology_factory_v19"
-}
+# ===== SOURCE: C_BIOLOGY_ROOM_stage1_provider.py =====
 
-BIOLOGY_ENTITY_REGISTRY = {
-    "organism": [], "species": [], "population": [], "ecosystem": [],
-    "gene": [], "protein": [], "cell": [], "tissue": [], "organ": [],
-    "animal": [], "plant": [], "fungi": [], "bacteria": [], "virus": []
-}
 
-BIOLOGY_CONCEPT_GRAPH = {
-    "gene": ["protein"],
-    "protein": ["cell"],
-    "cell": ["tissue"],
-    "tissue": ["organ"],
-    "organ": ["organism"],
-    "organism": ["population"],
-    "population": ["species"],
-    "species": ["ecosystem"]
-}
+# =====================================================
+# APRIL BIOLOGY ROOM
+# Stage 1: Knowledge Provider skeleton
+# =====================================================
 
-BIOLOGY_KNOWLEDGE_BASE = {
-    "genetics": {},
-    "molecular_biology": {},
-    "cell_biology": {},
-    "anatomy": {},
-    "physiology": {},
-    "biochemistry": {},
-    "immunology": {},
-    "microbiology": {},
-    "zoology": {},
-    "botany": {},
-    "ecology": {},
-    "evolution": {},
-    "taxonomy": {},
-    "population_biology": {}
-}
+from typing import Dict, List, Any, Protocol
 
-BIOLOGY_ENTITY_GRAPH = {
-    "gene": {
-        "domain":"genetics",
-        "related_to":["allele","chromosome","genome","mutation"],
-        "processes":["replication","transcription","translation"]
-    },
-    "cell": {
-        "domain":"cell_biology",
-        "related_to":["protein","tissue","membrane"]
-    },
-    "species": {
-        "domain":"taxonomy",
-        "related_to":["population","ecosystem"]
-    }
-}
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
 
-BIOLOGY_RELATION_GRAPH = {
-    "gene->protein":"encodes",
-    "protein->cell":"participates_in",
-    "cell->tissue":"forms",
-    "population->ecosystem":"inhabits"
-}
+DOMAIN = "biology"
 
-BIOLOGY_PROCESS_GRAPH = {
-    "replication":["dna","polymerase","chromosome"],
-    "transcription":["dna","rna"],
-    "translation":["rna","protein"]
-}
+class KnowledgeProvider(Protocol):
+    name: str
+    def search(self, topic: str) -> Dict[str, Any]: ...
 
-class BiologyOperationDetector:
-    def detect(self, text:str)->str:
-        t=text.lower()
-        if "срав" in t: return "compare"
-        if "классиф" in t: return "classify"
-        if "граф" in t: return "visualize"
-        if "таблиц" in t: return "tabulate"
-        if "исслед" in t: return "research"
-        return "analyze"
+class GeneOntologyProvider:
+    """Stage-1 placeholder for future Gene Ontology integration."""
 
-class BiologyEntityRegistry:
-    def extract(self, text:str):
-        return [x for x in text.lower().split() if len(x)>2]
+    name = "gene_ontology"
 
-class BiologyResponsePlanner:
-    def build(self, operation:str):
+    def search(self, topic: str) -> Dict[str, Any]:
         return {
-            "text": True,
-            "table": operation in ["compare","tabulate"],
-            "graph": False,
-            "diagram": False,
-            "sources": True,
-            "comparison": operation=="compare"
-        }
-
-
-class BiologyReasoningSynthesizer:
-
-    def synthesize(self, semantic, knowledge_context):
-
-        entities = semantic.get("canonical_entities", [])
-        concepts = semantic.get("concepts", [])
-        nodes = knowledge_context.get("knowledge_nodes", [])
-        relations = knowledge_context.get("relations", [])
-
-        parts = []
-
-        if "dna" in entities:
-            parts.append(
-                "ДНК — молекула, которая хранит наследственную информацию организма. "
-                "Она организована в гены и хромосомы и используется клетками для синтеза белков."
-            )
-
-        elif "gene" in entities:
-            parts.append(
-                "Ген представляет собой участок ДНК, содержащий инструкции для синтеза функциональных продуктов клетки."
-            )
-
-        elif nodes:
-            parts.append(
-                f"Обнаружено {len(nodes)} связанных биологических объектов и {len(relations)} связей между ними."
-            )
-
-        if concepts:
-            parts.append(
-                "Ключевые концепции: " + ", ".join(concepts)
-            )
-
-        return "\n\n".join(parts) if parts else "Недостаточно знаний для формирования ответа."
-
-
-class BiologyReasoningEngine:
-    def run(self, topic:str):
-        operation = BiologyOperationDetector().detect(topic)
-        entities = BiologyEntityRegistry().extract(topic)
-        planner = BiologyResponsePlanner().build(operation)
-
-        resolved_objects = resolve_objects(topic)
-        resolved_domains = resolve_domains(topic)
-
-        available_artifacts = list(
-            BIOLOGY_ARTIFACT_LIBRARY.keys()
-        ) if 'BIOLOGY_ARTIFACT_LIBRARY' in globals() else []
-
-        semantic = BiologySemanticAnalyzer().analyze(topic)
-
-        knowledge_context = build_biology_knowledge_context(semantic)
-
-        answer = ""
-        internal_explanation = ""
-
-        # Scene-first architecture:
-        # Biology room provides knowledge payload only.
-
-        result = {
-            "answer": "",  # final answer generated only by Executor,
-            "internal_explanation": "",
-            "scene_mode": "knowledge_first",
-            "operation": operation,
-            "entities": entities,
-            "domains": list(BIOLOGY_KNOWLEDGE_BASE.keys()),
-            "resolved_objects": resolved_objects,
-            "resolved_domains": resolved_domains,
-            "available_artifacts": available_artifacts,
-            "recommended_resources": globals().get('BIOLOGY_RESOURCE_LIBRARY', {}),
-            "semantic": semantic,
-            "intent": semantic["intent"],
-            "canonical_entities": semantic["canonical_entities"],
-            "concepts": semantic["concepts"],
-
-            "response_plan": planner,
-            "knowledge_graph": BIOLOGY_ENTITY_GRAPH,
-            "relation_graph": BIOLOGY_RELATION_GRAPH,
-            "process_graph": BIOLOGY_PROCESS_GRAPH,
-            "table": [],
-            "graph": [],
-            "diagram": [],
-            "sources": [],
-            "comparison": {}
-        }
-
-        result = enrich_reasoning_result_with_knowledge(
-            result,
-            semantic
-        )
-
-        return result
-
-class BiologyRoom(Room):
-    name = "biology"
-    room_type = "science"
-    ROOM_ID = "BIOLOGY_ROOM"
-    ARTIFACT_TYPE = "function"
-
-    async def handle(self, user_id, text, context, run):
-        machine_request = context if isinstance(context, MachineRequest) else None
-        topic = text if machine_request is None else (machine_request.goal or text)
-
-        result = BiologyReasoningEngine().run(topic)
-
-        artifact = create_artifact(
-            artifact_type=self.ARTIFACT_TYPE,
-            room_source=self.ROOM_ID,
-            data={
-                "domain":"biology",
-                "topic":text,
-                "room_identity":ROOM_IDENTITY,
-                **result
+            "provider": self.name,
+            "domain": DOMAIN,
+            "topic": topic,
+            "status": "provider_registered",
+            "prompt_fragments": [
+                "Use accepted biological terminology.",
+                "Prefer molecular biology and genetics context when relevant.",
+                "State uncertainty when evidence is insufficient."
+            ],
+            "artifact_hints": {
+                "markdown": True,
+                "table": True,
+                "graph": False
             }
-        )
-
-        response = MachineResponse()
-        response.artifacts.append(artifact)
-
-        contribution = BiologyContributionBuilder().build(result)
-        response.contributions.append(contribution)
-        response.executor_hints.update(contribution.get("scene_hints", {}))
-
-
-        contract = UniversalArtifactContract()
-        contract.transport.origin=self.ROOM_ID
-        contract.transport.destination="executor"
-        contract.transport.pipeline_stage="room_output"
-        contract.artifact=artifact
-        contract.payload.artifacts=[artifact.data]
-        contract.payload.executor_notes={
-            "professional_contribution": contribution,
-            "executor_mode":"unified_prompt_builder"
         }
 
-        return {
-            "type":"artifact",
-            "artifact":artifact,
-            "machine_response":response,
-            "contract":contract,
-            "room":self.name,
-            "domain":"biology"
-        }
-
-ROOM = BiologyRoom()
-
-
-# =====================================================
-# V20 KNOWLEDGE EXPANSION LAYERS
-# =====================================================
-
-BIOLOGY_OBJECT_GRAPH = {
-    "human": {
-        "type": "species",
-        "genus": "Homo",
-        "family": "Hominidae",
-        "domains": ["genetics", "physiology", "evolution"]
-    },
-    "lion": {
-        "type": "species",
-        "genus": "Panthera",
-        "family": "Felidae",
-        "domains": ["genetics", "ecology", "evolution"]
-    },
-    "tiger": {
-        "type": "species",
-        "genus": "Panthera",
-        "family": "Felidae",
-        "domains": ["genetics", "ecology", "evolution"]
-    }
+PROVIDERS: Dict[str, KnowledgeProvider] = {
+    "gene_ontology": GeneOntologyProvider(),
 }
 
-BIOLOGY_DOMAIN_GRAPH = {
-    "genetics": ["dna", "gene", "chromosome", "genome", "mutation"],
-    "ecology": ["population", "ecosystem", "food_chain"],
-    "evolution": ["adaptation", "selection", "speciation"],
-    "zoology": ["animal", "mammal", "bird", "reptile"],
-    "botany": ["plant", "photosynthesis", "root", "leaf"]
+def get_biology_context(topic: str) -> Dict[str, Any]:
+    provider = PROVIDERS["gene_ontology"]
+    return provider.search(topic)
+
+
+# ===== SOURCE: C_BIOLOGY_ROOM_stage2.py =====
+
+# =====================================================
+# APRIL BIOLOGY ROOM
+# Stage 1 - Competency + Real Provider Registry
+# =====================================================
+
+from typing import Dict, List, Any
+
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
+
+ROOM_ID="biology"
+
+BIOLOGY_COMPETENCY={
+    "domains":[
+        "genetics",
+        "molecular_biology",
+        "cell_biology",
+        "physiology",
+        "microbiology",
+        "botany",
+        "zoology",
+        "ecology",
+        "evolution",
+    ]
 }
 
-BIOLOGY_ARTIFACT_LIBRARY = {
-    "population_growth": {
-        "supports_graph": True,
-        "supports_table": True,
-        "supports_comparison": True
+# Open knowledge providers (registry only)
+BIOLOGY_PROVIDERS=[
+    {
+        "id":"gene_ontology",
+        "name":"Gene Ontology",
+        "kind":"ontology",
+        "access":"api_or_download",
+        "enabled":True,
     },
-    "species_comparison": {
-        "supports_graph": True,
-        "supports_table": True,
-        "supports_comparison": True
-    }
-}
-
-BIOLOGY_RESOURCE_LIBRARY = {
-    "genetics": ["NCBI", "Ensembl"],
-    "ecology": ["IUCN"],
-    "evolution": ["Tree of Life"]
-}
-
-
-# =====================================================
-# V21 INTEGRATION LAYER
-# =====================================================
-
-def resolve_objects(text: str):
-    t = text.lower()
-    found = []
-    for obj in BIOLOGY_OBJECT_GRAPH.keys():
-        if obj in t:
-            found.append(obj)
-    return found
-
-def resolve_domains(text: str):
-    t = text.lower()
-    domains = []
-    for domain, concepts in BIOLOGY_DOMAIN_GRAPH.items():
-        if any(c in t for c in concepts):
-            domains.append(domain)
-    return domains
-
-# Suggested patch for BiologyReasoningEngine:
-# resolved_objects = resolve_objects(topic)
-# resolved_domains = resolve_domains(topic)
-# available_artifacts = [
-#   k for k,v in BIOLOGY_ARTIFACT_LIBRARY.items()
-#   if v.get("supports_graph") or v.get("supports_table")
-# ]
-#
-# return {
-#   ...existing fields...,
-#   "resolved_objects": resolved_objects,
-#   "resolved_domains": resolved_domains,
-#   "available_artifacts": available_artifacts,
-#   "recommended_resources": BIOLOGY_RESOURCE_LIBRARY
-# }
-
-
-# =====================================================
-# V23 CANONICAL ENTITY RESOLUTION LAYER
-# =====================================================
-
-BIOLOGY_CANONICAL_ENTITIES = {
-    "tiger": ["tiger", "tigers", "тигр", "тигры", "тигра", "тигров"],
-    "lion": ["lion", "lions", "лев", "львы", "льва", "львов"],
-    "human": ["human", "humans", "человек", "люди", "человека"],
-    "dna": ["dna", "днк"],
-    "gene": ["gene", "ген", "гены", "генов"],
-    "photosynthesis": ["photosynthesis", "фотосинтез"]
-}
-
-def resolve_canonical_entities(text:str):
-    t = text.lower()
-    found = []
-    for canonical, aliases in BIOLOGY_CANONICAL_ENTITIES.items():
-        if any(alias in t for alias in aliases):
-            found.append(canonical)
-    return found
-
-# Integration note for BiologyReasoningEngine.run():
-# canonical_entities = resolve_canonical_entities(topic)
-# answer generation should prefer canonical_entities over raw words.
-
-
-# =====================================================
-# V24 SEMANTIC REASONING LAYER
-# =====================================================
-
-class BiologySemanticAnalyzer:
-
-    def analyze(self, text:str):
-
-        t = text.lower()
-
-        intent = "explain"
-
-        if "срав" in t:
-            intent = "compare"
-        elif "покажи" in t or "граф" in t:
-            intent = "visualize"
-        elif "таблиц" in t:
-            intent = "tabulate"
-        elif "исслед" in t:
-            intent = "research"
-
-        canonical_entities = resolve_canonical_entities(text)
-
-        concepts = []
-        domains = []
-
-        for entity in canonical_entities:
-
-            if entity == "dna":
-                concepts.append("genetic_information")
-                domains.append("genetics")
-
-            elif entity == "gene":
-                concepts.append("inheritance")
-                domains.append("genetics")
-
-            elif entity == "photosynthesis":
-                concepts.append("energy_conversion")
-                domains.append("botany")
-
-            elif entity in ["tiger", "lion", "human"]:
-                concepts.append("organism")
-                domains.append("zoology")
-
-        return {
-            "intent": intent,
-            "canonical_entities": canonical_entities,
-            "concepts": list(set(concepts)),
-            "domains": list(set(domains))
-        }
-
-# Integration target:
-#
-# semantic = BiologySemanticAnalyzer().analyze(topic)
-#
-# return {
-#     ...
-#     "semantic": semantic,
-#     "intent": semantic["intent"],
-#     "canonical_entities": semantic["canonical_entities"],
-#     "concepts": semantic["concepts"]
-# }
-
-
-# =====================================================
-# V26 BIOLOGY KNOWLEDGE ENGINE
-# =====================================================
-
-BIOLOGY_KNOWLEDGE_PACKETS = {
-    "human_dna": {
-        "summary": "ДНК человека содержит наследственную информацию организма. Она организована в хромосомы и кодирует работу клеток, тканей и органов.",
-        "domains": ["genetics"],
-        "concepts": ["genetic_information", "inheritance"]
+    {
+        "id":"ncbi",
+        "name":"NCBI",
+        "kind":"knowledge",
+        "access":"entrez",
+        "enabled":True,
     },
-    "tiger_dna": {
-        "summary": "ДНК тигра хранит генетическую информацию вида Panthera tigris и используется для изучения эволюции, популяций и сохранения вида.",
-        "domains": ["genetics", "zoology"],
-        "concepts": ["genetic_information", "species"]
+    {
+        "id":"uniprot",
+        "name":"UniProt",
+        "kind":"protein",
+        "access":"rest",
+        "enabled":True,
     },
-    "photosynthesis": {
-        "summary": "Фотосинтез — процесс преобразования световой энергии в химическую энергию с образованием органических веществ.",
-        "domains": ["botany"],
-        "concepts": ["energy_conversion"]
-    }
-}
+]
 
-class BiologyKnowledgeEngine:
-
-    def build_packet(self, semantic: dict):
-
-        entities = semantic.get("canonical_entities", [])
-
-        if "human" in entities and "dna" in entities:
-            return BIOLOGY_KNOWLEDGE_PACKETS["human_dna"]
-
-        if "tiger" in entities and "dna" in entities:
-            return BIOLOGY_KNOWLEDGE_PACKETS["tiger_dna"]
-
-        if "photosynthesis" in entities:
-            return BIOLOGY_KNOWLEDGE_PACKETS["photosynthesis"]
-
-        return {
-            "summary": "Биологическая тема распознана. Требуется углублённый анализ предметной области.",
-            "domains": semantic.get("domains", []),
-            "concepts": semantic.get("concepts", [])
-        }
-
-
-# =====================================================
-# V27 CONCEPT + EXPLANATION ENGINE
-# =====================================================
-
-BIOLOGY_CONCEPT_LIBRARY = {
-    "dna": {
-        "type": "molecule",
-        "functions": [
-            "inheritance",
-            "genome_storage",
-            "protein_synthesis"
-        ]
-    },
-    "gene": {
-        "type": "genetic_unit",
-        "functions": [
-            "trait_encoding",
-            "inheritance"
-        ]
-    },
-    "photosynthesis": {
-        "type": "biological_process",
-        "functions": [
-            "energy_conversion",
-            "glucose_production",
-            "oxygen_release"
-        ]
-    }
-}
-
-BIOLOGY_RELATION_LIBRARY = {
-    "dna": ["gene", "chromosome", "cell"],
-    "gene": ["dna", "protein"],
-    "photosynthesis": ["plant", "chlorophyll", "sunlight"]
-}
-
-class BiologyExplanationEngine:
-
-    def explain(self, semantic: dict):
-
-        entities = semantic.get("canonical_entities", [])
-        concepts = semantic.get("concepts", [])
-
-        explanation_parts = []
-
-        for entity in entities:
-
-            if entity in BIOLOGY_CONCEPT_LIBRARY:
-
-                node = BIOLOGY_CONCEPT_LIBRARY[entity]
-
-                explanation_parts.append(
-                    f"{entity} является объектом типа "
-                    f"{node.get('type')}."
-                )
-
-                funcs = node.get("functions", [])
-                if funcs:
-                    explanation_parts.append(
-                        "Основные функции: " +
-                        ", ".join(funcs)
-                    )
-
-        if concepts:
-            explanation_parts.append(
-                "Связанные концепции: " +
-                ", ".join(concepts)
-            )
-
-        if not explanation_parts:
-            explanation_parts.append(
-                "Биологическая тема распознана и подготовлена "
-                "для дальнейшего анализа знаний."
-            )
-
-        return " ".join(explanation_parts)
-
-
-# =====================================================
-# V29 KNOWLEDGE RESOLVER ARCHITECTURE
-# =====================================================
-
-class BiologyKnowledgeProvider:
-    provider_name = "base"
-
-    def resolve(self, entities, concepts, domains):
-        return {
-            "knowledge_nodes": [],
-            "relations": [],
-            "sources": [],
-            "graph_data": [],
-            "table_data": []
-        }
-
-
-class LocalBiologyProvider(BiologyKnowledgeProvider):
-
-    provider_name = "local_biology"
-
-    def resolve(self, entities, concepts, domains):
-
-        nodes = []
-        relations = []
-
-        for entity in entities:
-
-            if entity in BIOLOGY_CONCEPT_LIBRARY:
-                nodes.append({
-                    "id": entity,
-                    **BIOLOGY_CONCEPT_LIBRARY[entity]
-                })
-
-            if entity in BIOLOGY_RELATION_LIBRARY:
-                relations.append({
-                    "entity": entity,
-                    "relations": BIOLOGY_RELATION_LIBRARY[entity]
-                })
-
-        return {
-            "knowledge_nodes": nodes,
-            "relations": relations,
-            "sources": ["local_library"],
-            "graph_data": relations,
-            "table_data": nodes
-        }
-
-
-class WikidataBiologyProvider(BiologyKnowledgeProvider):
-
-    provider_name = "wikidata"
-
-    def resolve(self, entities, concepts, domains):
-
-        return {
-            "knowledge_nodes": [],
-            "relations": [],
-            "sources": ["wikidata_placeholder"],
-            "graph_data": [],
-            "table_data": []
-        }
-
-
-class BiologyKnowledgeResolver:
-
-    def __init__(self):
-
-        self.providers = [
-            LocalBiologyProvider(),
-            WikidataBiologyProvider()
-        ]
-
-    def resolve(self, entities, concepts, domains):
-
-        result = {
-            "knowledge_nodes": [],
-            "relations": [],
-            "sources": [],
-            "graph_data": [],
-            "table_data": []
-        }
-
-        for provider in self.providers:
-
-            provider_result = provider.resolve(
-                entities,
-                concepts,
-                domains
-            )
-
-            for key in result:
-                result[key].extend(
-                    provider_result.get(key, [])
-                )
-
-        return result
-
-
-# =====================================================
-# V30 RESOLVER INTEGRATION LAYER
-# =====================================================
-
-class BiologyReasoningContextBuilder:
-
-    def build(self, semantic):
-
-        resolver = BiologyKnowledgeResolver()
-
-        knowledge = resolver.resolve(
-            entities=semantic.get("canonical_entities", []),
-            concepts=semantic.get("concepts", []),
-            domains=semantic.get("domains", [])
-        )
-
-        return {
-            "semantic": semantic,
-            "knowledge": knowledge,
-            "knowledge_nodes": knowledge.get("knowledge_nodes", []),
-            "relations": knowledge.get("relations", []),
-            "sources": knowledge.get("sources", []),
-            "graph_data": knowledge.get("graph_data", []),
-            "table_data": knowledge.get("table_data", [])
-        }
-
-
-# Suggested integration for BiologyReasoningEngine.run():
-#
-# semantic = BiologySemanticAnalyzer().analyze(topic)
-# context = BiologyReasoningContextBuilder().build(semantic)
-#
-# knowledge_nodes = context["knowledge_nodes"]
-# relations = context["relations"]
-# sources = context["sources"]
-#
-# artifact payload should expose:
-# knowledge_nodes
-# relations
-# sources
-# graph_data
-# table_data
-#
-# so Scene Builder can consume them directly.
-
-
-# =====================================================
-# V31 RESOLVER -> ENGINE INTEGRATION
-# =====================================================
-
-class BiologyKnowledgeSceneAdapter:
-
-    def build_scene_payload(self, context):
-
-        return {
-            "knowledge_nodes": context.get("knowledge_nodes", []),
-            "relations": context.get("relations", []),
-            "sources": context.get("sources", []),
-            "graph_data": context.get("graph_data", []),
-            "table_data": context.get("table_data", [])
-        }
-
-
-# Integration target for BiologyReasoningEngine.run():
-#
-# semantic = BiologySemanticAnalyzer().analyze(topic)
-#
-# context = BiologyReasoningContextBuilder().build(
-#     semantic
-# )
-#
-# scene_payload = BiologyKnowledgeSceneAdapter().build_scene_payload(
-#     context
-# )
-#
-# return {
-#     ...existing fields...,
-#     "knowledge_nodes": scene_payload["knowledge_nodes"],
-#     "relations": scene_payload["relations"],
-#     "knowledge_sources": scene_payload["sources"],
-#     "graph_data": scene_payload["graph_data"],
-#     "table_data": scene_payload["table_data"]
-# }
-#
-# This preserves compatibility while exposing
-# internal and external knowledge providers
-# to Executor and Scene Builder.
-
-
-# =====================================================
-# V32 EXTERNAL KNOWLEDGE PROVIDER CONTRACT
-# =====================================================
-
-BIOLOGY_EXTERNAL_PROVIDER_CONFIG = {
-    "wikidata": {
-        "enabled": True,
-        "provider": "WikidataBiologyProvider"
-    },
-    "gene_ontology": {
-        "enabled": False,
-        "provider": "GeneOntologyProvider"
-    },
-    "ncbi": {
-        "enabled": False,
-        "provider": "NCBIProvider"
-    },
-    "ensembl": {
-        "enabled": False,
-        "provider": "EnsemblProvider"
-    }
-}
-
-
-class GeneOntologyProvider(BiologyKnowledgeProvider):
-
-    provider_name = "gene_ontology"
-
-    def resolve(self, entities, concepts, domains):
-
-        return {
-            "knowledge_nodes": [],
-            "relations": [],
-            "sources": ["gene_ontology_placeholder"],
-            "graph_data": [],
-            "table_data": []
-        }
-
-
-class NCBIProvider(BiologyKnowledgeProvider):
-
-    provider_name = "ncbi"
-
-    def resolve(self, entities, concepts, domains):
-
-        return {
-            "knowledge_nodes": [],
-            "relations": [],
-            "sources": ["ncbi_placeholder"],
-            "graph_data": [],
-            "table_data": []
-        }
-
-
-class EnsemblProvider(BiologyKnowledgeProvider):
-
-    provider_name = "ensembl"
-
-    def resolve(self, entities, concepts, domains):
-
-        return {
-            "knowledge_nodes": [],
-            "relations": [],
-            "sources": ["ensembl_placeholder"],
-            "graph_data": [],
-            "table_data": []
-        }
-
-
-# =====================================================
-# V33 DYNAMIC PROVIDER REGISTRY
-# =====================================================
-
-class BiologyProviderRegistry:
-
-    def build_providers(self):
-
-        providers = [LocalBiologyProvider()]
-
-        cfg = BIOLOGY_EXTERNAL_PROVIDER_CONFIG
-
-        if cfg.get("wikidata", {}).get("enabled"):
-            providers.append(WikidataBiologyProvider())
-
-        if cfg.get("gene_ontology", {}).get("enabled"):
-            providers.append(GeneOntologyProvider())
-
-        if cfg.get("ncbi", {}).get("enabled"):
-            providers.append(NCBIProvider())
-
-        if cfg.get("ensembl", {}).get("enabled"):
-            providers.append(EnsemblProvider())
-
-        return providers
-
-
-class DynamicBiologyKnowledgeResolver(BiologyKnowledgeResolver):
-
-    def __init__(self):
-
-        registry = BiologyProviderRegistry()
-        self.providers = registry.build_providers()
-        
-        
-# Integration target:
-#
-# resolver = DynamicBiologyKnowledgeResolver()
-#
-# knowledge = resolver.resolve(
-#     entities=semantic["canonical_entities"],
-#     concepts=semantic["concepts"],
-#     domains=semantic["domains"]
-# )
-#
-# This removes hardcoded providers and routes
-# all knowledge access through the provider registry.
-
-
-# =====================================================
-# V34 ACTIVE RESOLVER INTEGRATION PATCH
-# =====================================================
-
-def build_biology_knowledge_context(semantic: dict):
-
-    resolver = DynamicBiologyKnowledgeResolver()
-
-    knowledge = resolver.resolve(
-        entities=semantic.get("canonical_entities", []),
-        concepts=semantic.get("concepts", []),
-        domains=semantic.get("domains", [])
-    )
-
+def get_context(machine_request: MachineRequest)->Dict[str,Any]:
     return {
-        "knowledge_nodes": knowledge.get("knowledge_nodes", []),
-        "relations": knowledge.get("relations", []),
-        "knowledge_sources": knowledge.get("sources", []),
-        "graph_data": knowledge.get("graph_data", []),
-        "table_data": knowledge.get("table_data", [])
+        "room":ROOM_ID,
+        "competency":BIOLOGY_COMPETENCY,
+        "providers":BIOLOGY_PROVIDERS,
+        "machine_request":machine_request,
     }
 
-# Integration target inside BiologyReasoningEngine.run():
-#
-# semantic = BiologySemanticAnalyzer().analyze(topic)
-# knowledge_context = build_biology_knowledge_context(semantic)
-#
-# result.update(knowledge_context)
-#
-# This keeps backward compatibility while exposing
-# resolver-driven knowledge to Artifact and Scene layers.
 
+# ===== SOURCE: C_BIOLOGY_ROOM_stage3.py =====
 
 # =====================================================
-# V35 SCRUTER VISIBILITY CONTRACT
+# APRIL BIOLOGY ROOM
+# Stage 1 - Competency + Real Provider Registry
 # =====================================================
 
-def enrich_reasoning_result_with_knowledge(result: dict, semantic: dict):
+from typing import Dict, List, Any
+import os
+from Bio import Entrez
 
-    try:
-        knowledge_context = build_biology_knowledge_context(semantic)
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
 
-        result.update({
-            "knowledge_nodes": knowledge_context.get("knowledge_nodes", []),
-            "relations": knowledge_context.get("relations", []),
-            "knowledge_sources": knowledge_context.get("knowledge_sources", []),
-            "graph_data": knowledge_context.get("graph_data", []),
-            "table_data": knowledge_context.get("table_data", []),
-            "scene_ready": True,
-            "knowledge_provider_mode": "dynamic",
-            "artifact_expansion_ready": True,
-            "machine_payload": True,
-            "scene_contribution_mode": True
-        })
+ROOM_ID="biology"
 
-    except Exception as e:
-        result["knowledge_error"] = str(e)
+BIOLOGY_COMPETENCY={
+    "domains":[
+        "genetics",
+        "molecular_biology",
+        "cell_biology",
+        "physiology",
+        "microbiology",
+        "botany",
+        "zoology",
+        "ecology",
+        "evolution",
+    ]
+}
 
+# Open knowledge providers (registry only)
+BIOLOGY_PROVIDERS=[
+    {
+        "id":"gene_ontology",
+        "name":"Gene Ontology",
+        "kind":"ontology",
+        "access":"api_or_download",
+        "enabled":True,
+    },
+    {
+        "id":"ncbi",
+        "name":"NCBI",
+        "kind":"knowledge",
+        "access":"entrez",
+        "enabled":True,
+    },
+    {
+        "id":"uniprot",
+        "name":"UniProt",
+        "kind":"protein",
+        "access":"rest",
+        "enabled":True,
+    },
+]
+
+def get_context(machine_request: MachineRequest)->Dict[str,Any]:
+    return {
+        "room":ROOM_ID,
+        "competency":BIOLOGY_COMPETENCY,
+        "providers":BIOLOGY_PROVIDERS,
+        "machine_request":machine_request,
+    }
+
+
+NCBI_CONFIG={
+    "tool":"April",
+    "email":os.getenv("NCBI_EMAIL",""),
+}
+
+def configure_ncbi()->None:
+    if NCBI_CONFIG["email"]:
+        Entrez.email=NCBI_CONFIG["email"]
+    Entrez.tool=NCBI_CONFIG["tool"]
+
+def ncbi_search(term:str, db:str="pubmed", retmax:int=5)->Dict[str,Any]:
+    configure_ncbi()
+    handle=Entrez.esearch(db=db, term=term, retmax=retmax)
+    result=Entrez.read(handle)
+    handle.close()
     return result
 
 
-# PATCH TARGET INSIDE BiologyReasoningEngine.run():
-#
-# semantic = BiologySemanticAnalyzer().analyze(topic)
-# result = {...existing payload...}
-# result = enrich_reasoning_result_with_knowledge(
-#     result,
-#     semantic
-# )
-# return result
-#
-# Scruter / Scene Builder fields:
-#   knowledge_nodes
-#   relations
-#   knowledge_sources
-#   graph_data
-#   table_data
-#   scene_ready
-
+# ===== SOURCE: C_BIOLOGY_ROOM_stage4.py =====
 
 # =====================================================
-# V40 CANONICAL RELATION CONTRACT
+# APRIL BIOLOGY ROOM
+# Stage 1 - Competency + Real Provider Registry
 # =====================================================
 
-def build_canonical_relations():
-    canonical = []
-    for entity, rels in BIOLOGY_RELATION_LIBRARY.items():
-        canonical.append({
-            "entity": entity,
-            "relations": rels
-        })
-    return canonical
+from typing import Dict, List, Any
+
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
+
+ROOM_ID="biology"
+
+BIOLOGY_COMPETENCY={
+    "domains":[
+        "genetics",
+        "molecular_biology",
+        "cell_biology",
+        "physiology",
+        "microbiology",
+        "botany",
+        "zoology",
+        "ecology",
+        "evolution",
+    ]
+}
+
+# Open knowledge providers (registry only)
+BIOLOGY_PROVIDERS=[
+    {
+        "id":"gene_ontology",
+        "name":"Gene Ontology",
+        "kind":"ontology",
+        "access":"api_or_download",
+        "enabled":True,
+    },
+    {
+        "id":"ncbi",
+        "name":"NCBI",
+        "kind":"knowledge",
+        "access":"entrez",
+        "enabled":True,
+    },
+    {
+        "id":"uniprot",
+        "name":"UniProt",
+        "kind":"protein",
+        "access":"rest",
+        "enabled":True,
+    },
+]
 
 
-# =====================================================
-# V50 PROFESSIONAL CONTRIBUTION LAYER
-# =====================================================
 
-class BiologyContributionBuilder:
+# ------------------------------------------------------------------
+# Stage 3 - NCBI integration foundation
+# ------------------------------------------------------------------
 
-    def build(self, result: dict):
+import os
+
+try:
+    from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except Exception:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
+
+NCBI_CONFIG = {
+    "tool": "April",
+    "email": os.getenv("NCBI_EMAIL", ""),
+}
+
+def configure_ncbi() -> bool:
+    if not BIOPYTHON_AVAILABLE:
+        return False
+    Entrez.tool = NCBI_CONFIG["tool"]
+    if NCBI_CONFIG["email"]:
+        Entrez.email = NCBI_CONFIG["email"]
+    return True
+
+def ncbi_search(term: str, db: str = "pubmed", retmax: int = 5) -> Dict[str, Any]:
+    if not configure_ncbi():
+        return {
+            "provider": "ncbi",
+            "status": "biopython_not_installed",
+            "results": [],
+        }
+
+    try:
+        with Entrez.esearch(db=db, term=term, retmax=retmax) as handle:
+            data = Entrez.read(handle)
 
         return {
-            "room_identity": ROOM_IDENTITY,
-            "professional_domain": "biology",
-            "knowledge_nodes": result.get("knowledge_nodes", []),
-            "relations": result.get("relations", []),
-            "knowledge_packets": result.get("knowledge_sources", []),
-            "recommended_graphs": result.get("graph_data", []),
-            "recommended_tables": result.get("table_data", []),
-            "recommended_diagrams": result.get("diagram", []),
-            "recommended_gallery": [],
-            "recommended_links": result.get("sources", []),
-            "scene_hints": {
-                "scene_mode": "knowledge_first",
-                "preferred_blocks": result.get("response_plan", {})
-            },
-            "executor_prompt_fragment": {
-                "domain":"biology",
-                "intent": result.get("intent"),
-                "entities": result.get("canonical_entities", []),
-                "concepts": result.get("concepts", []),
-                "focus":"Provide only structured biological expertise for Executor. Do not generate the final user answer.",
-                "render_candidates":["table","graph","diagram","gallery","markdown","linkcard"]
-            },
-            "executor_constraints":{
-                "room_generates_final_answer":False,
-                "requires_executor":True,
-                "openai_owner":"executor",
-                "room_generates_prompt_only":True
-            },
-            "confidence":0.95,
-            "quality":0.95,
-            "missing_information":[],
-            "followup_questions":[]
+            "provider": "ncbi",
+            "status": "ok",
+            "database": db,
+            "ids": data.get("IdList", []),
+            "count": data.get("Count", "0"),
+        }
+    except Exception as exc:
+        return {
+            "provider": "ncbi",
+            "status": "error",
+            "error": str(exc),
+        }
+
+def get_context(machine_request: MachineRequest) -> Dict[str, Any]:
+    context = {
+        "room": ROOM_ID,
+        "competency": BIOLOGY_COMPETENCY,
+        "providers": BIOLOGY_PROVIDERS,
+        "machine_request": machine_request,
+    }
+
+    topic = ""
+    if isinstance(machine_request, dict):
+        topic = str(machine_request.get("query", ""))
+
+    if topic:
+        context["ncbi"] = ncbi_search(topic)
+
+    return context
+
+
+# ===== SOURCE: C_BIOLOGY_ROOM_stage5.py =====
+
+# =====================================================
+# APRIL BIOLOGY ROOM
+# Stage 1 - Competency + Real Provider Registry
+# =====================================================
+
+from typing import Dict, List, Any
+
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
+
+ROOM_ID="biology"
+
+BIOLOGY_COMPETENCY={
+    "domains":[
+        "genetics",
+        "molecular_biology",
+        "cell_biology",
+        "physiology",
+        "microbiology",
+        "botany",
+        "zoology",
+        "ecology",
+        "evolution",
+    ]
+}
+
+# Open knowledge providers (registry only)
+BIOLOGY_PROVIDERS=[
+    {
+        "id":"gene_ontology",
+        "name":"Gene Ontology",
+        "kind":"ontology",
+        "access":"api_or_download",
+        "enabled":True,
+    },
+    {
+        "id":"ncbi",
+        "name":"NCBI",
+        "kind":"knowledge",
+        "access":"entrez",
+        "enabled":True,
+    },
+    {
+        "id":"uniprot",
+        "name":"UniProt",
+        "kind":"protein",
+        "access":"rest",
+        "enabled":True,
+    },
+]
+
+
+
+# ------------------------------------------------------------------
+# Stage 3 - NCBI integration foundation
+# ------------------------------------------------------------------
+
+import os
+
+try:
+    from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except Exception:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
+
+NCBI_CONFIG = {
+    "tool": "April",
+    "email": os.getenv("NCBI_EMAIL", ""),
+}
+
+def configure_ncbi() -> bool:
+    if not BIOPYTHON_AVAILABLE:
+        return False
+    Entrez.tool = NCBI_CONFIG["tool"]
+    if NCBI_CONFIG["email"]:
+        Entrez.email = NCBI_CONFIG["email"]
+    return True
+
+def ncbi_search(term: str, db: str = "pubmed", retmax: int = 5) -> Dict[str, Any]:
+    if not configure_ncbi():
+        return {
+            "provider": "ncbi",
+            "status": "biopython_not_installed",
+            "results": [],
+        }
+
+    try:
+        with Entrez.esearch(db=db, term=term, retmax=retmax) as handle:
+            data = Entrez.read(handle)
+
+        return {
+            "provider": "ncbi",
+            "status": "ok",
+            "database": db,
+            "ids": data.get("IdList", []),
+            "count": data.get("Count", "0"),
+        }
+    except Exception as exc:
+        return {
+            "provider": "ncbi",
+            "status": "error",
+            "error": str(exc),
+        }
+
+def get_context(machine_request: MachineRequest) -> Dict[str, Any]:
+    context = {
+        "room": ROOM_ID,
+        "competency": BIOLOGY_COMPETENCY,
+        "providers": BIOLOGY_PROVIDERS,
+        "machine_request": machine_request,
+    }
+
+    topic = ""
+    if isinstance(machine_request, dict):
+        topic = str(machine_request.get("query", ""))
+
+    if topic:
+        context["ncbi"] = ncbi_search(topic)
+
+    return context
+
+
+# ------------------------------------------------------------------
+# Stage 4 - NCBI summary extraction
+# ------------------------------------------------------------------
+
+def ncbi_summary(db: str, ids: list[str]) -> Dict[str, Any]:
+    if not ids:
+        return {"provider": "ncbi", "status": "empty", "documents": []}
+
+    if not configure_ncbi():
+        return {"provider": "ncbi", "status": "biopython_not_installed", "documents": []}
+
+    try:
+        with Entrez.esummary(db=db, id=",".join(ids)) as handle:
+            summary = Entrez.read(handle)
+
+        docs = []
+        for item in summary:
+            docs.append({
+                "uid": item.get("Id") or item.get("uid"),
+                "title": item.get("Title", ""),
+            })
+
+        return {
+            "provider": "ncbi",
+            "status": "ok",
+            "documents": docs,
+        }
+    except Exception as exc:
+        return {
+            "provider": "ncbi",
+            "status": "error",
+            "error": str(exc),
+            "documents": [],
         }
 
 
+# ===== SOURCE: C_BIOLOGY_ROOM_stage6_executor_ready.py =====
+
 # =====================================================
-# V60 EXECUTOR PLANNING CONTRACT
+# APRIL BIOLOGY ROOM
+# Stage 1 - Competency + Real Provider Registry
 # =====================================================
 
-class BiologyExecutorPlanner:
-    """Produces only structured guidance for Executor."""
+from typing import Dict, List, Any
 
-    def build_prompt_fragment(self, contribution: dict):
+from blocks.room_protocol import Room
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
+
+ROOM_ID="biology"
+
+BIOLOGY_COMPETENCY={
+    "domains":[
+        "genetics",
+        "molecular_biology",
+        "cell_biology",
+        "physiology",
+        "microbiology",
+        "botany",
+        "zoology",
+        "ecology",
+        "evolution",
+    ]
+}
+
+# Open knowledge providers (registry only)
+BIOLOGY_PROVIDERS=[
+    {
+        "id":"gene_ontology",
+        "name":"Gene Ontology",
+        "kind":"ontology",
+        "access":"api_or_download",
+        "enabled":True,
+    },
+    {
+        "id":"ncbi",
+        "name":"NCBI",
+        "kind":"knowledge",
+        "access":"entrez",
+        "enabled":True,
+    },
+    {
+        "id":"uniprot",
+        "name":"UniProt",
+        "kind":"protein",
+        "access":"rest",
+        "enabled":True,
+    },
+]
+
+
+
+# ------------------------------------------------------------------
+# Stage 3 - NCBI integration foundation
+# ------------------------------------------------------------------
+
+import os
+
+try:
+    from Bio import Entrez
+    BIOPYTHON_AVAILABLE = True
+except Exception:
+    Entrez = None
+    BIOPYTHON_AVAILABLE = False
+
+NCBI_CONFIG = {
+    "tool": "April",
+    "email": os.getenv("NCBI_EMAIL", ""),
+}
+
+def configure_ncbi() -> bool:
+    if not BIOPYTHON_AVAILABLE:
+        return False
+    Entrez.tool = NCBI_CONFIG["tool"]
+    if NCBI_CONFIG["email"]:
+        Entrez.email = NCBI_CONFIG["email"]
+    return True
+
+def ncbi_search(term: str, db: str = "pubmed", retmax: int = 5) -> Dict[str, Any]:
+    if not configure_ncbi():
         return {
-            "domain": "biology",
-            "entities": contribution.get("executor_prompt_fragment", {}).get("entities", []),
-            "concepts": contribution.get("executor_prompt_fragment", {}).get("concepts", []),
-            "constraints": contribution.get("executor_constraints", {}),
-            "tool_requests": contribution.get("scene_hints", {}).get("preferred_blocks", {}),
-            "final_response_owner": "executor"
+            "provider": "ncbi",
+            "status": "biopython_not_installed",
+            "results": [],
         }
+
+    try:
+        with Entrez.esearch(db=db, term=term, retmax=retmax) as handle:
+            data = Entrez.read(handle)
+
+        return {
+            "provider": "ncbi",
+            "status": "ok",
+            "database": db,
+            "ids": data.get("IdList", []),
+            "count": data.get("Count", "0"),
+        }
+    except Exception as exc:
+        return {
+            "provider": "ncbi",
+            "status": "error",
+            "error": str(exc),
+        }
+
+def get_context(machine_request: MachineRequest) -> Dict[str, Any]:
+    context = {
+        "room": ROOM_ID,
+        "competency": BIOLOGY_COMPETENCY,
+        "providers": BIOLOGY_PROVIDERS,
+        "machine_request": machine_request,
+    }
+
+    topic = ""
+    if isinstance(machine_request, dict):
+        topic = str(machine_request.get("query", ""))
+
+    if topic:
+        context["ncbi"] = ncbi_search(topic)
+
+    return context
+
+
+# ------------------------------------------------------------------
+# Stage 4 - NCBI summary extraction
+# ------------------------------------------------------------------
+
+def ncbi_summary(db: str, ids: list[str]) -> Dict[str, Any]:
+    if not ids:
+        return {"provider": "ncbi", "status": "empty", "documents": []}
+
+    if not configure_ncbi():
+        return {"provider": "ncbi", "status": "biopython_not_installed", "documents": []}
+
+    try:
+        with Entrez.esummary(db=db, id=",".join(ids)) as handle:
+            summary = Entrez.read(handle)
+
+        docs = []
+        for item in summary:
+            docs.append({
+                "uid": item.get("Id") or item.get("uid"),
+                "title": item.get("Title", ""),
+            })
+
+        return {
+            "provider": "ncbi",
+            "status": "ok",
+            "documents": docs,
+        }
+    except Exception as exc:
+        return {
+            "provider": "ncbi",
+            "status": "error",
+            "error": str(exc),
+            "documents": [],
+        }
+
+
+# ------------------------------------------------------------------
+# Stage 5 - Unified Machine Contribution
+# ------------------------------------------------------------------
+
+def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any]:
+    query = ""
+    if isinstance(machine_request, dict):
+        query = str(machine_request.get("query",""))
+
+    search = ncbi_search(query) if query else {}
+    summary = {}
+    if search.get("status") == "ok":
+        summary = ncbi_summary(search.get("database","pubmed"), search.get("ids", []))
+
+    return {
+        "room": ROOM_ID,
+        "confidence": 0.95 if query else 0.0,
+        "knowledge_context": {
+            "competency": BIOLOGY_COMPETENCY,
+            "providers": BIOLOGY_PROVIDERS,
+            "ncbi_search": search,
+            "ncbi_summary": summary,
+        },
+        "prompt_fragments": [
+            "Use accepted biological terminology.",
+            "Prefer evidence-based biological explanations.",
+            "Mention uncertainty when evidence is limited."
+        ],
+        "artifact_hints": {
+            "text": True,
+            "table": True,
+            "graph": False,
+            "links": True,
+        },
+    }
