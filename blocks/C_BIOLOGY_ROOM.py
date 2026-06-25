@@ -87,8 +87,12 @@ def build_machine_contribution(machine_request:MachineRequest)->Dict[str,Any]:
     }
 
 
+
 class BiologyRoom:
+    name = ROOM_ID
     id = ROOM_ID
+    domains = BIOLOGY_COMPETENCY["domains"]
+    providers = BIOLOGY_PROVIDERS
 
     def get_context(self, machine_request: MachineRequest):
         return get_context(machine_request)
@@ -97,3 +101,4 @@ class BiologyRoom:
         return build_machine_contribution(machine_request)
 
 ROOM = BiologyRoom()
+
