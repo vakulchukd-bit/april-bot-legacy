@@ -191,6 +191,8 @@ from blocks.C_ARTIFACT_CONTRACT import (
 
 # Legacy text fallback removed from unified broadband route
 
+from blocks.provider_router import generate_text
+
 # =========================================================
 # 🧠 PRESENTATION
 # =========================================================
@@ -1953,21 +1955,10 @@ async def execute(
                 "🔥 USING ACTIVITY WRAPPER"
             )
 
-            fallback_result = await run_with_activity(
-
-                chat_id,
-
-                text_process(
-
-                    user_id,
-
-                    context_text,
-
-                    state,
-
-                    energy
-                )
-            )
+            generated_text = await generate_text(context_text)
+            fallback_result = {"content": generated_text}
+            if run_with_activity:
+                fallback_result = await run_with_activity(chat_id, fallback_result)
 
         else:
 
@@ -1975,16 +1966,8 @@ async def execute(
                 "🔥 NO ACTIVITY WRAPPER"
             )
 
-            fallback_result = await text_process(
-
-                user_id,
-
-                context_text,
-
-                state,
-
-                energy
-            )
+            generated_text = await generate_text(context_text)
+            fallback_result = {"content": generated_text}
 
         print(
             "🔥 FALLBACK RESULT TYPE:",
