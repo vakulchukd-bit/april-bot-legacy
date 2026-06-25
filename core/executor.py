@@ -1952,13 +1952,17 @@ async def execute(
         if run_with_activity:
 
             print(
-                "🔥 USING ACTIVITY WRAPPER"
+                "🔥 USING BROADBAND PROVIDER ROUTE"
             )
 
-            generated_text = await generate_text(context_text)
-            fallback_result = {"content": generated_text}
-            if run_with_activity:
-                fallback_result = await run_with_activity(chat_id, fallback_result)
+            generated_text = await run_with_activity(
+                chat_id,
+                generate_text(context_text)
+            )
+
+            fallback_result = {
+                "content": generated_text
+            }
 
         else:
 
