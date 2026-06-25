@@ -85,3 +85,15 @@ def build_machine_contribution(machine_request:MachineRequest)->Dict[str,Any]:
             "graph":False,
         },
     }
+
+
+class BiologyRoom:
+    id = ROOM_ID
+
+    def get_context(self, machine_request: MachineRequest):
+        return get_context(machine_request)
+
+    def build_machine_contribution(self, machine_request: MachineRequest):
+        return build_machine_contribution(machine_request)
+
+ROOM = BiologyRoom()
