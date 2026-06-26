@@ -100,5 +100,31 @@ class BiologyRoom:
     def build_machine_contribution(self, machine_request: MachineRequest):
         return build_machine_contribution(machine_request)
 
+
+
+    def evaluate(self, machine_request: MachineRequest):
+        query = ""
+        if isinstance(machine_request, dict):
+            query = str(machine_request.get("query","")).lower()
+        score = 0.0
+        for token in ("днк","dna","ген","gene","клет","биолог","организм","protein","белок","эволюц"):
+            if token in query:
+                score = max(score,0.95)
+        return {
+            "room": self.id,
+            "score": score,
+            "active": score > 0.0,
+            "reason": "biology_match" if score>0 else "no_match",
+        }
+
+    def execute(self, machine_request: MachineRequest):
+        contribution = self.build_machine_contribution(machine_request)
+        return create_artifact(
+            room=self.id,
+            artifact_type="biology",
+            payload=contribution,
+        )
+
+
 ROOM = BiologyRoom()
 
