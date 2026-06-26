@@ -14,6 +14,43 @@ from blocks.C_ARTIFACT_CONTRACT import (
 
 ROOM_ID = "it"
 
+
+try:
+    import pygments
+    PYGMENTS_AVAILABLE = True
+except ImportError:
+    pygments = None
+    PYGMENTS_AVAILABLE = False
+
+try:
+    import git
+    GITPYTHON_AVAILABLE = True
+except ImportError:
+    git = None
+    GITPYTHON_AVAILABLE = False
+
+try:
+    import lizard
+    LIZARD_AVAILABLE = True
+except ImportError:
+    lizard = None
+    LIZARD_AVAILABLE = False
+
+try:
+    import tree_sitter
+    TREE_SITTER_AVAILABLE = True
+except ImportError:
+    tree_sitter = None
+    TREE_SITTER_AVAILABLE = False
+
+IT_LIBRARY_STATUS = {
+    "pygments": PYGMENTS_AVAILABLE,
+    "gitpython": GITPYTHON_AVAILABLE,
+    "lizard": LIZARD_AVAILABLE,
+    "tree_sitter": TREE_SITTER_AVAILABLE,
+}
+
+
 # =====================================================
 # STAGE PLAN
 # =====================================================
@@ -65,6 +102,7 @@ def get_context(machine_request: MachineRequest) -> Dict[str, Any]:
         "room": ROOM_ID,
         "competency": IT_COMPETENCY,
         "providers": IT_PROVIDERS,
+        "libraries": IT_LIBRARY_STATUS,
     }
 
 
@@ -80,6 +118,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             "Return machine-readable IT contribution."
         ],
         "artifact_hints": {
+            "text": True,
             "code": True,
             "table": True,
             "links": True,
@@ -104,14 +143,17 @@ def evaluate(machine_request: MachineRequest) -> Dict[str, Any]:
     }
 
 def execute(machine_request: MachineRequest):
-    contribution=build_machine_contribution(machine_request)
+    contribution = build_machine_contribution(machine_request)
     return create_artifact(
-        artifact_type="function",
-        room_source=ROOM_ID,
-        data=contribution,
+        room=ROOM_ID,
+        artifact_type="it",
+        payload=contribution,
     )
 
 class ITRoom(Room):
     name = ROOM_ID
+    id = ROOM_ID
+    domains = IT_COMPETENCY["domains"]
+    providers = IT_PROVIDERS
 
 ROOM = ITRoom()
