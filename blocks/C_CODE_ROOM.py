@@ -94,8 +94,26 @@ class CodeRoom:
             query=str(machine_request.get("query","")).lower()
         score=0.0
         for token in (
-            "python","javascript","typescript","java","c++","c#",
-            "code","код","api","debug","алгоритм","function","class"
+            # Languages
+            "python","py","javascript","js","typescript","ts","java","kotlin",
+            "swift","go","golang","rust","php","ruby","perl","scala",
+            "c","c++","c#","sql","html","css","xml","json","yaml","bash",
+            "powershell","lua","dart","r","matlab",
+
+            # Programming concepts
+            "code","код","программа","программирование","исходный код",
+            "скрипт","модуль","класс","class","function","функция","метод",
+            "объект","ооп","object","algorithm","алгоритм","debug","отладка",
+            "рефакторинг","оптимизация","api","sdk","library","библиотека",
+
+            # Frameworks / tools
+            "flask","django","fastapi","react","angular","vue","node",
+            "docker","git","github","pytest","unittest",
+
+            # Typical requests
+            "напиши программу","напиши код","создай программу",
+            "создай приложение","реализуй","исправь код",
+            "сгенерируй код","console","консольное приложение"
         ):
             if token in query:
                 score=max(score,0.95)
