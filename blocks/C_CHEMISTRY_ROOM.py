@@ -1,118 +1,116 @@
-# =====================================================
-# APRIL C_CHEMISTRY_ROOM
-# =====================================================
-
-from typing import Dict, Any
+from typing import Any, Dict
+import os
 
 from blocks.room_protocol import Room
-from blocks.C_ARTIFACT_CONTRACT import create_artifact
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_artifact,
+    MachineRequest,
+    MachineResponse,
+    UniversalArtifactContract,
+)
 
+ROOM_ID = "chemistry"
 
-class ChemistryRoom(Room):
+CHEMISTRY_COMPETENCY = {
+    "domains": [
+        "organic_chemistry",
+        "inorganic_chemistry",
+        "physical_chemistry",
+        "analytical_chemistry",
+        "biochemistry",
+        "electrochemistry",
+        "thermochemistry",
+        "chemical_kinetics",
+        "equilibrium",
+        "materials_science",
+    ]
+}
 
-    name = "chemistry"
+CHEMISTRY_PROVIDERS = [
+    {"id":"pubchem","name":"PubChem","kind":"compound","enabled":True},
+    {"id":"chebi","name":"ChEBI","kind":"ontology","enabled":True},
+    {"id":"chemspider","name":"ChemSpider","kind":"compound","enabled":False},
+    {"id":"nist","name":"NIST Chemistry","kind":"reference","enabled":True},
+]
 
-    room_type = "science"
+CHEMISTRY_CONFIG = {
+    "tool":"April",
+    "email":os.getenv("CHEMISTRY_EMAIL",""),
+}
 
-    ROOM_ID = "CHEMISTRY_ROOM"
+def configure_chemistry()->bool:
+    return True
 
-    ARTIFACT_TYPE = "function"
+def chemistry_search(term:str)->Dict[str,Any]:
+    return {
+        "provider":"chemistry",
+        "results":[],
+    }
 
-    quality_score = 1.0
-    confidence_score = 1.0
-    completeness_score = 1.0
+def get_context(machine_request:MachineRequest)->Dict[str,Any]:
+    query=""
+    if isinstance(machine_request,dict):
+        query=str(machine_request.get("query",""))
+    return {
+        "room":ROOM_ID,
+        "competency":CHEMISTRY_COMPETENCY,
+        "providers":CHEMISTRY_PROVIDERS,
+        "chemistry":chemistry_search(query),
+    }
 
-    # =================================================
-    # ROOM EXECUTION
-    # =================================================
+def build_machine_contribution(machine_request:MachineRequest)->Dict[str,Any]:
+    ctx=get_context(machine_request)
+    return {
+        "room":ROOM_ID,
+        "knowledge_context":ctx,
+        "prompt_fragments":[
+            "Use accepted chemical terminology.",
+            "Prefer evidence-based chemistry.",
+            "Prefer IUPAC nomenclature when appropriate.",
+            "State uncertainty when evidence is limited."
+        ],
+        "artifact_hints":{
+            "text":True,
+            "table":True,
+            "links":True,
+            "graph":False,
+            "formula":True,
+        },
+    }
 
-    async def handle(
-        self,
-        user_id,
-        text,
-        context,
-        run
-    ):
+class ChemistryRoom:
+    name=ROOM_ID
+    id=ROOM_ID
+    domains=CHEMISTRY_COMPETENCY["domains"]
+    providers=CHEMISTRY_PROVIDERS
 
-        print("CHEMISTRY ROOM HANDLE START")
+    def get_context(self,machine_request:MachineRequest):
+        return get_context(machine_request)
 
-        artifact = self.process({
+    def build_machine_contribution(self,machine_request:MachineRequest):
+        return build_machine_contribution(machine_request)
 
-            "topic": text
-
-        })
-
+    def evaluate(self,machine_request:MachineRequest):
+        query=""
+        if isinstance(machine_request,dict):
+            query=str(machine_request.get("query","")).lower()
+        score=0.0
+        for token in ("хими","chem","молек","реакц","атом","ион","кислот","щелоч","элемент"):
+            if token in query:
+                score=max(score,0.95)
         return {
-
-            "type": "text",
-
-            "data":
-                "CHEMISTRY ROOM ACTIVE"
+            "room":self.id,
+            "score":score,
+            "active":score>0.0,
+            "reason":"chemistry_match" if score>0 else "no_match",
         }
 
-    # =================================================
-    # ARTIFACT FACTORY
-    # =================================================
-
-    def process(
-        self,
-        task: Dict[str, Any]
-    ):
-
-        topic = task.get(
-            "topic",
-            ""
+    def execute(self,machine_request:MachineRequest):
+        contribution=self.build_machine_contribution(machine_request)
+        return create_artifact(
+            room=self.id,
+            artifact_type="chemistry",
+            payload=contribution,
         )
 
-        artifact = create_artifact(
-
-            artifact_type=
-                self.ARTIFACT_TYPE,
-
-            room_source=
-                self.ROOM_ID,
-
-            data={
-
-                "domain":
-                    "chemistry",
-
-                "topic":
-                    topic,
-
-                "analysis":
-                    {},
-
-                "sections": [
-
-                    "organic",
-
-                    "inorganic",
-
-                    "physical",
-
-                    "analytical",
-
-                    "biochemistry",
-
-                    "reactions",
-
-                    "elements",
-
-                    "molecules"
-                ]
-            }
-        )
-
-        artifact.quality.validation_passed = True
-
-        artifact.quality.quality_score = 1.0
-
-        artifact.quality.confidence_score = 1.0
-
-        artifact.quality.completeness_score = 1.0
-
-        return artifact
-
-
-ROOM = ChemistryRoom()
+ROOM=ChemistryRoom()
