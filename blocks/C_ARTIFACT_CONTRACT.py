@@ -190,7 +190,6 @@ FACTORY_ROOM_MAP = {
 
     "diagram": "C_DIAGRAM_ROOM",
 
-    "code": "C_CODE_ROOM",
 
     "link": "C_LINK_ROOM",
 
