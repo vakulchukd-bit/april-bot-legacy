@@ -20,3 +20,12 @@ biopython
 pubchempy
 periodictable
 # rdkit  # enable later if deployment environment supports it
+
+# Code
+pygments
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+gitpython
+lizard
