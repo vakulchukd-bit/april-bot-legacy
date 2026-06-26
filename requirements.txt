@@ -9,6 +9,14 @@ matplotlib
 sympy
 psycopg2-binary
 flask
-beautifulsoup4
 flask-cors
+beautifulsoup4
 google-genai>=1.16.1
+
+# Biology
+biopython
+
+# Chemistry
+pubchempy
+periodictable
+# rdkit  # enable later if deployment environment supports it
