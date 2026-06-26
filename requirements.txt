@@ -29,3 +29,8 @@ tree-sitter-javascript
 tree-sitter-typescript
 gitpython
 lizard
+# IT Room Stage 3
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-rust
+tree-sitter-go
