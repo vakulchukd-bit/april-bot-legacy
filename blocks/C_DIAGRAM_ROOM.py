@@ -7,10 +7,168 @@ from typing import Dict, Any, List
 from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
+try:
+    import networkx as nx
+except ImportError:
+    nx = None
+
+try:
+    import graphviz
+except ImportError:
+    graphviz = None
+
+try:
+    import pydot
+except ImportError:
+    pydot = None
+
+
+
+DIAGRAM_COMPETENCY = {
+    "domains": [
+        "flowchart",
+        "uml",
+        "architecture",
+        "mindmap",
+        "erd",
+        "bpmn",
+        "network_topology",
+        "dependency_graph",
+        "pipeline",
+        "workflow",
+        "organization_chart",
+        "decision_tree",
+        "sequence_diagram",
+        "class_diagram",
+        "state_diagram",
+    ]
+}
+
+
+DIAGRAM_TYPES = {
+    "flowchart": ["algorithm","process","workflow","logic"],
+    "uml": ["class","sequence","activity","state","component","deployment"],
+    "architecture": ["software","system","microservice","api","cloud"],
+    "database": ["erd","entity","relation","schema"],
+    "mindmap": ["mindmap","concept","knowledge"],
+    "network": ["network","topology","infrastructure"],
+    "business": ["bpmn","organization","decision","process"],
+}
+
+def detect_diagram_type(task: Dict[str, Any]) -> str:
+    text = str(task.get("diagram","")).lower()
+    for dtype, terms in DIAGRAM_TYPES.items():
+        if any(t in text for t in terms):
+            return dtype
+    return "flowchart"
+
+
+
+DIAGRAM_LIBRARIES = {
+    "graph_engine": nx is not None,
+    "graphviz": graphviz is not None,
+    "pydot": pydot is not None,
+}
+
+
+DIAGRAM_LIBRARY = {
+    "flowchart": {
+        "outputs": ["flowchart"],
+        "builders": ["build_nodes","build_edges","build_flow"],
+    },
+    "uml": {
+        "outputs": ["class","sequence","activity","state","component","deployment"],
+        "builders": ["build_nodes","build_edges","build_layout"],
+    },
+    "architecture": {
+        "outputs": ["software_architecture","microservices","api","cloud"],
+        "builders": ["build_architecture","build_layout"],
+    },
+    "erd": {
+        "outputs": ["entity_relationship"],
+        "builders": ["build_nodes","build_edges"],
+    },
+    "mindmap": {
+        "outputs": ["mindmap"],
+        "builders": ["build_mindmap"],
+    },
+    "bpmn": {
+        "outputs": ["process_map","workflow"],
+        "builders": ["build_flow","build_layout"],
+    },
+}
+
+ROOM_ID = "DIAGRAM_ROOM"
+
+DIAGRAM_PROVIDERS = [
+    {"id":"diagram_engine","name":"April Diagram Engine","kind":"diagram","enabled":True},
+    {"id":"layout_engine","name":"April Layout Engine","kind":"layout","enabled":True},
+]
+
+
+DIAGRAM_CONTEXT = {
+    "room": ROOM_ID,
+    "competency": DIAGRAM_COMPETENCY,
+    "providers": DIAGRAM_PROVIDERS,
+}
+
+
+
+
+def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Stage 4:
+    Builds the internal machine representation of the future diagram.
+    Rendering is intentionally NOT performed here.
+    """
+    work_order = {
+        "diagram_type": detect_diagram_type(task),
+        "description": task.get("diagram",""),
+        "nodes": [],
+        "edges": [],
+        "layout": "auto",
+        "hierarchy": {},
+        "flow": {},
+        "mindmap": {},
+        "architecture": {},
+        "library": select_diagram_library(task),
+    }
+    return work_order
+
+
+
+def prepare_diagram_artifact(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Stage 5:
+    Final preparation of the machine artifact before Executor aggregation.
+    Rendering remains outside the room.
+    """
+    model = build_machine_model(task)
+    return {
+        "artifact_type": "diagram",
+        "room": "DIAGRAM_ROOM",
+        "diagram_type": model["diagram_type"],
+        "machine_model": model,
+        "render_ready": True,
+    }
+
+
+
+def select_diagram_library(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Select the most appropriate professional diagram library
+    based on the semantic intent of the machine request.
+    """
+    dtype = detect_diagram_type(task)
+    return DIAGRAM_LIBRARY.get(dtype, DIAGRAM_LIBRARY["flowchart"])
+
 
 class DiagramRoom(Room):
 
     name = "diagram"
+    id = ROOM_ID
+    domains = DIAGRAM_COMPETENCY["domains"]
+    providers = DIAGRAM_PROVIDERS
 
     room_type = "visual"
 
@@ -22,7 +180,9 @@ class DiagramRoom(Room):
     confidence_score = 1.0
     completeness_score = 1.0
 
-    # =================================================
+
+
+# =================================================
     # ROOM EXECUTION
     # =================================================
 
@@ -91,7 +251,7 @@ class DiagramRoom(Room):
         description: str
     ) -> List[Dict]:
 
-        return []
+        return [{"id":"root","label":description[:80] or "Diagram","type":"node"}]
 
     # =================================================
     # EDGE ENGINE
@@ -113,12 +273,7 @@ class DiagramRoom(Room):
         description: str
     ) -> Dict:
 
-        return {
-
-            "start": None,
-
-            "end": None
-        }
+        return {"start":"root","end":"root"}
 
     # =================================================
     # HIERARCHY ENGINE
@@ -129,7 +284,7 @@ class DiagramRoom(Room):
         description: str
     ) -> Dict:
 
-        return {}
+        return {"root":[]}
 
     # =================================================
     # MINDMAP ENGINE
@@ -140,7 +295,7 @@ class DiagramRoom(Room):
         description: str
     ) -> Dict:
 
-        return {}
+        return {"center":"root","branches":[]}
 
     # =================================================
     # ARCHITECTURE ENGINE
@@ -151,7 +306,7 @@ class DiagramRoom(Room):
         description: str
     ) -> Dict:
 
-        return {}
+        return {"components":[]}
 
     # =================================================
     # LAYOUT ENGINE
@@ -204,70 +359,28 @@ class DiagramRoom(Room):
         self,
         description: str
     ):
-
-        nodes = self.build_nodes(
-            description
-        )
-
-        edges = self.build_edges(
-            description
-        )
-
-        artifact = create_artifact(
-
-            artifact_type=
-                self.ARTIFACT_TYPE,
-
-            room_source=
-                self.ROOM_ID,
-
-            data={
-
-                "description":
-                    description,
-
-                "nodes":
-                    nodes,
-
-                "edges":
-                    edges,
-
-                "flow":
-                    self.build_flow(
-                        description
-                    ),
-
-                "hierarchy":
-                    self.build_hierarchy(
-                        description
-                    ),
-
-                "mindmap":
-                    self.build_mindmap(
-                        description
-                    ),
-
-                "architecture":
-                    self.build_architecture(
-                        description
-                    ),
-
-                "layout":
-                    self.build_layout(
-                        nodes
-                    )
+        task = {"diagram": description}
+        contribution = self.build_machine_contribution(task)
+        return create_artifact(
+            artifact_type=self.ARTIFACT_TYPE,
+            room_source=self.ROOM_ID,
+            data=contribution["artifact"]["machine_model"] | {
+                "description": description,
+                "domain":"diagram",
+                "room_identity":{
+                    "specialization":"visual_structure_engine",
+                    "knowledge_class":"structural_visualization"
+                },
+                "knowledge_scope": DIAGRAM_COMPETENCY["domains"],
+                "capabilities":[
+                    "build_nodes","build_edges","build_flow",
+                    "build_hierarchy","build_mindmap",
+                    "build_architecture","build_layout",
+                    "validate_diagram","calculate_quality"
+                ],
+                "artifact_outputs":["diagram","graph","table"],
             }
         )
-
-        artifact.quality.validation_passed = True
-
-        artifact.quality.quality_score = 1.0
-
-        artifact.quality.confidence_score = 1.0
-
-        artifact.quality.completeness_score = 1.0
-
-        return artifact
 
     # =================================================
     # MAIN PROCESS
@@ -297,5 +410,18 @@ class DiagramRoom(Room):
             description
         )
 
+
+
+    def build_machine_contribution(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        model = build_machine_model(task)
+        model["library"] = select_diagram_library(task)
+        return {
+            "room": self.ROOM_ID,
+            "machine_model": model,
+            "artifact": prepare_diagram_artifact(task),
+        }
+
+    def execute(self, task: Dict[str, Any]):
+        return self.process(task)
 
 ROOM = DiagramRoom()
