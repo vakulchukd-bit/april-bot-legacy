@@ -421,7 +421,40 @@ class DiagramRoom(Room):
             "artifact": prepare_diagram_artifact(task),
         }
 
-    def execute(self, task: Dict[str, Any]):
-        return self.process(task)
+
+    def evaluate(self, machine_request: Dict[str, Any]):
+        query = ""
+        if isinstance(machine_request, dict):
+            query = (
+                str(machine_request.get("query", "")) + " " +
+                str(machine_request.get("diagram", ""))
+            ).lower()
+
+        score = 0.0
+        keywords = (
+            "диаграм","схем","uml","flowchart","graph",
+            "erd","bpmn","mindmap","mind map",
+            "архитектур","блок-схем","sequence",
+            "class diagram","state diagram"
+        )
+        for token in keywords:
+            if token in query:
+                score = max(score, 0.95)
+
+        return {
+            "room": self.id,
+            "score": score,
+            "active": score > 0.0,
+            "reason": "diagram_match" if score > 0 else "no_match",
+        }
+
+    def execute(self, machine_request: Dict[str, Any]):
+        return self.process({
+            "diagram": machine_request.get("diagram")
+                       or machine_request.get("query",""),
+            "goal": machine_request.get("goal"),
+            "purpose": machine_request.get("purpose"),
+            "active_scene": machine_request.get("active_scene"),
+        })
 
 ROOM = DiagramRoom()
