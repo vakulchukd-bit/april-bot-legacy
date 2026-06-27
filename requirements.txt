@@ -34,3 +34,9 @@ tree-sitter-c
 tree-sitter-cpp
 tree-sitter-rust
 tree-sitter-go
+
+# Diagram
+networkx
+graphviz
+pydot
+
