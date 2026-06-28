@@ -982,7 +982,19 @@ def analyze(
 
     requested_representation = detect_representation_request(text)
 
-    result["requested_representation"] = requested_representation
+    
+result["requested_representation"] = requested_representation
+
+# Stage2: promote requested representation into machine requirements
+if requested_representation:
+    if requested_representation not in result["required_representations"]:
+        result["required_representations"].append(requested_representation)
+    if requested_representation not in result["candidate_representations"]:
+        result["candidate_representations"].append(requested_representation)
+    if requested_representation not in result["factory_targets"]:
+        result["factory_targets"].append(requested_representation)
+    result["current_representation"] = requested_representation
+
 
     result["graph_action"] = detect_graph_action(text)
 
