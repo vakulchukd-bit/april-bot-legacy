@@ -507,6 +507,8 @@ class MachineRequest:
     visual_context: Dict[str, Any] = field(default_factory=dict)
     available_tools: List[str] = field(default_factory=list)
     requested_outputs: List[str] = field(default_factory=list)
+    required_competencies: List[str] = field(default_factory=list)
+    required_artifacts: List[str] = field(default_factory=list)
     routing: Dict[str, Any] = field(default_factory=dict)
     constraints: Dict[str, Any] = field(default_factory=dict)
 
@@ -519,6 +521,7 @@ class MachineResponse:
     contributions: List[Dict[str, Any]] = field(default_factory=list)
     recommendations: List[str] = field(default_factory=list)
     executor_hints: Dict[str, Any] = field(default_factory=dict)
+    routing_decision: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class MachineScene:
