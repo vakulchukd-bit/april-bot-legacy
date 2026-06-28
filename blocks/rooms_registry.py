@@ -16,9 +16,9 @@
 # EXECUTION_CONTEXT
 #
 # OUTPUT:
-# ROOM_SELECTION
+# ROOM_CAPABILITIES
 # ROOM_EXECUTION_RESULT
-# MULTIMODAL_ROUTING
+# MACHINE_ARTIFACTS
 #
 # DEPENDENCIES:
 # room_protocol
@@ -505,10 +505,9 @@ def build_professional_room_vector(context):
 
 
 def select_professional_rooms(context):
-
-    vector = build_professional_room_vector(
-        context
-    )
+    # Executor is the single orchestration authority.
+    # Registry exposes capabilities only and does not choose winners.
+    return build_professional_room_vector(context)
 
     candidates = []
 
