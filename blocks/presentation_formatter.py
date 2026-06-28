@@ -27,6 +27,7 @@ INPUT:
 - machine_payloads
 
 OUTPUT:
+- machine_scene_passthrough
 - human_visible_response
 - renderer_safe_output
 - web_ui_ready_payload
@@ -42,6 +43,7 @@ DEPENDENCIES:
 
 GOLDEN RULE:
 Presentation layer NEVER mutates:
+- machine_scene
 - renderer payloads
 - machine payloads
 - execution routing
@@ -1228,6 +1230,10 @@ def format_response_presentation(
     # =================================================
     # 🔥 RENDERER SAFE
     # =====================================================
+
+    if isinstance(final_text, dict) and final_text.get("type")=="scene":
+        safe_format_log("MACHINE SCENE PRESERVED")
+        return final_text
 
     if is_renderer_payload(final_text):
 
