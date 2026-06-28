@@ -376,7 +376,7 @@ def build_graph_payload(
 
         "graph": expression,
 
-        "renderer": "graph",
+        "renderer": None,
 
         "scene_type": "graph",
 
@@ -401,7 +401,7 @@ def build_formula_payload(
 
         "formula": formula,
 
-        "renderer": "formula",
+        "renderer": None,
 
         "scene_type": "formula",
 
@@ -422,7 +422,7 @@ def build_table_payload():
 
         "type": "table",
 
-        "renderer": "table",
+        "renderer": None,
 
         "scene_type": "table",
 
@@ -447,7 +447,7 @@ def build_scene_payload(
 
         "content": content,
 
-        "renderer": "scene",
+        "renderer": None,
 
         "scene_type": "generic",
 
@@ -521,9 +521,7 @@ def interpret_graph_request(
                 "renderer_payload_expected"
             ] = True
 
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "graph"
+            semantic["required_artifact"]="graph"
 
             semantic[
                 "renderer_first"
@@ -553,9 +551,7 @@ def interpret_graph_request(
                 "renderer_payload_expected"
             ] = True
 
-            semantic[
-                "confirmed_renderer_artifact"
-            ] = "formula"
+            semantic["required_artifact"]="formula"
 
             semantic[
                 "renderer_first"
