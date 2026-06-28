@@ -428,8 +428,10 @@ def detect_representation_candidates(text):
     if any(x in lower for x in ["формула","уравнение"]):
         reps.append("formula")
 
+    # Do not force text as a representation.
+    # Empty means Executor decides from full context.
     if not reps:
-        reps.append("text")
+        return []
 
     return reps
 
@@ -1110,13 +1112,9 @@ def interpret_request(
     result["candidate_representations"] = representation_candidates
     result["required_representations"] = list(representation_candidates)
 
-    result["factory_order"] = build_factory_order(
-        result
-    )
-
-    safe_patch_log(
-        f"FACTORY ORDER: {result['factory_order']}"
-    )
+    # Stage: Executor owns routing; interpretation provides only understanding.
+    result["factory_order"] = {}
+    safe_patch_log("FACTORY ORDER DEFERRED TO EXECUTOR")
 
 
     if detect_discussion_mode(t):
