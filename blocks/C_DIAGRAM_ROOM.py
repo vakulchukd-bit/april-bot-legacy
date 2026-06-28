@@ -220,7 +220,9 @@ class DiagramRoom(Room):
                 "artifact": artifact
             },
             "machine_response": {
-                "artifacts": [artifact]
+                "artifacts": [artifact],
+                "routing_decision": {},
+                "executor_owner": True
             }
         }
 
@@ -385,6 +387,8 @@ class DiagramRoom(Room):
                     "validate_diagram","calculate_quality"
                 ],
                 "artifact_outputs":["diagram","graph","table"],
+                "required_competencies":["diagram","layout","structure"],
+                "required_artifacts":["diagram"],
             }
         )
 
