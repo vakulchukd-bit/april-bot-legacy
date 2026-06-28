@@ -1262,6 +1262,11 @@ def analyze(
     if dynamic_focus:
         factory_targets.append("focus")
 
+    # Preserve representation requests collected earlier.
+    existing_targets = list(result.get("factory_targets", []))
+    for target in existing_targets:
+        if target not in factory_targets:
+            factory_targets.append(target)
     result["factory_targets"] = factory_targets
 
     # =====================================================
@@ -1313,7 +1318,13 @@ def analyze(
         "required_representations",
         []
     )
-
+    artifact_bundle["candidate_representations"] = result.get(
+        "candidate_representations",
+        []
+    )
+    artifact_bundle["requested_representation"] = result.get(
+        "requested_representation"
+    )
     artifact_bundle["factory_order"] = {}
 
     result["artifact_bundle"] = artifact_bundle
