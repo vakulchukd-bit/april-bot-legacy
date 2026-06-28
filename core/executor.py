@@ -1339,11 +1339,8 @@ async def execute_rooms(
                         []
                     )
 
-                    if expanded_blocks:
-                        blocks.extend(expanded_blocks)
-
-                    # Avoid duplicating raw artifact blocks when
-                    # scene blocks have already been produced.
+                    # Stage: scene_blocks are the canonical visual route.
+                    # expanded_blocks remain machine metadata and are not rendered.
                     if not scene_blocks:
                         blocks.append(block)
                 else:
@@ -2610,17 +2607,8 @@ def build_scene_from_artifact(artifact):
 
     has_graph = any(v for v in unified_graph_payload.values())
 
-    if not has_graph:
-        topic = artifact.get("topic") or artifact.get("content") or ""
-        if topic:
-            unified_graph_payload = {
-                "knowledge_graph": {
-                    "nodes": [{"id":"topic","label":str(topic)}],
-                    "edges": [],
-                    "relations": []
-                }
-            }
-            has_graph = True
+    # Stage: do not synthesize graph payloads from plain text.
+    # Graph blocks are emitted only when a room explicitly provides graph data.
 
     if has_graph:
 
