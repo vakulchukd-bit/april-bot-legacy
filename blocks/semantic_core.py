@@ -632,13 +632,13 @@ def analyze(
         # 🧠 SOFT HINTS
         # =====================================================
 
-        "possible_room": "text",
+        "possible_room": None,
 
-        "possible_output": "text",
+        "possible_output": None,
 
         "possible_scene_type": None,
 
-        "possible_capability": "text",
+        "possible_capability": None,
 
         "required_domains": [],
         "candidate_domains": [],
@@ -946,14 +946,9 @@ def analyze(
             []
         )
 
-        result["factory_order"] = interpreted.get(
-            "factory_order",
-            {}
-        )
+        result["factory_order"] = {}
 
-        safe_semantic_log(
-            f"FACTORY ORDER: {result['factory_order']}"
-        )
+        safe_semantic_log("FACTORY ORDER DEFERRED TO EXECUTOR")
 
     # =====================================================
     # 🔥 ACTIVE FLOW
@@ -1308,10 +1303,7 @@ def analyze(
         []
     )
 
-    artifact_bundle["factory_order"] = result.get(
-        "factory_order",
-        {}
-    )
+    artifact_bundle["factory_order"] = {}
 
     result["artifact_bundle"] = artifact_bundle
 
