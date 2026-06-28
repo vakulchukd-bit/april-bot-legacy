@@ -210,12 +210,18 @@ class DiagramRoom(Room):
                 context.get("active_scene")
         })
 
+        if artifact is None:
+            return None
+
         return {
-
-            "type": "text",
-
-            "data":
-                "DIAGRAM ROOM ACTIVE"
+            "type": "artifact",
+            "artifact": artifact,
+            "contract": {
+                "artifact": artifact
+            },
+            "machine_response": {
+                "artifacts": [artifact]
+            }
         }
 
     # =================================================
