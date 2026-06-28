@@ -1046,14 +1046,9 @@ async def execute_rooms(
 
     max_results = 8
 
-    factory_required_rooms = get_factory_required_rooms(
-        semantic
-    )
+    factory_required_rooms = []
 
-    print(
-        "🏭 FACTORY REQUIRED ROOMS:",
-        factory_required_rooms
-    )
+    print("🏭 ROOM SELECTION DELEGATED TO EXECUTOR")
 
     # =====================================================
     # 🔥 EVALUATION
@@ -1063,10 +1058,8 @@ async def execute_rooms(
 
         try:
 
-            if factory_required_rooms:
-
-                if room.name not in factory_required_rooms:
-                    continue
+            # Room filtering is performed by the unified
+            # executor cognition pipeline.
 
             score = room.evaluate(
 
