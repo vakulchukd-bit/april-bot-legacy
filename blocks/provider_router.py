@@ -614,7 +614,10 @@ async def transcribe_voice(
                 True
             )
 
-            return build_provider_machine_response(text)
+            # Voice pipeline must return the recognized text itself.
+            # checkout_server.normalize_voice_transcript() expects a plain
+            # transcript (or a simple text field), not a provider wrapper.
+            return text
 
         provider_exit(
             "voice_transcription",
