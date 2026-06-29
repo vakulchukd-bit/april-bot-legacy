@@ -1018,12 +1018,14 @@ def should_skip_formatting(
     # =====================================================
 
     if is_code_payload(text):
-
-        safe_format_log(
-            "CODE BYPASS"
-        )
-
-        return True
+        # Do not bypass renderer candidates such as markdown tables.
+        if "|" in text and "\n|" in text:
+            safe_format_log("TABLE CANDIDATE")
+        else:
+            safe_format_log(
+                "CODE BYPASS"
+            )
+            return True
 
     return False
 
@@ -1218,6 +1220,10 @@ def format_response_presentation(
     # =================================================
     # 🔥 MACHINE SAFE
     # =====================================================
+
+    if isinstance(final_text, dict) and final_text.get("type")=="provider_response":
+        safe_format_log("PROVIDER CONTRACT PRESERVED")
+        return final_text
 
     if is_machine_payload(final_text):
 
