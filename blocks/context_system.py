@@ -1810,6 +1810,54 @@ def build_visual_memory_block(state):
     )
 
 
+
+
+# =====================================================
+# 🚀 USER SPACE FOUNDATION (APRIL UPGRADE)
+# =====================================================
+
+def build_user_space(state):
+    """
+    Unified machine workspace used as the single source of truth.
+    This is an architectural facade over the existing state structure.
+    No new state manager or parallel memory is introduced.
+    """
+
+    scene = state.get("scene_state", {})
+    visual_scene = state.get("active_visual_scene", {})
+
+    return {
+        "active_scene": scene,
+        "dialog": state.get("dialog", []),
+        "current_request": state.get("current_request"),
+        "dynamic_focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "active_flow": state.get("active_flow", {}),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "memory_summary": state.get("memory_summary", ""),
+        "renderer_state": state.get("renderer_state", {}),
+        "workspace_state": {
+            "visual_scene": visual_scene,
+            "visual_focus": state.get("visual_focus", {}),
+            "execution_mode": state.get("execution_mode"),
+            "visual_mode": state.get("visual_mode"),
+        },
+    }
+
+
+def build_scene_contract(state):
+    """
+    Canonical scene payload shared with downstream components.
+    """
+    return {
+        "version": 1,
+        "user_space": build_user_space(state),
+        "scene": state.get("scene_state", {}),
+        "renderer_state": state.get("renderer_state", {}),
+    }
+
+
 # =====================================================
 # 🧠 APRIL CONTEXT SYSTEM V2 MEMORY INTEGRATION
 # =====================================================
