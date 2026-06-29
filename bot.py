@@ -448,6 +448,28 @@ def human_to_machine(
             "web_router"
     }
 
+
+# =========================================================
+# 🔥 SAFE VOICE PAYLOAD
+# =========================================================
+def normalize_voice_text(value):
+    """
+    Voice pipeline may now return either a string or a machine dict.
+    Always extract a safe text payload before calling .strip().
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("text","content","response","data"):
+            v = value.get(key)
+            if isinstance(v, str):
+                return v.strip()
+        return ""
+    return str(value).strip()
+
+
 # =========================================================
 # 🔥 RESPONSE NORMALIZER
 # =========================================================
@@ -888,13 +910,7 @@ def april_web_chat():
             )
         )
 
-        text = safe_string(
-
-            data.get(
-                "text",
-                ""
-            )
-        ).strip()
+        text = normalize_voice_text(data.get("text", ""))
 
         result = asyncio.run(
 
