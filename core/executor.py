@@ -1,104 +1,8 @@
 # =========================================================
-# 🧠 APRIL CENTRAL BRAIN CORE
-# =========================================================
-
-"""
-APRIL CENTRAL BRAIN CORE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-NEW GOLDEN ARCHITECTURE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This file is now:
-
-✅ semantic orchestration core
-✅ trajectory-aware machine router
-✅ modality synchronization center
-✅ scene-first coordination layer
-✅ machine-language execution hub
-✅ continuity-safe room dispatcher
-✅ renderer-aware executor
-✅ unified response contract authority
-
-This file is NOT:
-
-❌ trigger router
-❌ keyword dispatcher
-❌ telegram-style controller
-❌ text-first chatbot core
-❌ frontend renderer
-❌ ui formatter
-❌ transport pipeline
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN FLOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Human Layer
-    ↓
-BotRoot / Web
-    ↓
-Human → Machine Translator
-    ↓
-APRIL CENTRAL BRAIN
-    ↓
-Semantic State
-Trajectory
-Scene Continuity
-Modality Context
-    ↓
-TASK CHANNEL
-    ↓
-Rooms
-    ↓
-RESPONSE CHANNEL
-    ↓
-Unified Machine Payload
-    ↓
-BotRoot Human Translator
-    ↓
-Web Renderer Space
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🧠 GOLDEN RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. Rooms NEVER compete using keywords.
-
-2. Routing is based on:
-- trajectory
-- modality
-- continuity
-- semantic intent
-- scene ownership
-
-3. Human language NEVER routes rooms directly.
-
-4. Machine channels are isolated.
-
-5. Scene continuity is higher priority
-than trigger words.
-
-6. "show", "continue", "fix", "this"
-must inherit active trajectory.
-
-7. Renderer payloads are sacred.
-
-Never flatten:
-- graph
-- formula
-- diagram
-- scene
-- layout
-- multimodal blocks
-
-8. Executor owns orchestration.
-
-Rooms only execute cognition tasks.
-"""
-
-# =========================================================
-# 🔥 CORE IMPORTS
+# APRIL EXECUTOR
+# Central orchestration kernel.
+# Canonical execution path:
+# User Space -> MachineRequest -> Rooms -> MachineResponse -> MachineScene -> Scene Contract
 # =========================================================
 
 import traceback
@@ -1359,7 +1263,6 @@ async def execute_rooms(
                         []
                     )
 
-                    # Stage: scene_blocks are the canonical visual route.
                     # expanded_blocks remain machine metadata and are not rendered.
                     if not scene_blocks:
                         blocks.append(block)
@@ -2073,7 +1976,7 @@ async def execute(
 
 
 # =========================================================
-# 🧠 EXECUTOR V2 MEMORY + UTC INTEGRATION
+# 🧠 EXECUTOR MEMORY + UTC INTEGRATION
 # =========================================================
 
 def build_executor_memory_awareness(cognition):
@@ -2195,7 +2098,7 @@ def utc_memory_gate(cognition):
 
 
 # =========================================================
-# 🧠 MEMORY RECALL ENGINE V3
+# 🧠 MEMORY RECALL
 # =========================================================
 
 def build_memory_recall_context(state):
@@ -2243,13 +2146,10 @@ def build_executor_memory_recall(state):
         "memory_active": True
     }
 
-# =========================================================
-# END OF MEMORY RECALL ENGINE V3
-# =========================================================
 
 
 # =========================================================
-# 🧠 EXECUTOR V4 MEMORY RECALL ACTIVATION
+# 🧠 EXECUTOR MEMORY RECALL ACTIVATION
 # =========================================================
 
 def build_recall_candidates(state):
@@ -2288,13 +2188,10 @@ def build_memory_recall_payload(state):
 
     return recall
 
-# =========================================================
-# END OF EXECUTOR V4 MEMORY RECALL ACTIVATION
-# =========================================================
 
 
 # =========================================================
-# 🧠 EXECUTOR V5 UTC MEMORY RECALL SELECTION
+# 🧠 EXECUTOR UTC MEMORY RECALL SELECTION
 # =========================================================
 
 from datetime import datetime, timezone
@@ -2370,7 +2267,7 @@ def build_ranked_memory_recall(state):
 
 
 # =========================================================
-# 🧠 VISUAL SUMMARY BRIDGE V1
+# 🧠 VISUAL SUMMARY
 # =========================================================
 
 def build_visual_summary_awareness(state):
@@ -2415,7 +2312,7 @@ def build_visual_summary_awareness(state):
 
 
 # =========================================================
-# 🧠 EXECUTOR V6 LIVE VISION BRIDGE
+# 🧠 EXECUTOR LIVE VISION BRIDGE
 # =========================================================
 
 def build_live_vision_feed(state):
@@ -2458,13 +2355,10 @@ def build_executor_runtime_bridge(state):
         "bridge_ready": True
     }
 
-# =========================================================
-# END OF EXECUTOR V6 LIVE VISION BRIDGE
-# =========================================================
 
 
 # =========================================================
-# 🧠 EXECUTOR V7 LIVE VISION -> MEMORY TRANSFER
+# 🧠 EXECUTOR LIVE VISION -> MEMORY TRANSFER
 # =========================================================
 
 def build_live_scene_snapshot(state):
@@ -2521,14 +2415,11 @@ def on_live_session_closed(state):
         "snapshot": snapshot
     }
 
-# =========================================================
-# END OF EXECUTOR V7 LIVE VISION -> MEMORY TRANSFER
-# =========================================================
 
 
 
 # =========================================================
-# 🧠 EXECUTOR V8 ARTIFACT EXPANSION LAYER
+# 🧠 EXECUTOR ARTIFACT EXPANSION
 # =========================================================
 
 ARTIFACT_BLOCK_MAP = {
@@ -2574,11 +2465,12 @@ def expand_artifact_payload(artifact):
     return blocks
 
 
-_original_artifact_to_render_block = artifact_to_render_block
+# Canonical artifact -> render resolver
+_previous_artifact_to_render_block = artifact_to_render_block
 
 def artifact_to_render_block(result):
 
-    translated = _original_artifact_to_render_block(result)
+    translated = _previous_artifact_to_render_block(result)
 
     try:
 
@@ -2612,7 +2504,7 @@ def artifact_to_render_block(result):
 
 
 # =========================================================
-# 🧠 EXECUTOR V9 SCENE COMPOSER
+# 🧠 EXECUTOR SCENE COMPOSER
 # =========================================================
 
 def build_scene_from_artifact(artifact):
@@ -2632,7 +2524,6 @@ def build_scene_from_artifact(artifact):
 
     has_graph = any(v for v in unified_graph_payload.values())
 
-    # Stage: do not synthesize graph payloads from plain text.
     # Graph blocks are emitted only when a room explicitly provides graph data.
 
     if has_graph:
@@ -2670,8 +2561,7 @@ def build_scene_from_artifact(artifact):
 
 
 # =========================================================
-# END EXECUTOR V8
-# =========================================================
+# END EXECUTOR # =========================================================
 
 
 # =========================================================
@@ -2705,23 +2595,5 @@ def build_machine_scene(response):
     return scene
 
 
-# =========================================================
-# FIBER COMPATIBILITY HELPERS
-# =========================================================
-
-def executor_extract_machine_request(context):
-    return context.get("machine_request")
-
-def executor_has_machine_contract(context):
-    return context.get("machine_request") is not None
-
-
-# =========================================================
-# UNIVERSAL ROOM PAYLOAD ADAPTER
-# =========================================================
-
-def executor_build_room_payload(context, legacy_payload):
-    machine_request = context.get("machine_request")
-    if machine_request is not None:
-        return machine_request
-    return legacy_payload
+# Compatibility helper layer removed.
+# Executor uses MachineRequest directly.
