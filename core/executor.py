@@ -1928,9 +1928,13 @@ async def execute(
         else:
             generated_text = await generate_text(context_text)
 
-        fallback_result = {
-            "content": generated_text
-        }
+        # Preserve provider machine contract if returned.
+        if isinstance(generated_text, dict):
+            fallback_result = generated_text
+        else:
+            fallback_result = {
+                "content": generated_text
+            }
 
     except Exception as e:
 
@@ -1949,9 +1953,9 @@ async def execute(
 
     if (
 
-        fallback_result
-        and fallback_result.get(
-            "content"
+        fallback_result and (
+            fallback_result.get("content") or
+            fallback_result.get("machine_response")
         )
     ):
 
@@ -1959,9 +1963,10 @@ async def execute(
 
             format_response_presentation(
 
-                text=fallback_result[
-                    "content"
-                ],
+                text=(
+                    fallback_result.get("content")
+                    or fallback_result.get("machine_response",{}).get("content","")
+                ),
 
                 user_text=text,
 
