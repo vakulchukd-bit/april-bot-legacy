@@ -1370,6 +1370,39 @@ def paypal_webhook():
 
 
 
+
+# =========================================================
+# 🌐 APRIL FRONTEND DEBUG
+# =========================================================
+
+@app.route(
+    "/frontend_log",
+    methods=["POST"]
+)
+def frontend_log():
+
+    try:
+        data = request.json or {}
+
+        print("=" * 80)
+        print("🌐 APRIL WEB DEBUG")
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print("=" * 80)
+
+        return jsonify({
+            "success": True
+        })
+
+    except Exception as e:
+
+        print("FRONTEND DEBUG ERROR:", e)
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 # =========================================================
 # 👤 APRIL USER REGISTRY
 # =========================================================
