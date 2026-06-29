@@ -375,6 +375,23 @@ def normalize_response_text(text):
 
 
 # =====================================================
+# 🔥 MACHINE RESPONSE WRAPPER
+# =====================================================
+
+def build_provider_machine_response(text):
+    return {
+        "type": "provider_response",
+        "machine_response": {
+            "content": text,
+            "artifacts": [],
+            "scene": None,
+            "provider_contract": "v1"
+        }
+    }
+
+
+
+# =====================================================
 # 🔥 SAFE OVERLOAD RESPONSE
 # =====================================================
 
@@ -506,9 +523,9 @@ async def generate_text(
                 False
             )
 
-            return build_overload_response(
+            return build_provider_machine_response(build_overload_response(
                 "Dialogue-space"
-            )
+            ))
 
         provider_log(
             "🧠 OPENAI TEXT SUCCESS"
@@ -597,7 +614,7 @@ async def transcribe_voice(
                 True
             )
 
-            return text
+            return build_provider_machine_response(text)
 
         provider_exit(
             "voice_transcription",
@@ -703,7 +720,7 @@ async def analyze_image_with_fallback(
                     True
                 )
 
-                return text
+                return build_provider_machine_response(text)
 
         except Exception as e:
 
@@ -780,7 +797,7 @@ async def analyze_image_with_fallback(
                 True
             )
 
-            return text
+            return build_provider_machine_response(text)
 
         provider_exit(
             "openai_image_fallback",
