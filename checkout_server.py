@@ -688,6 +688,24 @@ def checkout(plan, user_id):
         user_id=user_id
     )
 
+
+# =========================================================
+# 🔥 SAFE VOICE TRANSCRIPT
+# =========================================================
+def normalize_voice_transcript(transcript):
+    if transcript is None:
+        return ""
+    if isinstance(transcript,str):
+        return transcript.strip()
+    if isinstance(transcript,dict):
+        for k in ("text","content","response","data"):
+            v=transcript.get(k)
+            if isinstance(v,str):
+                return v.strip()
+        return ""
+    return str(transcript).strip()
+
+
 # =========================================================
 # 🎤 APRIL VOICE
 # =========================================================
@@ -741,6 +759,8 @@ def voice_chat():
                 temp_path
             )
         )
+
+        transcript = normalize_voice_transcript(transcript)
 
         print(
             "TRANSCRIPT:",
