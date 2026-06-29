@@ -1592,6 +1592,8 @@ def build_deephub_context(
         "_machine_context"
     ] = machine_payload
 
+    state["_executor_context_packet"] = build_executor_context_packet(state)
+
     payload = build_context_text(
 
         user_id,
@@ -1855,6 +1857,40 @@ def build_scene_contract(state):
         "user_space": build_user_space(state),
         "scene": state.get("scene_state", {}),
         "renderer_state": state.get("renderer_state", {}),
+    }
+
+
+
+
+# =====================================================
+# 🚀 USER SPACE CONSOLIDATION (APRIL UPGRADE PHASE 2)
+# =====================================================
+
+def build_workspace_summary(state):
+    """
+    Consolidated workspace snapshot used by Executor.
+    It compresses the current workspace without replacing
+    existing state structures.
+    """
+    return {
+        "active_scene": state.get("scene_state", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "memory_summary": state.get("memory_summary", ""),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "focus_state": state.get("focus_state", state.get("dynamic_focus", {})),
+        "active_flow": state.get("active_flow", {}),
+        "renderer_state": state.get("renderer_state", {}),
+    }
+
+
+def build_executor_context_packet(state):
+    """
+    Canonical packet for Executor. Keeps one User Space entrypoint.
+    """
+    return {
+        "user_space": build_user_space(state),
+        "workspace_summary": build_workspace_summary(state),
+        "scene_contract": build_scene_contract(state),
     }
 
 
