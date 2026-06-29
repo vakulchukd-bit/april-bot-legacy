@@ -572,6 +572,9 @@ def build_executor_context(
         "state":
             state,
 
+        "user_space":
+            build_executor_user_space(state),
+
         "memory_routing":
             {
                 "focus_recommendation":
@@ -584,6 +587,30 @@ def build_executor_context(
                     cognition.get("memory_analysis", cognition.get("memory_signals", {}))
             }
     }
+
+
+
+# =========================================================
+# 🧠 USER SPACE EXECUTOR BRIDGE (APRIL UPGRADE)
+# =========================================================
+
+def build_executor_user_space(state):
+    """
+    Executor consumes one logical User Space assembled from the
+    existing state. No parallel state or executor is created.
+    """
+    return {
+        "scene": state.get("scene_state", {}),
+        "workspace": state.get("workspace_state", {}),
+        "dialog": state.get("dialog", []),
+        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "active_flow": state.get("active_flow", {}),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "renderer_state": state.get("renderer_state", {}),
+    }
+
 
 # =========================================================
 # 🔥 ROOM SCORING
