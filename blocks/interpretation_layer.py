@@ -1112,6 +1112,17 @@ def interpret_request(
     result["candidate_representations"] = representation_candidates
     result["required_representations"] = list(representation_candidates)
 
+    # Preserve machine understanding coming from previous layers.
+    semantic_reps = semantic.get("required_representations", []) or []
+    cognition_reps = cognition.get("required_representations", []) or []
+
+    for rep in semantic_reps + cognition_reps:
+        if rep not in result["required_representations"]:
+            result["required_representations"].append(rep)
+        if rep not in result["candidate_representations"]:
+            result["candidate_representations"].append(rep)
+
+
     # Stage: Executor owns routing; interpretation provides only understanding.
     result["factory_order"] = {}
     safe_patch_log("FACTORY ORDER DEFERRED TO EXECUTOR")
