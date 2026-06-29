@@ -167,7 +167,6 @@ def normalize_text(text):
         text or ""
     ).strip()
 
-
 def clamp(
     value,
     minimum=0.0,
@@ -195,7 +194,6 @@ def track_room(name):
         "active_rooms"
     ].add(name)
 
-
 def track_trajectory(name):
 
     if not name:
@@ -204,7 +202,6 @@ def track_trajectory(name):
     EMAPS[
         "active_trajectories"
     ].add(name)
-
 
 def track_modality(name):
 
@@ -263,10 +260,9 @@ def detect_task_type(
     state
 ):
 
-    scene_state = state.get(
-        "scene_state",
-        {}
-    )
+    user_space = build_executor_user_space(state)
+
+    scene_state = user_space.get("scene", {})
 
     trajectory = scene_state.get(
         "trajectory"
@@ -328,24 +324,15 @@ def build_executor_context(
     text
 ):
 
-    scene_state = state.get(
-        "scene_state",
-        {}
-    )
+    user_space = build_executor_user_space(state)
 
-    active_flow = state.get(
-        "active_flow"
-    )
+    scene_state = user_space.get("scene", {})
 
-    visual_continuity_summary = state.get(
-        "visual_continuity_summary",
-        {}
-    )
+    active_flow = user_space.get("active_flow", {})
 
-    active_visual_scene = state.get(
-        "active_visual_scene",
-        {}
-    )
+    visual_continuity_summary = user_space.get("visual_continuity_summary", {})
+
+    active_visual_scene = user_space.get("active_visual_scene", {})
 
     visual_memory_bridge = build_visual_memory_bridge(
         user_id
@@ -477,7 +464,7 @@ def build_executor_context(
             state,
 
         "user_space":
-            build_executor_user_space(state),
+            user_space,
 
         "memory_routing":
             {
@@ -491,8 +478,6 @@ def build_executor_context(
                     cognition.get("memory_analysis", cognition.get("memory_signals", {}))
             }
     }
-
-
 
 # =========================================================
 # 🧠 USER SPACE EXECUTOR BRIDGE (APRIL UPGRADE)
@@ -512,9 +497,11 @@ def build_executor_user_space(state):
         "active_flow": state.get("active_flow", {}),
         "memory_timeline": state.get("memory_timeline", {}),
         "visual_summary": state.get("visual_summary", {}),
+        "visual_continuity_summary": state.get("visual_continuity_summary", {}),
+        "active_visual_scene": state.get("active_visual_scene", {}),
         "renderer_state": state.get("renderer_state", {}),
+        "task_resolution": state.get("task_resolution", {}),
     }
-
 
 # =========================================================
 # 🔥 ROOM SCORING
@@ -530,10 +517,9 @@ def stabilize_room_score(
     state
 ):
 
-    scene_state = state.get(
-        "scene_state",
-        {}
-    )
+    user_space = build_executor_user_space(state)
+
+    scene_state = user_space.get("scene", {})
 
     active_room = scene_state.get(
         "active_room"
@@ -586,12 +572,11 @@ def stabilize_room_score(
     # 🔥 TRAJECTORY LOCK
     # =====================================================
 
-
     # =====================================================
     # 🔥 TASK RESOLUTION PRIORITY
     # =====================================================
 
-    task_resolution = state.get(
+    task_resolution = user_space.get(
         "task_resolution",
         {}
     )
@@ -632,10 +617,6 @@ def stabilize_room_score(
         20.0
     )
 
-
-
-
-
 # =========================================================
 # 🧠 DOMAIN COMPETENCE ROUTING
 # =========================================================
@@ -657,7 +638,6 @@ def build_domain_room_map():
         "literature": ["literature"],
         "utc": ["utc"]
     }
-
 
 def domain_room_bonus(room, semantic):
 
@@ -681,8 +661,6 @@ def domain_room_bonus(room, semantic):
                 bonus += 6.0
 
     return bonus
-
-
 
 # =========================================================
 # 🏭 FACTORY ORDER EXECUTION
@@ -757,8 +735,6 @@ def build_scene_plan(response_decision, semantic=None):
             "artifact_first_scene_composition"
     }
 
-
-
 # =====================================================
 # 🧠 ARTIFACT -> RENDER BLOCK RESOLVER
 # =====================================================
@@ -788,8 +764,6 @@ def artifact_to_render_block(result):
     translated["machine_payload"] = True
 
     return translated
-
-
 
 # =====================================================
 # 🧠 BOT.RU MACHINE -> HUMAN TRANSLATOR
@@ -875,7 +849,6 @@ def botru_translate_artifact(artifact):
         "content": str(artifact)
     }
 
-
 # =========================================================
 # 🧠 TASK RESOLUTION LAYER
 # =========================================================
@@ -928,7 +901,6 @@ def build_task_resolution(
 
     return resolution
 
-
 def build_guidance_response(
     task_resolution
 ):
@@ -976,8 +948,6 @@ async def execute_rooms(
     machine_responses = []
 
     max_results = 8
-
-    factory_required_rooms = []
 
     print("🏭 ROOM SELECTION DELEGATED TO EXECUTOR")
 
@@ -1094,7 +1064,7 @@ async def execute_rooms(
 
             print(f"🔥 HANDLE CALL [{room.name}]")
 
-            handler_payload = machine_request if machine_request is not None else machine_task_payload
+            handler_payload = machine_request or machine_task_payload
 
             result = await room.handle(
 
@@ -1222,50 +1192,37 @@ async def execute_rooms(
         )
 
         # ================================================
-        # 🔥 ARTIFACT SCENE COMPOSITION
+        # 🔥 CANONICAL SCENE CONTRACT COMPOSITION
         # ================================================
 
         unified_machine_response = collect_machine_contract(machine_contracts)
         unified_machine_scene = build_machine_scene(unified_machine_response)
-
-        artifact_scene = response_decision.get(
-            "artifact_scene",
-            []
-        )
 
         scene_plan = build_scene_plan(
             response_decision,
             semantic
         )
 
-        blocks = []
+        blocks = list(getattr(unified_machine_scene, "blocks", []))
 
-        for item in collected_results:
+        if not blocks:
+            for item in collected_results:
 
-            result = item.get("result", {})
+                result = item.get("result", {})
 
-            if isinstance(result, dict):
-                block = artifact_to_render_block(
-                        result
-                    )
+                if not isinstance(result, dict):
+                    continue
 
-                if isinstance(block, dict):
-                    scene_blocks = block.get(
-                        "scene_blocks",
-                        []
-                    )
+                block = artifact_to_render_block(result)
 
-                    if scene_blocks:
-                        blocks.extend(scene_blocks)
+                if not isinstance(block, dict):
+                    blocks.append(block)
+                    continue
 
-                    expanded_blocks = block.get(
-                        "expanded_blocks",
-                        []
-                    )
+                scene_blocks = block.get("scene_blocks", [])
 
-                    # expanded_blocks remain machine metadata and are not rendered.
-                    if not scene_blocks:
-                        blocks.append(block)
+                if scene_blocks:
+                    blocks.extend(scene_blocks)
                 else:
                     blocks.append(block)
 
@@ -1275,18 +1232,18 @@ async def execute_rooms(
             "trajectory": context.get("trajectory"),
             "result": {
                 "type": "scene",
-                "blocks": blocks,
-                "artifact_scene": artifact_scene,
+                "blocks": blocks,  # canonical scene payload
+                "artifact_scene": scene_plan.get("artifact_scene", []),
                 "scene_plan": scene_plan,
-                "scene_composition_ready": len(artifact_scene) > 0,
+                "scene_composition_ready": len(scene_plan.get("artifact_scene", [])) > 0,
                 "machine_scene": unified_machine_scene,
+                "scene_contract": True,  # canonical output for checkout_server and AprilWeb
                 "machine_contract_count": len(machine_contracts),
                 "machine_response_count": len(machine_responses)
             }
         }
 
     return None
-
 
 # =========================================================
 # 🧠 APRIL ANSWER SYNTHESIS LAYER
@@ -1392,11 +1349,9 @@ def synthesize_final_answer(
 
     return result
 
-
 # =========================================================
 # 🚀 APRIL EXECUTOR
 # =========================================================
-
 
 async def execute(
 
@@ -1646,7 +1601,6 @@ async def execute(
     # 🔥 EXECUTOR CONTEXT
     # =====================================================
 
-
     # =====================================================
     # 🔥 UNIVERSAL MACHINE REQUEST
     # =====================================================
@@ -1716,14 +1670,12 @@ async def execute(
     # 🔥 ROOM EXECUTION
     # =====================================================
 
-
     print("🔥 EXECUTOR CONTEXT READY")
     print("🔥 CONTEXT CHAT:", chat_id)
     print("🔥 CONTEXT USER:", user_id)
     print("🔥 TASK TYPE:", task_type)
     print("🔥 RUN:", run_with_activity)
     print("🔥 RUN TYPE:", type(run_with_activity))
-
 
     context["machine_request"] = machine_request
 
@@ -1808,7 +1760,6 @@ async def execute(
                 )
 
                 result["data"] = formatted
-
 
         result_payload = result.get(
             "data"
@@ -1949,33 +1900,6 @@ async def execute(
 
 
 # =========================================================
-# 🧠 SCENE-AWARE ROUTING NOTES
-# =========================================================
-# Executor should consume:
-# state["scene_relation"]
-# state["scene_history"]
-# state["dynamic_focus"]
-# and preserve continuity before room switching.
-
-
-# =========================================================
-# 🧠 UNIFIED SCENE ROUTING CONTRACT
-# =========================================================
-#
-# Routing priority order:
-# 1. scene_relation
-# 2. active_scene
-# 3. dynamic_focus
-# 4. goal_hierarchy
-# 5. open_loops
-#
-# Rooms receive unified cognition context.
-# Internal cognition never becomes renderer output.
-#
-
-
-
-# =========================================================
 # 🧠 EXECUTOR MEMORY + UTC INTEGRATION
 # =========================================================
 
@@ -1998,7 +1922,6 @@ def build_executor_memory_awareness(cognition):
         "executor_guidance":
             cognition.get("executor_guidance", {})
     }
-
 
 def build_scene_verification(
 
@@ -2031,7 +1954,6 @@ def build_scene_verification(
         ] = False
 
     return verification
-
 
 def memory_aware_room_bonus(
     room,
@@ -2073,7 +1995,6 @@ def memory_aware_room_bonus(
 
     return bonus
 
-
 def utc_memory_gate(cognition):
 
     awareness = cognition.get(
@@ -2096,7 +2017,6 @@ def utc_memory_gate(cognition):
             )
     }
 
-
 # =========================================================
 # 🧠 MEMORY RECALL
 # =========================================================
@@ -2116,7 +2036,6 @@ def build_memory_recall_context(state):
         "open_loops": open_loops
     }
 
-
 def calculate_memory_relevance(memory_context):
 
     score = 0.0
@@ -2135,7 +2054,6 @@ def calculate_memory_relevance(memory_context):
 
     return min(score, 1.0)
 
-
 def build_executor_memory_recall(state):
 
     memory_context = build_memory_recall_context(state)
@@ -2145,8 +2063,6 @@ def build_executor_memory_recall(state):
         "memory_relevance": calculate_memory_relevance(memory_context),
         "memory_active": True
     }
-
-
 
 # =========================================================
 # 🧠 EXECUTOR MEMORY RECALL ACTIVATION
@@ -2175,7 +2091,6 @@ def build_recall_candidates(state):
 
     return candidates
 
-
 def build_memory_recall_payload(state):
 
     recall = build_executor_memory_recall(state)
@@ -2187,8 +2102,6 @@ def build_memory_recall_payload(state):
     )
 
     return recall
-
-
 
 # =========================================================
 # 🧠 EXECUTOR UTC MEMORY RECALL SELECTION
@@ -2262,20 +2175,14 @@ def build_ranked_memory_recall(state):
 
     return recall
 
-
-
-
-
 # =========================================================
 # 🧠 VISUAL SUMMARY
 # =========================================================
 
 def build_visual_summary_awareness(state):
 
-    active_visual_scene = state.get(
-        "active_visual_scene",
-        {}
-    )
+    user_space = build_executor_user_space(state)
+    active_visual_scene = user_space.get("active_visual_scene", {})
 
     visual_summary = state.get(
         "visual_summary",
@@ -2310,7 +2217,6 @@ def build_visual_summary_awareness(state):
             active_visual_scene
     }
 
-
 # =========================================================
 # 🧠 EXECUTOR LIVE VISION BRIDGE
 # =========================================================
@@ -2338,7 +2244,6 @@ def build_live_vision_feed(state):
             "open_tab_live_runtime"
     }
 
-
 def build_executor_runtime_bridge(state):
 
     return {
@@ -2354,8 +2259,6 @@ def build_executor_runtime_bridge(state):
 
         "bridge_ready": True
     }
-
-
 
 # =========================================================
 # 🧠 EXECUTOR LIVE VISION -> MEMORY TRANSFER
@@ -2375,7 +2278,6 @@ def build_live_scene_snapshot(state):
         "snapshot_type":
             "tab_close_snapshot"
     }
-
 
 def transfer_scene_to_today_memory(state):
 
@@ -2399,7 +2301,6 @@ def transfer_scene_to_today_memory(state):
 
     return snapshot
 
-
 def on_live_session_closed(state):
 
     snapshot = transfer_scene_to_today_memory(
@@ -2414,9 +2315,6 @@ def on_live_session_closed(state):
         "transferred": True,
         "snapshot": snapshot
     }
-
-
-
 
 # =========================================================
 # 🧠 EXECUTOR ARTIFACT EXPANSION
@@ -2464,8 +2362,7 @@ def expand_artifact_payload(artifact):
 
     return blocks
 
-
-# Canonical artifact -> render resolver
+# Canonical artifact -> scene resolver (single expansion pipeline)
 _previous_artifact_to_render_block = artifact_to_render_block
 
 def artifact_to_render_block(result):
@@ -2481,33 +2378,22 @@ def artifact_to_render_block(result):
 
         if isinstance(translated, dict):
 
-            translated["expanded_blocks"] = (
-                expand_artifact_payload(artifact)
-            )
-
-            translated["scene_blocks"] = (
-                build_scene_from_artifact(artifact)
-                if isinstance(artifact, dict)
-                else []
-            )
-
-            translated["artifact_expansion_ready"] = True
-            translated["scene_ready"] = len(
-                translated.get("scene_blocks", [])
-            ) > 0
+            translated["scene_blocks"] = []
+            translated["expanded_blocks"] = []
+            translated["artifact_expansion_ready"] = False
+            translated["scene_ready"] = False
 
     except Exception:
         pass
 
     return translated
 
-
-
 # =========================================================
 # 🧠 EXECUTOR SCENE COMPOSER
 # =========================================================
 
 def build_scene_from_artifact(artifact):
+    # Legacy compatibility helper. Canonical scenes should be produced through MachineScene.
 
     scene_blocks = []
 
@@ -2559,10 +2445,8 @@ def build_scene_from_artifact(artifact):
 
     return scene_blocks
 
-
 # =========================================================
 # END EXECUTOR # =========================================================
-
 
 # =========================================================
 # APRIL FIBER EXECUTOR BRIDGE
@@ -2585,15 +2469,19 @@ def collect_machine_contract(room_contracts):
     return response
 
 def build_machine_scene(response):
-    scene=MachineScene()
+    scene = MachineScene()
+
     for art in response.artifacts:
         scene.blocks.append({
-            "artifact_type":art.metadata.artifact_type,
-            "room":art.metadata.room_source,
-            "payload":art.data
+            "type": "artifact",
+            "artifact_type": art.metadata.artifact_type,
+            "room": art.metadata.room_source,
+            "payload": art.data,
+            "scene_contract": True
         })
-    return scene
 
+    scene.scene_contract = True
+    return scene
 
 # Compatibility helper layer removed.
 # Executor uses MachineRequest directly.
