@@ -5,19 +5,18 @@
 # =====================================================
 
 """
-APRIL SPATIAL / DIAGRAM UNDERSTANDING
+APRIL SPATIAL / DIAGRAM MACHINE SERVICE
 
 APRIL_FILE_ID:
 APRIL_DIAGRAM_SYSTEM_CORE
 
 ROLE:
-SPATIAL_SEMANTIC_ANALYZER
+SPATIAL_SEMANTIC_SERVICE
 
 INPUT:
-EXECUTOR_MACHINE_CONTEXT
-SEMANTIC_TEXT
+MACHINE_REQUEST
+EXECUTOR_CONTEXT
 SCENE_CONTEXT
-RENDERER_REQUEST
 
 OUTPUT:
 SPATIAL_ANALYSIS
@@ -247,8 +246,27 @@ ENGINEERING_SIGNALS = [
 ]
 
 # =====================================================
-# 🔥 SEMANTIC ANALYSIS
+# 🔥 LEGACY TEXT ANALYSIS (backward compatibility)
 # =====================================================
+
+
+def analyze_diagram_request(machine_request: dict):
+    """Preferred Executor entrypoint."""
+    machine_request = machine_request or {}
+    semantic = machine_request.get("semantic", {})
+    reps = semantic.get("required_representations", []) or []
+    return {
+        "spatial_intent": bool(semantic.get("spatial")),
+        "diagram_intent": "diagram" in reps,
+        "engineering_intent": bool(semantic.get("engineering")),
+        "structure_intent": bool(semantic.get("structure")),
+        "renderer_candidate": "diagram" in reps,
+        "scene_candidate": True,
+        "geometry_detected": bool(semantic.get("geometry")),
+        "spatial_score": 1.0 if "diagram" in reps else 0.0,
+        "machine_channel": DIAGRAM_RESPONSE_CHANNEL,
+        "machine_only": True
+    }
 
 def analyze_diagram_semantics(
     text
@@ -380,12 +398,13 @@ def analyze_diagram_semantics(
 # 🔥 LEGACY COMPATIBILITY
 # =====================================================
 
+# LEGACY COMPATIBILITY ONLY
 def is_diagram_request(
     text: str
 ) -> bool:
 
     """
-    Legacy compatibility bridge.
+    Deprecated compatibility bridge. Executor should provide machine context.
 
     НЕ trigger routing.
 
@@ -394,9 +413,12 @@ def is_diagram_request(
     для старых systems.
     """
 
-    analysis = analyze_diagram_semantics(
-        text
-    )
+    if isinstance(hidden_context, dict) and hidden_context.get("semantic"):
+        analysis = analyze_diagram_request(hidden_context)
+    else:
+        analysis = analyze_diagram_semantics(
+            text
+        )
 
     return analysis.get(
         "renderer_candidate",
