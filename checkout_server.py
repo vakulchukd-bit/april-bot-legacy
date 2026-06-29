@@ -220,6 +220,25 @@ def resolve_scene_content(result):
     return ""
 
 
+
+# =========================================================
+# 🧠 EXECUTOR CONTRACT PASS-THROUGH
+# =========================================================
+
+def executor_contract_passthrough(result):
+    """
+    Preserve Executor Scene Contract whenever it already exists.
+    Gateway should enrich only missing transport metadata.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    if result.get("scene_contract"):
+        result.setdefault("gateway_contract", True)
+        return result
+
+    return result
+
 # =========================================================
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
@@ -425,7 +444,20 @@ def normalize_executor_response(
     print("🌐 NORMALIZED:")
     print(normalized)
 
+    # Canonical transport object for AprilWeb.
     normalized["scene_contract"] = build_gateway_scene_contract(normalized)
+
+    # Legacy renderer fields remain for compatibility only.
+    normalized["legacy_renderers"] = {
+        "graph": normalized.get("graph"),
+        "formula": normalized.get("formula"),
+        "table": normalized.get("table"),
+        "gallery": normalized.get("gallery"),
+        "layout": normalized.get("layout"),
+        "visual": normalized.get("visual"),
+    }
+
+    normalized["preferred_transport"] = "scene_contract"
     return normalized
 
 
@@ -484,6 +516,24 @@ def build_gateway_scene_contract(normalized):
     }
 
 
+
+# =========================================================
+# 🧠 SPACE CONTINUITY PAYLOAD
+# =========================================================
+
+def build_space_continuity(normalized):
+    """
+    Canonical workspace payload passed to AprilWeb.
+    """
+    return {
+        "active_scene": normalized.get("scene", {}),
+        "renderer_state": normalized.get("renderer_state", {}),
+        "workspace": normalized.get("space", {}),
+        "continuity": normalized.get("continuity", {}),
+        "trajectory": normalized.get("trajectory", {}),
+        "scene_contract": normalized.get("scene_contract", {}),
+    }
+
 # =========================================================
 # 🧠 WEB EXECUTION
 # =========================================================
@@ -520,14 +570,32 @@ async def process_web_message(
     # 🔥 NORMALIZE FOR WEB SPACE
     # =====================================================
 
-    normalized = (
-        normalize_executor_response(
-            result
-        )
-    )
+    result = executor_contract_passthrough(result)
+
+    normalized = normalize_executor_response(result)
+
+    normalized["space_continuity"] = build_space_continuity(normalized)
 
     return normalized
 
+
+
+# =========================================================
+# 🧠 FINAL GATEWAY TRANSPORT
+# =========================================================
+
+def build_gateway_transport_payload(normalized):
+    """
+    Final transport object.
+    Gateway forwards the Executor scene without rebuilding it.
+    """
+    return {
+        "scene_contract": normalized.get("scene_contract", {}),
+        "space_continuity": normalized.get("space_continuity", {}),
+        "render_blocks": normalized.get("render_blocks", []),
+        "renderer_state": normalized.get("renderer_state", {}),
+        "content": normalized.get("content", ""),
+    }
 
 # =========================================================
 # 🎨 SUCCESS HTML
@@ -1090,6 +1158,8 @@ def web_chat():
                 text
             )
         )
+
+        result["gateway_transport"] = build_gateway_transport_payload(result)
 
         return jsonify({
 
