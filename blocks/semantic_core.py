@@ -327,16 +327,20 @@ def detect_representation_request(text):
     t = (text or "").lower()
 
     graph_words = [
-        "покажи",
-        "визуально",
         "график",
-        "построй"
+        "построй график",
+        "функция",
+        "plot",
+        "chart"
     ]
 
     table_words = [
         "таблица",
-        "значения",
-        "сравни"
+        "таблицу",
+        "таблич",
+        "периодическая",
+        "менделеева",
+        "значения"
     ]
 
     link_words = [
@@ -987,6 +991,7 @@ def analyze(
 
     # Stage2: promote requested representation into machine requirements
     if requested_representation:
+        result["unresolved_intent"] = False
         if requested_representation not in result["required_representations"]:
             result["required_representations"].append(requested_representation)
         if requested_representation not in result["candidate_representations"]:
