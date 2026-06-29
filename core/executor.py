@@ -1203,28 +1203,7 @@ async def execute_rooms(
             semantic
         )
 
-        blocks = list(getattr(unified_machine_scene, "blocks", []))
-
-        if not blocks:
-            for item in collected_results:
-
-                result = item.get("result", {})
-
-                if not isinstance(result, dict):
-                    continue
-
-                block = artifact_to_render_block(result)
-
-                if not isinstance(block, dict):
-                    blocks.append(block)
-                    continue
-
-                scene_blocks = block.get("scene_blocks", [])
-
-                if scene_blocks:
-                    blocks.extend(scene_blocks)
-                else:
-                    blocks.append(block)
+        blocks = compose_canonical_scene_blocks(unified_machine_scene, collected_results)
 
         return {
             "channel": RESPONSE_CHANNEL,
@@ -1243,7 +1222,99 @@ async def execute_rooms(
             }
         }
 
+        payload["result"] = build_checkout_scene_contract(payload["result"])
+        return payload
+
     return None
+
+
+# =====================================================
+# 🧠 REPRESENTATION GATE
+# =====================================================
+
+def apply_representation_gate(blocks, response_decision=None, semantic=None):
+    response_decision = response_decision or {}
+    semantic = semantic or {}
+    preferred = (
+        response_decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+    )
+    if not preferred:
+        return blocks
+    filtered=[]
+    for b in blocks:
+        if not isinstance(b, dict):
+            filtered.append(b); continue
+        t=b.get("type")
+        if t in ("graph","formula","table","diagram","gallery"):
+            if t!=preferred:
+                continue
+        filtered.append(b)
+    return filtered
+
+
+
+
+# =========================================================
+# 🧠 CANONICAL SCENE COMPOSER
+# =========================================================
+
+
+def is_canonical_scene(scene):
+    """Single routing check used by Executor."""
+    return bool(getattr(scene, "scene_contract", False))
+
+def compose_canonical_scene_blocks(machine_scene, collected_results):
+    """
+    Canonical scene assembly.
+    Prefer MachineScene blocks and only fall back to legacy
+    artifact conversion when MachineScene has no renderable blocks.
+    """
+    blocks = list(getattr(machine_scene, "blocks", []))
+
+    if blocks:
+        return blocks
+
+    for item in collected_results:
+        result = item.get("result", {})
+        if not isinstance(result, dict):
+            continue
+
+        block = artifact_to_render_block(result)
+        if isinstance(block, dict):
+            scene_blocks = block.get("scene_blocks", [])
+            if scene_blocks:
+                blocks.extend(scene_blocks)
+            else:
+                blocks.append(block)
+        elif block:
+            blocks.append(block)
+
+    return blocks
+
+
+
+# =========================================================
+# 🧠 CHECKOUT SCENE CONTRACT BRIDGE
+# =========================================================
+
+def build_checkout_scene_contract(scene_result):
+    """
+    Canonical hand-off object for checkout_server.
+    Executor exposes one Scene Contract without rebuilding it.
+    """
+    if not isinstance(scene_result, dict):
+        return scene_result
+
+    return {
+        "scene_contract": True,
+        "scene_version": "1.0",
+        "machine_scene": scene_result.get("machine_scene"),
+        "scene_plan": scene_result.get("scene_plan"),
+        "blocks": scene_result.get("blocks", []),
+        "artifact_scene": scene_result.get("artifact_scene", []),
+        "renderer_state": scene_result.get("renderer_state", {}),
+    }
 
 # =========================================================
 # 🧠 APRIL ANSWER SYNTHESIS LAYER
@@ -2380,7 +2451,6 @@ def artifact_to_render_block(result):
 
             translated["scene_blocks"] = []
             translated["expanded_blocks"] = []
-            translated["artifact_expansion_ready"] = False
             translated["scene_ready"] = False
 
     except Exception:
@@ -2393,7 +2463,9 @@ def artifact_to_render_block(result):
 # =========================================================
 
 def build_scene_from_artifact(artifact):
-    # Legacy compatibility helper. Canonical scenes should be produced through MachineScene.
+    # Legacy compatibility helper.
+    # Used only as a fallback when MachineScene has no renderable blocks.
+    # Canonical route: MachineScene -> Scene Contract.
 
     scene_blocks = []
 
