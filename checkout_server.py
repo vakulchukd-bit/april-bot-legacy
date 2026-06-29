@@ -425,6 +425,7 @@ def normalize_executor_response(
     print("🌐 NORMALIZED:")
     print(normalized)
 
+    normalized["scene_contract"] = build_gateway_scene_contract(normalized)
     return normalized
 
 
@@ -458,6 +459,28 @@ def build_artifact_packet(result):
             "preferred_representation",
             "markdown"
         )
+    }
+
+
+
+# =========================================================
+# 🧠 GATEWAY SCENE CONTRACT (APRIL UPGRADE)
+# =========================================================
+
+def build_gateway_scene_contract(normalized):
+    """
+    Gateway must transparently forward the Scene Contract without
+    rebuilding it.
+    """
+    return {
+        "version": 1,
+        "scene": normalized.get("scene", {}),
+        "render_blocks": normalized.get("render_blocks", []),
+        "renderer_state": normalized.get("renderer_state", {}),
+        "artifact_packet": normalized.get("artifact_packet"),
+        "continuity": normalized.get("continuity", {}),
+        "trajectory": normalized.get("trajectory", {}),
+        "space": normalized.get("space", {}),
     }
 
 
