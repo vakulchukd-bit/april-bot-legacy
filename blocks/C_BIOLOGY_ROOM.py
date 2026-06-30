@@ -84,11 +84,24 @@ def build_machine_contribution(machine_request:MachineRequest)->Dict[str,Any]:
             "links":True,
             "graph":False,
         },
+        "domain":"biology",
+        "knowledge_scope": BIOLOGY_COMPETENCY["domains"],
+        "artifact_outputs":["text","table","link"],
+        "capabilities":["biology_analysis"],
+        "scene_contributions":[],
+        "focus_contributions":[],
+        "memory_contributions":[],
+        "trajectory_hints":[],
+        "scene_hints":[],
+        "room_identity":{
+            "specialization":"biology",
+            "knowledge_class":"science"
+        },
     }
 
 
 
-class BiologyRoom:
+class BiologyRoom(Room):
     name = ROOM_ID
     id = ROOM_ID
     domains = BIOLOGY_COMPETENCY["domains"]
@@ -102,10 +115,8 @@ class BiologyRoom:
 
 
 
-    def evaluate(self, machine_request: MachineRequest):
-        query = ""
-        if isinstance(machine_request, dict):
-            query = str(machine_request.get("query","")).lower()
+    def evaluate(self, text: str, context: Dict[str, Any]):
+        query = (text or "").lower()
         score = 0.0
         for token in ("днк","dna","ген","gene","клет","биолог","организм","protein","белок","эволюц"):
             if token in query:
@@ -120,10 +131,39 @@ class BiologyRoom:
     def execute(self, machine_request: MachineRequest):
         contribution = self.build_machine_contribution(machine_request)
         return create_artifact(
-            room=self.id,
             artifact_type="biology",
-            payload=contribution,
+            room_source=self.id,
+            data=contribution,
         )
+
+    async def handle(self, request: MachineRequest, run=None) -> MachineResponse:
+        score = self.evaluate(
+            request.goal,
+            request.visual_context,
+        )
+
+        response = MachineResponse()
+        response.fiber = request.fiber
+        response.confidence = score["score"]
+        response.routing_decision = score
+
+        if not score["active"]:
+            response.contributions.append({
+                "room": self.id,
+                "status": "no_match",
+            })
+            return response
+
+        artifact = self.execute(request)
+        response.artifacts.append(artifact)
+        response.contributions.append({
+            "room": self.id,
+            "status": "completed",
+            "artifact_type": "biology",
+        })
+        response.executor_hints["room"]="biology"
+        response.executor_hints["outputs"]=["text","table","link"]
+        return response
 
 
 ROOM = BiologyRoom()
