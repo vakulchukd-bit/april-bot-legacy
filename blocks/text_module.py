@@ -1021,7 +1021,7 @@ async def process(
     state["last_text_time"] = time.time()
 
     log_text_execution(
-        "TEXT_MODULE_SUCCESS"
+        "TEXT_ARTIFACT_READY"
     )
 
     # =================================================
@@ -1030,6 +1030,22 @@ async def process(
 
     return {
 
+        # =================================================
+        # 🔥 FIBER TEXT ARTIFACT (Stage 1)
+        # =================================================
+        "artifact_type": "text",
+        "artifact_version": "fiber_v1",
+        "producer_room": "TEXT_ROOM",
+        "scene_ready": False,
+        "semantic_focus": None,
+        "representation_hints": [],
+
+        "fiber_trace": {
+            "room": "TEXT",
+            "stage": "TEXT_ARTIFACT",
+            "route": "FIBER",
+            "artifact": "text"
+        },
         "type": "text",
 
         "content": reply,
