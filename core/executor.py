@@ -1066,16 +1066,23 @@ async def execute_rooms(
 
             handler_payload = machine_request or machine_task_payload
 
+            # =====================================================
+            # FIBER ROUTE (canonical)
+            # =====================================================
             result = await room.handle(
-
-                user_id,
-
-                text,
-
                 handler_payload,
-
                 run_with_activity
             )
+
+            # -----------------------------------------------------
+            # LEGACY ROUTE (disabled for migration reference)
+            # result = await room.handle(
+            #     user_id,
+            #     text,
+            #     handler_payload,
+            #     run_with_activity
+            # )
+            # -----------------------------------------------------
 
             print(f"🔥 HANDLE RESULT TYPE [{room.name}]:", type(result))
             print(f"🔥 HANDLE RESULT [{room.name}]:", result)
@@ -1750,6 +1757,7 @@ async def execute(
     print("🔥 RUN TYPE:", type(run_with_activity))
 
     context["machine_request"] = machine_request
+    print(f"🟢 FIBER trace={getattr(machine_request,'trace_id',None)} input=MachineRequest")
 
     room_response = await execute_rooms(
 
