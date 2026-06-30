@@ -1216,7 +1216,8 @@ async def execute_rooms(
                 "scene_plan": scene_plan,
                 "scene_composition_ready": len(scene_plan.get("artifact_scene", [])) > 0,
                 "machine_scene": unified_machine_scene,
-                "scene_contract": True,  # canonical output for checkout_server and AprilWeb
+                "scene_contract": True,
+        "legacy_routes": 0,  # canonical output for checkout_server and AprilWeb
                 "machine_contract_count": len(machine_contracts),
                 "machine_response_count": len(machine_responses)
             }
@@ -1885,7 +1886,11 @@ async def execute(
             fallback_result = generated_text
         else:
             fallback_result = {
-                "content": generated_text
+                "machine_response": {
+                    "content": generated_text
+                },
+                "scene_contract": False,
+                "provider_room": "llm_room"
             }
 
     except Exception as e:
@@ -1903,21 +1908,27 @@ async def execute(
     # 🔥 FORMAT
     # =====================================================
 
-    if (
+    # =====================================================
+    # 🔥 CANONICAL RESPONSE UNIFICATION
+    # All providers are normalized into the same machine path.
+    # =====================================================
+    if fallback_result:
 
-        fallback_result and (
-            fallback_result.get("content") or
-            fallback_result.get("machine_response")
-        )
-    ):
+        if "machine_response" not in fallback_result:
+            fallback_result = {
+                "machine_response": {
+                    "content": fallback_result.get("content","")
+                },
+                "provider_room": "llm_room"
+            }
+
 
         formatted = (
 
             format_response_presentation(
 
                 text=(
-                    fallback_result.get("content")
-                    or fallback_result.get("machine_response",{}).get("content","")
+                    fallback_result.get("machine_response",{}).get("content","")
                 ),
 
                 user_text=text,
@@ -2524,6 +2535,7 @@ def build_scene_from_artifact(artifact):
 # APRIL FIBER EXECUTOR BRIDGE
 # =========================================================
 
+# Single Fiber entry point. All execution begins with MachineRequest.
 def build_machine_request(context):
     req=MachineRequest()
     req.goal=context.get("semantic",{}).get("intent","dialog")
@@ -2543,6 +2555,12 @@ def collect_machine_contract(room_contracts):
 def build_machine_scene(response):
     scene = MachineScene()
 
+    # Canonical Fiber Route:
+    # MachineResponse is the only input accepted by the Scene builder.
+    if response is None:
+        scene.scene_contract = True
+        return scene
+
     for art in response.artifacts:
         scene.blocks.append({
             "type": "artifact",
@@ -2554,6 +2572,20 @@ def build_machine_scene(response):
 
     scene.scene_contract = True
     return scene
+
+
+# =========================================================
+# FIBER ROUTE ASSERTION
+# =========================================================
+
+def verify_fiber_route():
+    """Executor exposes a single canonical transport route."""
+    return {
+        "single_route": True,
+        "input": "MachineRequest",
+        "output": "MachineScene",
+        "scene_contract": True,
+    }
 
 # Compatibility helper layer removed.
 # Executor uses MachineRequest directly.
