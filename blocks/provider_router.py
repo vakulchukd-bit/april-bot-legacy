@@ -387,19 +387,23 @@ def build_provider_machine_response(text, parsed_contract=None):
             "summary": parsed_contract.get("summary", text),
             "explanation": parsed_contract.get("explanation", text),
             "content": text,
+            "scene": parsed_contract.get("scene", {}),
+            "render_blocks": parsed_contract.get("render_blocks", []),
             "artifacts": parsed_contract.get("artifacts", []),
             "scene_plan": parsed_contract.get("scene_plan", ["text"]),
             "confidence": parsed_contract.get("confidence", 1.0),
             "metadata": parsed_contract.get("metadata", {}),
             "provider": "openai",
             "render_priority": parsed_contract.get("render_priority", []),
-            "provider_contract": "fiber_v2"
+            "provider_contract": "fiber_v3",
+            "transport_contract": "scene_first"
         }
     }
 
 import json
 
 def parse_provider_machine_contract(raw_text):
+    """Compatibility parser. Executor now prefers native MachineResponse; parser is fallback-only."""
     try:
         data=json.loads(raw_text)
         if isinstance(data,dict):
@@ -407,6 +411,8 @@ def parse_provider_machine_contract(raw_text):
     except Exception:
         pass
     return {
+        "scene": {},
+        "render_blocks": [],
         "summary": raw_text,
         "explanation": raw_text,
         "artifacts": [],
@@ -417,6 +423,19 @@ def parse_provider_machine_contract(raw_text):
     }
 
 
+
+
+
+# =====================================================
+# STAGE 2 - SCENE-FIRST CONTRACT
+# =====================================================
+
+def ensure_scene_first_contract(contract):
+    contract = validate_machine_response_contract(contract)
+    contract.setdefault("scene", {})
+    contract.setdefault("render_blocks", [])
+    contract.setdefault("artifacts", [])
+    return contract
 
 
 # =====================================================
@@ -436,6 +455,8 @@ def validate_machine_response_contract(contract):
     contract.setdefault("scene_plan", ["text"])
     contract.setdefault("render_priority", ["text"])
     contract.setdefault("confidence", 0.0)
+    contract.setdefault("scene", {})
+    contract.setdefault("render_blocks", [])
     contract.setdefault("metadata", {})
 
     return contract
@@ -507,30 +528,30 @@ def sanitize_internal_reasoning(text):
 
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are the internal reasoning provider for the April Executor.
+You are the Provider of the APRIL Fiber Route.
 
-Return ONLY a valid JSON object representing a MachineResponse.
-Do not output any text before or after the JSON.
-If information is unavailable, use empty values instead of omitting fields.
-Return ONLY a machine contract.
-Do not address the user.
-Do not produce Markdown.
-Do not produce HTML.
-Do not produce React.
-Do not format as a chat reply.
+Produce one unified MachineResponse for the Executor.
+Return one transport contract only.
+Do not produce chat text, Markdown, HTML or explanations.
 
-Return an object containing:
+Required top-level fields:
 summary
 explanation
+scene
 artifacts
+render_blocks
 scene_plan
 render_priority
 confidence
 metadata
+
+Every answer must be suitable for direct Scene construction by the Executor.
 """
 
 def normalize_provider_input(messages):
-    """Normalize Executor payload to Responses API input items."""
+    """
+    Normalize Executor payload to Responses API input items.
+    """
     system_item = {
         "role": "system",
         "content": [
@@ -542,47 +563,57 @@ def normalize_provider_input(messages):
     }
 
     if isinstance(messages, str):
-        user_item = {
+        return [system_item, {
             "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": messages,
-                }
-            ],
-        }
-        return [system_item, user_item]
+            "content": [{"type": "input_text", "text": messages}],
+        }]
 
     if isinstance(messages, dict):
         if "role" in messages and "content" in messages:
             return [system_item, messages]
-
-        return [
-            system_item,
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": json.dumps(messages, ensure_ascii=False)
-                    }
-                ]
-            }
-        ]
+        return [system_item, {
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": json.dumps(messages, ensure_ascii=False)
+            }],
+        }]
 
     if isinstance(messages, list):
         return [system_item] + messages
 
-    user_item = {
+    return [system_item, {
         "role": "user",
-        "content": [
-            {
-                "type": "input_text",
-                "text": str(messages),
-            }
-        ],
-    }
-    return [system_item, user_item]
+        "content": [{"type": "input_text", "text": str(messages)}],
+    }]
+
+# =====================================================
+# STAGE 3 - UNIFIED PROVIDER CONTRACT
+# =====================================================
+
+def create_provider_contract(raw_text):
+    if (
+        isinstance(raw_text, dict)
+        and raw_text.get("type") == "provider_response"
+        and isinstance(raw_text.get("machine_response"), dict)
+    ):
+        return raw_text
+
+    parsed = raw_text if isinstance(raw_text, dict) else parse_provider_machine_contract(raw_text)
+    contract = ensure_scene_first_contract(parsed)
+    return build_provider_machine_response(raw_text, contract)
+
+
+
+# =====================================================
+# STAGE 4 - CENTRALIZED FALLBACK CONTRACT
+# =====================================================
+
+def build_fallback_provider_contract(space):
+    overload = build_overload_response(space)
+    return provider_contract_ready(
+        create_provider_contract(overload)
+    )
 
 
 # =====================================================
@@ -650,9 +681,8 @@ async def generate_text(
             )
 
             overload = build_overload_response("Dialogue-space")
-            contract = validate_machine_response_contract(parse_provider_machine_contract(overload))
             return provider_contract_ready(
-                build_provider_machine_response(overload, contract)
+                create_provider_contract(overload)
             )
 
         provider_log(
@@ -664,9 +694,8 @@ async def generate_text(
             True
         )
 
-        contract = validate_machine_response_contract(parse_provider_machine_contract(text))
         return provider_contract_ready(
-            build_provider_machine_response(text, contract)
+            create_provider_contract(text)
         )
 
     except Exception as e:
@@ -681,7 +710,7 @@ async def generate_text(
             False
         )
 
-        return provider_contract_ready(build_provider_machine_response(build_overload_response("Dialogue-space"), parse_provider_machine_contract(build_overload_response("Dialogue-space"))))
+        return build_fallback_provider_contract("Dialogue-space")
 
 
 # =====================================================
@@ -852,8 +881,7 @@ async def analyze_image_with_fallback(
                     True
                 )
 
-                contract = validate_machine_response_contract(parse_provider_machine_contract(text))
-                return provider_contract_ready(build_provider_machine_response(text, contract))
+                return provider_contract_ready(create_provider_contract(text))
 
         except Exception as e:
 
@@ -930,19 +958,14 @@ async def analyze_image_with_fallback(
                 True
             )
 
-            contract = validate_machine_response_contract(parse_provider_machine_contract(text))
-            return provider_contract_ready(build_provider_machine_response(text, contract))
+            return provider_contract_ready(create_provider_contract(text))
 
         provider_exit(
             "openai_image_fallback",
             False
         )
 
-        overload = build_overload_response("Visual-space")
-        contract = validate_machine_response_contract(parse_provider_machine_contract(overload))
-        return provider_contract_ready(
-            build_provider_machine_response(overload, contract)
-        )
+        return build_fallback_provider_contract("Visual-space")
 
     except Exception as e:
 
@@ -956,8 +979,8 @@ async def analyze_image_with_fallback(
             False
         )
 
-        overload = build_overload_response("Visual-space")
-        contract = validate_machine_response_contract(parse_provider_machine_contract(overload))
-        return provider_contract_ready(
-            build_provider_machine_response(overload, contract)
-        )
+        return build_fallback_provider_contract("Visual-space")
+
+
+PROVIDER_ROUTE_VERSION="fiber_scene_v4"
+PROVIDER_LEGACY_MODE=False
