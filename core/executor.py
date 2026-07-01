@@ -1212,19 +1212,19 @@ async def execute_rooms(
 
         blocks = compose_canonical_scene_blocks(unified_machine_scene, collected_results)
 
-        return {
+        payload = {
             "channel": RESPONSE_CHANNEL,
             "room": "scene",
             "trajectory": context.get("trajectory"),
             "result": {
                 "type": "scene",
-                "blocks": blocks,  # canonical scene payload
+                "blocks": blocks,
                 "artifact_scene": scene_plan.get("artifact_scene", []),
                 "scene_plan": scene_plan,
                 "scene_composition_ready": len(scene_plan.get("artifact_scene", [])) > 0,
                 "machine_scene": unified_machine_scene,
                 "scene_contract": True,
-        "legacy_routes": 0,  # canonical output for checkout_server and AprilWeb
+                "legacy_routes": 0,
                 "machine_contract_count": len(machine_contracts),
                 "machine_response_count": len(machine_responses)
             }
@@ -1824,7 +1824,7 @@ async def execute(
 
             if isinstance(original_text, str):
 
-                formatted = format_response_presentation(
+                formatted = normalize_provider_scene(format_response_presentation(
 
                     text=original_text,
 
@@ -1931,13 +1931,11 @@ async def execute(
             }
 
 
-        formatted = (
+        machine_payload = fallback_result.get("machine_response", {})
 
-            format_response_presentation(
+        formatted = normalize_provider_scene(format_response_presentation(
 
-                text=(
-                    fallback_result.get("machine_response",{}).get("content","")
-                ),
+                response=machine_payload,
 
                 user_text=text,
 
@@ -1948,8 +1946,7 @@ async def execute(
                 response_decision=response_decision,
 
                 visual_reference=visual_reference
-            )
-        )
+        ))
 
         add_dialog(
 
@@ -1969,10 +1966,14 @@ async def execute(
             str(formatted)[:500]
         )
 
+        if isinstance(formatted, dict):
+            if formatted.get("type")=="scene_contract" or formatted.get("scene_present"):
+                return formatted
+            if formatted.get("type")=="scene":
+                return formatted
+
         return {
-
             "type": "text",
-
             "data": formatted
         }
 
@@ -2597,3 +2598,37 @@ def verify_fiber_route():
 
 # Compatibility helper layer removed.
 # Executor uses MachineRequest directly.
+# =====================================================
+# STAGE 2 - Scene Contract Bridge
+# =====================================================
+
+def normalize_provider_scene(result):
+    if not isinstance(result, dict):
+        return result
+
+    if result.get("type") == "scene_contract":
+        return result
+
+    if result.get("scene_contract") is True:
+        return {
+            "type": "scene_contract",
+            **result
+        }
+
+    return result
+
+
+
+
+
+# =====================================================
+# EXECUTOR ROUTE VERSION
+# =====================================================
+EXECUTOR_ROUTE_VERSION="fiber_scene_v2"
+EXECUTOR_LEGACY_TEXT_ROUTE=False
+
+
+# =====================================================
+# EXECUTOR FIBER CANONICAL
+# =====================================================
+EXECUTOR_FIBER_CANONICAL = True
