@@ -392,6 +392,7 @@ def build_provider_machine_response(text, parsed_contract=None):
             "confidence": parsed_contract.get("confidence", 1.0),
             "metadata": parsed_contract.get("metadata", {}),
             "provider": "openai",
+            "render_priority": parsed_contract.get("render_priority", []),
             "provider_contract": "fiber_v2"
         }
     }
@@ -411,7 +412,8 @@ def parse_provider_machine_contract(raw_text):
         "artifacts": [],
         "scene_plan": ["text"],
         "confidence": 0.9,
-        "metadata":{"fallback_contract":True}
+        "render_priority":["text"],
+        "metadata":{"fallback_contract":True,"parser":"compat"}
     }
 
 
@@ -420,6 +422,29 @@ def parse_provider_machine_contract(raw_text):
 # =====================================================
 # 🔥 SAFE OVERLOAD RESPONSE
 # =====================================================
+
+
+
+def validate_machine_response_contract(contract):
+    """Guarantee a valid transport contract for Executor."""
+    if not isinstance(contract, dict):
+        contract = {}
+
+    contract.setdefault("summary", "")
+    contract.setdefault("explanation", contract["summary"])
+    contract.setdefault("artifacts", [])
+    contract.setdefault("scene_plan", ["text"])
+    contract.setdefault("render_priority", ["text"])
+    contract.setdefault("confidence", 0.0)
+    contract.setdefault("metadata", {})
+
+    return contract
+
+
+def provider_contract_ready(machine_response):
+    provider_log("🧠 FIBER ROUTE: MachineResponse READY")
+    return machine_response
+
 
 def build_overload_response(
     space="Dialogue-space"
@@ -465,13 +490,9 @@ def build_provider_task_state(
 
 
 def sanitize_internal_reasoning(text):
-
     if not text:
-        contract = parse_provider_machine_contract(text)
-        provider_log('🧠 MACHINE CONTRACT READY')
-        return build_provider_machine_response(text, contract)
-
-    blocked = [
+        return ""
+    blocked=[
         "possibly",
         "perhaps",
         "internal reasoning",
@@ -479,13 +500,34 @@ def sanitize_internal_reasoning(text):
         "I think",
         "I am reasoning"
     ]
-
-    result = str(text)
-
+    result=str(text)
     for item in blocked:
-        result = result.replace(item, "")
-
+        result=result.replace(item,"")
     return result.strip()
+
+
+PROVIDER_MACHINE_SYSTEM_PROMPT = """
+You are the internal reasoning provider for the April Executor.
+
+Return ONLY a valid JSON object representing a MachineResponse.
+Do not output any text before or after the JSON.
+If information is unavailable, use empty values instead of omitting fields.
+Return ONLY a machine contract.
+Do not address the user.
+Do not produce Markdown.
+Do not produce HTML.
+Do not produce React.
+Do not format as a chat reply.
+
+Return an object containing:
+summary
+explanation
+artifacts
+scene_plan
+render_priority
+confidence
+metadata
+"""
 
 # =====================================================
 # 🔥 TEXT GENERATION
@@ -525,7 +567,13 @@ async def generate_text(
 
                 model=model,
 
-                input=messages,
+                input=[
+                    {
+                        "role": "system",
+                        "content": PROVIDER_MACHINE_SYSTEM_PROMPT
+                    },
+                    messages
+                ],
 
                 temperature=temperature,
 
@@ -551,9 +599,11 @@ async def generate_text(
                 False
             )
 
-            return build_provider_machine_response(build_overload_response(
-                "Dialogue-space"
-            ))
+            overload = build_overload_response("Dialogue-space")
+            contract = validate_machine_response_contract(parse_provider_machine_contract(overload))
+            return provider_contract_ready(
+                build_provider_machine_response(overload, contract)
+            )
 
         provider_log(
             "🧠 OPENAI TEXT SUCCESS"
@@ -564,7 +614,10 @@ async def generate_text(
             True
         )
 
-        return text
+        contract = validate_machine_response_contract(parse_provider_machine_contract(text))
+        return provider_contract_ready(
+            build_provider_machine_response(text, contract)
+        )
 
     except Exception as e:
 
@@ -578,9 +631,7 @@ async def generate_text(
             False
         )
 
-        return build_overload_response(
-            "Dialogue-space"
-        )
+        return provider_contract_ready(build_provider_machine_response(build_overload_response("Dialogue-space"), parse_provider_machine_contract(build_overload_response("Dialogue-space"))))
 
 
 # =====================================================
@@ -751,7 +802,8 @@ async def analyze_image_with_fallback(
                     True
                 )
 
-                return build_provider_machine_response(text)
+                contract = validate_machine_response_contract(parse_provider_machine_contract(text))
+                return provider_contract_ready(build_provider_machine_response(text, contract))
 
         except Exception as e:
 
@@ -828,15 +880,18 @@ async def analyze_image_with_fallback(
                 True
             )
 
-            return build_provider_machine_response(text)
+            contract = validate_machine_response_contract(parse_provider_machine_contract(text))
+            return provider_contract_ready(build_provider_machine_response(text, contract))
 
         provider_exit(
             "openai_image_fallback",
             False
         )
 
-        return build_overload_response(
-            "Visual-space"
+        overload = build_overload_response("Visual-space")
+        contract = validate_machine_response_contract(parse_provider_machine_contract(overload))
+        return provider_contract_ready(
+            build_provider_machine_response(overload, contract)
         )
 
     except Exception as e:
@@ -851,6 +906,8 @@ async def analyze_image_with_fallback(
             False
         )
 
-        return build_overload_response(
-            "Visual-space"
+        overload = build_overload_response("Visual-space")
+        contract = validate_machine_response_contract(parse_provider_machine_contract(overload))
+        return provider_contract_ready(
+            build_provider_machine_response(overload, contract)
         )
