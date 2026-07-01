@@ -1824,19 +1824,21 @@ async def execute(
 
             if isinstance(original_text, str):
 
-                formatted = normalize_provider_scene(format_response_presentation(
+                formatted = normalize_provider_scene(
+                    format_response_presentation(
 
-                    text=original_text,
+                        text=original_text,
 
-                    user_text=text,
+                        user_text=text,
 
-                    semantic=semantic,
+                        semantic=semantic,
 
-                    cognition=cognition,
+                        cognition=cognition,
 
-                    response_decision=response_decision,
+                        response_decision=response_decision,
 
-                    visual_reference=visual_reference
+                        visual_reference=visual_reference
+                    )
                 )
 
                 result["data"] = formatted
