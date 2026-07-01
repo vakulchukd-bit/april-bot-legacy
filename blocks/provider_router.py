@@ -378,16 +378,42 @@ def normalize_response_text(text):
 # 🔥 MACHINE RESPONSE WRAPPER
 # =====================================================
 
-def build_provider_machine_response(text):
+def build_provider_machine_response(text, parsed_contract=None):
+    """Build a unified MachineResponse transport contract."""
+    parsed_contract = parsed_contract or {}
     return {
         "type": "provider_response",
         "machine_response": {
+            "summary": parsed_contract.get("summary", text),
+            "explanation": parsed_contract.get("explanation", text),
             "content": text,
-            "artifacts": [],
-            "scene": None,
-            "provider_contract": "v1"
+            "artifacts": parsed_contract.get("artifacts", []),
+            "scene_plan": parsed_contract.get("scene_plan", ["text"]),
+            "confidence": parsed_contract.get("confidence", 1.0),
+            "metadata": parsed_contract.get("metadata", {}),
+            "provider": "openai",
+            "provider_contract": "fiber_v2"
         }
     }
+
+import json
+
+def parse_provider_machine_contract(raw_text):
+    try:
+        data=json.loads(raw_text)
+        if isinstance(data,dict):
+            return data
+    except Exception:
+        pass
+    return {
+        "summary": raw_text,
+        "explanation": raw_text,
+        "artifacts": [],
+        "scene_plan": ["text"],
+        "confidence": 0.9,
+        "metadata":{"fallback_contract":True}
+    }
+
 
 
 
@@ -441,7 +467,9 @@ def build_provider_task_state(
 def sanitize_internal_reasoning(text):
 
     if not text:
-        return text
+        contract = parse_provider_machine_contract(text)
+        provider_log('🧠 MACHINE CONTRACT READY')
+        return build_provider_machine_response(text, contract)
 
     blocked = [
         "possibly",
