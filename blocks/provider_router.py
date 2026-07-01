@@ -529,6 +529,62 @@ confidence
 metadata
 """
 
+def normalize_provider_input(messages):
+    """Normalize Executor payload to Responses API input items."""
+    system_item = {
+        "role": "system",
+        "content": [
+            {
+                "type": "input_text",
+                "text": PROVIDER_MACHINE_SYSTEM_PROMPT,
+            }
+        ],
+    }
+
+    if isinstance(messages, str):
+        user_item = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": messages,
+                }
+            ],
+        }
+        return [system_item, user_item]
+
+    if isinstance(messages, dict):
+        if "role" in messages and "content" in messages:
+            return [system_item, messages]
+
+        return [
+            system_item,
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(messages, ensure_ascii=False)
+                    }
+                ]
+            }
+        ]
+
+    if isinstance(messages, list):
+        return [system_item] + messages
+
+    user_item = {
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": str(messages),
+            }
+        ],
+    }
+    return [system_item, user_item]
+
+
 # =====================================================
 # 🔥 TEXT GENERATION
 # =====================================================
@@ -567,13 +623,7 @@ async def generate_text(
 
                 model=model,
 
-                input=[
-                    {
-                        "role": "system",
-                        "content": PROVIDER_MACHINE_SYSTEM_PROMPT
-                    },
-                    messages
-                ],
+                input=normalize_provider_input(messages),
 
                 temperature=temperature,
 
