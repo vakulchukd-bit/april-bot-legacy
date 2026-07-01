@@ -284,6 +284,25 @@ def is_machine_payload(value):
     )
 
 
+
+# =====================================================
+# 🔥 MACHINE RESPONSE DETECTION
+# =====================================================
+
+def is_machine_response(value):
+    if not isinstance(value, dict):
+        return False
+    machine_keys = {
+        "summary",
+        "scene_plan",
+        "artifacts",
+        "render_priority",
+        "confidence",
+        "metadata",
+    }
+    return len(machine_keys.intersection(value.keys())) >= 2
+
+
 # =====================================================
 # 🔥 NORMALIZATION
 # =====================================================
@@ -1221,6 +1240,13 @@ def format_response_presentation(
     # 🔥 MACHINE SAFE
     # =====================================================
 
+    if is_machine_response(final_text):
+        safe_format_log("MACHINE RESPONSE -> SCENE CONTRACT")
+        return finalize_presentation_payload({
+            "presentation_mode": "scene_pipeline",
+            "machine_response": final_text
+        })
+
     if isinstance(final_text, dict) and final_text.get("type")=="provider_response":
         safe_format_log("PROVIDER CONTRACT PRESERVED")
         return final_text
@@ -1329,3 +1355,51 @@ def suppress_internal_status(text):
     for b in blocked:
         text = text.replace(b, "")
     return text
+
+
+# =====================================================
+# STAGE 3 - Preserve scene pipeline contract
+# =====================================================
+
+def preserve_scene_pipeline(payload):
+    if isinstance(payload, dict) and payload.get("presentation_mode") == "scene_pipeline":
+        safe_format_log("SCENE PIPELINE PRESERVED")
+        return payload
+    return payload
+
+
+# =====================================================
+# STAGE 4 - MachineResponse -> Scene Contract
+# =====================================================
+
+def build_scene_contract(machine_response):
+    if not isinstance(machine_response, dict):
+        return machine_response
+
+    return {
+        "type": "scene_contract",
+        "scene_present": True,
+        "scene": machine_response.get("scene", {}),
+        "artifacts": machine_response.get("artifacts", []),
+        "scene_plan": machine_response.get("scene_plan", ""),
+        "summary": machine_response.get("summary", {}),
+        "render_priority": machine_response.get("render_priority", 0),
+        "confidence": machine_response.get("confidence", 0),
+        "metadata": machine_response.get("metadata", {}),
+    }
+
+
+# =====================================================
+# STAGE 5 - Unified Presentation Route
+# =====================================================
+
+def finalize_presentation_payload(payload):
+    if (
+        isinstance(payload, dict)
+        and payload.get("presentation_mode") == "scene_pipeline"
+        and "machine_response" in payload
+    ):
+        safe_format_log("SCENE CONTRACT BUILT")
+        return build_scene_contract(payload["machine_response"])
+
+    return preserve_scene_pipeline(payload)
