@@ -300,7 +300,19 @@ def is_machine_response(value):
         "confidence",
         "metadata",
     }
-    return len(machine_keys.intersection(value.keys())) >= 2
+    return (value.get("transport_contract")=="scene_first") or (len(machine_keys.intersection(value.keys())) >= 2)
+
+
+
+# =====================================================
+# STAGE 1 - SCENE CONTRACT DETECTION
+# =====================================================
+
+def is_scene_contract(value):
+    return (
+        isinstance(value, dict)
+        and value.get("type")=="scene_contract"
+    )
 
 
 # =====================================================
@@ -356,10 +368,9 @@ def normalize_text_payload(value):
         (dict, list)
     ):
 
-        safe_format_log(
-            "OBJECT PAYLOAD PRESERVED"
-        )
-
+        if is_scene_contract(value):
+            return value
+        safe_format_log("OBJECT PAYLOAD PRESERVED")
         return value
 
     try:
@@ -1024,13 +1035,9 @@ def should_skip_formatting(
     # 🔥 JSON SAFE
     # =====================================================
 
-    if looks_like_json(text):
+    # Legacy JSON route retired.
+    # JSON strings continue through the normal formatter.
 
-        safe_format_log(
-            "JSON BYPASS"
-        )
-
-        return True
 
     # =================================================
     # 🔥 CODE SAFE
@@ -1248,6 +1255,13 @@ def format_response_presentation(
         })
 
     if isinstance(final_text, dict) and final_text.get("type")=="provider_response":
+        mr = final_text.get("machine_response")
+        if is_machine_response(mr):
+            safe_format_log("PROVIDER -> SCENE CONTRACT")
+            return finalize_presentation_payload({
+                "presentation_mode":"scene_pipeline",
+                "machine_response": mr
+            })
         safe_format_log("PROVIDER CONTRACT PRESERVED")
         return final_text
 
@@ -1262,6 +1276,10 @@ def format_response_presentation(
     # =================================================
     # 🔥 RENDERER SAFE
     # =====================================================
+
+    if is_scene_contract(final_text):
+        safe_format_log("SCENE CONTRACT PRESERVED")
+        return final_text
 
     if isinstance(final_text, dict) and final_text.get("type")=="scene":
         safe_format_log("MACHINE SCENE PRESERVED")
@@ -1287,15 +1305,15 @@ def format_response_presentation(
     # 🔥 OBJECT SAFE
     # =====================================================
 
+    if is_scene_contract(final_text):
+        safe_format_log("FINAL SCENE CONTRACT")
+        return final_text
+
     if not isinstance(
         final_text,
         str
     ):
-
-        safe_format_log(
-            "FINAL OBJECT PRESERVED"
-        )
-
+        safe_format_log("FINAL OBJECT PRESERVED")
         return final_text
 
     if not final_text:
@@ -1394,12 +1412,29 @@ def build_scene_contract(machine_response):
 # =====================================================
 
 def finalize_presentation_payload(payload):
+    if not isinstance(payload, dict):
+        return payload
+
+    if is_scene_contract(payload):
+        safe_format_log("SCENE CONTRACT PASSTHROUGH")
+        return payload
+
     if (
-        isinstance(payload, dict)
-        and payload.get("presentation_mode") == "scene_pipeline"
+        payload.get("presentation_mode") == "scene_pipeline"
         and "machine_response" in payload
     ):
+        mr = payload["machine_response"]
+        if is_scene_contract(mr):
+            safe_format_log("READY SCENE CONTRACT")
+            return mr
         safe_format_log("SCENE CONTRACT BUILT")
-        return build_scene_contract(payload["machine_response"])
+        return build_scene_contract(mr)
 
     return preserve_scene_pipeline(payload)
+
+
+# =====================================================
+# FINAL ROUTE MARKER
+# =====================================================
+
+PRESENTATION_ROUTE_VERSION = "fiber_scene_v1"
