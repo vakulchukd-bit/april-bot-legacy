@@ -258,6 +258,17 @@ def normalize_executor_response(
             "space": {}
         }
 
+    print("========== NORMALIZE EXECUTOR RESPONSE ==========")
+    print("RESULT TYPE:", type(result))
+    if isinstance(result, dict):
+        print("RESULT KEYS:", list(result.keys()))
+        scene_obj = result.get("scene")
+        print("ROOT RENDER_BLOCKS:", bool(result.get("render_blocks")))
+        if isinstance(scene_obj, dict):
+            print("SCENE KEYS:", list(scene_obj.keys()))
+            print("SCENE RENDER_BLOCKS:", bool(scene_obj.get("render_blocks")))
+            print("SCENE BLOCKS:", bool(scene_obj.get("blocks")))
+    
     normalized = {
 
         # =================================================
