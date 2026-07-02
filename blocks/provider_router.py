@@ -644,14 +644,8 @@ async def generate_text(
         provider_log(
             "========== PROVIDER INPUT =========="
         )
-        provider_log(
-            "RAW MESSAGE TYPE:",
-            type(messages)
-        )
-        provider_log(
-            "RAW MESSAGE:",
-            str(messages)[:4000]
-        )
+        provider_log("RAW MESSAGE TYPE:", type(messages))
+        provider_log("RAW MESSAGE:", str(messages)[:4000])
 
         provider_log(
             "🧠 PROVIDER BALANCE:",
@@ -660,16 +654,10 @@ async def generate_text(
             )
         )
 
-        response = (
-
-            openai_client.responses.create(
-
-                model=model,
-
-                normalized_input = normalize_provider_input(messages)
+        normalized_input = normalize_provider_input(messages)
 
         provider_log("========== NORMALIZED INPUT ==========")
-        provider_log(json.dumps(normalized_input, ensure_ascii=False, indent=2)[:8000])
+        provider_log(json.dumps(normalized_input, ensure_ascii=False)[:8000])
 
         response = (
 
@@ -720,10 +708,10 @@ async def generate_text(
             True
         )
 
-        contract = create_provider_contract(text)
+        contract=create_provider_contract(text)
 
         provider_log("========== PROVIDER CONTRACT ==========")
-        provider_log(json.dumps(contract, ensure_ascii=False, indent=2)[:8000])
+        provider_log(json.dumps(contract, ensure_ascii=False)[:8000])
 
         return provider_contract_ready(contract)
 
