@@ -642,6 +642,18 @@ async def generate_text(
         )
 
         provider_log(
+            "========== PROVIDER INPUT =========="
+        )
+        provider_log(
+            "RAW MESSAGE TYPE:",
+            type(messages)
+        )
+        provider_log(
+            "RAW MESSAGE:",
+            str(messages)[:4000]
+        )
+
+        provider_log(
             "🧠 PROVIDER BALANCE:",
             provider_state.get(
                 "provider_balance"
@@ -654,13 +666,27 @@ async def generate_text(
 
                 model=model,
 
-                input=normalize_provider_input(messages),
+                normalized_input = normalize_provider_input(messages)
+
+        provider_log("========== NORMALIZED INPUT ==========")
+        provider_log(json.dumps(normalized_input, ensure_ascii=False, indent=2)[:8000])
+
+        response = (
+
+            openai_client.responses.create(
+
+                model=model,
+
+                input=normalized_input,
 
                 temperature=temperature,
 
                 max_output_tokens=max_output_tokens
             )
         )
+
+        provider_log("========== RAW OPENAI OUTPUT ==========")
+        provider_log(response.output_text[:8000] if response.output_text else "EMPTY")
 
         text = normalize_response_text(
 
@@ -694,9 +720,12 @@ async def generate_text(
             True
         )
 
-        return provider_contract_ready(
-            create_provider_contract(text)
-        )
+        contract = create_provider_contract(text)
+
+        provider_log("========== PROVIDER CONTRACT ==========")
+        provider_log(json.dumps(contract, ensure_ascii=False, indent=2)[:8000])
+
+        return provider_contract_ready(contract)
 
     except Exception as e:
 
