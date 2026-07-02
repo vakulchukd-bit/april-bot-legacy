@@ -1273,6 +1273,7 @@ def is_canonical_scene(scene):
     return bool(getattr(scene, "scene_contract", False))
 
 def compose_canonical_scene_blocks(machine_scene, collected_results):
+    # Stage 3: canonical scene extraction
     """
     Canonical scene assembly.
     Prefer MachineScene blocks and only fall back to legacy
@@ -1280,8 +1281,22 @@ def compose_canonical_scene_blocks(machine_scene, collected_results):
     """
     blocks = list(getattr(machine_scene, "blocks", []))
 
+    # Prefer already-built scene blocks.
     if blocks:
         return blocks
+
+    scene = getattr(machine_scene, "scene", None)
+    if isinstance(scene, dict):
+        elements = scene.get("elements") or []
+        if elements:
+            return [
+                {
+                    "type": str(e.get("type", "text")).lower(),
+                    "payload": e,
+                    "scene_contract": True,
+                }
+                for e in elements if isinstance(e, dict)
+            ]
 
     for item in collected_results:
         result = item.get("result", {})
@@ -1314,14 +1329,22 @@ def build_checkout_scene_contract(scene_result):
     if not isinstance(scene_result, dict):
         return scene_result
 
+    machine_scene = scene_result.get("machine_scene")
+    blocks = scene_result.get("blocks", [])
+
+    if not blocks and hasattr(machine_scene, "blocks"):
+        blocks = list(getattr(machine_scene, "blocks", []))
+
     return {
         "scene_contract": True,
-        "scene_version": "1.0",
-        "machine_scene": scene_result.get("machine_scene"),
+        "scene_version": "1.1",
+        "machine_scene": machine_scene,
         "scene_plan": scene_result.get("scene_plan"),
-        "blocks": scene_result.get("blocks", []),
+        "blocks": blocks,
+        "render_blocks": blocks,
         "artifact_scene": scene_result.get("artifact_scene", []),
         "renderer_state": scene_result.get("renderer_state", {}),
+        "executor_route": "fiber_scene_v2",
     }
 
 # =========================================================
@@ -2556,6 +2579,29 @@ def build_machine_request(context):
     req.routing={"trajectory":context.get("trajectory")}
     return req
 
+
+# =====================================================
+# STAGE 1 - CONTRACT NORMALIZER
+# =====================================================
+
+def _extract_contract_payload(contract):
+    payload = {
+        "artifact": None,
+        "render_blocks": [],
+        "scene": None,
+        "renderer_state": {},
+        "metadata": {},
+    }
+    if contract is None:
+        return payload
+
+    payload["artifact"] = getattr(contract, "artifact", None)
+    payload["render_blocks"] = list(getattr(contract, "render_blocks", []) or [])
+    payload["scene"] = getattr(contract, "scene", None)
+    payload["renderer_state"] = getattr(contract, "renderer_state", {}) or {}
+    payload["metadata"] = getattr(contract, "metadata", {}) or {}
+    return payload
+
 def collect_machine_contract(room_contracts):
     print("========== COLLECT_MACHINE_CONTRACT ==========")
     print("ROOM CONTRACT COUNT:", len(room_contracts))
@@ -2564,8 +2610,21 @@ def collect_machine_contract(room_contracts):
         print(f"CONTRACT[{idx}] TYPE:", type(contract))
         print(f"CONTRACT[{idx}] HAS ARTIFACT:", hasattr(contract,"artifact"))
         print(f"CONTRACT[{idx}] HAS RENDER_BLOCKS:", hasattr(contract,"render_blocks"))
-        if hasattr(contract,"artifact") and contract.artifact:
-            response.artifacts.append(contract.artifact)
+        normalized = _extract_contract_payload(contract)
+
+        if normalized["artifact"]:
+            response.artifacts.append(normalized["artifact"])
+
+        if not hasattr(response, "render_blocks"):
+            response.render_blocks = []
+        response.render_blocks.extend(normalized["render_blocks"])
+
+        if normalized["scene"] and not hasattr(response, "scene"):
+            response.scene = normalized["scene"]
+
+        if not hasattr(response, "renderer_state"):
+            response.renderer_state = {}
+        response.renderer_state.update(normalized["renderer_state"])
     print("RESPONSE ARTIFACT COUNT:", len(response.artifacts))
     return response
 
@@ -2580,14 +2639,26 @@ def build_machine_scene(response):
         scene.scene_contract = True
         return scene
 
-    for art in response.artifacts:
+    # Stage 2: prefer canonical render blocks and scene before artifact fallback
+    if hasattr(response, "render_blocks") and response.render_blocks:
+        scene.blocks.extend(response.render_blocks)
+
+    elif hasattr(response, "scene") and response.scene:
         scene.blocks.append({
-            "type": "artifact",
-            "artifact_type": art.metadata.artifact_type,
-            "room": art.metadata.room_source,
-            "payload": art.data,
+            "type": "scene",
+            "payload": response.scene,
             "scene_contract": True
         })
+
+    else:
+        for art in response.artifacts:
+            scene.blocks.append({
+                "type": "artifact",
+                "artifact_type": getattr(art.metadata, "artifact_type", "artifact"),
+                "room": getattr(art.metadata, "room_source", "unknown"),
+                "payload": art.data,
+                "scene_contract": True
+            })
 
     print("SCENE BLOCK COUNT:", len(scene.blocks))
     scene.scene_contract = True
