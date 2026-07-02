@@ -1404,6 +1404,13 @@ def build_scene_contract(machine_response):
         "render_priority": machine_response.get("render_priority", 0),
         "confidence": machine_response.get("confidence", 0),
         "metadata": machine_response.get("metadata", {}),
+
+        # Preserve renderer payloads for AprilWeb
+        "render_blocks": machine_response.get("render_blocks", []),
+        "blocks": machine_response.get("blocks", machine_response.get("render_blocks", [])),
+        "renderer_state": machine_response.get("renderer_state", {}),
+        "visual_blocks": machine_response.get("visual_blocks", []),
+        "space": machine_response.get("space", {}),
     }
 
 
