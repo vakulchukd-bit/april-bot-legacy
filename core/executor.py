@@ -2557,13 +2557,21 @@ def build_machine_request(context):
     return req
 
 def collect_machine_contract(room_contracts):
+    print("========== COLLECT_MACHINE_CONTRACT ==========")
+    print("ROOM CONTRACT COUNT:", len(room_contracts))
     response=MachineResponse()
-    for contract in room_contracts:
+    for idx, contract in enumerate(room_contracts):
+        print(f"CONTRACT[{idx}] TYPE:", type(contract))
+        print(f"CONTRACT[{idx}] HAS ARTIFACT:", hasattr(contract,"artifact"))
+        print(f"CONTRACT[{idx}] HAS RENDER_BLOCKS:", hasattr(contract,"render_blocks"))
         if hasattr(contract,"artifact") and contract.artifact:
             response.artifacts.append(contract.artifact)
+    print("RESPONSE ARTIFACT COUNT:", len(response.artifacts))
     return response
 
 def build_machine_scene(response):
+    print("========== BUILD_MACHINE_SCENE ==========")
+    print("INPUT RESPONSE:", type(response))
     scene = MachineScene()
 
     # Canonical Fiber Route:
@@ -2581,6 +2589,7 @@ def build_machine_scene(response):
             "scene_contract": True
         })
 
+    print("SCENE BLOCK COUNT:", len(scene.blocks))
     scene.scene_contract = True
     return scene
 
