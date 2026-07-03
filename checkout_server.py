@@ -456,7 +456,12 @@ def normalize_executor_response(
     print(normalized)
 
     # Canonical transport object for AprilWeb.
-    normalized["scene_contract"] = build_gateway_scene_contract(normalized)
+    # Canonical route: preserve Executor scene_contract if already present.
+    normalized["scene_contract"] = (
+        result.get("scene_contract")
+        if isinstance(result, dict) and result.get("scene_contract")
+        else build_gateway_scene_contract(normalized)
+    )
 
     # Legacy renderer fields remain for compatibility only.
     normalized["legacy_renderers"] = {
@@ -600,6 +605,7 @@ def build_gateway_transport_payload(normalized):
     Final transport object.
     Gateway forwards the Executor scene without rebuilding it.
     """
+    # Forward canonical contract without rebuilding.
     return {
         "scene_contract": normalized.get("scene_contract", {}),
         "space_continuity": normalized.get("space_continuity", {}),
