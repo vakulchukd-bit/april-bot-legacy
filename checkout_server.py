@@ -171,7 +171,9 @@ def safe_json(value):
 def resolve_scene_content(result):
 
     content = (
-        result.get("content")
+        result.get("answer")
+        or result.get("content")
+        or result.get("summary")
         or result.get("response")
         or result.get("data")
     )
@@ -226,10 +228,7 @@ def resolve_scene_content(result):
 # =========================================================
 
 def executor_contract_passthrough(result):
-    """
-    Preserve Executor Scene Contract whenever it already exists.
-    Gateway should enrich only missing transport metadata.
-    """
+    
     if not isinstance(result, dict):
         return result
 
@@ -282,9 +281,13 @@ def normalize_executor_response(
             ),
 
         "content":
-            resolve_scene_content(
-                result
-            ),
+            resolve_scene_content(result),
+
+        "answer":
+            safe_json(result.get("answer")),
+
+        "summary":
+            safe_json(result.get("summary")),
 
         "scene_present":
             bool(
@@ -455,15 +458,18 @@ def normalize_executor_response(
     print("🌐 NORMALIZED:")
     print(normalized)
 
-    # Canonical transport object for AprilWeb.
-    # Canonical route: preserve Executor scene_contract if already present.
-    normalized["scene_contract"] = (
-        result.get("scene_contract")
-        if isinstance(result, dict) and result.get("scene_contract")
-        else build_gateway_scene_contract(normalized)
-    )
+    
+    canonical = result.get("scene_contract") if isinstance(result, dict) else None
+    if canonical:
+        canonical.setdefault("content", normalized.get("content"))
+        canonical.setdefault("answer", normalized.get("answer"))
+        canonical.setdefault("summary", normalized.get("summary"))
+        canonical.setdefault("render_blocks", normalized.get("render_blocks", []))
+        normalized["scene_contract"] = canonical
+    else:
+        normalized["scene_contract"] = build_gateway_scene_contract(normalized)
 
-    # Legacy renderer fields remain for compatibility only.
+    
     normalized["legacy_renderers"] = {
         "graph": normalized.get("graph"),
         "formula": normalized.get("formula"),
@@ -516,10 +522,7 @@ def build_artifact_packet(result):
 # =========================================================
 
 def build_gateway_scene_contract(normalized):
-    """
-    Gateway must transparently forward the Scene Contract without
-    rebuilding it.
-    """
+    
     return {
         "version": 1,
         "scene": normalized.get("scene", {}),
@@ -529,6 +532,9 @@ def build_gateway_scene_contract(normalized):
         "continuity": normalized.get("continuity", {}),
         "trajectory": normalized.get("trajectory", {}),
         "space": normalized.get("space", {}),
+        "content": normalized.get("content"),
+        "answer": normalized.get("answer"),
+        "summary": normalized.get("summary"),
     }
 
 
@@ -538,9 +544,7 @@ def build_gateway_scene_contract(normalized):
 # =========================================================
 
 def build_space_continuity(normalized):
-    """
-    Canonical workspace payload passed to AprilWeb.
-    """
+    
     return {
         "active_scene": normalized.get("scene", {}),
         "renderer_state": normalized.get("renderer_state", {}),
@@ -582,9 +586,7 @@ async def process_web_message(
         run_with_activity=run_with_activity
     )
 
-    # =====================================================
-    # 🔥 NORMALIZE FOR WEB SPACE
-    # =====================================================
+    
 
     result = executor_contract_passthrough(result)
 
@@ -601,17 +603,17 @@ async def process_web_message(
 # =========================================================
 
 def build_gateway_transport_payload(normalized):
-    """
-    Final transport object.
-    Gateway forwards the Executor scene without rebuilding it.
-    """
+    
     # Forward canonical contract without rebuilding.
+    contract = normalized.get("scene_contract", {})
     return {
-        "scene_contract": normalized.get("scene_contract", {}),
+        "scene_contract": contract,
         "space_continuity": normalized.get("space_continuity", {}),
-        "render_blocks": normalized.get("render_blocks", []),
-        "renderer_state": normalized.get("renderer_state", {}),
-        "content": normalized.get("content", ""),
+        "render_blocks": contract.get("render_blocks", normalized.get("render_blocks", [])),
+        "renderer_state": contract.get("renderer_state", normalized.get("renderer_state", {})),
+        "content": contract.get("content", normalized.get("content", "")),
+        "answer": contract.get("answer", normalized.get("answer")),
+        "summary": contract.get("summary", normalized.get("summary")),
     }
 
 # =========================================================
