@@ -101,6 +101,14 @@ def build_machine_contribution(machine_request:MachineRequest)->Dict[str,Any]:
 
 
 
+
+# =====================================================
+# CANONICAL_FIBER_ROUTE
+# MachineRequest -> MachineResponse -> Executor
+# This room must communicate only through the canonical
+# transport defined in C_ARTIFACT_CONTRACT.
+# =====================================================
+
 class BiologyRoom(Room):
     name = ROOM_ID
     id = ROOM_ID
