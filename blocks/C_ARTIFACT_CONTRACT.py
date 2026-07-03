@@ -779,7 +779,7 @@ class MachineResponse:
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     quality: Dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
-    contributions: List[Dict[str, Any]] = field(default_factory=list)
+    contributions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     recommendations: List[str] = field(default_factory=list)
     executor_hints: Dict[str, Any] = field(default_factory=dict)
     routing_decision: Dict[str, Any] = field(default_factory=dict)
@@ -912,3 +912,12 @@ def validate_fiber_core(contract: UniversalArtifactContract) -> dict:
         "scene_contract": hasattr(contract, "payload"),
         "artifact_contract": contract.artifact is not None or True,
     }
+
+
+# =====================================================
+# CANONICAL CONTRIBUTION API
+# =====================================================
+
+def add_room_contribution(response: MachineResponse, room: str, payload: Dict[str, Any]) -> None:
+    """Canonical API: each room writes its named contribution."""
+    response.contributions[room] = payload
