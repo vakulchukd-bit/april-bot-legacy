@@ -70,6 +70,10 @@ from blocks.presentation_formatter import (
     beautify_response
 )
 
+from blocks.C_ARTIFACT_CONTRACT import (
+    create_transport_contract,
+)
+
 # =====================================================
 # 🔥 MACHINE CHANNELS
 # =====================================================
@@ -1028,61 +1032,23 @@ async def process(
     # 🔥 FINAL RESULT
     # =====================================================
 
-    return {
-
-        # =================================================
-        # 🔥 FIBER TEXT ARTIFACT (Stage 1)
-        # =================================================
-        "artifact_type": "text",
-        "artifact_version": "fiber_v1",
-        "producer_room": "TEXT_ROOM",
-        "scene_ready": False,
-        "semantic_focus": None,
-        "representation_hints": [],
-
-        "fiber_trace": {
-            "room": "TEXT",
-            "stage": "TEXT_ARTIFACT",
-            "route": "FIBER",
-            "artifact": "text"
-        },
+    artifact_data = {
         "type": "text",
-
         "content": reply,
-
-        "machine_channels": {
-
-            "input":
-                TEXT_INPUT_CHANNEL,
-
-            "output":
-                TEXT_OUTPUT_CHANNEL
-        },
-
         "runtime": {
-
-            "plan":
-                runtime.get(
-                    "plan"
-                ),
-
-            "token_mode":
-                runtime.get(
-                    "token_mode"
-                )
+            "plan": runtime.get("plan"),
+            "token_mode": runtime.get("token_mode"),
         },
-
-        "renderer_safe": True,
-
-        "presentation_safe": True,
-
-        "continuity_safe": True,
-
-        "web_ready": True,
-
-        "botru_compatible": True,
-
-        "txt_config_ready": True,
-
-        "admin_panel_ready": True
+        "machine_channels": {
+            "input": TEXT_INPUT_CHANNEL,
+            "output": TEXT_OUTPUT_CHANNEL,
+        },
     }
+
+    return create_transport_contract(
+        artifact_type="text",
+        room_source="TEXT_ROOM",
+        data=artifact_data,
+        user_id=user_id,
+        subscription=runtime.get("plan", "Free"),
+    )
