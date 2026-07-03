@@ -1396,10 +1396,27 @@ def registry_accept_request(request: MachineRequest)->MachineRequest:
     return request
 
 def registry_collect_responses(responses):
-    mr=MachineResponse()
+    mr = MachineResponse()
+
     for r in responses:
-        if hasattr(r,"artifacts"):
+        if r is None:
+            continue
+
+        # Canonical path
+        if isinstance(r, MachineResponse):
             mr.artifacts.extend(r.artifacts)
+            continue
+
+        if hasattr(r, "artifacts"):
+            mr.artifacts.extend(r.artifacts)
+            continue
+
+        # Legacy compatibility during migration
+        if isinstance(r, dict):
+            artifact = r.get("artifact")
+            if artifact is not None:
+                mr.artifacts.append(artifact)
+
     return mr
 
 def registry_export_contract(response: MachineResponse):
