@@ -1069,9 +1069,12 @@ async def execute_rooms(
             # =====================================================
             # FIBER ROUTE (canonical)
             # =====================================================
+            # Fiber canonical room call with legacy compatibility payload.
             result = await room.handle(
-                handler_payload,
-                run_with_activity
+                user_id=user_id,
+                text=text,
+                context=handler_payload,
+                run=run_with_activity
             )
 
             # -----------------------------------------------------
