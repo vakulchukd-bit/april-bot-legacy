@@ -7,6 +7,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
     UniversalArtifactContract,
+    add_room_contribution,
 )
 
 try:
@@ -123,8 +124,8 @@ class BiologyRoom(Room):
 
 
 
-    def evaluate(self, text: str, context: Dict[str, Any]):
-        query = (text or "").lower()
+    def evaluate(self, request: MachineRequest):
+        query = (request.goal or "").lower()
         score = 0.0
         for token in ("днк","dna","ген","gene","клет","биолог","организм","protein","белок","эволюц"):
             if token in query:
@@ -145,10 +146,7 @@ class BiologyRoom(Room):
         )
 
     async def handle(self, request: MachineRequest, run=None) -> MachineResponse:
-        score = self.evaluate(
-            request.goal,
-            request.visual_context,
-        )
+        score = self.evaluate(request)
 
         response = MachineResponse()
         response.fiber = request.fiber
@@ -156,18 +154,16 @@ class BiologyRoom(Room):
         response.routing_decision = score
 
         if not score["active"]:
-            response.contributions.append({
-                "room": self.id,
-                "status": "no_match",
+            add_room_contribution(response,self.id,{
+                "status":"no_match"
             })
             return response
 
         artifact = self.execute(request)
         response.artifacts.append(artifact)
-        response.contributions.append({
-            "room": self.id,
-            "status": "completed",
-            "artifact_type": "biology",
+        add_room_contribution(response,self.id,{
+            "status":"completed",
+            "artifact_type":"biology"
         })
         response.executor_hints["room"]="biology"
         response.executor_hints["outputs"]=["text","table","link"]
