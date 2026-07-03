@@ -973,17 +973,7 @@ class TextRoom(Room):
             )
         )
 
-        return {
-
-            "type": "text",
-
-            "data":
-
-                result.get(
-                    "content",
-                    "⚠️ Пустой ответ"
-                )
-        }
+        return result
 
 
 
@@ -1009,7 +999,11 @@ class GuidanceRoom(Room):
 
         cognition = get_cognition(context)
 
-        return {"type":"internal_guidance","data":{"next_step": cognition.get("assistant_next_step")}}
+        mr = MachineResponse()
+        mr.contributions["guidance"] = {
+            "next_step": cognition.get("assistant_next_step")
+        }
+        return mr
 
 
 class GraphRoom(Room):
@@ -1034,23 +1028,15 @@ class GraphRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return {
-            "type":"artifact",
-            "artifact":{
-                "knowledge_graph":{
-                    "nodes":[],
-                    "edges":[],
-                    "relations":[]
-                },
-                "graph_data":{
-                    "nodes":[],
-                    "edges":[]
-                },
-                "description":"Knowledge graph generated from the current request.",
-                "title":"Graph",
-                "source":text
-            }
+        mr = MachineResponse()
+        mr.contributions["graph"] = {
+            "knowledge_graph":{"nodes":[],"edges":[],"relations":[]},
+            "graph_data":{"nodes":[],"edges":[]},
+            "description":"Knowledge graph generated from the current request.",
+            "title":"Graph",
+            "source":text
         }
+        return mr
 
 
 class FormulaRoom(Room):
@@ -1070,17 +1056,14 @@ class FormulaRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return build_artifact(
-            "formula",
-            data={
-                "formula": extract_formula_candidate(text) or text,
-                "title":"Formula"
-            },
-            view={
-                "latex":True,
-                "variables":True
-            }
-        )
+        mr = MachineResponse()
+        mr.contributions["formula"]={
+            "formula": extract_formula_candidate(text) or text,
+            "title":"Formula",
+            "latex":True,
+            "variables":True
+        }
+        return mr
 
 
 class FunctionRoom(Room):
@@ -1099,10 +1082,9 @@ class FunctionRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return {
-            "type": "function",
-            "data": text
-        }
+        mr = MachineResponse()
+        mr.contributions["function"]={"source":text}
+        return mr
 
 
 class TableRoom(Room):
@@ -1121,17 +1103,13 @@ class TableRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return build_artifact(
-            "table",
-            data={
-                "title":"Table",
-                "source": text,
-                **extract_table_payload(text)
-            },
-            view={
-                "spreadsheet":True
-            }
-        )
+        mr = MachineResponse()
+        mr.contributions["table"]={
+            "title":"Table",
+            "source":text,
+            **extract_table_payload(text)
+        }
+        return mr
 
 
 class LinkRoom(Room):
@@ -1150,10 +1128,9 @@ class LinkRoom(Room):
 
     async def handle(self, user_id, text, context, run):
 
-        return {
-            "type": "link",
-            "data": text
-        }
+        mr = MachineResponse()
+        mr.contributions["link"]={"source":text}
+        return mr
 
 
 # =====================================================
@@ -1197,20 +1174,17 @@ class DiagramRoom(Room):
         return 0.0
 
     async def handle(self, user_id, text, context, run):
-        return build_artifact(
-            "diagram",
-            data={
-                "title":"Diagram",
-                "nodes":[],
-                "edges":[],
-                "source":text
-            },
-            view={
-                "layout":"vertical",
-                "zoom":True,
-                "pan":True
-            }
-        )
+        mr = MachineResponse()
+        mr.contributions["diagram"] = {
+            "title":"Diagram",
+            "nodes":[],
+            "edges":[],
+            "source":text,
+            "layout":"vertical",
+            "zoom":True,
+            "pan":True
+        }
+        return mr
 
 
 class CodeRoom(Room):
@@ -1222,17 +1196,14 @@ class CodeRoom(Room):
         return 8.0 if detect_code_signal(text) else 0.0
 
     async def handle(self, user_id, text, context, run):
-        return build_artifact(
-            "code",
-            data={
-                "language":"auto",
-                "filename":"generated.txt",
-                "source":text
-            },
-            view={
-                "line_numbers":True
-            }
-        )
+        mr = MachineResponse()
+        mr.contributions["code"] = {
+            "language":"auto",
+            "filename":"generated.txt",
+            "source":text,
+            "line_numbers":True
+        }
+        return mr
 
 
 
@@ -1405,17 +1376,13 @@ def registry_collect_responses(responses):
         # Canonical path
         if isinstance(r, MachineResponse):
             mr.artifacts.extend(r.artifacts)
+            mr.contributions.update(getattr(r,"contributions",{}))
             continue
 
         if hasattr(r, "artifacts"):
             mr.artifacts.extend(r.artifacts)
             continue
-
-        # Legacy compatibility during migration
-        if isinstance(r, dict):
-            artifact = r.get("artifact")
-            if artifact is not None:
-                mr.artifacts.append(artifact)
+        # Canonical route only.
 
     return mr
 
@@ -1424,7 +1391,7 @@ def registry_export_contract(response: MachineResponse):
     contract.transport.origin="rooms_registry"
     contract.transport.destination="executor"
     contract.transport.pipeline_stage="registry_output"
-    contract.payload.artifacts=[a.data for a in response.artifacts]
+    contract.payload.artifacts = list(response.artifacts)
     if response.artifacts:
         contract.artifact=response.artifacts[0]
     return contract
