@@ -223,6 +223,11 @@ def validate_machine_response(
     if not result:
         return False
 
+    from blocks.C_ARTIFACT_CONTRACT import MachineResponse
+
+    if isinstance(result, MachineResponse):
+        return True
+
     if not isinstance(
         result,
         dict
@@ -1077,16 +1082,6 @@ async def execute_rooms(
                 run=run_with_activity
             )
 
-            # -----------------------------------------------------
-            # LEGACY ROUTE (disabled for migration reference)
-            # result = await room.handle(
-            #     user_id,
-            #     text,
-            #     handler_payload,
-            #     run_with_activity
-            # )
-            # -----------------------------------------------------
-
             print(f"🔥 HANDLE RESULT TYPE [{room.name}]:", type(result))
             print(f"🔥 HANDLE RESULT [{room.name}]:", result)
 
@@ -1126,6 +1121,16 @@ async def execute_rooms(
             # ================================================
             # INTERNAL SIGNALS ARE NOT USER ANSWERS
             # ================================================
+
+            if hasattr(result, "artifacts") and not isinstance(result, dict):
+                collected_results.append({
+                    "channel": RESPONSE_CHANNEL,
+                    "room": room.name,
+                    "trajectory": context.get("trajectory"),
+                    "result": result,
+                })
+                machine_responses.append(result)
+                continue
 
             result_type = result.get("type")
 
@@ -1345,6 +1350,9 @@ def build_checkout_scene_contract(scene_result):
         "scene_plan": scene_result.get("scene_plan"),
         "blocks": blocks,
         "render_blocks": blocks,
+        "content": scene_result.get("content"),
+        "summary": scene_result.get("summary"),
+        "answer": scene_result.get("answer"),
         "artifact_scene": scene_result.get("artifact_scene", []),
         "renderer_state": scene_result.get("renderer_state", {}),
         "executor_route": "fiber_scene_v2",
@@ -2511,9 +2519,6 @@ def artifact_to_render_block(result):
 # =========================================================
 
 def build_scene_from_artifact(artifact):
-    # Legacy compatibility helper.
-    # Used only as a fallback when MachineScene has no renderable blocks.
-    # Canonical route: MachineScene -> Scene Contract.
 
     scene_blocks = []
 
@@ -2594,6 +2599,10 @@ def _extract_contract_payload(contract):
         "scene": None,
         "renderer_state": {},
         "metadata": {},
+        "content": None,
+        "summary": None,
+        "answer": None,
+        "contributions": {},
     }
     if contract is None:
         return payload
@@ -2603,12 +2612,20 @@ def _extract_contract_payload(contract):
     payload["scene"] = getattr(contract, "scene", None)
     payload["renderer_state"] = getattr(contract, "renderer_state", {}) or {}
     payload["metadata"] = getattr(contract, "metadata", {}) or {}
+    payload["content"] = getattr(contract, "content", None)
+    payload["summary"] = getattr(contract, "summary", None)
+    payload["answer"] = getattr(contract, "answer", None)
+    payload["contributions"] = getattr(contract, "contributions", {}) or {}
     return payload
 
 def collect_machine_contract(room_contracts):
     print("========== COLLECT_MACHINE_CONTRACT ==========")
     print("ROOM CONTRACT COUNT:", len(room_contracts))
     response=MachineResponse()
+    response.content = None
+    response.summary = None
+    response.answer = None
+    response.contributions = {}
     for idx, contract in enumerate(room_contracts):
         print(f"CONTRACT[{idx}] TYPE:", type(contract))
         print(f"CONTRACT[{idx}] HAS ARTIFACT:", hasattr(contract,"artifact"))
@@ -2628,6 +2645,14 @@ def collect_machine_contract(room_contracts):
         if not hasattr(response, "renderer_state"):
             response.renderer_state = {}
         response.renderer_state.update(normalized["renderer_state"])
+
+        if normalized["content"] and not response.content:
+            response.content = normalized["content"]
+        if normalized["summary"] and not response.summary:
+            response.summary = normalized["summary"]
+        if normalized["answer"] and not response.answer:
+            response.answer = normalized["answer"]
+        response.contributions.update(normalized["contributions"])
     print("RESPONSE ARTIFACT COUNT:", len(response.artifacts))
     return response
 
@@ -2641,8 +2666,6 @@ def build_machine_scene(response):
     if response is None:
         scene.scene_contract = True
         return scene
-
-    # Stage 2: prefer canonical render blocks and scene before artifact fallback
     if hasattr(response, "render_blocks") and response.render_blocks:
         scene.blocks.extend(response.render_blocks)
 
@@ -2654,6 +2677,21 @@ def build_machine_scene(response):
         })
 
     else:
+        # Preserve textual MachineResponse when no renderer blocks exist.
+        text_payload = (
+            getattr(response, "answer", None)
+            or getattr(response, "content", None)
+            or getattr(response, "summary", None)
+        )
+
+        if text_payload:
+            scene.blocks.append({
+                "type": "text",
+                "content": text_payload,
+                "scene_contract": True,
+                "canonical_route": True,
+            })
+
         for art in response.artifacts:
             scene.blocks.append({
                 "type": "artifact",
@@ -2680,9 +2718,6 @@ def verify_fiber_route():
         "output": "MachineScene",
         "scene_contract": True,
     }
-
-# Compatibility helper layer removed.
-# Executor uses MachineRequest directly.
 # =====================================================
 # STAGE 2 - Scene Contract Bridge
 # =====================================================
