@@ -236,6 +236,18 @@ def executor_contract_passthrough(result):
         result.setdefault("gateway_contract", True)
         return result
 
+    if result.get("scene") or result.get("render_blocks") or result.get("blocks"):
+        result["scene_contract"] = {
+            "version": 1,
+            "scene": result.get("scene", {}),
+            "render_blocks": result.get("render_blocks", result.get("blocks", [])),
+            "renderer_state": result.get("renderer_state", {}),
+            "content": result.get("content"),
+            "answer": result.get("answer"),
+            "summary": result.get("summary"),
+        }
+        result["gateway_contract"] = True
+
     return result
 
 # =========================================================
@@ -590,8 +602,10 @@ async def process_web_message(
 
     result = executor_contract_passthrough(result)
 
+    normalized = normalize_executor_response(result)
+
     try:
-        sc = result.get("scene_contract") if isinstance(result, dict) else None
+        sc = normalized.get("scene_contract") if isinstance(normalized, dict) else None
         print("="*80)
         print("🧭 FIBER SCENE CONTRACT AUDIT")
         print("SCENE_CONTRACT TYPE:", type(sc))
@@ -605,8 +619,6 @@ async def process_web_message(
         print("="*80)
     except Exception as audit_error:
         print("SCENE CONTRACT AUDIT ERROR:", audit_error)
-
-    normalized = normalize_executor_response(result)
 
     normalized["space_continuity"] = build_space_continuity(normalized)
 
