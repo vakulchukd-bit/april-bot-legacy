@@ -250,9 +250,9 @@ def safe_output(result):
     if not result:
         return ""
 
-    if result.get("type") == "artifact":
+    if governance_type(result) == "artifact":
 
-        artifact = result.get("artifact")
+        artifact = governance_get(result, "artifact")
 
         try:
             return str(
@@ -261,12 +261,41 @@ def safe_output(result):
         except Exception:
             return str(result)
 
-    return str(
-        result.get(
-            "data",
-            ""
-        )
-    ).strip()
+    value = (
+        governance_get(result, "data", None)
+        or governance_get(result, "content", None)
+        or governance_get(result, "summary", None)
+        or governance_get(result, "answer", "")
+    )
+    return str(value).strip()
+
+
+
+# =========================================================
+# 🧠 GOVERNANCE RESULT ADAPTER (STAGE 1)
+# =========================================================
+
+def governance_get(result, key, default=None):
+    if result is None:
+        return default
+    if isinstance(result, dict):
+        return result.get(key, default)
+    try:
+        value = getattr(result, key)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+    getter = getattr(result, "get", None)
+    if callable(getter):
+        try:
+            return getter(key, default)
+        except Exception:
+            pass
+    return default
+
+def governance_type(result):
+    return governance_get(result, "type", "text")
 
 # =========================================================
 # 🧠 SYSTEM LEAK DETECTION
@@ -362,10 +391,7 @@ def is_renderer_result(result):
 
         return False
 
-    result_type = result.get(
-        "type",
-        "text"
-    )
+    result_type = governance_type(result)
 
     if result_type in [
 
@@ -540,16 +566,19 @@ def analyze_completion(
 
         return payload
 
-    result_type = result.get(
-        "type",
-        "text"
-    )
+    result_type = governance_type(result)
 
-    output = safe_output(
-        result
-    )
-
+    output = safe_output(result)
     lowered = output.lower()
+
+    # Canonical machine-response fallback
+    if not output:
+        output = str(
+            governance_get(result, "content", "")
+            or governance_get(result, "summary", "")
+            or governance_get(result, "answer", "")
+        ).strip()
+        lowered = output.lower()
 
     if result_type in [
 
@@ -707,7 +736,9 @@ def evaluate_usefulness(
 
     lowered = output.lower()
 
-    if result.get("type") in [
+    result_kind = governance_type(result)
+
+    if result_kind in [
 
         "artifact",
         "graph",
@@ -777,9 +808,7 @@ def validate_final_response(
         cognition
     )
 
-    if not completion.get(
-        "completed"
-    ):
+    if not governance_get(completion, "completed"):
 
         APRIL_LOG_OUT(
 
@@ -865,9 +894,7 @@ def should_override(
         "prefer_renderer"
     ):
 
-        if result.get(
-            "type"
-        ) == "image":
+        if governance_type(result) == "image":
 
             APRIL_LOG_OUT(
 
@@ -1089,15 +1116,10 @@ def build_authority_decision(
             not override,
 
         "completed":
-            completion.get(
-                "completed",
-                False
-            ),
+            governance_get(completion, "completed", False),
 
         "completion_reason":
-            completion.get(
-                "reason"
-            ),
+            governance_get(completion, "reason"),
 
         "usefulness":
             usefulness,
