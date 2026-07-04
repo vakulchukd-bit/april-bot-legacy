@@ -590,6 +590,22 @@ async def process_web_message(
 
     result = executor_contract_passthrough(result)
 
+    try:
+        sc = result.get("scene_contract") if isinstance(result, dict) else None
+        print("="*80)
+        print("🧭 FIBER SCENE CONTRACT AUDIT")
+        print("SCENE_CONTRACT TYPE:", type(sc))
+        if isinstance(sc, dict):
+            print("SCENE_CONTRACT KEYS:", list(sc.keys()))
+            rb = sc.get("render_blocks", [])
+            print("RENDER_BLOCKS COUNT:", len(rb) if isinstance(rb, list) else "not-list")
+            print("RENDERER_STATE KEYS:", list((sc.get("renderer_state") or {}).keys()))
+        else:
+            print("SCENE_CONTRACT VALUE:", sc)
+        print("="*80)
+    except Exception as audit_error:
+        print("SCENE CONTRACT AUDIT ERROR:", audit_error)
+
     normalized = normalize_executor_response(result)
 
     normalized["space_continuity"] = build_space_continuity(normalized)
