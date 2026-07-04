@@ -1829,6 +1829,24 @@ async def execute(
             {}
         )
 
+        # =====================================================
+        # FIBER ROUTE STAGE 2
+        # Preserve canonical transport fields from the outer
+        # payload when Executor unwraps "result".
+        # =====================================================
+        if isinstance(room_response, dict) and isinstance(result, dict):
+            for _k in (
+                "scene_contract",
+                "render_blocks",
+                "renderer_state",
+                "machine_scene",
+                "scene_plan",
+                "gateway_transport",
+                "scene_version",
+            ):
+                if _k in room_response and _k not in result:
+                    result[_k] = room_response.get(_k)
+
         result = synthesize_final_answer(
             result=result,
             cognition=cognition,
