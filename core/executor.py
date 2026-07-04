@@ -1344,8 +1344,14 @@ def build_checkout_scene_contract(scene_result):
         blocks = list(getattr(machine_scene, "blocks", []))
 
     return {
-        "scene_contract": True,
-        "scene_version": "1.1",
+        "scene_contract": {
+            "render_blocks": blocks,
+            "scene_plan": scene_result.get("scene_plan"),
+            "renderer_state": scene_result.get("renderer_state", {}),
+            "machine_scene": machine_scene,
+            "scene_version": "1.2",
+        },
+        "scene_version": "1.2",
         "machine_scene": machine_scene,
         "scene_plan": scene_result.get("scene_plan"),
         "blocks": blocks,
