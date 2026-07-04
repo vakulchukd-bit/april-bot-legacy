@@ -574,6 +574,20 @@ def normalize_executor_response(
 
     normalized["final_text"] = final_text
 
+    # =====================================================
+    # FIBER ROUTE PASSTHROUGH (Stage 1)
+    # Preserve canonical transport contract from Executor.
+    # =====================================================
+    normalized["scene_contract"] = result.get("scene_contract")
+    normalized["gateway_transport"] = result.get("gateway_transport")
+    normalized["render_blocks"] = result.get(
+        "render_blocks",
+        normalized.get("blocks", [])
+    )
+    normalized["renderer_state"] = result.get("renderer_state")
+    normalized["machine_scene"] = result.get("machine_scene")
+    normalized["scene_plan"] = result.get("scene_plan")
+
     return normalized
 
 # =========================================================
@@ -811,7 +825,26 @@ def organize_multimodal_response(
             result.get(
                 "links",
                 []
-            )
+            ),
+
+        # Fiber Route transport passthrough
+        "scene_contract":
+            result.get("scene_contract"),
+
+        "gateway_transport":
+            result.get("gateway_transport"),
+
+        "render_blocks":
+            result.get("render_blocks", []),
+
+        "renderer_state":
+            result.get("renderer_state"),
+
+        "machine_scene":
+            result.get("machine_scene"),
+
+        "scene_plan":
+            result.get("scene_plan")
     }
 
     return organized
@@ -981,7 +1014,25 @@ def april_web_chat():
                 result.get(
                     "links",
                     []
-                )
+                ),
+
+            "scene_contract":
+                result.get("scene_contract"),
+
+            "gateway_transport":
+                result.get("gateway_transport"),
+
+            "render_blocks":
+                result.get("render_blocks", []),
+
+            "renderer_state":
+                result.get("renderer_state"),
+
+            "machine_scene":
+                result.get("machine_scene"),
+
+            "scene_plan":
+                result.get("scene_plan")
         })
 
     except Exception as e:
