@@ -1234,7 +1234,15 @@ async def execute_rooms(
                 "scene_contract": True,
                 "legacy_routes": 0,
                 "machine_contract_count": len(machine_contracts),
-                "machine_response_count": len(machine_responses)
+                "machine_response_count": len(machine_responses),
+
+                # =====================================================
+                # CANONICAL TEXT TRANSPORT
+                # Preserve MachineResponse text on the single Fiber Route.
+                # =====================================================
+                "content": getattr(unified_machine_response, "content", None),
+                "summary": getattr(unified_machine_response, "summary", None),
+                "answer": getattr(unified_machine_response, "answer", None)
             }
         }
 
@@ -1828,24 +1836,6 @@ async def execute(
             "result",
             {}
         )
-
-        # =====================================================
-        # FIBER ROUTE STAGE 2
-        # Preserve canonical transport fields from the outer
-        # payload when Executor unwraps "result".
-        # =====================================================
-        if isinstance(room_response, dict) and isinstance(result, dict):
-            for _k in (
-                "scene_contract",
-                "render_blocks",
-                "renderer_state",
-                "machine_scene",
-                "scene_plan",
-                "gateway_transport",
-                "scene_version",
-            ):
-                if _k in room_response and _k not in result:
-                    result[_k] = room_response.get(_k)
 
         result = synthesize_final_answer(
             result=result,
