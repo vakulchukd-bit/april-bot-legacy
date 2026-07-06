@@ -267,16 +267,31 @@ def machine_to_human(
     payload,
     result_type="text"
 ):
+    # Canonical Bot.ru bridge:
+    # Accept MachineResponse / Scene Contract dictionaries
+    # and extract the human-facing text before cleanup.
+    if isinstance(payload, dict):
+        for key in (
+            "answer",
+            "response",
+            "content",
+            "final_text",
+            "summary",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                payload = value
+                break
+        else:
+            payload = json.dumps(payload, ensure_ascii=False)
 
-    if not isinstance(
-        payload,
-        str
-    ):
+    elif payload is None:
+        payload = ""
 
-        return payload
+    elif not isinstance(payload, str):
+        payload = str(payload)
 
     if result_type in RENDERER_TYPES:
-
         return payload
 
     payload = remove_machine_garbage(
