@@ -703,8 +703,18 @@ def enrich_machine_response(contract):
     mr = contract.setdefault("machine_response", {})
 
     content = mr.get("content") or mr.get("answer") or mr.get("summary") or ""
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            mr["answer"] = content["text"]
+        elif isinstance(content.get("answer"), str):
+            mr["answer"] = content["answer"]
+        elif isinstance(content.get("summary"), str):
+            mr["answer"] = content["summary"]
+        else:
+            mr.setdefault("answer","")
+    else:
+        mr.setdefault("answer", content)
     mr["content"] = content
-    mr.setdefault("answer", content)
     mr.setdefault("summary", content[:500] if isinstance(content, str) else "")
     mr.setdefault("scene", {})
     mr.setdefault("render_blocks", [])
@@ -779,10 +789,22 @@ def detect_executor_artifacts(machine_response):
         if key not in content:
             continue
         payload = content[key]
-        render_blocks.append({
-            "type": block_type,
-            "payload": payload
-        })
+        block={"type":block_type}
+        if block_type=="text":
+            block["content"]=payload
+        elif block_type=="table" and isinstance(payload,dict):
+            block.update(payload)
+        elif block_type=="gallery":
+            block["images"]=payload
+        elif block_type=="image":
+            block["url"]=payload
+        elif block_type=="code":
+            block["content"]=payload
+        elif block_type=="link":
+            block["links"]=payload
+        else:
+            block["payload"]=payload
+        render_blocks.append(block)
         artifacts.append({
             "type": block_type,
             "payload": payload
