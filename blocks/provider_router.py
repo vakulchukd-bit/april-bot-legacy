@@ -421,7 +421,7 @@ def build_provider_machine_response(text, parsed_contract=None):
 import json
 
 def parse_provider_machine_contract(raw_text):
-    """Compatibility parser. Executor now prefers native MachineResponse; parser is fallback-only."""
+    """Parse a MachineResponse transport contract."""
     try:
         data=json.loads(raw_text)
         if isinstance(data,dict):
@@ -481,7 +481,6 @@ def validate_machine_response_contract(contract):
 
 
 def provider_contract_ready(machine_response):
-    provider_log("🧠 FIBER ROUTE: MachineResponse READY")
     return machine_response
 
 
@@ -545,6 +544,12 @@ def sanitize_internal_reasoning(text):
     return result.strip()
 
 
+# =====================================================
+# PROVIDER RESPONSIBILITY — OPENAI REQUEST BUILDER
+# Stage 2 COMPLETE
+# Canonical MachineRequest -> Canonical OpenAI Request
+# =====================================================
+
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
 You are the Provider of the APRIL Fiber Route.
 
@@ -566,10 +571,54 @@ metadata
 Every answer must be suitable for direct Scene construction by the Executor.
 """
 
+
+def build_openai_request(machine_request):
+    """
+    Stage 2:
+    Convert one canonical MachineRequest into one canonical
+    OpenAI Responses API request.
+    """
+    if not isinstance(machine_request, dict):
+        machine_request = {}
+
+    payload = {
+        "goal": machine_request.get("goal"),
+        "intent": machine_request.get("intent"),
+        "memory": machine_request.get("memory"),
+        "visual_context": machine_request.get("visual_context"),
+        "routing": machine_request.get("routing"),
+        "response_decision": machine_request.get("response_decision"),
+        "renderer_preferences": machine_request.get("renderer_preferences"),
+        "metadata": machine_request.get("metadata"),
+    }
+
+    provider_log("========== MACHINE REQUEST ==========")
+    provider_log(json.dumps(payload, ensure_ascii=False)[:8000])
+
+    structured_prompt = (
+        "APRIL MACHINE REQUEST\n\n"
+        "Return ONLY one valid MachineResponse transport contract.\n\n"
+        f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
+        f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
+        f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
+        f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
+        f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
+        f"RESPONSE_DECISION:\n{json.dumps(payload.get('response_decision'), ensure_ascii=False)}\n\n"
+        f"RENDERER:\n{json.dumps(payload.get('renderer_preferences'), ensure_ascii=False)}\n\n"
+        "Output format: MachineResponse only. No markdown. No explanations."
+    )
+
+    return {
+        "role": "user",
+        "content": [{
+            "type": "input_text",
+            "text": structured_prompt
+        }]
+    }
+
+
 def normalize_provider_input(messages):
-    """
-    Normalize Executor payload to Responses API input items.
-    """
+    """Build canonical OpenAI request from MachineRequest."""
     system_item = {
         "role": "system",
         "content": [
@@ -580,62 +629,141 @@ def normalize_provider_input(messages):
         ],
     }
 
-    if isinstance(messages, str):
-        return [system_item, {
-            "role": "user",
-            "content": [{"type": "input_text", "text": messages}],
-        }]
+    # Stage 1: canonical MachineRequest has highest priority.
+    if not isinstance(messages, dict):
+        raise TypeError(
+            "Provider accepts only canonical MachineRequest."
+        )
 
-    if isinstance(messages, dict):
-        if "role" in messages and "content" in messages:
-            return [system_item, messages]
-        return [system_item, {
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": json.dumps(messages, ensure_ascii=False)
-            }],
-        }]
-
-    if isinstance(messages, list):
-        return [system_item] + messages
-
-    return [system_item, {
-        "role": "user",
-        "content": [{"type": "input_text", "text": str(messages)}],
-    }]
+    return [system_item, build_openai_request(messages)]
 
 # =====================================================
 # STAGE 3 - UNIFIED PROVIDER CONTRACT
 # =====================================================
 
+# =====================================================
+# PROVIDER RESPONSIBILITY — OPENAI RESPONSE TRANSLATOR
+# STAGE 3 COMPLETE
+# Provider is the single OpenAI→April translator.
+# Every provider response leaves this file only as a
+# validated canonical MachineResponse for the Executor.
+# =====================================================
+
 def create_provider_contract(raw_text):
+    """Stage 3: translate every OpenAI response into one canonical MachineResponse."""
+
     if (
         isinstance(raw_text, dict)
         and raw_text.get("type") == "provider_response"
         and isinstance(raw_text.get("machine_response"), dict)
     ):
-        return raw_text
+        provider_log("🧠 STAGE3: canonical MachineResponse received")
+        return provider_contract_ready(raw_text)
 
     parsed = raw_text if isinstance(raw_text, dict) else parse_provider_machine_contract(raw_text)
-    contract = ensure_scene_first_contract(parsed)
-    return build_provider_machine_response(raw_text, contract)
+    parsed = validate_machine_response_contract(parsed)
+    parsed = ensure_scene_first_contract(parsed)
+
+    parsed.setdefault("content", parsed.get("response") or parsed.get("summary",""))
+    parsed.setdefault("answer", parsed.get("content"))
+    parsed.setdefault("response", parsed.get("answer"))
+
+    machine = build_provider_machine_response(raw_text, parsed)
+
+    return finalize_executor_contract(machine)
 
 
 
-# =====================================================
-# STAGE 4 - CENTRALIZED FALLBACK CONTRACT
-# =====================================================
 
-def build_fallback_provider_contract(space):
+def enrich_machine_response(contract):
+    """
+    Normalize fields expected by Executor.
+    """
+    mr = contract.setdefault("machine_response", {})
+
+    content = mr.get("content") or mr.get("answer") or mr.get("summary") or ""
+    mr["content"] = content
+    mr.setdefault("answer", content)
+    mr.setdefault("summary", content[:500] if isinstance(content, str) else "")
+    mr.setdefault("scene", {})
+    mr.setdefault("render_blocks", [])
+    mr.setdefault("artifacts", [])
+    mr.setdefault("scene_plan", ["text"])
+    mr.setdefault("render_priority", ["text"])
+    mr.setdefault("metadata", {})
+    return contract
+
+
+
+def infer_executor_rendering(machine_response):
+    """
+    Infer rendering hints for Executor.
+    """
+    mr = machine_response.setdefault("machine_response", {})
+    content = str(mr.get("content") or "")
+
+    if not mr.get("render_blocks"):
+        mr["render_blocks"] = [{
+            "type": "text",
+            "content": content
+        }]
+
+    if not mr.get("scene_plan"):
+        mr["scene_plan"] = ["text"]
+
+    if not mr.get("render_priority"):
+        mr["render_priority"] = ["text"]
+
+    return machine_response
+
+
+
+def detect_executor_artifacts(machine_response):
+    """
+    Populate canonical artifact/render hints from structured content.
+    """
+    mr = machine_response.setdefault("machine_response", {})
+    content = mr.get("content")
+
+    if isinstance(content, dict):
+        if content.get("table") and not mr.get("artifacts"):
+            mr["artifacts"]=[{"type":"table","payload":content["table"]}]
+        if content.get("graph"):
+            mr.setdefault("render_blocks", []).append({
+                "type":"graph",
+                "payload":content["graph"]
+            })
+        if content.get("links"):
+            mr.setdefault("metadata", {})["links"]=content["links"]
+
+    return machine_response
+
+
+
+def finalize_executor_contract(machine_response):
+    """Canonical Provider -> Executor transport pipeline."""
+    for step in (
+        enrich_machine_response,
+        infer_executor_rendering,
+        detect_executor_artifacts,
+    ):
+        machine_response = step(machine_response)
+    return machine_response
+
+
+def build_provider_overload_contract(space):
     overload = build_overload_response(space)
-    return provider_contract_ready(
-        create_provider_contract(overload)
-    )
+    return create_provider_contract(overload)
 
 
 # =====================================================
 # 🔥 TEXT GENERATION
+# =====================================================
+
+# =====================================================
+# PROVIDER ROUTE
+# Canonical flow:
+# MachineRequest -> OpenAI -> MachineResponse -> Executor
 # =====================================================
 
 async def generate_text(
@@ -674,7 +802,7 @@ async def generate_text(
 
         normalized_input = normalize_provider_input(messages)
 
-        provider_log("========== NORMALIZED INPUT ==========")
+        provider_log("========== OPENAI REQUEST BUILDER ==========")
         provider_log(json.dumps(normalized_input, ensure_ascii=False)[:8000])
 
         response = (
@@ -713,9 +841,7 @@ async def generate_text(
             )
 
             overload = build_overload_response("Dialogue-space")
-            return provider_contract_ready(
-                create_provider_contract(overload)
-            )
+            return create_provider_contract(overload)
 
         provider_log(
             "🧠 OPENAI TEXT SUCCESS"
@@ -726,12 +852,8 @@ async def generate_text(
             True
         )
 
-        contract=create_provider_contract(text)
-
-        provider_log("========== PROVIDER CONTRACT ==========")
-        provider_log(json.dumps(contract, ensure_ascii=False)[:8000])
-
-        return provider_contract_ready(contract)
+        contract = create_provider_contract(text)
+        return contract
 
     except Exception as e:
 
@@ -745,7 +867,7 @@ async def generate_text(
             False
         )
 
-        return build_fallback_provider_contract("Dialogue-space")
+        return build_provider_overload_contract("Dialogue-space")
 
 
 # =====================================================
@@ -916,7 +1038,7 @@ async def analyze_image_with_fallback(
                     True
                 )
 
-                return provider_contract_ready(create_provider_contract(text))
+                return create_provider_contract(text)
 
         except Exception as e:
 
@@ -993,14 +1115,14 @@ async def analyze_image_with_fallback(
                 True
             )
 
-            return provider_contract_ready(create_provider_contract(text))
+            return create_provider_contract(text)
 
         provider_exit(
             "openai_image_fallback",
             False
         )
 
-        return build_fallback_provider_contract("Visual-space")
+        return build_provider_overload_contract("Visual-space")
 
     except Exception as e:
 
@@ -1014,7 +1136,7 @@ async def analyze_image_with_fallback(
             False
         )
 
-        return build_fallback_provider_contract("Visual-space")
+        return build_provider_overload_contract("Visual-space")
 
 
 PROVIDER_ROUTE_VERSION="fiber_scene_v4"
