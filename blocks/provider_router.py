@@ -419,6 +419,7 @@ def build_provider_machine_response(text, parsed_contract=None):
     }
 
 import json
+from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
 def parse_provider_machine_contract(raw_text):
     """Parse a MachineResponse transport contract."""
@@ -617,6 +618,25 @@ def build_openai_request(machine_request):
     }
 
 
+
+def machine_request_to_dict(machine_request):
+    """Convert canonical MachineRequest object to provider payload."""
+    if isinstance(machine_request, dict):
+        return machine_request
+    if isinstance(machine_request, MachineRequest):
+        return {
+            "goal": getattr(machine_request, "goal", None),
+            "intent": getattr(machine_request, "intent", None),
+            "memory": getattr(machine_request, "memory", None),
+            "visual_context": getattr(machine_request, "visual_context", None),
+            "routing": getattr(machine_request, "routing", None),
+            "response_decision": getattr(machine_request, "response_decision", None),
+            "renderer_preferences": getattr(machine_request, "renderer_preferences", None),
+            "metadata": getattr(machine_request, "metadata", None),
+        }
+    raise TypeError("Provider accepts only canonical MachineRequest.")
+
+
 def normalize_provider_input(messages):
     """Build canonical OpenAI request from MachineRequest."""
     system_item = {
@@ -629,13 +649,8 @@ def normalize_provider_input(messages):
         ],
     }
 
-    # Stage 1: canonical MachineRequest has highest priority.
-    if not isinstance(messages, dict):
-        raise TypeError(
-            "Provider accepts only canonical MachineRequest."
-        )
-
-    return [system_item, build_openai_request(messages)]
+    payload = machine_request_to_dict(messages)
+    return [system_item, build_openai_request(payload)]
 
 # =====================================================
 # STAGE 3 - UNIFIED PROVIDER CONTRACT
