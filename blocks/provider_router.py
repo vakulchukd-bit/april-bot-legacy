@@ -741,21 +741,61 @@ def infer_executor_rendering(machine_response):
 
 def detect_executor_artifacts(machine_response):
     """
-    Populate canonical artifact/render hints from structured content.
+    Universal artifact normalization for the existing Fiber Route.
     """
     mr = machine_response.setdefault("machine_response", {})
     content = mr.get("content")
+    if not isinstance(content, dict):
+        return machine_response
 
-    if isinstance(content, dict):
-        if content.get("table") and not mr.get("artifacts"):
-            mr["artifacts"]=[{"type":"table","payload":content["table"]}]
-        if content.get("graph"):
-            mr.setdefault("render_blocks", []).append({
-                "type":"graph",
-                "payload":content["graph"]
+    render_blocks = mr.setdefault("render_blocks", [])
+    artifacts = mr.setdefault("artifacts", [])
+    metadata = mr.setdefault("metadata", {})
+
+    mapping = {
+        "table":"table",
+        "graph":"graph",
+        "knowledge_graph":"knowledge_graph",
+        "relation_graph":"relation_graph",
+        "relations":"relations",
+        "gallery":"gallery",
+        "image":"image",
+        "images":"gallery",
+        "diagram":"diagram",
+        "scene":"scene",
+        "layout":"layout",
+        "visual":"visual",
+        "renderer_scene":"renderer_scene",
+        "code":"code",
+        "formula":"formula",
+        "function":"function",
+        "markdown":"markdown",
+        "text":"text",
+        "link":"link",
+        "links":"link",
+    }
+
+    for key, block_type in mapping.items():
+        if key not in content:
+            continue
+        payload = content[key]
+        render_blocks.append({
+            "type": block_type,
+            "payload": payload
+        })
+        artifacts.append({
+            "type": block_type,
+            "payload": payload
+        })
+        if key in ("link","links"):
+            metadata["links"] = payload
+
+    if mr.get("answer"):
+        if not any(b.get("type")=="text" for b in render_blocks):
+            render_blocks.insert(0,{
+                "type":"text",
+                "content":mr["answer"]
             })
-        if content.get("links"):
-            mr.setdefault("metadata", {})["links"]=content["links"]
 
     return machine_response
 
