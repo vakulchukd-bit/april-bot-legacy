@@ -381,12 +381,30 @@ def normalize_response_text(text):
 def build_provider_machine_response(text, parsed_contract=None):
     """Build a unified MachineResponse transport contract."""
     parsed_contract = parsed_contract or {}
+
+    summary = parsed_contract.get("summary", "")
+    explanation = parsed_contract.get("explanation", summary)
+
+    content = parsed_contract.get("content")
+    if content is None:
+        content = text
+
+    answer = parsed_contract.get("answer")
+    if answer is None:
+        answer = content
+
+    response = parsed_contract.get("response")
+    if response is None:
+        response = answer
+
     return {
         "type": "provider_response",
         "machine_response": {
-            "summary": parsed_contract.get("summary", text),
-            "explanation": parsed_contract.get("explanation", text),
-            "content": text,
+            "summary": summary,
+            "explanation": explanation,
+            "content": content,
+            "answer": answer,
+            "response": response,
             "scene": parsed_contract.get("scene", {}),
             "render_blocks": parsed_contract.get("render_blocks", []),
             "artifacts": parsed_contract.get("artifacts", []),
