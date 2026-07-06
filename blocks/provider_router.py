@@ -382,18 +382,11 @@ def build_provider_machine_response(text, parsed_contract=None):
     """Build a unified MachineResponse transport contract."""
     parsed_contract = parsed_contract or {}
 
+    answer = parsed_contract.get("answer") or text
+    content = parsed_contract.get("content") or answer
+    response = parsed_contract.get("response") or answer
     summary = parsed_contract.get("summary", "")
     explanation = parsed_contract.get("explanation", summary)
-
-    content = parsed_contract.get("content")
-    if content is None:
-        content = text
-
-    answer = parsed_contract.get("answer")
-    if answer is None:
-        answer = content
-
-    response = parsed_contract.get("response")
     if response is None:
         response = answer
 
@@ -432,8 +425,10 @@ def parse_provider_machine_contract(raw_text):
     return {
         "scene": {},
         "render_blocks": [],
-        "summary": raw_text,
-        "explanation": raw_text,
+        "answer": raw_text,
+        "content": raw_text,
+        "summary": "",
+        "explanation": "",
         "artifacts": [],
         "scene_plan": ["text"],
         "confidence": 0.9,
@@ -559,8 +554,10 @@ Return one transport contract only.
 Do not produce chat text, Markdown, HTML or explanations.
 
 Required top-level fields:
+answer
 summary
 explanation
+content
 scene
 artifacts
 render_blocks
@@ -569,7 +566,7 @@ render_priority
 confidence
 metadata
 
-Every answer must be suitable for direct Scene construction by the Executor.
+Every answer must contain a human-facing 'answer' field and be suitable for direct Scene construction by the Executor.
 """
 
 
