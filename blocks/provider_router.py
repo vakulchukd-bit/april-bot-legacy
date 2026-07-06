@@ -579,15 +579,23 @@ def build_openai_request(machine_request):
     if not isinstance(machine_request, dict):
         machine_request = {}
 
+    intent = machine_request.get("intent") or {}
+    user_text = (
+        intent.get("normalized_text")
+        or intent.get("text")
+        or machine_request.get("content")
+        or ""
+    )
+
     payload = {
         "goal": machine_request.get("goal"),
-        "intent": machine_request.get("intent"),
+        "intent": {
+            "type": intent.get("type"),
+            "normalized_text": user_text,
+        },
         "memory": machine_request.get("memory"),
         "visual_context": machine_request.get("visual_context"),
-        "routing": machine_request.get("routing"),
-        "response_decision": machine_request.get("response_decision"),
         "renderer_preferences": machine_request.get("renderer_preferences"),
-        "metadata": machine_request.get("metadata"),
     }
 
     provider_log("========== MACHINE REQUEST ==========")
@@ -595,6 +603,7 @@ def build_openai_request(machine_request):
 
     structured_prompt = (
         "APRIL MACHINE REQUEST\n\n"
+        "Respond to the USER message. Never repeat or paraphrase the user's words as the answer. Answer naturally.\n"
         "Return ONLY one valid MachineResponse transport contract.\n\n"
         f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
         f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
