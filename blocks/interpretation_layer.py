@@ -1050,33 +1050,6 @@ def build_scene_strategy(result):
     return strategy
 
 
-
-
-# =====================================================
-# 🔥 SCENE BLUEPRINT
-# =====================================================
-
-def build_scene_blueprint(result):
-
-    reps = result.get("required_representations", [])
-    strategy = result.get("scene_strategy", {})
-
-    required = ["text"]
-    if "graph" in reps:
-        required = ["graph","summary"]
-    elif "table" in reps:
-        required = ["table","summary"]
-    elif "formula" in reps:
-        required = ["formula","text"]
-
-    return {
-        "representation": reps[0] if reps else "text",
-        "required_blocks": required,
-        "optional_blocks": strategy.get("preferred_blocks", []),
-        "render_priority": strategy.get("preferred_blocks", ["text"]),
-        "renderer_expected": result.get("prefer_renderer", False),
-        "continuation": result.get("continuation", False)
-    }
 # =====================================================
 # 🔥 MAIN INTERPRETER
 # =====================================================
@@ -1500,9 +1473,7 @@ def interpret_request(
     )
 
 
-        result["scene_blueprint"] = build_scene_blueprint(result)
-
-# =====================================================
+    # =====================================================
     # 🔥 FINAL STABILIZATION
     # =====================================================
 
