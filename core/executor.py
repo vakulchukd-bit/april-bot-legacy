@@ -1,4 +1,3 @@
-# =========================================================
 # APRIL EXECUTOR
 # Central orchestration kernel.
 # Canonical execution path:
@@ -1921,23 +1920,28 @@ async def execute(
     # 🔥 BROADBAND PROVIDER ROUTE
     # =====================================================
 
-    context_text = build_deephub_context(
-        user_id,
-        text,
-        state
-    )
-
-    print("🔥 EXECUTOR BROADBAND PROVIDER ROUTE")
+        print("🔥 EXECUTOR BROADBAND PROVIDER ROUTE")
 
     try:
+
+        # =====================================================
+        # STAGE 1 IMPLEMENTATION
+        # Canonical Provider entry: Executor now prefers the
+        # MachineRequest. Legacy text remains only as fallback
+        # until Provider migration is complete.
+        # =====================================================
+        # Canonical Fiber Route:
+        # Executor always sends MachineRequest to Provider.
+        # Legacy text fallback removed.
+        provider_input = machine_request
 
         if run_with_activity:
             generated_text = await run_with_activity(
                 chat_id,
-                generate_text(context_text)
+                generate_text(provider_input)
             )
         else:
-            generated_text = await generate_text(context_text)
+            generated_text = await generate_text(provider_input)
 
         # Preserve provider machine contract if returned.
         if isinstance(generated_text, dict):
