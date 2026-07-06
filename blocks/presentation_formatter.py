@@ -1401,6 +1401,9 @@ def build_scene_contract(machine_response):
         "artifacts": machine_response.get("artifacts", []),
         "scene_plan": machine_response.get("scene_plan", ""),
         "summary": machine_response.get("summary", {}),
+        # Preserve user-facing response fields
+        "content": machine_response.get("content", ""),
+        "answer": machine_response.get("answer", ""),
         "render_priority": machine_response.get("render_priority", 0),
         "confidence": machine_response.get("confidence", 0),
         "metadata": machine_response.get("metadata", {}),
