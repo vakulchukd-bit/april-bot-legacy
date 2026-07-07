@@ -1237,6 +1237,7 @@ async def execute_rooms(
         # ================================================
 
         unified_machine_response = collect_machine_contract(machine_contracts)
+        unified_machine_response = merge_machine_responses(unified_machine_response, machine_responses)
         reflection_context = {
             "semantic": semantic,
             "cognition": cognition,
@@ -2758,6 +2759,32 @@ def collect_machine_contract(room_contracts):
         response.contributions.update(normalized["contributions"])
     print("RESPONSE ARTIFACT COUNT:", len(response.artifacts))
     return response
+
+
+# =====================================================
+# STAGE 21 - MERGE MACHINE RESPONSES
+# =====================================================
+def merge_machine_responses(unified_machine_response, machine_responses):
+    for resp in machine_responses:
+        if resp is None:
+            continue
+        if getattr(resp,"answer",None) and not getattr(unified_machine_response,"answer",None):
+            unified_machine_response.answer=resp.answer
+        if getattr(resp,"content",None) and not getattr(unified_machine_response,"content",None):
+            unified_machine_response.content=resp.content
+        if getattr(resp,"summary",None) and not getattr(unified_machine_response,"summary",None):
+            unified_machine_response.summary=resp.summary
+        if hasattr(resp,"artifacts"):
+            unified_machine_response.artifacts.extend(list(getattr(resp,"artifacts",[]) or []))
+        rb=list(getattr(resp,"render_blocks",[]) or [])
+        if not hasattr(unified_machine_response,"render_blocks"):
+            unified_machine_response.render_blocks=[]
+        unified_machine_response.render_blocks.extend(rb)
+        rs=getattr(resp,"renderer_state",{}) or {}
+        if not hasattr(unified_machine_response,"renderer_state"):
+            unified_machine_response.renderer_state={}
+        unified_machine_response.renderer_state.update(rs)
+    return unified_machine_response
 
 def build_machine_scene(response):
     print("========== BUILD_MACHINE_SCENE ==========")
