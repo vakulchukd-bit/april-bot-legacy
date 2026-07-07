@@ -1911,6 +1911,57 @@ async def execute(
         run_with_activity=run_with_activity
     )
 
+
+    # =====================================================
+    # CPU REDIRECT FROM PROVIDER
+    # =====================================================
+    if isinstance(room_response, dict) and room_response.get("executor_cpu_redirect"):
+        executor_cpu_checkpoint(
+            "CPU_REDIRECT_ACCEPTED",
+            phase=room_response.get("next_stage"),
+            route=room_response.get("route_target"),
+        )
+
+        machine_response = room_response.get("machine_response")
+        if machine_response is not None:
+            machine_response = executor_cpu_reflect(
+                semantic=semantic,
+                cognition=cognition,
+                response_decision=response_decision,
+                state=state,
+                machine_response=machine_response,
+            )
+            machine_response = executor_reflection_pass(
+                machine_response,
+                {
+                    "semantic": semantic,
+                    "cognition": cognition,
+                    "response_decision": response_decision,
+                    "state": state,
+                },
+            )
+
+            machine_scene = build_machine_scene(machine_response)
+            machine_scene = executor_cpu_sync_scene(machine_response, machine_scene)
+            machine_scene = executor_cpu_finalize_scene(machine_response, machine_scene)
+            machine_scene = executor_cpu_validate_completeness(machine_response, machine_scene)
+
+            return build_checkout_scene_contract({
+                "machine_scene": machine_scene,
+                "scene_plan": {},
+                "blocks": list(getattr(machine_scene, "render_blocks", []) or getattr(machine_scene, "blocks", [])),
+                "render_blocks": list(getattr(machine_scene, "render_blocks", []) or getattr(machine_scene, "blocks", [])),
+                "content": getattr(machine_response, "content", None),
+                "summary": getattr(machine_response, "summary", None),
+                "answer": getattr(machine_response, "answer", None),
+                "renderer_state": getattr(machine_response, "renderer_state", {}),
+            })
+
+        return {
+            "type":"text",
+            "data":"CPU redirect received without MachineResponse."
+        }
+
     # =====================================================
     # 🔥 ROOM SUCCESS
     # =====================================================
