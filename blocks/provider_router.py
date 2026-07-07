@@ -190,7 +190,7 @@ provider_state = {
 
     "execution_mode": "calm",
 
-    "fallback_pressure": 0.0,
+    "route_health": 1.0,
 
     "provider_balance": "stable"
 }
@@ -228,8 +228,8 @@ def update_provider_behavior():
     if delta <= 60:
 
         provider_state[
-            "fallback_pressure"
-        ] = 0.7
+            "route_health"
+        ] = 0.3
 
         provider_state[
             "provider_balance"
@@ -238,8 +238,8 @@ def update_provider_behavior():
     else:
 
         provider_state[
-            "fallback_pressure"
-        ] = 0.2
+            "route_health"
+        ] = 1.0
 
         provider_state[
             "provider_balance"
@@ -328,8 +328,8 @@ def mark_gemini_failure():
     ] = "fallback"
 
     provider_state[
-        "fallback_pressure"
-    ] = 0.9
+        "route_health"
+    ] = 0.0
 
 
 # =====================================================
@@ -351,8 +351,8 @@ def mark_gemini_success():
     ] = "stable"
 
     provider_state[
-        "fallback_pressure"
-    ] = 0.1
+        "route_health"
+    ] = 1.0
 
 
 # =====================================================
@@ -433,7 +433,7 @@ def parse_provider_machine_contract(raw_text):
         "scene_plan": ["text"],
         "confidence": 0.9,
         "render_priority":["text"],
-        "metadata":{"fallback_contract":True,"parser":"compat"}
+        "metadata":{"parser":"strict"}
     }
 
 
@@ -480,7 +480,7 @@ def provider_contract_ready(machine_response):
     return machine_response
 
 
-def build_overload_response(
+def # removed build_overload_response(
     space="Dialogue-space"
 ):
 
@@ -835,8 +835,7 @@ def finalize_executor_contract(machine_response):
 
 
 def build_provider_overload_contract(space):
-    overload = build_overload_response(space)
-    return create_provider_contract(overload)
+    raise RuntimeError(f"Provider route failed: {space}")
 
 
 # =====================================================
@@ -923,8 +922,7 @@ async def generate_text(
                 False
             )
 
-            overload = build_overload_response("Dialogue-space")
-            return create_provider_contract(overload)
+            raise RuntimeError("Provider returned empty response")
 
         provider_log(
             "🧠 OPENAI TEXT SUCCESS"
@@ -950,7 +948,7 @@ async def generate_text(
             False
         )
 
-        return build_provider_overload_contract("Dialogue-space")
+        raise
 
 
 # =====================================================
@@ -1043,7 +1041,7 @@ async def transcribe_voice(
 # 🔥 IMAGE ANALYSIS
 # =====================================================
 
-async def analyze_image_with_fallback(
+async def analyze_image(
     path,
     prompt
 ):
@@ -1139,7 +1137,7 @@ async def analyze_image_with_fallback(
     try:
 
         provider_log(
-            "⚠️ OPENAI IMAGE FALLBACK"
+            "OPENAI IMAGE ROUTE"
         )
 
         provider_log(
@@ -1194,18 +1192,18 @@ async def analyze_image_with_fallback(
         if text:
 
             provider_exit(
-                "openai_image_fallback",
+                "openai_image",
                 True
             )
 
             return create_provider_contract(text)
 
         provider_exit(
-            "openai_image_fallback",
+            "openai_image",
             False
         )
 
-        return build_provider_overload_contract("Visual-space")
+        raise RuntimeError("Visual provider route failed")
 
     except Exception as e:
 
@@ -1215,11 +1213,11 @@ async def analyze_image_with_fallback(
         )
 
         provider_exit(
-            "openai_image_fallback",
+            "openai_image",
             False
         )
 
-        return build_provider_overload_contract("Visual-space")
+        raise RuntimeError("Visual provider route failed")
 
 
 PROVIDER_ROUTE_VERSION="fiber_scene_v4"
