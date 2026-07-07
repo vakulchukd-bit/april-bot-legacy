@@ -571,6 +571,8 @@ def build_openai_request(machine_request):
         },
         "memory": machine_request.get("memory"),
         "visual_context": machine_request.get("visual_context"),
+        "routing": machine_request.get("routing"),
+        "response_decision": machine_request.get("response_decision"),
         "renderer_preferences": machine_request.get("renderer_preferences"),
     }
 
@@ -710,10 +712,7 @@ def infer_executor_rendering(machine_response):
     content = str(mr.get("content") or "")
 
     if not mr.get("render_blocks"):
-        mr["render_blocks"] = [{
-            "type": "text",
-            "content": content
-        }]
+        raise ValueError("MachineResponse missing render_blocks")
 
     if not mr.get("scene_plan"):
         mr["scene_plan"] = ["text"]
