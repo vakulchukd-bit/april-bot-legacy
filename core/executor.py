@@ -1244,6 +1244,9 @@ async def execute_rooms(
             "state": state,
         }
 
+        executor_cpu_mark_object('machine_response', unified_machine_response, 'provider->executor')
+        executor_cpu_verify_identity('machine_response', unified_machine_response)
+        executor_cpu_capture_payload('machine_response', unified_machine_response)
         executor_cpu_after_response(unified_machine_response)
         executor_cpu_update("machine_response", unified_machine_response)
 
@@ -1273,6 +1276,9 @@ async def execute_rooms(
             unified_machine_response,
             unified_machine_scene
         )
+        executor_cpu_mark_object('machine_scene', unified_machine_scene, 'executor')
+        executor_cpu_verify_identity('machine_scene', unified_machine_scene)
+        executor_cpu_capture_payload('machine_scene', unified_machine_scene)
         executor_cpu_after_scene(unified_machine_scene)
         executor_cpu_update("machine_scene", unified_machine_scene)
 
@@ -1877,6 +1883,8 @@ async def execute(
     print("🔥 RUN:", run_with_activity)
     print("🔥 RUN TYPE:", type(run_with_activity))
 
+    executor_cpu_mark_object('machine_request', machine_request, 'executor')
+    executor_cpu_verify_identity('machine_request', machine_request)
     executor_cpu_after_request(machine_request)
     executor_cpu_update("machine_request", machine_request)
 
@@ -3089,19 +3097,30 @@ def build_executor_cpu_snapshot(
 # =====================================================
 
 def executor_cpu_begin(user_input):
+
+    executor_cpu_enter_stage('executor_cpu_begin')
+    executor_cpu_leave_stage('executor_cpu_begin')
     return executor_cpu_checkpoint(
         "APRILWEB_INPUT",
         text=user_input,
     )
 
 def executor_cpu_after_semantic(semantic):
+
+    executor_cpu_enter_stage('executor_cpu_after_semantic')
+    executor_cpu_leave_stage('executor_cpu_after_semantic')
     return executor_cpu_checkpoint(
         "SEMANTIC_READY",
         intent=semantic.get("intent"),
         render_intent=semantic.get("render_intent"),
     )
 
-def executor_cpu_after_request(machine_request):
+def executor_cpu_mark_object('machine_request', machine_request, 'executor')
+    executor_cpu_verify_identity('machine_request', machine_request)
+    executor_cpu_after_request(machine_request):
+
+    executor_cpu_enter_stage('executor_cpu_after_request')
+    executor_cpu_leave_stage('executor_cpu_after_request')
     return executor_cpu_checkpoint(
         "MACHINE_REQUEST_READY",
         trace=getattr(machine_request,"trace_id",None),
@@ -3109,6 +3128,9 @@ def executor_cpu_after_request(machine_request):
     )
 
 def executor_cpu_after_response(machine_response):
+
+    executor_cpu_enter_stage('executor_cpu_after_response')
+    executor_cpu_leave_stage('executor_cpu_after_response')
     return executor_cpu_checkpoint(
         "MACHINE_RESPONSE_READY",
         has_answer=bool(getattr(machine_response,"answer",None)),
@@ -3116,6 +3138,9 @@ def executor_cpu_after_response(machine_response):
     )
 
 def executor_cpu_after_scene(machine_scene):
+
+    executor_cpu_enter_stage('executor_cpu_after_scene')
+    executor_cpu_leave_stage('executor_cpu_after_scene')
     return executor_cpu_checkpoint(
         "SCENE_READY",
         block_count=len(getattr(machine_scene,"blocks",[]) or []),
@@ -3194,6 +3219,41 @@ def executor_cpu_cycle(
 
 
 
+
+# =====================================================
+# EXECUTION SESSION (STAGE 17)
+# =====================================================
+
+EXECUTOR_CPU_SESSION = {
+    "id": None,
+    "stages": {},
+    "started_at": None,
+}
+
+def executor_cpu_enter_stage(stage):
+    import time
+    EXECUTOR_CPU_SESSION["stages"].setdefault(stage,{})
+    EXECUTOR_CPU_SESSION["stages"][stage]["status"]="running"
+    EXECUTOR_CPU_SESSION["stages"][stage]["started_at"]=time.time()
+
+def executor_cpu_leave_stage(stage):
+    import time
+    s=EXECUTOR_CPU_SESSION["stages"].setdefault(stage,{})
+    s["finished_at"]=time.time()
+    s["status"]="success"
+    if "started_at" in s:
+        s["duration"]=s["finished_at"]-s["started_at"]
+
+def executor_cpu_fail_stage(stage,error):
+    import time
+    s=EXECUTOR_CPU_SESSION["stages"].setdefault(stage,{})
+    s["finished_at"]=time.time()
+    s["status"]="failed"
+    s["error"]=str(error)
+
+def executor_cpu_execution_report():
+    return EXECUTOR_CPU_SESSION
+
 # =====================================================
 # EXECUTOR CPU DECISION ENGINE (STAGE 7)
 # =====================================================
@@ -3260,6 +3320,32 @@ def executor_cpu_reflect(
     setattr(machine_response, "executor_cpu_verified", True)
     return machine_response
 
+
+
+# =====================================================
+# EXECUTOR CPU OBJECT LINEAGE (STAGE 18)
+# =====================================================
+
+EXECUTOR_CPU_OBJECTS = {
+    "machine_request": {},
+    "machine_response": {},
+    "machine_scene": {},
+}
+
+def executor_cpu_mark_object(name, obj, owner):
+    if obj is None:
+        return
+    EXECUTOR_CPU_OBJECTS[name] = {
+        "owner": owner,
+        "object_type": type(obj).__name__,
+        "object_id": id(obj),
+    }
+
+def executor_cpu_lineage_report():
+    return {
+        "session": EXECUTOR_CPU_SESSION,
+        "objects": EXECUTOR_CPU_OBJECTS,
+    }
 
 # =====================================================
 # EXECUTOR CPU SCENE APPROVAL (STAGE 9)
@@ -3335,6 +3421,58 @@ def executor_cpu_validate_completeness(machine_response, machine_scene):
     machine_scene.executor_cpu_completeness = completeness
     return machine_scene
 
+
+
+# =====================================================
+# EXECUTOR CPU ROUTE GUARD (STAGE 19)
+# =====================================================
+
+EXECUTOR_CPU_ROUTE_GUARD = []
+
+def executor_cpu_verify_identity(name, obj):
+    if obj is None:
+        return True
+    current=id(obj)
+    known=EXECUTOR_CPU_OBJECTS.get(name,{})
+    previous=known.get("object_id")
+    ok=(previous is None or previous==current)
+    EXECUTOR_CPU_ROUTE_GUARD.append({
+        "object":name,
+        "previous":previous,
+        "current":current,
+        "stable":ok,
+    })
+    return ok
+
+def executor_cpu_route_guard_report():
+    return {
+        "objects":EXECUTOR_CPU_OBJECTS,
+        "route_guard":EXECUTOR_CPU_ROUTE_GUARD,
+    }
+
+
+# =====================================================
+# EXECUTOR CPU PAYLOAD GUARD (STAGE 20)
+# =====================================================
+
+EXECUTOR_CPU_PAYLOAD_TRACE=[]
+
+def executor_cpu_capture_payload(stage, obj):
+    if obj is None:
+        return
+    entry={
+        "stage": stage,
+        "answer": bool(getattr(obj,"answer",None)),
+        "summary": bool(getattr(obj,"summary",None)),
+        "content": bool(getattr(obj,"content",None)),
+        "artifacts": len(getattr(obj,"artifacts",[]) or []),
+        "render_blocks": len(getattr(obj,"render_blocks",[]) or []),
+    }
+    EXECUTOR_CPU_PAYLOAD_TRACE.append(entry)
+    return entry
+
+def executor_cpu_payload_report():
+    return EXECUTOR_CPU_PAYLOAD_TRACE
 
 # =====================================================
 # EXECUTOR CPU ROOM SUPERVISOR (STAGE 11)
