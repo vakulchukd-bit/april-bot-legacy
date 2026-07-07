@@ -1094,7 +1094,12 @@ async def execute_rooms(
 
             print(f"🔥 HANDLE CALL [{room.name}]")
 
-            handler_payload = machine_request or machine_task_payload
+            # =====================================================
+            # STAGE 25 - CANONICAL FIBER ROUTE
+            # =====================================================
+            # Legacy machine_task_payload route removed.
+            # Rooms receive only the canonical MachineRequest.
+            handler_payload = machine_request
 
             # =====================================================
             # FIBER ROUTE (canonical)
@@ -1891,6 +1896,7 @@ async def execute(
 
     context["machine_request"] = machine_request
     print(f"🟢 FIBER trace={getattr(machine_request,'trace_id',None)} input=MachineRequest")
+    print("🟢 FIBER_CANONICAL_ONLY: legacy room payload disabled")
 
     room_response = await execute_rooms(
 
@@ -1923,7 +1929,16 @@ async def execute(
         )
 
         machine_response = room_response.get("machine_response")
+
+        # Stage 26: finalize second Fiber pass inside Executor.
         if machine_response is not None:
+            try:
+                setattr(machine_response, "execution_phase", "POST_PROVIDER")
+                setattr(machine_response, "fiber_pass", 2)
+            except Exception:
+                if isinstance(machine_response, dict):
+                    machine_response["execution_phase"] = "POST_PROVIDER"
+                    machine_response["fiber_pass"] = 2
             machine_response = executor_cpu_reflect(
                 semantic=semantic,
                 cognition=cognition,
