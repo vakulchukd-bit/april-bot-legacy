@@ -902,14 +902,6 @@ async def process(
         # Legacy messages stack removed
         messages = machine_request
 
-        # messages = build_message_stack(
-
-            system_state,
-            safe_history,
-            sanitize_model_output(
-                text
-            )
-        )
 
         # =================================================
         # 🔥 PROVIDER CONFIG
