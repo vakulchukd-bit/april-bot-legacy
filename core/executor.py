@@ -1362,7 +1362,7 @@ def compose_canonical_scene_blocks(machine_scene, collected_results):
     Prefer MachineScene blocks and only fall back to legacy
     artifact conversion when MachineScene has no renderable blocks.
     """
-    blocks = list(getattr(machine_scene, "blocks", []))
+    blocks = list(getattr(machine_scene, "render_blocks", None) or getattr(machine_scene, "blocks", []))
 
     # Prefer already-built scene blocks.
     if blocks:
@@ -1416,7 +1416,7 @@ def build_checkout_scene_contract(scene_result):
     blocks = scene_result.get("blocks", [])
 
     if not blocks and hasattr(machine_scene, "blocks"):
-        blocks = list(getattr(machine_scene, "blocks", []))
+        blocks = list(getattr(machine_scene, "render_blocks", None) or getattr(machine_scene, "blocks", []))
 
     return {
         "scene_contract": {
@@ -2762,7 +2762,9 @@ def build_machine_scene(response):
         scene.scene_contract = True
         return scene
     if hasattr(response, "render_blocks") and response.render_blocks:
-        scene.blocks.extend(response.render_blocks)
+        canonical_blocks=list(response.render_blocks)
+        scene.blocks=canonical_blocks
+        scene.render_blocks=canonical_blocks
 
     elif hasattr(response, "scene") and response.scene:
         scene.blocks.append({
@@ -3279,8 +3281,8 @@ def executor_cpu_sync_scene(machine_response, machine_scene):
     if scene_blocks is None:
         setattr(machine_scene, "render_blocks", [])
 
-    if not getattr(machine_scene, "render_blocks", []):
-        machine_scene.render_blocks = response_blocks
+    machine_scene.render_blocks = response_blocks
+    machine_scene.blocks = machine_scene.render_blocks
 
     machine_scene.executor_cpu_scene_sync = {
         "synced": True,
