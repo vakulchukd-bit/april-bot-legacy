@@ -721,32 +721,27 @@ def enrich_machine_response(contract):
 
 def infer_executor_rendering(machine_response):
     """
-    Infer rendering hints for Executor.
+    Provider validates transport only.
+    Executor decides rendering.
     """
     mr = machine_response.setdefault("machine_response", {})
-    content = str(mr.get("content") or "")
-
-    if not mr.get("render_blocks"):
-        raise ValueError("MachineResponse missing render_blocks")
-
-    if not mr.get("scene_plan"):
-        mr["scene_plan"] = ["text"]
-
-    if not mr.get("render_priority"):
-        mr["render_priority"] = ["text"]
-
+    mr.setdefault("render_blocks", [])
+    mr.setdefault("scene_plan", ["text"])
+    mr.setdefault("render_priority", ["text"])
     return machine_response
 
 
 
 def detect_executor_artifacts(machine_response):
     """
-    Universal artifact normalization for the existing Fiber Route.
+    Passive normalization only.
+    Do not infer scene or create blocks if they are absent.
     """
     mr = machine_response.setdefault("machine_response", {})
-    content = mr.get("content")
-    if not isinstance(content, dict):
-        return machine_response
+    mr.setdefault("render_blocks", [])
+    mr.setdefault("artifacts", [])
+    mr.setdefault("metadata", {})
+    return machine_response
 
     render_blocks = mr.setdefault("render_blocks", [])
     artifacts = mr.setdefault("artifacts", [])
@@ -814,7 +809,7 @@ def detect_executor_artifacts(machine_response):
 
 
 def finalize_executor_contract(machine_response):
-    """Canonical Provider -> Executor transport pipeline."""
+    """Canonical Provider -> Executor transport pipeline. Provider validates only; Executor owns scene construction."""
     for step in (
         enrich_machine_response,
         infer_executor_rendering,
