@@ -833,6 +833,35 @@ def build_provider_overload_contract(space):
 # MachineRequest -> OpenAI -> MachineResponse -> Executor
 # =====================================================
 
+
+# =====================================================
+# STAGE 4 - CPU PHASE GUARD
+# =====================================================
+
+def provider_should_bypass_openai(messages):
+    """
+    Detect post-provider execution phases.
+    Returns (bypass, payload).
+    """
+    phase = None
+
+    if isinstance(messages, dict):
+        phase = messages.get("execution_phase")
+    else:
+        phase = getattr(messages, "execution_phase", None)
+
+    if phase in ("POST_PROVIDER", "POST_REASONING", "SCENE_READY"):
+        provider_log(f"CPU ROUTE GUARD: bypass OpenAI (phase={phase})")
+        return True, {
+            "type": "provider_cpu_redirect",
+            "execution_phase": phase,
+            "provider_bypassed": True,
+        }
+
+    return False, None
+
+
+
 async def generate_text(
 
     messages,
@@ -845,6 +874,15 @@ async def generate_text(
         "openai_text",
         messages
     )
+
+    bypass, payload = provider_should_bypass_openai(messages)
+    if bypass:
+        provider_exit("cpu_redirect", True)
+        payload["executor_cpu_redirect"] = True
+        payload["route_target"] = "executor_cpu"
+        payload["next_stage"] = "EXECUTOR_CPU"
+        return payload
+
 
     try:
 
