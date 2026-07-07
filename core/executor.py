@@ -1261,6 +1261,10 @@ async def execute_rooms(
         )
 
         unified_machine_scene = build_machine_scene(unified_machine_response)
+        unified_machine_scene = executor_cpu_sync_scene(
+            unified_machine_response,
+            unified_machine_scene
+        )
         unified_machine_scene = executor_cpu_finalize_scene(
             unified_machine_response,
             unified_machine_scene
@@ -2838,6 +2842,99 @@ def normalize_provider_scene(result):
 # =====================================================
 
 
+
+# =====================================================
+# EXECUTOR CPU RENDER BLOCK MATERIALIZER (STAGE 13)
+# =====================================================
+
+def executor_cpu_materialize_blocks(machine_response):
+    """
+    Convert CPU presentation decisions into canonical render_blocks.
+    Never calls Provider/OpenAI.
+    """
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+
+    if render_blocks:
+        return machine_response
+
+    answer = (
+        getattr(machine_response, "answer", None)
+        or getattr(machine_response, "content", None)
+        or getattr(machine_response, "summary", None)
+        or ""
+    )
+
+    for block in plan.get("blocks", []):
+        if block == "table":
+            render_blocks.append({
+                "type": "table",
+                "payload": {"source": "executor_cpu"},
+                "scene_contract": True,
+            })
+        elif block == "graph":
+            render_blocks.append({
+                "type": "graph",
+                "payload": {"source": "executor_cpu"},
+                "scene_contract": True,
+            })
+        elif block == "formula":
+            render_blocks.append({
+                "type": "formula",
+                "content": answer,
+                "scene_contract": True,
+            })
+
+    if not render_blocks and answer:
+        render_blocks.append({
+            "type": "text",
+            "content": answer,
+            "scene_contract": True,
+        })
+
+    machine_response.render_blocks = render_blocks
+    return machine_response
+
+
+# =====================================================
+# EXECUTOR CPU ARTIFACT PAYLOAD LINKER (STAGE 14)
+# =====================================================
+
+def executor_cpu_attach_artifact_payloads(machine_response):
+    """
+    Fill render_block payloads from artifact.data so AprilWeb receives
+    real structured content instead of placeholder payloads.
+    """
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+
+    artifact_data = {}
+    for art in artifacts:
+        data = getattr(art, "data", None)
+        if isinstance(data, dict):
+            artifact_data.update(data)
+
+    for block in render_blocks:
+        if not isinstance(block, dict):
+            continue
+        payload = block.setdefault("payload", {})
+        btype = block.get("type")
+
+        if btype == "table":
+            payload["table_data"] = (
+                artifact_data.get("table_data")
+                or artifact_data.get("multiplication_table")
+            )
+        elif btype == "graph":
+            payload["graph_data"] = artifact_data.get("graph_data")
+        elif btype == "formula":
+            payload["formula"] = artifact_data.get("formula")
+        elif btype == "text":
+            payload["structured"] = artifact_data
+
+    machine_response.render_blocks = render_blocks
+    return machine_response
+
 def executor_reflection_pass(machine_response, executor_context):
     """
     Executor Pass #2.
@@ -3099,6 +3196,34 @@ def executor_cpu_cycle(
 # EXECUTOR CPU DECISION ENGINE (STAGE 7)
 # =====================================================
 
+
+# =====================================================
+# EXECUTOR CPU DECISION MATRIX (STAGE 12)
+# =====================================================
+
+def executor_cpu_build_presentation_plan(machine_response):
+    """
+    Inspect MachineResponse and prepare presentation hints
+    without calling Provider/OpenAI.
+    """
+    plan = {"representation":"text","blocks":[]}
+
+    artifacts = getattr(machine_response, "artifacts", []) or []
+    for art in artifacts:
+        data = getattr(art, "data", {}) if hasattr(art, "data") else {}
+        if isinstance(data, dict):
+            if "multiplication_table" in data or "table_data" in data:
+                plan["representation"]="table"
+                plan["blocks"].append("table")
+            if "graph_data" in data:
+                plan["representation"]="graph"
+                plan["blocks"].append("graph")
+            if "formula" in data:
+                plan["blocks"].append("formula")
+
+    machine_response.executor_presentation_plan = plan
+    return machine_response
+
 def executor_cpu_reflect(
     *,
     semantic,
@@ -3112,6 +3237,10 @@ def executor_cpu_reflect(
     No Provider/OpenAI calls.
     Decides how the response should be represented before Scene creation.
     """
+    machine_response = executor_cpu_build_presentation_plan(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+
     planner = {
         "goal": semantic.get("intent"),
         "representation": (
@@ -3124,6 +3253,7 @@ def executor_cpu_reflect(
         "dialog_focus": cognition.get("dynamic_focus", {}),
     }
 
+    planner["presentation_plan"] = getattr(machine_response,"executor_presentation_plan",{})
     setattr(machine_response, "executor_planner", planner)
     setattr(machine_response, "executor_cpu_verified", True)
     return machine_response
@@ -3132,6 +3262,32 @@ def executor_cpu_reflect(
 # =====================================================
 # EXECUTOR CPU SCENE APPROVAL (STAGE 9)
 # =====================================================
+
+
+# =====================================================
+# EXECUTOR CPU SCENE SYNCHRONIZER (STAGE 15)
+# =====================================================
+
+def executor_cpu_sync_scene(machine_response, machine_scene):
+    """
+    Ensure MachineScene inherits CPU-generated render blocks.
+    Does not generate new knowledge or call Provider.
+    """
+    response_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+
+    scene_blocks = getattr(machine_scene, "render_blocks", None)
+    if scene_blocks is None:
+        setattr(machine_scene, "render_blocks", [])
+
+    if not getattr(machine_scene, "render_blocks", []):
+        machine_scene.render_blocks = response_blocks
+
+    machine_scene.executor_cpu_scene_sync = {
+        "synced": True,
+        "response_blocks": len(response_blocks),
+        "scene_blocks": len(getattr(machine_scene, "render_blocks", []) or []),
+    }
+    return machine_scene
 
 def executor_cpu_finalize_scene(machine_response, machine_scene):
     """CPU becomes the final approval point before AprilWeb.
