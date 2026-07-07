@@ -3115,9 +3115,7 @@ def executor_cpu_after_semantic(semantic):
         render_intent=semantic.get("render_intent"),
     )
 
-def executor_cpu_mark_object('machine_request', machine_request, 'executor')
-    executor_cpu_verify_identity('machine_request', machine_request)
-    executor_cpu_after_request(machine_request):
+def executor_cpu_after_request(machine_request):
 
     executor_cpu_enter_stage('executor_cpu_after_request')
     executor_cpu_leave_stage('executor_cpu_after_request')
