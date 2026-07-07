@@ -2003,119 +2003,17 @@ async def execute(
         return result
         
     # =====================================================
-    # 🔥 BROADBAND PROVIDER ROUTE
+    # 🔥 CPU TERMINATION ROUTE
     # =====================================================
 
-        print("🔥 EXECUTOR BROADBAND PROVIDER ROUTE")
-
-    try:
-
-        # =====================================================
-        # STAGE 1 IMPLEMENTATION
-        # Canonical Provider entry: Executor now prefers the
-        # MachineRequest. Legacy text remains only as fallback
-        # until Provider migration is complete.
-        # =====================================================
-        # Canonical Fiber Route:
-        # Executor always sends MachineRequest to Provider.
-        # Legacy text fallback removed.
-        provider_input = machine_request
-
-        if run_with_activity:
-            generated_text = await run_with_activity(
-                chat_id,
-                generate_text(provider_input)
-            )
-        else:
-            generated_text = await generate_text(provider_input)
-
-        # Preserve provider machine contract if returned.
-        if isinstance(generated_text, dict):
-            fallback_result = generated_text
-        else:
-            fallback_result = {
-                "machine_response": {
-                    "content": generated_text
-                },
-                "scene_contract": False,
-                "provider_room": "llm_room"
-            }
-
-    except Exception as e:
-
-        print("🔥 PROVIDER ROUTE ERROR:", e)
-
-        traceback.print_exc()
-
-        return {
-            "type": "text",
-            "data": f"⚠️ PROVIDER ROUTE ERROR: {e}"
-        }
-
-# =====================================================
-    # 🔥 FORMAT
-    # =====================================================
-
-    # =====================================================
-    # 🔥 CANONICAL RESPONSE UNIFICATION
-    # All providers are normalized into the same machine path.
-    # =====================================================
-    if fallback_result:
-
-        if "machine_response" not in fallback_result:
-            fallback_result = {
-                "machine_response": {
-                    "content": fallback_result.get("content","")
-                },
-                "provider_room": "llm_room"
-            }
-
-
-        machine_payload = fallback_result.get("machine_response", {})
-
-        formatted = normalize_provider_scene(format_response_presentation(
-
-                response=machine_payload,
-
-                user_text=text,
-
-                semantic=semantic,
-
-                cognition=cognition,
-
-                response_decision=response_decision,
-
-                visual_reference=visual_reference
-        ))
-
-        add_dialog(
-
-            user_id,
-
-            "assistant",
-
-            str(formatted)[:1200]
-        )
-
-        update_memory_summary(
-
-            state,
-
-            text,
-
-            str(formatted)[:500]
-        )
-
-        if isinstance(formatted, dict):
-            if formatted.get("type")=="scene_contract" or formatted.get("scene_present"):
-                return formatted
-            if formatted.get("type")=="scene":
-                return formatted
-
-        return {
-            "type": "text",
-            "data": formatted
-        }
+    # Legacy fallback Provider route removed.
+    # Executor must complete the canonical Fiber route only.
+    return {
+        "type": "text",
+        "data": "⚠️ Executor completed without a Scene Contract. CPU fallback engaged.",
+        "executor_route": "fiber_cpu_only",
+        "provider_fallback_removed": True,
+    }
 
     # =====================================================
     # 🔥 FINAL SAFETY
