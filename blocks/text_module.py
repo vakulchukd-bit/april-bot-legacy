@@ -890,9 +890,12 @@ async def process(
 
         # LEGACY REMOVED
         # STAGE 26 - Executor synchronization
-        machine_request = state.get("machine_request")
-        if machine_request is None:
-            machine_request = state.get("context", {}).get("machine_request")
+        machine_request = (
+            state.get("machine_request")
+            or state.get("context", {}).get("machine_request")
+            or state.get("executor_context", {}).get("machine_request")
+            or state.get("transport", {}).get("machine_request")
+        )
 
         # execution_phase is now set by Executor AFTER the first provider pass.
 
