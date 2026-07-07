@@ -420,21 +420,8 @@ def parse_provider_machine_contract(raw_text):
         data=json.loads(raw_text)
         if isinstance(data,dict):
             return data
-    except Exception:
-        pass
-    return {
-        "scene": {},
-        "render_blocks": [],
-        "answer": raw_text,
-        "content": raw_text,
-        "summary": "",
-        "explanation": "",
-        "artifacts": [],
-        "scene_plan": ["text"],
-        "confidence": 0.9,
-        "render_priority":["text"],
-        "metadata":{"parser":"strict"}
-    }
+    except Exception as e:
+        raise ValueError("Invalid MachineResponse JSON from provider") from e
 
 
 
@@ -478,17 +465,6 @@ def validate_machine_response_contract(contract):
 
 def provider_contract_ready(machine_response):
     return machine_response
-
-
-def # removed build_overload_response(
-    space="Dialogue-space"
-):
-
-    return (
-        f"⚠️ {space} "
-        f"временно перегружен."
-    )
-
 
 
 # =====================================================
@@ -1143,7 +1119,7 @@ async def analyze_image(
         provider_log(
             "🧠 FALLBACK PRESSURE:",
             provider_state.get(
-                "fallback_pressure"
+                "route_health"
             )
         )
 
