@@ -636,8 +636,8 @@ def machine_request_to_dict(machine_request):
     raise TypeError("Provider accepts only canonical MachineRequest.")
 
 
-def normalize_provider_input(messages):
-    """Build canonical OpenAI request from MachineRequest."""
+def normalize_provider_input(machine_request):
+    """Build canonical OpenAI request from MachineRequest only."""
     system_item = {
         "role": "system",
         "content": [
@@ -648,7 +648,7 @@ def normalize_provider_input(messages):
         ],
     }
 
-    payload = machine_request_to_dict(messages)
+    payload = machine_request_to_dict(machine_request)
     return [system_item, build_openai_request(payload)]
 
 # =====================================================
@@ -875,12 +875,26 @@ async def generate_text(
         messages
     )
 
+    # Legacy messages[] route removed.
+    # Only canonical MachineRequest is accepted beyond this point.
+
     bypass, payload = provider_should_bypass_openai(messages)
     if bypass:
         provider_exit("cpu_redirect", True)
         payload["executor_cpu_redirect"] = True
         payload["route_target"] = "executor_cpu"
         payload["next_stage"] = "EXECUTOR_CPU"
+
+        # Stage 9: preserve transport information for Executor CPU.
+        if isinstance(messages, dict):
+            payload["machine_response"] = messages.get("machine_response")
+            payload["trace_id"] = messages.get("trace_id")
+            payload["fiber_pass"] = messages.get("fiber_pass", 2)
+        else:
+            payload["machine_response"] = getattr(messages, "machine_response", None)
+            payload["trace_id"] = getattr(messages, "trace_id", None)
+            payload["fiber_pass"] = getattr(messages, "fiber_pass", 2)
+
         return payload
 
 
