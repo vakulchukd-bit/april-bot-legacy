@@ -1210,6 +1210,18 @@ async def execute_rooms(
         # ================================================
 
         unified_machine_response = collect_machine_contract(machine_contracts)
+        reflection_context = {
+            "semantic": semantic,
+            "cognition": cognition,
+            "response_decision": response_decision,
+            "state": state,
+        }
+
+        unified_machine_response = executor_reflection_pass(
+            unified_machine_response,
+            reflection_context
+        )
+
         unified_machine_scene = build_machine_scene(unified_machine_response)
 
         scene_plan = build_scene_plan(
@@ -2757,6 +2769,60 @@ def normalize_provider_scene(result):
 
 
 
+
+
+
+# =====================================================
+# EXECUTOR REFLECTION PASS (STAGE 1)
+# =====================================================
+
+def executor_reflection_pass(machine_response, executor_context):
+    """
+    Local second-pass cognition.
+    Never calls Provider or OpenAI.
+    Uses the already computed executor state to enrich the scene.
+    """
+    if machine_response is None:
+        return machine_response
+
+    semantic = executor_context.get("semantic", {})
+    response_decision = executor_context.get("response_decision", {})
+
+    if hasattr(machine_response, "render_blocks"):
+        blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    else:
+        blocks = []
+
+    answer = (
+        getattr(machine_response, "answer", None)
+        or getattr(machine_response, "content", None)
+        or getattr(machine_response, "summary", None)
+    )
+
+    if not blocks and answer:
+        preferred = (
+            response_decision.get("preferred_representation")
+            or semantic.get("preferred_representation")
+            or "text"
+        )
+
+        blocks.append({
+            "type": preferred if preferred in ("table","graph","gallery","formula","diagram","link") else "text",
+            "content": answer,
+            "reflection_generated": True,
+            "executor_pass": 2,
+        })
+
+        machine_response.render_blocks = blocks
+
+    machine_response.executor_reflection = {
+        "pass": 2,
+        "provider_reentry": False,
+        "openai_reentry": False,
+        "reflection_complete": True,
+    }
+
+    return machine_response
 
 
 # =====================================================
