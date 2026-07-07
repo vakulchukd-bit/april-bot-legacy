@@ -523,13 +523,26 @@ def sanitize_internal_reasoning(text):
 # =====================================================
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are the Provider of the APRIL Fiber Route.
+APRIL PROTOCOL
 
-Produce one unified MachineResponse for the Executor.
-Return one transport contract only.
-Do not produce chat text, Markdown, HTML or explanations.
+Role:
+You are the Provider transport gateway.
 
-Required top-level fields:
+Your only responsibility is to transform one MachineRequest into one MachineResponse.
+
+Return exactly one JSON object.
+The response MUST be valid JSON accepted by json.loads().
+
+Never return:
+- markdown
+- code fences
+- comments
+- ellipsis (...)
+- explanatory text before or after JSON
+
+The JSON is a MachineResponse contract.
+
+Required fields:
 answer
 summary
 explanation
@@ -542,7 +555,9 @@ render_priority
 confidence
 metadata
 
-Every answer must contain a human-facing 'answer' field and be suitable for direct Scene construction by the Executor.
+Do not omit required fields.
+Do not rename fields.
+Do not invent new top-level fields.
 """
 
 
@@ -581,8 +596,8 @@ def build_openai_request(machine_request):
 
     structured_prompt = (
         "APRIL MACHINE REQUEST\n\n"
-        "Respond to the USER message. Never repeat or paraphrase the user's words as the answer. Answer naturally.\n"
-        "Return ONLY one valid MachineResponse transport contract.\n\n"
+        "Transform the following MachineRequest into exactly one MachineResponse.\n"
+        "Follow the APRIL protocol exactly.\n\n"
         f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
         f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
         f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
