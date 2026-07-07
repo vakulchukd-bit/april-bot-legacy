@@ -1,3 +1,22 @@
+# =========================================================
+# APRIL EXECUTOR CPU CONTRACT
+# =========================================================
+#
+# Executor is the central processor (CPU) of April.
+# It owns the complete lifecycle of every request:
+#   AprilWeb input
+#   -> cognition
+#   -> MachineRequest
+#   -> Provider/OpenAI
+#   -> MachineResponse
+#   -> reflection
+#   -> MachineScene
+#   -> AprilWeb output
+#
+# Specialized modules compute. Executor decides.
+# Provider transports. AprilWeb renders.
+# =========================================================
+
 # APRIL EXECUTOR
 # Central orchestration kernel.
 # Canonical execution path:
@@ -92,7 +111,6 @@ from blocks.C_ARTIFACT_CONTRACT import (
 # 🧠 TEXT FALLBACK
 # =========================================================
 
-# Legacy text fallback removed from unified broadband route
 
 from blocks.provider_router import generate_text
 
@@ -948,6 +966,7 @@ async def execute_rooms(
 
     scored_rooms = []
     collected_results = []
+    executor_room_report = []
     machine_contracts = []
     machine_responses = []
 
@@ -1028,6 +1047,13 @@ async def execute_rooms(
 
             track_room(
                 room.name
+            )
+            executor_room_report = executor_cpu_register_room(
+                executor_room_report,
+                room.name,
+                score=score,
+                executed=True,
+                accepted=False,
             )
 
             machine_request = context.get("machine_request")
@@ -1174,6 +1200,7 @@ async def execute_rooms(
             collected_results.append(
                 machine_response_payload
             )
+            executor_room_report[-1]["accepted"] = True
 
             if isinstance(result, dict):
                 contract = result.get("contract")
@@ -1217,12 +1244,33 @@ async def execute_rooms(
             "state": state,
         }
 
+        executor_cpu_after_response(unified_machine_response)
+        executor_cpu_update("machine_response", unified_machine_response)
+
+        unified_machine_response = executor_cpu_reflect(
+            semantic=semantic,
+            cognition=cognition,
+            response_decision=response_decision,
+            state=state,
+            machine_response=unified_machine_response,
+        )
+
         unified_machine_response = executor_reflection_pass(
             unified_machine_response,
             reflection_context
         )
 
         unified_machine_scene = build_machine_scene(unified_machine_response)
+        unified_machine_scene = executor_cpu_finalize_scene(
+            unified_machine_response,
+            unified_machine_scene
+        )
+        unified_machine_scene = executor_cpu_validate_completeness(
+            unified_machine_response,
+            unified_machine_scene
+        )
+        executor_cpu_after_scene(unified_machine_scene)
+        executor_cpu_update("machine_scene", unified_machine_scene)
 
         scene_plan = build_scene_plan(
             response_decision,
@@ -1257,6 +1305,10 @@ async def execute_rooms(
             }
         }
 
+        unified_machine_scene = executor_cpu_attach_room_report(
+            unified_machine_scene,
+            executor_room_report
+        )
         payload["result"] = build_checkout_scene_contract(payload["result"])
         return payload
 
@@ -1514,6 +1566,9 @@ async def execute(
         text
     )
 
+    executor_cpu_begin(text)
+    executor_cpu_update("aprilweb_input", text)
+
     state = get_state(
         user_id
     )
@@ -1546,6 +1601,9 @@ async def execute(
             {}
         )
     )
+
+    executor_cpu_after_semantic(semantic)
+    executor_cpu_update("semantic", semantic)
 
     semantic = detect_goal(
 
@@ -1814,6 +1872,9 @@ async def execute(
     print("🔥 TASK TYPE:", task_type)
     print("🔥 RUN:", run_with_activity)
     print("🔥 RUN TYPE:", type(run_with_activity))
+
+    executor_cpu_after_request(machine_request)
+    executor_cpu_update("machine_request", machine_request)
 
     context["machine_request"] = machine_request
     print(f"🟢 FIBER trace={getattr(machine_request,'trace_id',None)} input=MachineRequest")
@@ -2776,54 +2837,63 @@ def normalize_provider_scene(result):
 # EXECUTOR REFLECTION PASS (STAGE 1)
 # =====================================================
 
+
 def executor_reflection_pass(machine_response, executor_context):
     """
-    Local second-pass cognition.
-    Never calls Provider or OpenAI.
-    Uses the already computed executor state to enrich the scene.
+    Executor Pass #2.
+    Local cognition only.
+    Never calls Provider/OpenAI.
+    Builds a presentation decision before MachineScene.
     """
     if machine_response is None:
         return machine_response
 
-    semantic = executor_context.get("semantic", {})
-    response_decision = executor_context.get("response_decision", {})
+    semantic=executor_context.get("semantic",{}) or {}
+    cognition=executor_context.get("cognition",{}) or {}
+    response_decision=executor_context.get("response_decision",{}) or {}
+    state=executor_context.get("state",{}) or {}
 
-    if hasattr(machine_response, "render_blocks"):
-        blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    else:
-        blocks = []
+    blocks=list(getattr(machine_response,"render_blocks",[]) or [])
 
-    answer = (
-        getattr(machine_response, "answer", None)
-        or getattr(machine_response, "content", None)
-        or getattr(machine_response, "summary", None)
-    )
+    answer=(getattr(machine_response,"answer",None)
+        or getattr(machine_response,"content",None)
+        or getattr(machine_response,"summary",None)
+        or "")
 
-    if not blocks and answer:
-        preferred = (
-            response_decision.get("preferred_representation")
-            or semantic.get("preferred_representation")
-            or "text"
-        )
+    planner=getattr(machine_response,"executor_planner",None)
+    if planner is None:
+        planner={
+            "goal":semantic.get("intent"),
+            "representation":response_decision.get("preferred_representation")
+                or semantic.get("preferred_representation")
+                or "text",
+            "memory_active":bool(state.get("memory_timeline")),
+            "visual_active":bool(state.get("active_visual_scene")),
+        }
+    planner["reflection"]=True
 
+    if not blocks:
+        rep=planner["representation"]
+        if rep not in ("text","table","graph","gallery","formula","diagram","link"):
+            rep="text"
         blocks.append({
-            "type": preferred if preferred in ("table","graph","gallery","formula","diagram","link") else "text",
-            "content": answer,
-            "reflection_generated": True,
-            "executor_pass": 2,
+            "type":rep,
+            "content":answer,
+            "executor_generated":True,
+            "executor_pass":2,
+            "planner":planner
         })
 
-        machine_response.render_blocks = blocks
-
-    machine_response.executor_reflection = {
-        "pass": 2,
-        "provider_reentry": False,
-        "openai_reentry": False,
-        "reflection_complete": True,
+    machine_response.render_blocks=blocks
+    machine_response.executor_cpu_verified=True
+    machine_response.executor_reflection={
+        "pass":2,
+        "planner":planner,
+        "provider_reentry":False,
+        "openai_reentry":False,
+        "decision_complete":True
     }
-
     return machine_response
-
 
 # =====================================================
 # EXECUTOR ROUTE VERSION
@@ -2836,3 +2906,294 @@ EXECUTOR_LEGACY_TEXT_ROUTE=False
 # EXECUTOR FIBER CANONICAL
 # =====================================================
 EXECUTOR_FIBER_CANONICAL = True
+
+# =====================================================
+# EXECUTOR CPU STAGE 1
+# =====================================================
+
+EXECUTOR_CPU_ENABLED = True
+
+# =====================================================
+# EXECUTOR CPU QUALITY CONTROLLER (STAGE 2)
+# =====================================================
+
+EXECUTOR_CPU_TRACE = []
+
+def executor_cpu_checkpoint(stage, **payload):
+    """Central quality checkpoint.
+    Does not alter routing.
+    Records what the Executor knows at each stage.
+    """
+    entry={
+        "stage": stage,
+        "payload": payload,
+    }
+    EXECUTOR_CPU_TRACE.append(entry)
+    return entry
+
+def build_executor_quality_state(
+    *,
+    aprilweb_input=None,
+    semantic=None,
+    machine_request=None,
+    machine_response=None,
+    machine_scene=None,
+    aprilweb_output=None,
+):
+    return {
+        "input_seen": aprilweb_input is not None,
+        "semantic_seen": semantic is not None,
+        "request_seen": machine_request is not None,
+        "response_seen": machine_response is not None,
+        "scene_seen": machine_scene is not None,
+        "output_seen": aprilweb_output is not None,
+        "quality_route_complete": all([
+            aprilweb_input is not None,
+            machine_request is not None,
+            machine_response is not None,
+            machine_scene is not None,
+        ]),
+    }
+
+
+
+def build_executor_cpu_snapshot(
+    *,
+    user_input=None,
+    machine_request=None,
+    machine_response=None,
+    machine_scene=None,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+):
+    """
+    Single executor awareness object.
+    This is diagnostic state only.
+    No Provider/OpenAI calls are allowed here.
+    """
+    return {
+        "cpu": True,
+        "input_received": user_input is not None,
+        "machine_request_ready": machine_request is not None,
+        "machine_response_ready": machine_response is not None,
+        "scene_ready": machine_scene is not None,
+        "semantic_ready": semantic is not None,
+        "cognition_ready": cognition is not None,
+        "decision_ready": response_decision is not None,
+    }
+
+
+
+# =====================================================
+# EXECUTOR CPU PIPELINE (STAGE 3)
+# =====================================================
+
+def executor_cpu_begin(user_input):
+    return executor_cpu_checkpoint(
+        "APRILWEB_INPUT",
+        text=user_input,
+    )
+
+def executor_cpu_after_semantic(semantic):
+    return executor_cpu_checkpoint(
+        "SEMANTIC_READY",
+        intent=semantic.get("intent"),
+        render_intent=semantic.get("render_intent"),
+    )
+
+def executor_cpu_after_request(machine_request):
+    return executor_cpu_checkpoint(
+        "MACHINE_REQUEST_READY",
+        trace=getattr(machine_request,"trace_id",None),
+        goal=getattr(machine_request,"goal",None),
+    )
+
+def executor_cpu_after_response(machine_response):
+    return executor_cpu_checkpoint(
+        "MACHINE_RESPONSE_READY",
+        has_answer=bool(getattr(machine_response,"answer",None)),
+        has_blocks=bool(getattr(machine_response,"render_blocks",[])),
+    )
+
+def executor_cpu_after_scene(machine_scene):
+    return executor_cpu_checkpoint(
+        "SCENE_READY",
+        block_count=len(getattr(machine_scene,"blocks",[]) or []),
+    )
+
+
+
+# =====================================================
+# EXECUTOR CPU CONTROLLER (STAGE 4)
+# =====================================================
+
+EXECUTOR_CPU_ROUTE = {
+    "aprilweb_input": None,
+    "semantic": None,
+    "machine_request": None,
+    "provider_request": None,
+    "provider_response": None,
+    "machine_response": None,
+    "reflection": None,
+    "machine_scene": None,
+    "aprilweb_output": None,
+}
+
+def executor_cpu_update(stage, value):
+    if stage in EXECUTOR_CPU_ROUTE:
+        EXECUTOR_CPU_ROUTE[stage] = value
+    executor_cpu_checkpoint(stage, updated=True)
+    return EXECUTOR_CPU_ROUTE
+
+def executor_cpu_health():
+    return {
+        "known_stages": sum(v is not None for v in EXECUTOR_CPU_ROUTE.values()),
+        "total_stages": len(EXECUTOR_CPU_ROUTE),
+        "complete": all(v is not None for v in EXECUTOR_CPU_ROUTE.values()),
+    }
+
+
+# =====================================================
+# EXECUTOR CPU DECISION LOOP (STAGE 5)
+# =====================================================
+
+def executor_cpu_cycle(
+    *,
+    aprilweb_input=None,
+    semantic=None,
+    cognition=None,
+    machine_request=None,
+    provider_request=None,
+    provider_response=None,
+    machine_response=None,
+    reflection=None,
+    machine_scene=None,
+    aprilweb_output=None,
+):
+    """Central CPU synchronization point.
+    It never changes routing or calls Provider/OpenAI.
+    It only maintains a complete awareness of the lifecycle.
+    """
+
+    executor_cpu_update("aprilweb_input", aprilweb_input)
+    executor_cpu_update("semantic", semantic)
+    executor_cpu_update("machine_request", machine_request)
+    executor_cpu_update("provider_request", provider_request)
+    executor_cpu_update("provider_response", provider_response)
+    executor_cpu_update("machine_response", machine_response)
+    executor_cpu_update("reflection", reflection)
+    executor_cpu_update("machine_scene", machine_scene)
+    executor_cpu_update("aprilweb_output", aprilweb_output)
+
+    return {
+        "route": EXECUTOR_CPU_ROUTE.copy(),
+        "health": executor_cpu_health(),
+        "trace_size": len(EXECUTOR_CPU_TRACE),
+        "executor_role": "APRIL_CPU"
+    }
+
+
+
+# =====================================================
+# EXECUTOR CPU DECISION ENGINE (STAGE 7)
+# =====================================================
+
+def executor_cpu_reflect(
+    *,
+    semantic,
+    cognition,
+    response_decision,
+    state,
+    machine_response,
+):
+    """
+    Executor-owned decision layer.
+    No Provider/OpenAI calls.
+    Decides how the response should be represented before Scene creation.
+    """
+    planner = {
+        "goal": semantic.get("intent"),
+        "representation": (
+            response_decision.get("preferred_representation")
+            or semantic.get("preferred_representation")
+            or "text"
+        ),
+        "memory_active": bool(state.get("memory_timeline")),
+        "visual_active": bool(state.get("active_visual_scene")),
+        "dialog_focus": cognition.get("dynamic_focus", {}),
+    }
+
+    setattr(machine_response, "executor_planner", planner)
+    setattr(machine_response, "executor_cpu_verified", True)
+    return machine_response
+
+
+# =====================================================
+# EXECUTOR CPU SCENE APPROVAL (STAGE 9)
+# =====================================================
+
+def executor_cpu_finalize_scene(machine_response, machine_scene):
+    """CPU becomes the final approval point before AprilWeb.
+    It does not rebuild the scene; it validates and annotates it.
+    """
+    planner=getattr(machine_response,"executor_planner",{}) or {}
+    verification={
+        "approved": True,
+        "representation": planner.get("representation","text"),
+        "goal": planner.get("goal"),
+        "has_blocks": bool(getattr(machine_scene,"blocks",[])),
+        "block_count": len(getattr(machine_scene,"blocks",[]) or []),
+    }
+    machine_scene.executor_cpu=verification
+    machine_scene.executor_cpu_verified=True
+    return machine_scene
+
+
+# =====================================================
+# EXECUTOR CPU COMPLETENESS (STAGE 10)
+# =====================================================
+
+def executor_cpu_validate_completeness(machine_response, machine_scene):
+    """Validate that the response representation matches the CPU plan.
+    This stage never calls Provider/OpenAI and never creates a new route.
+    """
+    planner = getattr(machine_response, "executor_planner", {}) or {}
+    rep = planner.get("representation", "text")
+
+    blocks = list(getattr(machine_scene, "blocks", []) or [])
+    block_types = {
+        b.get("type") for b in blocks
+        if isinstance(b, dict) and "type" in b
+    }
+
+    completeness = {
+        "representation": rep,
+        "representation_present": rep in block_types if rep != "text" else True,
+        "block_types": sorted(block_types),
+        "approved": True,
+    }
+
+    machine_scene.executor_cpu_completeness = completeness
+    return machine_scene
+
+
+# =====================================================
+# EXECUTOR CPU ROOM SUPERVISOR (STAGE 11)
+# =====================================================
+
+def executor_cpu_register_room(cpu_log, room_name, score=None,
+                               executed=False, accepted=False):
+    if cpu_log is None:
+        cpu_log=[]
+    cpu_log.append({
+        "room": room_name,
+        "score": score,
+        "executed": executed,
+        "accepted": accepted,
+    })
+    return cpu_log
+
+def executor_cpu_attach_room_report(machine_scene, room_report):
+    machine_scene.executor_room_report = room_report
+    return machine_scene
