@@ -888,7 +888,21 @@ async def process(
         # 🔥 MESSAGE STACK
         # =====================================================
 
-        messages = build_message_stack(
+        # LEGACY REMOVED
+        # STAGE 26 - Executor synchronization
+        machine_request = state.get("machine_request")
+        if machine_request is None:
+            machine_request = state.get("context", {}).get("machine_request")
+
+        # execution_phase is now set by Executor AFTER the first provider pass.
+
+        if machine_request is None:
+            raise RuntimeError("Canonical MachineRequest required before text generation.")
+
+        # Legacy messages stack removed
+        messages = machine_request
+
+        # messages = build_message_stack(
 
             system_state,
             safe_history,
@@ -915,7 +929,7 @@ async def process(
 
         output = await generate_text(
 
-            messages=messages,
+            messages=machine_request,
 
             temperature=config[
                 "temperature"
@@ -927,6 +941,10 @@ async def process(
 
             model=TEXT_MODEL
         )
+
+        # Provider may already return a canonical transport object.
+        if isinstance(output, dict):
+            return output
 
         output = sanitize_model_output(
             output
