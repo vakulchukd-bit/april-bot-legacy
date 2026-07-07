@@ -208,8 +208,18 @@ def unlock_image(state):
 
 def get_executor_context(context):
 
-    if not isinstance(context, dict):
+    # Canonical MachineRequest support
+    if isinstance(context, MachineRequest):
+        return {
+            "machine_request": context,
+            "state": {"machine_request": context},
+            "chat_id": getattr(getattr(context, "identity", None), "user_id", None),
+            "energy": "MEDIUM",
+            "cognition": {},
+            "semantic": {},
+        }
 
+    if not isinstance(context, dict):
         return {}
 
     return context.get(
@@ -235,10 +245,12 @@ def get_state(context):
         context
     )
 
-    return executor_context.get(
-        "state",
-        {}
-    )
+    state = executor_context.get("state", {})
+
+    if isinstance(context, MachineRequest):
+        state["machine_request"] = context
+
+    return state
 
 
 def get_cognition(context):
