@@ -2076,12 +2076,46 @@ async def execute(
 
     # Legacy fallback Provider route removed.
     # Executor must complete the canonical Fiber route only.
-    return {
-        "type": "text",
-        "data": "⚠️ Executor completed without a Scene Contract. CPU fallback engaged.",
-        "executor_route": "fiber_cpu_only",
-        "provider_fallback_removed": True,
-    }
+    # =====================================================
+    # CANONICAL CPU TERMINATION
+    # Never leave Executor without a Scene Contract.
+    # =====================================================
+    fallback_response = MachineResponse()
+    fallback_response.answer = "Executor completed without a canonical room result."
+    fallback_response.content = fallback_response.answer
+
+    fallback_response = executor_cpu_reflect(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=fallback_response,
+    )
+
+    fallback_response = executor_reflection_pass(
+        fallback_response,
+        {
+            "semantic": semantic,
+            "cognition": cognition,
+            "response_decision": response_decision,
+            "state": state,
+        },
+    )
+
+    fallback_scene = build_machine_scene(fallback_response)
+    fallback_scene = executor_cpu_sync_scene(fallback_response, fallback_scene)
+    fallback_scene = executor_cpu_finalize_scene(fallback_response, fallback_scene)
+    fallback_scene = executor_cpu_validate_completeness(fallback_response, fallback_scene)
+
+    return build_checkout_scene_contract({
+        "machine_scene": fallback_scene,
+        "scene_plan": {},
+        "blocks": list(getattr(fallback_scene,"render_blocks",[]) or getattr(fallback_scene,"blocks",[])),
+        "content": fallback_response.content,
+        "summary": getattr(fallback_response,"summary",None),
+        "answer": fallback_response.answer,
+        "renderer_state": {},
+    })
 
     # =====================================================
     # 🔥 FINAL SAFETY
