@@ -170,6 +170,11 @@ def safe_json(value):
 
 def resolve_scene_content(result):
 
+    contract = result.get("scene_contract") if isinstance(result, dict) else {}
+    if isinstance(contract, dict):
+        for k in ("answer","content","summary"):
+            if contract.get(k):
+                return contract.get(k)
     content = (
         result.get("answer")
         or result.get("content")
@@ -234,19 +239,11 @@ def executor_contract_passthrough(result):
 
     if result.get("scene_contract"):
         result.setdefault("gateway_contract", True)
+        result.setdefault("gateway_transport_only", True)
         return result
 
-    if result.get("scene") or result.get("render_blocks") or result.get("blocks"):
-        result["scene_contract"] = {
-            "version": 1,
-            "scene": result.get("scene", {}),
-            "render_blocks": result.get("render_blocks", result.get("blocks", [])),
-            "renderer_state": result.get("renderer_state", {}),
-            "content": result.get("content"),
-            "answer": result.get("answer"),
-            "summary": result.get("summary"),
-        }
-        result["gateway_contract"] = True
+    if not result.get("scene_contract"):
+        raise RuntimeError("Executor must provide canonical scene_contract.")
 
     return result
 
@@ -303,12 +300,13 @@ def normalize_executor_response(
 
         "scene_present":
             bool(
-                result.get("scene")
+                result.get("scene_contract") or result.get("scene")
             ),
 
         "blocks_present":
             bool(
-                result.get("render_blocks")
+                (result.get("scene_contract") or {}).get("render_blocks")
+                or result.get("render_blocks")
                 or result.get("blocks")
             ),
 
@@ -323,22 +321,13 @@ def normalize_executor_response(
 
         "render_blocks":
             safe_json(
-                result.get(
-                    "render_blocks",
-                    result.get(
-                        "blocks",
-                        []
-                    )
-                )
+                ((result.get("scene_contract") or {}).get("render_blocks"))
+                or result.get("render_blocks")
+                or result.get("blocks", [])
             ),
 
         "scene":
-            safe_json(
-                result.get(
-                    "scene",
-                    {}
-                )
-            ),
+            safe_json((result.get("scene_contract") or {}).get("scene", result.get("scene", {}))),
 
         "space":
             safe_json(
@@ -423,12 +412,7 @@ def normalize_executor_response(
             ),
 
         "renderer_state":
-            safe_json(
-                result.get(
-                    "renderer_state",
-                    {}
-                )
-            ),
+            safe_json((result.get("scene_contract") or {}).get("renderer_state", result.get("renderer_state", {}))),
 
         "artifact_packet":
             safe_json(
@@ -455,11 +439,10 @@ def normalize_executor_response(
     print(
         "🌐 WIDESCENE:",
         {
-            "scene": bool(result.get("scene")),
+            "scene_contract": bool(result.get("scene_contract")),
             "artifact": bool(result.get("artifact")),
             "blocks": bool(
-                result.get("render_blocks")
-                or result.get("blocks")
+                ((result.get("scene_contract") or {}).get("render_blocks"))
             )
         }
     )
@@ -472,14 +455,20 @@ def normalize_executor_response(
 
     
     canonical = result.get("scene_contract") if isinstance(result, dict) else None
+    executor_final = False
+    if isinstance(canonical, dict):
+        executor_final = canonical.get("scene_contract_final") or result.get("scene_contract_final")
+
     if canonical:
         canonical.setdefault("content", normalized.get("content"))
         canonical.setdefault("answer", normalized.get("answer"))
         canonical.setdefault("summary", normalized.get("summary"))
         canonical.setdefault("render_blocks", normalized.get("render_blocks", []))
         normalized["scene_contract"] = canonical
-    else:
+    elif not executor_final:
         normalized["scene_contract"] = build_gateway_scene_contract(normalized)
+    else:
+        normalized["scene_contract"] = canonical
 
     
     normalized["legacy_renderers"] = {
@@ -492,6 +481,8 @@ def normalize_executor_response(
     }
 
     normalized["preferred_transport"] = "scene_contract"
+    normalized["transport_role"] = "gateway_only"
+    normalized["gateway_mutation"] = False
     return normalized
 
 
@@ -534,7 +525,11 @@ def build_artifact_packet(result):
 # =========================================================
 
 def build_gateway_scene_contract(normalized):
+    """Fallback only. Canonical Scene Contract must come from Executor."""
     
+    if normalized.get("scene_contract"):
+        return normalized["scene_contract"]
+
     return {
         "version": 1,
         "scene": normalized.get("scene", {}),
@@ -633,13 +628,18 @@ async def process_web_message(
 def build_gateway_transport_payload(normalized):
     
     # Forward canonical contract without rebuilding.
-    contract = normalized.get("scene_contract", {})
+    contract = normalized.get("scene_contract", {}) or {}
+    contract.setdefault("gateway_transport_only", True)
+    contract.setdefault("gateway_owner", "checkout_server")
     return {
         "scene_contract": contract,
+        "contract_version": contract.get("version", 1),
+        "transport_mode":"passthrough",
+        "gateway_rebuild":False,
         "space_continuity": normalized.get("space_continuity", {}),
-        "render_blocks": contract.get("render_blocks", normalized.get("render_blocks", [])),
-        "renderer_state": contract.get("renderer_state", normalized.get("renderer_state", {})),
-        "content": contract.get("content", normalized.get("content", "")),
+        "render_blocks": contract.get("render_blocks", []),
+        "renderer_state": contract.get("renderer_state", {}),
+        "content": contract.get("content", ""),
         "answer": contract.get("answer", normalized.get("answer")),
         "summary": contract.get("summary", normalized.get("summary")),
     }
@@ -1208,47 +1208,31 @@ def web_chat():
 
         result["gateway_transport"] = build_gateway_transport_payload(result)
 
+        # =========================================================
+        # LEGACY TRANSPORT (TEMPORARILY DISABLED)
+        # =========================================================
+        #
+        # The legacy response below unpacked Scene Contract back into
+        # graph/formula/table/gallery/layout/visual/blocks fields.
+        # This creates a parallel transport route and conflicts with
+        # the canonical Fiber Route.
+        #
+        # Keep this block only as historical reference while migrating
+        # AprilWeb. If testing confirms it is unnecessary, delete it
+        # permanently. If a required capability is discovered, restore
+        # it through Scene Contract rather than separate transport
+        # fields.
+        #
+        # return jsonify({... legacy transport ...})
+        #
+        # =========================================================
+
         return jsonify({
-
             "success": True,
-
-            "space_response":
-                safe_json(result),
-
-            "type":
-                result.get("type"),
-
-            "graph":
-                result.get("graph"),
-
-            "formula":
-                result.get("formula"),
-
-            "table":
-                result.get("table"),
-
-            "gallery":
-                result.get("gallery"),
-
-            "layout":
-                result.get("layout"),
-
-            "visual":
-                result.get("visual"),
-
-            "blocks":
-                result.get("render_blocks", []),
-
-            "renderer_mode":
-                WEB_RENDERER_MODE,
-
-            "scene_mode":
-                WEB_SCENE_MODE,
-
-            "visual_summary":
-                safe_json(
-                    visual_summary
-                )
+            "gateway_transport": safe_json(result.get("gateway_transport", {})),
+            "renderer_mode": WEB_RENDERER_MODE,
+            "scene_mode": WEB_SCENE_MODE,
+            "visual_summary": safe_json(visual_summary)
         })
 
     except Exception as e:
