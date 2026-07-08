@@ -1449,6 +1449,8 @@ def build_checkout_scene_contract(scene_result):
         "artifact_scene": scene_result.get("artifact_scene", []),
         "renderer_state": scene_result.get("renderer_state", {}),
         "executor_route": "fiber_scene_v2",
+        "scene_contract_owner": "executor",
+        "scene_contract_final": True,
     }
 
 # =========================================================
@@ -3384,6 +3386,9 @@ def executor_cpu_reflect(
         "dialog_focus": cognition.get("dynamic_focus", {}),
     }
 
+    decision = getattr(machine_response,"executor_decision",{}) or {}
+    if decision.get("representation"):
+        planner["representation"] = decision["representation"]
     planner["presentation_plan"] = getattr(machine_response,"executor_presentation_plan",{})
     setattr(machine_response, "executor_planner", planner)
     setattr(machine_response, "executor_cpu_verified", True)
@@ -3458,8 +3463,10 @@ def executor_cpu_finalize_scene(machine_response, machine_scene):
         "has_blocks": bool(getattr(machine_scene,"blocks",[])),
         "block_count": len(getattr(machine_scene,"blocks",[]) or []),
     }
+    verification["executor_decision"] = getattr(machine_response, "executor_decision", {})
     machine_scene.executor_cpu=verification
     machine_scene.executor_cpu_verified=True
+    machine_scene.executor_decision = getattr(machine_response, "executor_decision", {})
     return machine_scene
 
 
