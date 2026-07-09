@@ -127,6 +127,20 @@ from checkout_server import app
 # 🔥 CONFIG
 # =========================================================
 
+# =========================================================
+# 🧠 APRIL CPU BRIDGE
+# =========================================================
+
+CPU_TRACE = []
+
+def cpu_checkpoint(stage, status="OK", **payload):
+    CPU_TRACE.append({
+        "stage": stage,
+        "status": status,
+        "payload": payload,
+    })
+
+
 OPENAI_API_KEY = os.getenv(
     "OPENAI_API_KEY"
 )
@@ -862,6 +876,13 @@ def organize_multimodal_response(
             result.get("scene_plan")
     }
 
+    cpu_checkpoint(
+        "bot_ru_output",
+        scene_contract=organized.get("scene_contract") is not None,
+        gateway_transport=organized.get("gateway_transport") is not None,
+        render_blocks=len(organized.get("render_blocks") or []),
+    )
+
     return organized
 
 # =========================================================
@@ -877,6 +898,8 @@ async def process_april_request(
     # =====================================================
     # 🔥 HUMAN → MACHINE
     # =====================================================
+
+    cpu_checkpoint("bot_ru_input")
 
     machine_request = human_to_machine(
 
@@ -911,6 +934,8 @@ async def process_april_request(
     # 🔥 NORMALIZE
     # =====================================================
 
+    cpu_checkpoint("executor_completed")
+
     normalized = normalize_executor_response(
         result
     )
@@ -930,8 +955,17 @@ async def process_april_request(
     # 🔥 MACHINE → HUMAN
     # =====================================================
 
+    cpu_checkpoint("bot_ru_output_prepare")
+
     organized = organize_multimodal_response(
         normalized
+    )
+
+    cpu_checkpoint(
+        "bot_ru_output",
+        scene_contract=organized.get("scene_contract") is not None,
+        gateway_transport=organized.get("gateway_transport") is not None,
+        render_blocks=len(organized.get("render_blocks") or []),
     )
 
     return organized
