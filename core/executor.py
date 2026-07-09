@@ -1836,6 +1836,7 @@ async def execute(
         }
 
 
+    # Canonical rule: a valid MachineResponse has priority over room diagnostics.
     if room_response:
 
         result = room_response.get(
@@ -1973,8 +1974,23 @@ async def execute(
             "renderer_state": getattr(scene, "renderer_state", {}),
         })
 
+    # LEGACY FALLBACK DISABLED
+    existing_response = EXECUTOR_CPU_ROUTE.get("machine_response")
+    if existing_response is not None:
+        mr = existing_response
+        ms = build_machine_scene(mr)
+        return build_checkout_scene_contract({
+            "machine_scene": ms,
+            "scene_plan": {},
+            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
+            "content": getattr(mr,"content",None),
+            "summary": getattr(mr,"summary",None),
+            "answer": getattr(mr,"answer",None),
+            "renderer_state": getattr(mr,"renderer_state",{}),
+        })
+
     fallback_response = MachineResponse()
-    fallback_response.answer = "Executor completed without a canonical room result."
+    fallback_response.answer = "Legacy fallback reached (diagnostic only)."
     fallback_response.content = fallback_response.answer
 
     fallback_response = executor_cpu_reflect(
