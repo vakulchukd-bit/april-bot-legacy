@@ -1,15 +1,36 @@
+# =========================================================
 # APRIL EXECUTOR CPU CONTRACT
+# =========================================================
+#
+# Executor is the central processor (CPU) of April.
+# It owns the complete lifecycle of every request:
+#   AprilWeb input
+#   -> cognition
+#   -> MachineRequest
+#   -> Provider/OpenAI
+#   -> MachineResponse
 #   -> reflection
+#   -> MachineScene
+#   -> AprilWeb output
+#
+# Specialized modules compute. Executor decides.
+# Provider transports. AprilWeb renders.
+# =========================================================
 
 # APRIL EXECUTOR
+# Central orchestration kernel.
 # Canonical execution path:
 # User Space -> MachineRequest -> Rooms -> MachineResponse -> MachineScene -> Scene Contract
+# =========================================================
 
 import traceback
 import time
 
 from datetime import datetime
 
+# =========================================================
+# 🧠 COGNITIVE SYSTEMS
+# =========================================================
 
 from blocks.semantic_core import (
     analyze as semantic_analyze
@@ -46,7 +67,9 @@ from blocks.april_authority import (
     build_authority_decision
 )
 
+# =========================================================
 # 🧠 MEMORY + CONTEXT
+# =========================================================
 
 from blocks.state_manager import (
 
@@ -69,6 +92,9 @@ from blocks.context_system import (
     build_deephub_context
 )
 
+# =========================================================
+# 🧠 ROOMS
+# =========================================================
 
 from blocks.rooms_registry import (
     ROOMS
@@ -81,16 +107,24 @@ from blocks.C_ARTIFACT_CONTRACT import (
     UniversalArtifactContract,
 )
 
+# =========================================================
+# 🧠 TEXT FALLBACK
+# =========================================================
 
 
 from blocks.provider_router import generate_text
 
+# =========================================================
 # 🧠 PRESENTATION
+# =========================================================
 
 from blocks.presentation_formatter import (
     format_response_presentation
 )
 
+# =========================================================
+# 🧠 EXPERIENCE
+# =========================================================
 
 from blocks.energy_manager import (
     get_energy
@@ -101,6 +135,9 @@ from blocks.experience import (
     load_experience
 )
 
+# =========================================================
+# 🔥 MACHINE CHANNELS
+# =========================================================
 
 TASK_CHANNEL = {
 
@@ -120,6 +157,9 @@ RESPONSE_CHANNEL = {
     "human_access": False
 }
 
+# =========================================================
+# 🔥 EXECUTION MAP
+# =========================================================
 
 EMAPS = {
 
@@ -134,6 +174,9 @@ EMAPS = {
     "machine_routes": []
 }
 
+# =========================================================
+# 🔥 HELPERS
+# =========================================================
 
 def normalize_text(text):
 
@@ -155,6 +198,9 @@ def clamp(
 
     return value
 
+# =========================================================
+# 🔥 TRACKERS
+# =========================================================
 
 def track_room(name):
 
@@ -183,6 +229,9 @@ def track_modality(name):
         "active_modalities"
     ].add(name)
 
+# =========================================================
+# 🔥 RESPONSE VALIDATION
+# =========================================================
 
 def validate_machine_response(
     result
@@ -223,6 +272,9 @@ def validate_machine_response(
 
     return True
 
+# =========================================================
+# 🔥 TASK TYPE
+# =========================================================
 
 def detect_task_type(
     semantic,
@@ -276,7 +328,9 @@ def detect_task_type(
 
     return "text"
 
+# =========================================================
 # 🔥 EXECUTOR CONTEXT
+# =========================================================
 
 def build_executor_context(
 
@@ -308,6 +362,9 @@ def build_executor_context(
 
     return {
 
+        # =================================================
+        # 🔥 MACHINE
+        # =====================================================
 
         "machine_channel":
             TASK_CHANNEL,
@@ -318,6 +375,9 @@ def build_executor_context(
         "executor_version":
             "unified_broadband_route_v1",
 
+        # =================================================
+        # 🔥 USER
+        # =====================================================
 
         "user_id":
             user_id,
@@ -325,6 +385,9 @@ def build_executor_context(
         "chat_id":
             chat_id,
 
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
 
         "semantic":
             semantic,
@@ -362,6 +425,9 @@ def build_executor_context(
         "visual_reference":
             visual_reference,
 
+        # =================================================
+        # 🔥 CONTINUITY
+        # =====================================================
 
         "scene_state":
             scene_state,
@@ -405,10 +471,16 @@ def build_executor_context(
                 "active_goal"
             ),
 
+        # =================================================
+        # 🔥 MACHINE INPUT
+        # =====================================================
 
         "machine_input":
             text,
 
+        # =================================================
+        # 🔥 FULL STATE
+        # =====================================================
 
         "state":
             state,
@@ -429,6 +501,9 @@ def build_executor_context(
             }
     }
 
+# =========================================================
+# 🧠 USER SPACE EXECUTOR BRIDGE (APRIL UPGRADE)
+# =========================================================
 
 def build_executor_user_space(state):
     """
@@ -450,6 +525,9 @@ def build_executor_user_space(state):
         "task_resolution": state.get("task_resolution", {}),
     }
 
+# =========================================================
+# 🔥 ROOM SCORING
+# =========================================================
 
 def stabilize_room_score(
 
@@ -469,6 +547,9 @@ def stabilize_room_score(
         "active_room"
     )
 
+    # =====================================================
+    # 🔥 ACTIVE ROOM CONTINUITY
+    # =====================================================
 
     if active_room:
 
@@ -476,6 +557,9 @@ def stabilize_room_score(
 
             score += 4.0
 
+    # =====================================================
+    # 🔥 RENDERER PRIORITY
+    # =====================================================
 
     if response_decision.get(
         "renderer_first_mode"
@@ -490,6 +574,9 @@ def stabilize_room_score(
 
             score += 5.0
 
+    # =====================================================
+    # 🔥 VISUAL GENERATION CONTROL
+    # =====================================================
 
     if response_decision.get(
         "avoid_heavy_generation"
@@ -503,7 +590,13 @@ def stabilize_room_score(
 
             score -= 8.0
 
+    # =====================================================
+    # 🔥 TRAJECTORY LOCK
+    # =====================================================
 
+    # =====================================================
+    # 🔥 TASK RESOLUTION PRIORITY
+    # =====================================================
 
     task_resolution = user_space.get(
         "task_resolution",
@@ -546,6 +639,9 @@ def stabilize_room_score(
         20.0
     )
 
+# =========================================================
+# 🧠 DOMAIN COMPETENCE ROUTING
+# =========================================================
 
 def build_domain_room_map():
 
@@ -588,6 +684,9 @@ def domain_room_bonus(room, semantic):
 
     return bonus
 
+# =========================================================
+# 🏭 FACTORY ORDER EXECUTION
+# =========================================================
 
 def get_factory_required_rooms(semantic):
 
@@ -601,6 +700,9 @@ def get_factory_required_rooms(semantic):
         []
     )
 
+# =====================================================
+# 🧠 ARTIFACT SCENE PLANNER
+# =====================================================
 
 def build_scene_plan(response_decision, semantic=None):
 
@@ -655,9 +757,14 @@ def build_scene_plan(response_decision, semantic=None):
             "artifact_first_scene_composition"
     }
 
+# =====================================================
+# 🧠 ARTIFACT -> RENDER BLOCK RESOLVER
+# =====================================================
 
 def artifact_to_render_block(result):
 
+    # MACHINE PAYLOAD MUST STAY MACHINE PAYLOAD
+    # BotRU is the only human translator.
 
     if not isinstance(result, dict):
         return {
@@ -680,6 +787,9 @@ def artifact_to_render_block(result):
 
     return translated
 
+# =====================================================
+# 🧠 BOT.RU MACHINE -> HUMAN TRANSLATOR
+# =====================================================
 
 def botru_translate_artifact(artifact):
 
@@ -689,6 +799,7 @@ def botru_translate_artifact(artifact):
             "content": ""
         }
 
+    # BaseArtifact support
     if hasattr(artifact, "data"):
 
         payload = artifact.data
@@ -760,6 +871,9 @@ def botru_translate_artifact(artifact):
         "content": str(artifact)
     }
 
+# =========================================================
+# 🧠 TASK RESOLUTION LAYER
+# =========================================================
 
 def build_task_resolution(
     cognition,
@@ -834,7 +948,9 @@ def build_guidance_response(
         "data": messages[step]
     }
 
+# =========================================================
 # 🔥 ROOM EXECUTION
+# =========================================================
 
 async def execute_rooms(
 
@@ -858,11 +974,16 @@ async def execute_rooms(
 
     print("🏭 ROOM SELECTION DELEGATED TO EXECUTOR")
 
+    # =====================================================
+    # 🔥 EVALUATION
+    # =====================================================
 
     for room in ROOMS:
 
         try:
 
+            # Room filtering is performed by the unified
+            # executor cognition pipeline.
 
             score = room.evaluate(
 
@@ -905,6 +1026,9 @@ async def execute_rooms(
                 e
             )
 
+    # =====================================================
+    # 🔥 SORT
+    # =====================================================
 
     scored_rooms.sort(
 
@@ -913,6 +1037,9 @@ async def execute_rooms(
         reverse=True
     )
 
+    # =====================================================
+    # 🔥 EXECUTION
+    # =====================================================
 
     for score, room in scored_rooms:
 
@@ -967,10 +1094,17 @@ async def execute_rooms(
 
             print(f"🔥 HANDLE CALL [{room.name}]")
 
+            # =====================================================
+            # STAGE 25 - CANONICAL FIBER ROUTE
+            # =====================================================
+            # Legacy machine_task_payload route removed.
             # Rooms receive only the canonical MachineRequest.
             handler_payload = machine_request
 
+            # =====================================================
             # FIBER ROUTE (canonical)
+            # =====================================================
+            # Fiber canonical room call with legacy compatibility payload.
             result = await room.handle(
                 user_id=user_id,
                 text=text,
@@ -1014,6 +1148,9 @@ async def execute_rooms(
                 print(f"🔥 OVERRIDE BLOCKED [{room.name}]")
                 continue
 
+            # ================================================
+            # INTERNAL SIGNALS ARE NOT USER ANSWERS
+            # ================================================
 
             if hasattr(result, "artifacts") and not isinstance(result, dict):
                 collected_results.append({
@@ -1100,7 +1237,9 @@ async def execute_rooms(
             f"🔥 COLLECTED ROOMS: {len(collected_results)}"
         )
 
+        # ================================================
         # 🔥 CANONICAL SCENE CONTRACT COMPOSITION
+        # ================================================
 
         unified_machine_response = collect_machine_contract(machine_contracts)
         unified_machine_response = merge_machine_responses(unified_machine_response, machine_responses)
@@ -1172,7 +1311,10 @@ async def execute_rooms(
                 "machine_contract_count": len(machine_contracts),
                 "machine_response_count": len(machine_responses),
 
+                # =====================================================
                 # CANONICAL TEXT TRANSPORT
+                # Preserve MachineResponse text on the single Fiber Route.
+                # =====================================================
                 "content": getattr(unified_machine_response, "content", None),
                 "summary": getattr(unified_machine_response, "summary", None),
                 "answer": getattr(unified_machine_response, "answer", None)
@@ -1189,7 +1331,9 @@ async def execute_rooms(
     return None
 
 
+# =====================================================
 # 🧠 REPRESENTATION GATE
+# =====================================================
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
     response_decision = response_decision or {}
@@ -1214,7 +1358,9 @@ def apply_representation_gate(blocks, response_decision=None, semantic=None):
 
 
 
+# =========================================================
 # 🧠 CANONICAL SCENE COMPOSER
+# =========================================================
 
 
 def is_canonical_scene(scene):
@@ -1222,6 +1368,7 @@ def is_canonical_scene(scene):
     return bool(getattr(scene, "scene_contract", False))
 
 def compose_canonical_scene_blocks(machine_scene, collected_results):
+    # Stage 3: canonical scene extraction
     """
     Canonical scene assembly.
     Prefer MachineScene blocks and only fall back to legacy
@@ -1229,6 +1376,7 @@ def compose_canonical_scene_blocks(machine_scene, collected_results):
     """
     blocks = list(getattr(machine_scene, "render_blocks", None) or getattr(machine_scene, "blocks", []))
 
+    # Prefer already-built scene blocks.
     if blocks:
         return blocks
 
@@ -1264,7 +1412,9 @@ def compose_canonical_scene_blocks(machine_scene, collected_results):
 
 
 
+# =========================================================
 # 🧠 CHECKOUT SCENE CONTRACT BRIDGE
+# =========================================================
 
 def build_checkout_scene_contract(scene_result):
     """
@@ -1303,6 +1453,9 @@ def build_checkout_scene_contract(scene_result):
         "scene_contract_final": True,
     }
 
+# =========================================================
+# 🧠 APRIL ANSWER SYNTHESIS LAYER
+# =========================================================
 
 def synthesize_final_answer(
     result,
@@ -1320,6 +1473,14 @@ def synthesize_final_answer(
     
     result_type = result.get("type")
 
+    # =====================================================
+    # 🔥 EXPLANATION-FIRST STABILIZATION
+    # =====================================================
+    #
+    # If cognition determined that the user wants an
+    # explanation of a graph/formula/table, preserve
+    # dialogue format and do not force renderer output.
+    #
     explanation_pref = (
         cognition.get("representation_understanding", {})
         .get("prefer_text_explanation", False)
@@ -1396,7 +1557,9 @@ def synthesize_final_answer(
 
     return result
 
+# =========================================================
 # 🚀 APRIL EXECUTOR
+# =========================================================
 
 async def execute(
 
@@ -1432,6 +1595,9 @@ async def execute(
         user_id
     )
 
+    # =====================================================
+    # 🔥 SEMANTIC
+    # =====================================================
 
     semantic = semantic_analyze(
 
@@ -1466,6 +1632,9 @@ async def execute(
         semantic=semantic
     )
 
+    # =====================================================
+    # 🔥 REASONING
+    # =====================================================
 
     reasoning = build_reasoning_state(
 
@@ -1476,6 +1645,9 @@ async def execute(
         semantic=semantic
     )
 
+    # =====================================================
+    # 🔥 COGNITION
+    # =====================================================
 
     cognition = analyze_cognition(
 
@@ -1488,6 +1660,9 @@ async def execute(
         reasoning=reasoning
     )
 
+    # =====================================================
+    # 🔥 PERSONALITY
+    # =====================================================
 
     cognition = apply_april_personality(
 
@@ -1502,6 +1677,9 @@ async def execute(
         state=state
     )
 
+    # =====================================================
+    # 🔥 VISUAL CONTINUITY INTEGRATION
+    # =====================================================
 
     visual_continuity = state.get(
         "visual_continuity_summary",
@@ -1518,6 +1696,9 @@ async def execute(
         )
     )
 
+    # =====================================================
+    # 🔥 VISUAL REFERENCE
+    # =====================================================
 
     visual_reference = (
 
@@ -1533,6 +1714,9 @@ async def execute(
         )
     )
 
+    # =====================================================
+    # 🔥 RESPONSE DECISION
+    # =====================================================
 
     response_decision = (
 
@@ -1548,7 +1732,9 @@ async def execute(
         )
     )
 
+    # =====================================================
     # 🔥 GOLDEN MEMORY ROUTING LAYER
+    # =====================================================
 
     memory_routing = {
 
@@ -1565,6 +1751,9 @@ async def execute(
             cognition.get("memory_analysis", cognition.get("memory_signals", {}))
     }
 
+    # =====================================================
+    # 🔥 AUTHORITY
+    # =====================================================
 
     authority_decision = (
 
@@ -1587,7 +1776,9 @@ async def execute(
         )
     )
 
+    # =====================================================
     # 🔥 MEMORY
+    # =====================================================
 
     add_dialog(
 
@@ -1607,6 +1798,9 @@ async def execute(
         ""
     )
 
+    # =====================================================
+    # 🔥 TASK TYPE
+    # =====================================================
 
     task_type = detect_task_type(
 
@@ -1617,8 +1811,13 @@ async def execute(
         state
     )
 
+    # =====================================================
     # 🔥 EXECUTOR CONTEXT
+    # =====================================================
 
+    # =====================================================
+    # 🔥 UNIVERSAL MACHINE REQUEST
+    # =====================================================
     machine_request = build_machine_request({
         "semantic": semantic,
         "memory_routing": memory_routing,
@@ -1649,6 +1848,9 @@ async def execute(
         text=text
     )
 
+    # =====================================================
+    # 🧠 TASK RESOLUTION
+    # =====================================================
 
     task_resolution = build_task_resolution(
 
@@ -1665,12 +1867,22 @@ async def execute(
         task_resolution
     )
 
+    # =====================================================
+    # 🔥 INTERNAL GUIDANCE ONLY
+    # =====================================================
+    #
+    # Guidance is executor metadata.
+    # It must help routing and rooms.
+    # It must NOT become a user response.
+    #
     state["task_resolution"] = task_resolution
 
     if guidance_response:
         state["guidance_response"] = guidance_response
 
+    # =====================================================
     # 🔥 ROOM EXECUTION
+    # =====================================================
 
     print("🔥 EXECUTOR CONTEXT READY")
     print("🔥 CONTEXT CHAT:", chat_id)
@@ -1708,6 +1920,9 @@ async def execute(
     )
 
 
+    # =====================================================
+    # CPU REDIRECT FROM PROVIDER
+    # =====================================================
     if isinstance(room_response, dict) and room_response.get("executor_cpu_redirect"):
         executor_cpu_checkpoint(
             "CPU_REDIRECT_ACCEPTED",
@@ -1717,6 +1932,7 @@ async def execute(
 
         machine_response = room_response.get("machine_response")
 
+        # Stage 26: finalize second Fiber pass inside Executor.
         if machine_response is not None:
             try:
                 setattr(machine_response, "execution_phase", "POST_PROVIDER")
@@ -1763,6 +1979,9 @@ async def execute(
             "data":"CPU redirect received without MachineResponse."
         }
 
+    # =====================================================
+    # 🔥 ROOM SUCCESS
+    # =====================================================
 
     if room_response:
 
@@ -1792,6 +2011,9 @@ async def execute(
                 "data": str(result)
             }
 
+        # =====================================================
+        # APRIL RESPONSE STABILIZATION
+        # =====================================================
 
         if result.get("type") == "text":
 
@@ -1848,24 +2070,16 @@ async def execute(
 
         return result
         
+    # =====================================================
+    # 🔥 CPU TERMINATION ROUTE
+    # =====================================================
 
+    # Legacy fallback Provider route removed.
     # Executor must complete the canonical Fiber route only.
+    # =====================================================
     # CANONICAL CPU TERMINATION
     # Never leave Executor without a Scene Contract.
-    # Canonical safeguard: do not replace a valid MachineResponse.
-    if EXECUTOR_CPU_ROUTE.get("machine_response") is not None:
-        mr = EXECUTOR_CPU_ROUTE["machine_response"]
-        ms = build_machine_scene(mr)
-        return build_checkout_scene_contract({
-            "machine_scene": ms,
-            "scene_plan": {},
-            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
-            "content": getattr(mr,"content",None),
-            "summary": getattr(mr,"summary",None),
-            "answer": getattr(mr,"answer",None),
-            "renderer_state": getattr(mr,"renderer_state",{}),
-        })
-
+    # =====================================================
     fallback_response = MachineResponse()
     fallback_response.answer = "Executor completed without a canonical room result."
     fallback_response.content = fallback_response.answer
@@ -1903,6 +2117,9 @@ async def execute(
         "renderer_state": {},
     })
 
+    # =====================================================
+    # 🔥 FINAL SAFETY
+    # =====================================================
 
     return {
 
@@ -1913,7 +2130,9 @@ async def execute(
     }
 
 
+# =========================================================
 # 🧠 EXECUTOR MEMORY + UTC INTEGRATION
+# =========================================================
 
 def build_executor_memory_awareness(cognition):
 
@@ -2029,7 +2248,9 @@ def utc_memory_gate(cognition):
             )
     }
 
+# =========================================================
 # 🧠 MEMORY RECALL
+# =========================================================
 
 def build_memory_recall_context(state):
 
@@ -2074,7 +2295,9 @@ def build_executor_memory_recall(state):
         "memory_active": True
     }
 
+# =========================================================
 # 🧠 EXECUTOR MEMORY RECALL ACTIVATION
+# =========================================================
 
 def build_recall_candidates(state):
 
@@ -2111,7 +2334,9 @@ def build_memory_recall_payload(state):
 
     return recall
 
+# =========================================================
 # 🧠 EXECUTOR UTC MEMORY RECALL SELECTION
+# =========================================================
 
 from datetime import datetime, timezone
 
@@ -2181,6 +2406,9 @@ def build_ranked_memory_recall(state):
 
     return recall
 
+# =========================================================
+# 🧠 VISUAL SUMMARY
+# =========================================================
 
 def build_visual_summary_awareness(state):
 
@@ -2220,6 +2448,9 @@ def build_visual_summary_awareness(state):
             active_visual_scene
     }
 
+# =========================================================
+# 🧠 EXECUTOR LIVE VISION BRIDGE
+# =========================================================
 
 def build_live_vision_feed(state):
 
@@ -2260,7 +2491,9 @@ def build_executor_runtime_bridge(state):
         "bridge_ready": True
     }
 
+# =========================================================
 # 🧠 EXECUTOR LIVE VISION -> MEMORY TRANSFER
+# =========================================================
 
 def build_live_scene_snapshot(state):
 
@@ -2314,6 +2547,9 @@ def on_live_session_closed(state):
         "snapshot": snapshot
     }
 
+# =========================================================
+# 🧠 EXECUTOR ARTIFACT EXPANSION
+# =========================================================
 
 ARTIFACT_BLOCK_MAP = {
     "graph_data": "graph",
@@ -2382,6 +2618,9 @@ def artifact_to_render_block(result):
 
     return translated
 
+# =========================================================
+# 🧠 EXECUTOR SCENE COMPOSER
+# =========================================================
 
 def build_scene_from_artifact(artifact):
 
@@ -2400,6 +2639,7 @@ def build_scene_from_artifact(artifact):
 
     has_graph = any(v for v in unified_graph_payload.values())
 
+    # Graph blocks are emitted only when a room explicitly provides graph data.
 
     if has_graph:
 
@@ -2434,9 +2674,14 @@ def build_scene_from_artifact(artifact):
 
     return scene_blocks
 
+# =========================================================
 # END EXECUTOR # =========================================================
 
+# =========================================================
+# APRIL FIBER EXECUTOR BRIDGE
+# =========================================================
 
+# Single Fiber entry point. All execution begins with MachineRequest.
 def build_machine_request(context):
     req=MachineRequest()
     req.goal=context.get("semantic",{}).get("intent","dialog")
@@ -2447,6 +2692,9 @@ def build_machine_request(context):
     return req
 
 
+# =====================================================
+# STAGE 1 - CONTRACT NORMALIZER
+# =====================================================
 
 def _extract_contract_payload(contract):
     payload = {
@@ -2513,6 +2761,9 @@ def collect_machine_contract(room_contracts):
     return response
 
 
+# =====================================================
+# STAGE 21 - MERGE MACHINE RESPONSES
+# =====================================================
 def merge_machine_responses(unified_machine_response, machine_responses):
     for resp in machine_responses:
         if resp is None:
@@ -2541,6 +2792,7 @@ def build_machine_scene(response):
     scene = MachineScene()
 
     # Canonical Fiber Route:
+    # MachineResponse is the only input accepted by the Scene builder.
     if response is None:
         scene.scene_contract = True
         return scene
@@ -2557,6 +2809,7 @@ def build_machine_scene(response):
         })
 
     else:
+        # Preserve textual MachineResponse when no renderer blocks exist.
         text_payload = (
             getattr(response, "answer", None)
             or getattr(response, "content", None)
@@ -2585,6 +2838,9 @@ def build_machine_scene(response):
     return scene
 
 
+# =========================================================
+# FIBER ROUTE ASSERTION
+# =========================================================
 
 def verify_fiber_route():
     """Executor exposes a single canonical transport route."""
@@ -2594,6 +2850,9 @@ def verify_fiber_route():
         "output": "MachineScene",
         "scene_contract": True,
     }
+# =====================================================
+# STAGE 2 - Scene Contract Bridge
+# =====================================================
 
 def normalize_provider_scene(result):
     if not isinstance(result, dict):
@@ -2615,9 +2874,15 @@ def normalize_provider_scene(result):
 
 
 
+# =====================================================
+# EXECUTOR REFLECTION PASS (STAGE 1)
+# =====================================================
 
 
 
+# =====================================================
+# EXECUTOR CPU RENDER BLOCK MATERIALIZER (STAGE 13)
+# =====================================================
 
 def executor_cpu_materialize_blocks(machine_response):
     """
@@ -2668,6 +2933,9 @@ def executor_cpu_materialize_blocks(machine_response):
     return machine_response
 
 
+# =====================================================
+# EXECUTOR CPU ARTIFACT PAYLOAD LINKER (STAGE 14)
+# =====================================================
 
 def executor_cpu_attach_artifact_payloads(machine_response):
     """
@@ -2761,32 +3029,38 @@ def executor_reflection_pass(machine_response, executor_context):
     }
     return machine_response
 
+# =====================================================
 # EXECUTOR ROUTE VERSION
+# =====================================================
 EXECUTOR_ROUTE_VERSION="fiber_scene_v2"
 EXECUTOR_LEGACY_TEXT_ROUTE=False
 
 
+# =====================================================
 # EXECUTOR FIBER CANONICAL
+# =====================================================
 EXECUTOR_FIBER_CANONICAL = True
 
+# =====================================================
+# EXECUTOR CPU STAGE 1
+# =====================================================
 
 EXECUTOR_CPU_ENABLED = True
 
+# =====================================================
+# EXECUTOR CPU QUALITY CONTROLLER (STAGE 2)
+# =====================================================
 
 EXECUTOR_CPU_TRACE = []
 
 def executor_cpu_checkpoint(stage, **payload):
-    """Central CPU supervision. Never changes routing."""
-    reg = executor_cpu_expected(stage)
-    entry = {
+    """Central quality checkpoint.
+    Does not alter routing.
+    Records what the Executor knows at each stage.
+    """
+    entry={
         "stage": stage,
-        "role": reg.get("role"),
-        "expected_input": reg.get("input"),
-        "expected_output": reg.get("output"),
-        "next_stage": reg.get("next"),
-        "status": payload.pop("status","OK"),
         "payload": payload,
-        "timestamp": time.time(),
     }
     EXECUTOR_CPU_TRACE.append(entry)
     return entry
@@ -2845,6 +3119,9 @@ def build_executor_cpu_snapshot(
 
 
 
+# =====================================================
+# EXECUTOR CPU PIPELINE (STAGE 3)
+# =====================================================
 
 def executor_cpu_begin(user_input):
 
@@ -2896,56 +3173,9 @@ def executor_cpu_after_scene(machine_scene):
 
 
 
-
-
-APRIL_CPU_REGISTRY = {
-    "semantic": {
-        "role": "Semantic Analysis",
-        "input": "UserText",
-        "output": "SemanticState",
-        "next": "rooms",
-    },
-    "rooms": {
-        "role": "Domain Processing",
-        "input": "MachineRequest",
-        "output": "MachineResponse",
-        "next": "provider",
-    },
-    "provider": {
-        "role": "LLM Provider",
-        "input": "MachineRequest",
-        "output": "MachineResponse",
-        "next": "executor_reflection",
-    },
-    "executor_reflection": {
-        "role": "CPU Reflection",
-        "input": "MachineResponse",
-        "output": "MachineScene",
-        "next": "bot_ru",
-    },
-    "bot_ru": {
-        "role": "Machine→Human Translation",
-        "input": "MachineScene",
-        "output": "SceneContract",
-        "next": "checkout_server",
-    },
-    "checkout_server": {
-        "role": "Transport",
-        "input": "SceneContract",
-        "output": "GatewayTransport",
-        "next": "aprilweb",
-    },
-    "aprilweb": {
-        "role": "Renderer",
-        "input": "GatewayTransport",
-        "output": "VisualScene",
-        "next": None,
-    },
-}
-
-def executor_cpu_expected(stage):
-    return APRIL_CPU_REGISTRY.get(stage, {})
-
+# =====================================================
+# EXECUTOR CPU CONTROLLER (STAGE 4)
+# =====================================================
 
 EXECUTOR_CPU_ROUTE = {
     "aprilweb_input": None,
@@ -2973,6 +3203,9 @@ def executor_cpu_health():
     }
 
 
+# =====================================================
+# EXECUTOR CPU DECISION LOOP (STAGE 5)
+# =====================================================
 
 def executor_cpu_cycle(
     *,
@@ -3012,6 +3245,9 @@ def executor_cpu_cycle(
 
 
 
+# =====================================================
+# EXECUTION SESSION (STAGE 17)
+# =====================================================
 
 EXECUTOR_CPU_SESSION = {
     "id": None,
@@ -3043,8 +3279,14 @@ def executor_cpu_fail_stage(stage,error):
 def executor_cpu_execution_report():
     return EXECUTOR_CPU_SESSION
 
+# =====================================================
+# EXECUTOR CPU DECISION ENGINE (STAGE 7)
+# =====================================================
 
 
+# =====================================================
+# EXECUTOR CPU DECISION MATRIX (STAGE 12)
+# =====================================================
 
 def executor_cpu_build_presentation_plan(machine_response):
     """
@@ -3188,6 +3430,9 @@ def executor_cpu_reflect(
 
 
 
+# =====================================================
+# EXECUTOR CPU OBJECT LINEAGE (STAGE 18)
+# =====================================================
 
 EXECUTOR_CPU_OBJECTS = {
     "machine_request": {},
@@ -3210,8 +3455,14 @@ def executor_cpu_lineage_report():
         "objects": EXECUTOR_CPU_OBJECTS,
     }
 
+# =====================================================
+# EXECUTOR CPU SCENE APPROVAL (STAGE 9)
+# =====================================================
 
 
+# =====================================================
+# EXECUTOR CPU SCENE SYNCHRONIZER (STAGE 15)
+# =====================================================
 
 def executor_cpu_sync_scene(machine_response, machine_scene):
     """
@@ -3253,6 +3504,9 @@ def executor_cpu_finalize_scene(machine_response, machine_scene):
     return machine_scene
 
 
+# =====================================================
+# EXECUTOR CPU COMPLETENESS (STAGE 10)
+# =====================================================
 
 def executor_cpu_validate_completeness(machine_response, machine_scene):
     """Validate that the response representation matches the CPU plan.
@@ -3279,6 +3533,9 @@ def executor_cpu_validate_completeness(machine_response, machine_scene):
 
 
 
+# =====================================================
+# EXECUTOR CPU ROUTE GUARD (STAGE 19)
+# =====================================================
 
 EXECUTOR_CPU_ROUTE_GUARD = []
 
@@ -3304,6 +3561,9 @@ def executor_cpu_route_guard_report():
     }
 
 
+# =====================================================
+# EXECUTOR CPU PAYLOAD GUARD (STAGE 20)
+# =====================================================
 
 EXECUTOR_CPU_PAYLOAD_TRACE=[]
 
@@ -3324,6 +3584,9 @@ def executor_cpu_capture_payload(stage, obj):
 def executor_cpu_payload_report():
     return EXECUTOR_CPU_PAYLOAD_TRACE
 
+# =====================================================
+# EXECUTOR CPU ROOM SUPERVISOR (STAGE 11)
+# =====================================================
 
 def executor_cpu_register_room(cpu_log, room_name, score=None,
                                executed=False, accepted=False):
