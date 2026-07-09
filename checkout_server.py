@@ -146,21 +146,6 @@ app = Flask(__name__)
 CORS(app)
 
 
-
-# =========================================================
-# 🧠 APRIL CPU GATEWAY BRIDGE
-# =========================================================
-
-GATEWAY_CPU_TRACE = []
-
-def gateway_cpu_checkpoint(stage, status="OK", **payload):
-    GATEWAY_CPU_TRACE.append({
-        "stage": stage,
-        "status": status,
-        "payload": payload,
-    })
-
-
 # =========================================================
 # 🧠 SAFE JSON
 # =========================================================
@@ -610,11 +595,7 @@ async def process_web_message(
 
     
 
-    gateway_cpu_checkpoint("executor_output_received")
-
     result = executor_contract_passthrough(result)
-
-    gateway_cpu_checkpoint("contract_passthrough_ok")
 
     normalized = normalize_executor_response(result)
 
@@ -1225,15 +1206,7 @@ def web_chat():
             )
         )
 
-        gateway_cpu_checkpoint("normalize_complete")
-
         result["gateway_transport"] = build_gateway_transport_payload(result)
-
-        gateway_cpu_checkpoint(
-            "gateway_transport_ready",
-            scene_contract=bool(result.get("gateway_transport",{}).get("scene_contract")),
-            render_blocks=len(result.get("gateway_transport",{}).get("render_blocks",[]) or []),
-        )
 
         # =========================================================
         # LEGACY TRANSPORT (TEMPORARILY DISABLED)
