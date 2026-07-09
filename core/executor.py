@@ -1922,7 +1922,7 @@ async def execute(
         return result
         
 
-    # Executor must complete the canonical Fiber route only.
+    # Canonical Executor exit: after this point only unrecoverable errors are allowed.
     # CANONICAL CPU TERMINATION
     # Never leave Executor without a Scene Contract.
     # Canonical safeguard: do not replace a valid MachineResponse.
@@ -1989,9 +1989,10 @@ async def execute(
             "renderer_state": getattr(mr,"renderer_state",{}),
         })
 
-    fallback_response = MachineResponse()
-    fallback_response.answer = "Legacy fallback reached (diagnostic only)."
-    fallback_response.content = fallback_response.answer
+    raise RuntimeError(
+        "Executor reached legacy fallback. Canonical route was not completed; "
+        "this indicates an upstream routing bug."
+    )
 
     fallback_response = executor_cpu_reflect(
         semantic=semantic,
