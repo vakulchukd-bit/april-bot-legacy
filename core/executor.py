@@ -1957,6 +1957,22 @@ async def execute(
             "renderer_state": getattr(existing_response,"renderer_state",{}),
         })
 
+    # CANONICAL RULE:
+    # If a MachineScene has already been built, Executor must never
+    # overwrite it with a diagnostic fallback.
+    if EXECUTOR_CPU_ROUTE.get("machine_scene") is not None:
+        scene = EXECUTOR_CPU_ROUTE["machine_scene"]
+        mr = EXECUTOR_CPU_ROUTE.get("machine_response")
+        return build_checkout_scene_contract({
+            "machine_scene": scene,
+            "scene_plan": {},
+            "blocks": list(getattr(scene, "render_blocks", []) or getattr(scene, "blocks", [])),
+            "content": getattr(mr, "content", None) if mr else None,
+            "summary": getattr(mr, "summary", None) if mr else None,
+            "answer": getattr(mr, "answer", None) if mr else None,
+            "renderer_state": getattr(scene, "renderer_state", {}),
+        })
+
     fallback_response = MachineResponse()
     fallback_response.answer = "Executor completed without a canonical room result."
     fallback_response.content = fallback_response.answer
