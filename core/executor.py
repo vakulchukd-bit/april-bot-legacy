@@ -1938,6 +1938,25 @@ async def execute(
             "renderer_state": getattr(mr,"renderer_state",{}),
         })
 
+    # CANONICAL CPU RULE:
+    # This diagnostic branch must never execute after a valid MachineResponse
+    # has already been produced anywhere in the route.
+    existing_response = EXECUTOR_CPU_ROUTE.get("machine_response")
+    if existing_response is not None:
+        ms = build_machine_scene(existing_response)
+        ms = executor_cpu_sync_scene(existing_response, ms)
+        ms = executor_cpu_finalize_scene(existing_response, ms)
+        ms = executor_cpu_validate_completeness(existing_response, ms)
+        return build_checkout_scene_contract({
+            "machine_scene": ms,
+            "scene_plan": {},
+            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
+            "content": getattr(existing_response,"content",None),
+            "summary": getattr(existing_response,"summary",None),
+            "answer": getattr(existing_response,"answer",None),
+            "renderer_state": getattr(existing_response,"renderer_state",{}),
+        })
+
     fallback_response = MachineResponse()
     fallback_response.answer = "Executor completed without a canonical room result."
     fallback_response.content = fallback_response.answer
