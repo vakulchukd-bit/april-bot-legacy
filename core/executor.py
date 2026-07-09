@@ -2776,17 +2776,13 @@ EXECUTOR_CPU_ENABLED = True
 EXECUTOR_CPU_TRACE = []
 
 def executor_cpu_checkpoint(stage, **payload):
-    """Central CPU supervision. Never changes routing."""
-    reg = executor_cpu_expected(stage)
-    entry = {
+    """Central quality checkpoint.
+    Does not alter routing.
+    Records what the Executor knows at each stage.
+    """
+    entry={
         "stage": stage,
-        "role": reg.get("role"),
-        "expected_input": reg.get("input"),
-        "expected_output": reg.get("output"),
-        "next_stage": reg.get("next"),
-        "status": payload.pop("status","OK"),
         "payload": payload,
-        "timestamp": time.time(),
     }
     EXECUTOR_CPU_TRACE.append(entry)
     return entry
@@ -2897,56 +2893,6 @@ def executor_cpu_after_scene(machine_scene):
 
 
 
-
-APRIL_CPU_REGISTRY = {
-    "semantic": {
-        "role": "Semantic Analysis",
-        "input": "UserText",
-        "output": "SemanticState",
-        "next": "rooms",
-    },
-    "rooms": {
-        "role": "Domain Processing",
-        "input": "MachineRequest",
-        "output": "MachineResponse",
-        "next": "provider",
-    },
-    "provider": {
-        "role": "LLM Provider",
-        "input": "MachineRequest",
-        "output": "MachineResponse",
-        "next": "executor_reflection",
-    },
-    "executor_reflection": {
-        "role": "CPU Reflection",
-        "input": "MachineResponse",
-        "output": "MachineScene",
-        "next": "bot_ru",
-    },
-    "bot_ru": {
-        "role": "Machine→Human Translation",
-        "input": "MachineScene",
-        "output": "SceneContract",
-        "next": "checkout_server",
-    },
-    "checkout_server": {
-        "role": "Transport",
-        "input": "SceneContract",
-        "output": "GatewayTransport",
-        "next": "aprilweb",
-    },
-    "aprilweb": {
-        "role": "Renderer",
-        "input": "GatewayTransport",
-        "output": "VisualScene",
-        "next": None,
-    },
-}
-
-def executor_cpu_expected(stage):
-    return APRIL_CPU_REGISTRY.get(stage, {})
-
-
 EXECUTOR_CPU_ROUTE = {
     "aprilweb_input": None,
     "semantic": None,
@@ -2964,36 +2910,6 @@ def executor_cpu_update(stage, value):
         EXECUTOR_CPU_ROUTE[stage] = value
     executor_cpu_checkpoint(stage, updated=True)
     return EXECUTOR_CPU_ROUTE
-
-
-def executor_cpu_verify_stage(stage, value):
-    """
-    CPU contract verification.
-    Does not execute subsystem logic.
-    Only validates that the expected output exists.
-    """
-    reg = executor_cpu_expected(stage)
-    ok = value is not None
-    executor_cpu_checkpoint(
-        stage,
-        status="OK" if ok else "FAIL",
-        verified=ok,
-        expected_output=reg.get("output"),
-    )
-    return ok
-
-def executor_cpu_finalize_report():
-    """
-    Produce one consolidated execution report for the entire route.
-    """
-    return {
-        "executor_role": "APRIL_CPU",
-        "registry": APRIL_CPU_REGISTRY,
-        "trace": EXECUTOR_CPU_TRACE,
-        "health": executor_cpu_health(),
-        "route": EXECUTOR_CPU_ROUTE,
-    }
-
 
 def executor_cpu_health():
     return {
