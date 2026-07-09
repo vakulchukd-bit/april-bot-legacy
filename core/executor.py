@@ -1398,6 +1398,78 @@ def synthesize_final_answer(
 
 # 🚀 APRIL EXECUTOR
 
+
+def executor_cpu_run_stage(stage_name, func, *args, **kwargs):
+    """
+    Unified CPU dispatcher.
+    Executes a subsystem, records its status, and returns its result.
+    """
+    executor_cpu_enter_stage(stage_name)
+    try:
+        result = func(*args, **kwargs)
+        executor_cpu_verify_stage(stage_name, result)
+        executor_cpu_leave_stage(stage_name)
+        return result
+    except Exception as exc:
+        executor_cpu_fail_stage(stage_name, exc)
+        executor_cpu_checkpoint(stage_name, status="FAIL", error=str(exc))
+        raise
+
+
+
+def executor_cpu_pipeline(stage_name, producer, *args, **kwargs):
+    """
+    Canonical CPU pipeline wrapper.
+    CPU supervises the subsystem but never replaces it.
+    """
+    executor_cpu_enter_stage(stage_name)
+    try:
+        result = producer(*args, **kwargs)
+        ok = executor_cpu_verify_stage(stage_name, result)
+        executor_cpu_checkpoint(
+            stage_name,
+            contract_verified=ok,
+            subsystem=stage_name,
+            owner="executor_cpu",
+        )
+        executor_cpu_leave_stage(stage_name)
+        return result
+    except Exception as exc:
+        executor_cpu_fail_stage(stage_name, exc)
+        executor_cpu_checkpoint(
+            stage_name,
+            status="FAIL",
+            subsystem=stage_name,
+            error=str(exc),
+        )
+        raise
+
+APRIL_CPU_CANONICAL_ROUTE = [
+    "semantic",
+    "rooms",
+    "provider",
+    "executor_reflection",
+    "bot_ru",
+    "checkout_server",
+    "aprilweb",
+]
+
+def executor_cpu_route_report():
+    completed = {
+        item.get("stage")
+        for item in EXECUTOR_CPU_TRACE
+        if item.get("status") == "OK"
+    }
+    return {
+        "canonical_route": APRIL_CPU_CANONICAL_ROUTE,
+        "completed": sorted(completed),
+        "missing": [
+            s for s in APRIL_CPU_CANONICAL_ROUTE
+            if s not in completed
+        ],
+    }
+
+
 async def execute(
 
     user_id,
@@ -2776,13 +2848,17 @@ EXECUTOR_CPU_ENABLED = True
 EXECUTOR_CPU_TRACE = []
 
 def executor_cpu_checkpoint(stage, **payload):
-    """Central quality checkpoint.
-    Does not alter routing.
-    Records what the Executor knows at each stage.
-    """
-    entry={
+    """Central CPU supervision. Never changes routing."""
+    reg = executor_cpu_expected(stage)
+    entry = {
         "stage": stage,
+        "role": reg.get("role"),
+        "expected_input": reg.get("input"),
+        "expected_output": reg.get("output"),
+        "next_stage": reg.get("next"),
+        "status": payload.pop("status","OK"),
         "payload": payload,
+        "timestamp": time.time(),
     }
     EXECUTOR_CPU_TRACE.append(entry)
     return entry
@@ -2893,6 +2969,56 @@ def executor_cpu_after_scene(machine_scene):
 
 
 
+
+APRIL_CPU_REGISTRY = {
+    "semantic": {
+        "role": "Semantic Analysis",
+        "input": "UserText",
+        "output": "SemanticState",
+        "next": "rooms",
+    },
+    "rooms": {
+        "role": "Domain Processing",
+        "input": "MachineRequest",
+        "output": "MachineResponse",
+        "next": "provider",
+    },
+    "provider": {
+        "role": "LLM Provider",
+        "input": "MachineRequest",
+        "output": "MachineResponse",
+        "next": "executor_reflection",
+    },
+    "executor_reflection": {
+        "role": "CPU Reflection",
+        "input": "MachineResponse",
+        "output": "MachineScene",
+        "next": "bot_ru",
+    },
+    "bot_ru": {
+        "role": "Machine→Human Translation",
+        "input": "MachineScene",
+        "output": "SceneContract",
+        "next": "checkout_server",
+    },
+    "checkout_server": {
+        "role": "Transport",
+        "input": "SceneContract",
+        "output": "GatewayTransport",
+        "next": "aprilweb",
+    },
+    "aprilweb": {
+        "role": "Renderer",
+        "input": "GatewayTransport",
+        "output": "VisualScene",
+        "next": None,
+    },
+}
+
+def executor_cpu_expected(stage):
+    return APRIL_CPU_REGISTRY.get(stage, {})
+
+
 EXECUTOR_CPU_ROUTE = {
     "aprilweb_input": None,
     "semantic": None,
@@ -2910,6 +3036,36 @@ def executor_cpu_update(stage, value):
         EXECUTOR_CPU_ROUTE[stage] = value
     executor_cpu_checkpoint(stage, updated=True)
     return EXECUTOR_CPU_ROUTE
+
+
+def executor_cpu_verify_stage(stage, value):
+    """
+    CPU contract verification.
+    Does not execute subsystem logic.
+    Only validates that the expected output exists.
+    """
+    reg = executor_cpu_expected(stage)
+    ok = value is not None
+    executor_cpu_checkpoint(
+        stage,
+        status="OK" if ok else "FAIL",
+        verified=ok,
+        expected_output=reg.get("output"),
+    )
+    return ok
+
+def executor_cpu_finalize_report():
+    """
+    Produce one consolidated execution report for the entire route.
+    """
+    return {
+        "executor_role": "APRIL_CPU",
+        "registry": APRIL_CPU_REGISTRY,
+        "trace": EXECUTOR_CPU_TRACE,
+        "health": executor_cpu_health(),
+        "route": EXECUTOR_CPU_ROUTE,
+    }
+
 
 def executor_cpu_health():
     return {
@@ -3286,3 +3442,50 @@ def executor_cpu_register_room(cpu_log, room_name, score=None,
 def executor_cpu_attach_room_report(machine_scene, room_report):
     machine_scene.executor_room_report = room_report
     return machine_scene
+
+# ============================================================================
+# APRIL CPU ROADMAP (Stage 3)
+#
+# Executor is the central CPU.
+# It never replaces subsystem logic.
+# It orchestrates, verifies contracts, records lifecycle,
+# and exposes one execution report for diagnostics.
+# ============================================================================
+
+
+# ============================================================================
+# APRIL CPU STAGE 5
+# Final CPU supervision helpers.
+# These helpers DO NOT execute subsystem logic.
+# They only verify the canonical lifecycle.
+# ============================================================================
+
+def executor_cpu_assert_route():
+    report = executor_cpu_route_report()
+    return {
+        "route_ok": len(report["missing"]) == 0,
+        "missing": report["missing"],
+        "completed": report["completed"],
+    }
+
+
+def executor_cpu_system_report():
+    return {
+        "cpu": executor_cpu_finalize_report(),
+        "route": executor_cpu_route_report(),
+        "lineage": executor_cpu_lineage_report(),
+        "payload": executor_cpu_payload_report(),
+        "execution": executor_cpu_execution_report(),
+        "contracts": executor_cpu_assert_route(),
+    }
+
+
+def executor_cpu_finish():
+    report = executor_cpu_system_report()
+    executor_cpu_checkpoint(
+        "CPU_FINISH",
+        status="OK" if report["contracts"]["route_ok"] else "FAIL",
+        missing=report["contracts"]["missing"],
+    )
+    return report
+
