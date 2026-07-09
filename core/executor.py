@@ -1852,6 +1852,20 @@ async def execute(
     # Executor must complete the canonical Fiber route only.
     # CANONICAL CPU TERMINATION
     # Never leave Executor without a Scene Contract.
+    # Canonical safeguard: do not replace a valid MachineResponse.
+    if EXECUTOR_CPU_ROUTE.get("machine_response") is not None:
+        mr = EXECUTOR_CPU_ROUTE["machine_response"]
+        ms = build_machine_scene(mr)
+        return build_checkout_scene_contract({
+            "machine_scene": ms,
+            "scene_plan": {},
+            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
+            "content": getattr(mr,"content",None),
+            "summary": getattr(mr,"summary",None),
+            "answer": getattr(mr,"answer",None),
+            "renderer_state": getattr(mr,"renderer_state",{}),
+        })
+
     fallback_response = MachineResponse()
     fallback_response.answer = "Executor completed without a canonical room result."
     fallback_response.content = fallback_response.answer
