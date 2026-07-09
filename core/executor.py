@@ -1,9 +1,4 @@
-# APRIL EXECUTOR CPU CONTRACT
-#   -> reflection
 
-# APRIL EXECUTOR
-# Canonical execution path:
-# User Space -> MachineRequest -> Rooms -> MachineResponse -> MachineScene -> Scene Contract
 
 import traceback
 import time
@@ -46,7 +41,6 @@ from blocks.april_authority import (
     build_authority_decision
 )
 
-# 🧠 MEMORY + CONTEXT
 
 from blocks.state_manager import (
 
@@ -85,7 +79,6 @@ from blocks.C_ARTIFACT_CONTRACT import (
 
 from blocks.provider_router import generate_text
 
-# 🧠 PRESENTATION
 
 from blocks.presentation_formatter import (
     format_response_presentation
@@ -276,7 +269,6 @@ def detect_task_type(
 
     return "text"
 
-# 🔥 EXECUTOR CONTEXT
 
 def build_executor_context(
 
@@ -834,7 +826,6 @@ def build_guidance_response(
         "data": messages[step]
     }
 
-# 🔥 ROOM EXECUTION
 
 async def execute_rooms(
 
@@ -967,10 +958,8 @@ async def execute_rooms(
 
             print(f"🔥 HANDLE CALL [{room.name}]")
 
-            # Rooms receive only the canonical MachineRequest.
             handler_payload = machine_request
 
-            # FIBER ROUTE (canonical)
             result = await room.handle(
                 user_id=user_id,
                 text=text,
@@ -1100,7 +1089,6 @@ async def execute_rooms(
             f"🔥 COLLECTED ROOMS: {len(collected_results)}"
         )
 
-        # 🔥 CANONICAL SCENE CONTRACT COMPOSITION
 
         unified_machine_response = collect_machine_contract(machine_contracts)
         unified_machine_response = merge_machine_responses(unified_machine_response, machine_responses)
@@ -1172,7 +1160,6 @@ async def execute_rooms(
                 "machine_contract_count": len(machine_contracts),
                 "machine_response_count": len(machine_responses),
 
-                # CANONICAL TEXT TRANSPORT
                 "content": getattr(unified_machine_response, "content", None),
                 "summary": getattr(unified_machine_response, "summary", None),
                 "answer": getattr(unified_machine_response, "answer", None)
@@ -1189,7 +1176,6 @@ async def execute_rooms(
     return None
 
 
-# 🧠 REPRESENTATION GATE
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
     response_decision = response_decision or {}
@@ -1214,7 +1200,6 @@ def apply_representation_gate(blocks, response_decision=None, semantic=None):
 
 
 
-# 🧠 CANONICAL SCENE COMPOSER
 
 
 def is_canonical_scene(scene):
@@ -1264,7 +1249,6 @@ def compose_canonical_scene_blocks(machine_scene, collected_results):
 
 
 
-# 🧠 CHECKOUT SCENE CONTRACT BRIDGE
 
 def build_checkout_scene_contract(scene_result):
     """
@@ -1396,7 +1380,6 @@ def synthesize_final_answer(
 
     return result
 
-# 🚀 APRIL EXECUTOR
 
 async def execute(
 
@@ -1548,7 +1531,6 @@ async def execute(
         )
     )
 
-    # 🔥 GOLDEN MEMORY ROUTING LAYER
 
     memory_routing = {
 
@@ -1587,7 +1569,6 @@ async def execute(
         )
     )
 
-    # 🔥 MEMORY
 
     add_dialog(
 
@@ -1617,7 +1598,6 @@ async def execute(
         state
     )
 
-    # 🔥 EXECUTOR CONTEXT
 
     machine_request = build_machine_request({
         "semantic": semantic,
@@ -1670,7 +1650,6 @@ async def execute(
     if guidance_response:
         state["guidance_response"] = guidance_response
 
-    # 🔥 ROOM EXECUTION
 
     print("🔥 EXECUTOR CONTEXT READY")
     print("🔥 CONTEXT CHAT:", chat_id)
@@ -1849,23 +1828,6 @@ async def execute(
         return result
         
 
-    # Executor must complete the canonical Fiber route only.
-    # CANONICAL CPU TERMINATION
-    # Never leave Executor without a Scene Contract.
-    # Canonical safeguard: do not replace a valid MachineResponse.
-    if EXECUTOR_CPU_ROUTE.get("machine_response") is not None:
-        mr = EXECUTOR_CPU_ROUTE["machine_response"]
-        ms = build_machine_scene(mr)
-        return build_checkout_scene_contract({
-            "machine_scene": ms,
-            "scene_plan": {},
-            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
-            "content": getattr(mr,"content",None),
-            "summary": getattr(mr,"summary",None),
-            "answer": getattr(mr,"answer",None),
-            "renderer_state": getattr(mr,"renderer_state",{}),
-        })
-
     fallback_response = MachineResponse()
     fallback_response.answer = "Executor completed without a canonical room result."
     fallback_response.content = fallback_response.answer
@@ -1913,7 +1875,6 @@ async def execute(
     }
 
 
-# 🧠 EXECUTOR MEMORY + UTC INTEGRATION
 
 def build_executor_memory_awareness(cognition):
 
@@ -2029,7 +1990,6 @@ def utc_memory_gate(cognition):
             )
     }
 
-# 🧠 MEMORY RECALL
 
 def build_memory_recall_context(state):
 
@@ -2074,7 +2034,6 @@ def build_executor_memory_recall(state):
         "memory_active": True
     }
 
-# 🧠 EXECUTOR MEMORY RECALL ACTIVATION
 
 def build_recall_candidates(state):
 
@@ -2111,7 +2070,6 @@ def build_memory_recall_payload(state):
 
     return recall
 
-# 🧠 EXECUTOR UTC MEMORY RECALL SELECTION
 
 from datetime import datetime, timezone
 
@@ -2260,7 +2218,6 @@ def build_executor_runtime_bridge(state):
         "bridge_ready": True
     }
 
-# 🧠 EXECUTOR LIVE VISION -> MEMORY TRANSFER
 
 def build_live_scene_snapshot(state):
 
@@ -2357,7 +2314,6 @@ def expand_artifact_payload(artifact):
 
     return blocks
 
-# Canonical artifact -> scene resolver (single expansion pipeline)
 _previous_artifact_to_render_block = artifact_to_render_block
 
 def artifact_to_render_block(result):
@@ -2434,7 +2390,6 @@ def build_scene_from_artifact(artifact):
 
     return scene_blocks
 
-# END EXECUTOR # =========================================================
 
 
 def build_machine_request(context):
@@ -2540,7 +2495,6 @@ def build_machine_scene(response):
     print("INPUT RESPONSE:", type(response))
     scene = MachineScene()
 
-    # Canonical Fiber Route:
     if response is None:
         scene.scene_contract = True
         return scene
@@ -2761,12 +2715,10 @@ def executor_reflection_pass(machine_response, executor_context):
     }
     return machine_response
 
-# EXECUTOR ROUTE VERSION
 EXECUTOR_ROUTE_VERSION="fiber_scene_v2"
 EXECUTOR_LEGACY_TEXT_ROUTE=False
 
 
-# EXECUTOR FIBER CANONICAL
 EXECUTOR_FIBER_CANONICAL = True
 
 
