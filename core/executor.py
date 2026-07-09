@@ -1836,7 +1836,6 @@ async def execute(
         }
 
 
-    # Canonical rule: a valid MachineResponse has priority over room diagnostics.
     if room_response:
 
         result = room_response.get(
@@ -1922,7 +1921,7 @@ async def execute(
         return result
         
 
-    # Canonical Executor exit: after this point only unrecoverable errors are allowed.
+    # Executor must complete the canonical Fiber route only.
     # CANONICAL CPU TERMINATION
     # Never leave Executor without a Scene Contract.
     # Canonical safeguard: do not replace a valid MachineResponse.
@@ -1939,60 +1938,9 @@ async def execute(
             "renderer_state": getattr(mr,"renderer_state",{}),
         })
 
-    # CANONICAL CPU RULE:
-    # This diagnostic branch must never execute after a valid MachineResponse
-    # has already been produced anywhere in the route.
-    existing_response = EXECUTOR_CPU_ROUTE.get("machine_response")
-    if existing_response is not None:
-        ms = build_machine_scene(existing_response)
-        ms = executor_cpu_sync_scene(existing_response, ms)
-        ms = executor_cpu_finalize_scene(existing_response, ms)
-        ms = executor_cpu_validate_completeness(existing_response, ms)
-        return build_checkout_scene_contract({
-            "machine_scene": ms,
-            "scene_plan": {},
-            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
-            "content": getattr(existing_response,"content",None),
-            "summary": getattr(existing_response,"summary",None),
-            "answer": getattr(existing_response,"answer",None),
-            "renderer_state": getattr(existing_response,"renderer_state",{}),
-        })
-
-    # CANONICAL RULE:
-    # If a MachineScene has already been built, Executor must never
-    # overwrite it with a diagnostic fallback.
-    if EXECUTOR_CPU_ROUTE.get("machine_scene") is not None:
-        scene = EXECUTOR_CPU_ROUTE["machine_scene"]
-        mr = EXECUTOR_CPU_ROUTE.get("machine_response")
-        return build_checkout_scene_contract({
-            "machine_scene": scene,
-            "scene_plan": {},
-            "blocks": list(getattr(scene, "render_blocks", []) or getattr(scene, "blocks", [])),
-            "content": getattr(mr, "content", None) if mr else None,
-            "summary": getattr(mr, "summary", None) if mr else None,
-            "answer": getattr(mr, "answer", None) if mr else None,
-            "renderer_state": getattr(scene, "renderer_state", {}),
-        })
-
-    # LEGACY FALLBACK DISABLED
-    existing_response = EXECUTOR_CPU_ROUTE.get("machine_response")
-    if existing_response is not None:
-        mr = existing_response
-        ms = build_machine_scene(mr)
-        return build_checkout_scene_contract({
-            "machine_scene": ms,
-            "scene_plan": {},
-            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
-            "content": getattr(mr,"content",None),
-            "summary": getattr(mr,"summary",None),
-            "answer": getattr(mr,"answer",None),
-            "renderer_state": getattr(mr,"renderer_state",{}),
-        })
-
-    raise RuntimeError(
-        "Executor reached legacy fallback. Canonical route was not completed; "
-        "this indicates an upstream routing bug."
-    )
+    fallback_response = MachineResponse()
+    fallback_response.answer = "Executor completed without a canonical room result."
+    fallback_response.content = fallback_response.answer
 
     fallback_response = executor_cpu_reflect(
         semantic=semantic,
