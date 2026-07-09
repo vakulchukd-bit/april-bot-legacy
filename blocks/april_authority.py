@@ -876,7 +876,10 @@ def should_override(
         state
     )
 
-    if not valid:
+    # Canonical Fiber rule:
+    # If a valid MachineResponse already exists, Governance validates it
+    # but must not replace or block it.
+    if valid:
 
         APRIL_LOG_OUT(
 
@@ -884,11 +887,23 @@ def should_override(
 
             {
                 "override":
-                    True
+                    False
             }
         )
 
-        return True
+        return False
+
+    APRIL_LOG_OUT(
+
+        "GOVERNANCE_ROOM",
+
+        {
+            "override":
+                True
+        }
+    )
+
+    return True
 
     if semantic.get(
         "prefer_renderer"
