@@ -1170,6 +1170,15 @@ async def execute_rooms(
             reflection_context
         )
 
+        # X007 TEST: canonical response guard
+        if getattr(unified_machine_response, "answer", None) and not getattr(unified_machine_response, "content", None):
+            unified_machine_response.content = unified_machine_response.answer
+        if getattr(unified_machine_response, "content", None) and not getattr(unified_machine_response, "summary", None):
+            unified_machine_response.summary = unified_machine_response.content
+        print("🟢 X007 CPU CANONICAL",
+              bool(getattr(unified_machine_response,"answer",None)),
+              bool(getattr(unified_machine_response,"content",None)),
+              bool(getattr(unified_machine_response,"summary",None)))
         unified_machine_scene = build_machine_scene(unified_machine_response)
         unified_machine_scene = executor_cpu_sync_scene(
             unified_machine_response,
@@ -1229,6 +1238,18 @@ async def execute_rooms(
             machine_scene=unified_machine_scene,
             scene_contract=payload["result"],
         )
+        
+        # X008 TEST: verify canonical transport immediately before checkout
+        if getattr(unified_machine_response, "answer", None):
+            payload["result"]["answer"] = getattr(unified_machine_response, "answer", None)
+        if getattr(unified_machine_response, "content", None):
+            payload["result"]["content"] = getattr(unified_machine_response, "content", None)
+        if getattr(unified_machine_response, "summary", None):
+            payload["result"]["summary"] = getattr(unified_machine_response, "summary", None)
+        print("🟢 X008 PRE-CHECKOUT CANONICAL",
+              payload["result"].get("answer"),
+              payload["result"].get("content"))
+
         payload["result"] = build_checkout_scene_contract(payload["result"])
         executor_cpu_contract_probe(
             "POST_CHECKOUT",
@@ -3495,5 +3516,13 @@ def executor_cpu_register_room(cpu_log, room_name, score=None,
 def executor_cpu_attach_room_report(machine_scene, room_report):
     machine_scene.executor_room_report = room_report
     return machine_scene
+
+
+# X006 REVIEW PATCH
+# TODO:
+# - Preserve canonical MachineResponse after Provider.
+# - Prevent normalization from overwriting answer/content.
+# - Ensure MachineScene is built only from canonical MachineResponse.
+# - Fail fast if SceneContract loses answer/content.
 
 # X005 placeholder for canonical MachineResponse guard
