@@ -1,3 +1,18 @@
+
+# ==========================================================
+# XSCRUTER EXPERIMENTAL BUILD X-001
+#
+# Purpose:
+# - Experimental CPU consolidation build.
+# - Test version for route diagnostics.
+# - Safe rollback expected if hypothesis is rejected.
+#
+# Hypothesis:
+# Executor should become the single coordination CPU while
+# preserving one Fiber route and one Artifact Contract.
+#
+# ==========================================================
+
 # APRIL EXECUTOR CPU CONTRACT
 #   -> reflection
 
@@ -46,7 +61,11 @@ from blocks.april_authority import (
     build_authority_decision
 )
 
-# 🧠 MEMORY + CONTEXT
+# ==========================================================
+# XSCRUTER MEMORY SUPERVISION
+# CPU coordinates memory subsystems.
+# Memory modules execute independently.
+# ==========================================================
 
 from blocks.state_manager import (
 
@@ -276,7 +295,10 @@ def detect_task_type(
 
     return "text"
 
-# 🔥 EXECUTOR CONTEXT
+# ==========================================================
+# XSCRUTER EXECUTION CONTEXT
+# Unified runtime context prepared by CPU.
+# ==========================================================
 
 def build_executor_context(
 
@@ -834,7 +856,11 @@ def build_guidance_response(
         "data": messages[step]
     }
 
-# 🔥 ROOM EXECUTION
+# ==========================================================
+# ROOM EXECUTION PHASE
+# Rooms execute tasks.
+# CPU supervises and validates results.
+# ==========================================================
 
 async def execute_rooms(
 
@@ -1115,7 +1141,7 @@ async def execute_rooms(
         executor_cpu_verify_identity('machine_response', unified_machine_response)
         executor_cpu_capture_payload('machine_response', unified_machine_response)
         executor_cpu_after_response(unified_machine_response)
-        executor_cpu_update("machine_response", unified_machine_response)
+        executor_cpu_sync("machine_response", unified_machine_response)
 
         unified_machine_response = executor_cpu_reflect(
             semantic=semantic,
@@ -1147,7 +1173,7 @@ async def execute_rooms(
         executor_cpu_verify_identity('machine_scene', unified_machine_scene)
         executor_cpu_capture_payload('machine_scene', unified_machine_scene)
         executor_cpu_after_scene(unified_machine_scene)
-        executor_cpu_update("machine_scene", unified_machine_scene)
+        executor_cpu_sync("machine_scene", unified_machine_scene)
 
         scene_plan = build_scene_plan(
             response_decision,
@@ -1183,7 +1209,19 @@ async def execute_rooms(
             unified_machine_scene,
             executor_room_report
         )
+        executor_cpu_contract_probe(
+            "PRE_CHECKOUT",
+            machine_response=unified_machine_response,
+            machine_scene=unified_machine_scene,
+            scene_contract=payload["result"],
+        )
         payload["result"] = build_checkout_scene_contract(payload["result"])
+        executor_cpu_contract_probe(
+            "POST_CHECKOUT",
+            machine_response=unified_machine_response,
+            machine_scene=unified_machine_scene,
+            scene_contract=payload["result"],
+        )
         return payload
 
     return None
@@ -1214,7 +1252,10 @@ def apply_representation_gate(blocks, response_decision=None, semantic=None):
 
 
 
-# 🧠 CANONICAL SCENE COMPOSER
+# ==========================================================
+# CANONICAL SCENE COMPOSER
+# Scene assembly owned by Executor CPU.
+# ==========================================================
 
 
 def is_canonical_scene(scene):
@@ -1264,7 +1305,26 @@ def compose_canonical_scene_blocks(machine_scene, collected_results):
 
 
 
-# 🧠 CHECKOUT SCENE CONTRACT BRIDGE
+# ==========================================================
+# CPU → CHECKOUT HANDOFF
+# Approved SceneContract leaves CPU here.
+# ==========================================================
+
+
+# ===== XSCRUTER X003 TEST DIAGNOSTICS =====
+def executor_cpu_contract_probe(stage, machine_response=None, machine_scene=None, scene_contract=None):
+    print(f"🟢 X003 [{stage}]")
+    if machine_response is not None:
+        print("  answer:", getattr(machine_response, "answer", None))
+        print("  content:", getattr(machine_response, "content", None))
+        print("  blocks:", len(getattr(machine_response, "render_blocks", []) or []))
+    if machine_scene is not None:
+        print("  scene_blocks:", len(getattr(machine_scene, "blocks", []) or []))
+    if isinstance(scene_contract, dict):
+        print("  contract_answer:", scene_contract.get("answer"))
+        if getattr(machine_response, "answer", None) and not scene_contract.get("answer"):
+            print("🟢 CPU CONTRACT LOSS DETECTED")
+# ===== END X003 TEST DIAGNOSTICS =====
 
 def build_checkout_scene_contract(scene_result):
     """
@@ -1396,8 +1456,16 @@ def synthesize_final_answer(
 
     return result
 
-# 🚀 APRIL EXECUTOR
+# ==========================================================
+# XSCRUTER MAIN EXECUTION LOOP
+# Single lifecycle coordinator.
+# ==========================================================
 
+# XSCRUTER HYPOTHESIS:
+# 1. Every request enters here.
+# 2. CPU supervises every stage.
+# 3. Every subsystem reports back here.
+# 4. One canonical SceneContract exits here.
 async def execute(
 
     user_id,
@@ -1455,7 +1523,7 @@ async def execute(
     )
 
     executor_cpu_after_semantic(semantic)
-    executor_cpu_update("semantic", semantic)
+    executor_cpu_sync("semantic", semantic)
 
     semantic = detect_goal(
 
@@ -1617,7 +1685,10 @@ async def execute(
         state
     )
 
-    # 🔥 EXECUTOR CONTEXT
+    # ==========================================================
+# XSCRUTER EXECUTION CONTEXT
+# Unified runtime context prepared by CPU.
+# ==========================================================
 
     machine_request = build_machine_request({
         "semantic": semantic,
@@ -1670,7 +1741,11 @@ async def execute(
     if guidance_response:
         state["guidance_response"] = guidance_response
 
-    # 🔥 ROOM EXECUTION
+    # ==========================================================
+# ROOM EXECUTION PHASE
+# Rooms execute tasks.
+# CPU supervises and validates results.
+# ==========================================================
 
     print("🔥 EXECUTOR CONTEXT READY")
     print("🔥 CONTEXT CHAT:", chat_id)
@@ -1682,7 +1757,7 @@ async def execute(
     executor_cpu_mark_object('machine_request', machine_request, 'executor')
     executor_cpu_verify_identity('machine_request', machine_request)
     executor_cpu_after_request(machine_request)
-    executor_cpu_update("machine_request", machine_request)
+    executor_cpu_sync("machine_request", machine_request)
 
     context["machine_request"] = machine_request
     print(f"🟢 FIBER trace={getattr(machine_request,'trace_id',None)} input=MachineRequest")
@@ -2029,7 +2104,10 @@ def utc_memory_gate(cognition):
             )
     }
 
-# 🧠 MEMORY RECALL
+# ==========================================================
+# MEMORY RECALL SUPERVISION
+# CPU coordinates recall strategy.
+# ==========================================================
 
 def build_memory_recall_context(state):
 
@@ -2434,7 +2512,10 @@ def build_scene_from_artifact(artifact):
 
     return scene_blocks
 
-# END EXECUTOR # =========================================================
+# ==========================================================
+# END OF XSCRUTER CORE
+# Remaining helpers support the canonical CPU lifecycle.
+# ==========================================================
 
 
 def build_machine_request(context):
@@ -2958,6 +3039,27 @@ EXECUTOR_CPU_ROUTE = {
     "machine_scene": None,
     "aprilweb_output": None,
 }
+
+
+# ===== XSCRUTER X002 CORE =====
+
+def executor_cpu_sync(stage, value):
+    """
+    Canonical CPU synchronization point.
+    Updates route, verifies stage and records a checkpoint.
+    """
+    executor_cpu_update(stage, value)
+    executor_cpu_verify_stage(stage, value)
+    return value
+
+def executor_cpu_route_snapshot():
+    return {
+        "route": EXECUTOR_CPU_ROUTE.copy(),
+        "health": executor_cpu_health(),
+        "session": EXECUTOR_CPU_SESSION,
+    }
+
+# ===== END XSCRUTER X002 CORE =====
 
 def executor_cpu_update(stage, value):
     if stage in EXECUTOR_CPU_ROUTE:
