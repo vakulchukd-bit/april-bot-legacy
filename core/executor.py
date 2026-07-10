@@ -1036,9 +1036,14 @@ async def execute_rooms(
             print(f"🔥 OVERRIDE [{room.name}]:", override)
 
             if override:
-
-                print(f"🔥 OVERRIDE BLOCKED [{room.name}]")
-                continue
+                # X4.2 TEST: preserve canonical MachineResponse if already produced.
+                if isinstance(result, dict) and result.get("machine_response") is not None:
+                    print(f"🟢 X4.2 OVERRIDE BYPASSED [{room.name}]")
+                elif hasattr(result, "answer") or hasattr(result, "artifacts"):
+                    print(f"🟢 X4.2 OVERRIDE BYPASSED [{room.name}]")
+                else:
+                    print(f"🔥 OVERRIDE BLOCKED [{room.name}]")
+                    continue
 
 
             if hasattr(result, "artifacts") and not isinstance(result, dict):
@@ -1130,6 +1135,15 @@ async def execute_rooms(
 
         unified_machine_response = collect_machine_contract(machine_contracts)
         unified_machine_response = merge_machine_responses(unified_machine_response, machine_responses)
+        if not getattr(unified_machine_response,'answer',None):
+            for r in machine_responses:
+                a=getattr(r,'answer',None)
+                if a:
+                    unified_machine_response.answer=a
+                    unified_machine_response.content=getattr(r,'content',a)
+                    unified_machine_response.summary=getattr(r,'summary',a)
+                    print('🟢 X4.2 ANSWER RESTORED')
+                    break
         reflection_context = {
             "semantic": semantic,
             "cognition": cognition,
