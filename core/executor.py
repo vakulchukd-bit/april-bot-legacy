@@ -1941,9 +1941,18 @@ async def execute(
             "renderer_state": getattr(mr,"renderer_state",{}),
         })
 
+    # X4.1 TEST: do not fabricate a canonical answer.
+    executor_cpu_checkpoint(
+        "CPU_ROUTE_INCOMPLETE",
+        status="FAIL",
+        reason="MachineResponse missing after canonical route",
+    )
+    raise RuntimeError(
+        "Canonical MachineResponse missing after Executor route. "
+        "Fallback response generation is disabled in X4.1 TEST."
+    )
+
     fallback_response = MachineResponse()
-    fallback_response.answer = "Executor completed without a canonical room result."
-    fallback_response.content = fallback_response.answer
 
     fallback_response = executor_cpu_reflect(
         semantic=semantic,
