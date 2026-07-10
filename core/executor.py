@@ -3495,3 +3495,5 @@ def executor_cpu_register_room(cpu_log, room_name, score=None,
 def executor_cpu_attach_room_report(machine_scene, room_report):
     machine_scene.executor_room_report = room_report
     return machine_scene
+
+# X005 placeholder for canonical MachineResponse guard
