@@ -1,3 +1,11 @@
+# ==========================================================
+# X025 OPTIMIZATION PASS
+# Executor target:
+# MachineRequest -> Rooms -> MachineResponse
+# -> SingleSpace -> SceneContract -> Checkout
+# Legacy path scheduled for removal after validation.
+# ==========================================================
+
 
 # ==========================================================
 # XSCRUTER EXPERIMENTAL BUILD X-001
@@ -1192,19 +1200,7 @@ async def execute_rooms(
               bool(getattr(unified_machine_response,"answer",None)),
               bool(getattr(unified_machine_response,"content",None)),
               bool(getattr(unified_machine_response,"summary",None)))
-        unified_machine_scene = build_machine_scene(unified_machine_response)
-        unified_machine_scene = executor_cpu_sync_scene(
-            unified_machine_response,
-            unified_machine_scene
-        )
-        unified_machine_scene = executor_cpu_finalize_scene(
-            unified_machine_response,
-            unified_machine_scene
-        )
-        unified_machine_scene = executor_cpu_validate_completeness(
-            unified_machine_response,
-            unified_machine_scene
-        )
+        unified_machine_scene = executor_cpu_scene_pipeline(unified_machine_response)
         executor_cpu_mark_object('machine_scene', unified_machine_scene, 'executor')
         executor_cpu_verify_identity('machine_scene', unified_machine_scene)
         executor_cpu_capture_payload('machine_scene', unified_machine_scene)
@@ -1871,24 +1867,9 @@ async def execute(
                 },
             )
 
-            machine_scene = build_machine_scene(machine_response)
-            machine_scene = executor_cpu_sync_scene(machine_response, machine_scene)
-            machine_scene = executor_cpu_finalize_scene(machine_response, machine_scene)
-            machine_scene = executor_cpu_validate_completeness(machine_response, machine_scene)
+            machine_scene = executor_cpu_scene_pipeline(machine_response)
 
             return executor_cpu_finalize_transport(machine_response)
-
-            # LEGACY (kept below for rollback reference)
-            # return build_checkout_scene_contract({
-                "machine_scene": machine_scene,
-                "scene_plan": {},
-                "blocks": list(getattr(machine_scene, "render_blocks", []) or getattr(machine_scene, "blocks", [])),
-                "render_blocks": list(getattr(machine_scene, "render_blocks", []) or getattr(machine_scene, "blocks", [])),
-                "content": getattr(machine_response, "content", None),
-                "summary": getattr(machine_response, "summary", None),
-                "answer": getattr(machine_response, "answer", None),
-                "renderer_state": getattr(machine_response, "renderer_state", {}),
-            })
 
         return {
             "type":"text",
@@ -1988,7 +1969,10 @@ async def execute(
     if EXECUTOR_CPU_ROUTE.get("machine_response") is not None:
         mr = EXECUTOR_CPU_ROUTE["machine_response"]
         ms = build_machine_scene(mr)
-        return build_checkout_scene_contract({
+        return executor_cpu_finalize_transport(mr)
+
+        # Legacy fallback removed
+        # return build_checkout_scene_contract({
             "machine_scene": ms,
             "scene_plan": {},
             "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
@@ -3411,6 +3395,18 @@ def executor_cpu_lineage_report():
 
 
 
+
+# ==========================================================
+# X024 UNIFIED SCENE PIPELINE
+# ==========================================================
+def executor_cpu_scene_pipeline(machine_response):
+    """Single CPU pipeline for MachineScene creation."""
+    scene = build_machine_scene(machine_response)
+    scene = executor_cpu_sync_scene(machine_response, scene)
+    scene = executor_cpu_finalize_scene(machine_response, scene)
+    scene = executor_cpu_validate_completeness(machine_response, scene)
+    return scene
+
 def executor_cpu_sync_scene(machine_response, machine_scene):
     """
     Ensure MachineScene inherits CPU-generated render blocks.
@@ -3550,102 +3546,6 @@ def executor_cpu_attach_room_report(machine_scene, room_report):
 # X005 placeholder for canonical MachineResponse guard
 
 
-# ==========================================================
-# X013 SINGLE SPACE EXPERIMENT
-# ==========================================================
-def executor_cpu_build_canonical_space(  # LEGACY_DEPRECATEDmachine_response):
-    scene = build_machine_scene(machine_response)
-    blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
-    return {
-        "machine_response": machine_response,
-        "machine_scene": scene,
-        "answer": getattr(machine_response, "answer", None),
-        "content": getattr(machine_response, "content", None),
-        "summary": getattr(machine_response, "summary", None),
-        "render_blocks": blocks,
-        "scene_contract": True,
-    }
-
-
-# ==========================================================
-# X014 SINGLE SPACE ROUTER
-# ==========================================================
-def executor_cpu_space_to_scene_contract(  # LEGACY_DEPRECATEDspace):
-    """Build a SceneContract directly from the canonical space."""
-    return {
-        "scene_contract": True,
-        "machine_scene": space.get("machine_scene"),
-        "render_blocks": list(space.get("render_blocks") or []),
-        "answer": space.get("answer"),
-        "content": space.get("content"),
-        "summary": space.get("summary"),
-    }
-
-# Next implementation step:
-# Replace intermediate payload construction with:
-# canonical_space -> executor_cpu_space_to_scene_contract()
-
-
-# ==========================================================
-# X015 SINGLE SPACE STAGE 3
-# ==========================================================
-
-def executor_cpu_finalize_space(space):
-    """Normalize the canonical space before transport."""
-    space = dict(space)
-
-    if not space.get("content") and space.get("answer"):
-        space["content"] = space["answer"]
-
-    if not space.get("summary") and space.get("content"):
-        space["summary"] = space["content"]
-
-    if space.get("machine_scene") is not None and not space.get("render_blocks"):
-        scene = space["machine_scene"]
-        space["render_blocks"] = list(
-            getattr(scene, "render_blocks", None) or
-            getattr(scene, "blocks", []) or []
-        )
-
-    space["canonical_space"] = True
-    return space
-
-# Planned migration:
-# MachineResponse
-#      ↓
-# executor_cpu_build_canonical_space()
-#      ↓
-# executor_cpu_finalize_space()
-#      ↓
-# executor_cpu_space_to_scene_contract()
-
-
-# ==========================================================
-# X016 SINGLE SPACE STAGE 4
-# ==========================================================
-
-def executor_cpu_execute_canonical_space(  # LEGACY_DEPRECATEDmachine_response):
-    """Experimental unified execution path.
-
-    Builds one canonical space, normalizes it and derives the
-    SceneContract from that single object.
-    """
-    space = executor_cpu_build_canonical_space(machine_response)
-    space = executor_cpu_finalize_space(space)
-    contract = executor_cpu_space_to_scene_contract(space)
-
-    contract["canonical_space"] = True
-    contract["executor_route"] = "single_space_cpu"
-
-    return contract
-
-# Planned integration:
-# Provider
-#   -> MachineResponse
-#   -> executor_cpu_execute_canonical_space()
-#   -> Checkout
-#   -> AprilWeb
-
 
 # ==========================================================
 # X018 CPU SINGLE SPACE CORE
@@ -3717,14 +3617,3 @@ def executor_cpu_finalize_transport(machine_response):
 # Checkout
 
 
-# ==========================================================
-# X021 CLEANUP STATUS
-# Active route:
-# MachineResponse
-#   -> executor_cpu_build_single_space()
-#   -> executor_cpu_finalize_transport()
-#   -> Checkout
-#
-# Remaining legacy build_checkout_scene_contract() call sites
-# should be removed after validation.
-# ==========================================================
