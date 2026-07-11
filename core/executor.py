@@ -1268,7 +1268,7 @@ async def execute_rooms(
             payload["result"]["content"] = unified_machine_response.content
             payload["result"]["summary"] = unified_machine_response.summary
         # X017 TEST: switch to canonical single-space route
-        payload["result"] = executor_cpu_execute_canonical_space(unified_machine_response)
+        payload["result"] = executor_cpu_finalize_transport(unified_machine_response)
 
         executor_cpu_contract_probe(
             "POST_CHECKOUT",
@@ -1876,7 +1876,10 @@ async def execute(
             machine_scene = executor_cpu_finalize_scene(machine_response, machine_scene)
             machine_scene = executor_cpu_validate_completeness(machine_response, machine_scene)
 
-            return build_checkout_scene_contract({
+            return executor_cpu_finalize_transport(machine_response)
+
+            # LEGACY (kept below for rollback reference)
+            # return build_checkout_scene_contract({
                 "machine_scene": machine_scene,
                 "scene_plan": {},
                 "blocks": list(getattr(machine_scene, "render_blocks", []) or getattr(machine_scene, "blocks", [])),
@@ -3550,7 +3553,7 @@ def executor_cpu_attach_room_report(machine_scene, room_report):
 # ==========================================================
 # X013 SINGLE SPACE EXPERIMENT
 # ==========================================================
-def executor_cpu_build_canonical_space(machine_response):
+def executor_cpu_build_canonical_space(  # LEGACY_DEPRECATEDmachine_response):
     scene = build_machine_scene(machine_response)
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
     return {
@@ -3567,7 +3570,7 @@ def executor_cpu_build_canonical_space(machine_response):
 # ==========================================================
 # X014 SINGLE SPACE ROUTER
 # ==========================================================
-def executor_cpu_space_to_scene_contract(space):
+def executor_cpu_space_to_scene_contract(  # LEGACY_DEPRECATEDspace):
     """Build a SceneContract directly from the canonical space."""
     return {
         "scene_contract": True,
@@ -3621,7 +3624,7 @@ def executor_cpu_finalize_space(space):
 # X016 SINGLE SPACE STAGE 4
 # ==========================================================
 
-def executor_cpu_execute_canonical_space(machine_response):
+def executor_cpu_execute_canonical_space(  # LEGACY_DEPRECATEDmachine_response):
     """Experimental unified execution path.
 
     Builds one canonical space, normalizes it and derives the
@@ -3642,3 +3645,86 @@ def executor_cpu_execute_canonical_space(machine_response):
 #   -> executor_cpu_execute_canonical_space()
 #   -> Checkout
 #   -> AprilWeb
+
+
+# ==========================================================
+# X018 CPU SINGLE SPACE CORE
+# ==========================================================
+def executor_cpu_build_single_space(machine_response):
+    """Canonical CPU object. All downstream structures derive from this space."""
+    scene = build_machine_scene(machine_response)
+
+    blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
+
+    answer = getattr(machine_response, "answer", None)
+    content = getattr(machine_response, "content", None) or answer
+    summary = getattr(machine_response, "summary", None) or content
+
+    return {
+        "canonical_space": True,
+        "machine_response": machine_response,
+        "machine_scene": scene,
+        "answer": answer,
+        "content": content,
+        "summary": summary,
+        "render_blocks": blocks,
+        "scene_contract": {
+            "machine_scene": scene,
+            "render_blocks": blocks,
+            "answer": answer,
+            "content": content,
+            "summary": summary,
+        },
+    }
+
+# Planned migration:
+# collect_machine_contract()
+#      ↓
+# merge_machine_responses()
+#      ↓
+# executor_cpu_build_single_space()
+#      ↓
+# Checkout / AprilWeb
+
+
+# ==========================================================
+# X019 SINGLE SPACE CLEAN ROUTE
+# Transitional cleanup plan:
+#  - CPU owns one Canonical Space.
+#  - SceneContract is derived only from Canonical Space.
+#  - No parallel payload ownership.
+# ==========================================================
+
+def executor_cpu_finalize_transport(machine_response):
+    """Return the final transport object from the canonical CPU space."""
+    space = executor_cpu_build_single_space(machine_response)
+    return space["scene_contract"]
+
+# DEPRECATION NOTICE
+# Legacy helper chain should be removed after validation:
+#   executor_cpu_build_canonical_space()
+#   executor_cpu_finalize_space()
+#   executor_cpu_space_to_scene_contract()
+#   executor_cpu_execute_canonical_space()
+#
+# Target route:
+# MachineResponse
+#      ↓
+# executor_cpu_build_single_space()
+#      ↓
+# executor_cpu_finalize_transport()
+#      ↓
+# Checkout
+
+
+# ==========================================================
+# X021 CLEANUP STATUS
+# Active route:
+# MachineResponse
+#   -> executor_cpu_build_single_space()
+#   -> executor_cpu_finalize_transport()
+#   -> Checkout
+#
+# Remaining legacy build_checkout_scene_contract() call sites
+# should be removed after validation.
+# ==========================================================
