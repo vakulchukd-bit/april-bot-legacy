@@ -1971,16 +1971,7 @@ async def execute(
         ms = build_machine_scene(mr)
         return executor_cpu_finalize_transport(mr)
 
-        # Legacy fallback removed
-        # return build_checkout_scene_contract({
-            "machine_scene": ms,
-            "scene_plan": {},
-            "blocks": list(getattr(ms,"render_blocks",[]) or getattr(ms,"blocks",[])),
-            "content": getattr(mr,"content",None),
-            "summary": getattr(mr,"summary",None),
-            "answer": getattr(mr,"answer",None),
-            "renderer_state": getattr(mr,"renderer_state",{}),
-        })
+
 
     # X4.1 TEST: do not fabricate a canonical answer.
     executor_cpu_checkpoint(
