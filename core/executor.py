@@ -877,21 +877,49 @@ def executor_cpu_register_room(report, room_name, **kwargs):
     report.append(entry)
     return report
 
-async def execute_rooms(rooms, machine_request):
-    """Fiber route execution: one MachineRequest -> one MachineResponse."""
+async def execute_rooms(
+    user_id,
+    text,
+    context,
+    semantic,
+    cognition,
+    response_decision,
+    state,
+    run_with_activity,
+):
+    machine_request = context.get("machine_request")
+    if machine_request is None:
+        raise RuntimeError("MachineRequest missing from executor context")
+
     machine_response = None
 
-    for room in rooms:
-        result = room.evaluate(machine_request)
-        if result is None:
+    for room in ROOMS:
+        try:
+            result = await room.handle(
+                user_id=user_id,
+                text=text,
+                context=machine_request,
+                run=run_with_activity,
+            )
+            if isinstance(result, MachineResponse):
+                machine_response = result
+                break
+            if isinstance(result, dict) and isinstance(result.get("machine_response"), MachineResponse):
+                machine_response = result["machine_response"]
+                break
+        except Exception:
             continue
-        machine_response = result
-        break
 
     if machine_response is None:
-        raise RuntimeError("No MachineResponse produced by any room")
+        raise RuntimeError("No MachineResponse produced")
 
-    scene = executor_cpu_scene_pipeline(machine_response)
+    machine_response = executor_cpu_reflect(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
     return executor_cpu_finalize_transport(machine_response)
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
