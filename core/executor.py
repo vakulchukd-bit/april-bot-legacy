@@ -1,4 +1,6 @@
 
+
+
 # ==========================================================
 # X025 OPTIMIZATION PASS
 # Executor target:
@@ -1672,3 +1674,66 @@ def executor_cpu_finalize_transport(machine_response):
         'scene_contract': True,
         'render_blocks': list(getattr(machine_response,'render_blocks',[]) or []),
     }
+
+
+# ==========================================================
+# PUBLIC EXECUTOR ENTRY (X029)
+# Temporary compatibility facade for bot.py / checkout_server.py
+# ==========================================================
+
+async def execute(
+    user_id,
+    chat_id=None,
+    text="",
+    run_with_activity=None,
+    **kwargs,
+):
+    chat_id = chat_id or user_id
+    state = get_state(user_id)
+    semantic = semantic_analyze(text)
+    reasoning = build_reasoning_state(text=text, semantic=semantic)
+    cognition = analyze_cognition(
+        text=text,
+        semantic=semantic,
+        state=state,
+    )
+    response_decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        state=state,
+    )
+    visual_reference = build_visual_reference(
+        user_id=user_id,
+        state=state,
+    )
+    task_type = detect_task_type(
+        semantic,
+        cognition,
+        state,
+    )
+    context = build_executor_context(
+        user_id=user_id,
+        chat_id=chat_id,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+    )
+    context["machine_request"] = MachineRequest(
+        text=text,
+        context=context,
+    )
+    return await execute_rooms(
+        user_id=user_id,
+        text=text,
+        context=context,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        run_with_activity=run_with_activity,
+    )
