@@ -1699,7 +1699,9 @@ async def execute(
         state=state,
     )
     visual_reference = build_visual_reference(
-        user_id=user_id,
+        semantic=semantic,
+        cognition=cognition,
+        text=text,
         state=state,
     )
 
