@@ -1729,8 +1729,11 @@ async def execute(
         text=text,
     )
     context["machine_request"] = MachineRequest(
-        text=text,
-        context=context,
+        goal=text,
+        intent=semantic,
+        conversation=context,
+        memory=state,
+        visual_context={"visual_reference": visual_reference},
     )
     return await execute_rooms(
         user_id=user_id,
