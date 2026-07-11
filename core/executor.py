@@ -1695,6 +1695,7 @@ async def execute(
     cognition = analyze_cognition(
         text=text,
         semantic=semantic,
+        reasoning=reasoning,
         state=state,
     )
     response_decision = build_response_decision(
