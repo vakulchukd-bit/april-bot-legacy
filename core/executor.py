@@ -869,6 +869,14 @@ def build_guidance_response(
 # CPU supervises and validates results.
 # ==========================================================
 
+
+
+def executor_cpu_register_room(report, room_name, **kwargs):
+    entry={"room": room_name}
+    entry.update(kwargs)
+    report.append(entry)
+    return report
+
 async def execute_rooms(
 
     user_id,
@@ -1142,28 +1150,6 @@ async def execute_rooms(
 
         unified_machine_response = collect_machine_contract(machine_contracts)
         unified_machine_response = merge_machine_responses(unified_machine_response, machine_responses)
-
-        # X012 STAGE4: Canonical response must never be discarded.
-        if machine_responses:
-            for _mr in machine_responses:
-                if getattr(_mr, "answer", None):
-                    unified_machine_response.answer = getattr(_mr, "answer", None)
-                    unified_machine_response.content = (
-                        getattr(_mr, "content", None) or unified_machine_response.answer
-                    )
-                    unified_machine_response.summary = (
-                        getattr(_mr, "summary", None) or unified_machine_response.content
-                    )
-                    break
-        if not getattr(unified_machine_response,'answer',None):
-            for r in machine_responses:
-                a=getattr(r,'answer',None)
-                if a:
-                    unified_machine_response.answer=a
-                    unified_machine_response.content=getattr(r,'content',a)
-                    unified_machine_response.summary=getattr(r,'summary',a)
-                    print('🟢 X4.2 ANSWER RESTORED')
-                    break
         reflection_context = {
             "semantic": semantic,
             "cognition": cognition,
@@ -1189,16 +1175,6 @@ async def execute_rooms(
             unified_machine_response,
             reflection_context
         )
-
-        # X007 TEST: canonical response guard
-        if getattr(unified_machine_response, "answer", None) and not getattr(unified_machine_response, "content", None):
-            unified_machine_response.content = unified_machine_response.answer
-        if getattr(unified_machine_response, "content", None) and not getattr(unified_machine_response, "summary", None):
-            unified_machine_response.summary = unified_machine_response.content
-        print("🟢 X007 CPU CANONICAL",
-              bool(getattr(unified_machine_response,"answer",None)),
-              bool(getattr(unified_machine_response,"content",None)),
-              bool(getattr(unified_machine_response,"summary",None)))
         unified_machine_scene = executor_cpu_scene_pipeline(unified_machine_response)
         executor_cpu_mark_object('machine_scene', unified_machine_scene, 'executor')
         executor_cpu_verify_identity('machine_scene', unified_machine_scene)
@@ -1246,17 +1222,6 @@ async def execute_rooms(
             machine_scene=unified_machine_scene,
             scene_contract=payload["result"],
         )
-        
-        # X008 TEST: verify canonical transport immediately before checkout
-        if getattr(unified_machine_response, "answer", None):
-            payload["result"]["answer"] = getattr(unified_machine_response, "answer", None)
-        if getattr(unified_machine_response, "content", None):
-            payload["result"]["content"] = getattr(unified_machine_response, "content", None)
-        if getattr(unified_machine_response, "summary", None):
-            payload["result"]["summary"] = getattr(unified_machine_response, "summary", None)
-        print("🟢 X008 PRE-CHECKOUT CANONICAL",
-              payload["result"].get("answer"),
-              payload["result"].get("content"))
 
         if unified_machine_response.answer:
             payload["result"]["answer"] = unified_machine_response.answer
@@ -1664,15 +1629,14 @@ def executor_cpu_scene_pipeline(machine_response):
 # ==========================================================
 
 def executor_cpu_finalize_transport(machine_response):
+    scene = executor_cpu_scene_pipeline(machine_response)
     return {
-        'transport_contract':'scene_first',
-        'provider_contract':'fiber_v3',
-        'answer': getattr(machine_response,'answer',None),
-        'content': getattr(machine_response,'content',None),
-        'summary': getattr(machine_response,'summary',None),
-        'machine_response': machine_response,
-        'scene_contract': True,
-        'render_blocks': list(getattr(machine_response,'render_blocks',[]) or []),
+        "transport_contract": "scene_first",
+        "provider_contract": "fiber_v3",
+        "machine_response": machine_response,
+        "machine_scene": scene.get("machine_scene"),
+        "scene_contract": scene.get("scene_contract"),
+        "render_blocks": scene.get("render_blocks", []),
     }
 
 
