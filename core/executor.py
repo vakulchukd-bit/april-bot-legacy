@@ -1691,7 +1691,7 @@ async def execute(
     chat_id = chat_id or user_id
     state = get_state(user_id)
     semantic = semantic_analyze(text)
-    reasoning = build_reasoning_state(text=text, semantic=semantic)
+    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
     cognition = analyze_cognition(
         text=text,
         semantic=semantic,
