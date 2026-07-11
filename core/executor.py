@@ -1,6 +1,4 @@
 
-
-
 # ==========================================================
 # X025 OPTIMIZATION PASS
 # Executor target:
@@ -1308,11 +1306,11 @@ def apply_representation_gate(blocks, response_decision=None, semantic=None):
 
 
 def is_canonical_scene(scene):
-    Canonical scene assembly.
-    Prefer MachineScene blocks and only fall back to legacy
-    artifact conversion when MachineScene has no renderable blocks.
-    Canonical hand-off object for checkout_server.
-    Executor exposes one Scene Contract without rebuilding it.
+    # Canonical scene assembly.
+    # Prefer MachineScene blocks and only fall back to legacy
+    # artifact conversion when MachineScene has no renderable blocks.
+    # Canonical hand-off object for checkout_server.
+    # Executor exposes one Scene Contract without rebuilding it.
     return {
         "single_route": True,
         "input": "MachineRequest",
@@ -1487,20 +1485,20 @@ EXECUTOR_CPU_ENABLED = True
 EXECUTOR_CPU_TRACE = []
 
 def executor_cpu_checkpoint(stage, **payload):
-    Single executor awareness object.
-    This is diagnostic state only.
-    No Provider/OpenAI calls are allowed here.
-    Canonical CPU synchronization point.
-    Updates route, verifies stage and records a checkpoint.
-    CPU contract verification.
-    Does not execute subsystem logic.
-    Only validates that the expected output exists.
-    Produce one consolidated execution report for the entire route.
-    It never changes routing or calls Provider/OpenAI.
-    It only maintains a complete awareness of the lifecycle.
-    Inspect MachineResponse and prepare presentation hints
-    without calling Provider/OpenAI.
-    Never produces user-visible text and never calls Provider/OpenAI.
+    # Single executor awareness object.
+    # This is diagnostic state only.
+    # No Provider/OpenAI calls are allowed here.
+    # Canonical CPU synchronization point.
+    # Updates route, verifies stage and records a checkpoint.
+    # CPU contract verification.
+    # Does not execute subsystem logic.
+    # Only validates that the expected output exists.
+    # Produce one consolidated execution report for the entire route.
+    # It never changes routing or calls Provider/OpenAI.
+    # It only maintains a complete awareness of the lifecycle.
+    # Inspect MachineResponse and prepare presentation hints
+    # without calling Provider/OpenAI.
+    # Never produces user-visible text and never calls Provider/OpenAI.
     ctx=getattr(machine_response,"executor_cognitive_context",{}) or {}
     decision={
         "topic_mode":"continuation" if ctx.get("trajectory") else "new_topic",
@@ -1616,10 +1614,10 @@ def executor_cpu_lineage_report():
 # X024 UNIFIED SCENE PIPELINE
 # ==========================================================
 def executor_cpu_scene_pipeline(machine_response):
-    Ensure MachineScene inherits CPU-generated render blocks.
-    Does not generate new knowledge or call Provider.
-    It does not rebuild the scene; it validates and annotates it.
-    This stage never calls Provider/OpenAI and never creates a new route.
+    # Ensure MachineScene inherits CPU-generated render blocks.
+    # Does not generate new knowledge or call Provider.
+    # It does not rebuild the scene; it validates and annotates it.
+    # This stage never calls Provider/OpenAI and never creates a new route.
     scene = build_machine_scene(machine_response)
 
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
@@ -1664,3 +1662,13 @@ def executor_cpu_scene_pipeline(machine_response):
 # ==========================================================
 
 def executor_cpu_finalize_transport(machine_response):
+    return {
+        'transport_contract':'scene_first',
+        'provider_contract':'fiber_v3',
+        'answer': getattr(machine_response,'answer',None),
+        'content': getattr(machine_response,'content',None),
+        'summary': getattr(machine_response,'summary',None),
+        'machine_response': machine_response,
+        'scene_contract': True,
+        'render_blocks': list(getattr(machine_response,'render_blocks',[]) or []),
+    }
