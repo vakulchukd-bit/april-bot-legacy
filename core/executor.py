@@ -1135,6 +1135,19 @@ async def execute_rooms(
 
         unified_machine_response = collect_machine_contract(machine_contracts)
         unified_machine_response = merge_machine_responses(unified_machine_response, machine_responses)
+
+        # X012 STAGE4: Canonical response must never be discarded.
+        if machine_responses:
+            for _mr in machine_responses:
+                if getattr(_mr, "answer", None):
+                    unified_machine_response.answer = getattr(_mr, "answer", None)
+                    unified_machine_response.content = (
+                        getattr(_mr, "content", None) or unified_machine_response.answer
+                    )
+                    unified_machine_response.summary = (
+                        getattr(_mr, "summary", None) or unified_machine_response.content
+                    )
+                    break
         if not getattr(unified_machine_response,'answer',None):
             for r in machine_responses:
                 a=getattr(r,'answer',None)
@@ -1250,7 +1263,13 @@ async def execute_rooms(
               payload["result"].get("answer"),
               payload["result"].get("content"))
 
-        payload["result"] = build_checkout_scene_contract(payload["result"])
+        if unified_machine_response.answer:
+            payload["result"]["answer"] = unified_machine_response.answer
+            payload["result"]["content"] = unified_machine_response.content
+            payload["result"]["summary"] = unified_machine_response.summary
+        # X017 TEST: switch to canonical single-space route
+        payload["result"] = executor_cpu_execute_canonical_space(unified_machine_response)
+
         executor_cpu_contract_probe(
             "POST_CHECKOUT",
             machine_response=unified_machine_response,
@@ -3526,3 +3545,100 @@ def executor_cpu_attach_room_report(machine_scene, room_report):
 # - Fail fast if SceneContract loses answer/content.
 
 # X005 placeholder for canonical MachineResponse guard
+
+
+# ==========================================================
+# X013 SINGLE SPACE EXPERIMENT
+# ==========================================================
+def executor_cpu_build_canonical_space(machine_response):
+    scene = build_machine_scene(machine_response)
+    blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
+    return {
+        "machine_response": machine_response,
+        "machine_scene": scene,
+        "answer": getattr(machine_response, "answer", None),
+        "content": getattr(machine_response, "content", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": blocks,
+        "scene_contract": True,
+    }
+
+
+# ==========================================================
+# X014 SINGLE SPACE ROUTER
+# ==========================================================
+def executor_cpu_space_to_scene_contract(space):
+    """Build a SceneContract directly from the canonical space."""
+    return {
+        "scene_contract": True,
+        "machine_scene": space.get("machine_scene"),
+        "render_blocks": list(space.get("render_blocks") or []),
+        "answer": space.get("answer"),
+        "content": space.get("content"),
+        "summary": space.get("summary"),
+    }
+
+# Next implementation step:
+# Replace intermediate payload construction with:
+# canonical_space -> executor_cpu_space_to_scene_contract()
+
+
+# ==========================================================
+# X015 SINGLE SPACE STAGE 3
+# ==========================================================
+
+def executor_cpu_finalize_space(space):
+    """Normalize the canonical space before transport."""
+    space = dict(space)
+
+    if not space.get("content") and space.get("answer"):
+        space["content"] = space["answer"]
+
+    if not space.get("summary") and space.get("content"):
+        space["summary"] = space["content"]
+
+    if space.get("machine_scene") is not None and not space.get("render_blocks"):
+        scene = space["machine_scene"]
+        space["render_blocks"] = list(
+            getattr(scene, "render_blocks", None) or
+            getattr(scene, "blocks", []) or []
+        )
+
+    space["canonical_space"] = True
+    return space
+
+# Planned migration:
+# MachineResponse
+#      ↓
+# executor_cpu_build_canonical_space()
+#      ↓
+# executor_cpu_finalize_space()
+#      ↓
+# executor_cpu_space_to_scene_contract()
+
+
+# ==========================================================
+# X016 SINGLE SPACE STAGE 4
+# ==========================================================
+
+def executor_cpu_execute_canonical_space(machine_response):
+    """Experimental unified execution path.
+
+    Builds one canonical space, normalizes it and derives the
+    SceneContract from that single object.
+    """
+    space = executor_cpu_build_canonical_space(machine_response)
+    space = executor_cpu_finalize_space(space)
+    contract = executor_cpu_space_to_scene_contract(space)
+
+    contract["canonical_space"] = True
+    contract["executor_route"] = "single_space_cpu"
+
+    return contract
+
+# Planned integration:
+# Provider
+#   -> MachineResponse
+#   -> executor_cpu_execute_canonical_space()
+#   -> Checkout
+#   -> AprilWeb
