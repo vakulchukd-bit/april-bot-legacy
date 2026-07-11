@@ -1698,14 +1698,16 @@ async def execute(
         reasoning=reasoning,
         state=state,
     )
+    visual_reference = build_visual_reference(
+        user_id=user_id,
+        state=state,
+    )
+
     response_decision = build_response_decision(
         semantic=semantic,
         cognition=cognition,
         state=state,
-    )
-    visual_reference = build_visual_reference(
-        user_id=user_id,
-        state=state,
+        visual_reference=visual_reference,
     )
     task_type = detect_task_type(
         semantic,
