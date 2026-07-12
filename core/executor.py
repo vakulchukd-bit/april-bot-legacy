@@ -260,7 +260,7 @@ def detect_task_type(
     state
 ):
 
-    user_space = build_executor_user_space(state)
+    user_space = build_executor_user_space(state, conversation_space)
 
     scene_state = user_space.get("scene", {})
 
@@ -317,8 +317,6 @@ def build_conversation_space(state, semantic, cognition, response_decision, text
     Canonical Conversation Space shared by MachineRequest, MachineResponse and MachineScene.
     Contains no rendering logic and performs no Provider/OpenAI calls.
     """
-    conversation_space = build_conversation_space(state, semantic, cognition, response_decision, text, visual_reference)
-
     return {
         "timeline": state.get("dialog", []),
         "last_user_turn": text,
@@ -360,6 +358,15 @@ def build_executor_context(
 
     visual_memory_bridge = build_visual_memory_bridge(
         user_id
+    )
+
+    conversation_space = build_conversation_space(
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        text=text,
+        visual_reference=visual_reference,
     )
 
     return {
@@ -488,7 +495,8 @@ def build_executor_context(
     }
 
 
-def build_executor_user_space(state):
+def build_executor_user_space(state, conversation_space=None):
+    conversation_space = conversation_space or {}
     return {
         "scene": state.get("scene_state", {}),
         "workspace": state.get("workspace_state", {}),
@@ -1174,7 +1182,9 @@ def executor_cpu_checkpoint(stage, **payload):
     # Inspect MachineResponse and prepare presentation hints
     # without calling Provider/OpenAI.
     # Never produces user-visible text and never calls Provider/OpenAI.
-    ctx=getattr(machine_response,"executor_cognitive_context",{}) or {}
+    return payload.get("machine_response")
+    # disabled legacy checkpoint
+    ctx={}
     decision={
         "topic_mode":"continuation" if ctx.get("trajectory") else "new_topic",
         "use_visual_memory":bool(ctx.get("active_visual_scene")),
@@ -1497,11 +1507,9 @@ async def execute(
         task_type=task_type,
         text=text,
     )
-    context["conversation_space"]=context.get("conversation_space")
     context["machine_request"] = MachineRequest(
         goal=text,
         intent=semantic,
-        conversation=context,
         memory=state,
         visual_context={"visual_reference": visual_reference},
         conversation=context.get("conversation_space"),
