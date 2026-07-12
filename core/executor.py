@@ -1291,6 +1291,43 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
 
 
 
+
+def executor_cpu_normalize_answer(machine_response):
+    """Ensure canonical text fields always exist before Scene construction."""
+    answer = getattr(machine_response, "answer", None)
+    content = getattr(machine_response, "content", None)
+    summary = getattr(machine_response, "summary", None)
+
+    value = answer or content or summary
+
+    if not value:
+        for block in list(getattr(machine_response, "render_blocks", []) or []):
+            if isinstance(block, dict):
+                value = block.get("content") or block.get("text")
+                if value:
+                    break
+
+    if not value:
+        for art in list(getattr(machine_response, "artifacts", []) or []):
+            data = getattr(art, "data", None)
+            if isinstance(data, dict):
+                value = (
+                    data.get("answer")
+                    or data.get("content")
+                    or data.get("summary")
+                    or data.get("text")
+                )
+                if value:
+                    break
+
+    value = value or ""
+
+    machine_response.answer = value
+    machine_response.content = value
+    machine_response.summary = value
+    return machine_response
+
+
 def executor_cpu_build_presentation_plan(machine_response):
     """
     Inspect MachineResponse and prepare presentation hints
@@ -1342,6 +1379,7 @@ def executor_cpu_reflect(
     machine_response = executor_cpu_integrate_presentation(machine_response)
     machine_response = executor_cpu_materialize_blocks(machine_response)
     machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
 
     conversation_space = getattr(machine_response, "conversation_space", {}) or {}
 
