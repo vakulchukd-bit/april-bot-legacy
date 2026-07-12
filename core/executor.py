@@ -311,6 +311,29 @@ def detect_task_type(
 # Unified runtime context prepared by CPU.
 # ==========================================================
 
+
+def build_conversation_space(state, semantic, cognition, response_decision, text, visual_reference):
+    """
+    Canonical Conversation Space shared by MachineRequest, MachineResponse and MachineScene.
+    Contains no rendering logic and performs no Provider/OpenAI calls.
+    """
+    conversation_space = build_conversation_space(state, semantic, cognition, response_decision, text, visual_reference)
+
+    return {
+        "timeline": state.get("dialog", []),
+        "last_user_turn": text,
+        "last_april_turn": state.get("last_april_turn"),
+        "semantic": semantic,
+        "cognition": cognition,
+        "response_decision": response_decision,
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "active_visual_scene": state.get("active_visual_scene", {}),
+        "visual_reference": visual_reference,
+    }
+
 def build_executor_context(
 
     user_id,
@@ -449,6 +472,8 @@ def build_executor_context(
         "user_space":
             user_space,
 
+        "conversation_space": conversation_space,
+
         "memory_routing":
             {
                 "focus_recommendation":
@@ -467,7 +492,9 @@ def build_executor_user_space(state):
     return {
         "scene": state.get("scene_state", {}),
         "workspace": state.get("workspace_state", {}),
-        "dialog": state.get("dialog", []),
+        "dialog": conversation_space.get("timeline", state.get("dialog", [])),
+        "last_user_turn": conversation_space.get("last_user_turn"),
+        "last_april_turn": conversation_space.get("last_april_turn"),
         "focus": state.get("focus_state", state.get("dynamic_focus", {})),
         "goal_hierarchy": state.get("goal_hierarchy", {}),
         "active_flow": state.get("active_flow", {}),
@@ -913,6 +940,8 @@ async def execute_rooms(
     if machine_response is None:
         raise RuntimeError("No MachineResponse produced")
 
+    setattr(machine_response, "conversation_space", context.get("conversation_space"))
+
     machine_response = executor_cpu_reflect(
         semantic=semantic,
         cognition=cognition,
@@ -1185,6 +1214,8 @@ def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decisi
     """Internal CPU-only cognitive integration.
     Never produces user-visible text and never calls Provider/OpenAI.
     """
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+
     reflection = {
         "dialog": state.get("dialog", []),
         "memory_timeline": state.get("memory_timeline", {}),
@@ -1195,6 +1226,7 @@ def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decisi
         "dynamic_focus": cognition.get("dynamic_focus", {}),
         "open_loops": cognition.get("open_loops", {}),
         "preferred_representation": response_decision.get("preferred_representation"),
+        "conversation_space": conversation_space,
         "internal_only": True,
         "human_visible": False,
     }
@@ -1275,8 +1307,15 @@ def executor_cpu_reflect(
     machine_response = executor_cpu_materialize_blocks(machine_response)
     machine_response = executor_cpu_attach_artifact_payloads(machine_response)
 
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+
+    semantic = conversation_space.get("semantic", semantic)
+    cognition = conversation_space.get("cognition", cognition)
+    response_decision = conversation_space.get("response_decision", response_decision)
+
     planner = {
         "goal": semantic.get("intent"),
+        "conversation_space": conversation_space,
         "representation": (
             response_decision.get("preferred_representation")
             or semantic.get("preferred_representation")
@@ -1332,8 +1371,23 @@ def executor_cpu_scene_pipeline(machine_response):
     # It does not rebuild the scene; it validates and annotates it.
     # This stage never calls Provider/OpenAI and never creates a new route.
     scene = build_machine_scene(machine_response)
+    try:
+        setattr(scene, "conversation_space",
+                getattr(machine_response, "conversation_space", None))
+    except Exception:
+        pass
+
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
 
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
+
+    try:
+        setattr(scene, "timeline", conversation_space.get("timeline", []))
+        setattr(scene, "last_user_turn", conversation_space.get("last_user_turn"))
+        setattr(scene, "last_april_turn", conversation_space.get("last_april_turn"))
+        setattr(scene, "active_goal", conversation_space.get("response_decision", {}).get("goal"))
+    except Exception:
+        pass
 
     answer = getattr(machine_response, "answer", None)
     content = getattr(machine_response, "content", None) or answer
@@ -1348,6 +1402,10 @@ def executor_cpu_scene_pipeline(machine_response):
         "summary": summary,
         "render_blocks": blocks,
         "scene_contract": {
+            "conversation_space": conversation_space,
+            "timeline": conversation_space.get("timeline", []),
+            "last_user_turn": conversation_space.get("last_user_turn"),
+            "last_april_turn": conversation_space.get("last_april_turn"),
             "machine_scene": scene,
             "render_blocks": blocks,
             "answer": answer,
@@ -1374,9 +1432,12 @@ def executor_cpu_scene_pipeline(machine_response):
 
 def executor_cpu_finalize_transport(machine_response):
     scene = executor_cpu_scene_pipeline(machine_response)
+    conversation_space = getattr(machine_response, "conversation_space", None)
+
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3",
+        "conversation_space": conversation_space,
         "machine_response": machine_response,
         "machine_scene": scene.get("machine_scene"),
         "scene_contract": scene.get("scene_contract"),
@@ -1436,12 +1497,14 @@ async def execute(
         task_type=task_type,
         text=text,
     )
+    context["conversation_space"]=context.get("conversation_space")
     context["machine_request"] = MachineRequest(
         goal=text,
         intent=semantic,
         conversation=context,
         memory=state,
         visual_context={"visual_reference": visual_reference},
+        conversation=context.get("conversation_space"),
     )
     return await execute_rooms(
         user_id=user_id,
