@@ -495,6 +495,7 @@ def build_executor_context(
         "user_space":
             user_space,
 
+        "canonical_space": conversation_space,
         "conversation_space": conversation_space,
 
         "memory_routing":
@@ -965,15 +966,17 @@ async def execute_rooms(
         raise RuntimeError("No MachineResponse produced")
 
     conversation_space=context.get("conversation_space") or {}
-    conversation_space["current_turn"]["april"]={
+    april_turn={
         "answer": getattr(machine_response,"answer",None),
         "summary": getattr(machine_response,"summary",None),
         "render_blocks": list(getattr(machine_response,"render_blocks",[]) or []),
     }
+    conversation_space["current_turn"]["april"]=april_turn
+    conversation_space["last_april_turn"]=april_turn
 
-    conversation_space.setdefault("timeline", []).append(
-        conversation_space["current_turn"]
-    )
+    timeline = conversation_space.setdefault("timeline", [])
+    timeline.append(conversation_space["current_turn"])
+    conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
 
     machine_response = executor_cpu_reflect(
@@ -1463,9 +1466,12 @@ def executor_cpu_scene_pipeline(machine_response):
     except Exception:
         pass
 
-    answer = getattr(machine_response, "answer", None)
+    current_turn = conversation_space.get("current_turn", {})
+    april_turn = current_turn.get("april") or {}
+
+    answer = april_turn.get("answer") or getattr(machine_response, "answer", None)
     content = getattr(machine_response, "content", None) or answer
-    summary = getattr(machine_response, "summary", None) or content
+    summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
 
     return {
         "canonical_space": True,
@@ -1477,14 +1483,20 @@ def executor_cpu_scene_pipeline(machine_response):
         "render_blocks": blocks,
         "scene_contract": {
             "conversation_space": conversation_space,
+            "current_turn": conversation_space.get("current_turn"),
             "timeline": conversation_space.get("timeline", []),
             "last_user_turn": conversation_space.get("last_user_turn"),
             "last_april_turn": conversation_space.get("last_april_turn"),
             "machine_scene": scene,
+            "current_turn": current_turn,
             "render_blocks": blocks,
             "answer": answer,
             "content": content,
             "summary": summary,
+            "modalities": conversation_space.get("modalities", {}),
+            "dialog": conversation_space.get("dialog", []),
+            "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
+            "focus": conversation_space.get("focus", {}),
         },
     }
 
@@ -1515,6 +1527,7 @@ def executor_cpu_finalize_transport(machine_response):
         "machine_response": machine_response,
         "machine_scene": scene.get("machine_scene"),
         "scene_contract": scene.get("scene_contract"),
+        "current_turn": conversation_space.get("current_turn") if conversation_space else None,
         "render_blocks": scene.get("render_blocks", []),
     }
 
