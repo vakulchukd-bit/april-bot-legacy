@@ -319,6 +319,22 @@ def build_conversation_space(state, semantic, cognition, response_decision, text
     """
     return {
         "timeline": state.get("dialog", []),
+        "current_turn": {
+            "user": {
+                "text": text,
+                "voice": None,
+                "image": None,
+                "files": [],
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            "april": None,
+        },
+        "modalities": {
+            "text": bool(text),
+            "voice": False,
+            "image": False,
+            "files": False,
+        },
         "last_user_turn": text,
         "last_april_turn": state.get("last_april_turn"),
         "semantic": semantic,
@@ -948,7 +964,17 @@ async def execute_rooms(
     if machine_response is None:
         raise RuntimeError("No MachineResponse produced")
 
-    setattr(machine_response, "conversation_space", context.get("conversation_space"))
+    conversation_space=context.get("conversation_space") or {}
+    conversation_space["current_turn"]["april"]={
+        "answer": getattr(machine_response,"answer",None),
+        "summary": getattr(machine_response,"summary",None),
+        "render_blocks": list(getattr(machine_response,"render_blocks",[]) or []),
+    }
+
+    conversation_space.setdefault("timeline", []).append(
+        conversation_space["current_turn"]
+    )
+    setattr(machine_response, "conversation_space", conversation_space)
 
     machine_response = executor_cpu_reflect(
         semantic=semantic,
@@ -1507,13 +1533,19 @@ async def execute(
         task_type=task_type,
         text=text,
     )
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+
     context["machine_request"] = MachineRequest(
-        goal=text,
+        goal=current_turn.get("user", {}).get("text", text),
         intent=semantic,
         memory=state,
         visual_context={"visual_reference": visual_reference},
-        conversation=context.get("conversation_space"),
+        conversation=conversation_space,
     )
+
+    setattr(context["machine_request"], "current_turn", current_turn)
+
     return await execute_rooms(
         user_id=user_id,
         text=text,
