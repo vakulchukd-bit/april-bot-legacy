@@ -597,7 +597,21 @@ async def process_web_message(
 
     result = executor_contract_passthrough(result)
 
-    normalized = normalize_executor_response(result)
+    if isinstance(result, dict) and result.get("scene_contract"):
+        normalized = {
+            "scene_contract": result["scene_contract"],
+            "content": (result["scene_contract"].get("content")
+                        or result["scene_contract"].get("answer")
+                        or ""),
+            "answer": result["scene_contract"].get("answer"),
+            "summary": result["scene_contract"].get("summary"),
+            "render_blocks": result["scene_contract"].get("render_blocks", []),
+            "scene": (result["scene_contract"].get("machine_scene")
+                      or result["scene_contract"].get("scene", {})),
+        }
+        normalized["space_continuity"] = build_space_continuity(normalized)
+    else:
+        normalized = normalize_executor_response(result)
 
     try:
         sc = normalized.get("scene_contract") if isinstance(normalized, dict) else None
@@ -1227,9 +1241,15 @@ def web_chat():
         #
         # =========================================================
 
+        gt=result.get("gateway_transport",{})
         return jsonify({
             "success": True,
-            "gateway_transport": safe_json(result.get("gateway_transport", {})),
+            "gateway_transport": safe_json(gt),
+            "scene_contract": safe_json(gt.get("scene_contract", {})),
+            "render_blocks": safe_json(gt.get("render_blocks", [])),
+            "content": gt.get("content",""),
+            "answer": gt.get("answer",""),
+            "summary": gt.get("summary",""),
             "renderer_mode": WEB_RENDERER_MODE,
             "scene_mode": WEB_SCENE_MODE,
             "visual_summary": safe_json(visual_summary)
