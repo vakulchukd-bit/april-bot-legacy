@@ -1181,6 +1181,73 @@ def executor_cpu_integrate_presentation(machine_response):
     machine_response.executor_presentation_integrated = True
     return machine_response
 
+def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decision, state, machine_response):
+    """Internal CPU-only cognitive integration.
+    Never produces user-visible text and never calls Provider/OpenAI.
+    """
+    reflection = {
+        "dialog": state.get("dialog", []),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "active_visual_scene": state.get("active_visual_scene", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "trajectory": state.get("scene_state", {}).get("trajectory"),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "dynamic_focus": cognition.get("dynamic_focus", {}),
+        "open_loops": cognition.get("open_loops", {}),
+        "preferred_representation": response_decision.get("preferred_representation"),
+        "internal_only": True,
+        "human_visible": False,
+    }
+    setattr(machine_response, "executor_cognitive_context", reflection)
+    return machine_response
+
+
+
+def executor_cpu_build_executor_decision(*, semantic, cognition, response_decision, state, machine_response):
+    """CPU-only decision layer. Produces machine decision, never user text."""
+    ctx=getattr(machine_response,"executor_cognitive_context",{}) or {}
+    decision={
+        "topic_mode":"continuation" if ctx.get("trajectory") else "new_topic",
+        "use_visual_memory":bool(ctx.get("active_visual_scene")),
+        "use_memory_timeline":bool(ctx.get("memory_timeline")),
+        "continue_scene":bool(ctx.get("active_visual_scene")),
+        "representation":response_decision.get("preferred_representation")
+            or semantic.get("preferred_representation")
+            or "text",
+        "internal_only":True,
+        "human_visible":False,
+    }
+    setattr(machine_response,"executor_decision",decision)
+    return machine_response
+
+
+
+
+def executor_cpu_build_presentation_plan(machine_response):
+    """
+    Inspect MachineResponse and prepare presentation hints
+    without calling Provider/OpenAI.
+    """
+    plan = {"representation":"text","blocks":[]}
+
+    artifacts = getattr(machine_response, "artifacts", []) or []
+    for art in artifacts:
+        data = getattr(art, "data", {}) if hasattr(art, "data") else {}
+        if isinstance(data, dict):
+            if "multiplication_table" in data or "table_data" in data:
+                plan["representation"]="table"
+                plan["blocks"].append("table")
+            if "graph_data" in data:
+                plan["representation"]="graph"
+                plan["blocks"].append("graph")
+            if "formula" in data:
+                plan["blocks"].append("formula")
+
+    machine_response.executor_presentation_plan = plan
+    return machine_response
+
+
+
 def executor_cpu_reflect(
     *,
     semantic,
