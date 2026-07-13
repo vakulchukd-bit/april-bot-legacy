@@ -921,3 +921,61 @@ def validate_fiber_core(contract: UniversalArtifactContract) -> dict:
 def add_room_contribution(response: MachineResponse, room: str, payload: Dict[str, Any]) -> None:
     """Canonical API: each room writes its named contribution."""
     response.contributions[room] = payload
+
+
+# =====================================================
+# CPU COORDINATION API (Stage 1)
+# Factory remains autonomous internally.
+# CPU becomes the single coordinator.
+# =====================================================
+
+FACTORY_CPU_HOOKS = {
+    "begin": None,
+    "success": None,
+    "error": None,
+}
+
+def register_cpu_hooks(begin=None, success=None, error=None):
+    FACTORY_CPU_HOOKS["begin"] = begin
+    FACTORY_CPU_HOOKS["success"] = success
+    FACTORY_CPU_HOOKS["error"] = error
+
+def factory_stage_begin(stage:str,payload:dict|None=None):
+    cb=FACTORY_CPU_HOOKS.get("begin")
+    if cb:
+        cb(stage,payload or {})
+
+def factory_stage_success(stage:str,payload:dict|None=None):
+    cb=FACTORY_CPU_HOOKS.get("success")
+    if cb:
+        cb(stage,payload or {})
+
+def factory_stage_error(stage:str,error):
+    cb=FACTORY_CPU_HOOKS.get("error")
+    if cb:
+        cb(stage,error)
+
+
+# =====================================================
+# CPU FACTORY EVENTS (Stage 2)
+# =====================================================
+
+def factory_room_begin(room_name:str, request:dict|None=None):
+    factory_stage_begin("ROOM_BEGIN",{
+        "room":room_name,
+        "input":request or {}
+    })
+
+def factory_room_success(room_name:str, artifact=None):
+    factory_stage_success("ROOM_SUCCESS",{
+        "room":room_name,
+        "artifact":type(artifact).__name__ if artifact is not None else None
+    })
+
+def factory_room_error(room_name:str, error):
+    factory_stage_error(f"{room_name}: {error}")
+
+def factory_response_complete(response=None):
+    factory_stage_success("FACTORY_COMPLETE",{
+        "response_type":type(response).__name__ if response is not None else None
+    })
