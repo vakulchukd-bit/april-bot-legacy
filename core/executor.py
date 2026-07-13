@@ -1563,6 +1563,11 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
 
     for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata"):
         value = getattr(machine_response, field, None)
+        if field == "metadata":
+            value = value or {}
+            value.setdefault("answer", getattr(machine_response, "answer", ""))
+            value.setdefault("content", getattr(machine_response, "content", ""))
+            value.setdefault("summary", getattr(machine_response, "summary", ""))
         if value is None and hasattr(scene, field):
             value = getattr(scene, field)
         try:
