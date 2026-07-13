@@ -1016,6 +1016,10 @@ async def execute_rooms(
         room_results,
     )
 
+    setattr(machine_response, "provider_transport_verified", True)
+    setattr(machine_response, "provider_contract_version", "fiber_v3_stage2")
+
+
     diagnostics = (
         getattr(machine_response, "contributions", {})
         .get("registry_diagnostics", {})
