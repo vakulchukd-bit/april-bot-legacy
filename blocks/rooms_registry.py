@@ -1,4 +1,3 @@
-# =====================================================
 # 🧠 APRIL ROOMS REGISTRY
 # =====================================================
 #
@@ -1407,3 +1406,123 @@ def registry_export_contract(response: MachineResponse):
     if response.artifacts:
         contract.artifact=response.artifacts[0]
     return contract
+
+
+# =====================================================
+# 🧠 EXECUTOR CPU REGISTRY BRIDGE (Stage 1)
+# =====================================================
+
+REGISTRY_CPU_TRACE = {
+    "enabled": False,
+    "history": [],
+}
+
+def registry_trace(stage, **payload):
+    if not REGISTRY_CPU_TRACE["enabled"]:
+        return
+    REGISTRY_CPU_TRACE["history"].append({
+        "stage": stage,
+        "payload": payload,
+    })
+
+def registry_execute(machine_request: MachineRequest, room_results):
+    """
+    Canonical entrypoint used by Executor.
+    Aggregates room results into one MachineResponse.
+    """
+    registry_trace("request_received", request_type=type(machine_request).__name__)
+
+    response = registry_collect_responses(room_results)
+
+    response.contributions.setdefault(
+        "registry",
+        {
+            "rooms_processed": len(room_results),
+            "artifacts": len(response.artifacts),
+        },
+    )
+
+    registry_trace(
+        "response_ready",
+        artifacts=len(response.artifacts),
+        contributions=list(response.contributions.keys()),
+    )
+
+    response = registry_validate_response(response)
+    return response
+
+
+# =====================================================
+# 🧠 PARENT ROOM DISPATCH (Stage 2)
+# =====================================================
+
+PARENT_ROOM_GROUPS = {
+    "knowledge": [
+        "mathematics","trigonometry","physics","chemistry",
+        "biology","literature","engineering","it","web",
+        "politics","news","social","utc"
+    ],
+    "presentation": [
+        "graph","formula","table","diagram","code","link"
+    ],
+    "visual": [
+        "image_generate","image_edit"
+    ],
+    "dialog": [
+        "text","guidance"
+    ],
+}
+
+def registry_execution_summary(response: MachineResponse):
+    return {
+        "artifacts": len(response.artifacts),
+        "contributions": sorted(list(response.contributions.keys())),
+        "parent_groups": list(PARENT_ROOM_GROUPS.keys()),
+    }
+
+def registry_parent_dispatch(machine_request: MachineRequest, room_results):
+    """
+    Canonical parent-dispatch endpoint.
+    Executor calls only this API.
+    """
+    response = registry_execute(machine_request, room_results)
+    response.contributions.setdefault(
+        "registry_summary",
+        registry_execution_summary(response)
+    )
+    registry_trace(
+        "parent_dispatch_complete",
+        summary=response.contributions["registry_summary"]
+    )
+    return response
+
+
+# =====================================================
+# 🧠 MACHINE RESPONSE VALIDATION (Stage 3)
+# =====================================================
+
+REQUIRED_RESPONSE_FIELDS = (
+    "artifacts",
+    "contributions",
+)
+
+def registry_validate_response(response: MachineResponse):
+    diagnostics = {
+        "valid": True,
+        "missing": [],
+        "artifact_count": len(getattr(response, "artifacts", [])),
+        "contribution_count": len(getattr(response, "contributions", {})),
+    }
+
+    for field in REQUIRED_RESPONSE_FIELDS:
+        if not hasattr(response, field):
+            diagnostics["valid"] = False
+            diagnostics["missing"].append(field)
+
+    response.contributions.setdefault(
+        "registry_diagnostics",
+        diagnostics
+    )
+
+    registry_trace("validation_complete", **diagnostics)
+    return response
