@@ -953,6 +953,20 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
     scene.blocks = blocks
     scene.contract.blocks = blocks
 
+    # Carry canonical response payload.
+    scene.metadata.update({
+        "answer": getattr(response, "answer", ""),
+        "content": getattr(response, "content", ""),
+        "summary": getattr(response, "summary", ""),
+        "contributions": dict(getattr(response, "contributions", {}) or {}),
+        "executor_hints": dict(getattr(response, "executor_hints", {}) or {}),
+    })
+
+    setattr(scene, "artifacts", list(getattr(response, "artifacts", []) or []))
+    setattr(scene, "answer", getattr(response, "answer", ""))
+    setattr(scene, "content", getattr(response, "content", ""))
+    setattr(scene, "summary", getattr(response, "summary", ""))
+
     # Preserve optional runtime context.
     if hasattr(response, "conversation_space"):
         setattr(scene, "conversation_space", getattr(response, "conversation_space"))
@@ -965,6 +979,10 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract = scene.contract or create_default_scene_contract()
     contract.blocks = list(scene.blocks or [])
     contract.metadata.update(scene.metadata or {})
+    contract.metadata.setdefault("answer", getattr(scene,"answer",""))
+    contract.metadata.setdefault("content", getattr(scene,"content",""))
+    contract.metadata.setdefault("summary", getattr(scene,"summary",""))
+    contract.metadata.setdefault("artifact_count", len(getattr(scene,"artifacts",[]) or []))
     scene.contract = contract
     return contract
 
