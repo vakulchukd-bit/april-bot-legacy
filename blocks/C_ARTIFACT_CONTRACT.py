@@ -979,3 +979,30 @@ def factory_response_complete(response=None):
     factory_stage_success("FACTORY_COMPLETE",{
         "response_type":type(response).__name__ if response is not None else None
     })
+
+
+# =====================================================
+# CPU FACTORY BRIDGE (Stage 3)
+# =====================================================
+
+FACTORY_CPU_REGISTERED = False
+
+def factory_register_cpu_bridge(register_callback):
+    """Register CPU hooks exactly once."""
+    global FACTORY_CPU_REGISTERED
+    if FACTORY_CPU_REGISTERED:
+        return
+    register_callback(
+        begin=factory_stage_begin,
+        success=factory_stage_success,
+        error=factory_stage_error,
+    )
+    FACTORY_CPU_REGISTERED = True
+
+def factory_room_selected(room_name:str):
+    factory_stage_success("ROOM_SELECTED",{
+        "room":room_name
+    })
+
+def factory_machine_response_ready(response):
+    factory_response_complete(response)
