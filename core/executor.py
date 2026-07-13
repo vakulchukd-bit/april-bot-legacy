@@ -101,7 +101,8 @@ from blocks.context_system import (
 
 
 from blocks.rooms_registry import (
-    ROOMS
+    ROOMS,
+    registry_parent_dispatch,
 )
 
 from blocks.C_ARTIFACT_CONTRACT import (
@@ -1008,7 +1009,27 @@ async def execute_rooms(
         state=state,
         machine_response=machine_response,
     )
-    cpu_trace_success("ROOM_EXECUTION", {"answer": getattr(machine_response,"answer",None)})
+
+    room_results = [{"machine_response": machine_response}]
+    machine_response = registry_parent_dispatch(
+        machine_request,
+        room_results,
+    )
+
+    diagnostics = (
+        getattr(machine_response, "contributions", {})
+        .get("registry_diagnostics", {})
+    )
+
+    cpu_trace_success(
+        "ROOM_EXECUTION",
+        {
+            "answer": getattr(machine_response, "answer", None),
+            "artifacts": len(getattr(machine_response, "artifacts", []) or []),
+            "diagnostics": diagnostics,
+        },
+    )
+
     return executor_cpu_finalize_transport(machine_response)
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
