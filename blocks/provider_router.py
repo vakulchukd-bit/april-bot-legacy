@@ -463,6 +463,41 @@ def validate_machine_response_contract(contract):
     return contract
 
 
+
+# =====================================================
+# STAGE 1 - CANONICAL TEXT TRANSPORT
+# =====================================================
+
+def normalize_text_transport(contract):
+    """
+    Synchronize answer/content/response/summary/explanation so that
+    a non-empty value is propagated across the transport contract.
+    """
+    if not isinstance(contract, dict):
+        return {}
+
+    candidate = (
+        contract.get("answer")
+        or contract.get("content")
+        or contract.get("response")
+        or contract.get("summary")
+        or contract.get("explanation")
+        or ""
+    )
+
+    contract["answer"] = candidate
+    contract["content"] = candidate
+    contract["response"] = candidate
+
+    if not contract.get("summary"):
+        contract["summary"] = candidate
+
+    if not contract.get("explanation"):
+        contract["explanation"] = contract["summary"]
+
+    return contract
+
+
 def provider_contract_ready(machine_response):
     return machine_response
 
@@ -677,14 +712,11 @@ def create_provider_contract(raw_text):
     parsed = raw_text if isinstance(raw_text, dict) else parse_provider_machine_contract(raw_text)
     parsed = validate_machine_response_contract(parsed)
     parsed = ensure_scene_first_contract(parsed)
-
-    parsed.setdefault("content", parsed.get("response") or parsed.get("summary",""))
-    parsed.setdefault("answer", parsed.get("content"))
-    parsed.setdefault("response", parsed.get("answer"))
+    parsed = normalize_text_transport(parsed)
 
     machine = build_provider_machine_response(raw_text, parsed)
 
-    return finalize_executor_contract(machine)
+    return provider_finalize_for_executor(machine)
 
 
 
@@ -734,13 +766,35 @@ def infer_executor_rendering(machine_response):
 
 def detect_executor_artifacts(machine_response):
     """
-    Passive normalization only.
-    Do not infer scene or create blocks if they are absent.
+    Stage 3:
+    Normalize artifacts and ensure a canonical text block exists.
     """
     mr = machine_response.setdefault("machine_response", {})
-    mr.setdefault("render_blocks", [])
-    mr.setdefault("artifacts", [])
-    mr.setdefault("metadata", {})
+    render_blocks = mr.setdefault("render_blocks", [])
+    artifacts = mr.setdefault("artifacts", [])
+    metadata = mr.setdefault("metadata", {})
+
+    answer = (
+        mr.get("answer")
+        or mr.get("content")
+        or mr.get("summary")
+        or ""
+    )
+
+    if answer and not any(
+        isinstance(b, dict) and b.get("type") == "text"
+        for b in render_blocks
+    ):
+        render_blocks.insert(0, {
+            "type": "text",
+            "content": answer,
+            "scene_contract": True,
+        })
+
+    metadata["provider_stage"] = "stage3"
+    metadata["artifact_count"] = len(artifacts)
+    metadata["render_block_count"] = len(render_blocks)
+
     return machine_response
 
     render_blocks = mr.setdefault("render_blocks", [])
@@ -808,12 +862,52 @@ def detect_executor_artifacts(machine_response):
 
 
 
+
+# =====================================================
+# STAGE 2 - EXECUTOR HANDOFF
+# =====================================================
+
+def provider_finalize_for_executor(contract):
+    """
+    Canonical Provider -> Executor bridge.
+    Ensures the payload is normalized before leaving Provider.
+    """
+    contract = enrich_machine_response(contract)
+    contract = infer_executor_rendering(contract)
+    contract = detect_executor_artifacts(contract)
+    return contract
+
+
+
+# =====================================================
+# STAGE 4 - PROVIDER AUDIT
+# =====================================================
+
+def provider_transport_audit(machine_response):
+    """
+    Final verification before handing off to Executor.
+    """
+    mr = machine_response.setdefault("machine_response", {})
+    audit = {
+        "answer_length": len(mr.get("answer") or ""),
+        "content_length": len(mr.get("content") or ""),
+        "summary_length": len(mr.get("summary") or ""),
+        "artifact_count": len(mr.get("artifacts", []) or []),
+        "render_block_count": len(mr.get("render_blocks", []) or []),
+        "scene_valid": isinstance(mr.get("scene"), dict),
+    }
+    mr.setdefault("metadata", {})["provider_audit"] = audit
+    provider_log(f"PROVIDER AUDIT: {audit}")
+    return machine_response
+
+
 def finalize_executor_contract(machine_response):
     """Canonical Provider -> Executor transport pipeline. Provider validates only; Executor owns scene construction."""
     for step in (
         enrich_machine_response,
         infer_executor_rendering,
         detect_executor_artifacts,
+        provider_transport_audit,
     ):
         machine_response = step(machine_response)
     return machine_response
