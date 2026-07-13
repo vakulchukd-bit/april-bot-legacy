@@ -1554,6 +1554,24 @@ def executor_cpu_lineage_report():
 # ==========================================================
 # X024 UNIFIED SCENE PIPELINE
 # ==========================================================
+
+
+def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
+    """Synchronize canonical fields into SceneContract."""
+    if scene_contract is None:
+        return scene_contract
+
+    for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata"):
+        value = getattr(machine_response, field, None)
+        if value is None and hasattr(scene, field):
+            value = getattr(scene, field)
+        try:
+            setattr(scene_contract, field, value)
+        except Exception:
+            if isinstance(scene_contract, dict):
+                scene_contract[field] = value
+    return scene_contract
+
 def executor_cpu_scene_pipeline(machine_response):
     # Ensure MachineScene inherits CPU-generated render blocks.
     # Does not generate new knowledge or call Provider.
@@ -1586,6 +1604,7 @@ def executor_cpu_scene_pipeline(machine_response):
     summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
 
     scene_contract = build_scene_contract(scene)
+    scene_contract = executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
 
     return {
         "canonical_space": True,
