@@ -269,10 +269,16 @@ def validate_machine_response(
 def detect_task_type(
     semantic,
     cognition,
-    state
+    state,
+    conversation_space=None,
 ):
 
-    user_space = build_executor_user_space(state, conversation_space)
+    # conversation_space may not exist yet during the early
+    # executor stages. Fall back to state-only user space.
+    user_space = build_executor_user_space(
+        state,
+        conversation_space=conversation_space,
+    )
 
     scene_state = user_space.get("scene", {})
 
@@ -1708,6 +1714,7 @@ async def execute(
         semantic,
         cognition,
         state,
+        conversation_space=None,
     )
     # Build canonical CPU context only once.
     context = build_executor_context(
