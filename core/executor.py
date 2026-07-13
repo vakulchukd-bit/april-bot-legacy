@@ -967,6 +967,8 @@ async def execute_rooms(
         raise RuntimeError("MachineRequest missing from executor context")
 
     machine_response = None
+    room_results = []
+    room_execution_report = []
 
     for room in ROOMS:
         try:
@@ -976,13 +978,23 @@ async def execute_rooms(
                 context=machine_request,
                 run=run_with_activity,
             )
+
             if isinstance(result, MachineResponse):
-                machine_response = result
-                break
+                room_results.append({"room": getattr(room,"name","unknown"), "machine_response": result})
+                room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"ok"})
+                if machine_response is None:
+                    machine_response = result
+                continue
+
             if isinstance(result, dict) and isinstance(result.get("machine_response"), MachineResponse):
-                machine_response = result["machine_response"]
-                break
-        except Exception:
+                room_results.append({"room": getattr(room,"name","unknown"), "machine_response": result["machine_response"]})
+                room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"ok"})
+                if machine_response is None:
+                    machine_response = result["machine_response"]
+                continue
+
+        except Exception as exc:
+            room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"error","error":str(exc)})
             continue
 
     if machine_response is None:
@@ -1010,7 +1022,9 @@ async def execute_rooms(
         machine_response=machine_response,
     )
 
-    room_results = [{"machine_response": machine_response}]
+    setattr(machine_response,"room_execution_report",room_execution_report)
+    if not room_results:
+        room_results=[{"machine_response":machine_response}]
     machine_response = registry_parent_dispatch(
         machine_request,
         room_results,
