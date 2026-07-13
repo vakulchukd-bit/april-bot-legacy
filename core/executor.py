@@ -109,6 +109,8 @@ from blocks.C_ARTIFACT_CONTRACT import (
     MachineResponse,
     MachineScene,
     UniversalArtifactContract,
+    build_machine_scene,
+    build_scene_contract,
 )
 
 
@@ -1544,6 +1546,8 @@ def executor_cpu_scene_pipeline(machine_response):
     content = getattr(machine_response, "content", None) or answer
     summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
 
+    scene_contract = build_scene_contract(scene)
+
     return {
         "canonical_space": True,
         "machine_response": machine_response,
@@ -1552,7 +1556,8 @@ def executor_cpu_scene_pipeline(machine_response):
         "content": content,
         "summary": summary,
         "render_blocks": blocks,
-        "scene_contract": {
+        "scene_contract": scene_contract,  # canonical factory contract
+        "scene_runtime": {
             "conversation_space": conversation_space,
             "current_turn": conversation_space.get("current_turn"),
             "timeline": conversation_space.get("timeline", []),
