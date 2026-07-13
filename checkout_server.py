@@ -247,6 +247,19 @@ def executor_contract_passthrough(result):
 
     return result
 
+
+# =========================================================
+# GATEWAY COMPATIBILITY LAYER (Stage 2)
+# =========================================================
+# Temporary compatibility only.
+# These helpers exist while AprilWeb migrates.
+# Future owner: April CPU.
+# - resolve_scene_content()
+# - normalize_executor_response()
+# - build_gateway_scene_contract()
+# - build_gateway_transport_payload()
+# =========================================================
+
 # =========================================================
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
@@ -483,7 +496,7 @@ def normalize_executor_response(
     normalized["preferred_transport"] = "scene_contract"
     normalized["transport_role"] = "gateway_only"
     normalized["gateway_mutation"] = False
-    return normalized
+    return gateway_return_cpu_result(normalized)
 
 
 
@@ -561,9 +574,59 @@ def build_space_continuity(normalized):
         "scene_contract": normalized.get("scene_contract", {}),
     }
 
+
+# =========================================================
+# APRIL CPU GATEWAY CONTRACT (Stage 1)
+# =========================================================
+# Checkout Server is a transport gateway only.
+# Responsibilities:
+# 1. Receive HTTP requests.
+# 2. Forward requests to April CPU (execute()).
+# 3. Return canonical Scene Contract.
+# 4. Do not make routing decisions.
+# CPU owns routing, orchestration and SceneContract creation.
+# =========================================================
+
+GATEWAY_ROLE = "TRANSPORT_ONLY"
+CPU_OWNS_ROUTING = True
+CPU_OWNS_SCENE_CONTRACT = True
+
 # =========================================================
 # 🧠 WEB EXECUTION
 # =========================================================
+
+# Gateway wrapper: forwards to April CPU.
+
+# =========================================================
+# CPU FORWARDING LAYER (Stage 3)
+# =========================================================
+# Gateway delegates orchestration to April CPU.
+# This wrapper is the single forwarding point.
+# Future CPU diagnostics can be attached here without
+# changing Flask routes.
+
+async def gateway_forward_to_cpu(user_id, text, run_with_activity):
+    return await execute(
+        user_id=user_id,
+        text=text,
+        chat_id=user_id,
+        run_with_activity=run_with_activity,
+    )
+
+
+
+# =========================================================
+# APRIL CPU EXECUTION BRIDGE (Final Gateway Pass)
+# =========================================================
+# Single CPU bridge used by all web entrypoints.
+
+async def gateway_cpu_execute(user_id, text, run_with_activity):
+    result = await gateway_forward_to_cpu(
+        user_id=user_id,
+        text=text,
+        run_with_activity=run_with_activity,
+    )
+    return gateway_return_cpu_result(result)
 
 async def process_web_message(
     user_id,
@@ -582,14 +645,11 @@ async def process_web_message(
 
         return result
 
-    result = await execute(
+    # Canonical CPU bridge
+    result = await gateway_cpu_execute(
 
         user_id=user_id,
-
         text=text,
-
-        chat_id=user_id,
-
         run_with_activity=run_with_activity
     )
 
@@ -611,6 +671,7 @@ async def process_web_message(
         }
         normalized["space_continuity"] = build_space_continuity(normalized)
     else:
+        # Compatibility path until CPU returns canonical transport only
         normalized = normalize_executor_response(result)
 
     try:
@@ -634,6 +695,29 @@ async def process_web_message(
     return normalized
 
 
+
+
+# =========================================================
+# GATEWAY TRANSPORT POLICY (Stage 4)
+# =========================================================
+# Checkout Server MUST NOT:
+#   - choose execution routes
+#   - build business logic
+#   - orchestrate subsystems
+#   - own SceneContract semantics
+#
+# Checkout Server MAY:
+#   - receive HTTP requests
+#   - forward requests to April CPU
+#   - return canonical CPU response
+#   - expose infrastructure endpoints
+# =========================================================
+
+def gateway_return_cpu_result(cpu_result):
+    """Final gateway return point.
+    Future logging/trace hooks should be attached here.
+    """
+    return cpu_result
 
 # =========================================================
 # 🧠 FINAL GATEWAY TRANSPORT
