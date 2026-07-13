@@ -260,6 +260,57 @@ def executor_contract_passthrough(result):
 # - build_gateway_transport_payload()
 # =========================================================
 
+
+# =========================================================
+# 🧠 CANONICAL SCENE CONTRACT ADAPTER (Stage 1)
+# =========================================================
+
+def scene_contract_view(contract):
+    """
+    Temporary adapter while Gateway migrates from dict to
+    canonical SceneContract dataclass.
+    """
+    if contract is None:
+        return {}
+
+    if isinstance(contract, dict):
+        return contract
+
+    view = {}
+
+    for attr in (
+        "blocks",
+        "metadata",
+        "renderer_state",
+        "scene",
+        "content",
+        "answer",
+        "summary",
+        "machine_scene",
+        "version",
+    ):
+        if hasattr(contract, attr):
+            view[attr] = getattr(contract, attr)
+
+    if "render_blocks" not in view:
+        view["render_blocks"] = view.get("blocks", [])
+
+    return view
+
+
+
+
+# =========================================================
+# 🧠 CANONICAL SCENE ACCESSORS (Stage 2)
+# =========================================================
+
+def canonical_scene_blocks(contract):
+    return scene_contract_view(contract).get("render_blocks", [])
+
+def canonical_scene_metadata(contract):
+    return scene_contract_view(contract).get("metadata", {})
+
+
 # =========================================================
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
@@ -318,7 +369,7 @@ def normalize_executor_response(
 
         "blocks_present":
             bool(
-                (result.get("scene_contract") or {}).get("render_blocks")
+                scene_contract_view(result.get("scene_contract")).get("render_blocks")
                 or result.get("render_blocks")
                 or result.get("blocks")
             ),
@@ -334,13 +385,13 @@ def normalize_executor_response(
 
         "render_blocks":
             safe_json(
-                ((result.get("scene_contract") or {}).get("render_blocks"))
+                (scene_contract_view(result.get("scene_contract")).get("render_blocks"))
                 or result.get("render_blocks")
                 or result.get("blocks", [])
             ),
 
         "scene":
-            safe_json((result.get("scene_contract") or {}).get("scene", result.get("scene", {}))),
+            safe_json(scene_contract_view(result.get("scene_contract")).get("scene", result.get("scene", {}))),
 
         "space":
             safe_json(
@@ -425,7 +476,7 @@ def normalize_executor_response(
             ),
 
         "renderer_state":
-            safe_json((result.get("scene_contract") or {}).get("renderer_state", result.get("renderer_state", {}))),
+            safe_json(scene_contract_view(result.get("scene_contract")).get("renderer_state", result.get("renderer_state", {}))),
 
         "artifact_packet":
             safe_json(
@@ -455,7 +506,7 @@ def normalize_executor_response(
             "scene_contract": bool(result.get("scene_contract")),
             "artifact": bool(result.get("artifact")),
             "blocks": bool(
-                ((result.get("scene_contract") or {}).get("render_blocks"))
+                (scene_contract_view(result.get("scene_contract")).get("render_blocks"))
             )
         }
     )
@@ -467,12 +518,13 @@ def normalize_executor_response(
     print(normalized)
 
     
-    canonical = result.get("scene_contract") if isinstance(result, dict) else None
+    canonical = scene_contract_view(result.get("scene_contract")) if isinstance(result, dict) else None
     executor_final = False
-    if isinstance(canonical, dict):
+    if canonical:
         executor_final = canonical.get("scene_contract_final") or result.get("scene_contract_final")
 
     if canonical:
+        canonical = scene_contract_view(canonical)
         canonical.setdefault("content", normalized.get("content"))
         canonical.setdefault("answer", normalized.get("answer"))
         canonical.setdefault("summary", normalized.get("summary"))
@@ -660,14 +712,14 @@ async def process_web_message(
     if isinstance(result, dict) and result.get("scene_contract"):
         normalized = {
             "scene_contract": result["scene_contract"],
-            "content": (result["scene_contract"].get("content")
-                        or result["scene_contract"].get("answer")
+            "content": (scene_contract_view(result["scene_contract"]).get("content")
+                        or scene_contract_view(result["scene_contract"]).get("answer")
                         or ""),
-            "answer": result["scene_contract"].get("answer"),
-            "summary": result["scene_contract"].get("summary"),
-            "render_blocks": result["scene_contract"].get("render_blocks", []),
-            "scene": (result["scene_contract"].get("machine_scene")
-                      or result["scene_contract"].get("scene", {})),
+            "answer": scene_contract_view(result["scene_contract"]).get("answer"),
+            "summary": scene_contract_view(result["scene_contract"]).get("summary"),
+            "render_blocks": scene_contract_view(result["scene_contract"]).get("render_blocks", []),
+            "scene": (scene_contract_view(result["scene_contract"]).get("machine_scene")
+                      or scene_contract_view(result["scene_contract"]).get("scene", {})),
         }
         normalized["space_continuity"] = build_space_continuity(normalized)
     else:
@@ -719,6 +771,16 @@ def gateway_return_cpu_result(cpu_result):
     """
     return cpu_result
 
+
+# =========================================================
+# LEGACY SCENE CONTRACT STATUS (Stage 3)
+# =========================================================
+# Gateway no longer owns SceneContract semantics.
+# Executor + Artifact Factory are canonical owners.
+# Remaining compatibility code exists only to serialize the
+# canonical transport during migration to AprilWeb.
+# =========================================================
+
 # =========================================================
 # 🧠 FINAL GATEWAY TRANSPORT
 # =========================================================
@@ -726,7 +788,7 @@ def gateway_return_cpu_result(cpu_result):
 def build_gateway_transport_payload(normalized):
     
     # Forward canonical contract without rebuilding.
-    contract = normalized.get("scene_contract", {}) or {}
+    contract = scene_contract_view(normalized.get("scene_contract"))
     contract.setdefault("gateway_transport_only", True)
     contract.setdefault("gateway_owner", "checkout_server")
     return {
