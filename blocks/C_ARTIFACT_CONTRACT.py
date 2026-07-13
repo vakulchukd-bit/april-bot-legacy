@@ -873,6 +873,8 @@ __all__ = [
     "build_universal_contract",
     "create_transport_contract",
     "validate_universal_contract",
+    "build_machine_scene",
+    "build_scene_contract",
 ]
 
 
@@ -921,6 +923,50 @@ def validate_fiber_core(contract: UniversalArtifactContract) -> dict:
 def add_room_contribution(response: MachineResponse, room: str, payload: Dict[str, Any]) -> None:
     """Canonical API: each room writes its named contribution."""
     response.contributions[room] = payload
+
+
+
+
+# =====================================================
+# CANONICAL MACHINE SCENE BUILDER
+# =====================================================
+
+def build_machine_scene(response: MachineResponse) -> MachineScene:
+    """Canonical MachineResponse -> MachineScene transformation.
+    The Factory owns Scene construction; Executor only invokes it.
+    """
+    scene = create_default_machine_scene()
+
+    # Preserve Fiber ownership.
+    scene.fiber = response.fiber
+
+    # Carry metadata when available.
+    scene.metadata = {
+        "confidence": getattr(response, "confidence", 0.0),
+        "diagnostics": getattr(response, "diagnostics", {}),
+        "quality": getattr(response, "quality", {}),
+        "routing_decision": getattr(response, "routing_decision", {}),
+    }
+
+    # Reuse render blocks if Executor already materialized them.
+    blocks = list(getattr(response, "render_blocks", []) or [])
+    scene.blocks = blocks
+    scene.contract.blocks = blocks
+
+    # Preserve optional runtime context.
+    if hasattr(response, "conversation_space"):
+        setattr(scene, "conversation_space", getattr(response, "conversation_space"))
+
+    return scene
+
+
+def build_scene_contract(scene: MachineScene) -> SceneContract:
+    """Canonical SceneContract builder from MachineScene."""
+    contract = scene.contract or create_default_scene_contract()
+    contract.blocks = list(scene.blocks or [])
+    contract.metadata.update(scene.metadata or {})
+    scene.contract = contract
+    return contract
 
 
 # =====================================================
