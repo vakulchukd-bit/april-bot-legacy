@@ -1214,19 +1214,43 @@ EXECUTOR_CPU_ENABLED = True
 APRIL_CPU_TRACE_ENABLED=False
 CPU_EXECUTION_JOURNAL=[]
 
+
+
+# ==========================================================
+# APRIL CPU STAGE REGISTRY (Stage 5)
+# ==========================================================
+
+CPU_STAGE_REGISTRY=[]
+
+def cpu_stage_record(stage,status,details=None):
+    entry={
+        "stage":stage,
+        "status":status,
+        "details":details or {},
+        "timestamp":time.time(),
+    }
+    CPU_STAGE_REGISTRY.append(entry)
+    return entry
+
+def cpu_stage_snapshot():
+    return list(CPU_STAGE_REGISTRY)
+
 def cpu_trace_begin(stage,payload=None):
     if not APRIL_CPU_TRACE_ENABLED:
         return
+    cpu_stage_record(stage,"BEGIN",payload or {})
     CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"BEGIN","payload":payload or {},"timestamp":time.time()})
 
 def cpu_trace_success(stage,payload=None):
     if not APRIL_CPU_TRACE_ENABLED:
         return
+    cpu_stage_record(stage,"SUCCESS",payload or {})
     CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"SUCCESS","payload":payload or {},"timestamp":time.time()})
 
 def cpu_trace_error(stage,error):
     if not APRIL_CPU_TRACE_ENABLED:
         return
+    cpu_stage_record(stage,"ERROR",{"error":str(error)})
     CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"ERROR","error":str(error),"timestamp":time.time()})
 
 def cpu_execution_journal():
@@ -1578,6 +1602,76 @@ def executor_cpu_finalize_transport(machine_response):
 # Temporary compatibility facade for bot.py / checkout_server.py
 # ==========================================================
 
+
+
+# ==========================================================
+# APRIL CPU COORDINATION LAYER (Stage 3)
+# ==========================================================
+
+CPU_COORDINATION_POLICY = {
+    "gateway":"checkout_server",
+    "factory":"C_ARTIFACT_CONTRACT",
+    "single_route":True,
+    "trace_owner":"executor_cpu",
+}
+
+
+
+# ==========================================================
+# APRIL CPU FACTORY BRIDGE (Stage 4)
+# ==========================================================
+
+def executor_cpu_factory_bridge(machine_result):
+    """Single bridge between CPU and Artifact Factory output."""
+    cpu_trace_begin("FACTORY_RETURN", {})
+    if isinstance(machine_result, dict):
+        cpu_trace_success("FACTORY_RETURN", {
+            "has_scene_contract": "scene_contract" in machine_result,
+            "has_machine_response": "machine_response" in machine_result,
+            "has_machine_scene": "machine_scene" in machine_result,
+        })
+    return machine_result
+
+def executor_cpu_gateway_dispatch(result):
+    """Single exit point from CPU toward Gateway."""
+    cpu_trace_success("CPU_GATEWAY_DISPATCH",{
+        "scene_contract": isinstance(result,dict) and "scene_contract" in result
+    })
+    return result
+
+
+
+# ==========================================================
+# APRIL CPU <-> FACTORY HOOK BRIDGE (Stage 6)
+# ==========================================================
+
+def executor_cpu_register_factory_hooks(register_hook):
+    """Attach CPU trace callbacks to Artifact Factory."""
+    register_hook(
+        begin=cpu_trace_begin,
+        success=cpu_trace_success,
+        error=cpu_trace_error,
+    )
+
+def executor_cpu_factory_event(stage, payload=None):
+    cpu_trace_begin(stage, payload or {})
+
+def executor_cpu_factory_complete(stage, payload=None):
+    cpu_trace_success(stage, payload or {})
+
+
+
+# ==========================================================
+# APRIL CPU FACTORY SYNCHRONIZATION (Stage 7)
+# ==========================================================
+
+def executor_cpu_sync_factory_bridge(factory_register):
+    """Bind CPU and Artifact Factory into one execution route."""
+    executor_cpu_register_factory_hooks(factory_register)
+    cpu_trace_success("FACTORY_BRIDGE_REGISTERED",{
+        "single_route":True
+    })
+
 async def execute(
     user_id,
     chat_id=None,
@@ -1634,6 +1728,10 @@ async def execute(
 
     # Canonical CPU entry: build one MachineRequest from ConversationSpace
     # CPU owns exactly one MachineRequest for the whole execution.
+    # Factory hooks are registered once CPU context exists.
+    if "factory_hook_registration" in kwargs:
+        executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
+
     context["machine_request"] = MachineRequest(
         goal=current_turn.get("user", {}).get("text", text),
         intent=semantic,
@@ -1657,5 +1755,7 @@ async def execute(
         state=state,
         run_with_activity=run_with_activity,
     )
+    result = executor_cpu_factory_bridge(result)
+    result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
     return result
