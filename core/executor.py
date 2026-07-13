@@ -952,6 +952,7 @@ async def execute_rooms(
     state,
     run_with_activity,
 ):
+    cpu_trace_begin("ROOM_EXECUTION", {"text": text})
     machine_request = context.get("machine_request")
     if machine_request is None:
         raise RuntimeError("MachineRequest missing from executor context")
@@ -999,6 +1000,7 @@ async def execute_rooms(
         state=state,
         machine_response=machine_response,
     )
+    cpu_trace_success("ROOM_EXECUTION", {"answer": getattr(machine_response,"answer",None)})
     return executor_cpu_finalize_transport(machine_response)
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
@@ -1205,6 +1207,31 @@ EXECUTOR_FIBER_CANONICAL = True
 
 
 EXECUTOR_CPU_ENABLED = True
+
+# ==========================================================
+# APRIL CPU TRACE INFRASTRUCTURE (Stage 1)
+# ==========================================================
+APRIL_CPU_TRACE_ENABLED=False
+CPU_EXECUTION_JOURNAL=[]
+
+def cpu_trace_begin(stage,payload=None):
+    if not APRIL_CPU_TRACE_ENABLED:
+        return
+    CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"BEGIN","payload":payload or {},"timestamp":time.time()})
+
+def cpu_trace_success(stage,payload=None):
+    if not APRIL_CPU_TRACE_ENABLED:
+        return
+    CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"SUCCESS","payload":payload or {},"timestamp":time.time()})
+
+def cpu_trace_error(stage,error):
+    if not APRIL_CPU_TRACE_ENABLED:
+        return
+    CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"ERROR","error":str(error),"timestamp":time.time()})
+
+def cpu_execution_journal():
+    return list(CPU_EXECUTION_JOURNAL)
+
 
 
 # Legacy trace retained but disabled
@@ -1560,6 +1587,7 @@ async def execute(
 ):
     chat_id = chat_id or user_id
     # CPU loads persistent state through the state service only.
+    cpu_trace_begin("EXECUTE", {"user_id": user_id})
     state = get_state(user_id)
     semantic = semantic_analyze(text)
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
@@ -1619,7 +1647,7 @@ async def execute(
     # CPU delegates execution to Room Dispatcher
     # CPU ends here; domain execution belongs to Rooms.
     # After this point the CPU only supervises the execution lifecycle.
-    return await execute_rooms(
+    result = await execute_rooms(
         user_id=user_id,
         text=text,
         context=context,
@@ -1629,3 +1657,5 @@ async def execute(
         state=state,
         run_with_activity=run_with_activity,
     )
+    cpu_trace_success("EXECUTE")
+    return result
