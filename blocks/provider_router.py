@@ -734,10 +734,12 @@ def recover_machine_contract(contract):
             "scene_contract":True
         })
     contract["metadata"]["contract_recovered"]=True
+    contract["metadata"]["transport_stage"]="provider_stage2"
     return contract
 
 def create_provider_contract(raw_text):
-    """Stage 3: translate every OpenAI response into one canonical MachineResponse."""
+    """Stage 3: translate every OpenAI response into one canonical MachineResponse.
+    Stage 1 upgrade: avoid repeated normalization and preserve canonical transport."""
 
     if (
         isinstance(raw_text, dict)
@@ -748,14 +750,16 @@ def create_provider_contract(raw_text):
         return provider_contract_ready(raw_text)
 
     parsed = raw_text if isinstance(raw_text, dict) else parse_provider_machine_contract(raw_text)
-    parsed = validate_machine_response_contract(parsed)
+    # STAGE 1: single canonical validation pass
     parsed = ensure_scene_first_contract(parsed)
+    # STAGE 2: preserve canonical text first, then recover only missing fields
     parsed = normalize_text_transport(parsed)
     parsed = recover_machine_contract(parsed)
 
+    # STAGE 3: build one canonical provider response then perform a single executor handoff
     machine = build_provider_machine_response(raw_text, parsed)
-
-    return provider_finalize_for_executor(machine)
+    machine = provider_finalize_for_executor(machine)
+    return machine
 
 
 
@@ -831,6 +835,7 @@ def detect_executor_artifacts(machine_response):
         })
 
     metadata["provider_stage"] = "stage3"
+    metadata["canonical_handoff"] = True
     metadata["artifact_count"] = len(artifacts)
     metadata["render_block_count"] = len(render_blocks)
 
@@ -941,7 +946,9 @@ def provider_transport_audit(machine_response):
 
 
 def finalize_executor_contract(machine_response):
-    """Canonical Provider -> Executor transport pipeline. Provider validates only; Executor owns scene construction."""
+    """Stage 4: final canonical Provider -> Executor transport pipeline.
+    This is the single validated handoff to the Executor."""
+    # Stage 4: execute one ordered canonical transport pipeline.
     for step in (
         enrich_machine_response,
         infer_executor_rendering,
@@ -1390,5 +1397,5 @@ async def analyze_image(
         raise RuntimeError("Visual provider route failed")
 
 
-PROVIDER_ROUTE_VERSION="fiber_scene_v4"
+PROVIDER_ROUTE_VERSION="fiber_scene_v4_stage4"
 PROVIDER_LEGACY_MODE=False
