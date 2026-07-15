@@ -423,6 +423,7 @@ def build_universal_contract(
             artifact.render.web_block
         ]
 
+        contract.metadata.setdefault("artifact_contract_stage","stage4_final")
     return contract
 
 
@@ -774,6 +775,7 @@ class MachineRequest:
 
 @dataclass
 class MachineResponse:
+    # Stage 1: reserve canonical transport fields to avoid dynamic attribute loss.
     fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
     artifacts: List[BaseArtifact] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
@@ -783,6 +785,11 @@ class MachineResponse:
     recommendations: List[str] = field(default_factory=list)
     executor_hints: Dict[str, Any] = field(default_factory=dict)
     routing_decision: Dict[str, Any] = field(default_factory=dict)
+    answer: str = ""
+    content: str = ""
+    summary: str = ""
+    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    scene: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class MachineScene:
@@ -799,6 +806,7 @@ class MachineScene:
 # FIBER CORE FINALIZATION
 # =====================================================
 
+# Stage 4: finalized canonical transport contract
 FIBER_CORE_VERSION = "1.0"
 FIBER_CORE_SINGLE_ROUTE = True
 FIBER_ROUTE_NAME = "APRIL_FIBER_ROUTE"
@@ -953,6 +961,7 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
     scene.blocks = blocks
     scene.contract.blocks = blocks
 
+    # Stage 2: carry canonical transport fields into the scene.
     # Carry canonical response payload.
     scene.metadata.update({
         "answer": getattr(response, "answer", ""),
@@ -975,6 +984,7 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
 
 
 def build_scene_contract(scene: MachineScene) -> SceneContract:
+    # Stage 3: finalize the canonical SceneContract from MachineScene.
     """Canonical SceneContract builder from MachineScene."""
     contract = scene.contract or create_default_scene_contract()
     contract.blocks = list(scene.blocks or [])
@@ -983,6 +993,8 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.metadata.setdefault("content", getattr(scene,"content",""))
     contract.metadata.setdefault("summary", getattr(scene,"summary",""))
     contract.metadata.setdefault("artifact_count", len(getattr(scene,"artifacts",[]) or []))
+    contract.metadata.setdefault("transport_stage","artifact_contract_stage2")
+    contract.metadata.setdefault("canonical_scene_contract", True)
     scene.contract = contract
     return contract
 
