@@ -989,12 +989,13 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract = scene.contract or create_default_scene_contract()
     contract.blocks = list(scene.blocks or [])
     contract.metadata.update(scene.metadata or {})
-    contract.metadata.setdefault("answer", getattr(scene,"answer",""))
-    contract.metadata.setdefault("content", getattr(scene,"content",""))
-    contract.metadata.setdefault("summary", getattr(scene,"summary",""))
-    contract.metadata.setdefault("artifact_count", len(getattr(scene,"artifacts",[]) or []))
-    contract.metadata.setdefault("transport_stage","artifact_contract_stage2")
-    contract.metadata.setdefault("canonical_scene_contract", True)
+    # Canonical transport fields must always reflect the latest scene state.
+    contract.metadata["answer"] = getattr(scene, "answer", "")
+    contract.metadata["content"] = getattr(scene, "content", "")
+    contract.metadata["summary"] = getattr(scene, "summary", "")
+    contract.metadata["artifact_count"] = len(getattr(scene, "artifacts", []) or [])
+    contract.metadata["transport_stage"] = "artifact_contract_stage2"
+    contract.metadata["canonical_scene_contract"] = True
     scene.contract = contract
     return contract
 
