@@ -1033,9 +1033,20 @@ async def execute_rooms(
         room_results,
     )
 
+    if machine_response is None:
+        machine_response = reflected_machine_response
+
     # Preserve canonical transport fields if Registry returned an
     # incomplete MachineResponse.
-    for _field in ("answer", "content", "summary", "render_blocks", "artifacts", "conversation_space"):
+    for _field in (
+        "answer",
+        "content",
+        "summary",
+        "render_blocks",
+        "artifacts",
+        "conversation_space",
+        "metadata",
+    ):
         current = getattr(machine_response, _field, None)
         previous = getattr(reflected_machine_response, _field, None)
         if (current is None or current == "" or current == [] or current == {}) and previous not in (None, "", [], {}):
@@ -1629,12 +1640,18 @@ def executor_cpu_scene_pipeline(machine_response):
     except Exception:
         pass
 
+    # Canonical source of truth: MachineResponse.
     current_turn = conversation_space.get("current_turn", {})
-    april_turn = current_turn.get("april") or {}
+    april_turn = current_turn.setdefault("april", {})
 
-    answer = april_turn.get("answer") or getattr(machine_response, "answer", None)
+    answer = getattr(machine_response, "answer", None)
     content = getattr(machine_response, "content", None) or answer
-    summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
+    summary = getattr(machine_response, "summary", None) or content
+
+    april_turn["answer"] = answer
+    april_turn["content"] = content
+    april_turn["summary"] = summary
+    conversation_space["last_april_turn"] = dict(april_turn)
 
     scene_contract = build_scene_contract(scene)
     executor_cpu_transport_diag('AFTER_BUILD_SCENE_CONTRACT', machine_response, scene_contract)
