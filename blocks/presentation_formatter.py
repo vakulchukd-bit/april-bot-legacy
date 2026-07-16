@@ -1390,7 +1390,7 @@ def preserve_scene_pipeline(payload):
 # STAGE 4 - MachineResponse -> Scene Contract
 # =====================================================
 
-def build_scene_contract(machine_response):
+def build_scene_contract_legacy(machine_response):
     if not isinstance(machine_response, dict):
         return machine_response
 
@@ -1437,8 +1437,13 @@ def finalize_presentation_payload(payload):
         if is_scene_contract(mr):
             safe_format_log("READY SCENE CONTRACT")
             return mr
-        safe_format_log("SCENE CONTRACT BUILT")
-        return build_scene_contract(mr)
+
+        safe_format_log("CANONICAL CONTRACT REQUIRED")
+        # Presentation layer must not build SceneContract.
+        # Pass MachineResponse forward unchanged so the canonical
+        # transport layer (C_ARTIFACT_CONTRACT / Executor) remains
+        # the single owner of SceneContract construction.
+        return mr
 
     return preserve_scene_pipeline(payload)
 
