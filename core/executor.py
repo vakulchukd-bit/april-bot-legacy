@@ -1026,10 +1026,20 @@ async def execute_rooms(
     setattr(machine_response,"room_execution_report",room_execution_report)
     if not room_results:
         room_results=[{"machine_response":machine_response}]
+    reflected_machine_response = machine_response
+
     machine_response = registry_parent_dispatch(
         machine_request,
         room_results,
     )
+
+    # Preserve canonical transport fields if Registry returned an
+    # incomplete MachineResponse.
+    for _field in ("answer", "content", "summary", "render_blocks", "artifacts", "conversation_space"):
+        current = getattr(machine_response, _field, None)
+        previous = getattr(reflected_machine_response, _field, None)
+        if (current is None or current == "" or current == [] or current == {}) and previous not in (None, "", [], {}):
+            setattr(machine_response, _field, previous)
 
     executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
 
