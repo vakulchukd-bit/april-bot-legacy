@@ -45,9 +45,6 @@
 #
 # =====================================================
 
-print(
-    "🧠 APRIL ROOMS REGISTRY LOADED"
-)
 
 # =====================================================
 # 🔥 IMPORTS
@@ -142,22 +139,8 @@ OUTPUT_MACHINE_CHANNEL = {
 ROOMS_PATCH_LOG = []
 
 def safe_rooms_log(*args):
-
-    try:
-
-        print(
-            "APRIL ROOMS:",
-            *args
-        )
-
-        ROOMS_PATCH_LOG.append(
-            " ".join(
-                [str(x) for x in args]
-            )
-        )
-
-    except:
-        pass
+    # Lightweight: keep hook but avoid console spam.
+    return
 
 
 # =====================================================
@@ -1466,14 +1449,6 @@ def registry_execute(machine_request: MachineRequest, room_results):
     )
 
     response = registry_validate_response(response)
-    response.contributions.setdefault(
-        "registry_transport",
-        {
-            "has_answer": bool(getattr(response, "answer", "")),
-            "has_content": bool(getattr(response, "content", "")),
-            "has_summary": bool(getattr(response, "summary", "")),
-        },
-    )
     return response
 
 
