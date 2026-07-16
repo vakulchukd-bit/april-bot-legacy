@@ -1014,6 +1014,7 @@ async def execute_rooms(
     conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
 
+    executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
     machine_response = executor_cpu_reflect(
         semantic=semantic,
         cognition=cognition,
@@ -1029,6 +1030,8 @@ async def execute_rooms(
         machine_request,
         room_results,
     )
+
+    executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
 
     setattr(machine_response, "provider_transport_verified", True)
     setattr(machine_response, "provider_contract_version", "fiber_v3_stage2")
@@ -1556,6 +1559,21 @@ def executor_cpu_lineage_report():
 # ==========================================================
 
 
+
+def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
+    try:
+        print({
+            "APRIL_EXECUTOR_STAGE": stage,
+            "answer": getattr(machine_response, "answer", None),
+            "content": getattr(machine_response, "content", None),
+            "summary": getattr(machine_response, "summary", None),
+            "render_blocks": len(getattr(machine_response, "render_blocks", []) or []),
+            "has_scene_contract": scene_contract is not None,
+        })
+    except Exception as exc:
+        print({"APRIL_EXECUTOR_STAGE": stage, "diag_error": str(exc)})
+
+
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
     """Synchronize canonical fields into SceneContract."""
     if scene_contract is None:
@@ -1609,7 +1627,9 @@ def executor_cpu_scene_pipeline(machine_response):
     summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
 
     scene_contract = build_scene_contract(scene)
+    executor_cpu_transport_diag('AFTER_BUILD_SCENE_CONTRACT', machine_response, scene_contract)
     scene_contract = executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
+    executor_cpu_transport_diag('AFTER_SYNC_SCENE_CONTRACT', machine_response, scene_contract)
 
     return {
         "canonical_space": True,
@@ -1659,6 +1679,7 @@ def executor_cpu_finalize_transport(machine_response):
     scene = executor_cpu_scene_pipeline(machine_response)
     conversation_space = getattr(machine_response, "conversation_space", None)
 
+    executor_cpu_transport_diag('FINAL_TRANSPORT', machine_response, scene.get('scene_contract'))
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3",
