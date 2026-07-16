@@ -961,7 +961,7 @@ async def execute_rooms(
     state,
     run_with_activity,
 ):
-    cpu_trace_begin("ROOM_EXECUTION", {"text": text})
+    
     machine_request = context.get("machine_request")
     if machine_request is None:
         raise RuntimeError("MachineRequest missing from executor context")
@@ -1052,7 +1052,8 @@ async def execute_rooms(
         .get("registry_diagnostics", {})
     )
 
-    cpu_trace_success(
+    if False:
+        cpu_trace_success(
         "ROOM_EXECUTION",
         {
             "answer": getattr(machine_response, "answer", None),
@@ -1571,17 +1572,16 @@ def executor_cpu_lineage_report():
 
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
+    """Lightweight transport diagnostics."""
     try:
         print({
             "APRIL_EXECUTOR_STAGE": stage,
-            "answer": getattr(machine_response, "answer", None),
-            "content": getattr(machine_response, "content", None),
-            "summary": getattr(machine_response, "summary", None),
-            "render_blocks": len(getattr(machine_response, "render_blocks", []) or []),
+            "has_answer": bool(getattr(machine_response, "answer", "")),
+            "has_content": bool(getattr(machine_response, "content", "")),
             "has_scene_contract": scene_contract is not None,
         })
-    except Exception as exc:
-        print({"APRIL_EXECUTOR_STAGE": stage, "diag_error": str(exc)})
+    except Exception:
+        pass
 
 
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
