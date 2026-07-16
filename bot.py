@@ -603,6 +603,20 @@ def normalize_executor_response(
     normalized["machine_scene"] = result.get("machine_scene")
     normalized["scene_plan"] = result.get("scene_plan")
 
+    # Fiber Route Stage 1: preserve canonical Executor transport.
+    scene_contract = normalized.get("scene_contract")
+    if isinstance(scene_contract, dict):
+        normalized["final_text"] = (
+            scene_contract.get("answer")
+            or scene_contract.get("content")
+            or scene_contract.get("summary")
+            or normalized["final_text"]
+        )
+        normalized["render_blocks"] = (
+            scene_contract.get("render_blocks")
+            or normalized.get("render_blocks", [])
+        )
+
     return normalized
 
 # =========================================================
@@ -1082,3 +1096,68 @@ if __name__ == "__main__":
 
         use_reloader=False
     )
+
+
+# =====================================================
+# FIBER ROUTE STAGE 2
+# Canonical transport passthrough helper.
+# =====================================================
+
+def preserve_executor_scene_contract(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+
+    scene = payload.get("scene_contract")
+    if not isinstance(scene, dict):
+        return payload
+
+    payload["answer"] = scene.get("answer") or payload.get("answer")
+    payload["summary"] = scene.get("summary") or payload.get("summary")
+    payload["content"] = scene.get("content") or payload.get("content")
+
+    if scene.get("render_blocks"):
+        payload["render_blocks"] = scene["render_blocks"]
+
+    payload["gateway_transport"] = payload.get("gateway_transport") or scene
+    return payload
+
+
+# =====================================================
+# FIBER ROUTE STAGE 3
+# Legacy normalization is intentionally kept for rollback.
+# It is commented rather than removed.
+# =====================================================
+
+'''
+LEGACY NORMALIZATION (kept for rollback/testing)
+
+normalized = normalize_executor_response(result)
+organized = organize_multimodal_response(normalized)
+
+The canonical route should instead be:
+
+Executor
+    -> SceneContract
+    -> checkout_server
+    -> Bot.ru passthrough
+    -> AprilWeb
+
+Enable the legacy path only if rollback is required.
+'''
+
+
+# =====================================================
+# FIBER ROUTE STAGE 4 (TEST MODE)
+# Legacy route disabled for testing.
+# =====================================================
+
+'''
+# LEGACY PATH (DISABLED)
+# normalized = normalize_executor_response(result)
+# organized = organize_multimodal_response(normalized)
+# response = machine_to_human(organized)
+'''
+
+# ACTIVE CANONICAL PATH
+result = preserve_executor_scene_contract(result)
+response = machine_to_human(result)
