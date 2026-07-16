@@ -1398,8 +1398,10 @@ def registry_collect_responses(responses):
                 mr.artifacts.extend(getattr(candidate, "artifacts", []) or [])
                 mr.contributions.update(getattr(candidate, "contributions", {}) or {})
                 for field in ("answer","content","summary","render_blocks","metadata"):
-                    if not getattr(mr, field, None):
-                        setattr(mr, field, getattr(candidate, field, None))
+                    current = getattr(mr, field, None)
+                    incoming = getattr(candidate, field, None)
+                    if (not current) and incoming:
+                        setattr(mr, field, incoming)
             continue
 
         if hasattr(r, "artifacts"):
@@ -1464,6 +1466,14 @@ def registry_execute(machine_request: MachineRequest, room_results):
     )
 
     response = registry_validate_response(response)
+    response.contributions.setdefault(
+        "registry_transport",
+        {
+            "has_answer": bool(getattr(response, "answer", "")),
+            "has_content": bool(getattr(response, "content", "")),
+            "has_summary": bool(getattr(response, "summary", "")),
+        },
+    )
     return response
 
 
