@@ -1111,6 +1111,13 @@ async def generate_text(
         )
 
         contract = create_provider_contract(text)
+
+        # =====================================================
+        # STAGE 5 - FINAL PROVIDER->EXECUTOR TRANSPORT
+        # Single canonical handoff with final audit.
+        # =====================================================
+        contract = finalize_executor_contract(contract)
+
         return contract
 
     except Exception as e:
