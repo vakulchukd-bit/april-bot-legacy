@@ -1378,22 +1378,37 @@ def registry_accept_request(request: MachineRequest)->MachineRequest:
     return request
 
 def registry_collect_responses(responses):
-    mr = MachineResponse()
+    """Preserve the first complete MachineResponse and merge subsequent room contributions."""
+    mr = None
 
     for r in responses:
         if r is None:
             continue
 
-        # Canonical path
+        candidate = None
         if isinstance(r, MachineResponse):
-            mr.artifacts.extend(r.artifacts)
-            mr.contributions.update(getattr(r,"contributions",{}))
+            candidate = r
+        elif isinstance(r, dict) and isinstance(r.get("machine_response"), MachineResponse):
+            candidate = r["machine_response"]
+
+        if candidate is not None:
+            if mr is None:
+                mr = candidate
+            else:
+                mr.artifacts.extend(getattr(candidate, "artifacts", []) or [])
+                mr.contributions.update(getattr(candidate, "contributions", {}) or {})
+                for field in ("answer","content","summary","render_blocks","metadata"):
+                    if not getattr(mr, field, None):
+                        setattr(mr, field, getattr(candidate, field, None))
             continue
 
         if hasattr(r, "artifacts"):
-            mr.artifacts.extend(r.artifacts)
-            continue
-        # Canonical route only.
+            if mr is None:
+                mr = MachineResponse()
+            mr.artifacts.extend(getattr(r,"artifacts",[]) or [])
+
+    if mr is None:
+        mr = MachineResponse()
 
     return mr
 
