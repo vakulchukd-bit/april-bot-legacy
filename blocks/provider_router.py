@@ -440,8 +440,7 @@ def ensure_scene_first_contract(contract):
     contract.setdefault("scene", {})
     contract.setdefault("render_blocks", [])
     contract.setdefault("artifacts", [])
-    provider_log({"trace_stage":"provider_return","machine_response":isinstance(contract,dict) and "machine_response" in contract})
-        return contract
+    return contract
 
 
 # =====================================================
