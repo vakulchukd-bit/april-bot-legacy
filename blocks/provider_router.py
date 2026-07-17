@@ -846,68 +846,6 @@ def detect_executor_artifacts(machine_response):
 
     return machine_response
 
-    render_blocks = mr.setdefault("render_blocks", [])
-    artifacts = mr.setdefault("artifacts", [])
-    metadata = mr.setdefault("metadata", {})
-
-    mapping = {
-        "table":"table",
-        "graph":"graph",
-        "knowledge_graph":"knowledge_graph",
-        "relation_graph":"relation_graph",
-        "relations":"relations",
-        "gallery":"gallery",
-        "image":"image",
-        "images":"gallery",
-        "diagram":"diagram",
-        "scene":"scene",
-        "layout":"layout",
-        "visual":"visual",
-        "renderer_scene":"renderer_scene",
-        "code":"code",
-        "formula":"formula",
-        "function":"function",
-        "markdown":"markdown",
-        "text":"text",
-        "link":"link",
-        "links":"link",
-    }
-
-    for key, block_type in mapping.items():
-        if key not in content:
-            continue
-        payload = content[key]
-        block={"type":block_type}
-        if block_type=="text":
-            block["content"]=payload
-        elif block_type=="table" and isinstance(payload,dict):
-            block.update(payload)
-        elif block_type=="gallery":
-            block["images"]=payload
-        elif block_type=="image":
-            block["url"]=payload
-        elif block_type=="code":
-            block["content"]=payload
-        elif block_type=="link":
-            block["links"]=payload
-        else:
-            block["payload"]=payload
-        render_blocks.append(block)
-        artifacts.append({
-            "type": block_type,
-            "payload": payload
-        })
-        if key in ("link","links"):
-            metadata["links"] = payload
-
-    if mr.get("answer"):
-        if not any(b.get("type")=="text" for b in render_blocks):
-            render_blocks.insert(0,{
-                "type":"text",
-                "content":mr["answer"]
-            })
-
-    return machine_response
 
 
 
