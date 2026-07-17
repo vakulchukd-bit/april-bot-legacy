@@ -617,17 +617,24 @@ def build_openai_request(machine_request):
         or ""
     )
 
+    # STAGE 2 - Compact Provider Payload
+    memory = machine_request.get("memory") or {}
+    visual = machine_request.get("visual_context") or {}
+
     payload = {
         "goal": machine_request.get("goal"),
         "intent": {
             "type": intent.get("type"),
             "normalized_text": user_text,
         },
-        "memory": machine_request.get("memory"),
-        "visual_context": machine_request.get("visual_context"),
+        "memory": {
+            "memory_summary": memory.get("memory_summary"),
+            "active_flow": memory.get("active_flow"),
+        },
+        "visual_context": {
+            "visual_reference": visual.get("visual_reference"),
+        },
         "routing": machine_request.get("routing"),
-        "response_decision": machine_request.get("response_decision"),
-        "renderer_preferences": machine_request.get("renderer_preferences"),
     }
 
     provider_log("========== MACHINE REQUEST ==========")
@@ -642,8 +649,6 @@ def build_openai_request(machine_request):
         f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
         f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
         f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
-        f"RESPONSE_DECISION:\n{json.dumps(payload.get('response_decision'), ensure_ascii=False)}\n\n"
-        f"RENDERER:\n{json.dumps(payload.get('renderer_preferences'), ensure_ascii=False)}\n\n"
         "Output format: MachineResponse only. No markdown. No explanations."
     )
 
