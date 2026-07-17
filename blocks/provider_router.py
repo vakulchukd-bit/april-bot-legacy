@@ -440,7 +440,8 @@ def ensure_scene_first_contract(contract):
     contract.setdefault("scene", {})
     contract.setdefault("render_blocks", [])
     contract.setdefault("artifacts", [])
-    return contract
+    provider_log({"trace_stage":"provider_return","machine_response":isinstance(contract,dict) and "machine_response" in contract})
+        return contract
 
 
 # =====================================================
@@ -1081,6 +1082,7 @@ async def generate_text(
         provider_log("========== RAW OPENAI OUTPUT ==========")
         provider_log(response.output_text[:8000] if response.output_text else "EMPTY")
 
+        provider_log("TRACE STAGE: normalize_response_text input", (response.output_text or "")[:300])
         text = normalize_response_text(
 
             response.output_text
@@ -1110,13 +1112,18 @@ async def generate_text(
             True
         )
 
+        provider_log({"trace_stage":"before_create_provider_contract","text_len":len(text),"preview":text[:300]})
         contract = create_provider_contract(text)
+        provider_log({"trace_stage":"after_create_provider_contract","keys":list(contract.keys()) if isinstance(contract,dict) else str(type(contract))})
 
         # =====================================================
         # STAGE 5 - FINAL PROVIDER->EXECUTOR TRANSPORT
         # Single canonical handoff with final audit.
         # =====================================================
+        provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
         contract = finalize_executor_contract(contract)
+        mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
+        provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
 
         return contract
 
