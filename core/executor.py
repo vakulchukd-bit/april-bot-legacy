@@ -1,35 +1,20 @@
-
-
-
-# ==========================================================
-# X025 OPTIMIZATION PASS
-# Executor target:
-# MachineRequest -> Rooms -> MachineResponse
-# -> SingleSpace -> SceneContract -> Checkout
-# Legacy path scheduled for removal after validation.
-# ==========================================================
-
-
-# ==========================================================
-# XSCRUTER EXPERIMENTAL BUILD X-001
+# =============================================================================
+#                               APRIL EXECUTOR CPU
+#                          executor.py  •  Fiber Processor
 #
-# Purpose:
-# - Experimental CPU consolidation build.
-# - Test version for route diagnostics.
-# - Safe rollback expected if hypothesis is rejected.
+#  Canonical Processor of the April execution pipeline.
+#  Route:
+#      MachineRequest → Rooms → MachineResponse
+#      → MachineScene → SceneContract
 #
-# Hypothesis:
-# Executor should become the single coordination CPU while
-# preserving one Fiber route and one Artifact Contract.
+#  Single Fiber Route • Single Artifact Contract • Executor CPU
 #
-# ==========================================================
+#  MAINTENANCE NOTE
+#  Executor owns orchestration and enrichment.
+#  Provider supplies only a compact MachineRequest.
+#  Preserve the canonical transport contract.
 
-# APRIL EXECUTOR CPU CONTRACT
-#   -> reflection
-
-# APRIL EXECUTOR
-# Canonical execution path:
-# User Space -> MachineRequest -> Rooms -> MachineResponse -> MachineScene -> Scene Contract
+# =============================================================================
 
 import traceback
 import time
@@ -115,7 +100,6 @@ from blocks.C_ARTIFACT_CONTRACT import (
 )
 
 
-
 # Legacy provider import (CPU should not call Provider directly)
 # TODO(Stage5): Provider must be called outside CPU coordinator
 from blocks.provider_router import generate_text
@@ -196,37 +180,16 @@ def clamp(
 
 
 def track_room(name):
+    # Disabled instrumentation hook (preserved behavior).
     return
-
-
-    if not name:
-        return
-
-    EMAPS[
-        "active_rooms"
-    ].add(name)
 
 def track_trajectory(name):
+    # Disabled instrumentation hook (preserved behavior).
     return
-
-
-    if not name:
-        return
-
-    EMAPS[
-        "active_trajectories"
-    ].add(name)
 
 def track_modality(name):
+    # Disabled instrumentation hook (preserved behavior).
     return
-
-
-    if not name:
-        return
-
-    EMAPS[
-        "active_modalities"
-    ].add(name)
 
 
 def validate_machine_response(
@@ -517,8 +480,8 @@ def build_executor_context(
         "user_space":
             user_space,
 
-        "canonical_space": conversation_space,
         "conversation_space": conversation_space,
+        "canonical_space": conversation_space,
 
         "memory_routing":
             {
@@ -605,7 +568,6 @@ def stabilize_room_score(
         ]:
 
             score -= 8.0
-
 
 
     task_resolution = user_space.get(
@@ -944,12 +906,22 @@ def build_guidance_response(
 # ==========================================================
 
 
-
 def executor_cpu_register_room(report, room_name, **kwargs):
     entry={"room": room_name}
     entry.update(kwargs)
     report.append(entry)
     return report
+
+
+def _extract_machine_response(result):
+    """Return MachineResponse from room result or None."""
+    if isinstance(result, MachineResponse):
+        return result
+    if isinstance(result, dict):
+        mr = result.get("machine_response")
+        if isinstance(mr, MachineResponse):
+            return mr
+    return None
 
 async def execute_rooms(
     user_id,
@@ -966,9 +938,9 @@ async def execute_rooms(
     if machine_request is None:
         raise RuntimeError("MachineRequest missing from executor context")
 
-    machine_response = None
     room_results = []
     room_execution_report = []
+    machine_response = None
 
     for room in ROOMS:
         try:
@@ -979,18 +951,19 @@ async def execute_rooms(
                 run=run_with_activity,
             )
 
-            if isinstance(result, MachineResponse):
-                room_results.append({"room": getattr(room,"name","unknown"), "machine_response": result})
-                room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"ok"})
+            extracted = _extract_machine_response(result)
+            if extracted is not None:
+                room_results.append({
+                    "room": getattr(room, "name", "unknown"),
+                    "machine_response": extracted,
+                })
+                executor_cpu_register_room(
+                    room_execution_report,
+                    getattr(room, "name", "unknown"),
+                    status="ok",
+                )
                 if machine_response is None:
-                    machine_response = result
-                continue
-
-            if isinstance(result, dict) and isinstance(result.get("machine_response"), MachineResponse):
-                room_results.append({"room": getattr(room,"name","unknown"), "machine_response": result["machine_response"]})
-                room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"ok"})
-                if machine_response is None:
-                    machine_response = result["machine_response"]
+                    machine_response = extracted
                 continue
 
         except Exception as exc:
@@ -1096,8 +1069,6 @@ def apply_representation_gate(blocks, response_decision=None, semantic=None):
     return filtered
 
 
-
-
 # ==========================================================
 # CANONICAL SCENE COMPOSER
 # Scene assembly owned by Executor CPU.
@@ -1131,14 +1102,6 @@ def normalize_provider_scene(result):
         }
 
     return result
-
-
-
-
-
-
-
-
 
 
 def executor_cpu_materialize_blocks(machine_response):
@@ -1184,7 +1147,6 @@ def executor_cpu_materialize_blocks(machine_response):
 
     machine_response.render_blocks = render_blocks
     return machine_response
-
 
 
 def executor_cpu_attach_artifact_payloads(machine_response):
@@ -1287,7 +1249,6 @@ APRIL_CPU_TRACE_ENABLED=False
 CPU_EXECUTION_JOURNAL=[]
 
 
-
 # ==========================================================
 # APRIL CPU STAGE REGISTRY (Stage 5)
 # ==========================================================
@@ -1329,7 +1290,6 @@ def cpu_execution_journal():
     return list(CPU_EXECUTION_JOURNAL)
 
 
-
 # Legacy trace retained but disabled
 EXECUTOR_CPU_TRACE = []
 
@@ -1349,22 +1309,7 @@ def executor_cpu_checkpoint(stage, **payload):
     # without calling Provider/OpenAI.
     # Never produces user-visible text and never calls Provider/OpenAI.
     return payload.get("machine_response")
-    # disabled legacy checkpoint
-    ctx={}
-    decision={
-        "topic_mode":"continuation" if ctx.get("trajectory") else "new_topic",
-        "use_visual_memory":bool(ctx.get("active_visual_scene")),
-        "use_memory_timeline":bool(ctx.get("memory_timeline")),
-        "continue_scene":bool(ctx.get("active_visual_scene")),
-        "representation":response_decision.get("preferred_representation")
-            or semantic.get("preferred_representation")
-            or "text",
-        "internal_only":True,
-        "human_visible":False,
-    }
-    setattr(machine_response,"executor_decision",decision)
-    return machine_response
-
+    # Legacy diagnostic implementation removed during cleanup.
 
 
 def executor_cpu_integrate_presentation(machine_response):
@@ -1410,7 +1355,6 @@ def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decisi
     return machine_response
 
 
-
 def executor_cpu_build_executor_decision(*, semantic, cognition, response_decision, state, machine_response):
     """CPU-only decision layer. Produces machine decision, never user text."""
     ctx=getattr(machine_response,"executor_cognitive_context",{}) or {}
@@ -1427,9 +1371,6 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
     }
     setattr(machine_response,"executor_decision",decision)
     return machine_response
-
-
-
 
 
 def executor_cpu_normalize_answer(machine_response):
@@ -1492,7 +1433,6 @@ def executor_cpu_build_presentation_plan(machine_response):
     return machine_response
 
 
-
 def executor_cpu_reflect(
     *,
     semantic,
@@ -1547,10 +1487,6 @@ def executor_cpu_reflect(
     setattr(machine_response, "executor_planner", planner)
     setattr(machine_response, "executor_cpu_verified", True)
     return machine_response
-
-
-
-
 EXECUTOR_CPU_OBJECTS = {
     "machine_request": {},
     "machine_response": {},
@@ -1573,13 +1509,9 @@ def executor_cpu_lineage_report():
     }
 
 
-
-
-
 # ==========================================================
 # X024 UNIFIED SCENE PIPELINE
 # ==========================================================
-
 
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
@@ -1642,11 +1574,6 @@ def executor_cpu_scene_pipeline(machine_response):
 
     current_turn = conversation_space.get("current_turn", {})
     april_turn = current_turn.get("april") or {}
-
-    answer = april_turn.get("answer") or getattr(machine_response, "answer", None)
-    content = getattr(machine_response, "content", None) or answer
-    summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
-
     scene_contract = build_scene_contract(scene)
     executor_cpu_transport_diag('AFTER_BUILD_SCENE_CONTRACT', machine_response, scene_contract)
     scene_contract = executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
@@ -1656,9 +1583,9 @@ def executor_cpu_scene_pipeline(machine_response):
         "canonical_space": True,
         "machine_response": machine_response,
         "machine_scene": scene,
-        "answer": answer,
-        "content": content,
-        "summary": summary,
+        "answer": getattr(machine_response, "answer", None),
+        "content": getattr(machine_response, "content", None),
+        "summary": getattr(machine_response, "summary", None),
         "render_blocks": blocks,
         "scene_contract": scene_contract,  # canonical factory contract
         "scene_runtime": {
@@ -1668,11 +1595,10 @@ def executor_cpu_scene_pipeline(machine_response):
             "last_user_turn": conversation_space.get("last_user_turn"),
             "last_april_turn": conversation_space.get("last_april_turn"),
             "machine_scene": scene,
-            "current_turn": current_turn,
             "render_blocks": blocks,
-            "answer": answer,
-            "content": content,
-            "summary": summary,
+            "answer": getattr(machine_response, "answer", None),
+            "content": getattr(machine_response, "content", None),
+            "summary": getattr(machine_response, "summary", None),
             "modalities": conversation_space.get("modalities", {}),
             "dialog": conversation_space.get("dialog", []),
             "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
@@ -1719,7 +1645,6 @@ def executor_cpu_finalize_transport(machine_response):
 # ==========================================================
 
 
-
 # ==========================================================
 # APRIL CPU COORDINATION LAYER (Stage 3)
 # ==========================================================
@@ -1730,7 +1655,6 @@ CPU_COORDINATION_POLICY = {
     "single_route":True,
     "trace_owner":"executor_cpu",
 }
-
 
 
 # ==========================================================
@@ -1756,7 +1680,6 @@ def executor_cpu_gateway_dispatch(result):
     return result
 
 
-
 # ==========================================================
 # APRIL CPU <-> FACTORY HOOK BRIDGE (Stage 6)
 # ==========================================================
@@ -1774,7 +1697,6 @@ def executor_cpu_factory_event(stage, payload=None):
 
 def executor_cpu_factory_complete(stage, payload=None):
     cpu_trace_success(stage, payload or {})
-
 
 
 # ==========================================================
