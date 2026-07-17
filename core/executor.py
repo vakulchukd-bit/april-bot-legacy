@@ -1640,18 +1640,12 @@ def executor_cpu_scene_pipeline(machine_response):
     except Exception:
         pass
 
-    # Canonical source of truth: MachineResponse.
     current_turn = conversation_space.get("current_turn", {})
-    april_turn = current_turn.setdefault("april", {})
+    april_turn = current_turn.get("april") or {}
 
-    answer = getattr(machine_response, "answer", None)
+    answer = april_turn.get("answer") or getattr(machine_response, "answer", None)
     content = getattr(machine_response, "content", None) or answer
-    summary = getattr(machine_response, "summary", None) or content
-
-    april_turn["answer"] = answer
-    april_turn["content"] = content
-    april_turn["summary"] = summary
-    conversation_space["last_april_turn"] = dict(april_turn)
+    summary = april_turn.get("summary") or getattr(machine_response, "summary", None) or content
 
     scene_contract = build_scene_contract(scene)
     executor_cpu_transport_diag('AFTER_BUILD_SCENE_CONTRACT', machine_response, scene_contract)
@@ -1855,13 +1849,24 @@ async def execute(
     if "factory_hook_registration" in kwargs:
         executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
 
+    # STAGE 1 - COMPACT PROVIDER REQUEST
+    compact_memory = {
+        "memory_summary": state.get("memory_summary"),
+        "active_flow": state.get("active_flow"),
+    }
+    compact_conversation = {
+        "last_user_turn": current_turn.get("user", {}).get("text", text),
+        "last_april_turn": conversation_space.get("last_april_turn"),
+    }
     context["machine_request"] = MachineRequest(
         goal=current_turn.get("user", {}).get("text", text),
         intent=semantic,
-        memory=state,
+        memory=compact_memory,
         visual_context={"visual_reference": visual_reference},
-        conversation=conversation_space,  # single shared user space
+        conversation=compact_conversation,
     )
+    context["executor_state"] = state
+    context["executor_conversation_space"] = conversation_space
 
     setattr(context["machine_request"], "current_turn", current_turn)
 
