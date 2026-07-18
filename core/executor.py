@@ -1038,7 +1038,10 @@ async def execute_rooms(
 
     # TEST-3: Canonical normalization before reflection.
     machine_response = executor_cpu_normalize_answer(machine_response)
-    executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
+    print("MR_ID_BEFORE_REFLECT:", id(machine_response))
+    print("MR_ANSWER_BEFORE_REFLECT:", getattr(machine_response,"answer",""))
+    print("MR_CONTENT_BEFORE_REFLECT:", getattr(machine_response,"content",""))
+executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
     machine_response = executor_cpu_reflect(
         semantic=semantic,
         cognition=cognition,
@@ -1625,7 +1628,10 @@ def executor_cpu_scene_pipeline(machine_response):
     # This stage never calls Provider/OpenAI and never creates a new route.
     executor_cpu_transport_diag('BEFORE_BUILD_MACHINE_SCENE', machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
+    print("MR_ID_BEFORE_BUILD_MACHINE_SCENE:", id(machine_response))
+    print("MR_ANSWER_BEFORE_BUILD_MACHINE_SCENE:", getattr(machine_response,"answer",""))
     scene = build_machine_scene(machine_response)
+    print("MR_ID_AFTER_BUILD_MACHINE_SCENE:", id(machine_response))
     try:
         setattr(scene, "conversation_space",
                 getattr(machine_response, "conversation_space", None))
