@@ -981,6 +981,7 @@ async def execute_rooms(
                     print("MR ANSWER:", mr.get("answer"))
                     print("MR CONTENT:", mr.get("content"))
                     print("MR SUMMARY:", mr.get("summary"))
+                    print("MR_DICT_ID:", id(mr))
                 elif isinstance(mr, MachineResponse):
                     print("MR OBJECT ANSWER:", getattr(mr, "answer", ""))
                     print("MR OBJECT CONTENT:", getattr(mr, "content", ""))
@@ -1038,6 +1039,7 @@ async def execute_rooms(
 
     # TEST-3: Canonical normalization before reflection.
     machine_response = executor_cpu_normalize_answer(machine_response)
+    print("TRACE BEFORE_REFLECT ID:", id(machine_response))
     executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
     machine_response = executor_cpu_reflect(
         semantic=semantic,
@@ -1586,6 +1588,7 @@ def executor_cpu_lineage_report():
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
     print("=== TRANSPORT_DIAG ===")
+    print("MR_OBJECT_ID:", id(machine_response))
     print("TYPE:", type(machine_response).__name__)
     print("ANSWER:", repr(getattr(machine_response,"answer", None))[:200])
     print("CONTENT:", repr(getattr(machine_response,"content", None))[:200])
@@ -1636,6 +1639,7 @@ def executor_cpu_scene_pipeline(machine_response):
     # Does not generate new knowledge or call Provider.
     # It does not rebuild the scene; it validates and annotates it.
     # This stage never calls Provider/OpenAI and never creates a new route.
+    print("TRACE BEFORE_BUILD_MACHINE_SCENE ID:", id(machine_response))
     executor_cpu_transport_diag('BEFORE_BUILD_MACHINE_SCENE', machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
     scene = build_machine_scene(machine_response)
