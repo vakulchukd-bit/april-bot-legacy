@@ -774,6 +774,7 @@ def recover_machine_contract(contract):
     contract.setdefault("render_priority", ["text"])
     contract.setdefault("metadata", {})
     if candidate and not any(isinstance(b, dict) and b.get("type")=="text" for b in contract["render_blocks"]):
+        pass  # inserted to preserve valid Python block
         # STAGE2: legacy automatic TextBlock injection disabled.
         # contract["render_blocks"].insert(0,{
 #             "type":"text",
