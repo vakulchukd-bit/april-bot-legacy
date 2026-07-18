@@ -415,16 +415,32 @@ import json
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
 def parse_provider_machine_contract(raw_text):
-    """Parse a MachineResponse transport contract."""
+    """Parse a MachineResponse transport contract with lightweight recovery."""
     try:
-        data=json.loads(raw_text)
-        if isinstance(data,dict):
+        data = json.loads(raw_text)
+        if isinstance(data, dict):
             return data
     except json.JSONDecodeError as e:
         provider_log(f"JSON PARSE ERROR line={e.lineno} col={e.colno} pos={e.pos}")
-        start=max(0,e.pos-80)
-        end=min(len(raw_text),e.pos+80)
+        start=max(0,e.pos-120)
+        end=min(len(raw_text),e.pos+120)
         provider_log(raw_text[start:end])
+
+        repaired=(raw_text or "").strip()
+
+        first=repaired.find("{")
+        last=repaired.rfind("}")
+
+        if first!=-1 and last>first:
+            repaired=repaired[first:last+1]
+            try:
+                data=json.loads(repaired)
+                if isinstance(data,dict):
+                    provider_log("JSON RECOVERY SUCCESS")
+                    return data
+            except Exception:
+                pass
+
         raise ValueError("Invalid MachineResponse JSON from provider") from e
 
 
@@ -567,21 +583,19 @@ APRIL PROTOCOL
 Role:
 You are the Provider transport gateway.
 
-Your only responsibility is to transform one MachineRequest into one MachineResponse.
+Internally perform the work in this order:
+1. Understand the request.
+2. Produce the complete answer.
+3. Produce a short summary from the answer.
+4. Produce the scene.
+5. Produce render_blocks from the scene.
+6. Return ONE final JSON object only.
 
-Return exactly one JSON object.
 The response MUST be valid JSON accepted by json.loads().
 
-Never return:
-- markdown
-- code fences
-- comments
-- ellipsis (...)
-- explanatory text before or after JSON
+Never output markdown, code fences, comments, reasoning or text before/after JSON.
 
-The JSON is a MachineResponse contract.
-
-Required fields:
+Required semantic fields:
 answer
 summary
 explanation
@@ -592,11 +606,9 @@ render_blocks
 scene_plan
 render_priority
 confidence
-metadata
 
-Do not omit required fields.
-Do not rename fields.
-Do not invent new top-level fields.
+Do not invent extra top-level fields.
+Provider transport metadata is added by Python after parsing.
 """
 
 
