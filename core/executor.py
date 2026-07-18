@@ -1623,6 +1623,8 @@ def executor_cpu_scene_pipeline(machine_response):
     # Does not generate new knowledge or call Provider.
     # It does not rebuild the scene; it validates and annotates it.
     # This stage never calls Provider/OpenAI and never creates a new route.
+    executor_cpu_transport_diag('BEFORE_BUILD_MACHINE_SCENE', machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
     scene = build_machine_scene(machine_response)
     try:
         setattr(scene, "conversation_space",
@@ -1693,6 +1695,7 @@ def executor_cpu_scene_pipeline(machine_response):
 # ==========================================================
 
 def executor_cpu_finalize_transport(machine_response):
+    machine_response = executor_cpu_normalize_answer(machine_response)
     scene = executor_cpu_scene_pipeline(machine_response)
     conversation_space = getattr(machine_response, "conversation_space", None)
 
