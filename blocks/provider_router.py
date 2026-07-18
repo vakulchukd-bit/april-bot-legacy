@@ -881,6 +881,7 @@ def detect_executor_artifacts(machine_response):
         isinstance(b, dict) and b.get("type") == "text"
         for b in render_blocks
     ):
+        pass  # preserve empty branch after legacy removal
         # STAGE2: legacy automatic executor TextBlock injection disabled.
         # render_blocks.insert(0, {
 #             "type": "text",
