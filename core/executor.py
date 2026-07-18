@@ -1,3 +1,5 @@
+# TEST-6 PATCH NOT APPLIED AUTOMATICALLY
+
 # =============================================================================
 #                               APRIL EXECUTOR CPU
 #                          executor.py  •  Fiber Processor
