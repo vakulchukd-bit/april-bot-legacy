@@ -1,4 +1,4 @@
-# TEST-10 PATCH NOT APPLIED AUTOMATICALLY
+# TEST-6 PATCH NOT APPLIED AUTOMATICALLY
 
 # =============================================================================
 #                               APRIL EXECUTOR CPU
@@ -1585,21 +1585,19 @@ def executor_cpu_lineage_report():
 
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
-
     print("=== TRANSPORT_DIAG ===")
-    print("DIAG_TYPE:", type(machine_response))
-    print("DIAG_IS_DICT:", isinstance(machine_response, dict))
-    if isinstance(machine_response, dict):
-        print("DIAG_KEYS:", list(machine_response.keys()))
-        print("DIAG_DICT_ANSWER:", machine_response.get("answer"))
-        print("DIAG_DICT_CONTENT:", machine_response.get("content"))
-    else:
-        print("DIAG_ATTR_ANSWER:", getattr(machine_response, "answer", None))
-        print("DIAG_ATTR_CONTENT:", getattr(machine_response, "content", None))
-        try:
-            print("DIAG_OBJECT_DICT:", vars(machine_response))
-        except Exception:
-            pass
+    print("TYPE:", type(machine_response).__name__)
+    print("ANSWER:", repr(getattr(machine_response,"answer", None))[:200])
+    print("CONTENT:", repr(getattr(machine_response,"content", None))[:200])
+    print("SUMMARY:", repr(getattr(machine_response,"summary", None))[:200])
+    print("HAS_RESPONSE_ATTR:", hasattr(machine_response,"response"))
+    if hasattr(machine_response,"response"):
+        r=getattr(machine_response,"response")
+        print("RESPONSE_TYPE:", type(r).__name__)
+        if isinstance(r,dict):
+            print("RESPONSE_KEYS:", list(r.keys())[:20])
+            print("RESPONSE_ANSWER:", repr(r.get("answer"))[:200])
+    print("======================")
     """Lightweight transport diagnostics."""
     try:
         print({
