@@ -1062,6 +1062,12 @@ async def execute_rooms(
     # ==============================
     machine_response = reflected_machine_response
 
+    # ==============================
+    # TEST-5
+    # Registry never replaces the provider object.
+    # Merge only enrichment fields and then re-normalize
+    # canonical transport fields from the surviving instance.
+    # ==============================
     if registry_result is not None:
         for _field in (
             "contributions",
@@ -1074,6 +1080,15 @@ async def execute_rooms(
                 value = getattr(registry_result, _field, None)
                 if value not in (None, "", [], {}):
                     setattr(machine_response, _field, value)
+            except Exception:
+                pass
+
+        for _field in ("answer","content","summary"):
+            try:
+                current = getattr(machine_response, _field, "")
+                incoming = getattr(registry_result, _field, "")
+                if (not current) and incoming:
+                    setattr(machine_response, _field, incoming)
             except Exception:
                 pass
 
