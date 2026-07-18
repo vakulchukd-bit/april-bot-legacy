@@ -914,13 +914,26 @@ def executor_cpu_register_room(report, room_name, **kwargs):
 
 
 def _extract_machine_response(result):
-    """Return MachineResponse from room result or None."""
+    """Return MachineResponse from room result or convert canonical provider dict."""
     if isinstance(result, MachineResponse):
         return result
+
     if isinstance(result, dict):
         mr = result.get("machine_response")
+
         if isinstance(mr, MachineResponse):
             return mr
+
+        if isinstance(mr, dict):
+            return MachineResponse(
+                answer=mr.get("answer", ""),
+                content=mr.get("content", ""),
+                summary=mr.get("summary", ""),
+                render_blocks=list(mr.get("render_blocks", []) or []),
+                artifacts=list(mr.get("artifacts", []) or []),
+                metadata=dict(mr.get("metadata", {}) or {}),
+            )
+
     return None
 
 async def execute_rooms(
