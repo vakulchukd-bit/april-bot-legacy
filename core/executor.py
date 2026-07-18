@@ -1050,30 +1050,34 @@ async def execute_rooms(
         room_results=[{"machine_response":machine_response}]
     reflected_machine_response = machine_response
 
-    machine_response = registry_parent_dispatch(
+    registry_result = registry_parent_dispatch(
         machine_request,
         room_results,
     )
 
-    if machine_response is None:
-        machine_response = reflected_machine_response
+    # ==============================
+    # TEST-4
+    # Preserve ONE MachineResponse instance across the Fiber route.
+    # Registry may enrich it, but must not replace it.
+    # ==============================
+    machine_response = reflected_machine_response
 
-    # Preserve canonical transport fields if Registry returned an
-    # incomplete MachineResponse.
-    for _field in (
-        "answer",
-        "content",
-        "summary",
-        "render_blocks",
-        "artifacts",
-        "conversation_space",
-        "metadata",
-    ):
-        current = getattr(machine_response, _field, None)
-        previous = getattr(reflected_machine_response, _field, None)
-        if (current is None or current == "" or current == [] or current == {}) and previous not in (None, "", [], {}):
-            setattr(machine_response, _field, previous)
+    if registry_result is not None:
+        for _field in (
+            "contributions",
+            "registry_diagnostics",
+            "artifacts",
+            "render_blocks",
+            "metadata",
+        ):
+            try:
+                value = getattr(registry_result, _field, None)
+                if value not in (None, "", [], {}):
+                    setattr(machine_response, _field, value)
+            except Exception:
+                pass
 
+    machine_response = executor_cpu_normalize_answer(machine_response)
     executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
 
     setattr(machine_response, "provider_transport_verified", True)
