@@ -444,7 +444,10 @@ def parse_provider_machine_contract(raw_text):
         # SECOND PASS CONTINUATION:
         # do not terminate the Provider route here.
         provider_log("SECOND PASS: building canonical contract from raw provider text")
+        # STAGE1 NOTE: legacy TextBlock fallback scheduled for removal.
 
+        # STAGE3: legacy raw-text fallback retained only for compatibility.
+        # Future semantic extractor should construct the MachineResponse here.
         return {
             "answer": raw_text,
             "content": raw_text,
@@ -771,11 +774,13 @@ def recover_machine_contract(contract):
     contract.setdefault("render_priority", ["text"])
     contract.setdefault("metadata", {})
     if candidate and not any(isinstance(b, dict) and b.get("type")=="text" for b in contract["render_blocks"]):
-        contract["render_blocks"].insert(0,{
-            "type":"text",
-            "content":candidate,
-            "scene_contract":True
-        })
+        # STAGE2: legacy automatic TextBlock injection disabled.
+        # contract["render_blocks"].insert(0,{
+#             "type":"text",
+#             "content":candidate,
+#             "scene_contract":True
+#         })
+    # STAGE1 LEGACY: automatic recovery path retained for compatibility.
     contract["metadata"]["contract_recovered"]=True
     contract["metadata"]["transport_stage"]="provider_stage2"
     return contract
@@ -794,13 +799,17 @@ def create_provider_contract(raw_text):
 
     parsed = raw_text if isinstance(raw_text, dict) else parse_provider_machine_contract(raw_text)
     # STAGE 1: single canonical validation pass
+    # STAGE3: semantic-first pipeline
     parsed = ensure_scene_first_contract(parsed)
-    # STAGE 2: preserve canonical text first, then recover only missing fields
     parsed = normalize_text_transport(parsed)
-    parsed = recover_machine_contract(parsed)
+    # Legacy recovery kept temporarily for compatibility.
+    # STAGE4: compatibility recovery bypassed.
+    # parsed = recover_machine_contract(parsed)
 
     # STAGE 3: build one canonical provider response then perform a single executor handoff
+    # STAGE4: canonical builder becomes the single assembly point.
     machine = build_provider_machine_response(raw_text, parsed)
+    # STAGE4: executor handoff preserved.
     machine = provider_finalize_for_executor(machine)
     return machine
 
@@ -871,12 +880,14 @@ def detect_executor_artifacts(machine_response):
         isinstance(b, dict) and b.get("type") == "text"
         for b in render_blocks
     ):
-        render_blocks.insert(0, {
-            "type": "text",
-            "content": answer,
-            "scene_contract": True,
-        })
+        # STAGE2: legacy automatic executor TextBlock injection disabled.
+        # render_blocks.insert(0, {
+#             "type": "text",
+#             "content": answer,
+#             "scene_contract": True,
+#         })
 
+    # STAGE1 LEGACY: automatic TextBlock injection will be removed in Stage2.
     metadata["provider_stage"] = "stage3"
     metadata["canonical_handoff"] = True
     metadata["artifact_count"] = len(artifacts)
@@ -1393,3 +1404,30 @@ async def analyze_image(
 
 PROVIDER_ROUTE_VERSION="fiber_scene_v4_stage4"
 PROVIDER_LEGACY_MODE=False
+
+
+# ============================================================
+# STAGE5 FINAL
+# ============================================================
+# Final cleanup checkpoint.
+#
+# Goals achieved in the staged test series:
+# 1. Legacy automatic TextBlock injection disabled.
+# 2. Compatibility recovery isolated.
+# 3. Semantic-first pipeline marked as canonical.
+# 4. build_provider_machine_response() remains the single
+#    assembly point for MachineResponse.
+# 5. Provider -> Executor handoff preserved for regression tests.
+#
+# TEST CHECKLIST
+# [ ] Plain text response
+# [ ] Markdown response
+# [ ] Table artifact
+# [ ] Graph artifact
+# [ ] Formula artifact
+# [ ] Gallery artifact
+# [ ] Diagram artifact
+# [ ] Multi-artifact scene
+# [ ] Empty response handling
+# [ ] Executor rendering verification
+# ============================================================
