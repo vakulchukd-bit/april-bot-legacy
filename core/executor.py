@@ -964,6 +964,27 @@ async def execute_rooms(
                 run=run_with_activity,
             )
 
+            print("=" * 80)
+            print("ROOM:", getattr(room, "name", "unknown"))
+            print("RESULT TYPE:", type(result))
+
+            if isinstance(result, dict):
+                print("RESULT KEYS:", list(result.keys()))
+
+                mr = result.get("machine_response")
+                print("MACHINE_RESPONSE TYPE:", type(mr))
+
+                if isinstance(mr, dict):
+                    print("MR KEYS:", list(mr.keys()))
+                    print("MR ANSWER:", mr.get("answer"))
+                    print("MR CONTENT:", mr.get("content"))
+                    print("MR SUMMARY:", mr.get("summary"))
+                elif isinstance(mr, MachineResponse):
+                    print("MR OBJECT ANSWER:", getattr(mr, "answer", ""))
+                    print("MR OBJECT CONTENT:", getattr(mr, "content", ""))
+
+            print("=" * 80)
+
             extracted = _extract_machine_response(result)
             if extracted is not None:
                 room_results.append({
