@@ -1,4 +1,4 @@
-# TEST-6 PATCH NOT APPLIED AUTOMATICALLY
+# TEST-10 PATCH NOT APPLIED AUTOMATICALLY
 
 # =============================================================================
 #                               APRIL EXECUTOR CPU
@@ -989,15 +989,6 @@ async def execute_rooms(
 
             extracted = _extract_machine_response(result)
 
-            print("="*80)
-            print("EXTRACTED_ID:", id(extracted) if extracted else None)
-            if extracted:
-                print("EXTRACTED_DICT:", getattr(extracted, "__dict__", {}))
-                print("EXTRACTED_ANSWER:", getattr(extracted, "answer", ""))
-                print("EXTRACTED_CONTENT:", getattr(extracted, "content", ""))
-                print("EXTRACTED_SUMMARY:", getattr(extracted, "summary", ""))
-            print("="*80)
-
             # TEST-3: Canonical Fiber adoption.
             # Preserve the provider transport as the CPU source of truth.
             if extracted is None and isinstance(result, dict):
@@ -1594,6 +1585,21 @@ def executor_cpu_lineage_report():
 
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
+
+    print("=== TRANSPORT_DIAG ===")
+    print("DIAG_TYPE:", type(machine_response))
+    print("DIAG_IS_DICT:", isinstance(machine_response, dict))
+    if isinstance(machine_response, dict):
+        print("DIAG_KEYS:", list(machine_response.keys()))
+        print("DIAG_DICT_ANSWER:", machine_response.get("answer"))
+        print("DIAG_DICT_CONTENT:", machine_response.get("content"))
+    else:
+        print("DIAG_ATTR_ANSWER:", getattr(machine_response, "answer", None))
+        print("DIAG_ATTR_CONTENT:", getattr(machine_response, "content", None))
+        try:
+            print("DIAG_OBJECT_DICT:", vars(machine_response))
+        except Exception:
+            pass
     """Lightweight transport diagnostics."""
     try:
         print({
