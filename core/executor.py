@@ -986,6 +986,19 @@ async def execute_rooms(
             print("=" * 80)
 
             extracted = _extract_machine_response(result)
+
+            # TEST-3: Canonical Fiber adoption.
+            # Preserve the provider transport as the CPU source of truth.
+            if extracted is None and isinstance(result, dict):
+                mr = result.get("machine_response")
+                if isinstance(mr, dict):
+                    extracted = MachineResponse()
+                    for k, v in mr.items():
+                        try:
+                            setattr(extracted, k, v)
+                        except Exception:
+                            pass
+
             if extracted is not None:
                 room_results.append({
                     "room": getattr(room, "name", "unknown"),
@@ -1021,6 +1034,8 @@ async def execute_rooms(
     conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
 
+    # TEST-3: Canonical normalization before reflection.
+    machine_response = executor_cpu_normalize_answer(machine_response)
     executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
     machine_response = executor_cpu_reflect(
         semantic=semantic,
