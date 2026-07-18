@@ -441,7 +441,33 @@ def parse_provider_machine_contract(raw_text):
             except Exception:
                 pass
 
-        raise ValueError("Invalid MachineResponse JSON from provider") from e
+        # SECOND PASS CONTINUATION:
+        # do not terminate the Provider route here.
+        provider_log("SECOND PASS: building canonical contract from raw provider text")
+
+        return {
+            "answer": raw_text,
+            "content": raw_text,
+            "response": raw_text,
+            "summary": raw_text[:500],
+            "explanation": raw_text[:500],
+            "scene": {},
+            "artifacts": [],
+            "render_blocks": [
+                {
+                    "type":"text",
+                    "content":raw_text,
+                    "scene_contract":True
+                }
+            ],
+            "scene_plan":["text"],
+            "render_priority":["text"],
+            "confidence":0.5,
+            "metadata":{
+                "provider_second_pass":True,
+                "parse_failed":True
+            }
+        }
 
 
 
