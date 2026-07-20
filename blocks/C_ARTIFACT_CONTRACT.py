@@ -416,6 +416,11 @@ def build_universal_contract(
 
     if artifact is not None:
         contract.payload.artifacts.append(artifact.data)
+        contract.machine_response = MachineResponse(
+            answer=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text',''),
+            content=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text',''),
+            summary=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text','')
+        )
         contract.fiber.metrics.block_count = 1
         contract.fiber.metrics.payload_size = len(str(artifact.data))
         contract.fiber.trace.room = artifact.metadata.room_source
