@@ -382,7 +382,10 @@ def build_provider_machine_response(text, parsed_contract=None):
     """Build a unified MachineResponse transport contract."""
     parsed_contract = parsed_contract or {}
 
-    answer = parsed_contract.get("answer") or text
+    answer = parsed_contract.get("answer", "")
+    if (not answer) and isinstance(text, str) and not text.lstrip().startswith("{"):
+        answer = text
+
     content = parsed_contract.get("content") or answer
     response = parsed_contract.get("response") or answer
     summary = parsed_contract.get("summary", "")
@@ -425,14 +428,6 @@ def parse_provider_machine_contract(raw_text):
         start=max(0,e.pos-120)
         end=min(len(raw_text),e.pos+120)
         provider_log(raw_text[start:end])
-
-        # ============================
-        # TEST 1 DIAGNOSTICS
-        # Preserve transport behavior, add full raw payload logging.
-        # ============================
-        provider_log("RAW PROVIDER TEXT START")
-        provider_log(repr(raw_text))
-        provider_log("RAW PROVIDER TEXT END")
 
         repaired=(raw_text or "").strip()
 
