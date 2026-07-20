@@ -385,7 +385,6 @@ def build_provider_machine_response(text, parsed_contract=None):
     answer = parsed_contract.get("answer", "")
     if (not answer) and isinstance(text, str) and not text.lstrip().startswith("{"):
         answer = text
-
     content = parsed_contract.get("content") or answer
     response = parsed_contract.get("response") or answer
     summary = parsed_contract.get("summary", "")
@@ -452,11 +451,11 @@ def parse_provider_machine_contract(raw_text):
         # STAGE3: legacy raw-text fallback retained only for compatibility.
         # Future semantic extractor should construct the MachineResponse here.
         return {
-            "answer": raw_text,
-            "content": raw_text,
-            "response": raw_text,
-            "summary": raw_text[:500],
-            "explanation": raw_text[:500],
+            "answer": "",
+            "content": "",
+            "response": "",
+            "summary": "",
+            "explanation": "",
             "scene": {},
             "artifacts": [],
             "render_blocks": [
@@ -471,7 +470,8 @@ def parse_provider_machine_contract(raw_text):
             "confidence":0.5,
             "metadata":{
                 "provider_second_pass":True,
-                "parse_failed":True
+                "parse_failed":True,
+                "raw_provider_text": raw_text
             }
         }
 
