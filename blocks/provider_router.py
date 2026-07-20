@@ -426,6 +426,14 @@ def parse_provider_machine_contract(raw_text):
         end=min(len(raw_text),e.pos+120)
         provider_log(raw_text[start:end])
 
+        # ============================
+        # TEST 1 DIAGNOSTICS
+        # Preserve transport behavior, add full raw payload logging.
+        # ============================
+        provider_log("RAW PROVIDER TEXT START")
+        provider_log(repr(raw_text))
+        provider_log("RAW PROVIDER TEXT END")
+
         repaired=(raw_text or "").strip()
 
         first=repaired.find("{")
