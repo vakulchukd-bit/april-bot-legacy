@@ -424,6 +424,19 @@ def parse_provider_machine_contract(raw_text):
             return data
     except json.JSONDecodeError as e:
         provider_log(f"JSON PARSE ERROR line={e.lineno} col={e.colno} pos={e.pos}")
+        provider_log("========== JSON ERROR ==========")
+        provider_log("ERROR_LINE:", e.lineno)
+        provider_log("ERROR_COLUMN:", e.colno)
+        provider_log("ERROR_POS:", e.pos)
+        start=max(0,e.pos-120)
+        end=min(len(raw_text),e.pos+120)
+        provider_log("ERROR_CONTEXT:")
+        provider_log(repr(raw_text[start:end]))
+        provider_log("ERROR_CHAR:")
+        provider_log(repr(raw_text[e.pos:e.pos+20]))
+        provider_log("TAIL_AFTER_ERROR:")
+        provider_log(repr(raw_text[e.pos:]))
+        provider_log("===============================")
         start=max(0,e.pos-120)
         end=min(len(raw_text),e.pos+120)
         provider_log(raw_text[start:end])
@@ -1085,6 +1098,16 @@ async def generate_text(
             if response.output_text
             else ""
         )
+
+        provider_log("========== JSON DIAGNOSTIC ==========")
+        provider_log("RAW_LENGTH:", len(text))
+        provider_log("RAW_HEAD:", repr(text[:200]))
+        provider_log("RAW_TAIL:", repr(text[-300:]))
+        if text:
+            provider_log("LAST_CHAR:", ord(text[-1]))
+            provider_log("LAST_CHAR_REPR:", repr(text[-1]))
+        provider_log("LAST_20_CHARS:", repr(text[-20:]))
+        provider_log("=====================================")
 
         if not text:
 
