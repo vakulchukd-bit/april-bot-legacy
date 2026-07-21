@@ -452,8 +452,15 @@ def parse_provider_machine_contract(raw_text):
         # Future semantic extractor should construct the MachineResponse here.
         import re
         def _grab(name):
-            m=re.search(r'"%s"\s*:\s*"((?:\\.|[^"])*)"'%name, raw_text, re.S)
-            return m.group(1).encode("utf-8").decode("unicode_escape") if m else ""
+            m = re.search(r'"%s"\s*:\s*"((?:\\.|[^"])*)"' % name, raw_text, re.S)
+            if not m:
+                return ""
+            value = m.group(1)
+            try:
+                value = json.loads(f'"{value}"')
+            except Exception:
+                pass
+            return value""
         recovered_answer=_grab("answer")
         recovered_summary=_grab("summary")
         recovered_explanation=_grab("explanation")
