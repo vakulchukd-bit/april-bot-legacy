@@ -428,6 +428,18 @@ def parse_provider_machine_contract(raw_text):
         end=min(len(raw_text),e.pos+120)
         provider_log(raw_text[start:end])
 
+        # TEST_2 diagnostics
+        provider_log("JSON ERROR CONTEXT START")
+        provider_log(repr(raw_text[max(0, e.pos-200):min(len(raw_text), e.pos+200)]))
+        provider_log("JSON ERROR CONTEXT END")
+        provider_log({
+            "json_error_line": e.lineno,
+            "json_error_col": e.colno,
+            "json_error_pos": e.pos,
+            "raw_length": len(raw_text)
+        })
+
+
         repaired=(raw_text or "").strip()
 
         first=repaired.find("{")
