@@ -1118,6 +1118,18 @@ async def generate_text(
         provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
         contract = create_provider_contract(raw_text)
 
+        # TEST_3 transport tracing
+        if isinstance(contract, dict):
+            mr = contract.get("machine_response", {})
+            provider_log("TEST3 TRACE AFTER_CREATE", {
+                "answer_preview": repr((mr.get("answer") or "")[:120]),
+                "content_preview": repr((mr.get("content") or "")[:120]),
+                "summary_preview": repr((mr.get("summary") or "")[:120]),
+                "answer_id": id(mr.get("answer")),
+                "content_id": id(mr.get("content")),
+                "summary_id": id(mr.get("summary")),
+            })
+
         if isinstance(contract, dict):
             mr = contract.get("machine_response")
             if isinstance(mr, dict):
@@ -1132,6 +1144,17 @@ async def generate_text(
         # =====================================================
         provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
         contract = finalize_executor_contract(contract)
+
+        if isinstance(contract, dict):
+            mr = contract.get("machine_response", {})
+            provider_log("TEST3 TRACE AFTER_FINALIZE", {
+                "answer_preview": repr((mr.get("answer") or "")[:120]),
+                "content_preview": repr((mr.get("content") or "")[:120]),
+                "summary_preview": repr((mr.get("summary") or "")[:120]),
+                "answer_id": id(mr.get("answer")),
+                "content_id": id(mr.get("content")),
+                "summary_id": id(mr.get("summary")),
+            })
         mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
         provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
 
