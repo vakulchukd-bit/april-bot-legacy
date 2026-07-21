@@ -698,19 +698,33 @@ def build_openai_request(machine_request):
     provider_log("========== MACHINE REQUEST ==========")
     provider_log(json.dumps(payload, ensure_ascii=False)[:8000])
 
-    structured_prompt = (
-        "APRIL MACHINE REQUEST\n\n"
-        "Transform the following MachineRequest into exactly one MachineResponse.\n"
-        "Follow the APRIL protocol exactly.\n\n"
-        f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
-        f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
-        f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
-        f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
-        f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
-        "Output format: MachineResponse only. No markdown. No explanations."
+        simple_request = (
+        (machine_request.get("intent") or {}).get("response_mode") == "talk"
+        and not (machine_request.get("intent") or {}).get("render_intent")
     )
 
-    return {
+    if simple_request:
+        structured_prompt = (
+            "APRIL MACHINE REQUEST\n\n"
+            "Return ONE valid JSON object only. "
+            "For simple conversation include ONLY these fields:\n"
+            "answer, summary, explanation, content. "
+            "Do NOT generate scene, render_blocks, artifacts or scene_plan."
+        )
+    else:
+        structured_prompt = (
+            "APRIL MACHINE REQUEST\n\n"
+            "Transform the following MachineRequest into exactly one MachineResponse.\n"
+            "Follow the APRIL protocol exactly.\n\n"
+            f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
+            f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
+            f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
+            f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
+            f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
+            "Output format: MachineResponse only. No markdown. No explanations."
+        )
+
+return {
         "role": "user",
         "content": [{
             "type": "input_text",
@@ -1017,7 +1031,7 @@ async def generate_text(
 
     messages,
     temperature=0.7,
-    max_output_tokens=4096,
+    max_output_tokens=8000,
     model="gpt-4o-mini"
 ):
 
