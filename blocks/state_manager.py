@@ -341,6 +341,10 @@ def build_default_state():
             "last_intent": None
         },
 
+        "current_object": None,
+        "current_topic": None,
+        "active_entity": None,
+
         # =================================================
         # 🔥 MACHINE FLAGS
         # =====================================================
@@ -1826,3 +1830,21 @@ def build_visual_memory_bridge(
             )
     }
 
+
+
+# =====================================================
+# 🧠 DIALOG CONTEXT MEMORY
+# =====================================================
+
+def update_dialog_context(user_id, semantic_result):
+    if not isinstance(semantic_result, dict):
+        return
+    state_obj = get_state(user_id)
+    obj = semantic_result.get("current_object")
+    topic = semantic_result.get("current_topic")
+    if obj:
+        state_obj["current_object"] = obj
+        state_obj["active_entity"] = obj
+    if topic:
+        state_obj["current_topic"] = topic
+    persist_state(user_id)
