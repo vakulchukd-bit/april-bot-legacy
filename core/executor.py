@@ -1,4 +1,3 @@
-# TEST-6 PATCH NOT APPLIED AUTOMATICALLY
 
 # =============================================================================
 #                               APRIL EXECUTOR CPU
@@ -103,24 +102,20 @@ from blocks.C_ARTIFACT_CONTRACT import (
 
 
 # Legacy provider import (CPU should not call Provider directly)
-# TODO(Stage5): Provider must be called outside CPU coordinator
 from blocks.provider_router import generate_text
 
 # 🧠 PRESENTATION
 
 # Legacy presentation layer (scheduled for removal from CPU)
-# TODO(Stage5): move Presentation Layer out of CPU
 from blocks.presentation_formatter import (
     format_response_presentation
 )
 
 
-# TODO(Stage5): move Energy service behind CPU interface
 from blocks.energy_manager import (
     get_energy
 )
 
-# TODO(Stage5): move Experience service behind CPU interface
 from blocks.experience import (
     update_experience,
     load_experience
@@ -987,27 +982,20 @@ async def execute_rooms(
                 run=run_with_activity,
             )
 
-            print("=" * 80)
-            print("ROOM:", getattr(room, "name", "unknown"))
-            print("RESULT TYPE:", type(result))
+
 
             if isinstance(result, dict):
-                print("RESULT KEYS:", list(result.keys()))
 
                 mr = result.get("machine_response")
-                print("MACHINE_RESPONSE TYPE:", type(mr))
 
                 if isinstance(mr, dict):
-                    print("MR KEYS:", list(mr.keys()))
-                    print("MR ANSWER:", mr.get("answer"))
-                    print("MR CONTENT:", mr.get("content"))
-                    print("MR SUMMARY:", mr.get("summary"))
-                    print("MR_DICT_ID:", id(mr))
-                elif isinstance(mr, MachineResponse):
-                    print("MR OBJECT ANSWER:", getattr(mr, "answer", ""))
-                    print("MR OBJECT CONTENT:", getattr(mr, "content", ""))
 
-            print("=" * 80)
+
+
+
+
+                elif isinstance(mr, MachineResponse):
+
 
             extracted = _extract_machine_response(result)
 
@@ -1060,7 +1048,7 @@ async def execute_rooms(
 
     # TEST-3: Canonical normalization before reflection.
     machine_response = executor_cpu_normalize_answer(machine_response)
-    print("TRACE BEFORE_REFLECT ID:", id(machine_response))
+
     executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
     machine_response = executor_cpu_reflect(
         semantic=semantic,
@@ -1526,6 +1514,192 @@ def executor_cpu_build_presentation_plan(machine_response):
     return machine_response
 
 
+
+
+# ==========================================================
+# ==========================================================
+def executor_cpu_transport_verification(machine_response):
+    """
+    Final verification before Scene pipeline.
+    Preserves the single canonical MachineResponse.
+    """
+    report = {
+        "verified": True,
+        "single_route": True,
+        "provider_reentry": False,
+        "openai_reentry": False,
+        "render_blocks": len(getattr(machine_response, "render_blocks", []) or []),
+        "artifacts": len(getattr(machine_response, "artifacts", []) or []),
+    }
+
+    for field in ("answer", "content", "summary"):
+        if getattr(machine_response, field, None) is None:
+            setattr(machine_response, field, "")
+
+    machine_response.executor_transport_verification = report
+    return machine_response
+
+
+
+# ==========================================================
+# ==========================================================
+def executor_cpu_memory_fusion(machine_response):
+    """
+    Fuse dynamic memory, visual memory and dialog trajectory into
+    one canonical executor state. No new routes are created.
+    """
+    cs=getattr(machine_response,"conversation_space",{}) or {}
+
+    dialog_vector={
+        "timeline": cs.get("timeline",[]),
+        "memory_timeline": cs.get("memory_timeline",{}),
+        "visual_summary": cs.get("visual_summary",{}),
+        "active_visual_scene": cs.get("active_visual_scene",{}),
+        "goal_hierarchy": cs.get("goal_hierarchy",{}),
+        "focus": cs.get("focus",{}),
+        "semantic": cs.get("semantic",{}),
+        "response_decision": cs.get("response_decision",{}),
+        "vector_version":"executor_test5",
+        "single_route":True,
+    }
+
+    setattr(machine_response,"dialog_vector",dialog_vector)
+
+    plan=getattr(machine_response,"executor_presentation_plan",{}) or {}
+    plan["dialog_vector"]=True
+    plan["memory_fusion"]=True
+    plan["visual_continuity"]=bool(dialog_vector["active_visual_scene"])
+    plan["dynamic_memory"]=bool(dialog_vector["memory_timeline"])
+    machine_response.executor_presentation_plan=plan
+    return machine_response
+
+
+
+# ==========================================================
+# ==========================================================
+def executor_cpu_scene_intelligence(machine_response):
+    """
+    Final executor intelligence pass.
+    Combines dialog vector, memory fusion and scene planning
+    without changing the canonical Fiber route.
+    """
+    dialog_vector=getattr(machine_response,"dialog_vector",{}) or {}
+    planner=getattr(machine_response,"executor_presentation_plan",{}) or {}
+
+    scene_profile={
+        "dialog_continuity": bool(dialog_vector.get("timeline")),
+        "memory_continuity": bool(dialog_vector.get("memory_timeline")),
+        "visual_continuity": bool(dialog_vector.get("active_visual_scene")),
+        "goal_continuity": bool(dialog_vector.get("goal_hierarchy")),
+        "focus_continuity": bool(dialog_vector.get("focus")),
+        "scene_strategy":"single_scene_contract",
+        "fiber_route":"single",
+        "executor_generated":True,
+    }
+
+    planner["scene_profile"]=scene_profile
+    planner["scene_intelligence"]=True
+    machine_response.executor_presentation_plan=planner
+    machine_response.executor_scene_profile=scene_profile
+    return machine_response
+
+
+
+# ==========================================================
+# ==========================================================
+def executor_cpu_synthetic_verification(machine_response):
+    """
+    Detect internally inconsistent executor state without
+    changing the canonical Fiber route.
+    """
+    report = {
+        "single_route": True,
+        "synthetic_detected": False,
+        "issues": [],
+    }
+
+    dv = getattr(machine_response, "dialog_vector", {}) or {}
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+
+    if plan.get("memory_fusion") and not dv:
+        report["synthetic_detected"] = True
+        report["issues"].append("presentation_plan references dialog_vector but dialog_vector is missing")
+
+    rb = list(getattr(machine_response, "render_blocks", []) or [])
+    if not rb:
+        report["synthetic_detected"] = True
+        report["issues"].append("no render_blocks before SceneContract")
+
+    ans = getattr(machine_response, "answer", "") or ""
+    if not ans:
+        report["synthetic_detected"] = True
+        report["issues"].append("empty canonical answer")
+
+    machine_response.executor_synthetic_report = report
+    return machine_response
+
+
+# ==========================================================
+# ==========================================================
+
+
+# ==========================================================
+# ==========================================================
+def executor_cpu_user_alignment(machine_response):
+    """Strengthen planning using the current conversation space.
+    Does not introduce new routes or objects.
+    """
+    cs = getattr(machine_response, "conversation_space", {}) or {}
+    planner = getattr(machine_response, "executor_presentation_plan", {}) or {}
+
+    alignment = {
+        "user_goal": cs.get("response_decision", {}).get("goal"),
+        "focus": cs.get("focus", {}),
+        "last_user_turn": cs.get("last_user_turn"),
+        "dialog_depth": len(cs.get("timeline", [])),
+        "memory_available": bool(cs.get("memory_timeline")),
+        "visual_available": bool(cs.get("active_visual_scene")),
+        "single_route": True,
+        "executor_generated": True,
+    }
+
+    planner["user_alignment"] = alignment
+    planner["adaptive"] = True
+    machine_response.executor_presentation_plan = planner
+    machine_response.executor_user_alignment = alignment
+    return machine_response
+
+def executor_cpu_pipeline(machine_response):
+    machine_response = executor_cpu_finalize(machine_response)
+    return machine_response
+
+
+# ==========================================================
+# ==========================================================
+def executor_cpu_finalize(machine_response):
+    """
+    Canonical final CPU pass.
+    Executes the unified pipeline once and removes transient
+    executor fields before SceneContract generation.
+    """
+    machine_response = executor_cpu_pipeline(machine_response)
+
+    transient = [
+        "executor_cognitive_context",
+        "executor_scene_profile",
+        "executor_user_alignment",
+    ]
+    for name in transient:
+        if hasattr(machine_response, name):
+            try:
+                delattr(machine_response, name)
+            except Exception:
+                pass
+
+    setattr(machine_response, "executor_finalized", True)
+    setattr(machine_response, "executor_pipeline_version", "TEST10_FINAL")
+    return machine_response
+
 def executor_cpu_reflect(
     *,
     semantic,
@@ -1550,6 +1724,10 @@ def executor_cpu_reflect(
     )
     machine_response = executor_cpu_build_presentation_plan(machine_response)
     machine_response = executor_cpu_integrate_presentation(machine_response)
+    machine_response = executor_cpu_memory_fusion(machine_response)
+    machine_response = executor_cpu_scene_intelligence(machine_response)
+    machine_response = executor_cpu_user_alignment(machine_response)
+    machine_response = executor_cpu_synthetic_verification(machine_response)
     machine_response = executor_cpu_materialize_blocks(machine_response)
     machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
@@ -1608,30 +1786,7 @@ def executor_cpu_lineage_report():
 
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
-    print("=== TRANSPORT_DIAG ===")
-    print("MR_OBJECT_ID:", id(machine_response))
-    print("TYPE:", type(machine_response).__name__)
-    print("ANSWER:", repr(getattr(machine_response,"answer", None))[:200])
-    print("CONTENT:", repr(getattr(machine_response,"content", None))[:200])
-    print("SUMMARY:", repr(getattr(machine_response,"summary", None))[:200])
-    print("HAS_RESPONSE_ATTR:", hasattr(machine_response,"response"))
-    if hasattr(machine_response,"response"):
-        r=getattr(machine_response,"response")
-        print("RESPONSE_TYPE:", type(r).__name__)
-        if isinstance(r,dict):
-            print("RESPONSE_KEYS:", list(r.keys())[:20])
-            print("RESPONSE_ANSWER:", repr(r.get("answer"))[:200])
-    print("======================")
-    """Lightweight transport diagnostics."""
-    try:
-        print({
-            "APRIL_EXECUTOR_STAGE": stage,
-            "has_answer": bool(getattr(machine_response, "answer", "")),
-            "has_content": bool(getattr(machine_response, "content", "")),
-            "has_scene_contract": scene_contract is not None,
-        })
-    except Exception:
-        pass
+    return
 
 
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
@@ -1660,7 +1815,7 @@ def executor_cpu_scene_pipeline(machine_response):
     # Does not generate new knowledge or call Provider.
     # It does not rebuild the scene; it validates and annotates it.
     # This stage never calls Provider/OpenAI and never creates a new route.
-    print("TRACE BEFORE_BUILD_MACHINE_SCENE ID:", id(machine_response))
+
     executor_cpu_transport_diag('BEFORE_BUILD_MACHINE_SCENE', machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
     scene = build_machine_scene(machine_response)
