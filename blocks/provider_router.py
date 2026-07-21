@@ -475,7 +475,7 @@ def parse_provider_machine_contract(raw_text):
             "render_blocks": [
                 {
                     "type":"text",
-                    "content":raw_text,
+                    "content": recovered_answer or recovered_summary or "",
                     "scene_contract":True
                 }
             ],
@@ -1017,7 +1017,7 @@ async def generate_text(
 
     messages,
     temperature=0.7,
-    max_output_tokens=1800,
+    max_output_tokens=4096,
     model="gpt-4o-mini"
 ):
 
@@ -1093,6 +1093,10 @@ async def generate_text(
         provider_log(response.output_text[:8000] if response.output_text else "EMPTY")
 
         raw_text = response.output_text or ""
+        provider_log(f"OPENAI OUTPUT LENGTH: {len(raw_text)}")
+        if hasattr(response,"incomplete_details"):
+            provider_log(f"OPENAI INCOMPLETE: {response.incomplete_details}")
+
         provider_log("TRACE STAGE: raw_provider_output", raw_text[:300])
 
         if not raw_text:
