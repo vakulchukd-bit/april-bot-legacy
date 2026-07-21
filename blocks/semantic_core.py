@@ -1377,4 +1377,4 @@ def analyze(
     )
 
 
-        return result
+    return result
