@@ -460,7 +460,7 @@ def parse_provider_machine_contract(raw_text):
                 value = json.loads(f'"{value}"')
             except Exception:
                 pass
-            return value""
+            return value
         recovered_answer=_grab("answer")
         recovered_summary=_grab("summary")
         recovered_explanation=_grab("explanation")
