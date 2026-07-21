@@ -428,18 +428,6 @@ def parse_provider_machine_contract(raw_text):
         end=min(len(raw_text),e.pos+120)
         provider_log(raw_text[start:end])
 
-        # TEST_2 diagnostics
-        provider_log("JSON ERROR CONTEXT START")
-        provider_log(repr(raw_text[max(0, e.pos-200):min(len(raw_text), e.pos+200)]))
-        provider_log("JSON ERROR CONTEXT END")
-        provider_log({
-            "json_error_line": e.lineno,
-            "json_error_col": e.colno,
-            "json_error_pos": e.pos,
-            "raw_length": len(raw_text)
-        })
-
-
         repaired=(raw_text or "").strip()
 
         first=repaired.find("{")
@@ -462,12 +450,19 @@ def parse_provider_machine_contract(raw_text):
 
         # STAGE3: legacy raw-text fallback retained only for compatibility.
         # Future semantic extractor should construct the MachineResponse here.
+        import re
+        def _grab(name):
+            m=re.search(r'"%s"\s*:\s*"((?:\\.|[^"])*)"'%name, raw_text, re.S)
+            return m.group(1).encode("utf-8").decode("unicode_escape") if m else ""
+        recovered_answer=_grab("answer")
+        recovered_summary=_grab("summary")
+        recovered_explanation=_grab("explanation")
         return {
-            "answer": "",
-            "content": "",
-            "response": "",
-            "summary": "",
-            "explanation": "",
+            "answer": recovered_answer,
+            "content": recovered_answer,
+            "response": recovered_answer,
+            "summary": recovered_summary,
+            "explanation": recovered_explanation,
             "scene": {},
             "artifacts": [],
             "render_blocks": [
@@ -1015,7 +1010,7 @@ async def generate_text(
 
     messages,
     temperature=0.7,
-    max_output_tokens=700,
+    max_output_tokens=1800,
     model="gpt-4o-mini"
 ):
 
@@ -1118,18 +1113,6 @@ async def generate_text(
         provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
         contract = create_provider_contract(raw_text)
 
-        # TEST_3 transport tracing
-        if isinstance(contract, dict):
-            mr = contract.get("machine_response", {})
-            provider_log("TEST3 TRACE AFTER_CREATE", {
-                "answer_preview": repr((mr.get("answer") or "")[:120]),
-                "content_preview": repr((mr.get("content") or "")[:120]),
-                "summary_preview": repr((mr.get("summary") or "")[:120]),
-                "answer_id": id(mr.get("answer")),
-                "content_id": id(mr.get("content")),
-                "summary_id": id(mr.get("summary")),
-            })
-
         if isinstance(contract, dict):
             mr = contract.get("machine_response")
             if isinstance(mr, dict):
@@ -1144,17 +1127,6 @@ async def generate_text(
         # =====================================================
         provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
         contract = finalize_executor_contract(contract)
-
-        if isinstance(contract, dict):
-            mr = contract.get("machine_response", {})
-            provider_log("TEST3 TRACE AFTER_FINALIZE", {
-                "answer_preview": repr((mr.get("answer") or "")[:120]),
-                "content_preview": repr((mr.get("content") or "")[:120]),
-                "summary_preview": repr((mr.get("summary") or "")[:120]),
-                "answer_id": id(mr.get("answer")),
-                "content_id": id(mr.get("content")),
-                "summary_id": id(mr.get("summary")),
-            })
         mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
         provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
 
