@@ -1078,15 +1078,10 @@ async def generate_text(
         provider_log("========== RAW OPENAI OUTPUT ==========")
         provider_log(response.output_text[:8000] if response.output_text else "EMPTY")
 
-        provider_log("TRACE STAGE: normalize_response_text input", (response.output_text or "")[:300])
-        text = normalize_response_text(
+        raw_text = response.output_text or ""
+        provider_log("TRACE STAGE: raw_provider_output", raw_text[:300])
 
-            response.output_text
-            if response.output_text
-            else ""
-        )
-
-        if not text:
+        if not raw_text:
 
             provider_log(
                 "🔥 OPENAI EMPTY RESPONSE"
@@ -1108,8 +1103,15 @@ async def generate_text(
             True
         )
 
-        provider_log({"trace_stage":"before_create_provider_contract","text_len":len(text),"preview":text[:300]})
-        contract = create_provider_contract(text)
+        provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
+        contract = create_provider_contract(raw_text)
+
+        if isinstance(contract, dict):
+            mr = contract.get("machine_response")
+            if isinstance(mr, dict):
+                for field in ("answer","content","summary","explanation","response"):
+                    if isinstance(mr.get(field), str):
+                        mr[field] = normalize_response_text(mr[field])
         provider_log({"trace_stage":"after_create_provider_contract","keys":list(contract.keys()) if isinstance(contract,dict) else str(type(contract))})
 
         # =====================================================
