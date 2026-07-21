@@ -958,6 +958,31 @@ def analyze(
     # 🔥 ACTIVE FLOW
     # =====================================================
 
+    # =====================================================
+    # 🧠 DIALOG ENTITY CONTINUITY
+    # =====================================================
+    last_user = history[-1].get("user", {}) if history else {}
+    last_april = history[-1].get("april", {}) if history else {}
+
+    active_entity = (
+        state.get("current_object")
+        or state.get("current_topic")
+        or state.get("active_entity")
+        or dialog_state.get("current_object")
+        or active_flow.get("current_object")
+    )
+
+    pronouns = ("его","её","их","об этом","об этом?","этом","ней","нём")
+
+    if active_entity:
+        result["current_object"] = active_entity
+        result["current_topic"] = active_entity
+
+    if any(p in t for p in pronouns) and active_entity:
+        result["continuation"] = True
+        result["continuation_target"] = active_entity
+        result["trajectory_active"] = True
+
     flow_type = active_flow.get(
         "type"
     )
@@ -1351,4 +1376,5 @@ def analyze(
         f"REPRESENTATIONS: {result.get('required_representations', [])}"
     )
 
-    return result
+
+        return result
