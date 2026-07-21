@@ -705,44 +705,22 @@ def build_openai_request(machine_request):
 
     if simple_request:
         structured_prompt = (
-            "APRIL MACHINE REQUEST
-"
+            "APRIL MACHINE REQUEST\n"
             "Return ONLY valid JSON with fields: "
             "answer, summary, explanation, content."
         )
     else:
         structured_prompt = (
-            "APRIL MACHINE REQUEST
-
-"
-            "Transform the following MachineRequest into exactly one MachineResponse.
-"
-            "Follow the APRIL protocol exactly.
-
-"
-            f"GOAL:
-{json.dumps(payload.get('goal'), ensure_ascii=False)}
-
-"
-            f"SEMANTIC:
-{json.dumps(payload.get('intent'), ensure_ascii=False)}
-
-"
-            f"MEMORY:
-{json.dumps(payload.get('memory'), ensure_ascii=False)}
-
-"
-            f"VISUAL_CONTEXT:
-{json.dumps(payload.get('visual_context'), ensure_ascii=False)}
-
-"
-            f"ROUTING:
-{json.dumps(payload.get('routing'), ensure_ascii=False)}
-
-"
+            "APRIL MACHINE REQUEST\n\n"
+            "Transform the following MachineRequest into exactly one MachineResponse.\n"
+            "Follow the APRIL protocol exactly.\n\n"
+            f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
+            f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
+            f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
+            f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
+            f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
             "Output format: MachineResponse only. No markdown. No explanations."
         )
-
     return {
         "role": "user",
         "content": [{
