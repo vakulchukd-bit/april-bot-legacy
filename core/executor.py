@@ -989,13 +989,9 @@ async def execute_rooms(
                 mr = result.get("machine_response")
 
                 if isinstance(mr, dict):
-
-
-
-
-
+                    pass
                 elif isinstance(mr, MachineResponse):
-
+                    pass
 
             extracted = _extract_machine_response(result)
 
@@ -1670,7 +1666,16 @@ def executor_cpu_user_alignment(machine_response):
     return machine_response
 
 def executor_cpu_pipeline(machine_response):
-    machine_response = executor_cpu_finalize(machine_response)
+    machine_response = executor_cpu_build_presentation_plan(machine_response)
+    machine_response = executor_cpu_integrate_presentation(machine_response)
+    machine_response = executor_cpu_transport_verification(machine_response)
+    machine_response = executor_cpu_memory_fusion(machine_response)
+    machine_response = executor_cpu_scene_intelligence(machine_response)
+    machine_response = executor_cpu_user_alignment(machine_response)
+    machine_response = executor_cpu_synthetic_verification(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
     return machine_response
 
 
