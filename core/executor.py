@@ -74,7 +74,8 @@ from blocks.state_manager import (
 
     get_active_flow,
 
-    build_visual_memory_bridge
+    build_visual_memory_bridge,
+    update_dialog_context
 )
 
 from blocks.mode_manager import (
@@ -1992,7 +1993,14 @@ async def execute(
     # CPU loads persistent state through the state service only.
     cpu_trace_begin("EXECUTE", {"user_id": user_id})
     state = get_state(user_id)
-    semantic = semantic_analyze(text)
+    semantic = semantic_analyze(
+        text=text,
+        state=state,
+        history=state.get("dialog", []),
+        active_flow=state.get("active_flow", {}),
+        dialog_state=state.get("scene_state", {}),
+    )
+    update_dialog_context(user_id, semantic)
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
     cognition = analyze_cognition(
         text=text,
@@ -2043,20 +2051,32 @@ async def execute(
         executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
 
     # STAGE 1 - COMPACT PROVIDER REQUEST
-    compact_memory = {
+    machine_memory = {
         "memory_summary": state.get("memory_summary"),
         "active_flow": state.get("active_flow"),
+        "memory_timeline": conversation_space.get("memory_timeline", {}),
+        "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
+        "focus": conversation_space.get("focus", {}),
+        "visual_summary": conversation_space.get("visual_summary", {}),
     }
-    compact_conversation = {
+
+    machine_conversation = {
+        "timeline": conversation_space.get("timeline", []),
         "last_user_turn": current_turn.get("user", {}).get("text", text),
         "last_april_turn": conversation_space.get("last_april_turn"),
+        "active_visual_scene": conversation_space.get("active_visual_scene", {}),
     }
+
     context["machine_request"] = MachineRequest(
         goal=current_turn.get("user", {}).get("text", text),
         intent=semantic,
-        memory=compact_memory,
-        visual_context={"visual_reference": visual_reference},
-        conversation=compact_conversation,
+        memory=machine_memory,
+        visual_context={
+            "visual_reference": visual_reference,
+            "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+            "visual_summary": conversation_space.get("visual_summary", {}),
+        },
+        conversation=machine_conversation,
     )
     context["executor_state"] = state
     context["executor_conversation_space"] = conversation_space
