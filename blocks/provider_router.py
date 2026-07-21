@@ -699,32 +699,30 @@ def build_openai_request(machine_request):
     provider_log(json.dumps(payload, ensure_ascii=False)[:8000])
 
         simple_request = (
-        (machine_request.get("intent") or {}).get("response_mode") == "talk"
-        and not (machine_request.get("intent") or {}).get("render_intent")
+        (payload.get("intent") or {}).get("type") in (None, "text")
+        and not payload.get("routing")
     )
 
     if simple_request:
         structured_prompt = (
-            "APRIL MACHINE REQUEST\n\n"
-            "Return ONE valid JSON object only. "
-            "For simple conversation include ONLY these fields:\n"
-            "answer, summary, explanation, content. "
-            "Do NOT generate scene, render_blocks, artifacts or scene_plan."
+            "APRIL MACHINE REQUEST\n"
+            "Return ONLY valid JSON with fields: "
+            "answer, summary, explanation, content."
         )
     else:
-        structured_prompt = (
-            "APRIL MACHINE REQUEST\n\n"
-            "Transform the following MachineRequest into exactly one MachineResponse.\n"
-            "Follow the APRIL protocol exactly.\n\n"
-            f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
-            f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
-            f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
-            f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
-            f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
-            "Output format: MachineResponse only. No markdown. No explanations."
+structured_prompt = (
+                "APRIL MACHINE REQUEST\n\n"
+                "Transform the following MachineRequest into exactly one MachineResponse.\n"
+                "Follow the APRIL protocol exactly.\n\n"
+                f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
+                f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
+                f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
+                f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
+                f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
+                "Output format: MachineResponse only. No markdown. No explanations."
         )
 
-return {
+    return {
         "role": "user",
         "content": [{
             "type": "input_text",
