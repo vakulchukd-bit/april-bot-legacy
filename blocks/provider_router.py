@@ -655,6 +655,15 @@ confidence
 
 Do not invent extra top-level fields.
 Provider transport metadata is added by Python after parsing.
+
+Behavior rules:
+- Use requested_outputs as mandatory output targets whenever present.
+- Use required_artifacts to decide which render_blocks to generate.
+- Use required_competencies to determine the professional depth of the answer.
+- If the request asks for comparison, generate a comparison table artifact.
+- If the request asks for a process, flow or route, generate a diagram/flow artifact.
+- If multiple representations are requested, generate all of them in one MachineResponse.
+- Prefer detailed explanations unless constraints explicitly require brevity.
 """
 
 
@@ -708,8 +717,14 @@ def build_openai_request(machine_request):
         f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
         f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
         f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
+        f"CONVERSATION:\n{json.dumps(payload.get('conversation'), ensure_ascii=False)}\n\n"
         f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
+        f"AVAILABLE_TOOLS:\n{json.dumps(payload.get('available_tools'), ensure_ascii=False)}\n\n"
+        f"REQUESTED_OUTPUTS:\n{json.dumps(payload.get('requested_outputs'), ensure_ascii=False)}\n\n"
+        f"REQUIRED_COMPETENCIES:\n{json.dumps(payload.get('required_competencies'), ensure_ascii=False)}\n\n"
+        f"REQUIRED_ARTIFACTS:\n{json.dumps(payload.get('required_artifacts'), ensure_ascii=False)}\n\n"
         f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
+        f"CONSTRAINTS:\n{json.dumps(payload.get('constraints'), ensure_ascii=False)}\n\n"
         "Output format: MachineResponse only. No markdown. No explanations."
     )
     return {
