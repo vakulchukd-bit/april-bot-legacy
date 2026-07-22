@@ -685,14 +685,15 @@ def build_openai_request(machine_request):
             "type": intent.get("type"),
             "normalized_text": user_text,
         },
-        "memory": {
-            "memory_summary": memory.get("memory_summary"),
-            "active_flow": memory.get("active_flow"),
-        },
-        "visual_context": {
-            "visual_reference": visual.get("visual_reference"),
-        },
+        "conversation": machine_request.get("conversation"),
+        "memory": memory,
+        "visual_context": visual,
+        "available_tools": machine_request.get("available_tools"),
+        "requested_outputs": machine_request.get("requested_outputs"),
+        "required_competencies": machine_request.get("required_competencies"),
+        "required_artifacts": machine_request.get("required_artifacts"),
         "routing": machine_request.get("routing"),
+        "constraints": machine_request.get("constraints"),
     }
 
     provider_log("========== MACHINE REQUEST ==========")
@@ -729,9 +730,15 @@ def machine_request_to_dict(machine_request):
         return {
             "goal": getattr(machine_request, "goal", None),
             "intent": getattr(machine_request, "intent", None),
+            "conversation": getattr(machine_request, "conversation", None),
             "memory": getattr(machine_request, "memory", None),
             "visual_context": getattr(machine_request, "visual_context", None),
+            "available_tools": getattr(machine_request, "available_tools", None),
+            "requested_outputs": getattr(machine_request, "requested_outputs", None),
+            "required_competencies": getattr(machine_request, "required_competencies", None),
+            "required_artifacts": getattr(machine_request, "required_artifacts", None),
             "routing": getattr(machine_request, "routing", None),
+            "constraints": getattr(machine_request, "constraints", None),
             "response_decision": getattr(machine_request, "response_decision", None),
             "renderer_preferences": getattr(machine_request, "renderer_preferences", None),
             "metadata": getattr(machine_request, "metadata", None),
