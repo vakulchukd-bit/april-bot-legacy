@@ -1186,9 +1186,6 @@ def executor_cpu_materialize_blocks(machine_response):
     plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
     render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
 
-    if render_blocks:
-        return machine_response
-
     answer = (
         getattr(machine_response, "answer", None)
         or getattr(machine_response, "content", None)
@@ -1196,32 +1193,45 @@ def executor_cpu_materialize_blocks(machine_response):
         or ""
     )
 
+    existing = {
+        block.get("type")
+        for block in render_blocks
+        if isinstance(block, dict)
+    }
+
+    # Stage 1:
+    # Canonical explanatory text always lives in TextBlock.
+    if answer and "text" not in existing:
+        render_blocks.insert(0, {
+            "type": "text",
+            "content": answer,
+            "scene_contract": True,
+            "executor_generated": True,
+        })
+        existing.add("text")
+
     for block in plan.get("blocks", []):
-        if block == "table":
+        if block == "table" and "table" not in existing:
             render_blocks.append({
                 "type": "table",
                 "payload": {"source": "executor_cpu"},
                 "scene_contract": True,
             })
-        elif block == "graph":
+            existing.add("table")
+        elif block == "graph" and "graph" not in existing:
             render_blocks.append({
                 "type": "graph",
                 "payload": {"source": "executor_cpu"},
                 "scene_contract": True,
             })
-        elif block == "formula":
+            existing.add("graph")
+        elif block == "formula" and "formula" not in existing:
             render_blocks.append({
                 "type": "formula",
                 "content": answer,
                 "scene_contract": True,
             })
-
-    if not render_blocks and answer:
-        render_blocks.append({
-            "type": "text",
-            "content": answer,
-            "scene_contract": True,
-        })
+            existing.add("formula")
 
     machine_response.render_blocks = render_blocks
     return machine_response
@@ -1240,18 +1250,42 @@ def executor_cpu_attach_artifact_payloads(machine_response):
     for block in render_blocks:
         if not isinstance(block, dict):
             continue
+
         payload = block.setdefault("payload", {})
         btype = block.get("type")
 
         if btype == "table":
+            payload.clear()
             payload["table_data"] = (
                 artifact_data.get("table_data")
                 or artifact_data.get("multiplication_table")
             )
+            block.pop("content", None)
+
         elif btype == "graph":
+            payload.clear()
             payload["graph_data"] = artifact_data.get("graph_data")
+            block.pop("content", None)
+
         elif btype == "formula":
+            payload.clear()
             payload["formula"] = artifact_data.get("formula")
+            block.pop("content", None)
+
+        elif btype == "code":
+            code = (
+                payload.get("code")
+                or artifact_data.get("code")
+                or block.get("code")
+            )
+            payload.clear()
+            if code:
+                payload["code"] = code
+            block.pop("content", None)
+            block.pop("text", None)
+            block.pop("description", None)
+            block.pop("analysis", None)
+
         elif btype == "text":
             payload["structured"] = artifact_data
 
