@@ -461,9 +461,24 @@ def parse_provider_machine_contract(raw_text):
             except Exception:
                 pass
             return value
-        recovered_answer=_grab("answer")
-        recovered_summary=_grab("summary")
-        recovered_explanation=_grab("explanation")
+
+        recovered_answer=(
+            _grab("answer")
+            or _grab("content")
+            or _grab("response")
+            or raw_text.strip()
+        )
+
+        recovered_summary=(
+            _grab("summary")
+            or recovered_answer
+        )
+
+        recovered_explanation=(
+            _grab("explanation")
+            or recovered_summary
+        )
+
         return {
             "answer": recovered_answer,
             "content": recovered_answer,
@@ -705,27 +720,48 @@ def build_openai_request(machine_request):
         "constraints": machine_request.get("constraints"),
     }
 
+    def _meaningful(value):
+        if value is None:
+            return False
+        if value == "":
+            return False
+        if value == {}:
+            return False
+        if value == []:
+            return False
+        return True
+
+    payload = {k: v for k, v in payload.items() if _meaningful(v)}
+
     provider_log("========== MACHINE REQUEST ==========")
     provider_log(json.dumps(payload, ensure_ascii=False)[:8000])
 
     # Always include the canonical MachineRequest payload for normal text requests.
     # A minimal prompt causes the model to answer about the protocol itself.
-    structured_prompt = (
+    sections=[]
+    order=[
+        ("goal","GOAL"),
+        ("intent","SEMANTIC"),
+        ("memory","MEMORY"),
+        ("conversation","CONVERSATION"),
+        ("visual_context","VISUAL_CONTEXT"),
+        ("available_tools","AVAILABLE_TOOLS"),
+        ("requested_outputs","REQUESTED_OUTPUTS"),
+        ("required_competencies","REQUIRED_COMPETENCIES"),
+        ("required_artifacts","REQUIRED_ARTIFACTS"),
+        ("routing","ROUTING"),
+        ("constraints","CONSTRAINTS"),
+    ]
+    for key,title in order:
+        if key in payload:
+            sections.append(f"{title}:\n{json.dumps(payload[key], ensure_ascii=False)}\n")
+
+    structured_prompt=(
         "APRIL MACHINE REQUEST\n\n"
-            "Transform the following MachineRequest into exactly one MachineResponse.\n"
-            "Follow the APRIL protocol exactly.\n\n"
-        f"GOAL:\n{json.dumps(payload.get('goal'), ensure_ascii=False)}\n\n"
-        f"SEMANTIC:\n{json.dumps(payload.get('intent'), ensure_ascii=False)}\n\n"
-        f"MEMORY:\n{json.dumps(payload.get('memory'), ensure_ascii=False)}\n\n"
-        f"CONVERSATION:\n{json.dumps(payload.get('conversation'), ensure_ascii=False)}\n\n"
-        f"VISUAL_CONTEXT:\n{json.dumps(payload.get('visual_context'), ensure_ascii=False)}\n\n"
-        f"AVAILABLE_TOOLS:\n{json.dumps(payload.get('available_tools'), ensure_ascii=False)}\n\n"
-        f"REQUESTED_OUTPUTS:\n{json.dumps(payload.get('requested_outputs'), ensure_ascii=False)}\n\n"
-        f"REQUIRED_COMPETENCIES:\n{json.dumps(payload.get('required_competencies'), ensure_ascii=False)}\n\n"
-        f"REQUIRED_ARTIFACTS:\n{json.dumps(payload.get('required_artifacts'), ensure_ascii=False)}\n\n"
-        f"ROUTING:\n{json.dumps(payload.get('routing'), ensure_ascii=False)}\n\n"
-        f"CONSTRAINTS:\n{json.dumps(payload.get('constraints'), ensure_ascii=False)}\n\n"
-        "Output format: MachineResponse only. No markdown. No explanations."
+        "Transform the following MachineRequest into exactly one MachineResponse.\n"
+        "Follow the APRIL protocol exactly.\n\n"
+        + "\n".join(sections)
+        + "\nOutput format: MachineResponse only. No markdown. No explanations."
     )
     return {
         "role": "user",
@@ -1036,11 +1072,29 @@ def provider_should_bypass_openai(messages):
 
 
 
+
+def provider_stage_log(stage, payload=None):
+    try:
+        if isinstance(payload, dict):
+            info={}
+            for k,v in payload.items():
+                if isinstance(v,str):
+                    info[k]=f"<str:{len(v)}>"
+                elif isinstance(v,(list,dict)):
+                    info[k]=f"<{type(v).__name__}:{len(v)}>"
+                else:
+                    info[k]=v
+            provider_log(f"[PROVIDER:{stage}] {info}")
+        else:
+            provider_log(f"[PROVIDER:{stage}] {payload}")
+    except Exception:
+        pass
+
 async def generate_text(
 
     messages,
     temperature=0.7,
-    max_output_tokens=8000,
+    max_output_tokens=None,
     model="gpt-4o-mini"
 ):
 
@@ -1093,22 +1147,25 @@ async def generate_text(
             )
         )
 
+        provider_stage_log("INPUT", {"type":type(messages).__name__})
         normalized_input = normalize_provider_input(messages)
+        provider_stage_log("OPENAI_REQUEST", {"items":len(normalized_input)})
 
         provider_log("========== OPENAI REQUEST BUILDER ==========")
         provider_log(json.dumps(normalized_input, ensure_ascii=False)[:8000])
 
+        request = {
+            "model": model,
+            "input": normalized_input,
+            "temperature": temperature,
+        }
+
+        if max_output_tokens is not None:
+            request["max_output_tokens"] = max_output_tokens
+
         response = (
-
             openai_client.responses.create(
-
-                model=model,
-
-                input=normalized_input,
-
-                temperature=temperature,
-
-                max_output_tokens=max_output_tokens
+                **request
             )
         )
 
@@ -1116,6 +1173,7 @@ async def generate_text(
         provider_log(response.output_text[:8000] if response.output_text else "EMPTY")
 
         raw_text = response.output_text or ""
+        provider_stage_log("OPENAI_RESPONSE", {"chars":len(raw_text)})
         provider_log(f"OPENAI OUTPUT LENGTH: {len(raw_text)}")
         if hasattr(response,"incomplete_details"):
             provider_log(f"OPENAI INCOMPLETE: {response.incomplete_details}")
@@ -1163,6 +1221,7 @@ async def generate_text(
         contract = finalize_executor_contract(contract)
         mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
         provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
+        provider_stage_log("EXECUTOR_HANDOFF", mr)
 
         return contract
 
