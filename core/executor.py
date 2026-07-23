@@ -1982,6 +1982,24 @@ def executor_cpu_sync_factory_bridge(factory_register):
         "single_route":True
     })
 
+
+def executor_provider_stage_log(stage, payload=None):
+    try:
+        info={}
+        if isinstance(payload, dict):
+            for k,v in payload.items():
+                if isinstance(v,str):
+                    info[k]=f"<str:{len(v)}>"
+                elif isinstance(v,(list,dict)):
+                    info[k]=f"<{type(v).__name__}:{len(v)}>"
+                else:
+                    info[k]=v
+        else:
+            info=payload
+        print(f"[EXECUTOR:{stage}] {info}")
+    except Exception:
+        pass
+
 async def execute(
     user_id,
     chat_id=None,
@@ -2067,6 +2085,7 @@ async def execute(
         "active_visual_scene": conversation_space.get("active_visual_scene", {}),
     }
 
+    executor_provider_stage_log("PROVIDER_REQUEST", {"goal":text,"timeline":len(machine_conversation.get("timeline",[])),"memory":len(machine_memory)})
     context["machine_request"] = MachineRequest(
         goal=current_turn.get("user", {}).get("text", text),
         intent=semantic,
@@ -2096,6 +2115,7 @@ async def execute(
         state=state,
         run_with_activity=run_with_activity,
     )
+    executor_provider_stage_log("PROVIDER_RESPONSE", {"has_machine_response":isinstance(result,dict) and "machine_response" in result,"has_scene_contract":isinstance(result,dict) and "scene_contract" in result,"render_blocks":len((result.get("render_blocks") if isinstance(result,dict) else []) or [])})
     result = executor_cpu_factory_bridge(result)
     result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
