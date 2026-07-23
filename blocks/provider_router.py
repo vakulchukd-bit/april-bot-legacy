@@ -1509,12 +1509,12 @@ async def analyze_image(
         raise RuntimeError("Visual provider route failed")
 
 
-PROVIDER_ROUTE_VERSION="fiber_scene_v4_stage4"
+PROVIDER_ROUTE_VERSION="provider_router_9"
 PROVIDER_LEGACY_MODE=False
 
 
 # ============================================================
-# STAGE5 FINAL
+# STAGE9 FINAL (provider_router_9)
 # ============================================================
 # Final cleanup checkpoint.
 #
