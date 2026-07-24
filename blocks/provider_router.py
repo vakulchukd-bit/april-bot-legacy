@@ -1095,7 +1095,7 @@ async def generate_text(
     messages,
     temperature=0.7,
     max_output_tokens=None,
-    model="gpt-4o-mini"
+    model="gpt-5"
 ):
 
     provider_enter(
