@@ -654,6 +654,10 @@ Internally perform the work in this order:
 
 The response MUST be valid JSON accepted by json.loads().
 
+Every newline inside string values MUST be escaped as \\n.
+Every double quote inside string values MUST be escaped.
+Return exactly one JSON object and nothing else.
+
 Never output markdown, code fences, comments, reasoning or text before/after JSON.
 
 Required semantic fields:
