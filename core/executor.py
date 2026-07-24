@@ -1408,8 +1408,8 @@ def executor_cpu_materialize_blocks(machine_response):
 
     # Stage 1:
     # Canonical explanatory text always lives in TextBlock.
-    if answer and "text" not in existing:
-        render_blocks.insert(0, {
+    if not render_blocks and answer:
+        render_blocks.append({
             "type": "text",
             "content": answer,
             "scene_contract": True,
@@ -1721,9 +1721,12 @@ def executor_cpu_normalize_answer(machine_response):
 
     value = value or ""
 
-    machine_response.answer = value
-    machine_response.content = value
-    machine_response.summary = value
+    if not getattr(machine_response, "answer", None):
+        machine_response.answer = value
+    if not getattr(machine_response, "content", None):
+        machine_response.content = value
+    if not getattr(machine_response, "summary", None):
+        machine_response.summary = value
     return machine_response
 
 
