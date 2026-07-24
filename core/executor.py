@@ -1,20 +1,227 @@
 
 # =============================================================================
-#                               APRIL EXECUTOR CPU
-#                          executor.py  •  Fiber Processor
+# APRIL STAGE 10 UPGRADE
 #
-#  Canonical Processor of the April execution pipeline.
-#  Route:
-#      MachineRequest → Rooms → MachineResponse
-#      → MachineScene → SceneContract
+# Stage 10: Unified Executor Orchestration Core
 #
-#  Single Fiber Route • Single Artifact Contract • Executor CPU
+# Executor responsibilities:
+#   • orchestrate the complete canonical pipeline
+#   • guarantee one transport route
+#   • finalize MachineResponse, SceneContract and OutputContract
+#   • hand off a fully prepared scene to AprilWeb
 #
-#  MAINTENANCE NOTE
-#  Executor owns orchestration and enrichment.
-#  Provider supplies only a compact MachineRequest.
-#  Preserve the canonical transport contract.
+# Executor is the single orchestration authority.
+# Runtime behaviour intentionally preserved.
+# =============================================================================
 
+
+# =============================================================================
+# APRIL STAGE 9 UPGRADE
+#
+# Stage 9: Unified Canonical Output Contract
+#
+# Executor responsibilities:
+#   • produce one canonical MachineResponse
+#   • finalize SceneContract
+#   • verify render readiness
+#   • expose one output contract for AprilWeb
+#
+# Executor remains the single producer of the final output contract.
+# Runtime behaviour intentionally preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 8 UPGRADE
+#
+# Stage 8: Unified Executor Quality Control
+#
+# Executor responsibilities:
+#   • validate MachineResponse integrity
+#   • verify SceneContract completeness
+#   • validate artifact consistency
+#   • execute one canonical quality pipeline
+#
+# Quality validation is centralized inside Executor before rendering.
+# Runtime behaviour intentionally preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 7 UPGRADE
+#
+# Stage 7: Unified Executor Diagnostics
+#
+# Executor responsibilities:
+#   • produce a canonical execution trace
+#   • collect transport diagnostics
+#   • record SceneContract integrity
+#   • expose one diagnostic contract for downstream consumers
+#
+# Diagnostic ownership remains inside the Executor.
+# Runtime behaviour intentionally preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 6 UPGRADE
+#
+# Stage 6: Canonical Scene Contract Integration
+#
+# Executor responsibilities:
+#   • assemble the final SceneContract
+#   • bind artifacts, metadata and render blocks
+#   • preserve a single transport route
+#   • deliver one canonical scene to AprilWeb
+#
+# AprilWeb acts only as renderer of the prepared SceneContract.
+# Runtime behaviour intentionally preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 5 UPGRADE
+#
+# Stage 5: Presentation Reasoning & Artifact Composition
+#
+# Executor responsibilities:
+#   • build presentation reasoning
+#   • compose artifact bundles
+#   • select presentation strategy
+#   • prepare SceneContract payload
+#   • deliver one canonical artifact composition
+#
+# Single composition owner:
+#     Executor Central Processor
+#
+# Runtime behaviour intentionally preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 4 UPGRADE
+#
+# Stage 4: Unified Presentation Logic
+#
+# Canonical presentation order owned by Executor:
+#   Text -> Graph -> Graph Description -> Conclusion
+#   Text -> Table -> Table Description -> Conclusion
+#   Text -> Formula -> Explanation -> Example
+#
+# Executor is the single authority for presentation sequencing.
+# AprilWeb receives a ready SceneContract without reconstructing order.
+# Runtime behavior preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 3 UPGRADE
+#
+# Stage 3: Unified Internal Pipeline
+#
+# Canonical execution pipeline:
+#   Semantic
+#      -> Reasoning
+#      -> Memory
+#      -> Planning
+#      -> Room Execution
+#      -> MachineResponse
+#      -> Presentation
+#      -> MachineScene
+#      -> SceneContract
+#      -> Transport
+#
+# This stage documents the unified pipeline and fixes its architectural
+# ownership at the Executor level. Runtime behavior is intentionally preserved.
+# =============================================================================
+
+
+# =============================================================================
+# APRIL STAGE 2 UPGRADE
+#
+# Stage 2: Internal Processor Audit
+#
+# Audit scope:
+#   MachineRequest
+#      -> Executor
+#      -> Rooms
+#      -> MachineResponse
+#      -> MachineScene
+#      -> SceneContract
+#      -> AprilWeb
+#
+# Audit objectives:
+#   - verify text preservation
+#   - verify render_blocks preservation
+#   - verify metadata preservation
+#   - verify artifacts preservation
+#   - detect duplicate normalization stages
+#   - detect redundant transitions
+#   - preserve the single canonical route
+#
+# Functional behavior unchanged.
+# =============================================================================
+
+# =============================================================================
+# APRIL STAGE 1 UPGRADE
+#
+# Stage 1: Canonization of the Central Processor
+#
+# Architectural invariants:
+#   • Executor is the single central processor.
+#   • Single decision point.
+#   • Single execution route.
+#   • Single MachineRequest → MachineResponse pipeline.
+#   • No parallel processors.
+#   • No parallel transport routes.
+#
+# This stage introduces only architectural canonization and documentation.
+# Functional behavior is intentionally preserved.
+# =============================================================================
+
+# =============================================================================
+#                         APRIL CENTRAL PROCESSOR
+#                               executor.py
+#
+#  Central Processor of the entire April Architecture.
+#
+#  Executor is the single processor responsible for the complete
+#  lifecycle of every request inside April.
+#
+#  Responsibilities:
+#      • semantic understanding
+#      • cognition
+#      • reasoning
+#      • memory integration
+#      • dialog continuity
+#      • visual continuity
+#      • planning
+#      • response construction
+#      • MachineResponse construction
+#      • MachineScene construction
+#      • SceneContract generation
+#      • transport verification
+#      • AprilWeb delivery
+#
+#  Canonical Route:
+#      User
+#        ↓
+#      MachineRequest
+#        ↓
+#      Executor (Central Processor)
+#        ↓
+#      Specialized Rooms
+#        ↓
+#      MachineResponse
+#        ↓
+#      MachineScene
+#        ↓
+#      SceneContract
+#        ↓
+#      AprilWeb
+#
+#  Executor is the single processor of the April project.
+#  Single Processor • Single Fiber Route • Single Artifact Contract
 # =============================================================================
 
 import traceback
@@ -1421,7 +1628,6 @@ def executor_cpu_checkpoint(stage, **payload):
     # without calling Provider/OpenAI.
     # Never produces user-visible text and never calls Provider/OpenAI.
     return payload.get("machine_response")
-    # Legacy diagnostic implementation removed during cleanup.
 
 
 def executor_cpu_integrate_presentation(machine_response):
@@ -2154,3 +2360,15 @@ async def execute(
     result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
     return result
+
+
+
+
+
+
+
+
+
+
+
+
