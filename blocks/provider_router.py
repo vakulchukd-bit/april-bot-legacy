@@ -1,4 +1,25 @@
 # =====================================================
+# APRIL FINAL UPGRADE
+# Single canonical route:
+# Provider -> MachineResponse -> SceneContract -> Executor -> Render
+# No parallel routes.
+# =====================================================
+
+APRIL_PROVIDER_CODE = "APR-PROVIDER-001"
+APRIL_MACHINE_RESPONSE_CODE = "APR-MR-001"
+APRIL_SCENE_CONTRACT_CODE = "APR-SCENE-001"
+APRIL_EXECUTOR_CODE = "APR-EXEC-001"
+APRIL_RENDER_CODE = "APR-RENDER-001"
+
+APRIL_ROUTE_TRACE = (
+    APRIL_PROVIDER_CODE,
+    APRIL_MACHINE_RESPONSE_CODE,
+    APRIL_SCENE_CONTRACT_CODE,
+    APRIL_EXECUTOR_CODE,
+    APRIL_RENDER_CODE,
+)
+
+# =====================================================
 # 🧠 APRIL PROVIDER ROUTER
 # =====================================================
 
