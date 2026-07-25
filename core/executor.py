@@ -1156,9 +1156,12 @@ def _extract_machine_response(result):
         or mr.get("text")
     ) or ""
 
-    response.answer = value
-    response.content = value
-    response.summary = value
+    if not getattr(response, "answer", None):
+        response.answer = value
+    if not getattr(response, "content", None):
+        response.content = value
+    if not getattr(response, "summary", None):
+        response.summary = value
 
     return response
 
@@ -1417,28 +1420,9 @@ def executor_cpu_materialize_blocks(machine_response):
         })
         existing.add("text")
 
-    for block in plan.get("blocks", []):
-        if block == "table" and "table" not in existing:
-            render_blocks.append({
-                "type": "table",
-                "payload": {"source": "executor_cpu"},
-                "scene_contract": True,
-            })
-            existing.add("table")
-        elif block == "graph" and "graph" not in existing:
-            render_blocks.append({
-                "type": "graph",
-                "payload": {"source": "executor_cpu"},
-                "scene_contract": True,
-            })
-            existing.add("graph")
-        elif block == "formula" and "formula" not in existing:
-            render_blocks.append({
-                "type": "formula",
-                "content": answer,
-                "scene_contract": True,
-            })
-            existing.add("formula")
+    # Stage 2:
+    # Executor no longer synthesizes table/graph/formula placeholders.
+    # Provider artifacts remain the single source for structured blocks.
 
     machine_response.render_blocks = render_blocks
     return machine_response
@@ -1910,8 +1894,9 @@ def executor_cpu_user_alignment(machine_response):
     return machine_response
 
 def executor_cpu_pipeline(machine_response):
-    machine_response = executor_cpu_build_presentation_plan(machine_response)
-    machine_response = executor_cpu_integrate_presentation(machine_response)
+    # Stage 3:
+    # Presentation plan is built once in the reflection pipeline.
+    # Avoid duplicate normalization inside the final CPU pipeline.
     machine_response = executor_cpu_transport_verification(machine_response)
     machine_response = executor_cpu_memory_fusion(machine_response)
     machine_response = executor_cpu_scene_intelligence(machine_response)
