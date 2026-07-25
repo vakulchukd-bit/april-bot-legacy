@@ -1,3 +1,71 @@
+
+# =====================================================
+# STAGE 3 - FULL RESPONSE PRESERVATION
+# =====================================================
+
+def provider_preserve_full_response(data):
+    if not isinstance(data, dict):
+        return {"content": str(data), "_provider_payload": data}
+
+    if "_provider_payload" not in data:
+        data["_provider_payload"] = dict(data)
+
+    data.setdefault("provider_raw", data["_provider_payload"])
+    data.setdefault("processor_input", data["_provider_payload"])
+    return data
+
+
+# =====================================================
+# STAGE 2 - CANONICAL CONTRACT
+# =====================================================
+
+CANONICAL_PROVIDER_TEXT_FIELD = "content"
+
+def provider_canonicalize_contract(data):
+    if not isinstance(data, dict):
+        data = {CANONICAL_PROVIDER_TEXT_FIELD: str(data)}
+
+    canonical = data.get("content") or data.get("answer") or data.get("summary") or ""
+
+    data["content"] = canonical
+    data["answer"] = canonical
+    data["summary"] = canonical
+
+    # legacy aliases are synchronized to the canonical value
+    for key in ("text", "message", "output_text"):
+        if key in data:
+            data[key] = canonical
+
+    return data
+
+
+# =====================================================
+# STAGE 1D - PROVIDER NORMALIZER
+# =====================================================
+
+def provider_normalize_contract(data):
+    if not isinstance(data, dict):
+        data = {"answer": str(data), "content": str(data)}
+    data.setdefault("scene", {})
+    data.setdefault("render_blocks", [])
+    data.setdefault("artifacts", [])
+    data.setdefault("summary", data.get("answer", data.get("content","")))
+    return data
+
+
+# =====================================================
+# STAGE 1C - PROVIDER VALIDATOR
+# =====================================================
+
+def provider_validate_contract(data):
+    if not isinstance(data, dict):
+        return {"answer": str(data), "content": str(data)}
+    if "answer" not in data and "content" in data:
+        data["answer"]=data["content"]
+    if "content" not in data and "answer" in data:
+        data["content"]=data["answer"]
+    return data
+
 # =====================================================
 # 🧠 APRIL PROVIDER ROUTER
 # =====================================================
@@ -415,6 +483,39 @@ def build_provider_machine_response(text, parsed_contract=None):
 
 import json
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
+
+
+
+# =====================================================
+# STAGE 1B - PROVIDER DECODER PIPELINE
+# =====================================================
+
+def provider_decode_json(raw_text):
+    try:
+        import json
+        data = json.loads(raw_text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
+
+def provider_decode_response(raw_text):
+    """
+    Stage 1B:
+    Canonical decoder pipeline.
+    JSON -> legacy parser.
+    Future stages will add semantic decoding here.
+    """
+    parsed = provider_decode_json(raw_text)
+    if parsed is None:
+        parsed = parse_provider_machine_contract(raw_text)
+    parsed = provider_validate_contract(parsed)
+    parsed = provider_normalize_contract(parsed)
+    parsed = provider_canonicalize_contract(parsed)
+    parsed = provider_preserve_full_response(parsed)
+    return parsed
+
 
 def parse_provider_machine_contract(raw_text):
     """Parse a MachineResponse transport contract with lightweight recovery."""
@@ -878,7 +979,7 @@ def create_provider_contract(raw_text):
         provider_log("🧠 STAGE3: canonical MachineResponse received")
         return provider_contract_ready(raw_text)
 
-    parsed = raw_text if isinstance(raw_text, dict) else parse_provider_machine_contract(raw_text)
+    parsed = raw_text if isinstance(raw_text, dict) else provider_decode_response(raw_text)
     # STAGE 1: single canonical validation pass
     # STAGE3: semantic-first pipeline
     parsed = ensure_scene_first_contract(parsed)
