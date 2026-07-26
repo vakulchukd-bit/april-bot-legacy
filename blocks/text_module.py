@@ -196,11 +196,11 @@ SYSTEM_PROMPT = """
 # 🔥 LIMITS
 # =====================================================
 
-MAX_MESSAGE_CHARS = 900
+MAX_MESSAGE_CHARS = 1000
 
-MAX_TOTAL_CHARS = 4200
+MAX_TOTAL_CHARS = 5000
 
-MAX_MEMORY_BLOCK = 280
+MAX_MEMORY_BLOCK = 3000
 
 # =====================================================
 # 🔥 PLAN CONFIG
@@ -208,11 +208,11 @@ MAX_MEMORY_BLOCK = 280
 
 PLAN_HISTORY_LIMITS = {
 
-    "free": 12,
+    "free": 15,
 
-    "lite": 24,
+    "lite": 30,
 
-    "premium": 40
+    "premium": 999999
 }
 
 PLAN_TOKEN_MODES = {
@@ -494,7 +494,7 @@ def get_config(energy):
 
             "temperature": 0.45,
 
-            "max_output_tokens": 180
+            "max_output_tokens": 300
         }
 
     if energy == "HIGH":
@@ -503,14 +503,14 @@ def get_config(energy):
 
             "temperature": 0.82,
 
-            "max_output_tokens": 700
+            "max_output_tokens": 3500
         }
 
     return {
 
         "temperature": 0.68,
 
-        "max_output_tokens": 420
+        "max_output_tokens": 1200
     }
 
 # =====================================================
