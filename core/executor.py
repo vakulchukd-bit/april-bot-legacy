@@ -1119,24 +1119,20 @@ def executor_cpu_register_room(report, room_name, **kwargs):
 
 
 def _extract_machine_response(result):
-    """Canonical provider -> MachineResponse conversion."""
+    """Stage 1 Executor: preserve Provider semantic fields without collapsing them."""
     if isinstance(result, MachineResponse):
         return result
-
     if not isinstance(result, dict):
         return None
 
-    mr = result.get("machine_response", result)
-
+    mr=result.get("machine_response", result)
     if isinstance(mr, MachineResponse):
         return mr
-
     if not isinstance(mr, dict):
         return None
 
-    response = MachineResponse()
+    response=MachineResponse()
 
-    # Copy every canonical field that exists on MachineResponse.
     for field in vars(response).keys():
         if field in mr:
             try:
@@ -1144,24 +1140,12 @@ def _extract_machine_response(result):
             except Exception:
                 pass
 
-    # Canonical text fallback.
-    value = (
-        getattr(response, "answer", "")
-        or getattr(response, "content", "")
-        or getattr(response, "summary", "")
-        or mr.get("answer")
-        or mr.get("content")
-        or mr.get("summary")
-        or mr.get("response")
-        or mr.get("text")
-    ) or ""
-
-    if not getattr(response, "answer", None):
-        response.answer = value
-    if not getattr(response, "content", None):
-        response.content = value
-    if not getattr(response, "summary", None):
-        response.summary = value
+    if not getattr(response,"answer",None):
+        response.answer=mr.get("answer","")
+    if not getattr(response,"content",None):
+        response.content=mr.get("content","")
+    if not getattr(response,"summary",None):
+        response.summary=mr.get("summary","")
 
     return response
 
@@ -1676,41 +1660,27 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
 
 
 def executor_cpu_normalize_answer(machine_response):
-    """Ensure canonical text fields always exist before Scene construction."""
-    answer = getattr(machine_response, "answer", None)
-    content = getattr(machine_response, "content", None)
-    summary = getattr(machine_response, "summary", None)
+    """Stage 2: preserve semantic fields; only fill missing canonical values."""
+    answer=getattr(machine_response,"answer",None)
+    content=getattr(machine_response,"content",None)
+    summary=getattr(machine_response,"summary",None)
 
-    value = answer or content or summary
-
-    if not value:
-        for block in list(getattr(machine_response, "render_blocks", []) or []):
-            if isinstance(block, dict):
-                value = block.get("content") or block.get("text")
-                if value:
+    fallback=None
+    if not (answer or content or summary):
+        for block in list(getattr(machine_response,"render_blocks",[]) or []):
+            if isinstance(block,dict):
+                fallback=block.get("content") or block.get("text")
+                if fallback:
                     break
 
-    if not value:
-        for art in list(getattr(machine_response, "artifacts", []) or []):
-            data = getattr(art, "data", None)
-            if isinstance(data, dict):
-                value = (
-                    data.get("answer")
-                    or data.get("content")
-                    or data.get("summary")
-                    or data.get("text")
-                )
-                if value:
-                    break
+    if fallback:
+        if not answer:
+            machine_response.answer=fallback
+        if not content:
+            machine_response.content=fallback
+        if not summary:
+            machine_response.summary=fallback
 
-    value = value or ""
-
-    if not getattr(machine_response, "answer", None):
-        machine_response.answer = value
-    if not getattr(machine_response, "content", None):
-        machine_response.content = value
-    if not getattr(machine_response, "summary", None):
-        machine_response.summary = value
     return machine_response
 
 
@@ -2348,15 +2318,3 @@ async def execute(
     result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
     return result
-
-
-
-
-
-
-
-
-
-
-
-
