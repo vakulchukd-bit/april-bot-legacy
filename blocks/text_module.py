@@ -494,7 +494,7 @@ def get_config(energy):
 
             "temperature": 0.45,
 
-            "max_output_tokens": 300
+            "max_output_tokens": 3000
         }
 
     if energy == "HIGH":
@@ -503,14 +503,14 @@ def get_config(energy):
 
             "temperature": 0.82,
 
-            "max_output_tokens": 3500
+            "max_output_tokens": 8000
         }
 
     return {
 
         "temperature": 0.68,
 
-        "max_output_tokens": 1200
+        "max_output_tokens": 5000
     }
 
 # =====================================================
