@@ -22,19 +22,25 @@ def provider_preserve_full_response(data):
 CANONICAL_PROVIDER_TEXT_FIELD = "content"
 
 def provider_canonicalize_contract(data):
+    """
+    Stage 1:
+    Preserve semantic fields. Do not overwrite answer/content/summary.
+    Only ensure the transport aliases exist.
+    """
     if not isinstance(data, dict):
         data = {CANONICAL_PROVIDER_TEXT_FIELD: str(data)}
 
-    canonical = data.get("content") or data.get("answer") or data.get("summary") or ""
+    if "content" not in data and "answer" in data:
+        data["content"] = data["answer"]
+    elif "answer" not in data and "content" in data:
+        data["answer"] = data["content"]
 
-    data["content"] = canonical
-    data["answer"] = canonical
-    data["summary"] = canonical
-
-    # legacy aliases are synchronized to the canonical value
     for key in ("text", "message", "output_text"):
-        if key in data:
-            data[key] = canonical
+        if key not in data:
+            if "content" in data:
+                data[key] = data["content"]
+            elif "answer" in data:
+                data[key] = data["answer"]
 
     return data
 
@@ -652,13 +658,14 @@ def validate_machine_response_contract(contract):
 
 def normalize_text_transport(contract):
     """
-    Synchronize answer/content/response/summary/explanation so that
-    a non-empty value is propagated across the transport contract.
+    Stage 2:
+    Non-destructive transport normalization.
+    Preserve semantic fields and only fill missing aliases.
     """
     if not isinstance(contract, dict):
         return {}
 
-    candidate = (
+    candidate=(
         contract.get("answer")
         or contract.get("content")
         or contract.get("response")
@@ -667,15 +674,11 @@ def normalize_text_transport(contract):
         or ""
     )
 
-    contract["answer"] = candidate
-    contract["content"] = candidate
-    contract["response"] = candidate
-
-    if not contract.get("summary"):
-        contract["summary"] = candidate
-
-    if not contract.get("explanation"):
-        contract["explanation"] = contract["summary"]
+    contract.setdefault("answer", candidate)
+    contract.setdefault("content", candidate)
+    contract.setdefault("response", candidate)
+    contract.setdefault("summary", candidate)
+    contract.setdefault("explanation", contract.get("summary",""))
 
     return contract
 
