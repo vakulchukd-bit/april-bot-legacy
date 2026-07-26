@@ -318,7 +318,7 @@ def machine_to_human(
 
     return safe_truncate(
         payload,
-        3000
+        8000
     )
 
 
