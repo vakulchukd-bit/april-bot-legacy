@@ -1321,6 +1321,35 @@ async def generate_text(
                         mr[field] = normalize_response_text(mr[field])
         provider_log({"trace_stage":"after_create_provider_contract","keys":list(contract.keys()) if isinstance(contract,dict) else str(type(contract))})
 
+        # ================= TEST DIAGNOSTICS =================
+        if isinstance(contract, dict):
+            mr = contract.get("machine_response", {})
+            provider_log("========== MACHINE RESPONSE DIAGNOSTICS ==========")
+            provider_log({
+                "answer_len": len(mr.get("answer") or ""),
+                "content_len": len(mr.get("content") or ""),
+                "summary_len": len(mr.get("summary") or ""),
+                "artifact_count": len(mr.get("artifacts", [])),
+                "render_block_count": len(mr.get("render_blocks", [])),
+            })
+
+            for i, artifact in enumerate(mr.get("artifacts", [])):
+                if isinstance(artifact, dict):
+                    atype = artifact.get("type")
+                    if atype == "table":
+                        provider_log(f"[TABLE #{i}] rows={len(artifact.get('rows', []))}")
+                        provider_log(f"[TABLE #{i}] headers={artifact.get('headers', [])}")
+                    elif atype == "graph":
+                        provider_log(f"[GRAPH #{i}] series={len(artifact.get('series', []))}")
+                    elif atype == "text":
+                        provider_log(f"[TEXT #{i}] chars={len(artifact.get('content',''))}")
+
+            provider_log("========== FULL MACHINE RESPONSE BEGIN ==========")
+            provider_log(json.dumps(mr, ensure_ascii=False)[:100000])
+            provider_log("========== FULL MACHINE RESPONSE END ==========")
+        # ====================================================
+
+
         # =====================================================
         # STAGE 5 - FINAL PROVIDER->EXECUTOR TRANSPORT
         # Single canonical handoff with final audit.
