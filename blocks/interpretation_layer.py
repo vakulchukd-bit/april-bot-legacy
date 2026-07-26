@@ -1513,7 +1513,7 @@ def interpret_request(
     result["estimated_action_count"] = estimate_action_count(result)
     result["response_complexity"] = determine_response_complexity(result)
 
-result["scene_strategy"] = build_scene_strategy(
+    result["scene_strategy"] = build_scene_strategy(
         result
     )
 
@@ -1568,6 +1568,7 @@ result["scene_strategy"] = build_scene_strategy(
     # 🔥 FINAL
     # =====================================================
 
+    result = validate_response_complexity(result)
     return result
 
 # =====================================================
@@ -1593,5 +1594,4 @@ def validate_response_complexity(result):
         result["response_complexity"] = RESPONSE_COMPLEXITY_LOW
     if result.get("estimated_action_count") is None:
         result["estimated_action_count"] = 0
-    result = validate_response_complexity(result)
     return result
