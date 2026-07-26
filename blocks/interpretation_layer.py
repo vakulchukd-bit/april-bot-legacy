@@ -806,7 +806,9 @@ def build_result(
         "candidate_domains": [],
         "required_representations": [],
         "candidate_representations": [],
-        "domain_confidence": {}
+        "domain_confidence": {},
+        "response_complexity": None,
+        "estimated_action_count": 0
     }
 
 
@@ -1048,6 +1050,41 @@ def build_scene_strategy(result):
         })
 
     return strategy
+
+
+
+
+# =====================================================
+# 🔥 RESPONSE COMPLEXITY
+# =====================================================
+
+RESPONSE_COMPLEXITY_LOW = "LOW"
+RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
+RESPONSE_COMPLEXITY_HIGH = "HIGH"
+
+
+def estimate_action_count(result):
+    """
+    Stage 1.
+
+    Infrastructure only.
+
+    Real calculation will be connected
+    during Stage 2.
+    """
+    return 1
+
+
+def determine_response_complexity(result):
+    actions = estimate_action_count(result)
+
+    if actions <= 1:
+        return RESPONSE_COMPLEXITY_LOW
+
+    if actions <= 3:
+        return RESPONSE_COMPLEXITY_MEDIUM
+
+    return RESPONSE_COMPLEXITY_HIGH
 
 
 # =====================================================
@@ -1468,7 +1505,15 @@ def interpret_request(
             result["content_role"] = "legend"
 
 
-    result["scene_strategy"] = build_scene_strategy(
+    
+    # =====================================================
+    # 🔥 RESPONSE COMPLEXITY (Stage 2)
+    # =====================================================
+
+    result["estimated_action_count"] = estimate_action_count(result)
+    result["response_complexity"] = determine_response_complexity(result)
+
+result["scene_strategy"] = build_scene_strategy(
         result
     )
 
@@ -1509,11 +1554,44 @@ def interpret_request(
 
         f"INTERPRETATION COMPLETE | "
         f"type={result.get('type')} | "
-        f"subtype={result.get('subtype')}"
+        f"subtype={result.get('subtype')} | "
+        f"complexity={result.get('response_complexity')}"
     )
+
+    # Stage 3
+    # Transport fields prepared for downstream layers.
+    result["semantic_response_complexity"] = result["response_complexity"]
+    result["machine_response_complexity"] = result["response_complexity"]
+
 
     # =====================================================
     # 🔥 FINAL
     # =====================================================
 
+    return result
+
+# =====================================================
+# 🔥 STAGE 4 TRANSPORT ACCESSORS
+# =====================================================
+
+def export_response_complexity(result):
+    return {
+        "response_complexity": result.get("response_complexity"),
+        "estimated_action_count": result.get("estimated_action_count"),
+        "semantic_response_complexity": result.get("semantic_response_complexity"),
+        "machine_response_complexity": result.get("machine_response_complexity"),
+    }
+
+
+
+# =====================================================
+# 🔥 STAGE 5 FINAL VALIDATION
+# =====================================================
+
+def validate_response_complexity(result):
+    if result.get("response_complexity") is None:
+        result["response_complexity"] = RESPONSE_COMPLEXITY_LOW
+    if result.get("estimated_action_count") is None:
+        result["estimated_action_count"] = 0
+    result = validate_response_complexity(result)
     return result
