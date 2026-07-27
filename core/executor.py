@@ -1416,53 +1416,29 @@ def executor_cpu_attach_artifact_payloads(machine_response):
     artifacts = list(getattr(machine_response, "artifacts", []) or [])
     render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
 
-    artifact_data = {}
-    for art in artifacts:
-        data = getattr(art, "data", None)
-        if isinstance(data, dict):
-            artifact_data.update(data)
+    artifact_index = {}
+
+    for artifact in artifacts:
+        artifact_type = (
+            getattr(artifact, "artifact_type", None)
+            or getattr(artifact, "type", None)
+        )
+        payload = getattr(artifact, "data", None)
+        if artifact_type and payload is not None:
+            artifact_index[artifact_type] = payload
 
     for block in render_blocks:
         if not isinstance(block, dict):
             continue
 
-        payload = block.setdefault("payload", {})
-        btype = block.get("type")
+        provider_payload = artifact_index.get(block.get("type"))
+        if provider_payload is None:
+            continue
 
-        if btype == "table":
-            payload.clear()
-            payload["table_data"] = (
-                artifact_data.get("table_data")
-                or artifact_data.get("multiplication_table")
-            )
-            block.pop("content", None)
-
-        elif btype == "graph":
-            payload.clear()
-            payload["graph_data"] = artifact_data.get("graph_data")
-            block.pop("content", None)
-
-        elif btype == "formula":
-            payload.clear()
-            payload["formula"] = artifact_data.get("formula")
-            block.pop("content", None)
-
-        elif btype == "code":
-            code = (
-                payload.get("code")
-                or artifact_data.get("code")
-                or block.get("code")
-            )
-            payload.clear()
-            if code:
-                payload["code"] = code
-            block.pop("content", None)
-            block.pop("text", None)
-            block.pop("description", None)
-            block.pop("analysis", None)
-
-        elif btype == "text":
-            payload["structured"] = artifact_data
+        block["payload"] = provider_payload
+        block["provider_payload"] = True
+        block["canonical_provider_payload"] = True
+        block["executor_generated"] = False
 
     machine_response.render_blocks = render_blocks
     return machine_response
