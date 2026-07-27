@@ -1377,36 +1377,15 @@ def normalize_provider_scene(result):
 
 
 def executor_cpu_materialize_blocks(machine_response):
-    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    """Stage 3: transport only.
 
-    answer = (
-        getattr(machine_response, "answer", None)
-        or getattr(machine_response, "content", None)
-        or getattr(machine_response, "summary", None)
-        or ""
+    Executor never creates, restores or synthesizes render_blocks.
+    Provider is the single owner of render_blocks.
+    """
+
+    render_blocks = list(
+        getattr(machine_response, "render_blocks", []) or []
     )
-
-    existing = {
-        block.get("type")
-        for block in render_blocks
-        if isinstance(block, dict)
-    }
-
-    # Stage 1:
-    # Canonical explanatory text always lives in TextBlock.
-    if not render_blocks and answer:
-        render_blocks.append({
-            "type": "text",
-            "content": answer,
-            "scene_contract": True,
-            "executor_generated": True,
-        })
-        existing.add("text")
-
-    # Stage 2:
-    # Executor no longer synthesizes table/graph/formula placeholders.
-    # Provider artifacts remain the single source for structured blocks.
 
     machine_response.render_blocks = render_blocks
     return machine_response
@@ -1661,24 +1640,44 @@ def executor_cpu_normalize_answer(machine_response):
 
 
 def executor_cpu_build_presentation_plan(machine_response):
-    """
-    Inspect MachineResponse and prepare presentation hints
-    without calling Provider/OpenAI.
-    """
-    plan = {"representation":"text","blocks":[]}
+    """Stage 2: determine presentation from artifact types only."""
+    plan = {
+        "representation": "text",
+        "blocks": [],
+        "artifact_types": [],
+        "provider_owned": True,
+    }
 
-    artifacts = getattr(machine_response, "artifacts", []) or []
-    for art in artifacts:
-        data = getattr(art, "data", {}) if hasattr(art, "data") else {}
-        if isinstance(data, dict):
-            if "multiplication_table" in data or "table_data" in data:
-                plan["representation"]="table"
-                plan["blocks"].append("table")
-            if "graph_data" in data:
-                plan["representation"]="graph"
-                plan["blocks"].append("graph")
-            if "formula" in data:
-                plan["blocks"].append("formula")
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+
+    for artifact in artifacts:
+        artifact_type = (
+            getattr(artifact, "artifact_type", None)
+            or getattr(artifact, "type", None)
+            or "text"
+        )
+
+        if artifact_type not in plan["artifact_types"]:
+            plan["artifact_types"].append(artifact_type)
+
+        if artifact_type not in plan["blocks"]:
+            plan["blocks"].append(artifact_type)
+
+    priority = [
+        "graph",
+        "table",
+        "formula",
+        "gallery",
+        "diagram",
+        "link",
+        "code",
+        "text",
+    ]
+
+    for rep in priority:
+        if rep in plan["artifact_types"]:
+            plan["representation"] = rep
+            break
 
     machine_response.executor_presentation_plan = plan
     return machine_response
