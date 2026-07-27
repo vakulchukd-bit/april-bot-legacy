@@ -1,48 +1,87 @@
 # =====================================================
-# 🏭 PROFESSIONAL GRAPH ROOM CORE
+# 🏭 GRAPH PAYLOAD BUILDER
+# =====================================================
+
+class GraphPayloadBuilder:
+
+    def build(
+        self,
+        semantic,
+        axis,
+        series,
+        legend,
+        annotations,
+        geometry,
+    ):
+
+        return {
+
+            "scene_type": "graph",
+
+            "title": semantic.title,
+
+            "graph_title": semantic.title,
+
+            "x_axis": axis.x_title,
+
+            "y_axis": axis.y_title,
+
+            "labels": series.labels,
+
+            "values": series.values,
+
+            "series": series.series,
+
+            "legend": legend.items,
+
+            "annotations": annotations.items,
+
+            "geometry": geometry,
+
+            "metadata": {
+
+                "room": "graph_room",
+
+                "renderer": "GraphBlock",
+
+                "transport": "UnifiedVisualPayload",
+
+                "version": "2.0"
+            }
+        }
+
+
+# =====================================================
+# 🏭 GRAPH ROOM
 # =====================================================
 
 class GraphRoom:
 
-    ROOM_NAME = "graph_room"
+    ...
 
     def __init__(self):
 
-        self.intent_analyzer = GraphIntentAnalyzer()
+        ...
 
-        self.semantic_parser = GraphSemanticParser()
-
-        self.axis_builder = GraphAxisBuilder()
-
-        self.series_builder = GraphSeriesBuilder()
-
-        self.legend_builder = GraphLegendBuilder()
-
-        self.annotation_builder = GraphAnnotationBuilder()
-
-        self.validator = GraphValidator()
-
-        self.optimizer = GraphOptimizer()
-
-        self.artifact_builder = GraphArtifactBuilder()
+        self.payload_builder = GraphPayloadBuilder()
 
     def execute(self, request: str):
 
-        intent = self.intent_analyzer.detect(request)
+        ...
 
-        semantic = self.semantic_parser.parse(
-            request,
-            intent
-        )
+        visual_payload = self.payload_builder.build(
 
-        axis = self.axis_builder.build(semantic)
+            semantic,
 
-        series = self.series_builder.build(semantic)
+            axis,
 
-        legend = self.legend_builder.build(semantic)
+            series,
 
-        annotations = self.annotation_builder.build(
-            semantic
+            legend,
+
+            annotations,
+
+            geometry
         )
 
         graph = self.artifact_builder.build(
@@ -55,7 +94,9 @@ class GraphRoom:
 
             legend=legend,
 
-            annotations=annotations
+            annotations=annotations,
+
+            visual_payload=visual_payload
         )
 
         graph = self.validator.validate(graph)
