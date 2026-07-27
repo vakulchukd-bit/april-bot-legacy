@@ -1,180 +1,72 @@
 # =====================================================
-# 🏭 APRIL C_ARTIFACT_CONTRACT
+# 🏭 PROFESSIONAL GRAPH ROOM CORE
 # =====================================================
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-import time
-import uuid
+class GraphRoom:
 
-# =====================================================
-# 🏭 ARTIFACT METADATA
-# =====================================================
+    ROOM_NAME = "graph_room"
 
-@dataclass
-class ArtifactMetadata:
+    def __init__(self):
 
-    artifact_id: str = field(
-        default_factory=lambda: str(uuid.uuid4())
-    )
+        self.intent_analyzer = GraphIntentAnalyzer()
 
-    artifact_version: str = "1.0"
+        self.semantic_parser = GraphSemanticParser()
 
-    created_at: float = field(
-        default_factory=time.time
-    )
+        self.axis_builder = GraphAxisBuilder()
 
-    room_source: str = ""
+        self.series_builder = GraphSeriesBuilder()
 
-    artifact_type: str = ""
+        self.legend_builder = GraphLegendBuilder()
 
-# =====================================================
-# 🏭 ARTIFACT CONTEXT
-# =====================================================
+        self.annotation_builder = GraphAnnotationBuilder()
 
-@dataclass
-class ArtifactContext:
+        self.validator = GraphValidator()
 
-    goal: Optional[str] = None
+        self.optimizer = GraphOptimizer()
 
-    purpose: Optional[str] = None
+        self.artifact_builder = GraphArtifactBuilder()
 
-    role: Optional[str] = None
+    def execute(self, request: str):
 
-    active_scene: Optional[str] = None
+        intent = self.intent_analyzer.detect(request)
 
-    dependencies: List[str] = field(
-        default_factory=list
-    )
+        semantic = self.semantic_parser.parse(
+            request,
+            intent
+        )
 
-# =====================================================
-# 🏭 ARTIFACT QUALITY
-# =====================================================
+        axis = self.axis_builder.build(semantic)
 
-@dataclass
-class ArtifactQuality:
+        series = self.series_builder.build(semantic)
 
-    quality_score: float = 0.0
+        legend = self.legend_builder.build(semantic)
 
-    confidence_score: float = 0.0
+        annotations = self.annotation_builder.build(
+            semantic
+        )
 
-    completeness_score: float = 0.0
+        graph = self.artifact_builder.build(
 
-    validation_passed: bool = False
+            semantic=semantic,
 
-    warnings: List[str] = field(
-        default_factory=list
-    )
+            axis=axis,
 
-# =====================================================
-# 🏭 RENDER CONTRACT
-# =====================================================
+            series=series,
 
-@dataclass
-class ArtifactRenderContract:
+            legend=legend,
 
-    web_block: str = ""
+            annotations=annotations
+        )
 
-    viewer: str = ""
+        graph = self.validator.validate(graph)
 
-    editable: bool = True
+        graph = self.optimizer.optimize(graph)
 
-    responsive: bool = True
+        return create_artifact(
 
-    exportable: bool = True
+            artifact_type="graph",
 
-# =====================================================
-# 🏭 BASE ARTIFACT
-# =====================================================
+            room_source=self.ROOM_NAME,
 
-@dataclass
-class BaseArtifact:
-
-    metadata: ArtifactMetadata
-
-    context: ArtifactContext
-
-    quality: ArtifactQuality
-
-    render: ArtifactRenderContract
-
-    data: Dict[str, Any] = field(
-        default_factory=dict
-    )
-
-# =====================================================
-# 🏭 WEB BLOCK MAP
-# =====================================================
-
-ARTIFACT_BLOCK_MAP = {
-
-    "graph": "GraphBlock",
-
-    "formula": "FormulaBlock",
-
-    "table": "TableBlock",
-
-    "diagram": "DiagramBlock",
-
-    "code": "CodeBlock",
-
-    "link": "LinkCard",
-
-    "gallery": "GalleryBlock",
-
-    "function": "FunctionBlock"
-}
-
-# =====================================================
-# 🏭 ARTIFACT FACTORY
-# =====================================================
-
-def create_artifact(
-    artifact_type: str,
-    room_source: str,
-    data: Dict[str, Any]
-):
-
-    return BaseArtifact(
-
-        metadata=ArtifactMetadata(
-            artifact_type=artifact_type,
-            room_source=room_source
-        ),
-
-        context=ArtifactContext(),
-
-        quality=ArtifactQuality(),
-
-        render=ArtifactRenderContract(
-            web_block=ARTIFACT_BLOCK_MAP.get(
-                artifact_type,
-                ""
-            )
-        ),
-
-        data=data
-    )
-
-# =====================================================
-# 🏭 SUPPORTED ARTIFACTS
-# =====================================================
-
-SUPPORTED_ARTIFACTS = [
-
-    "graph",
-
-    "formula",
-
-    "table",
-
-    "diagram",
-
-    "code",
-
-    "link",
-
-    "gallery",
-
-    "function"
-]
+            data=graph
+        )
