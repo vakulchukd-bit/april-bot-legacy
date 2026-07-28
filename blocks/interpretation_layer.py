@@ -1,3 +1,37 @@
+# =====================================================
+# TEST 40
+# DeepHub Preparation Build
+# Verified formatting and syntax pass.
+# =====================================================
+
+"""
+interpretation_test30.py
+STAGE 30
+Semantic Input Unification
+"""
+
+UNIFIED_INTERPRETATION_INPUT = {
+    "user_text": None,
+    "user_voice": None,
+    "user_image": None,
+    "assistant_response": None,
+    "dialogue_history": [],
+    "active_context": {},
+    "semantic_memory": {},
+    "active_goal": None,
+    "semantic_state": {}
+}
+
+SEMANTIC_DIALOGUE_STATE = {
+    "last_user_turn": None,
+    "last_april_turn": None,
+    "dialogue_goal": None,
+    "dialogue_context": {},
+    "scene_state": {},
+    "semantic_profile": {}
+}
+
+
 """
 interpretation_test29.py
 Canonical Semantic Interpretation Layer
@@ -1803,3 +1837,475 @@ def _semantic_evidence_stub(kind, text):
 
 def _semantic_evidence_stub(kind, text):
     return False
+
+# =====================================================
+# TEST 31
+# Semantic Dialogue Profile
+# =====================================================
+
+def build_semantic_dialog_profile(
+    text,
+    cognition=None,
+    semantic=None,
+    assistant_response=None,
+    dialogue_history=None,
+    vision_context=None
+):
+    cognition = cognition or {}
+    semantic = semantic or {}
+
+    return {
+        "input_text": text,
+        "assistant_response": assistant_response,
+        "dialogue_history": dialogue_history or [],
+        "vision_context": vision_context or {},
+        "active_goal": cognition.get("active_goal"),
+        "active_topic": cognition.get("active_topic_slot"),
+        "semantic_state": semantic,
+        "requires_scene_builder": False,
+        "profile_version": "test31"
+    }
+
+
+# =====================================================
+# TEST 32
+# Scene Construction Profile
+# =====================================================
+
+def build_scene_construction_profile(semantic_profile):
+    semantic_profile = semantic_profile or {}
+
+    return {
+        "requires_scene_builder": bool(
+            semantic_profile.get("vision_context")
+            or semantic_profile.get("active_goal")
+        ),
+        "scene_type": "dialogue",
+        "dialogue_mode": "semantic_unified",
+        "context_source": "semantic_profile",
+        "profile_version": "test32"
+    }
+
+
+# =====================================================
+# TEST 33
+# Unified Artifact Contract
+# No new routes. Uses the existing semantic pipeline.
+# =====================================================
+
+def build_scene_artifact_contract(
+    semantic_profile,
+    scene_profile
+):
+    semantic_profile = semantic_profile or {}
+    scene_profile = scene_profile or {}
+
+    return {
+        "contract": "scene_artifact",
+        "transport": "transport_state",
+        "semantic_profile": semantic_profile,
+        "scene_profile": scene_profile,
+        "dialogue_history": semantic_profile.get("dialogue_history", []),
+        "assistant_response": semantic_profile.get("assistant_response"),
+        "active_goal": semantic_profile.get("active_goal"),
+        "scene_type": scene_profile.get("scene_type", "dialogue"),
+        "representation": "executor_decides",
+        "profile_version": "test33"
+    }
+
+
+# =====================================================
+# TEST 34
+# Unified Scene Context
+# Single semantic route (no new transport)
+# =====================================================
+
+def build_unified_scene_context(
+    semantic_profile,
+    scene_profile,
+    artifact_contract,
+    voice_context=None,
+    vision_context=None,
+    gallery_context=None,
+    file_context=None,
+    assistant_response=None,
+    dialogue_history=None,
+    memory_state=None,
+):
+    semantic_profile = semantic_profile or {}
+    scene_profile = scene_profile or {}
+    artifact_contract = artifact_contract or {}
+
+    return {
+        "semantic_profile": semantic_profile,
+        "scene_profile": scene_profile,
+        "artifact_contract": artifact_contract,
+        "voice_context": voice_context or {},
+        "vision_context": vision_context or {},
+        "gallery_context": gallery_context or {},
+        "file_context": file_context or {},
+        "assistant_response": assistant_response,
+        "dialogue_history": dialogue_history or semantic_profile.get("dialogue_history", []),
+        "active_goal": semantic_profile.get("active_goal"),
+        "active_scene": scene_profile.get("scene_type", "dialogue"),
+        "memory_state": memory_state or {},
+        "continuity_state": {
+            "single_route": True,
+            "transport": "transport_state",
+            "scene_contract": "canonical"
+        },
+        "profile_version": "test34"
+    }
+
+
+# =====================================================
+# TEST 35
+# Execution Plan
+# Uses UnifiedSceneContext. No new routes.
+# =====================================================
+
+def build_scene_execution_plan(
+    semantic_profile,
+    scene_profile,
+    artifact_contract,
+    unified_scene_context=None
+):
+    semantic_profile = semantic_profile or {}
+    scene_profile = scene_profile or {}
+    artifact_contract = artifact_contract or {}
+
+    if unified_scene_context is None:
+        unified_scene_context = build_unified_scene_context(
+            semantic_profile,
+            scene_profile,
+            artifact_contract
+        )
+
+    return {
+        "transport": "transport_state",
+        "scene_contract": "canonical",
+        "scene_context": unified_scene_context,
+        "scene_type": scene_profile.get("scene_type", "dialogue"),
+        "representation": artifact_contract.get("representation", "executor_decides"),
+        "execution_mode": "single_semantic_pipeline",
+        "profile_version": "test35"
+    }
+
+
+# =====================================================
+# TEST 36
+# Unified Interpretation Inputs
+# Single scene understanding for all modalities.
+# =====================================================
+
+UNIFIED_DIALOGUE_INPUTS = (
+    "user_text",
+    "user_voice",
+    "user_files",
+    "user_images",
+    "user_gallery",
+    "assistant_response",
+    "dialogue_history",
+    "memory_state",
+    "active_goal",
+    "active_scene",
+)
+
+def build_unified_interpretation_state(
+    scene_context,
+    processor_state=None
+):
+    scene_context = scene_context or {}
+    processor_state = processor_state or {}
+
+    return {
+        "transport": "transport_state",
+        "scene_context": scene_context,
+        "processor_state": processor_state,
+        "dialogue_vector": scene_context.get("dialogue_history", []),
+        "assistant_response": scene_context.get("assistant_response"),
+        "voice_context": scene_context.get("voice_context", {}),
+        "vision_context": scene_context.get("vision_context", {}),
+        "gallery_context": scene_context.get("gallery_context", {}),
+        "file_context": scene_context.get("file_context", {}),
+        "active_goal": scene_context.get("active_goal"),
+        "active_scene": scene_context.get("active_scene"),
+        "executor_mode": "single_scene_contract",
+        "profile_version": "test36",
+    }
+
+
+# =====================================================
+# TEST 37
+# Unified Semantic Processor State
+# Canonical interpretation for processor/executor.
+# =====================================================
+
+def build_semantic_processor_state(
+    interpretation_state,
+    execution_plan=None
+):
+    interpretation_state = interpretation_state or {}
+    execution_plan = execution_plan or {}
+
+    return {
+        "transport": "transport_state",
+        "processor_contract": "canonical",
+        "interpretation_state": interpretation_state,
+        "execution_plan": execution_plan,
+        "semantic_inputs": {
+            "text": interpretation_state.get("scene_context", {}).get("semantic_profile", {}).get("input_text"),
+            "voice": interpretation_state.get("voice_context", {}),
+            "images": interpretation_state.get("vision_context", {}),
+            "gallery": interpretation_state.get("gallery_context", {}),
+            "files": interpretation_state.get("file_context", {}),
+            "assistant": interpretation_state.get("assistant_response"),
+            "history": interpretation_state.get("dialogue_vector", []),
+        },
+        "scene_understanding": {
+            "active_scene": interpretation_state.get("active_scene"),
+            "active_goal": interpretation_state.get("active_goal"),
+            "continuity": True,
+            "single_route": True,
+        },
+        "profile_version": "test37"
+    }
+
+
+# =====================================================
+# TEST 38
+# Dialogue Understanding Core
+# Unified processor response context.
+# =====================================================
+
+def build_dialogue_understanding_core(
+    processor_state,
+    executor_state=None
+):
+    processor_state = processor_state or {}
+    executor_state = executor_state or {}
+
+    semantic_inputs = processor_state.get("semantic_inputs", {})
+
+    return {
+        "transport": "transport_state",
+        "dialogue_understanding": {
+            "user_text": semantic_inputs.get("text"),
+            "voice": semantic_inputs.get("voice"),
+            "images": semantic_inputs.get("images"),
+            "gallery": semantic_inputs.get("gallery"),
+            "files": semantic_inputs.get("files"),
+            "assistant_response": semantic_inputs.get("assistant"),
+            "dialogue_history": semantic_inputs.get("history", []),
+            "scene_understanding": processor_state.get("scene_understanding", {}),
+        },
+        "processor_reasoning": {
+            "single_scene": True,
+            "history_aware": True,
+            "response_context": True,
+            "executor_shared_context": executor_state,
+        },
+        "profile_version": "test38"
+    }
+
+
+# =====================================================
+# TEST 38.1
+# Dialogue Optimization Layer
+# Extends Test 38 without introducing new routes.
+# =====================================================
+
+SEMANTIC_EVIDENCE_PRIORITY = (
+    "active_goal",
+    "assistant_response",
+    "dialogue_history",
+    "voice_context",
+    "vision_context",
+    "gallery_context",
+    "file_context",
+    "semantic_profile",
+)
+
+def optimize_dialogue_understanding(dialogue_core):
+    dialogue_core = dialogue_core or {}
+
+    understanding = dialogue_core.get("dialogue_understanding", {})
+
+    return {
+        "transport": "transport_state",
+        "dialogue_understanding": understanding,
+        "optimization": {
+            "semantic_priority": list(SEMANTIC_EVIDENCE_PRIORITY),
+            "history_weight": 0.40,
+            "assistant_weight": 0.20,
+            "goal_weight": 0.25,
+            "multimodal_weight": 0.15,
+            "response_continuity": True,
+            "scene_consistency": True,
+            "executor_alignment": True,
+            "processor_alignment": True,
+        },
+        "canonical_reasoning": {
+            "single_scene": True,
+            "single_contract": True,
+            "single_transport": True,
+            "reuse_previous_answer": True,
+            "preserve_dialogue_vector": True,
+        },
+        "profile_version": "test38.1"
+    }
+
+
+# =====================================================
+# TEST 38.2
+# Legacy Trigger Isolation
+# Removes legacy influence from semantic reasoning.
+# =====================================================
+
+LEGACY_TRIGGER_FLAGS = (
+    "legacy_keyword_matching",
+    "legacy_route_enabled",
+    "legacy_detectors_enabled",
+    "legacy_detectors_fallback",
+    "legacy_trigger_mode",
+)
+
+def build_semantic_interpretation_contract(dialogue_optimization):
+    dialogue_optimization = dialogue_optimization or {}
+
+    return {
+        "transport": "transport_state",
+        "semantic_contract": {
+            "mode": "canonical_semantic",
+            "legacy_isolated": True,
+            "single_scene": True,
+            "single_dialogue": True,
+            "single_processor": True,
+            "single_executor": True,
+        },
+        "disabled_legacy_flags": list(LEGACY_TRIGGER_FLAGS),
+        "dialogue_optimization": dialogue_optimization,
+        "reasoning_policy": {
+            "history_first": True,
+            "assistant_context": True,
+            "goal_driven": True,
+            "multimodal_fusion": True,
+            "trigger_independent": True,
+            "scene_continuity": True,
+        },
+        "profile_version": "test38.2"
+    }
+
+
+# =====================================================
+# TEST 39
+# Canonical Semantic Runtime
+# Replaces remaining descriptive placeholders with code.
+# =====================================================
+
+CANONICAL_SEMANTIC_RUNTIME = {
+    "transport":"transport_state",
+    "reasoning":"semantic_only",
+    "legacy_trigger_execution":False,
+    "single_scene":True,
+    "single_processor":True,
+    "single_executor":True,
+}
+
+def build_canonical_semantic_runtime(
+    semantic_contract,
+    processor_state,
+    dialogue_core
+):
+    semantic_contract = semantic_contract or {}
+    processor_state = processor_state or {}
+    dialogue_core = dialogue_core or {}
+
+    dialogue = dialogue_core.get("dialogue_understanding", {})
+    optimization = semantic_contract.get("reasoning_policy", {})
+
+    runtime = {
+        "transport":"transport_state",
+        "scene": dialogue.get("scene_understanding", {}),
+        "dialogue": dialogue,
+        "processor": processor_state,
+        "reasoning_policy": optimization,
+        "continuity_vector":{
+            "history": dialogue.get("dialogue_history", []),
+            "assistant": dialogue.get("assistant_response"),
+            "goal": dialogue.get("scene_understanding",{}).get("active_goal"),
+        },
+        "legacy":{
+            "enabled": False,
+            "trigger_execution": False,
+            "keyword_matching": False,
+        },
+        "profile_version":"test39"
+    }
+
+    runtime["input_sources"] = {
+        k:v for k,v in (
+            ("text",dialogue.get("user_text")),
+            ("voice",dialogue.get("voice")),
+            ("images",dialogue.get("images")),
+            ("gallery",dialogue.get("gallery")),
+            ("files",dialogue.get("files")),
+        ) if v not in (None,{},[])
+    }
+
+    return runtime
+
+
+# =====================================================
+# TEST 39.1
+# Canonical Semantic Fusion
+# =====================================================
+
+def fuse_semantic_inputs(runtime_state):
+    runtime_state = runtime_state or {}
+
+    inputs = dict(runtime_state.get("input_sources", {}))
+    continuity = runtime_state.get("continuity_vector", {})
+    scene = runtime_state.get("scene", {})
+
+    fused_context = {
+        "transport": "transport_state",
+        "scene": scene,
+        "goal": continuity.get("goal"),
+        "history": continuity.get("history", []),
+        "assistant_response": continuity.get("assistant"),
+        "modalities": {
+            "text": inputs.get("text"),
+            "voice": inputs.get("voice"),
+            "images": inputs.get("images"),
+            "gallery": inputs.get("gallery"),
+            "files": inputs.get("files"),
+        },
+        "semantic_state": {
+            "single_route": True,
+            "multimodal_fusion": True,
+            "legacy_trigger_enabled": False,
+            "context_complete": True,
+        },
+        "profile_version": "test39.1",
+    }
+
+    fused_context["available_modalities"] = [
+        name for name, value in fused_context["modalities"].items()
+        if value not in (None, {}, [], "")
+    ]
+
+    return fused_context
+
+
+def build_processor_execution_context(runtime_state):
+    runtime_state = runtime_state or {}
+    fused = fuse_semantic_inputs(runtime_state)
+
+    return {
+        "transport": "transport_state",
+        "semantic_context": fused,
+        "executor_context": fused,
+        "processor_context": fused,
+        "profile_version": "test39.1",
+    }
