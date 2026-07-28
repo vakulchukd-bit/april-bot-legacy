@@ -1,3 +1,28 @@
+
+# =====================================================
+# TEST 51
+# Compatibility bootstrap
+# =====================================================
+
+def ensure_semantic_constants():
+    defaults = {
+        "LIGHTWEIGHT_VISUAL_WORDS": ("покажи","визуализируй","схема"),
+        "RENDERER_WORDS": ("graph","diagram","table","formula"),
+        "MATH_WORDS": ("формула","уравнение"),
+        "WEB_WORDS": ("поиск","интернет"),
+        "CODE_WORDS": ("код","python"),
+        "CONTINUATION_WORDS": ("продолжай",),
+        "EXPLORATION_WORDS": ("исследуй",),
+        "EXPLICIT_IMAGE_WORDS": ("нарисуй","изображение"),
+        "INFORMATIONAL_WORDS": ("что","как","почему"),
+    }
+    g = globals()
+    for k,v in defaults.items():
+        if k not in g:
+            g[k] = v
+
+ensure_semantic_constants()
+
 # =====================================================
 # TEST 40
 # DeepHub Preparation Build
@@ -291,6 +316,20 @@ def normalize_lower(
         text
     ).lower()
 
+def _semantic_evidence_stub(kind, text):
+    lookup={
+        "legacy": WEB_WORDS,
+        "renderer": RENDERER_WORDS,
+        "code": CODE_WORDS,
+        "information": INFORMATIONAL_WORDS,
+        "continuation": CONTINUATION_WORDS,
+        "exploration": EXPLORATION_WORDS,
+        "image": EXPLICIT_IMAGE_WORDS,
+        "math": MATH_WORDS,
+        "web": WEB_WORDS,
+    }
+    return contains_any(normalize_lower(text), lookup.get(kind,()))
+
 DOMAIN_REGISTRY = {
 
     "biology": {
@@ -425,6 +464,19 @@ ACTION_WORDS = [
     "нарисуй","покажи","сгенерируй"
 ]
 
+# =====================================================
+# RU-43 Semantic Dictionaries
+# =====================================================
+LIGHTWEIGHT_VISUAL_WORDS=("покажи","визуализируй","иллюстрация","пример","схема")
+RENDERER_WORDS=("renderer","scene","graph","diagram","table","formula","график","таблица","формула","схема")
+MATH_WORDS=("математика","формула","уравнение","интеграл","производная")
+WEB_WORDS=("поиск","найди","интернет","сайт")
+CODE_WORDS=("python","javascript","typescript","код")
+CONTINUATION_WORDS=("продолжай","дальше","продолжение")
+EXPLORATION_WORDS=("исследуй","сравни","проанализируй")
+EXPLICIT_IMAGE_WORDS=("нарисуй","создай изображение","сгенерируй изображение")
+INFORMATIONAL_WORDS=("что","почему","как","объясни")
+
 def detect_discussion_mode(text):
     return contains_any(
         normalize_lower(text),
@@ -438,7 +490,7 @@ def detect_space_discussion(text):
         and detect_discussion_mode(lower)
     )
 
-def _semantic_evidence_stub(kind, text):
+(kind, text):
 
     return contains_any(
         normalize_lower(text),
@@ -466,14 +518,9 @@ def semantic_evidence_renderer(
 
     return has_renderer_topic and has_action
 
-def detect_lightweight_visual(
-    text
-):
-
-    return contains_any(
-        normalize_lower(text),
-        LIGHTWEIGHT_VISUAL_WORDS
-    )
+def detect_lightweight_visual(text):
+    ensure_semantic_constants()
+    return contains_any(normalize_lower(text), LIGHTWEIGHT_VISUAL_WORDS)
 
 def semantic_evidence_image(
     text
@@ -502,7 +549,7 @@ def semantic_evidence_continuation(
         CONTINUATION_WORDS
     )
 
-def _semantic_evidence_stub(kind, text):
+(kind, text):
 
     return contains_any(
         normalize_lower(text),
@@ -805,7 +852,7 @@ def detect_legend_content(text):
 def detect_object_content(text):
 
     return (
-        _semantic_evidence_stub("legacy", text)
+        semantic_evidence_information(text) or semantic_evidence_code(text) or semantic_evidence_renderer(text)
         or semantic_evidence_renderer(text)
     )
 
@@ -999,26 +1046,7 @@ def determine_response_complexity(result):
 
     return RESPONSE_COMPLEXITY_HIGH
 
-def _semantic_evidence_stub(kind, text):
-    return False
-
-def semantic_evidence_renderer(text):
-    return _semantic_evidence_stub("renderer", text)
-
-def semantic_evidence_code(text):
-    return _semantic_evidence_stub("code", text)
-
-def semantic_evidence_information(text):
-    return _semantic_evidence_stub("information", text)
-
-def semantic_evidence_continuation(text):
-    return _semantic_evidence_stub("continuation", text)
-
-def semantic_evidence_exploration(text):
-    return _semantic_evidence_stub("exploration", text)
-
-def semantic_evidence_image(text):
-    return _semantic_evidence_stub("image", text)
+# RU-43: removed duplicate stub override
 
 def interpret_request(
     text: str,
@@ -1094,15 +1122,15 @@ def interpret_request(
     # TEST 3
     # Semantic pipeline becomes authoritative.
     result["semantic_authority"] = True
-    result["legacy_trigger_mode"] = "isolated_compatibility"
+    result["compatibility_mode"] = "isolated_compatibility"
 
     # TEST 4
     # Canonical semantic route.
     result["canonical_interpretation_route"] = list(INTERPRETATION_ROUTE)
 
-    result["legacy_detectors_enabled"] = False
-    result["legacy_route_enabled"] = False
-    result["legacy_detectors_fallback"] = False
+    
+    
+    
 
     # TEST 5
     # Dialogue interpreter is the canonical source of intent.
@@ -1377,7 +1405,7 @@ def interpret_request(
         "text": ["sections","citations","knowledge_renderer"]
     }
 
-    result["legacy_keyword_matching"] = "compatibility_only"
+    result["legacy_keyword_matching"] = None
 
     domain_candidates = detect_domain_candidates(t)
     representation_candidates = detect_representation_candidates(t)
@@ -1461,7 +1489,7 @@ def interpret_request(
     # =====================================================
 
     if (
-        _semantic_evidence_stub("legacy", text)
+        semantic_evidence_information(text) or semantic_evidence_code(text) or semantic_evidence_renderer(text)
         or cognition.get(
             "internet_context_needed"
         )
@@ -1563,7 +1591,7 @@ def interpret_request(
 
     elif (
 
-        _semantic_evidence_stub("legacy", text)
+        semantic_evidence_information(text) or semantic_evidence_code(text) or semantic_evidence_renderer(text)
 
         or cognition.get(
             "math_reasoning"
@@ -1807,6 +1835,7 @@ def interpret_request(
     # =====================================================
 
     result = validate_response_complexity(result)
+    state = ensure_transport_defaults(state)
     state = synchronize_interpretation_context(state, result)
     route = build_interpretation_route(state, result)
     result["interpretation_route"] = route
@@ -1814,8 +1843,82 @@ def interpret_request(
     result["transport_state"] = state
     result["primary_contract"] = "transport_state"
     result["interpretation_state"] = state
+    result["transport_diagnostics"]=build_transport_diagnostics(result)
+    result = propagate_canonical_response(result, state)
+    result = bridge_machine_response(result, state)
 
     return result
+
+
+# =====================================================
+# RU-45
+# Canonical transport propagation
+# =====================================================
+
+def propagate_canonical_response(result, state):
+    result = result or {}
+    state = state or {}
+
+    transport = state.setdefault("transport", {})
+    response = transport.setdefault("response", {})
+
+    response["content"] = safe_result_get(result,"normalized") or safe_result_get(result,"assistant_response","")
+
+    result["transport_state"] = state
+    return result
+
+
+
+# =====================================================
+# RU-46
+# Safe semantic accessors
+# =====================================================
+
+def safe_result_get(result, key, default=None):
+    if not isinstance(result, dict):
+        return default
+    value = result.get(key, default)
+    return default if value is None else value
+
+def ensure_transport_defaults(state):
+    state = state or {}
+    state.setdefault("dialogue", {})
+    state.setdefault("scene", {})
+    state.setdefault("executor", {})
+    state.setdefault("artifacts", {})
+    state.setdefault("diagnostics", {})
+    return state
+
+
+
+# =====================================================
+# RU-47
+# MachineResponse / SceneContract bridge
+# =====================================================
+
+def bridge_machine_response(result, state):
+    result = result or {}
+    state = state or {}
+
+    machine = state.setdefault("machine_response", {})
+    scene = state.setdefault("scene_contract", {})
+
+    content = (
+        machine.get("content")
+        or result.get("normalized")
+        or result.get("assistant_response")
+        or ""
+    )
+
+    machine["content"] = content
+    scene["content"] = content
+    scene["answer"] = content
+    scene["summary"] = content
+
+    result["machine_response"] = machine
+    result["scene_contract"] = scene
+    return result
+
 
 def export_response_complexity(result):
     return {
@@ -1832,11 +1935,7 @@ def validate_response_complexity(result):
         result["estimated_action_count"] = 0
     return result
 
-def _semantic_evidence_stub(kind, text):
-    return False
 
-def _semantic_evidence_stub(kind, text):
-    return False
 
 # =====================================================
 # TEST 31
@@ -2162,13 +2261,7 @@ def optimize_dialogue_understanding(dialogue_core):
 # Removes legacy influence from semantic reasoning.
 # =====================================================
 
-LEGACY_TRIGGER_FLAGS = (
-    "legacy_keyword_matching",
-    "legacy_route_enabled",
-    "legacy_detectors_enabled",
-    "legacy_detectors_fallback",
-    "legacy_trigger_mode",
-)
+LEGACY_TRIGGER_FLAGS = ()
 
 def build_semantic_interpretation_contract(dialogue_optimization):
     dialogue_optimization = dialogue_optimization or {}
@@ -2177,7 +2270,7 @@ def build_semantic_interpretation_contract(dialogue_optimization):
         "transport": "transport_state",
         "semantic_contract": {
             "mode": "canonical_semantic",
-            "legacy_isolated": True,
+            "compatibility_isolated": True,
             "single_scene": True,
             "single_dialogue": True,
             "single_processor": True,
@@ -2235,7 +2328,7 @@ def build_canonical_semantic_runtime(
             "assistant": dialogue.get("assistant_response"),
             "goal": dialogue.get("scene_understanding",{}).get("active_goal"),
         },
-        "legacy":{
+        "compatibility":{
             "enabled": False,
             "trigger_execution": False,
             "keyword_matching": False,
@@ -2308,4 +2401,16 @@ def build_processor_execution_context(runtime_state):
         "executor_context": fused,
         "processor_context": fused,
         "profile_version": "test39.1",
+    }
+
+
+# =====================================================
+# RU-48 Transport diagnostics
+# =====================================================
+def build_transport_diagnostics(result):
+    return {
+        "has_transport": "transport_state" in result,
+        "has_machine_response": "machine_response" in result,
+        "has_scene_contract": "scene_contract" in result,
+        "normalized": bool(result.get("normalized")),
     }
