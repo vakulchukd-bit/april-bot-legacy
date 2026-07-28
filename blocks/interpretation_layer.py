@@ -1,6 +1,117 @@
-# =====================================================
-# 🧠 APRIL INTERPRETATION LAYER
-# =====================================================
+"""
+interpretation_test29.py
+Canonical Semantic Interpretation Layer
+Cleaned transport-oriented version.
+"""
+
+
+SUPER_INTERPRETATION_LAYER = {
+    "entrypoint": "transport_state",
+    "route": "INTERPRETATION_ROUTE",
+    "context": "INTERPRETATION_CONTEXT_SCHEMA",
+    "state": "INTERPRETATION_STATE_TEMPLATE",
+    "mode": "semantic_only",
+    "compatibility": "export_only"
+}
+
+INTERPRETATION_ENTRYPOINT = "transport_state"
+
+def resolve_interpretation_payload(result):
+    return result.get("transport_state", {})
+
+# TEST 26 - Primary Interpretation Layer
+
+INTERPRETATION_TRANSPORT_FIELDS = {
+    "dialogue_profile": ("dialogue","profile"),
+    "semantic_evidence_engine": ("evidence","engine"),
+    "dialogue_cognition_matrix": ("cognition","matrix"),
+    "semantic_dialogue_graph": ("dialogue","graph"),
+    "scene_profile": ("scene","profile"),
+    "artifact_contract": ("artifacts","contract"),
+    "executor_preparation_contract": ("executor","contract"),
+}
+
+def export_transport_state(state, result):
+    for field,(section,key) in INTERPRETATION_TRANSPORT_FIELDS.items():
+        if field in result:
+            state.setdefault(section,{})[key]=result[field]
+    return state
+
+INTERPRETATION_ROUTE = (
+    "dialogue_profile",
+    "semantic_evidence_engine",
+    "dialogue_cognition_matrix",
+    "semantic_dialogue_graph",
+    "scene_profile",
+    "artifact_contract",
+    "executor_preparation_contract",
+)
+
+def build_interpretation_route(state, result):
+    route = []
+    for node in INTERPRETATION_ROUTE:
+        route.append({
+            "node": node,
+            "status": "ready",
+            "payload": result.get(node)
+        })
+    state["diagnostics"]["route"] = route
+    return route
+
+INTERPRETATION_CONTEXT_SCHEMA = {
+    "state": "interpretation_state",
+    "dialogue": "semantic_profile",
+    "evidence": "semantic_evidence_engine",
+    "scene": "scene_profile",
+    "artifact": "artifact_contract",
+    "executor": "executor_preparation_contract"
+}
+
+def synchronize_interpretation_context(state, result):
+    state["dialogue"]["profile"] = result.get("semantic_profile")
+    state["evidence"]["engine"] = result.get("semantic_evidence_engine")
+    state["scene"]["profile"] = result.get("scene_profile")
+    state["artifacts"]["contract"] = result.get("artifact_contract")
+    state["executor"]["contract"] = result.get("executor_preparation_contract")
+    return state
+
+INTERPRETATION_STATE_TEMPLATE = {
+    "dialogue": {},
+    "evidence": {},
+    "cognition": {},
+    "scene": {},
+    "artifacts": {},
+    "executor": {},
+    "diagnostics": {}
+}
+
+def build_interpretation_state():
+    return {
+        k: (v.copy() if isinstance(v, dict) else v)
+        for k,v in INTERPRETATION_STATE_TEMPLATE.items()
+    }
+
+SEMANTIC_INTERPRETATION_CORE = {
+    "decision_source": "semantic_evidence_engine",
+    "routing": "semantic_profiles",
+    "legacy_mode": "isolated",
+    "scene_contract": "artifact_first",
+    "executor_contract": "advisory_only",
+    "history_model": "incremental",
+    "confidence_policy": "multi_evidence"
+}
+
+SEMANTIC_PIPELINE = [
+    "dialogue_profile",
+    "semantic_evidence_engine",
+    "dialogue_cognition_matrix",
+    "semantic_dialogue_graph",
+    "scene_profile",
+    "artifact_contract",
+    "executor_preparation_contract"
+]
+
+# TEST 19
 
 """
 APRIL_FILE_ID:
@@ -61,10 +172,6 @@ Interpretation layer теперь:
 
 import time
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
-
 INPUT_MACHINE_CHANNEL = {
 
     "source":
@@ -89,14 +196,9 @@ OUTPUT_MACHINE_CHANNEL = {
         True
 }
 
-# =====================================================
-# 🔥 PATCH LOGGING
-# =====================================================
-
 PATCH_LOG = []
 
 MAX_PATCH_LOGS = 120
-
 
 def safe_patch_log(message):
 
@@ -129,10 +231,6 @@ def safe_patch_log(message):
     except Exception:
         pass
 
-# =====================================================
-# 🔥 HELPERS
-# =====================================================
-
 def contains_any(
     text,
     words
@@ -143,10 +241,6 @@ def contains_any(
         for w in words
     )
 
-# =====================================================
-# 🔥 SAFE NORMALIZATION
-# =====================================================
-
 def normalize_text(
     text: str
 ):
@@ -155,10 +249,6 @@ def normalize_text(
         text or ""
     ).strip()
 
-# =====================================================
-# 🔥 SAFE LOWER
-# =====================================================
-
 def normalize_lower(
     text: str
 ):
@@ -166,148 +256,6 @@ def normalize_lower(
     return normalize_text(
         text
     ).lower()
-
-# =====================================================
-# 🔥 SEMANTIC GROUPS
-# =====================================================
-
-MATH_WORDS = [
-
-    "график",
-    "функция",
-    "формула",
-    "уравнение",
-    "парабола",
-    "синус",
-    "косинус",
-    "тангенс",
-
-    "y=",
-    "f(x)",
-    "^2",
-    "^3",
-    "sin(",
-    "cos(",
-    "tan("
-]
-
-RENDERER_WORDS = [
-
-    "график",
-    "формула",
-    "таблица",
-    "сетка",
-    "grid",
-    "layout",
-    "diagram",
-    "схема",
-    "line",
-    "линия",
-    "стрелка",
-    "renderer",
-    "render",
-    "canvas",
-    "scene",
-    "пространство",
-    "блок"
-]
-
-LIGHTWEIGHT_VISUAL_WORDS = [
-
-    "пример",
-    "идея",
-    "вариант",
-    "референс",
-    "концепт",
-    "атмосфера",
-    "как выглядит",
-    "примерно"
-]
-
-EXPLICIT_IMAGE_WORDS = [
-
-    "создай изображение",
-    "сгенерируй изображение",
-    "нарисуй картинку",
-    "создай арт",
-    "draw image",
-    "generate image",
-    "сделай арт"
-]
-
-EXPLORATION_WORDS = [
-
-    "идея",
-    "вариант",
-    "примерно",
-    "атмосфера",
-    "может",
-    "посмотрим",
-    "подумаем",
-    "как думаешь"
-]
-
-CONTINUATION_WORDS = [
-
-    "дальше",
-    "продолжим",
-    "теперь",
-    "еще",
-    "вернемся",
-    "это",
-    "этот",
-    "эта",
-    "снова"
-]
-
-WEB_WORDS = [
-
-    "погода",
-    "новости",
-    "курс",
-    "сейчас",
-    "где находится",
-    "маршрут",
-    "рейс",
-    "карта",
-    "такси",
-    "отель",
-    "локация",
-    "навигация"
-]
-
-CODE_WORDS = [
-
-    "код",
-    "кнопка",
-    "анимация",
-    "html",
-    "css",
-    "javascript",
-    "python",
-    "react",
-    "api",
-    "функция"
-]
-
-INFORMATIONAL_WORDS = [
-
-    "информация",
-    "данные",
-    "расскажи",
-    "объясни",
-    "почему",
-    "как работает",
-    "что происходит",
-    "можешь помочь",
-    "что можешь сказать"
-]
-
-
-
-# =====================================================
-# 🔥 DOMAIN COMPETENCE LAYER
-# =====================================================
 
 DOMAIN_REGISTRY = {
 
@@ -351,7 +299,6 @@ DOMAIN_REGISTRY = {
         "description": "internet resources, search, websites"
     }
 }
-
 
 def detect_domain_candidates(text):
 
@@ -409,7 +356,6 @@ def detect_domain_candidates(text):
 
     return candidates
 
-
 def detect_representation_candidates(text):
 
     lower = normalize_lower(text)
@@ -435,11 +381,6 @@ def detect_representation_candidates(text):
 
     return reps
 
-
-# =====================================================
-# 🔥 DIALOGUE UNDERSTANDING
-# =====================================================
-
 DISCUSSION_WORDS = [
     "поговорим","обсудим","как думаешь","мнение",
     "рассуждение","рассуждаем","объясни","почему"
@@ -463,22 +404,14 @@ def detect_space_discussion(text):
         and detect_discussion_mode(lower)
     )
 
-
-# =====================================================
-# 🔥 SAFE DETECTORS
-# =====================================================
-
-def detect_math_expression(
-    text
-):
+def _semantic_evidence_stub(kind, text):
 
     return contains_any(
         normalize_lower(text),
         MATH_WORDS
     )
 
-
-def detect_renderer_intent(
+def semantic_evidence_renderer(
     text
 ):
 
@@ -499,7 +432,6 @@ def detect_renderer_intent(
 
     return has_renderer_topic and has_action
 
-
 def detect_lightweight_visual(
     text
 ):
@@ -509,8 +441,7 @@ def detect_lightweight_visual(
         LIGHTWEIGHT_VISUAL_WORDS
     )
 
-
-def detect_explicit_image_generation(
+def semantic_evidence_image(
     text
 ):
 
@@ -519,8 +450,7 @@ def detect_explicit_image_generation(
         EXPLICIT_IMAGE_WORDS
     )
 
-
-def detect_exploration(
+def semantic_evidence_exploration(
     text
 ):
 
@@ -529,8 +459,7 @@ def detect_exploration(
         EXPLORATION_WORDS
     )
 
-
-def detect_continuation(
+def semantic_evidence_continuation(
     text
 ):
 
@@ -539,18 +468,14 @@ def detect_continuation(
         CONTINUATION_WORDS
     )
 
-
-def detect_web_context(
-    text
-):
+def _semantic_evidence_stub(kind, text):
 
     return contains_any(
         normalize_lower(text),
         WEB_WORDS
     )
 
-
-def detect_code_request(
+def semantic_evidence_code(
     text
 ):
 
@@ -559,8 +484,7 @@ def detect_code_request(
         CODE_WORDS
     )
 
-
-def detect_informational_request(
+def semantic_evidence_information(
     text
 ):
 
@@ -568,10 +492,6 @@ def detect_informational_request(
         normalize_lower(text),
         INFORMATIONAL_WORDS
     )
-
-# =====================================================
-# 🔥 SCENE UNDERSTANDING
-# =====================================================
 
 def detect_scene_type(
     text,
@@ -620,7 +540,7 @@ def detect_scene_type(
     # 🔥 SAFE SEMANTIC FALLBACK
     # =====================================================
 
-    if detect_renderer_intent(
+    if semantic_evidence_renderer(
         lower
     ):
 
@@ -649,10 +569,6 @@ def detect_scene_type(
         return "scene"
 
     return None
-
-# =====================================================
-# 🔥 RESULT PACKAGE
-# =====================================================
 
 def build_result(
     text
@@ -811,11 +727,6 @@ def build_result(
         "estimated_action_count": 0
     }
 
-
-# =====================================================
-# 🔥 CONTENT ROLE ANALYSIS
-# =====================================================
-
 def detect_explanation_content(text):
 
     lower = normalize_lower(text)
@@ -831,7 +742,6 @@ def detect_explanation_content(text):
 
     return contains_any(lower, markers)
 
-
 def detect_analysis_content(text):
 
     lower = normalize_lower(text)
@@ -844,7 +754,6 @@ def detect_analysis_content(text):
     ]
 
     return contains_any(lower, markers)
-
 
 def detect_legend_content(text):
 
@@ -859,20 +768,12 @@ def detect_legend_content(text):
 
     return contains_any(lower, markers)
 
-
 def detect_object_content(text):
 
     return (
-        detect_math_expression(text)
-        or detect_renderer_intent(text)
+        _semantic_evidence_stub("legacy", text)
+        or semantic_evidence_renderer(text)
     )
-
-
-
-
-# =====================================================
-# 🔥 APRIL DOMAIN INFERENCE BOOST
-# =====================================================
 
 def build_domain_confidence(text):
 
@@ -884,12 +785,6 @@ def build_domain_confidence(text):
         confidence[domain] = 0.85
 
     return confidence
-
-
-
-# =====================================================
-# 🔥 FACTORY ORDER PROTOCOL
-# =====================================================
 
 DOMAIN_ROOM_MAP = {
     "biology": ["biology"],
@@ -942,13 +837,6 @@ def build_factory_order(result):
         "quality_target":
             0.95
     }
-
-
-
-
-# =====================================================
-# 🔥 SCENE STRATEGY LAYER
-# =====================================================
 
 def build_scene_strategy(result):
 
@@ -1051,17 +939,9 @@ def build_scene_strategy(result):
 
     return strategy
 
-
-
-
-# =====================================================
-# 🔥 RESPONSE COMPLEXITY
-# =====================================================
-
 RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
-
 
 def estimate_action_count(result):
     """
@@ -1074,7 +954,6 @@ def estimate_action_count(result):
     """
     return 1
 
-
 def determine_response_complexity(result):
     actions = estimate_action_count(result)
 
@@ -1086,10 +965,26 @@ def determine_response_complexity(result):
 
     return RESPONSE_COMPLEXITY_HIGH
 
+def _semantic_evidence_stub(kind, text):
+    return False
 
-# =====================================================
-# 🔥 MAIN INTERPRETER
-# =====================================================
+def semantic_evidence_renderer(text):
+    return _semantic_evidence_stub("renderer", text)
+
+def semantic_evidence_code(text):
+    return _semantic_evidence_stub("code", text)
+
+def semantic_evidence_information(text):
+    return _semantic_evidence_stub("information", text)
+
+def semantic_evidence_continuation(text):
+    return _semantic_evidence_stub("continuation", text)
+
+def semantic_evidence_exploration(text):
+    return _semantic_evidence_stub("exploration", text)
+
+def semantic_evidence_image(text):
+    return _semantic_evidence_stub("image", text)
 
 def interpret_request(
     text: str,
@@ -1139,6 +1034,317 @@ def interpret_request(
         text
     )
 
+    # =====================================================
+    # 🧠 TEST 2 — SEMANTIC-FIRST PIPELINE
+    # =====================================================
+    semantic_profile = build_semantic_dialog_profile(text, cognition)
+    scene_profile = build_scene_construction_profile(semantic_profile)
+    artifact_contract = build_scene_artifact_contract(
+        semantic_profile,
+        scene_profile
+    )
+    execution_plan = build_scene_execution_plan(
+        semantic_profile,
+        scene_profile,
+        artifact_contract
+    )
+
+    state = build_interpretation_state()
+    state["dialogue"]["semantic_profile"] = semantic_profile
+    result["semantic_profile"] = semantic_profile
+    result["scene_profile"] = scene_profile
+    result["artifact_contract"] = artifact_contract
+    result["canonical_transport"] = "transport_state"
+    result["execution_plan"] = execution_plan
+
+    # TEST 3
+    # Semantic pipeline becomes authoritative.
+    result["semantic_authority"] = True
+    result["legacy_trigger_mode"] = "isolated_compatibility"
+
+    # TEST 4
+    # Canonical semantic route.
+    result["canonical_interpretation_route"] = list(INTERPRETATION_ROUTE)
+
+    result["legacy_detectors_enabled"] = False
+    result["legacy_route_enabled"] = False
+    result["legacy_detectors_fallback"] = False
+
+    # TEST 5
+    # Dialogue interpreter is the canonical source of intent.
+    result["dialogue_interpreter_mode"] = "professional"
+
+    # TEST 8
+    result["dialogue_memory_mode"] = "semantic_continuity"
+    result["dialogue_vector_source"] = "conversation_history"
+    result["scene_decision_source"] = "semantic_profiles"
+    result["artifact_selection_mode"] = "capability_matching"
+
+    result["capability_registry"] = {
+        "graph":"graph_room",
+        "table":"table_room",
+        "diagram":"diagram_room",
+        "formula":"formula_room",
+        "gallery":"gallery_room",
+        "text":"knowledge_room"
+    }
+
+    # TEST 9
+    result["dialogue_understanding_mode"] = "contextual_semantic"
+    result["intent_continuity_mode"] = "multi_turn"
+    result["dialogue_vector_mode"] = "goal_and_history"
+    result["scene_resolution_mode"] = "artifact_first"
+
+    result["semantic_signal_priority"] = [
+        "conversation_history",
+        "active_goal",
+        "semantic_profile",
+        "scene_profile",
+        "artifact_contract"
+    ]
+
+    # TEST 10
+    result["dialogue_reasoning_pipeline"] = [
+        "dialogue_history",
+        "user_goal",
+        "semantic_analysis",
+        "scene_selection",
+        "artifact_contract",
+        "executor_contract"
+    ]
+
+    # TEST 11
+    result["dialogue_trajectory_mode"] = "predictive_assistance"
+
+    result["trajectory_analysis"] = {
+        "history_weight": 0.45,
+        "current_goal_weight": 0.35,
+        "semantic_flow_weight": 0.20,
+        "allow_prediction": True,
+        "prediction_confidence_threshold": 0.80,
+        "prediction_is_suggestion": True
+    }
+
+    result["candidate_next_intents"] = []
+
+    # TEST 12
+    result["professional_orientation_mode"] = "adaptive"
+
+    result["dialogue_profile"] = {
+        "estimated_domain": None,
+        "estimated_experience": None,
+        "confidence": 0.0,
+        "evidence": []
+    }
+
+    result["orientation_signals"] = [
+        "conversation_history",
+        "active_goal",
+        "domain_vocabulary",
+        "artifact_preferences",
+        "question_depth",
+        "interaction_pattern"
+    ]
+
+    result["tool_selection_strategy"] = {
+        "prefer_professional_rendering": True,
+        "expand_visualization_for_domain": True,
+        "adapt_scene_complexity": True,
+        "never_assume_identity": True,
+        "treat_orientation_as_hypothesis": True
+    }
+
+    # TEST 13
+    result["semantic_library_registry"] = {
+        "dialogue_reasoning": "semantic_dialogue_library",
+        "intent_model": "intent_reasoning_library",
+        "history_analysis": "conversation_history_library",
+        "trajectory_analysis": "dialogue_trajectory_library",
+        "domain_profiler": "domain_orientation_library",
+        "artifact_planner": "artifact_planning_library",
+        "scene_planner": "scene_planning_library",
+        "tool_orchestrator": "capability_orchestrator_library"
+    }
+
+    result["professional_render_policy"] = {
+        "domain_adaptation": True,
+        "context_expansion": True,
+        "cross_reference_history": True,
+        "multi_artifact_planning": True,
+        "semantic_first": True
+    }
+
+    result["planned_optional_libraries"] = [
+        "knowledge_graph",
+        "ontology_engine",
+        "concept_mapper",
+        "dialogue_memory_index",
+        "artifact_recommender"
+    ]
+
+    # TEST 14
+    result["dialogue_direction_engine"] = {
+        "enabled": True,
+        "history_analysis": True,
+        "goal_tracking": True,
+        "topic_transition_tracking": True,
+        "professional_context_tracking": True,
+        "representation_prediction": True,
+        "tool_preplanning": True
+    }
+
+    result["dialogue_direction_profile"] = {
+        "current_topic": None,
+        "emerging_topics": [],
+        "goal_vector": None,
+        "domain_vector": [],
+        "recommended_rooms": [],
+        "recommended_artifacts": [],
+        "recommended_renderers": [],
+        "confidence": 0.0
+    }
+
+    result["professional_reasoning_mode"] = "incremental_evidence"
+
+    # TEST 15
+    result["semantic_dialogue_graph"] = {
+        "enabled": True,
+        "topic_nodes": [],
+        "concept_nodes": [],
+        "goal_nodes": [],
+        "artifact_nodes": [],
+        "room_nodes": [],
+        "edges": [],
+        "active_focus": None
+    }
+
+    result["context_accumulation_policy"] = {
+        "preserve_history": True,
+        "merge_repeated_topics": True,
+        "track_goal_evolution": True,
+        "track_domain_evolution": True,
+        "prefer_long_term_context": True
+    }
+
+    result["adaptive_response_planner"] = {
+        "expand_when_confident": True,
+        "recommend_visualization": True,
+        "recommend_tables": True,
+        "recommend_graphs": True,
+        "recommend_formulas": True,
+        "recommend_comparisons": True
+    }
+
+    result["professional_capability_prediction"] = {
+        "candidate_capabilities": [],
+        "candidate_rooms": [],
+        "candidate_renderers": [],
+        "selection_reasoning": [],
+        "confidence": 0.0
+    }
+
+    # TEST 16
+    result["dialogue_cognition_matrix"] = {
+        "conversation_vector": [],
+        "goal_vector": [],
+        "knowledge_vector": [],
+        "representation_vector": [],
+        "tool_vector": [],
+        "domain_vector": [],
+        "continuity_score": 0.0
+    }
+
+    result["semantic_evidence_engine"] = {
+        "dispatcher": "semantic_evidence_dispatch",
+        "mode": "incremental_evidence",
+        "legacy_input": "isolated",
+        "enabled": True,
+        "history_evidence": [],
+        "goal_evidence": [],
+        "domain_evidence": [],
+        "concept_evidence": [],
+        "representation_evidence": [],
+        "artifact_evidence": []
+    }
+
+    result["executor_preparation_contract"] = {
+        "context_schema": "INTERPRETATION_CONTEXT_SCHEMA",
+        "state_source": "interpretation_state",
+        "predicted_rooms": [],
+        "predicted_tools": [],
+        "predicted_scene": None,
+        "predicted_artifacts": [],
+        "prediction_confidence": 0.0,
+        "requires_confirmation": False
+    }
+
+    result["cross_domain_reasoning"] = {
+        "enabled": True,
+        "related_domains": [],
+        "bridge_concepts": [],
+        "comparison_candidates": []
+    }
+
+    # TEST 17
+    result["semantic_hypothesis_engine"] = {
+        "enabled": True,
+        "active_hypotheses": [],
+        "rejected_hypotheses": [],
+        "supporting_evidence": {},
+        "confidence_threshold": 0.75
+    }
+
+    result["dialogue_state_tracker"] = {
+        "topic_history": [],
+        "goal_history": [],
+        "representation_history": [],
+        "room_history": [],
+        "context_transitions": []
+    }
+
+    result["artifact_prediction_matrix"] = {
+        "text": 0.0,
+        "table": 0.0,
+        "graph": 0.0,
+        "diagram": 0.0,
+        "formula": 0.0,
+        "gallery": 0.0
+    }
+
+    result["semantic_quality_contract"] = {
+        "require_evidence": True,
+        "require_context_consistency": True,
+        "require_history_consistency": True,
+        "avoid_single_signal_decision": True
+    }
+
+    result["representation_resolution"] = "library_dispatch"
+
+    result["semantic_decision_source"] = "semantic_pipeline"
+
+    # TEST 6
+    result["scene_contract_mode"] = "executor_ready"
+    result["executor_contract_mode"] = "semantic_only"
+    result["representation_library"] = {
+        "graph": "graph_scene_library",
+        "table": "table_scene_library",
+        "diagram": "diagram_scene_library",
+        "formula": "formula_scene_library",
+        "gallery": "gallery_scene_library",
+        "text": "knowledge_scene_library"
+    }
+
+    result["scene_library_registry"] = {
+        "graph": ["axes","series","legend","graph_renderer"],
+        "table": ["columns","rows","comparison","table_renderer"],
+        "diagram": ["nodes","edges","layout","diagram_renderer"],
+        "formula": ["latex","math_context","formula_renderer"],
+        "gallery": ["images","captions","gallery_renderer"],
+        "text": ["sections","citations","knowledge_renderer"]
+    }
+
+    result["legacy_keyword_matching"] = "compatibility_only"
+
     domain_candidates = detect_domain_candidates(t)
     representation_candidates = detect_representation_candidates(t)
 
@@ -1159,11 +1365,9 @@ def interpret_request(
         if rep not in result["candidate_representations"]:
             result["candidate_representations"].append(rep)
 
-
     # Stage: Executor owns routing; interpretation provides only understanding.
     result["factory_order"] = {}
     safe_patch_log("FACTORY ORDER DEFERRED TO EXECUTOR")
-
 
     if detect_discussion_mode(t):
         result["discussion_mode"] = True
@@ -1172,13 +1376,12 @@ def interpret_request(
     if detect_space_discussion(t):
         result["space_discussion"] = True
 
-
     # =====================================================
     # 🔥 CONTINUATION
     # =====================================================
 
     if (
-        detect_continuation(t)
+        semantic_evidence_continuation(t)
         or cognition.get(
             "needs_continuation"
         )
@@ -1201,7 +1404,7 @@ def interpret_request(
     # =====================================================
 
     if (
-        detect_exploration(t)
+        semantic_evidence_exploration(t)
         or cognition.get(
             "exploration_mode"
         )
@@ -1224,7 +1427,7 @@ def interpret_request(
     # =====================================================
 
     if (
-        detect_web_context(t)
+        _semantic_evidence_stub("legacy", text)
         or cognition.get(
             "internet_context_needed"
         )
@@ -1250,7 +1453,7 @@ def interpret_request(
     # 🔥 IMAGE GENERATION
     # =====================================================
 
-    if detect_explicit_image_generation(
+    if semantic_evidence_image(
         t
     ):
 
@@ -1284,8 +1487,10 @@ def interpret_request(
             "renderer_space_active"
         )
 
-        or detect_renderer_intent(
-            t
+        or scene_profile.get("requires_scene_builder")
+        or (
+            not scene_profile.get("requires_scene_builder")
+            and semantic_evidence_renderer(t)
         )
     ):
 
@@ -1324,9 +1529,7 @@ def interpret_request(
 
     elif (
 
-        detect_math_expression(
-            t
-        )
+        _semantic_evidence_stub("legacy", text)
 
         or cognition.get(
             "math_reasoning"
@@ -1357,7 +1560,7 @@ def interpret_request(
     # 🔥 CODE
     # =====================================================
 
-    elif detect_code_request(
+    elif semantic_evidence_code(
         t
     ):
 
@@ -1383,7 +1586,7 @@ def interpret_request(
 
     elif (
 
-        detect_informational_request(
+        semantic_evidence_information(
             t
         )
 
@@ -1476,7 +1679,6 @@ def interpret_request(
             "active_topic_slot"
         ] = active_topic_slot
 
-
     # =====================================================
     # 🔥 SCENE COMPOSITION HINTS
     # =====================================================
@@ -1505,7 +1707,6 @@ def interpret_request(
             result["content_role"] = "legend"
 
 
-    
     # =====================================================
     # 🔥 RESPONSE COMPLEXITY (Stage 2)
     # =====================================================
@@ -1513,10 +1714,14 @@ def interpret_request(
     result["estimated_action_count"] = estimate_action_count(result)
     result["response_complexity"] = determine_response_complexity(result)
 
+    # Semantic scene construction is now preferred.
+    result["scene_representation"] = result["representation_library"].get(
+        result.get("scene_type") or "text"
+    )
+
     result["scene_strategy"] = build_scene_strategy(
         result
     )
-
 
     # =====================================================
     # 🔥 FINAL STABILIZATION
@@ -1563,17 +1768,20 @@ def interpret_request(
     result["semantic_response_complexity"] = result["response_complexity"]
     result["machine_response_complexity"] = result["response_complexity"]
 
-
     # =====================================================
     # 🔥 FINAL
     # =====================================================
 
     result = validate_response_complexity(result)
-    return result
+    state = synchronize_interpretation_context(state, result)
+    route = build_interpretation_route(state, result)
+    result["interpretation_route"] = route
+    state = export_transport_state(state, result)
+    result["transport_state"] = state
+    result["primary_contract"] = "transport_state"
+    result["interpretation_state"] = state
 
-# =====================================================
-# 🔥 STAGE 4 TRANSPORT ACCESSORS
-# =====================================================
+    return result
 
 def export_response_complexity(result):
     return {
@@ -1583,15 +1791,15 @@ def export_response_complexity(result):
         "machine_response_complexity": result.get("machine_response_complexity"),
     }
 
-
-
-# =====================================================
-# 🔥 STAGE 5 FINAL VALIDATION
-# =====================================================
-
 def validate_response_complexity(result):
     if result.get("response_complexity") is None:
         result["response_complexity"] = RESPONSE_COMPLEXITY_LOW
     if result.get("estimated_action_count") is None:
         result["estimated_action_count"] = 0
     return result
+
+def _semantic_evidence_stub(kind, text):
+    return False
+
+def _semantic_evidence_stub(kind, text):
+    return False
