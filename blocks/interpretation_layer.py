@@ -490,8 +490,7 @@ def detect_space_discussion(text):
         and detect_discussion_mode(lower)
     )
 
-(kind, text):
-
+def semantic_evidence_math(text):
     return contains_any(
         normalize_lower(text),
         MATH_WORDS
@@ -549,8 +548,7 @@ def semantic_evidence_continuation(
         CONTINUATION_WORDS
     )
 
-(kind, text):
-
+def semantic_evidence_web(text):
     return contains_any(
         normalize_lower(text),
         WEB_WORDS
