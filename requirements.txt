@@ -40,3 +40,31 @@ networkx
 graphviz
 pydot
 
+# === Semantic Interpretation Stack ===
+sentence-transformers
+transformers
+tokenizers
+
+# Vector Memory
+faiss-cpu
+chromadb
+
+# NLP
+spacy
+nltk
+
+# Ontology / Knowledge Graph
+owlready2
+networkit
+
+# Semantic Analysis
+rapidfuzz
+pydantic
+jsonschema
+diskcache
+scipy
+
+# Future Semantic Libraries
+langdetect
+rank-bm25
+orjson
