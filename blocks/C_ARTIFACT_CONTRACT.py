@@ -123,6 +123,15 @@ class ArtifactQuality:
 # =====================================================
 
 @dataclass
+
+# =====================================================
+# STAGE 1 PRESENTATION TRANSPORT (TEST)
+# =====================================================
+# Stage 1:
+# - Introduces canonical presentation hints.
+# - No scene generation changes yet.
+# - SceneContract logic intentionally unchanged.
+
 class ArtifactRenderContract:
 
     web_block: str = ""
@@ -134,6 +143,15 @@ class ArtifactRenderContract:
     responsive: bool = True
 
     exportable: bool = True
+
+    # Stage 1 transport hints
+    payload_type: str = ""
+    scene_block: str = ""
+    renderer: str = ""
+    priority: int = 100
+    complexity: str = "balanced"
+    layout: str = "single"
+
 
 # =====================================================
 # BASE ARTIFACT
@@ -415,7 +433,16 @@ def build_universal_contract(
     contract.fiber.identity.subscription = subscription
 
     if artifact is not None:
+        presentation = artifact.data.setdefault(
+            "presentation",
+            build_presentation_hint(
+                artifact.metadata.artifact_type,
+                artifact.data.get("complexity","balanced")
+            )
+        )
         contract.payload.artifacts.append(artifact.data)
+        contract.payload.scene["presentation"] = presentation
+        contract.machine_response.executor_hints["presentation"] = presentation
         contract.machine_response = MachineResponse(
             answer=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text',''),
             content=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text',''),
@@ -700,6 +727,26 @@ class UniversalArtifactContract:
     payload: MachinePayload = field(default_factory=MachinePayload)
     artifact: Optional[BaseArtifact] = None
 
+
+
+
+# =====================================================
+# STAGE 2 PRESENTATION TRANSPORT (TEST)
+# =====================================================
+# Canonical presentation helper.
+
+
+def build_presentation_hint(artifact_type: str, complexity: str = "balanced") -> dict:
+    renderer = SCENE_BLOCK_REGISTRY.get(artifact_type, "TextBlock")
+    return {
+        "payload_type": artifact_type,
+        "scene_block": artifact_type,
+        "renderer": renderer,
+        "viewer": renderer,
+        "priority": 100,
+        "complexity": complexity,
+        "layout": "single" if complexity == "compact" else "adaptive",
+    }
 
 
 # =====================================================
@@ -988,11 +1035,54 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
     return scene
 
 
+
+# =====================================================
+# STAGE 3 PRESENTATION TRANSPORT (TEST)
+# =====================================================
+
+
+def build_canonical_scene_blocks(scene):
+    """
+    Stage 3 (test):
+    Build a default render block from presentation hints when
+    no render_blocks were produced upstream.
+    """
+    blocks = list(scene.blocks or [])
+    if blocks:
+        return blocks
+
+    metadata = scene.metadata or {}
+    presentation = metadata.get("presentation", {})
+
+    payload_type = presentation.get("payload_type", "text")
+    renderer = presentation.get(
+        "renderer",
+        SCENE_BLOCK_REGISTRY.get(payload_type, "TextBlock")
+    )
+
+    content = (
+        getattr(scene, "answer", "")
+        or getattr(scene, "content", "")
+        or getattr(scene, "summary", "")
+    )
+
+    if not content:
+        return []
+
+    return [{
+        "type": payload_type,
+        "renderer": renderer,
+        "viewer": presentation.get("viewer", renderer),
+        "content": content,
+        "priority": presentation.get("priority", 100),
+    }]
+
+
 def build_scene_contract(scene: MachineScene) -> SceneContract:
     # Stage 3: finalize the canonical SceneContract from MachineScene.
     """Canonical SceneContract builder from MachineScene."""
     contract = scene.contract or create_default_scene_contract()
-    contract.blocks = list(scene.blocks or [])
+    contract.blocks = build_canonical_scene_blocks(scene)
     contract.metadata.update(scene.metadata or {})
     # Canonical transport fields must always reflect the latest scene state.
     contract.metadata["answer"] = getattr(scene, "answer", "")
