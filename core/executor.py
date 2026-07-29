@@ -1965,7 +1965,23 @@ def executor_cpu_lineage_report():
 
 
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
-    return
+    try:
+        if machine_response is not None:
+            print(
+                f"[EXECUTOR][{stage}] "
+                f"answer={len(getattr(machine_response,'answer','') or '')} "
+                f"content={len(getattr(machine_response,'content','') or '')} "
+                f"summary={len(getattr(machine_response,'summary','') or '')} "
+                f"blocks={len(getattr(machine_response,'render_blocks',[]) or [])} "
+                f"artifacts={len(getattr(machine_response,'artifacts',[]) or [])}"
+            )
+        if scene_contract is not None:
+            blocks = getattr(scene_contract, 'render_blocks', None)
+            if blocks is None and isinstance(scene_contract, dict):
+                blocks = scene_contract.get('render_blocks', [])
+            print(f"[EXECUTOR][{stage}] scene_contract_blocks={len(blocks or [])}")
+    except Exception as exc:
+        print(f"[EXECUTOR][{stage}] diag_error={exc}")
 
 
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
@@ -2067,6 +2083,7 @@ def executor_cpu_scene_pipeline(machine_response):
 # ==========================================================
 
 def executor_cpu_finalize_transport(machine_response):
+    executor_cpu_transport_diag('TRANSPORT_ENTRY', machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
     scene = executor_cpu_scene_pipeline(machine_response)
     conversation_space = getattr(machine_response, "conversation_space", None)
