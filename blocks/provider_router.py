@@ -1330,11 +1330,30 @@ async def generate_text(
         request = {
             "model": model,
             "input": normalized_input,
-            "temperature": temperature,
         }
 
         if max_output_tokens is not None:
             request["max_output_tokens"] = max_output_tokens
+
+        # GPT-5.6 Responses API compatibility:
+        # only legacy models receive temperature.
+        legacy_temperature_models = {
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+        }
+
+        if (
+            temperature is not None
+            and model in legacy_temperature_models
+        ):
+            request["temperature"] = temperature
+
+        provider_log({
+            "provider_model": model,
+            "request_keys": list(request.keys()),
+        })
 
         response = (
             openai_client.responses.create(
