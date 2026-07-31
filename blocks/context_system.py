@@ -1114,6 +1114,8 @@ def build_context_text(
         []
     )
 
+    active_dialog = build_active_dialog(state, text)
+
     image_context = state.get(
         "image_context"
     )
@@ -1252,7 +1254,7 @@ def build_context_text(
 
     passive_block = ""
 
-    if passive_memory:
+    if passive_memory and should_include_archived_memory(text, state):
 
         passive_block = (
 
@@ -1293,6 +1295,9 @@ def build_context_text(
 
 {summary_block}
 
+{build_dialog_focus_block(state,text)}
+
+ACTIVE DIALOG:\n{active_dialog}\n
 {passive_block}
 
 {image_block}
@@ -1612,6 +1617,52 @@ def build_deephub_context(
     )
 
     return payload
+
+
+
+
+# =====================================================
+# 🚀 DIALOG INTENT GATE
+# =====================================================
+
+REFERENCE_MARKERS={
+    "помнишь","вернемся","вернёмся","продолжим",
+    "тот","та","те","предыдущий","прошлый",
+    "аналогично","как раньше","как тогда","дальше"
+}
+
+def detect_dialog_intent(current_text,state):
+    t=normalize_lower(current_text)
+    scene=state.get("scene_state",{})
+    topic=normalize_lower(scene.get("trajectory",""))
+    if topic and topic in t:
+        return "CONTINUE_TOPIC"
+    if any(x in t for x in ("помнишь","вернем","вернём","как раньше","как тогда")):
+        return "RETURN_TO_TOPIC"
+    if any(x in t for x in ("аналог","сравни","как в прошл")):
+        return "COMPARE_WITH_PAST"
+    if any(x in t for x in ("тот","эта","предыдущ","прошл")):
+        return "REFERENCE_OBJECT"
+    return "NEW_TOPIC"
+
+def should_include_archived_memory(current_text,state):
+    intent=detect_dialog_intent(current_text,state)
+    if intent=="NEW_TOPIC":
+        return False
+    score=0.0
+    t=normalize_lower(current_text)
+    for m in REFERENCE_MARKERS:
+        if m in t:
+            score+=0.1
+    if intent=="CONTINUE_TOPIC":
+        score+=0.45
+    elif intent=="RETURN_TO_TOPIC":
+        score+=0.35
+    elif intent=="COMPARE_WITH_PAST":
+        score+=0.25
+    elif intent=="REFERENCE_OBJECT":
+        score+=0.2
+    return score>=0.55
 
 
 # =====================================================
@@ -2041,3 +2092,32 @@ def build_context_memory_bridge(state):
                 []
             )
     }
+
+
+# =====================================================
+# 🚀 DIALOG FOCUS VECTOR
+# =====================================================
+
+def compute_dialog_focus(state,current_text):
+    scene=state.get("scene_state",{})
+    focus=state.get("focus_state",state.get("dynamic_focus",{}))
+    return {
+        "active_goal":scene.get("goal",""),
+        "active_topic":scene.get("trajectory",""),
+        "focus_vector":focus.get("primary_focus",scene.get("trajectory","")),
+        "direction_vector":{
+            "continue":detect_dialog_intent(current_text,state)=="CONTINUE_TOPIC",
+            "return":detect_dialog_intent(current_text,state)=="RETURN_TO_TOPIC",
+            "new_topic":detect_dialog_intent(current_text,state)=="NEW_TOPIC",
+        }
+    }
+
+def build_dialog_focus_block(state,current_text):
+    f=compute_dialog_focus(state,current_text)
+    return (
+        "\nDIALOG FOCUS:\n"
+        f"Goal: {f['active_goal']}\n"
+        f"Topic: {f['active_topic']}\n"
+        f"Vector: {f['focus_vector']}\n"
+        f"Direction: {f['direction_vector']}"
+    )
