@@ -1,235 +1,10 @@
 
-# =============================================================================
-# APRIL STAGE 10 UPGRADE
-#
-# Stage 10: Unified Executor Orchestration Core
-#
-# Executor responsibilities:
-#   • orchestrate the complete canonical pipeline
-#   • guarantee one transport route
-#   • finalize MachineResponse, SceneContract and OutputContract
-#   • hand off a fully prepared scene to AprilWeb
-#
-# Executor is the single orchestration authority.
-# Runtime behaviour intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 9 UPGRADE
-#
-# Stage 9: Unified Canonical Output Contract
-#
-# Executor responsibilities:
-#   • produce one canonical MachineResponse
-#   • finalize SceneContract
-#   • verify render readiness
-#   • expose one output contract for AprilWeb
-#
-# Executor remains the single producer of the final output contract.
-# Runtime behaviour intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 8 UPGRADE
-#
-# Stage 8: Unified Executor Quality Control
-#
-# Executor responsibilities:
-#   • validate MachineResponse integrity
-#   • verify SceneContract completeness
-#   • validate artifact consistency
-#   • execute one canonical quality pipeline
-#
-# Quality validation is centralized inside Executor before rendering.
-# Runtime behaviour intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 7 UPGRADE
-#
-# Stage 7: Unified Executor Diagnostics
-#
-# Executor responsibilities:
-#   • produce a canonical execution trace
-#   • collect transport diagnostics
-#   • record SceneContract integrity
-#   • expose one diagnostic contract for downstream consumers
-#
-# Diagnostic ownership remains inside the Executor.
-# Runtime behaviour intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 6 UPGRADE
-#
-# Stage 6: Canonical Scene Contract Integration
-#
-# Executor responsibilities:
-#   • assemble the final SceneContract
-#   • bind artifacts, metadata and render blocks
-#   • preserve a single transport route
-#   • deliver one canonical scene to AprilWeb
-#
-# AprilWeb acts only as renderer of the prepared SceneContract.
-# Runtime behaviour intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 5 UPGRADE
-#
-# Stage 5: Presentation Reasoning & Artifact Composition
-#
-# Executor responsibilities:
-#   • build presentation reasoning
-#   • compose artifact bundles
-#   • select presentation strategy
-#   • prepare SceneContract payload
-#   • deliver one canonical artifact composition
-#
-# Single composition owner:
-#     Executor Central Processor
-#
-# Runtime behaviour intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 4 UPGRADE
-#
-# Stage 4: Unified Presentation Logic
-#
-# Canonical presentation order owned by Executor:
-#   Text -> Graph -> Graph Description -> Conclusion
-#   Text -> Table -> Table Description -> Conclusion
-#   Text -> Formula -> Explanation -> Example
-#
-# Executor is the single authority for presentation sequencing.
-# AprilWeb receives a ready SceneContract without reconstructing order.
-# Runtime behavior preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 3 UPGRADE
-#
-# Stage 3: Unified Internal Pipeline
-#
-# Canonical execution pipeline:
-#   Semantic
-#      -> Reasoning
-#      -> Memory
-#      -> Planning
-#      -> Room Execution
-#      -> MachineResponse
-#      -> Presentation
-#      -> MachineScene
-#      -> SceneContract
-#      -> Transport
-#
-# This stage documents the unified pipeline and fixes its architectural
-# ownership at the Executor level. Runtime behavior is intentionally preserved.
-# =============================================================================
-
-
-# =============================================================================
-# APRIL STAGE 2 UPGRADE
-#
-# Stage 2: Internal Processor Audit
-#
-# Audit scope:
-#   MachineRequest
-#      -> Executor
-#      -> Rooms
-#      -> MachineResponse
-#      -> MachineScene
-#      -> SceneContract
-#      -> AprilWeb
-#
-# Audit objectives:
-#   - verify text preservation
-#   - verify render_blocks preservation
-#   - verify metadata preservation
-#   - verify artifacts preservation
-#   - detect duplicate normalization stages
-#   - detect redundant transitions
-#   - preserve the single canonical route
-#
-# Functional behavior unchanged.
-# =============================================================================
-
-# =============================================================================
-# APRIL STAGE 1 UPGRADE
-#
-# Stage 1: Canonization of the Central Processor
-#
-# Architectural invariants:
-#   • Executor is the single central processor.
-#   • Single decision point.
-#   • Single execution route.
-#   • Single MachineRequest → MachineResponse pipeline.
-#   • No parallel processors.
-#   • No parallel transport routes.
-#
-# This stage introduces only architectural canonization and documentation.
-# Functional behavior is intentionally preserved.
-# =============================================================================
-
-# =============================================================================
-#                         APRIL CENTRAL PROCESSOR
-#                               executor.py
-#
-#  Central Processor of the entire April Architecture.
-#
-#  Executor is the single processor responsible for the complete
-#  lifecycle of every request inside April.
-#
-#  Responsibilities:
-#      • semantic understanding
-#      • cognition
-#      • reasoning
-#      • memory integration
-#      • dialog continuity
-#      • visual continuity
-#      • planning
-#      • response construction
-#      • MachineResponse construction
-#      • MachineScene construction
-#      • SceneContract generation
-#      • transport verification
-#      • AprilWeb delivery
-#
-#  Canonical Route:
-#      User
-#        ↓
-#      MachineRequest
-#        ↓
-#      Executor (Central Processor)
-#        ↓
-#      Specialized Rooms
-#        ↓
-#      MachineResponse
-#        ↓
-#      MachineScene
-#        ↓
-#      SceneContract
-#        ↓
-#      AprilWeb
-#
-#  Executor is the single processor of the April project.
-#  Single Processor • Single Fiber Route • Single Artifact Contract
-# =============================================================================
 
 import traceback
 import time
 import re
 
 from datetime import datetime
-
 
 from blocks.semantic_core import (
     analyze as semantic_analyze
@@ -266,12 +41,6 @@ from blocks.april_authority import (
     build_authority_decision
 )
 
-# ==========================================================
-# XSCRUTER MEMORY SUPERVISION
-# CPU coordinates memory subsystems.
-# Memory modules execute independently.
-# ==========================================================
-
 from blocks.state_manager import (
 
     get_state,
@@ -294,7 +63,6 @@ from blocks.context_system import (
     build_deephub_context
 )
 
-
 from blocks.rooms_registry import (
     ROOMS,
     registry_parent_dispatch,
@@ -309,17 +77,11 @@ from blocks.C_ARTIFACT_CONTRACT import (
     build_scene_contract,
 )
 
-
-# Legacy provider import (CPU should not call Provider directly)
 from blocks.provider_router import generate_text
 
-# 🧠 PRESENTATION
-
-# Legacy presentation layer (scheduled for removal from CPU)
 from blocks.presentation_formatter import (
     format_response_presentation
 )
-
 
 from blocks.energy_manager import (
     get_energy
@@ -329,7 +91,6 @@ from blocks.experience import (
     update_experience,
     load_experience
 )
-
 
 TASK_CHANNEL = {
 
@@ -349,7 +110,6 @@ RESPONSE_CHANNEL = {
     "human_access": False
 }
 
-
 EMAPS = {
 
     "active_rooms": set(),
@@ -363,12 +123,62 @@ EMAPS = {
     "machine_routes": []
 }
 
-
 def normalize_text(text):
 
     return (
         text or ""
     ).strip()
+
+def _clip_text(value, limit=4000):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[-limit:]
+
+def _compact_timeline(timeline, max_items=14):
+    if not isinstance(timeline, list):
+        return []
+    if len(timeline) <= max_items:
+        return timeline
+
+    head = []
+    if timeline and isinstance(timeline[0], dict) and timeline[0].get("role") == "system":
+        head = [timeline[0]]
+        timeline = timeline[1:]
+        max_items = max(1, max_items - 1)
+
+    return head + timeline[-max_items:]
+
+def _compact_memory_bundle(memory_bundle):
+    if not isinstance(memory_bundle, dict):
+        return memory_bundle
+
+    compacted = {}
+    for key, value in memory_bundle.items():
+        if isinstance(value, str):
+            compacted[key] = _clip_text(value, 3000)
+        elif isinstance(value, dict):
+            compacted[key] = _compact_memory_bundle(value)
+        elif isinstance(value, list):
+            compacted[key] = value[-12:]
+        else:
+            compacted[key] = value
+    return compacted
+
+def _compact_conversation_space(conversation_space):
+    if not isinstance(conversation_space, dict):
+        return conversation_space
+
+    compacted = dict(conversation_space)
+    compacted["timeline"] = _compact_timeline(conversation_space.get("timeline", []), max_items=14)
+    compacted["dialog"] = _compact_timeline(conversation_space.get("dialog", []), max_items=14)
+    compacted["memory_timeline"] = _compact_memory_bundle(conversation_space.get("memory_timeline", {}))
+    compacted["memory_summary"] = _clip_text(conversation_space.get("memory_summary", ""), 3000)
+    return compacted
 
 def clamp(
     value,
@@ -404,7 +214,6 @@ def _looks_like_formula_text(value):
         return "=" in text or "^" in text
 
     return False
-
 
 def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
     semantic = semantic or {}
@@ -471,19 +280,14 @@ def _canonicalize_formula_blocks(machine_response, semantic=None, response_decis
     machine_response.render_blocks = render_blocks
     return machine_response
 
-
 def track_room(name):
-    # Disabled instrumentation hook (preserved behavior).
     return
 
 def track_trajectory(name):
-    # Disabled instrumentation hook (preserved behavior).
     return
 
 def track_modality(name):
-    # Disabled instrumentation hook (preserved behavior).
     return
-
 
 def validate_machine_response(
     result
@@ -524,7 +328,6 @@ def validate_machine_response(
 
     return True
 
-
 def detect_task_type(
     semantic,
     cognition,
@@ -532,8 +335,6 @@ def detect_task_type(
     conversation_space=None,
 ):
 
-    # conversation_space may not exist yet during the early
-    # executor stages. Fall back to state-only user space.
     user_space = build_executor_user_space(
         state,
         conversation_space=conversation_space,
@@ -582,12 +383,6 @@ def detect_task_type(
         return "math"
 
     return "text"
-
-# ==========================================================
-# XSCRUTER EXECUTION CONTEXT
-# Unified runtime context prepared by CPU.
-# ==========================================================
-
 
 def build_conversation_space(state, semantic, cognition, response_decision, text, visual_reference):
     """
@@ -664,7 +459,6 @@ def build_executor_context(
 
     return {
 
-
         "machine_channel":
             TASK_CHANNEL,
 
@@ -674,14 +468,11 @@ def build_executor_context(
         "executor_version":
             "april_cpu_v1",
 
-
         "user_id":
             user_id,
 
-        # Legacy transport identifier
         "chat_id":
             chat_id,
-
 
         "semantic":
             semantic,
@@ -718,7 +509,6 @@ def build_executor_context(
 
         "visual_reference":
             visual_reference,
-
 
         "scene_state":
             scene_state,
@@ -762,10 +552,8 @@ def build_executor_context(
                 "active_goal"
             ),
 
-
         "machine_input": text,
         "platform": "agnostic",
-
 
         "state":
             state,
@@ -773,8 +561,8 @@ def build_executor_context(
         "user_space":
             user_space,
 
-        "conversation_space": conversation_space,
-        "canonical_space": conversation_space,
+        "conversation_space": _compact_conversation_space(conversation_space),
+        "canonical_space": _compact_conversation_space(conversation_space),
 
         "memory_routing":
             {
@@ -788,7 +576,6 @@ def build_executor_context(
                     cognition.get("memory_analysis", cognition.get("memory_signals", {}))
             }
     }
-
 
 def build_executor_user_space(state, conversation_space=None):
     conversation_space = conversation_space or {}
@@ -809,7 +596,6 @@ def build_executor_user_space(state, conversation_space=None):
         "task_resolution": state.get("task_resolution", {}),
     }
 
-
 def stabilize_room_score(
 
     room,
@@ -828,13 +614,11 @@ def stabilize_room_score(
         "active_room"
     )
 
-
     if active_room:
 
         if room.name == active_room:
 
             score += 4.0
-
 
     if response_decision.get(
         "renderer_first_mode"
@@ -849,7 +633,6 @@ def stabilize_room_score(
 
             score += 5.0
 
-
     if response_decision.get(
         "avoid_heavy_generation"
     ):
@@ -861,7 +644,6 @@ def stabilize_room_score(
         ]:
 
             score -= 8.0
-
 
     task_resolution = user_space.get(
         "task_resolution",
@@ -904,7 +686,6 @@ def stabilize_room_score(
         20.0
     )
 
-
 def build_domain_room_map():
 
     return {
@@ -946,7 +727,6 @@ def domain_room_bonus(room, semantic):
 
     return bonus
 
-
 def get_factory_required_rooms(semantic):
 
     factory_order = semantic.get(
@@ -958,7 +738,6 @@ def get_factory_required_rooms(semantic):
         "required_rooms",
         []
     )
-
 
 def build_scene_plan(response_decision, semantic=None):
 
@@ -1013,9 +792,7 @@ def build_scene_plan(response_decision, semantic=None):
             "artifact_first_scene_composition"
     }
 
-
 def artifact_to_render_block(result):
-
 
     if not isinstance(result, dict):
         return {
@@ -1037,7 +814,6 @@ def artifact_to_render_block(result):
     translated["machine_payload"] = True
 
     return translated
-
 
 def botru_translate_artifact(artifact):
 
@@ -1118,7 +894,6 @@ def botru_translate_artifact(artifact):
         "content": str(artifact)
     }
 
-
 def build_task_resolution(
     cognition,
     response_decision,
@@ -1192,19 +967,11 @@ def build_guidance_response(
         "data": messages[step]
     }
 
-# ==========================================================
-# ROOM EXECUTION PHASE
-# Rooms execute tasks.
-# CPU supervises and validates results.
-# ==========================================================
-
-
 def executor_cpu_register_room(report, room_name, **kwargs):
     entry={"room": room_name}
     entry.update(kwargs)
     report.append(entry)
     return report
-
 
 def _extract_machine_response(result):
     """Stage 1 Executor: preserve Provider semantic fields without collapsing them."""
@@ -1265,8 +1032,6 @@ async def execute_rooms(
                 run=run_with_activity,
             )
 
-
-
             if isinstance(result, dict):
 
                 mr = result.get("machine_response")
@@ -1278,8 +1043,6 @@ async def execute_rooms(
 
             extracted = _extract_machine_response(result)
 
-            # TEST-3: Canonical Fiber adoption.
-            # Preserve the provider transport as the CPU source of truth.
             if extracted is None and isinstance(result, dict):
                 mr = result.get("machine_response")
                 if isinstance(mr, dict):
@@ -1311,6 +1074,18 @@ async def execute_rooms(
     if machine_response is None:
         raise RuntimeError("No MachineResponse produced")
 
+    if not getattr(machine_response, "answer", "") and not getattr(machine_response, "content", "") and not getattr(machine_response, "summary", "") and not list(getattr(machine_response, "render_blocks", []) or []):
+        machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
+        machine_response.content = machine_response.answer
+        machine_response.summary = "Пустой результат после обработки запроса."
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": machine_response.answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+        }]
+
     conversation_space=context.get("conversation_space") or {}
     april_turn={
         "answer": getattr(machine_response,"answer",None),
@@ -1325,7 +1100,10 @@ async def execute_rooms(
     conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
 
-    # TEST-3: Canonical normalization before reflection.
+    _canonical_answer = getattr(machine_response, "answer", "")
+    _canonical_content = getattr(machine_response, "content", "")
+    _canonical_summary = getattr(machine_response, "summary", "")
+
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
@@ -1347,19 +1125,8 @@ async def execute_rooms(
         room_results,
     )
 
-    # ==============================
-    # TEST-4
-    # Preserve ONE MachineResponse instance across the Fiber route.
-    # Registry may enrich it, but must not replace it.
-    # ==============================
     machine_response = reflected_machine_response
 
-    # ==============================
-    # TEST-5
-    # Registry never replaces the provider object.
-    # Merge only enrichment fields and then re-normalize
-    # canonical transport fields from the surviving instance.
-    # ==============================
     if registry_result is not None:
         for _field in (
             "contributions",
@@ -1385,11 +1152,28 @@ async def execute_rooms(
                 pass
 
     machine_response = executor_cpu_normalize_answer(machine_response)
+
+    if not getattr(machine_response, "answer", "") and _canonical_answer:
+        machine_response.answer = _canonical_answer
+    if not getattr(machine_response, "content", "") and _canonical_content:
+        machine_response.content = _canonical_content
+    if not getattr(machine_response, "summary", "") and _canonical_summary:
+        machine_response.summary = _canonical_summary
+
+    if (not list(getattr(machine_response, "render_blocks", []) or [])
+        and getattr(machine_response, "answer", "")):
+        machine_response.render_blocks=[{
+            "type":"text",
+            "content":machine_response.answer,
+            "renderer":"TextBlock",
+            "viewer":"TextBlock",
+            "priority":0,
+        }]
+
     executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
 
     setattr(machine_response, "provider_transport_verified", True)
     setattr(machine_response, "provider_contract_version", "fiber_v3_stage2")
-
 
     diagnostics = (
         getattr(machine_response, "contributions", {})
@@ -1428,19 +1212,7 @@ def apply_representation_gate(blocks, response_decision=None, semantic=None):
         filtered.append(b)
     return filtered
 
-
-# ==========================================================
-# CANONICAL SCENE COMPOSER
-# Scene assembly owned by Executor CPU.
-# ==========================================================
-
-
 def is_canonical_scene(scene):
-    # Canonical scene assembly.
-    # Prefer MachineScene blocks and only fall back to legacy
-    # artifact conversion when MachineScene has no renderable blocks.
-    # Canonical hand-off object for checkout_server.
-    # Executor exposes one Scene Contract without rebuilding it.
     return {
         "single_route": True,
         "input": "MachineRequest",
@@ -1463,7 +1235,6 @@ def normalize_provider_scene(result):
 
     return result
 
-
 def executor_cpu_materialize_blocks(machine_response):
     """Stage 3: transport only.
 
@@ -1477,7 +1248,6 @@ def executor_cpu_materialize_blocks(machine_response):
 
     machine_response.render_blocks = render_blocks
     return machine_response
-
 
 def executor_cpu_attach_artifact_payloads(machine_response):
     artifacts = list(getattr(machine_response, "artifacts", []) or [])
@@ -1561,27 +1331,15 @@ def executor_reflection_pass(machine_response, executor_context):
     }
     return machine_response
 
-# EXECUTOR ROUTE VERSION
 EXECUTOR_ROUTE_VERSION="fiber_scene_v2"
 EXECUTOR_LEGACY_TEXT_ROUTE=False
 
-
-# EXECUTOR FIBER CANONICAL
 EXECUTOR_FIBER_CANONICAL = True
-
 
 EXECUTOR_CPU_ENABLED = True
 
-# ==========================================================
-# APRIL CPU TRACE INFRASTRUCTURE (Stage 1)
-# ==========================================================
 APRIL_CPU_TRACE_ENABLED=False
 CPU_EXECUTION_JOURNAL=[]
-
-
-# ==========================================================
-# APRIL CPU STAGE REGISTRY (Stage 5)
-# ==========================================================
 
 CPU_STAGE_REGISTRY=[]
 
@@ -1619,27 +1377,10 @@ def cpu_trace_error(stage,error):
 def cpu_execution_journal():
     return list(CPU_EXECUTION_JOURNAL)
 
-
-# Legacy trace retained but disabled
 EXECUTOR_CPU_TRACE = []
 
 def executor_cpu_checkpoint(stage, **payload):
-    # Single executor awareness object.
-    # This is diagnostic state only.
-    # No Provider/OpenAI calls are allowed here.
-    # Canonical CPU synchronization point.
-    # Updates route, verifies stage and records a checkpoint.
-    # CPU contract verification.
-    # Does not execute subsystem logic.
-    # Only validates that the expected output exists.
-    # Produce one consolidated execution report for the entire route.
-    # It never changes routing or calls Provider/OpenAI.
-    # It only maintains a complete awareness of the lifecycle.
-    # Inspect MachineResponse and prepare presentation hints
-    # without calling Provider/OpenAI.
-    # Never produces user-visible text and never calls Provider/OpenAI.
     return payload.get("machine_response")
-
 
 def executor_cpu_integrate_presentation(machine_response):
     decision = getattr(machine_response, "executor_decision", {}) or {}
@@ -1683,7 +1424,6 @@ def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decisi
     setattr(machine_response, "executor_cognitive_context", reflection)
     return machine_response
 
-
 def executor_cpu_build_executor_decision(*, semantic, cognition, response_decision, state, machine_response):
     """CPU-only decision layer. Produces machine decision, never user text."""
     ctx=getattr(machine_response,"executor_cognitive_context",{}) or {}
@@ -1700,7 +1440,6 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
     }
     setattr(machine_response,"executor_decision",decision)
     return machine_response
-
 
 def executor_cpu_normalize_answer(machine_response):
     """Stage 2: preserve semantic fields; only fill missing canonical values."""
@@ -1725,7 +1464,6 @@ def executor_cpu_normalize_answer(machine_response):
             machine_response.summary=fallback
 
     return machine_response
-
 
 def executor_cpu_build_presentation_plan(machine_response):
     """Stage 2: determine presentation from artifact types only."""
@@ -1770,11 +1508,6 @@ def executor_cpu_build_presentation_plan(machine_response):
     machine_response.executor_presentation_plan = plan
     return machine_response
 
-
-
-
-# ==========================================================
-# ==========================================================
 def executor_cpu_transport_verification(machine_response):
     """
     Final verification before Scene pipeline.
@@ -1796,10 +1529,6 @@ def executor_cpu_transport_verification(machine_response):
     machine_response.executor_transport_verification = report
     return machine_response
 
-
-
-# ==========================================================
-# ==========================================================
 def executor_cpu_memory_fusion(machine_response):
     """
     Fuse dynamic memory, visual memory and dialog trajectory into
@@ -1830,10 +1559,6 @@ def executor_cpu_memory_fusion(machine_response):
     machine_response.executor_presentation_plan=plan
     return machine_response
 
-
-
-# ==========================================================
-# ==========================================================
 def executor_cpu_scene_intelligence(machine_response):
     """
     Final executor intelligence pass.
@@ -1860,10 +1585,6 @@ def executor_cpu_scene_intelligence(machine_response):
     machine_response.executor_scene_profile=scene_profile
     return machine_response
 
-
-
-# ==========================================================
-# ==========================================================
 def executor_cpu_synthetic_verification(machine_response):
     """
     Detect internally inconsistent executor state without
@@ -1895,13 +1616,6 @@ def executor_cpu_synthetic_verification(machine_response):
     machine_response.executor_synthetic_report = report
     return machine_response
 
-
-# ==========================================================
-# ==========================================================
-
-
-# ==========================================================
-# ==========================================================
 def executor_cpu_user_alignment(machine_response):
     """Strengthen planning using the current conversation space.
     Does not introduce new routes or objects.
@@ -1927,9 +1641,6 @@ def executor_cpu_user_alignment(machine_response):
     return machine_response
 
 def executor_cpu_pipeline(machine_response):
-    # Stage 3:
-    # Presentation plan is built once in the reflection pipeline.
-    # Avoid duplicate normalization inside the final CPU pipeline.
     machine_response = executor_cpu_transport_verification(machine_response)
     machine_response = executor_cpu_memory_fusion(machine_response)
     machine_response = executor_cpu_scene_intelligence(machine_response)
@@ -1941,9 +1652,6 @@ def executor_cpu_pipeline(machine_response):
     machine_response = executor_cpu_normalize_answer(machine_response)
     return machine_response
 
-
-# ==========================================================
-# ==========================================================
 def executor_cpu_finalize(machine_response):
     """
     Canonical final CPU pass.
@@ -2052,12 +1760,6 @@ def executor_cpu_lineage_report():
         "objects": EXECUTOR_CPU_OBJECTS,
     }
 
-
-# ==========================================================
-# X024 UNIFIED SCENE PIPELINE
-# ==========================================================
-
-
 def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
     try:
         if machine_response is not None:
@@ -2077,7 +1779,6 @@ def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=Non
     except Exception as exc:
         print(f"[EXECUTOR][{stage}] diag_error={exc}")
 
-
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
     """Synchronize canonical fields into SceneContract."""
     if scene_contract is None:
@@ -2092,7 +1793,6 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
             value.setdefault("content", getattr(machine_response, "content", ""))
             value.setdefault("summary", getattr(machine_response, "summary", ""))
 
-        # Never overwrite a valid scene_contract payload with an empty placeholder.
         if field == "render_blocks":
             scene_value = getattr(scene_contract, field, None)
             if not value and scene_value:
@@ -2107,7 +1807,6 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
             if scene_value not in (None, [], {}):
                 value = scene_value
 
-        # Keep previously built blocks if the new value is empty.
         if field == "render_blocks" and value in (None, [], {}):
             value = getattr(scene_contract, field, value)
 
@@ -2119,10 +1818,6 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
     return scene_contract
 
 def executor_cpu_scene_pipeline(machine_response):
-    # Ensure MachineScene inherits CPU-generated render blocks.
-    # Does not generate new knowledge or call Provider.
-    # It does not rebuild the scene; it validates and annotates it.
-    # This stage never calls Provider/OpenAI and never creates a new route.
 
     executor_cpu_transport_diag('BEFORE_BUILD_MACHINE_SCENE', machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
@@ -2181,22 +1876,6 @@ def executor_cpu_scene_pipeline(machine_response):
         },
     }
 
-# Planned migration:
-#      ↓
-#      ↓
-# executor_cpu_build_single_space()
-#      ↓
-# Checkout / AprilWeb
-
-
-# ==========================================================
-# X019 SINGLE SPACE CLEAN ROUTE
-# Transitional cleanup plan:
-#  - CPU owns one Canonical Space.
-#  - SceneContract is derived only from Canonical Space.
-#  - No parallel payload ownership.
-# ==========================================================
-
 def executor_cpu_finalize_transport(machine_response):
     executor_cpu_transport_diag('TRANSPORT_ENTRY', machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
@@ -2215,28 +1894,12 @@ def executor_cpu_finalize_transport(machine_response):
         "render_blocks": scene.get("render_blocks", []),
     }
 
-
-# ==========================================================
-# PUBLIC EXECUTOR ENTRY (X029)
-# Temporary compatibility facade for bot.py / checkout_server.py
-# ==========================================================
-
-
-# ==========================================================
-# APRIL CPU COORDINATION LAYER (Stage 3)
-# ==========================================================
-
 CPU_COORDINATION_POLICY = {
     "gateway":"checkout_server",
     "factory":"C_ARTIFACT_CONTRACT",
     "single_route":True,
     "trace_owner":"executor_cpu",
 }
-
-
-# ==========================================================
-# APRIL CPU FACTORY BRIDGE (Stage 4)
-# ==========================================================
 
 def executor_cpu_factory_bridge(machine_result):
     """Single bridge between CPU and Artifact Factory output."""
@@ -2256,11 +1919,6 @@ def executor_cpu_gateway_dispatch(result):
     })
     return result
 
-
-# ==========================================================
-# APRIL CPU <-> FACTORY HOOK BRIDGE (Stage 6)
-# ==========================================================
-
 def executor_cpu_register_factory_hooks(register_hook):
     """Attach CPU trace callbacks to Artifact Factory."""
     register_hook(
@@ -2275,18 +1933,12 @@ def executor_cpu_factory_event(stage, payload=None):
 def executor_cpu_factory_complete(stage, payload=None):
     cpu_trace_success(stage, payload or {})
 
-
-# ==========================================================
-# APRIL CPU FACTORY SYNCHRONIZATION (Stage 7)
-# ==========================================================
-
 def executor_cpu_sync_factory_bridge(factory_register):
     """Bind CPU and Artifact Factory into one execution route."""
     executor_cpu_register_factory_hooks(factory_register)
     cpu_trace_success("FACTORY_BRIDGE_REGISTERED",{
         "single_route":True
     })
-
 
 def executor_provider_stage_log(stage, payload=None):
     try:
@@ -2313,7 +1965,6 @@ async def execute(
     **kwargs,
 ):
     chat_id = chat_id or user_id
-    # CPU loads persistent state through the state service only.
     cpu_trace_begin("EXECUTE", {"user_id": user_id})
     state = get_state(user_id)
     semantic = semantic_analyze(
@@ -2350,7 +2001,6 @@ async def execute(
         state,
         conversation_space=None,
     )
-    # Build canonical CPU context only once.
     context = build_executor_context(
         user_id=user_id,
         chat_id=chat_id,
@@ -2363,28 +2013,23 @@ async def execute(
         task_type=task_type,
         text=text,
     )
-    # Canonical runtime state for every modality.
     conversation_space = context.get("conversation_space") or {}
     current_turn = conversation_space.get("current_turn", {})
 
-    # Canonical CPU entry: build one MachineRequest from ConversationSpace
-    # CPU owns exactly one MachineRequest for the whole execution.
-    # Factory hooks are registered once CPU context exists.
     if "factory_hook_registration" in kwargs:
         executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
 
-    # STAGE 1 - COMPACT PROVIDER REQUEST
     machine_memory = {
-        "memory_summary": state.get("memory_summary"),
+        "memory_summary": _clip_text(state.get("memory_summary"), 3000),
         "active_flow": state.get("active_flow"),
-        "memory_timeline": conversation_space.get("memory_timeline", {}),
-        "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
-        "focus": conversation_space.get("focus", {}),
-        "visual_summary": conversation_space.get("visual_summary", {}),
+        "memory_timeline": _compact_memory_bundle(conversation_space.get("memory_timeline", {})),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "focus": state.get("focus", state.get("focus_state", {})),
+        "visual_summary": _compact_memory_bundle(conversation_space.get("visual_summary", {})),
     }
 
     machine_conversation = {
-        "timeline": conversation_space.get("timeline", []),
+        "timeline": _compact_timeline(conversation_space.get("timeline", []), max_items=14),
         "last_user_turn": current_turn.get("user", {}).get("text", text),
         "last_april_turn": conversation_space.get("last_april_turn"),
         "active_visual_scene": conversation_space.get("active_visual_scene", {}),
@@ -2407,9 +2052,6 @@ async def execute(
 
     setattr(context["machine_request"], "current_turn", current_turn)
 
-    # CPU delegates execution to Room Dispatcher
-    # CPU ends here; domain execution belongs to Rooms.
-    # After this point the CPU only supervises the execution lifecycle.
     result = await execute_rooms(
         user_id=user_id,
         text=text,
