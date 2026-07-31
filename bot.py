@@ -95,6 +95,7 @@ import json
 import os
 import re
 import traceback
+from dataclasses import asdict, is_dataclass
 
 from datetime import datetime
 
@@ -206,6 +207,28 @@ def safe_truncate(
         return text
 
     return text[:limit] + "..."
+
+
+def scene_contract_to_dict(scene_contract):
+    if scene_contract is None:
+        return None
+
+    if isinstance(scene_contract, dict):
+        return scene_contract
+
+    if is_dataclass(scene_contract):
+        try:
+            return asdict(scene_contract)
+        except Exception:
+            pass
+
+    if hasattr(scene_contract, "__dict__"):
+        try:
+            return dict(vars(scene_contract))
+        except Exception:
+            pass
+
+    return scene_contract
 
 # =========================================================
 # 🔥 MACHINE CLEANER
@@ -494,6 +517,8 @@ def normalize_executor_response(
 ):
 
     result = result or {}
+    scene_contract = scene_contract_to_dict(result.get("scene_contract"))
+    gateway_transport = scene_contract_to_dict(result.get("gateway_transport"))
 
     normalized = {
 
@@ -593,8 +618,8 @@ def normalize_executor_response(
     # FIBER ROUTE PASSTHROUGH (Stage 1)
     # Preserve canonical transport contract from Executor.
     # =====================================================
-    normalized["scene_contract"] = result.get("scene_contract")
-    normalized["gateway_transport"] = result.get("gateway_transport")
+    normalized["scene_contract"] = scene_contract
+    normalized["gateway_transport"] = gateway_transport
     normalized["render_blocks"] = result.get(
         "render_blocks",
         normalized.get("blocks", [])
@@ -604,7 +629,6 @@ def normalize_executor_response(
     normalized["scene_plan"] = result.get("scene_plan")
 
     # Fiber Route Stage 1: preserve canonical Executor transport.
-    scene_contract = normalized.get("scene_contract")
     if isinstance(scene_contract, dict):
         normalized["final_text"] = (
             scene_contract.get("answer")
@@ -614,8 +638,15 @@ def normalize_executor_response(
         )
         normalized["render_blocks"] = (
             scene_contract.get("render_blocks")
+            or scene_contract.get("blocks")
             or normalized.get("render_blocks", [])
         )
+        normalized["scene"] = scene_contract.get("scene", normalized.get("scene"))
+        normalized["formula"] = scene_contract.get("formula", normalized.get("formula"))
+        normalized["table"] = scene_contract.get("table", normalized.get("table"))
+        normalized["graph"] = scene_contract.get("graph", normalized.get("graph"))
+        normalized["layout"] = scene_contract.get("layout", normalized.get("layout"))
+        normalized["visual"] = scene_contract.get("visual", normalized.get("visual"))
 
     return normalized
 
@@ -632,6 +663,8 @@ def synchronize_scene_continuity(
         user_id
     )
 
+    scene_contract = scene_contract_to_dict(result.get("scene_contract"))
+
     has_visual = any([
 
         result.get("scene"),
@@ -644,7 +677,11 @@ def synchronize_scene_continuity(
 
         result.get("formula"),
 
-        result.get("gallery")
+        result.get("gallery"),
+
+        result.get("render_blocks"),
+
+        scene_contract.get("render_blocks") if isinstance(scene_contract, dict) else None
     ])
 
     if not has_visual:
@@ -656,22 +693,28 @@ def synchronize_scene_continuity(
             datetime.now().isoformat(),
 
         "scene":
-            result.get("scene"),
+            result.get("scene") or (scene_contract.get("scene") if isinstance(scene_contract, dict) else None),
 
         "layout":
-            result.get("layout"),
+            result.get("layout") or (scene_contract.get("layout") if isinstance(scene_contract, dict) else None),
 
         "visual":
-            result.get("visual"),
+            result.get("visual") or (scene_contract.get("visual") if isinstance(scene_contract, dict) else None),
 
         "graph":
-            result.get("graph"),
+            result.get("graph") or (scene_contract.get("graph") if isinstance(scene_contract, dict) else None),
 
         "formula":
-            result.get("formula"),
+            result.get("formula") or (scene_contract.get("formula") if isinstance(scene_contract, dict) else None),
 
         "gallery":
-            result.get("gallery"),
+            result.get("gallery") or (scene_contract.get("gallery") if isinstance(scene_contract, dict) else None),
+
+        "render_blocks":
+            result.get("render_blocks") or (scene_contract.get("render_blocks") if isinstance(scene_contract, dict) else []),
+
+        "scene_contract":
+            scene_contract,
 
         "continuity_active":
             True
@@ -815,6 +858,9 @@ def organize_multimodal_response(
                 )
             ),
 
+        "final_text":
+            result.get("final_text", final_text),
+
         "graph":
             result.get(
                 "graph"
@@ -865,6 +911,9 @@ def organize_multimodal_response(
 
         "render_blocks":
             result.get("render_blocks", []),
+
+        "active_visual_scene":
+            result.get("active_visual_scene"),
 
         "renderer_state":
             result.get("renderer_state"),
@@ -928,6 +977,8 @@ async def process_april_request(
     normalized = normalize_executor_response(
         result
     )
+
+    normalized = preserve_executor_scene_contract(normalized)
 
     # =====================================================
     # 🔥 CONTINUITY
@@ -1061,7 +1112,10 @@ def april_web_chat():
                 result.get("machine_scene"),
 
             "scene_plan":
-                result.get("scene_plan")
+                result.get("scene_plan"),
+
+            "active_visual_scene":
+                result.get("active_visual_scene")
         })
 
     except Exception as e:
@@ -1158,6 +1212,6 @@ Enable the legacy path only if rollback is required.
 # response = machine_to_human(organized)
 '''
 
-# ACTIVE CANONICAL PATH
-result = preserve_executor_scene_contract(result)
-response = machine_to_human(result)
+# ACTIVE CANONICAL PATH DISABLED AT IMPORT TIME.
+# The endpoint above is the single canonical route.
+# If a rollback is needed, the legacy path can be re-enabled in a guarded block.
