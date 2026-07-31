@@ -977,9 +977,9 @@ def recover_machine_contract(contract):
         or contract.get("explanation")
         or ""
     )
-    contract["answer"] = candidate
-    contract["content"] = candidate
-    contract["response"] = candidate
+    contract.setdefault("answer", candidate)
+    contract.setdefault("content", contract.get("answer", candidate))
+    contract.setdefault("response", contract.get("answer", candidate))
     contract.setdefault("summary", candidate)
     contract.setdefault("explanation", contract["summary"])
     contract.setdefault("scene", {})
@@ -1025,6 +1025,12 @@ def create_provider_contract(raw_text):
     # STAGE 3: build one canonical provider response then perform a single executor handoff
     # STAGE4: canonical builder becomes the single assembly point.
     machine = build_provider_machine_response(raw_text, parsed)
+
+    mr = machine.setdefault("machine_response", {})
+    if mr.get("answer"):
+        mr["provider_original_answer"] = mr["answer"]
+        mr["provider_original_content"] = mr.get("content", mr["answer"])
+
     # STAGE4: executor handoff preserved.
     machine = provider_finalize_for_executor(machine)
     return machine
@@ -1184,6 +1190,10 @@ def provider_final_guard(contract):
         or mr.get("explanation")
         or ""
     )
+
+    original = mr.get("provider_original_answer")
+    if candidate.startswith("Не удалось сформировать ответ") and original:
+        candidate = original
 
     if candidate:
         mr["answer"] = candidate
