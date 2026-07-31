@@ -1395,6 +1395,11 @@ async def execute_rooms(
     conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
 
+    # Preserve canonical provider text across reflection/registry.
+    _canonical_answer = getattr(machine_response, "answer", "")
+    _canonical_content = getattr(machine_response, "content", "")
+    _canonical_summary = getattr(machine_response, "summary", "")
+
     # TEST-3: Canonical normalization before reflection.
     machine_response = executor_cpu_normalize_answer(machine_response)
 
@@ -1455,6 +1460,24 @@ async def execute_rooms(
                 pass
 
     machine_response = executor_cpu_normalize_answer(machine_response)
+
+    if not getattr(machine_response, "answer", "") and _canonical_answer:
+        machine_response.answer = _canonical_answer
+    if not getattr(machine_response, "content", "") and _canonical_content:
+        machine_response.content = _canonical_content
+    if not getattr(machine_response, "summary", "") and _canonical_summary:
+        machine_response.summary = _canonical_summary
+
+    if (not list(getattr(machine_response, "render_blocks", []) or [])
+        and getattr(machine_response, "answer", "")):
+        machine_response.render_blocks=[{
+            "type":"text",
+            "content":machine_response.answer,
+            "renderer":"TextBlock",
+            "viewer":"TextBlock",
+            "priority":0,
+        }]
+
     executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
 
     setattr(machine_response, "provider_transport_verified", True)
