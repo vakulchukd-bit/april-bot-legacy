@@ -1347,6 +1347,12 @@ async def execute_rooms(
                             pass
 
             if extracted is not None:
+                # Preserve the richest MachineResponse instead of the first one.
+                current_len = len(getattr(machine_response, "answer", "") or "") if machine_response else 0
+                new_len = len(getattr(extracted, "answer", "") or "")
+                if machine_response is None or new_len > current_len:
+                    machine_response = extracted
+
                 room_results.append({
                     "room": getattr(room, "name", "unknown"),
                     "machine_response": extracted,
@@ -1356,8 +1362,6 @@ async def execute_rooms(
                     getattr(room, "name", "unknown"),
                     status="ok",
                 )
-                if machine_response is None:
-                    machine_response = extracted
                 continue
 
         except Exception as exc:
