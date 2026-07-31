@@ -1020,7 +1020,7 @@ def create_provider_contract(raw_text):
     parsed = normalize_text_transport(parsed)
     # Legacy recovery kept temporarily for compatibility.
     # STAGE4: compatibility recovery bypassed.
-    # parsed = recover_machine_contract(parsed)
+    parsed = recover_machine_contract(parsed)
 
     # STAGE 3: build one canonical provider response then perform a single executor handoff
     # STAGE4: canonical builder becomes the single assembly point.
@@ -1166,6 +1166,40 @@ def finalize_executor_contract(machine_response):
     ):
         machine_response = step(machine_response)
     return machine_response
+
+
+
+def provider_final_guard(contract):
+    """
+    Final protection before Executor.
+    Prevents valid text responses from becoming empty contracts.
+    """
+    mr = contract.setdefault("machine_response", {})
+
+    candidate = (
+        mr.get("answer")
+        or mr.get("content")
+        or mr.get("response")
+        or mr.get("summary")
+        or mr.get("explanation")
+        or ""
+    )
+
+    if candidate:
+        mr["answer"] = candidate
+        mr["content"] = candidate
+        mr["response"] = candidate
+        mr.setdefault("summary", candidate)
+
+        blocks = mr.setdefault("render_blocks", [])
+        if not any(isinstance(b, dict) and b.get("type") == "text" for b in blocks):
+            blocks.insert(0, {
+                "type": "text",
+                "content": candidate,
+                "scene_contract": True,
+            })
+
+    return contract
 
 
 def build_provider_overload_contract(space):
@@ -1387,6 +1421,7 @@ async def generate_text(
         # =====================================================
         provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
         contract = finalize_executor_contract(contract)
+        contract = provider_final_guard(contract)
         mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
         provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
         provider_stage_log("EXECUTOR_HANDOFF", mr)
