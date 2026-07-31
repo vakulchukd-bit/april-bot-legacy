@@ -794,6 +794,9 @@ SCENE_BLOCK_REGISTRY = {
 class SceneContract:
     scene_version: str = "2.0"
     blocks: List[Dict[str, Any]] = field(default_factory=list)
+    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    active_scene: str = ""
+    space_continuity: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     supported_payloads: List[str] = field(
         default_factory=lambda: sorted(SUPPORTED_PAYLOAD_TYPES)
@@ -1083,6 +1086,7 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     """Canonical SceneContract builder from MachineScene."""
     contract = scene.contract or create_default_scene_contract()
     contract.blocks = build_canonical_scene_blocks(scene)
+    contract.render_blocks = list(contract.blocks)
     contract.metadata.update(scene.metadata or {})
     # Canonical transport fields must always reflect the latest scene state.
     contract.metadata["answer"] = getattr(scene, "answer", "")
@@ -1091,6 +1095,11 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.metadata["artifact_count"] = len(getattr(scene, "artifacts", []) or [])
     contract.metadata["transport_stage"] = "artifact_contract_stage2"
     contract.metadata["canonical_scene_contract"] = True
+    contract.active_scene = getattr(scene, "active_scene", "")
+    contract.space_continuity = {
+        "active_scene": contract.active_scene,
+        "render_blocks": contract.render_blocks,
+    }
     scene.contract = contract
     return contract
 
