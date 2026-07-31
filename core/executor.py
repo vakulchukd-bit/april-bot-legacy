@@ -370,6 +370,62 @@ def normalize_text(text):
         text or ""
     ).strip()
 
+
+def _clip_text(value, limit=4000):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[-limit:]
+
+
+def _compact_timeline(timeline, max_items=14):
+    if not isinstance(timeline, list):
+        return []
+    if len(timeline) <= max_items:
+        return timeline
+
+    # Preserve the earliest system message if present, then keep the latest turns.
+    head = []
+    if timeline and isinstance(timeline[0], dict) and timeline[0].get("role") == "system":
+        head = [timeline[0]]
+        timeline = timeline[1:]
+        max_items = max(1, max_items - 1)
+
+    return head + timeline[-max_items:]
+
+
+def _compact_memory_bundle(memory_bundle):
+    if not isinstance(memory_bundle, dict):
+        return memory_bundle
+
+    compacted = {}
+    for key, value in memory_bundle.items():
+        if isinstance(value, str):
+            compacted[key] = _clip_text(value, 3000)
+        elif isinstance(value, dict):
+            compacted[key] = _compact_memory_bundle(value)
+        elif isinstance(value, list):
+            compacted[key] = value[-12:]
+        else:
+            compacted[key] = value
+    return compacted
+
+
+def _compact_conversation_space(conversation_space):
+    if not isinstance(conversation_space, dict):
+        return conversation_space
+
+    compacted = dict(conversation_space)
+    compacted["timeline"] = _compact_timeline(conversation_space.get("timeline", []), max_items=14)
+    compacted["dialog"] = _compact_timeline(conversation_space.get("dialog", []), max_items=14)
+    compacted["memory_timeline"] = _compact_memory_bundle(conversation_space.get("memory_timeline", {}))
+    compacted["memory_summary"] = _clip_text(conversation_space.get("memory_summary", ""), 3000)
+    return compacted
+
 def clamp(
     value,
     minimum=0.0,
@@ -773,8 +829,8 @@ def build_executor_context(
         "user_space":
             user_space,
 
-        "conversation_space": conversation_space,
-        "canonical_space": conversation_space,
+        "conversation_space": _compact_conversation_space(conversation_space),
+        "canonical_space": _compact_conversation_space(conversation_space),
 
         "memory_routing":
             {
@@ -1310,6 +1366,20 @@ async def execute_rooms(
 
     if machine_response is None:
         raise RuntimeError("No MachineResponse produced")
+
+    # Safety net: keep the route alive even when the provider fails to synthesize
+    # a valid payload, but avoid blank UI bubbles by returning a minimal text notice.
+    if not getattr(machine_response, "answer", "") and not getattr(machine_response, "content", "") and not getattr(machine_response, "summary", "") and not list(getattr(machine_response, "render_blocks", []) or []):
+        machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
+        machine_response.content = machine_response.answer
+        machine_response.summary = "Пустой результат после обработки запроса."
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": machine_response.answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+        }]
 
     conversation_space=context.get("conversation_space") or {}
     april_turn={
@@ -2375,16 +2445,16 @@ async def execute(
 
     # STAGE 1 - COMPACT PROVIDER REQUEST
     machine_memory = {
-        "memory_summary": state.get("memory_summary"),
+        "memory_summary": _clip_text(state.get("memory_summary"), 3000),
         "active_flow": state.get("active_flow"),
-        "memory_timeline": conversation_space.get("memory_timeline", {}),
-        "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
-        "focus": conversation_space.get("focus", {}),
-        "visual_summary": conversation_space.get("visual_summary", {}),
+        "memory_timeline": _compact_memory_bundle(conversation_space.get("memory_timeline", {})),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "focus": state.get("focus", state.get("focus_state", {})),
+        "visual_summary": _compact_memory_bundle(conversation_space.get("visual_summary", {})),
     }
 
     machine_conversation = {
-        "timeline": conversation_space.get("timeline", []),
+        "timeline": _compact_timeline(conversation_space.get("timeline", []), max_items=14),
         "last_user_turn": current_turn.get("user", {}).get("text", text),
         "last_april_turn": conversation_space.get("last_april_turn"),
         "active_visual_scene": conversation_space.get("active_visual_scene", {}),
