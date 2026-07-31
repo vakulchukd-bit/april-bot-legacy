@@ -53,6 +53,10 @@ from blocks.ai_config import (
     TEXT_MODEL
 )
 
+# Canonical provider model comes from ai_config.
+# Keep text_module and provider_router synchronized.
+OPENAI_PROVIDER_MODEL = TEXT_MODEL
+
 from blocks.provider_router import (
     generate_text
 )
@@ -934,7 +938,7 @@ async def process(
                 "max_output_tokens"
             ],
 
-            model=TEXT_MODEL
+            model=OPENAI_PROVIDER_MODEL
         )
 
         # Provider may already return a canonical transport object.
