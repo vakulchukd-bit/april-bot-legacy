@@ -456,13 +456,34 @@ def build_provider_machine_response(text, parsed_contract=None):
     """Build a unified MachineResponse transport contract."""
     parsed_contract = parsed_contract or {}
 
-    answer = parsed_contract.get("answer", "")
-    if (not answer) and isinstance(text, str) and not text.lstrip().startswith("{"):
-        answer = text
-    content = parsed_contract.get("content") or answer
-    response = parsed_contract.get("response") or answer
-    summary = parsed_contract.get("summary", "")
-    explanation = parsed_contract.get("explanation", summary)
+    fallback = normalize_response_text(text)
+
+    answer = (
+        parsed_contract.get("answer")
+        or parsed_contract.get("content")
+        or parsed_contract.get("response")
+        or fallback
+    )
+
+    content = (
+        parsed_contract.get("content")
+        or answer
+    )
+
+    response = (
+        parsed_contract.get("response")
+        or answer
+    )
+
+    summary = (
+        parsed_contract.get("summary")
+        or answer
+    )
+
+    explanation = (
+        parsed_contract.get("explanation")
+        or summary
+    )
     if response is None:
         response = answer
 
