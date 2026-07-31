@@ -142,6 +142,16 @@ gemini_client = genai.Client(
 
 
 # =====================================================
+# OPENAI MODEL CONFIGURATION
+# =====================================================
+
+OPENAI_PRIMARY_MODEL = "gpt-5.6"
+OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
+OPENAI_FAST_MODEL = "gpt-5.6-luna"
+
+
+
+# =====================================================
 # 🔥 SAFE PATCH MODE
 # =====================================================
 
@@ -1224,7 +1234,7 @@ async def generate_text(
     messages,
     temperature=0.7,
     max_output_tokens=None,
-    model="gpt-5"
+    model=OPENAI_PRIMARY_MODEL
 ):
 
     provider_enter(
