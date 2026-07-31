@@ -56,6 +56,7 @@ from flask import (
 from flask_cors import CORS
 
 import requests
+from dataclasses import asdict, is_dataclass
 
 from openai import OpenAI
 
@@ -163,6 +164,28 @@ def safe_json(value):
         return str(value)
 
 
+def scene_contract_to_dict(contract):
+    if contract is None:
+        return {}
+
+    if isinstance(contract, dict):
+        return contract
+
+    if is_dataclass(contract):
+        try:
+            return asdict(contract)
+        except Exception:
+            pass
+
+    if hasattr(contract, "__dict__"):
+        try:
+            return dict(vars(contract))
+        except Exception:
+            pass
+
+    return {}
+
+
 
 # =========================================================
 # 🧠 WIDESCENE CONTENT RESOLVER
@@ -170,17 +193,23 @@ def safe_json(value):
 
 def resolve_scene_content(result):
 
-    contract = result.get("scene_contract") if isinstance(result, dict) else {}
-    if isinstance(contract, dict):
-        for k in ("answer","content","summary"):
-            if contract.get(k):
-                return contract.get(k)
+    result = result if isinstance(result, dict) else {}
+    contract = scene_contract_view(result.get("scene_contract"))
+
+    for k in ("answer", "content", "summary"):
+        value = contract.get(k)
+        if value:
+            return value
+
     content = (
         result.get("answer")
         or result.get("content")
         or result.get("summary")
         or result.get("response")
         or result.get("data")
+        or contract.get("content")
+        or contract.get("answer")
+        or contract.get("summary")
     )
 
     if content:
@@ -211,17 +240,24 @@ def resolve_scene_content(result):
                 if value:
                     return value
 
-    scene = result.get("scene")
-
-    if scene:
-        return ""
-
-    blocks = result.get(
-        "render_blocks",
-        result.get("blocks", [])
+    blocks = (
+        contract.get("render_blocks")
+        or result.get("render_blocks")
+        or contract.get("blocks")
+        or result.get("blocks", [])
     )
 
-    if blocks:
+    if isinstance(blocks, list):
+        for block in blocks:
+            if isinstance(block, dict):
+                for field in ("content", "text", "description"):
+                    value = block.get(field)
+                    if isinstance(value, str) and value.strip():
+                        return value
+
+    scene = result.get("scene") or contract.get("scene")
+
+    if scene:
         return ""
 
     return ""
@@ -270,30 +306,22 @@ def scene_contract_view(contract):
     Temporary adapter while Gateway migrates from dict to
     canonical SceneContract dataclass.
     """
-    if contract is None:
+    contract = scene_contract_to_dict(contract)
+    if not contract:
         return {}
 
-    if isinstance(contract, dict):
-        return contract
+    view = dict(contract)
 
-    view = {}
+    if "render_blocks" not in view or view.get("render_blocks") in (None, ""):
+        view["render_blocks"] = view.get("blocks", []) or []
 
-    for attr in (
-        "blocks",
-        "metadata",
-        "renderer_state",
-        "scene",
-        "content",
-        "answer",
-        "summary",
-        "machine_scene",
-        "version",
-    ):
-        if hasattr(contract, attr):
-            view[attr] = getattr(contract, attr)
+    if "blocks" not in view:
+        view["blocks"] = view.get("render_blocks", []) or []
 
-    if "render_blocks" not in view:
-        view["render_blocks"] = view.get("blocks", [])
+    view.setdefault("active_scene", "")
+    view.setdefault("space_continuity", {})
+    view.setdefault("renderer_state", {})
+    view.setdefault("metadata", {})
 
     return view
 
@@ -357,19 +385,19 @@ def normalize_executor_response(
             resolve_scene_content(result),
 
         "answer":
-            safe_json(result.get("answer")),
+            safe_json(result.get("answer") or scene_contract.get("answer")),
 
         "summary":
-            safe_json(result.get("summary")),
+            safe_json(result.get("summary") or scene_contract.get("summary")),
 
         "scene_present":
             bool(
-                result.get("scene_contract") or result.get("scene")
+                scene_contract or result.get("scene")
             ),
 
         "blocks_present":
             bool(
-                scene_contract_view(result.get("scene_contract")).get("render_blocks")
+                scene_contract.get("render_blocks")
                 or result.get("render_blocks")
                 or result.get("blocks")
             ),
@@ -385,13 +413,14 @@ def normalize_executor_response(
 
         "render_blocks":
             safe_json(
-                (scene_contract_view(result.get("scene_contract")).get("render_blocks"))
+                scene_contract.get("render_blocks")
                 or result.get("render_blocks")
+                or scene_contract.get("blocks")
                 or result.get("blocks", [])
             ),
 
         "scene":
-            safe_json(scene_contract_view(result.get("scene_contract")).get("scene", result.get("scene", {}))),
+            safe_json(root_scene.get("scene", result.get("scene", {}))),
 
         "space":
             safe_json(
@@ -407,32 +436,32 @@ def normalize_executor_response(
 
         "graph":
             safe_json(
-                result.get("graph")
+                result.get("graph") or scene_contract.get("graph")
             ),
 
         "formula":
             safe_json(
-                result.get("formula")
+                result.get("formula") or scene_contract.get("formula")
             ),
 
         "table":
             safe_json(
-                result.get("table")
+                result.get("table") or scene_contract.get("table")
             ),
 
         "gallery":
             safe_json(
-                result.get("gallery")
+                result.get("gallery") or scene_contract.get("gallery")
             ),
 
         "layout":
             safe_json(
-                result.get("layout")
+                result.get("layout") or scene_contract.get("layout")
             ),
 
         "visual":
             safe_json(
-                result.get("visual")
+                result.get("visual") or scene_contract.get("visual")
             ),
 
         # =================================================
@@ -476,7 +505,7 @@ def normalize_executor_response(
             ),
 
         "renderer_state":
-            safe_json(scene_contract_view(result.get("scene_contract")).get("renderer_state", result.get("renderer_state", {}))),
+            safe_json(scene_contract.get("renderer_state", result.get("renderer_state", {}))),
 
         "artifact_packet":
             safe_json(
@@ -506,7 +535,7 @@ def normalize_executor_response(
             "scene_contract": bool(result.get("scene_contract")),
             "artifact": bool(result.get("artifact")),
             "blocks": bool(
-                (scene_contract_view(result.get("scene_contract")).get("render_blocks"))
+                scene_contract.get("render_blocks")
             )
         }
     )
@@ -710,16 +739,24 @@ async def process_web_message(
     result = executor_contract_passthrough(result)
 
     if isinstance(result, dict) and result.get("scene_contract"):
+        scene_view = scene_contract_view(result["scene_contract"])
         normalized = {
-            "scene_contract": result["scene_contract"],
-            "content": (scene_contract_view(result["scene_contract"]).get("content")
-                        or scene_contract_view(result["scene_contract"]).get("answer")
+            "scene_contract": scene_view,
+            "content": (scene_view.get("content")
+                        or scene_view.get("answer")
+                        or scene_view.get("summary")
                         or ""),
-            "answer": scene_contract_view(result["scene_contract"]).get("answer"),
-            "summary": scene_contract_view(result["scene_contract"]).get("summary"),
-            "render_blocks": scene_contract_view(result["scene_contract"]).get("render_blocks", []),
-            "scene": (scene_contract_view(result["scene_contract"]).get("machine_scene")
-                      or scene_contract_view(result["scene_contract"]).get("scene", {})),
+            "answer": scene_view.get("answer"),
+            "summary": scene_view.get("summary"),
+            "render_blocks": scene_view.get("render_blocks", []),
+            "scene": (scene_view.get("machine_scene")
+                      or scene_view.get("scene", {})),
+            "graph": scene_view.get("graph"),
+            "formula": scene_view.get("formula"),
+            "table": scene_view.get("table"),
+            "gallery": scene_view.get("gallery"),
+            "layout": scene_view.get("layout"),
+            "visual": scene_view.get("visual"),
         }
         normalized["space_continuity"] = build_space_continuity(normalized)
     else:
@@ -1398,7 +1435,8 @@ def web_chat():
             "summary": gt.get("summary",""),
             "renderer_mode": WEB_RENDERER_MODE,
             "scene_mode": WEB_SCENE_MODE,
-            "visual_summary": safe_json(visual_summary)
+            "visual_summary": safe_json(visual_summary),
+            "active_visual_scene": safe_json(gt.get("active_visual_scene")),
         })
 
     except Exception as e:
