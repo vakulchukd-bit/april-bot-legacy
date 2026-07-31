@@ -248,7 +248,12 @@ VOICE_PROVIDER = "openai"
 # 🧠 PRIMARY MODELS
 # =========================================================
 
-TEXT_MODEL = "gpt-4o-mini"
+OPENAI_PRIMARY_MODEL = "gpt-5.6"
+OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
+OPENAI_FAST_MODEL = "gpt-5.6-luna"
+
+
+TEXT_MODEL = OPENAI_PRIMARY_MODEL
 
 VISION_FALLBACK_MODEL = "gpt-4.1-mini"
 
