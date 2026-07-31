@@ -226,6 +226,7 @@
 
 import traceback
 import time
+import re
 
 from datetime import datetime
 
@@ -382,6 +383,93 @@ def clamp(
         return maximum
 
     return value
+
+def _looks_like_formula_text(value):
+    if not isinstance(value, str):
+        return False
+
+    text = value.strip()
+    if not text:
+        return False
+
+    compact = text.replace(" ", "")
+    if len(compact) > 120:
+        return False
+
+    formula_chars = sum(ch in compact for ch in "=^_±×/*√π∑∫²³⁴⁵⁶⁷⁸⁹⁰")
+    if "=" in compact and formula_chars >= 1:
+        return True
+
+    if re.fullmatch(r"[A-Za-zА-Яа-я0-9\s\+\-\=\^\*\/\(\)\[\]\{\}\.,:;×√π²³⁴⁵⁶⁷⁸⁹⁰]+", text):
+        return "=" in text or "^" in text
+
+    return False
+
+
+def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    preferred = (
+        response_decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+        or ""
+    )
+
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    answer = getattr(machine_response, "answer", "") or ""
+    content = getattr(machine_response, "content", "") or ""
+    summary = getattr(machine_response, "summary", "") or ""
+
+    should_force_formula = (
+        preferred == "formula"
+        or semantic.get("math_intent")
+        or semantic.get("formula_intent")
+        or semantic.get("render_intent")
+        or "formula" in normalize_text(getattr(machine_response, "goal", "")).lower()
+        or "формул" in normalize_text(getattr(machine_response, "goal", "")).lower()
+    )
+
+    if not render_blocks:
+        candidate = answer or content or summary
+        if candidate and (_looks_like_formula_text(candidate) or should_force_formula):
+            render_blocks = [{
+                "type": "formula",
+                "content": candidate.strip() if isinstance(candidate, str) else candidate,
+                "renderer": "FormulaBlock",
+                "viewer": "FormulaBlock",
+                "priority": 100,
+            }]
+    else:
+        normalized = []
+        for block in render_blocks:
+            if not isinstance(block, dict):
+                normalized.append(block)
+                continue
+
+            block_type = str(block.get("type", "text") or "text")
+            block_content = block.get("content")
+            if (
+                block_type in ("text", "markdown")
+                and (
+                    should_force_formula
+                    or _looks_like_formula_text(block_content if isinstance(block_content, str) else "")
+                    or _looks_like_formula_text(answer)
+                    or _looks_like_formula_text(content)
+                    or _looks_like_formula_text(summary)
+                )
+            ):
+                block = dict(block)
+                block["type"] = "formula"
+                block["renderer"] = "FormulaBlock"
+                block["viewer"] = "FormulaBlock"
+                block.setdefault("priority", 100)
+            normalized.append(block)
+
+        render_blocks = normalized
+
+    machine_response.render_blocks = render_blocks
+    return machine_response
 
 
 def track_room(name):
@@ -1848,6 +1936,7 @@ def executor_cpu_pipeline(machine_response):
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
     machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(machine_response)
     machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
     return machine_response
@@ -1908,6 +1997,11 @@ def executor_cpu_reflect(
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
     machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(
+        machine_response,
+        semantic=semantic,
+        response_decision=response_decision,
+    )
     machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
 
@@ -1991,13 +2085,32 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
 
     for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata"):
         value = getattr(machine_response, field, None)
+
         if field == "metadata":
             value = value or {}
             value.setdefault("answer", getattr(machine_response, "answer", ""))
             value.setdefault("content", getattr(machine_response, "content", ""))
             value.setdefault("summary", getattr(machine_response, "summary", ""))
-        if value is None and hasattr(scene, field):
-            value = getattr(scene, field)
+
+        # Never overwrite a valid scene_contract payload with an empty placeholder.
+        if field == "render_blocks":
+            scene_value = getattr(scene_contract, field, None)
+            if not value and scene_value:
+                value = scene_value
+            elif (value in (None, [], {})) and hasattr(scene, field):
+                scene_value = getattr(scene, field)
+                if scene_value:
+                    value = scene_value
+
+        if value in (None, [], {}) and hasattr(scene, field):
+            scene_value = getattr(scene, field)
+            if scene_value not in (None, [], {}):
+                value = scene_value
+
+        # Keep previously built blocks if the new value is empty.
+        if field == "render_blocks" and value in (None, [], {}):
+            value = getattr(scene_contract, field, value)
+
         try:
             setattr(scene_contract, field, value)
         except Exception:
@@ -2023,6 +2136,8 @@ def executor_cpu_scene_pipeline(machine_response):
     conversation_space = getattr(machine_response, "conversation_space", {}) or {}
 
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
+    if not blocks:
+        blocks = list(getattr(machine_response, "render_blocks", []) or [])
 
     try:
         setattr(scene, "timeline", conversation_space.get("timeline", []))
