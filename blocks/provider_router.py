@@ -142,7 +142,7 @@ openai_client = OpenAI(
 # =====================================================
 
 OPENAI_FAST_MODEL = "gpt-5.6-luna"
-OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
+OPENAI_BALANCED_MODEL = "gpt-5.6-luna"
 OPENAI_PRIMARY_MODEL = OPENAI_FAST_MODEL
 
 
@@ -1262,11 +1262,9 @@ def select_openai_model(machine_request, requested_model=None):
     if requested_model in (OPENAI_FAST_MODEL, OPENAI_BALANCED_MODEL):
         chosen = requested_model
     else:
-        if any(marker in text_blob for marker in code_markers):
-            chosen = OPENAI_BALANCED_MODEL
-        else:
-            # Voice, ordinary dialogue, and everything non-code stay on Luna.
-            chosen = OPENAI_FAST_MODEL
+        # Stage: single-model routing.
+        # All first-circle text requests use Luna.
+        chosen = OPENAI_FAST_MODEL
 
     provider_log(
         "🧠 OPENAI MODEL ROUTER:",
@@ -1604,6 +1602,16 @@ async def analyze_image(
         "image_analysis",
         path
     )
+
+    provider_log("🔒 IMAGE ANALYSIS DISABLED (Premium only)")
+    provider_exit("image_analysis", True)
+
+    return {
+        "success": False,
+        "premium_required": True,
+        "image_analysis_disabled": True,
+        "reason": "Image analysis is temporarily disabled."
+    }
 
     try:
 
