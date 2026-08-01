@@ -71,8 +71,8 @@ APRIL PRINCIPLES:
 7. renderer-safe architecture
 """
 
-from blocks.gemini_vision import (
-    analyze_image_gemini
+from blocks.provider_router import (
+    analyze_image as provider_analyze_image
 )
 
 # =====================================================
@@ -446,7 +446,7 @@ async def analyze_provider_image(
         }
     )
 
-    result = await analyze_image_gemini(
+    result = await provider_analyze_image(
         path
     )
 
