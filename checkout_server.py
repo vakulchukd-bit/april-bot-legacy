@@ -1102,25 +1102,13 @@ def voice_chat():
             transcript
         )
 
-        result = asyncio.run(
-
-            process_web_message(
-
-                user_id="web_voice",
-
-                text=transcript
-            )
-        )
+        user_id = request.form.get("user_id", "web_voice")
 
         return jsonify({
 
             "success": True,
 
-            "transcript":
-                transcript,
-
-            "response":
-                result
+            "transcript": transcript
 
         })
 
