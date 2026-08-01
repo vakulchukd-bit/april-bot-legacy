@@ -1736,21 +1736,13 @@ async def generate_image(
 ):
     provider_enter("image_generation", {"size": size})
 
-    try:
-        provider_log("🧠 OPENAI IMAGE GENERATION START")
+    provider_log("🔒 IMAGE GENERATION DISABLED (Premium only)")
+    provider_exit("image_generation", True)
 
-        result = openai_client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size=size,
-            quality=quality,
-        )
-
-        provider_exit("image_generation", True)
-        return result
-
-    except Exception as e:
-        provider_log("🔥 IMAGE GENERATION ERROR:", e)
-        provider_exit("image_generation", False)
-        raise
+    return {
+        "success": False,
+        "premium_required": True,
+        "image_generation_disabled": True,
+        "reason": "Image generation is temporarily disabled."
+    }
 
