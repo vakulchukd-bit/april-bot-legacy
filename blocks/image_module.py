@@ -84,7 +84,6 @@ def patch_image_module_future(
 import base64
 import asyncio
 
-from openai import OpenAI
 
 from storage import (
 
@@ -97,6 +96,8 @@ from storage import (
 from blocks.state_manager import (
     set_last_entity
 )
+
+from blocks.provider_router import generate_image as provider_generate_image
 
 # =====================================================
 # 🔥 FILE ID
@@ -178,7 +179,6 @@ def log_image_generation_event(
 # 🔥 OPENAI
 # =====================================================
 
-client = OpenAI()
 
 # =====================================================
 # 🔥 ADMIN
@@ -354,103 +354,32 @@ def build_visual_generation_state(
             APRIL_FILE_ID
     }
 
+
+
+# =====================================================
+# PROVIDER BRIDGE
+# =====================================================
+
+async def generate_image_provider(prompt, size="1024x1024"):
+    return await provider_generate_image(
+        prompt=prompt,
+        size=size,
+        quality="auto",
+    )
+
 # =====================================================
 # 🔥 V1 (LEGACY RESERVE)
 # =====================================================
 
-async def generate_image(
-    prompt
-):
-
-    def run():
-
-        try:
-
-            print(
-                "🛑 OPENAI IMAGE DISABLED (V1)"
-            )
-
-            log_image_generation_event(
-                "legacy_generation_blocked"
-            )
-
-            return None
-
-        except Exception as e:
-
-            print(
-                "IMAGE GENERATION ERROR:",
-                e
-            )
-
-            log_image_generation_event(
-
-                "legacy_generation_error",
-
-                {
-                    "error":
-                        str(e)
-                }
-            )
-
-            return None
-
-    return await (
-        asyncio.get_event_loop()
-        .run_in_executor(
-            None,
-            run
-        )
-    )
+async def generate_image(prompt):
+    return await generate_image_provider(prompt=prompt, size="1024x1024")
 
 # =====================================================
 # 🔥 V2 (PRIMARY)
 # =====================================================
 
-async def generate_image_v2(
-    prompt
-):
-
-    def run():
-
-        try:
-
-            print(
-                "🛑 OPENAI IMAGE DISABLED (V2)"
-            )
-
-            log_image_generation_event(
-                "v2_generation_blocked"
-            )
-
-            return None
-
-        except Exception as e:
-
-            print(
-                "IMAGE GENERATION V2 ERROR:",
-                e
-            )
-
-            log_image_generation_event(
-
-                "v2_generation_error",
-
-                {
-                    "error":
-                        str(e)
-                }
-            )
-
-            return None
-
-    return await (
-        asyncio.get_event_loop()
-        .run_in_executor(
-            None,
-            run
-        )
-    )
+async def generate_image_v2(prompt):
+    return await generate_image_provider(prompt=prompt, size="1024x1024")
 
 # =====================================================
 # 🔥 INCREMENT
