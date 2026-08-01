@@ -349,14 +349,20 @@ def build_provider_machine_response(text, parsed_contract=None, source_request=N
         response = answer
 
     processor_input = {}
+    execution_round = 1
+    execution_phase = "FIRST_CIRCLE"
     if isinstance(source_request, dict):
         try:
             processor_input = copy.deepcopy(source_request)
         except Exception:
             processor_input = dict(source_request)
+        execution_round = source_request.get("execution_round", execution_round) or execution_round
+        execution_phase = source_request.get("execution_phase", execution_phase) or execution_phase
 
     machine = {
         "type": "provider_response",
+        "execution_round": execution_round,
+        "execution_phase": execution_phase,
         "processor_input": processor_input,
         "provider_source_request": processor_input,
         "machine_response": {
@@ -374,7 +380,9 @@ def build_provider_machine_response(text, parsed_contract=None, source_request=N
             "provider": "openai",
             "render_priority": parsed_contract.get("render_priority", []),
             "provider_contract": "fiber_v3",
-            "transport_contract": "scene_first"
+            "transport_contract": "scene_first",
+            "execution_round": execution_round,
+            "execution_phase": execution_phase,
         }
     }
 
@@ -383,18 +391,10 @@ def build_provider_machine_response(text, parsed_contract=None, source_request=N
         machine["machine_response"]["metadata"].setdefault("provider_source_request", processor_input)
         machine["machine_response"]["metadata"].setdefault("provider_first_circle", True)
         machine["machine_response"]["metadata"].setdefault("second_circle_ready", True)
+        machine["machine_response"]["metadata"].setdefault("execution_round", execution_round)
+        machine["machine_response"]["metadata"].setdefault("execution_phase", execution_phase)
 
     return machine
-
-import json
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest
-
-
-
-# =====================================================
-# STAGE 1B - PROVIDER DECODER PIPELINE
-# =====================================================
-
 def provider_decode_json(raw_text):
     try:
         import json
@@ -814,12 +814,22 @@ def build_openai_request(machine_request):
 
 
 def machine_request_to_dict(machine_request):
-    """Convert canonical MachineRequest object to provider payload."""
+    """Convert canonical MachineRequest object to provider payload.
+
+    Keeps the full transport envelope for processor handoff, while still
+    carrying the compact provider_request and execution-round markers used to
+    split the first and second circles.
+    """
     if isinstance(machine_request, dict):
         payload = dict(machine_request)
         if "provider_request" in machine_request:
             payload["provider_request"] = machine_request.get("provider_request")
+        if "execution_round" in machine_request:
+            payload["execution_round"] = machine_request.get("execution_round")
+        if "execution_phase" in machine_request:
+            payload["execution_phase"] = machine_request.get("execution_phase")
         return payload
+
     if isinstance(machine_request, MachineRequest):
         payload = {
             "goal": getattr(machine_request, "goal", None),
@@ -839,10 +849,13 @@ def machine_request_to_dict(machine_request):
         }
         if hasattr(machine_request, "provider_request"):
             payload["provider_request"] = getattr(machine_request, "provider_request", None)
+        if hasattr(machine_request, "execution_round"):
+            payload["execution_round"] = getattr(machine_request, "execution_round", None)
+        if hasattr(machine_request, "execution_phase"):
+            payload["execution_phase"] = getattr(machine_request, "execution_phase", None)
         return payload
+
     raise TypeError("Provider accepts only canonical MachineRequest.")
-
-
 def normalize_provider_input(machine_request):
     """Build canonical OpenAI request from MachineRequest only."""
     system_item = {
@@ -1143,29 +1156,48 @@ def build_provider_overload_contract(space):
 
 def provider_should_bypass_openai(messages):
     """
-    Detect post-provider execution phases.
+    Detect post-provider execution phases and second-circle payloads.
     Returns (bypass, payload).
     """
     phase = None
+    execution_round = None
+    provider_bypass = False
 
     if isinstance(messages, dict):
         phase = messages.get("execution_phase")
+        execution_round = messages.get("execution_round")
+        provider_bypass = bool(messages.get("provider_bypass"))
     else:
         phase = getattr(messages, "execution_phase", None)
+        execution_round = getattr(messages, "execution_round", None)
+        provider_bypass = bool(getattr(messages, "provider_bypass", False))
+
+    try:
+        execution_round_value = int(execution_round) if execution_round is not None else None
+    except Exception:
+        execution_round_value = None
+
+    if provider_bypass or (execution_round_value is not None and execution_round_value >= 2):
+        provider_log(
+            f"CPU ROUTE GUARD: bypass OpenAI (round={execution_round_value}, phase={phase})"
+        )
+        return True, {
+            "type": "provider_cpu_redirect",
+            "execution_phase": phase or "POST_PROVIDER",
+            "execution_round": execution_round_value or 2,
+            "provider_bypassed": True,
+        }
 
     if phase in ("POST_PROVIDER", "POST_REASONING", "SCENE_READY"):
         provider_log(f"CPU ROUTE GUARD: bypass OpenAI (phase={phase})")
         return True, {
             "type": "provider_cpu_redirect",
             "execution_phase": phase,
+            "execution_round": execution_round_value or 2,
             "provider_bypassed": True,
         }
 
     return False, None
-
-
-
-
 def provider_stage_log(stage, payload=None):
     try:
         if isinstance(payload, dict):
@@ -1309,8 +1341,11 @@ async def generate_text(
         )
 
         provider_stage_log("INPUT", {"type":type(messages).__name__})
-        normalized_input = normalize_provider_input(messages)
-        provider_stage_log("OPENAI_REQUEST", {"items":len(normalized_input)})
+        openai_source_request = None
+        if isinstance(source_request, dict):
+            openai_source_request = source_request.get("provider_request") or None
+        normalized_input = normalize_provider_input(openai_source_request or messages)
+        provider_stage_log("OPENAI_REQUEST", {"items":len(normalized_input), "round": getattr(messages, "execution_round", None) if not isinstance(messages, dict) else messages.get("execution_round")})
 
         provider_log("========== OPENAI REQUEST BUILDER ==========")
         provider_log(json.dumps(normalized_input, ensure_ascii=False)[:8000])
@@ -1343,6 +1378,7 @@ async def generate_text(
         provider_log({
             "provider_model": selected_model,
             "request_keys": list(request.keys()),
+            "execution_round": source_request.get("execution_round") if isinstance(source_request, dict) else getattr(messages, "execution_round", None),
         })
 
         response = (
