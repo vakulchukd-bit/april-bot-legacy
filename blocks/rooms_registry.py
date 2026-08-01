@@ -1357,6 +1357,18 @@ ROOM_REGISTRY_STATE = {
 # APRIL FIBER REGISTRY BRIDGE
 # =====================================================
 
+
+def _machine_response_has_payload(mr):
+    if mr is None:
+        return False
+    return bool(
+        getattr(mr, "answer", None)
+        or getattr(mr, "content", None)
+        or getattr(mr, "summary", None)
+        or list(getattr(mr, "render_blocks", []) or [])
+        or list(getattr(mr, "artifacts", []) or [])
+    )
+
 def registry_accept_request(request: MachineRequest)->MachineRequest:
     return request
 
@@ -1377,6 +1389,14 @@ def registry_collect_responses(responses):
         if candidate is not None:
             if mr is None:
                 mr = candidate
+            elif (not _machine_response_has_payload(mr)) and _machine_response_has_payload(candidate):
+                preserved = mr
+                mr = candidate
+                try:
+                    mr.contributions.update(getattr(preserved, "contributions", {}) or {})
+                    mr.artifacts.extend(getattr(preserved, "artifacts", []) or [])
+                except Exception:
+                    pass
             else:
                 mr.artifacts.extend(getattr(candidate, "artifacts", []) or [])
                 mr.contributions.update(getattr(candidate, "contributions", {}) or {})
