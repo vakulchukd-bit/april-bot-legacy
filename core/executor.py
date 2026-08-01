@@ -1075,11 +1075,11 @@ async def execute_rooms(
         raise RuntimeError("No MachineResponse produced")
 
     if not getattr(machine_response, "answer", "") and not getattr(machine_response, "content", "") and not getattr(machine_response, "summary", "") and not list(getattr(machine_response, "render_blocks", []) or []):
-        orig = getattr(machine_response,"provider_original_answer",None)
-                if orig:
-                    machine_response.answer = orig
-                else:
-                    machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
+        orig = getattr(machine_response, "provider_original_answer", None)
+        if orig:
+            machine_response.answer = orig
+        else:
+            machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
         machine_response.content = machine_response.answer
         machine_response.summary = "Пустой результат после обработки запроса."
         machine_response.render_blocks = [{
