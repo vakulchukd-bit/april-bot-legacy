@@ -2156,3 +2156,540 @@ async def execute(
     result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
     return result
+
+
+# =====================================================
+# STAGE 5 - MEMORY RECALL BRIDGE
+# =====================================================
+
+def _executor_cpu_textify(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = []
+        for key in (
+            "text",
+            "content",
+            "summary",
+            "answer",
+            "response",
+            "goal",
+            "intent",
+            "type",
+            "topic",
+            "message",
+            "description",
+            "caption",
+        ):
+            item = value.get(key)
+            if item not in (None, "", [], {}):
+                parts.append(_executor_cpu_textify(item))
+        if parts:
+            return " ".join(part for part in parts if part)
+        return " ".join(
+            _executor_cpu_textify(v)
+            for v in value.values()
+            if v not in (None, "", [], {})
+        ).strip()
+    if isinstance(value, list):
+        return " ".join(_executor_cpu_textify(v) for v in value if v not in (None, "", [], {})).strip()
+    return str(value).strip()
+
+
+def _executor_cpu_tokenize(text):
+    if not text:
+        return []
+    return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄє0-9_]+", str(text).lower())
+
+
+def _executor_cpu_parse_hint_payload(*values):
+    import json
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip()
+        if not candidate:
+            continue
+        if candidate.startswith("{") and candidate.endswith("}"):
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+    return {}
+
+
+def _executor_cpu_turn_text(turn):
+    if isinstance(turn, dict):
+        parts = []
+        for key in (
+            "text",
+            "content",
+            "summary",
+            "answer",
+            "response",
+            "goal",
+            "topic",
+            "last_user_turn",
+            "last_april_turn",
+        ):
+            item = turn.get(key)
+            if item not in (None, "", [], {}):
+                parts.append(_executor_cpu_textify(item))
+        if not parts and "user" in turn:
+            parts.append(_executor_cpu_textify(turn.get("user")))
+        if not parts and "april" in turn:
+            parts.append(_executor_cpu_textify(turn.get("april")))
+        return " ".join(part for part in parts if part).strip()
+    return _executor_cpu_textify(turn)
+
+
+def _executor_cpu_rank_candidates(query_tokens, candidates, limit=5):
+    ranked = []
+    total = len(candidates)
+    for idx, item in enumerate(candidates):
+        text = _executor_cpu_textify(item)
+        if not text:
+            continue
+        item_tokens = set(_executor_cpu_tokenize(text))
+        overlap = len(query_tokens & item_tokens)
+        recency = (total - idx) / max(total, 1)
+        score = overlap + (recency * 0.2)
+        if overlap > 0 or idx >= max(total - 3, 0):
+            ranked.append((score, idx, item, text))
+    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    selected = []
+    seen = set()
+    for score, idx, item, text in ranked:
+        marker = text[:240]
+        if marker in seen:
+            continue
+        seen.add(marker)
+        selected.append(
+            {
+                "score": round(score, 4),
+                "index": idx,
+                "content": text[:1200],
+                "source": item if isinstance(item, dict) else {"value": text[:1200]},
+            }
+        )
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def executor_cpu_memory_recall(
+    machine_response,
+    *,
+    semantic,
+    cognition,
+    response_decision,
+    state,
+    text,
+    provider_request=None,
+):
+    """
+    CPU-only retrieval bridge.
+
+    Detects whether the current request needs history / visual continuity / topic
+    continuation, then attaches only a compact recalled context to the executor
+    conversation space. Nothing here calls Provider/OpenAI.
+    """
+    if machine_response is None:
+        return machine_response
+
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+    current_text = _executor_cpu_textify(text)
+    answer_text = _executor_cpu_textify(getattr(machine_response, "answer", None))
+    content_text = _executor_cpu_textify(getattr(machine_response, "content", None))
+    summary_text = _executor_cpu_textify(getattr(machine_response, "summary", None))
+
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+    provider_request = provider_request or {}
+
+    hint_payload = _executor_cpu_parse_hint_payload(
+        answer_text,
+        content_text,
+        summary_text,
+        _executor_cpu_textify(semantic.get("memory_hint")),
+        _executor_cpu_textify(semantic.get("recall_hint")),
+        _executor_cpu_textify(semantic.get("retrieval_hint")),
+        _executor_cpu_textify(response_decision.get("memory_hint")),
+        _executor_cpu_textify(response_decision.get("recall_hint")),
+        _executor_cpu_textify(provider_request.get("memory_hint")),
+        _executor_cpu_textify(provider_request.get("recall_hint")),
+    )
+
+    blob = " ".join(
+        part for part in (
+            current_text,
+            _executor_cpu_textify(semantic.get("normalized_text")),
+            _executor_cpu_textify(semantic.get("type")),
+            _executor_cpu_textify(semantic.get("intent_type")),
+            _executor_cpu_textify(semantic.get("request_type")),
+            _executor_cpu_textify(semantic.get("intent")),
+            _executor_cpu_textify(semantic.get("topic")),
+            _executor_cpu_textify(semantic.get("goal")),
+            _executor_cpu_textify(response_decision.get("goal")),
+            answer_text,
+            content_text,
+            summary_text,
+            _executor_cpu_textify(provider_request.get("goal")),
+            _executor_cpu_textify(provider_request.get("intent")),
+        )
+        if part
+    ).lower()
+
+    history_markers = (
+        "history_reference",
+        "requires_history",
+        "history",
+        "memory",
+        "remember",
+        "recall",
+        "earlier",
+        "previous",
+        "before",
+        "again",
+        "return to",
+        "back to",
+        "same topic",
+        "last time",
+        "yesterday",
+        "давно",
+        "ранее",
+        "прошл",
+        "истори",
+        "вспомни",
+        "верн",
+        "продолж",
+        "тот же",
+        "та же",
+        "стар",
+    )
+
+    visual_markers = (
+        "visual_reference",
+        "requires_visual",
+        "visual",
+        "image",
+        "picture",
+        "photo",
+        "screenshot",
+        "screen",
+        "diagram",
+        "graph",
+        "chart",
+        "figure",
+        "drawing",
+        "picture",
+        "картин",
+        "изображ",
+        "скрин",
+        "схем",
+        "граф",
+        "диаграм",
+        "рисунк",
+        "фото",
+        "визуал",
+    )
+
+    continuation_markers = (
+        "continue_scene",
+        "continue",
+        "continuation",
+        "resume",
+        "next",
+        "same scene",
+        "same thing",
+        "that one",
+        "this one",
+        "ту же",
+        "продолж",
+        "дальше",
+        "снова",
+        "опять",
+    )
+
+    requires_history = bool(
+        hint_payload.get("requires_history")
+        or hint_payload.get("history_reference")
+        or hint_payload.get("needs_history")
+        or hint_payload.get("memory_reference")
+        or any(marker in blob for marker in history_markers)
+        or bool(
+            semantic.get("requires_history")
+            or semantic.get("history_reference")
+            or semantic.get("needs_history")
+            or semantic.get("memory_reference")
+        )
+    )
+
+    requires_visual = bool(
+        hint_payload.get("requires_visual")
+        or hint_payload.get("visual_reference")
+        or hint_payload.get("needs_visual")
+        or hint_payload.get("visual_target")
+        or any(marker in blob for marker in visual_markers)
+        or bool(
+            semantic.get("visual_generation_needed")
+            or semantic.get("visual_reference")
+            or semantic.get("visual_target")
+            or semantic.get("image_reference")
+        )
+    )
+
+    requires_continuation = bool(
+        hint_payload.get("continue_scene")
+        or hint_payload.get("requires_continuation")
+        or hint_payload.get("resume_topic")
+        or any(marker in blob for marker in continuation_markers)
+        or bool(
+            semantic.get("continue_scene")
+            or semantic.get("resume_topic")
+            or semantic.get("continuation")
+            or response_decision.get("continue_scene")
+        )
+    )
+
+    timeline = list(conversation_space.get("timeline") or state.get("dialog", []) or [])
+    if not timeline and isinstance(state.get("dialog"), list):
+        timeline = list(state.get("dialog", []))
+
+    recent_turns = timeline[-8:] if timeline else []
+    query_tokens = set(_executor_cpu_tokenize(" ".join([
+        current_text,
+        _executor_cpu_textify(semantic.get("normalized_text")),
+        _executor_cpu_textify(provider_request.get("goal")),
+        _executor_cpu_textify(provider_request.get("intent")),
+        _executor_cpu_textify(response_decision.get("goal")),
+    ])))
+
+    history_hits = []
+    if requires_history or requires_continuation or requires_visual:
+        candidates = []
+        for turn in recent_turns:
+            candidates.append(turn)
+        last_user_turn = conversation_space.get("last_user_turn") or state.get("last_user_turn")
+        last_april_turn = conversation_space.get("last_april_turn") or state.get("last_april_turn")
+        if last_user_turn:
+            candidates.append({"role": "last_user_turn", "text": last_user_turn})
+        if last_april_turn:
+            candidates.append({"role": "last_april_turn", **(last_april_turn if isinstance(last_april_turn, dict) else {"text": last_april_turn})})
+        history_hits = _executor_cpu_rank_candidates(query_tokens, candidates, limit=5)
+
+    visual_candidates = []
+    if requires_visual or requires_continuation:
+        visual_candidates.extend([
+            {"role": "active_visual_scene", **(conversation_space.get("active_visual_scene", {}) or {})},
+            {"role": "visual_summary", **(conversation_space.get("visual_summary", {}) or {})},
+            {"role": "visual_memory_bridge", **(state.get("visual_continuity_summary", {}) or {})},
+        ])
+    visual_hits = _executor_cpu_rank_candidates(query_tokens, visual_candidates, limit=3) if visual_candidates else []
+
+    active_memory_context = {
+        "requires_history": requires_history,
+        "requires_visual": requires_visual,
+        "requires_continuation": requires_continuation,
+        "history_hits": history_hits,
+        "visual_hits": visual_hits,
+        "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+        "memory_summary": _clip_text(state.get("memory_summary"), 3000),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "focus": state.get("focus", state.get("focus_state", {})),
+        "provider_hint": hint_payload,
+        "query": current_text,
+    }
+
+    conversation_space = dict(conversation_space)
+    conversation_space["memory_recall"] = {
+        "requires_history": requires_history,
+        "requires_visual": requires_visual,
+        "requires_continuation": requires_continuation,
+        "provider_hint": hint_payload,
+    }
+    conversation_space["retrieved_memory"] = active_memory_context
+    conversation_space["active_memory_context"] = active_memory_context
+    conversation_space["retrieved_history"] = history_hits
+    conversation_space["retrieved_visual"] = visual_hits
+
+    machine_response.conversation_space = conversation_space
+    setattr(machine_response, "retrieved_memory", active_memory_context)
+    setattr(machine_response, "active_memory_context", active_memory_context)
+    setattr(machine_response, "memory_recall", conversation_space["memory_recall"])
+    setattr(machine_response, "history_hits", history_hits)
+    setattr(machine_response, "visual_hits", visual_hits)
+    return machine_response
+
+
+def executor_cpu_memory_fusion(machine_response):
+    """
+    Fuse dynamic memory, visual memory and dialog trajectory into
+    one canonical executor state. No new routes are created.
+    """
+    cs=getattr(machine_response,"conversation_space",{}) or {}
+    active_memory_context = cs.get("active_memory_context", {}) or {}
+    retrieved_memory = cs.get("retrieved_memory", {}) or {}
+    memory_recall = cs.get("memory_recall", {}) or {}
+
+    dialog_vector={
+        "timeline": cs.get("timeline",[]),
+        "memory_timeline": cs.get("memory_timeline",{}),
+        "visual_summary": cs.get("visual_summary",{}),
+        "active_visual_scene": cs.get("active_visual_scene",{}),
+        "goal_hierarchy": cs.get("goal_hierarchy",{}),
+        "focus": cs.get("focus",{}),
+        "semantic": cs.get("semantic",{}),
+        "response_decision": cs.get("response_decision",{}),
+        "active_memory_context": active_memory_context,
+        "retrieved_memory": retrieved_memory,
+        "memory_recall": memory_recall,
+        "vector_version":"executor_test6",
+        "single_route":True,
+    }
+
+    setattr(machine_response,"dialog_vector",dialog_vector)
+
+    plan=getattr(machine_response,"executor_presentation_plan",{}) or {}
+    plan["dialog_vector"]=True
+    plan["memory_fusion"]=True
+    plan["memory_recall"]=bool(memory_recall)
+    plan["active_memory_context"]=bool(active_memory_context)
+    plan["retrieved_memory_hits"]=bool(retrieved_memory.get("history_hits") or retrieved_memory.get("visual_hits"))
+    plan["visual_continuity"]=bool(dialog_vector["active_visual_scene"])
+    plan["dynamic_memory"]=bool(dialog_vector["memory_timeline"])
+    machine_response.executor_presentation_plan=plan
+    return machine_response
+
+
+async def execute(
+    user_id,
+    chat_id=None,
+    text="",
+    run_with_activity=None,  # legacy compatibility, scheduled for removal
+    **kwargs,
+):
+    chat_id = chat_id or user_id
+    cpu_trace_begin("EXECUTE", {"user_id": user_id})
+    state = get_state(user_id)
+    semantic = semantic_analyze(
+        text=text,
+        state=state,
+        history=state.get("dialog", []),
+        active_flow=state.get("active_flow", {}),
+        dialog_state=state.get("scene_state", {}),
+    )
+    update_dialog_context(user_id, semantic)
+    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
+    cognition = analyze_cognition(
+        text=text,
+        semantic=semantic,
+        reasoning=reasoning,
+        state=state,
+    )
+    visual_reference = build_visual_reference(
+        semantic=semantic,
+        cognition=cognition,
+        text=text,
+        state=state,
+    )
+
+    response_decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        state=state,
+        visual_reference=visual_reference,
+    )
+    provider_request = build_provider_request(
+        semantic=semantic,
+        response_decision=response_decision,
+        text=text,
+    )
+    task_type = detect_task_type(
+        semantic,
+        cognition,
+        state,
+        conversation_space=None,
+    )
+    context = build_executor_context(
+        user_id=user_id,
+        chat_id=chat_id,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+        provider_request=provider_request,
+    )
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+
+    if "factory_hook_registration" in kwargs:
+        executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
+
+    machine_memory = {
+        "memory_summary": _clip_text(state.get("memory_summary"), 3000),
+        "active_flow": state.get("active_flow"),
+        "memory_timeline": _compact_memory_bundle(conversation_space.get("memory_timeline", {})),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "focus": state.get("focus", state.get("focus_state", {})),
+        "visual_summary": _compact_memory_bundle(conversation_space.get("visual_summary", {})),
+    }
+
+    machine_conversation = {
+        "timeline": _compact_timeline(conversation_space.get("timeline", []), max_items=14),
+        "last_user_turn": current_turn.get("user", {}).get("text", text),
+        "last_april_turn": conversation_space.get("last_april_turn"),
+        "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+    }
+
+    executor_provider_stage_log("PROVIDER_REQUEST", {"goal":text,"timeline":len(machine_conversation.get("timeline",[])),"memory":len(machine_memory)})
+    context["machine_request"] = MachineRequest(
+        goal=current_turn.get("user", {}).get("text", text),
+        intent=semantic,
+        memory=machine_memory,
+        visual_context={
+            "visual_reference": visual_reference,
+            "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+            "visual_summary": conversation_space.get("visual_summary", {}),
+        },
+        conversation=machine_conversation,
+    )
+    context["executor_state"] = state
+    context["executor_conversation_space"] = conversation_space
+
+    setattr(context["machine_request"], "current_turn", current_turn)
+    setattr(context["machine_request"], "provider_request", provider_request)
+    setattr(context["machine_request"], "execution_round", 1)
+    setattr(context["machine_request"], "execution_phase", "FIRST_CIRCLE")
+    setattr(context["machine_request"], "first_circle", True)
+    setattr(context["machine_request"], "second_circle_ready", False)
+    context["provider_request"] = provider_request
+    context["execution_round"] = 1
+    context["execution_phase"] = "FIRST_CIRCLE"
+
+    result = await execute_rooms(
+        user_id=user_id,
+        text=text,
+        context=context,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        run_with_activity=run_with_activity,
+    )
+    if isinstance(result, dict):
+        result["execution_round"] = 2
+        result["execution_phase"] = "POST_PROVIDER"
+    executor_provider_stage_log("PROVIDER_RESPONSE", {"has_machine_response":isinstance(result,dict) and "machine_response" in result,"has_scene_contract":isinstance(result,dict) and "scene_contract" in result,"render_blocks":len((result.get("render_blocks") if isinstance(result,dict) else []) or [])})
+    result = executor_cpu_factory_bridge(result)
+    result = executor_cpu_gateway_dispatch(result)
+    cpu_trace_success("EXECUTE")
+    return result
