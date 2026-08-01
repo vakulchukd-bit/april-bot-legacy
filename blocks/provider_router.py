@@ -104,7 +104,6 @@ OUTPUT:
 
 DEPENDENCIES:
 - openai
-- gemini
 - cognition
 - semantic_core
 - excrouter
@@ -125,7 +124,6 @@ import os
 import time
 
 from openai import OpenAI
-from google import genai
 
 
 # =====================================================
@@ -136,18 +134,15 @@ openai_client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-gemini_client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
 
 
 # =====================================================
 # OPENAI MODEL CONFIGURATION
 # =====================================================
 
-OPENAI_PRIMARY_MODEL = "gpt-5.6"
-OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
 OPENAI_FAST_MODEL = "gpt-5.6-luna"
+OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
+OPENAI_PRIMARY_MODEL = OPENAI_FAST_MODEL
 
 
 
@@ -255,18 +250,6 @@ provider_state = {
     "primary": "openai",
 
     # =================================================
-    # 🔥 VISUAL ASSIST LAYER
-    # =====================================================
-
-    "gemini_available": True,
-
-    "last_gemini_failure": 0,
-
-    "last_health_check": 0,
-
-    "recovery_cooldown": 45,
-
-    # =================================================
     # 🔥 BEHAVIOR STABILIZATION
     # =====================================================
 
@@ -300,143 +283,10 @@ def provider_log(*args):
 
 def update_provider_behavior():
 
-    now = time.time()
-
-    last_failure = provider_state.get(
-        "last_gemini_failure",
-        0
-    )
-
-    delta = now - last_failure
-
-    if delta <= 60:
-
-        provider_state[
-            "route_health"
-        ] = 0.3
-
-        provider_state[
-            "provider_balance"
-        ] = "recovery"
-
-    else:
-
-        provider_state[
-            "route_health"
-        ] = 1.0
-
-        provider_state[
-            "provider_balance"
-        ] = "stable"
-
-    if provider_state.get(
-        "gemini_available"
-    ):
-
-        provider_state[
-            "visual_mode"
-        ] = "distributed"
-
-    else:
-
-        provider_state[
-            "visual_mode"
-        ] = "restricted"
-
-
-# =====================================================
-# 🔥 GEMINI RESTORE CHECK
-# =====================================================
-
-def should_restore_gemini():
-
-    update_provider_behavior()
-
-    if provider_state["gemini_available"]:
-
-        return True
-
-    now = time.time()
-
-    cooldown = provider_state[
-        "recovery_cooldown"
-    ]
-
-    last_failure = provider_state[
-        "last_gemini_failure"
-    ]
-
-    if now - last_failure >= cooldown:
-
-        provider_log(
-            "🧠 GEMINI RECOVERY WINDOW OPEN"
-        )
-
-        provider_state[
-            "gemini_available"
-        ] = True
-
-        provider_state[
-            "last_health_check"
-        ] = now
-
-        provider_state[
-            "provider_balance"
-        ] = "probing"
-
-        return True
-
-    return False
-
-
-# =====================================================
-# 🔥 GEMINI FAILURE
-# =====================================================
-
-def mark_gemini_failure():
-
-    provider_log(
-        "🔥 GEMINI MARKED UNAVAILABLE"
-    )
-
-    provider_state[
-        "gemini_available"
-    ] = False
-
-    provider_state[
-        "last_gemini_failure"
-    ] = time.time()
-
-    provider_state[
-        "provider_balance"
-    ] = "fallback"
-
-    provider_state[
-        "route_health"
-    ] = 0.0
-
-
-# =====================================================
-# 🔥 GEMINI SUCCESS
-# =====================================================
-
-def mark_gemini_success():
-
-    provider_state[
-        "gemini_available"
-    ] = True
-
-    provider_state[
-        "last_health_check"
-    ] = time.time()
-
-    provider_state[
-        "provider_balance"
-    ] = "stable"
-
-    provider_state[
-        "route_health"
-    ] = 1.0
+    # Gemini routes removed. Keep provider health stable.
+    provider_state["route_health"] = 1.0
+    provider_state["provider_balance"] = "stable"
+    provider_state["visual_mode"] = "distributed" if provider_state.get("primary") == "openai" else "restricted"
 
 
 # =====================================================
@@ -1273,6 +1123,69 @@ def provider_stage_log(stage, payload=None):
     except Exception:
         pass
 
+
+def select_openai_model(machine_request, requested_model=None):
+    """
+    Route requests only to the approved OpenAI packages:
+    - GPT-5.6 Luna for voice/dialog/general chat
+    - GPT-5.6 Terra for code/debug/analysis/architecture
+    """
+    try:
+        data = machine_request_to_dict(machine_request)
+    except Exception:
+        data = machine_request if isinstance(machine_request, dict) else {}
+
+    intent = data.get("intent") or {}
+    routing = data.get("routing") or {}
+
+    request_type = (
+        routing.get("request_type")
+        or routing.get("type")
+        or intent.get("request_type")
+        or intent.get("type")
+        or intent.get("intent")
+        or intent.get("semantic_role")
+        or data.get("goal")
+        or ""
+    )
+
+    text_blob = " ".join([
+        str(request_type or ""),
+        str(intent.get("normalized_text") or ""),
+        str(data.get("goal") or ""),
+    ]).lower()
+
+    code_markers = [
+        "code", "python", "typescript", "javascript", "js", "ts",
+        "debug", "debugging", "refactor", "architecture", "analysis",
+        "audit", "review", "stack trace", "trace", "fix", "bug"
+    ]
+
+    voice_markers = [
+        "voice", "dialog", "dialogue", "chat", "conversation",
+        "talk", "speech", "transcript"
+    ]
+
+    # Respect explicit approved model choices first.
+    if requested_model in (OPENAI_FAST_MODEL, OPENAI_BALANCED_MODEL):
+        chosen = requested_model
+    else:
+        if any(marker in text_blob for marker in code_markers):
+            chosen = OPENAI_BALANCED_MODEL
+        else:
+            # Voice, ordinary dialogue, and everything non-code stay on Luna.
+            chosen = OPENAI_FAST_MODEL
+
+    provider_log(
+        "🧠 OPENAI MODEL ROUTER:",
+        {
+            "requested_model": requested_model,
+            "request_type": request_type,
+            "chosen_model": chosen,
+        }
+    )
+    return chosen
+
 async def generate_text(
 
     messages,
@@ -1337,8 +1250,10 @@ async def generate_text(
         provider_log("========== OPENAI REQUEST BUILDER ==========")
         provider_log(json.dumps(normalized_input, ensure_ascii=False)[:8000])
 
+        selected_model = select_openai_model(messages, model)
+
         request = {
-            "model": model,
+            "model": selected_model,
             "input": normalized_input,
         }
 
@@ -1361,7 +1276,7 @@ async def generate_text(
             request["temperature"] = temperature
 
         provider_log({
-            "provider_model": model,
+            "provider_model": selected_model,
             "request_keys": list(request.keys()),
         })
 
@@ -1576,6 +1491,8 @@ async def transcribe_voice(
 # 🔥 IMAGE ANALYSIS
 # =====================================================
 
+
+
 async def analyze_image(
     path,
     prompt
@@ -1586,100 +1503,15 @@ async def analyze_image(
         path
     )
 
-    update_provider_behavior()
-
-    # =================================================
-    # 🔥 GEMINI VISUAL PRIMARY
-    # =====================================================
-
-    if should_restore_gemini():
-
-        try:
-
-            provider_log(
-                "🧠 GEMINI IMAGE START"
-            )
-
-            provider_log(
-                "🧠 VISUAL MODE:",
-                provider_state.get(
-                    "visual_mode"
-                )
-            )
-
-            provider_log(
-                "🧠 GEMINI IMAGE PATH:",
-                path
-            )
-
-            uploaded = gemini_client.files.upload(
-                file=path
-            )
-
-            provider_log(
-                "🧠 GEMINI IMAGE UPLOADED"
-            )
-
-            response = (
-
-                gemini_client.models.generate_content(
-
-                    model="gemini-2.5-flash",
-
-                    contents=[
-                        uploaded,
-                        prompt
-                    ]
-                )
-            )
-
-            text = normalize_response_text(
-
-                response.text
-                if response.text
-                else ""
-            )
-
-            provider_log(
-                "🧠 GEMINI IMAGE RESPONSE:",
-                text[:120] if text else "EMPTY"
-            )
-
-            if text:
-
-                mark_gemini_success()
-
-                provider_exit(
-                    "gemini_image",
-                    True
-                )
-
-                return create_provider_contract(text)
-
-        except Exception as e:
-
-            provider_log(
-                "🔥 GEMINI IMAGE ERROR:",
-                e
-            )
-
-            mark_gemini_failure()
-
-    # =================================================
-    # 🔥 OPENAI VISUAL FALLBACK
-    # =====================================================
-
     try:
 
         provider_log(
-            "OPENAI IMAGE ROUTE"
+            "🧠 OPENAI IMAGE ANALYSIS START"
         )
 
         provider_log(
-            "🧠 FALLBACK PRESSURE:",
-            provider_state.get(
-                "route_health"
-            )
+            "🧠 OPENAI IMAGE PATH:",
+            path
         )
 
         with open(path, "rb") as image_file:
@@ -1722,6 +1554,11 @@ async def analyze_image(
             response.output_text
             if response.output_text
             else ""
+        )
+
+        provider_log(
+            "🧠 OPENAI IMAGE RESPONSE:",
+            text[:120] if text else "EMPTY"
         )
 
         if text:
@@ -1784,3 +1621,34 @@ PROVIDER_LEGACY_MODE=False
 # [ ] Empty response handling
 # [ ] Executor rendering verification
 # ============================================================
+
+
+# =====================================================
+# 🔥 IMAGE GENERATION
+# =====================================================
+
+async def generate_image(
+    prompt: str,
+    size: str = "1024x1024",
+    quality: str = "auto",
+):
+    provider_enter("image_generation", {"size": size})
+
+    try:
+        provider_log("🧠 OPENAI IMAGE GENERATION START")
+
+        result = openai_client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size=size,
+            quality=quality,
+        )
+
+        provider_exit("image_generation", True)
+        return result
+
+    except Exception as e:
+        provider_log("🔥 IMAGE GENERATION ERROR:", e)
+        provider_exit("image_generation", False)
+        raise
+
