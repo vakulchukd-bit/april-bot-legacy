@@ -941,8 +941,21 @@ async def process(
             model=OPENAI_PROVIDER_MODEL
         )
 
-        # Provider may already return a canonical transport object.
+        # Provider canonical contract validation.
         if isinstance(output, dict):
+            mr = output.get("machine_response", {})
+            candidate = (
+                mr.get("answer")
+                or mr.get("content")
+                or mr.get("response")
+                or mr.get("summary")
+                or ""
+            )
+            if candidate:
+                mr.setdefault("answer", candidate)
+                mr.setdefault("content", candidate)
+                mr.setdefault("response", candidate)
+                mr.setdefault("summary", candidate)
             return output
 
         output = sanitize_model_output(
