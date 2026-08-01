@@ -197,7 +197,7 @@ def build_visual_summary(
 
 def build_visual_memory(
     analysis_text,
-    provider="gemini"
+    provider="openai"
 ):
 
     """
@@ -442,7 +442,7 @@ async def analyze_provider_image(
 
         {
             "provider":
-                "gemini"
+                "openai"
         }
     )
 
@@ -456,7 +456,7 @@ async def analyze_provider_image(
 
         {
             "provider":
-                "gemini"
+                "openai"
         }
     )
 
@@ -520,6 +520,14 @@ async def analyze_image(
             path
         )
 
+        # Normalize provider output to plain text
+        if hasattr(result, "output_text"):
+            result = result.output_text
+        elif hasattr(result, "text"):
+            result = result.text
+        elif not isinstance(result, str):
+            result = str(result)
+
         print(
             "🧠 PROVIDER ANALYSIS COMPLETE"
         )
@@ -545,7 +553,7 @@ async def analyze_image(
 
         visual_memory = build_visual_memory(
             result,
-            provider="gemini"
+            provider="openai"
         )
 
         print(
