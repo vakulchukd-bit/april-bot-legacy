@@ -65,17 +65,23 @@ from openai import OpenAI
 # =====================================================
 
 from blocks.provider_router import (
-
-    provider_state,
-
-    should_restore_gemini,
-
-    mark_gemini_failure,
-
-    mark_gemini_success,
-
-    provider_log
+    provider_log,
+    analyze_image as provider_analyze_image,
 )
+
+
+
+# Compatibility after Gemini removal
+provider_state = {}
+
+def should_restore_gemini():
+    return False
+
+def mark_gemini_failure():
+    return None
+
+def mark_gemini_success():
+    return None
 
 # =====================================================
 # 🔥 FILE ID
