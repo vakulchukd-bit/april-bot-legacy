@@ -420,6 +420,57 @@ def build_conversation_space(state, semantic, cognition, response_decision, text
         "visual_reference": visual_reference,
     }
 
+
+def build_provider_request(semantic, response_decision, text):
+    """Build the compact first-circle request used by Provider/OpenAI."""
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+    normalized_text = normalize_text(text)
+
+    def _pick(*values):
+        for value in values:
+            if value not in (None, "", [], {}):
+                return value
+        return None
+
+    provider_request = {
+        "goal": normalized_text,
+        "intent": {
+            "type": semantic.get("type") or semantic.get("intent_type") or semantic.get("request_type"),
+            "normalized_text": normalized_text,
+        },
+        "requested_outputs": _pick(
+            response_decision.get("requested_outputs"),
+            semantic.get("requested_outputs"),
+            semantic.get("desired_outputs"),
+        ),
+        "required_competencies": _pick(
+            response_decision.get("required_competencies"),
+            semantic.get("required_competencies"),
+        ),
+        "required_artifacts": _pick(
+            response_decision.get("required_artifacts"),
+            semantic.get("required_artifacts"),
+        ),
+        "routing": _pick(
+            response_decision.get("routing"),
+            semantic.get("routing"),
+            {},
+        ),
+        "constraints": _pick(
+            response_decision.get("constraints"),
+            semantic.get("constraints"),
+            {},
+        ),
+    }
+
+    return {
+        key: value
+        for key, value in provider_request.items()
+        if value not in (None, "", [], {})
+    }
+
+
 def build_executor_context(
 
     user_id,
@@ -431,7 +482,8 @@ def build_executor_context(
     response_decision,
     visual_reference,
     task_type,
-    text
+    text,
+    provider_request=None
 ):
 
     user_space = build_executor_user_space(state)
@@ -553,6 +605,8 @@ def build_executor_context(
             ),
 
         "machine_input": text,
+        "provider_request":
+            provider_request or build_provider_request(semantic, response_decision, text),
         "platform": "agnostic",
 
         "state":
@@ -1999,6 +2053,11 @@ async def execute(
         state=state,
         visual_reference=visual_reference,
     )
+    provider_request = build_provider_request(
+        semantic=semantic,
+        response_decision=response_decision,
+        text=text,
+    )
     task_type = detect_task_type(
         semantic,
         cognition,
@@ -2016,6 +2075,7 @@ async def execute(
         visual_reference=visual_reference,
         task_type=task_type,
         text=text,
+        provider_request=provider_request,
     )
     conversation_space = context.get("conversation_space") or {}
     current_turn = conversation_space.get("current_turn", {})
@@ -2055,6 +2115,8 @@ async def execute(
     context["executor_conversation_space"] = conversation_space
 
     setattr(context["machine_request"], "current_turn", current_turn)
+    setattr(context["machine_request"], "provider_request", provider_request)
+    context["provider_request"] = provider_request
 
     result = await execute_rooms(
         user_id=user_id,
