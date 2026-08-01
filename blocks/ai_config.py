@@ -240,7 +240,7 @@ def build_policy_telemetry_payload():
 
 TEXT_PROVIDER = "openai"
 
-VISION_PROVIDER = "gemini"
+VISION_PROVIDER = "openai"
 
 VOICE_PROVIDER = "openai"
 
@@ -255,7 +255,7 @@ OPENAI_FAST_MODEL = "gpt-5.6-luna"
 
 TEXT_MODEL = OPENAI_PRIMARY_MODEL
 
-VISION_FALLBACK_MODEL = "gpt-4.1-mini"
+VISION_FALLBACK_MODEL = "gpt-5.6-luna"
 
 VOICE_MODEL = "gpt-4o-mini-transcribe"
 
