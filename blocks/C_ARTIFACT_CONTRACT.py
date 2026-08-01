@@ -830,7 +830,7 @@ class MachineRequest:
 
 @dataclass
 class MachineResponse:
-    # Stage 1: reserve canonical transport fields to avoid dynamic attribute loss.
+    # Canonical transport fields
     fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
     artifacts: List[BaseArtifact] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
@@ -840,11 +840,19 @@ class MachineResponse:
     recommendations: List[str] = field(default_factory=list)
     executor_hints: Dict[str, Any] = field(default_factory=dict)
     routing_decision: Dict[str, Any] = field(default_factory=dict)
+
     answer: str = ""
     content: str = ""
+    response: str = ""
     summary: str = ""
+    explanation: str = ""
+
     render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    artifacts_payload: List[Dict[str, Any]] = field(default_factory=list)
     scene: Dict[str, Any] = field(default_factory=dict)
+    scene_plan: List[str] = field(default_factory=lambda:["text"])
+    render_priority: List[str] = field(default_factory=lambda:["text"])
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class MachineScene:
