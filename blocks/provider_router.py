@@ -122,6 +122,7 @@ print("🧠 APRIL PROVIDER ROUTER LOADED")
 
 import os
 import time
+import copy
 
 from openai import OpenAI
 
@@ -312,7 +313,7 @@ def normalize_response_text(text):
 # 🔥 MACHINE RESPONSE WRAPPER
 # =====================================================
 
-def build_provider_machine_response(text, parsed_contract=None):
+def build_provider_machine_response(text, parsed_contract=None, source_request=None):
     """Build a unified MachineResponse transport contract."""
     parsed_contract = parsed_contract or {}
 
@@ -347,8 +348,17 @@ def build_provider_machine_response(text, parsed_contract=None):
     if response is None:
         response = answer
 
-    return {
+    processor_input = {}
+    if isinstance(source_request, dict):
+        try:
+            processor_input = copy.deepcopy(source_request)
+        except Exception:
+            processor_input = dict(source_request)
+
+    machine = {
         "type": "provider_response",
+        "processor_input": processor_input,
+        "provider_source_request": processor_input,
         "machine_response": {
             "summary": summary,
             "explanation": explanation,
@@ -367,6 +377,14 @@ def build_provider_machine_response(text, parsed_contract=None):
             "transport_contract": "scene_first"
         }
     }
+
+    if processor_input:
+        machine["machine_response"]["metadata"].setdefault("processor_input", processor_input)
+        machine["machine_response"]["metadata"].setdefault("provider_source_request", processor_input)
+        machine["machine_response"]["metadata"].setdefault("provider_first_circle", True)
+        machine["machine_response"]["metadata"].setdefault("second_circle_ready", True)
+
+    return machine
 
 import json
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
@@ -568,6 +586,32 @@ def provider_contract_ready(machine_response):
     return machine_response
 
 
+def attach_processor_input(contract, source_request=None):
+    """Preserve the second-circle input for the processor without sending it
+    to OpenAI. The source request stays attached to the returned contract so
+    the executor can reuse it for memory, history, and scene integration.
+    """
+    if not isinstance(contract, dict) or source_request is None:
+        return contract
+
+    try:
+        cloned = copy.deepcopy(source_request)
+    except Exception:
+        cloned = source_request
+
+    contract.setdefault("processor_input", cloned)
+    contract.setdefault("provider_source_request", cloned)
+
+    mr = contract.setdefault("machine_response", {})
+    metadata = mr.setdefault("metadata", {})
+    metadata.setdefault("processor_input", cloned)
+    metadata.setdefault("provider_source_request", cloned)
+    metadata.setdefault("provider_first_circle", True)
+    metadata.setdefault("second_circle_ready", True)
+
+    return contract
+
+
 # =====================================================
 # 🧠 ASSISTANT-AWARE PROVIDER ROUTING
 # =====================================================
@@ -671,42 +715,45 @@ Behavior rules:
 """
 
 
+
 def build_openai_request(machine_request):
     """
-    Stage 2:
-    Convert one canonical MachineRequest into one canonical
-    OpenAI Responses API request.
+    Stage 3:
+    Build a minimal first-circle OpenAI request.
+
+    If an explicit provider_request is available, it is used as the
+    canonical first-circle payload. Otherwise the request is reduced to the
+    compact fields required for the first circle.
     """
     if not isinstance(machine_request, dict):
         machine_request = {}
 
-    intent = machine_request.get("intent") or {}
+    provider_request = machine_request.get("provider_request") or {}
+    if not isinstance(provider_request, dict):
+        provider_request = {}
+
+    source_request = provider_request if provider_request else machine_request
+
+    intent = source_request.get("intent") or {}
     user_text = (
         intent.get("normalized_text")
         or intent.get("text")
-        or machine_request.get("content")
+        or source_request.get("goal")
+        or source_request.get("content")
         or ""
     )
 
-    # STAGE 2 - Compact Provider Payload
-    memory = machine_request.get("memory") or {}
-    visual = machine_request.get("visual_context") or {}
-
-    payload = {
-        "goal": machine_request.get("goal"),
+    minimal_payload = {
+        "goal": source_request.get("goal"),
         "intent": {
             "type": intent.get("type"),
             "normalized_text": user_text,
         },
-        "conversation": machine_request.get("conversation"),
-        "memory": memory,
-        "visual_context": visual,
-        "available_tools": machine_request.get("available_tools"),
-        "requested_outputs": machine_request.get("requested_outputs"),
-        "required_competencies": machine_request.get("required_competencies"),
-        "required_artifacts": machine_request.get("required_artifacts"),
-        "routing": machine_request.get("routing"),
-        "constraints": machine_request.get("constraints"),
+        "requested_outputs": source_request.get("requested_outputs"),
+        "required_competencies": source_request.get("required_competencies"),
+        "required_artifacts": source_request.get("required_artifacts"),
+        "routing": source_request.get("routing"),
+        "constraints": source_request.get("constraints"),
     }
 
     def _meaningful(value):
@@ -720,38 +767,42 @@ def build_openai_request(machine_request):
             return False
         return True
 
-    payload = {k: v for k, v in payload.items() if _meaningful(v)}
+    minimal_payload = {
+        k: v for k, v in minimal_payload.items() if _meaningful(v)
+    }
 
-    provider_log("========== MACHINE REQUEST ==========")
-    provider_log(json.dumps(payload, ensure_ascii=False)[:8000])
+    provider_log("========== MINIMAL OPENAI REQUEST ==========")
+    provider_log(json.dumps(minimal_payload, ensure_ascii=False)[:8000])
 
-    # Always include the canonical MachineRequest payload for normal text requests.
-    # A minimal prompt causes the model to answer about the protocol itself.
-    sections=[]
-    order=[
-        ("goal","GOAL"),
-        ("intent","SEMANTIC"),
-        ("memory","MEMORY"),
-        ("conversation","CONVERSATION"),
-        ("visual_context","VISUAL_CONTEXT"),
-        ("available_tools","AVAILABLE_TOOLS"),
-        ("requested_outputs","REQUESTED_OUTPUTS"),
-        ("required_competencies","REQUIRED_COMPETENCIES"),
-        ("required_artifacts","REQUIRED_ARTIFACTS"),
-        ("routing","ROUTING"),
-        ("constraints","CONSTRAINTS"),
+    sections = []
+    order = [
+        ("goal", "GOAL"),
+        ("intent", "SEMANTIC"),
+        ("requested_outputs", "REQUESTED_OUTPUTS"),
+        ("required_competencies", "REQUIRED_COMPETENCIES"),
+        ("required_artifacts", "REQUIRED_ARTIFACTS"),
+        ("routing", "ROUTING"),
+        ("constraints", "CONSTRAINTS"),
     ]
-    for key,title in order:
-        if key in payload:
-            sections.append(f"{title}:\n{json.dumps(payload[key], ensure_ascii=False)}\n")
 
-    structured_prompt=(
+    for key, title in order:
+        if key in minimal_payload:
+            sections.append(
+                f"{title}:\n{json.dumps(minimal_payload[key], ensure_ascii=False)}\n"
+            )
+
+    structured_prompt = (
         "APRIL MACHINE REQUEST\n\n"
-        "Transform the following MachineRequest into exactly one MachineResponse.\n"
-        "Follow the APRIL protocol exactly.\n\n"
+        "Transform the following current user request into exactly one "
+        "MachineResponse.\n"
+        "Use only the information below for the first circle.\n"
+        "Do not use conversation history, memory, visual timeline, or any "
+        "past dialog context.\n"
+        "Return one compact MachineResponse only.\n\n"
         + "\n".join(sections)
         + "\nOutput format: MachineResponse only. No markdown. No explanations."
     )
+
     return {
         "role": "user",
         "content": [{
@@ -765,9 +816,12 @@ def build_openai_request(machine_request):
 def machine_request_to_dict(machine_request):
     """Convert canonical MachineRequest object to provider payload."""
     if isinstance(machine_request, dict):
-        return machine_request
+        payload = dict(machine_request)
+        if "provider_request" in machine_request:
+            payload["provider_request"] = machine_request.get("provider_request")
+        return payload
     if isinstance(machine_request, MachineRequest):
-        return {
+        payload = {
             "goal": getattr(machine_request, "goal", None),
             "intent": getattr(machine_request, "intent", None),
             "conversation": getattr(machine_request, "conversation", None),
@@ -783,6 +837,9 @@ def machine_request_to_dict(machine_request):
             "renderer_preferences": getattr(machine_request, "renderer_preferences", None),
             "metadata": getattr(machine_request, "metadata", None),
         }
+        if hasattr(machine_request, "provider_request"):
+            payload["provider_request"] = getattr(machine_request, "provider_request", None)
+        return payload
     raise TypeError("Provider accepts only canonical MachineRequest.")
 
 
@@ -851,7 +908,7 @@ def recover_machine_contract(contract):
     contract["metadata"]["transport_stage"]="provider_stage2"
     return contract
 
-def create_provider_contract(raw_text):
+def create_provider_contract(raw_text, source_request=None):
     """Stage 3: translate every OpenAI response into one canonical MachineResponse.
     Stage 1 upgrade: avoid repeated normalization and preserve canonical transport."""
 
@@ -874,7 +931,7 @@ def create_provider_contract(raw_text):
 
     # STAGE 3: build one canonical provider response then perform a single executor handoff
     # STAGE4: canonical builder becomes the single assembly point.
-    machine = build_provider_machine_response(raw_text, parsed)
+    machine = build_provider_machine_response(raw_text, parsed, source_request=source_request)
 
     mr = machine.setdefault("machine_response", {})
     if mr.get("answer"):
@@ -882,7 +939,8 @@ def create_provider_contract(raw_text):
         mr["provider_original_content"] = mr.get("content", mr["answer"])
 
     # STAGE4: executor handoff preserved.
-    machine = provider_finalize_for_executor(machine)
+    machine = provider_finalize_for_executor(machine, source_request=source_request)
+    machine = attach_processor_input(machine, source_request)
     return machine
 
 
@@ -976,7 +1034,7 @@ def detect_executor_artifacts(machine_response):
 # STAGE 2 - EXECUTOR HANDOFF
 # =====================================================
 
-def provider_finalize_for_executor(contract):
+def provider_finalize_for_executor(contract, source_request=None):
     """
     Canonical Provider -> Executor bridge.
     Ensures the payload is normalized before leaving Provider.
@@ -984,6 +1042,8 @@ def provider_finalize_for_executor(contract):
     contract = enrich_machine_response(contract)
     contract = infer_executor_rendering(contract)
     contract = detect_executor_artifacts(contract)
+    if source_request is not None:
+        contract = attach_processor_input(contract, source_request)
     return contract
 
 
@@ -1202,6 +1262,8 @@ async def generate_text(
     # Legacy messages[] route removed.
     # Only canonical MachineRequest is accepted beyond this point.
 
+    source_request = machine_request_to_dict(messages)
+
     bypass, payload = provider_should_bypass_openai(messages)
     if bypass:
         provider_exit("cpu_redirect", True)
@@ -1218,6 +1280,9 @@ async def generate_text(
             payload["machine_response"] = getattr(messages, "machine_response", None)
             payload["trace_id"] = getattr(messages, "trace_id", None)
             payload["fiber_pass"] = getattr(messages, "fiber_pass", 2)
+
+        payload["processor_input"] = source_request if isinstance(source_request, dict) else {}
+        payload["provider_source_request"] = source_request if isinstance(source_request, dict) else {}
 
         return payload
 
@@ -1320,7 +1385,7 @@ async def generate_text(
         )
 
         provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
-        contract = create_provider_contract(raw_text)
+        contract = create_provider_contract(raw_text, source_request=source_request)
 
         if isinstance(contract, dict):
             mr = contract.get("machine_response")
@@ -1384,6 +1449,7 @@ async def generate_text(
         provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
         provider_stage_log("EXECUTOR_HANDOFF", mr)
 
+        contract = attach_processor_input(contract, source_request)
         return contract
 
     except Exception as e:
