@@ -462,6 +462,9 @@ def build_provider_request(semantic, response_decision, text):
             semantic.get("constraints"),
             {},
         ),
+        "execution_round": 1,
+        "execution_phase": "FIRST_CIRCLE",
+        "provider_mode": "compact_first_circle",
     }
 
     return {
@@ -516,6 +519,12 @@ def build_executor_context(
 
         "task_type":
             task_type,
+
+        "execution_round":
+            1,
+
+        "execution_phase":
+            "FIRST_CIRCLE",
 
         "executor_version":
             "april_cpu_v1",
@@ -1163,6 +1172,9 @@ async def execute_rooms(
     _canonical_summary = getattr(machine_response, "summary", "")
 
     machine_response = executor_cpu_normalize_answer(machine_response)
+    setattr(machine_response, "execution_round", 2)
+    setattr(machine_response, "execution_phase", "POST_PROVIDER")
+    setattr(machine_response, "provider_bypass", True)
 
     executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
     machine_response = executor_cpu_reflect(
@@ -1944,6 +1956,8 @@ def executor_cpu_finalize_transport(machine_response):
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3",
+        "execution_round": getattr(machine_response, "execution_round", 2),
+        "execution_phase": getattr(machine_response, "execution_phase", "POST_PROVIDER"),
         "conversation_space": conversation_space,
         "machine_response": machine_response,
         "machine_scene": scene.get("machine_scene"),
@@ -2116,7 +2130,13 @@ async def execute(
 
     setattr(context["machine_request"], "current_turn", current_turn)
     setattr(context["machine_request"], "provider_request", provider_request)
+    setattr(context["machine_request"], "execution_round", 1)
+    setattr(context["machine_request"], "execution_phase", "FIRST_CIRCLE")
+    setattr(context["machine_request"], "first_circle", True)
+    setattr(context["machine_request"], "second_circle_ready", False)
     context["provider_request"] = provider_request
+    context["execution_round"] = 1
+    context["execution_phase"] = "FIRST_CIRCLE"
 
     result = await execute_rooms(
         user_id=user_id,
@@ -2128,6 +2148,9 @@ async def execute(
         state=state,
         run_with_activity=run_with_activity,
     )
+    if isinstance(result, dict):
+        result["execution_round"] = 2
+        result["execution_phase"] = "POST_PROVIDER"
     executor_provider_stage_log("PROVIDER_RESPONSE", {"has_machine_response":isinstance(result,dict) and "machine_response" in result,"has_scene_contract":isinstance(result,dict) and "scene_contract" in result,"render_blocks":len((result.get("render_blocks") if isinstance(result,dict) else []) or [])})
     result = executor_cpu_factory_bridge(result)
     result = executor_cpu_gateway_dispatch(result)
