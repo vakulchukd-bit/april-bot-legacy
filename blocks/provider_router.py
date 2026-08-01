@@ -1451,6 +1451,20 @@ async def generate_text(
         provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
         contract = finalize_executor_contract(contract)
         contract = provider_final_guard(contract)
+        if isinstance(contract, dict):
+            mr = contract.setdefault("machine_response", {})
+            candidate = (
+                mr.get("answer")
+                or mr.get("content")
+                or mr.get("response")
+                or mr.get("summary")
+                or ""
+            )
+            if candidate:
+                mr["answer"]=candidate
+                mr["content"]=candidate
+                mr["response"]=candidate
+                mr.setdefault("summary",candidate)
         mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
         provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
         provider_stage_log("EXECUTOR_HANDOFF", mr)
