@@ -1040,33 +1040,118 @@ def _extract_machine_response(result):
     """Stage 1 Executor: preserve Provider semantic fields without collapsing them."""
     if isinstance(result, MachineResponse):
         return result
-    if not isinstance(result, dict):
+
+    if result is None:
         return None
 
-    mr=result.get("machine_response", result)
-    if isinstance(mr, MachineResponse):
-        return mr
-    if not isinstance(mr, dict):
-        return None
+    # UniversalArtifactContract / wrapper objects may carry the canonical response
+    # on an attribute rather than inside a dictionary.
+    if hasattr(result, "machine_response"):
+        mr = getattr(result, "machine_response", None)
+        if isinstance(mr, MachineResponse):
+            return mr
+        if isinstance(mr, dict):
+            response = MachineResponse()
+            for field in vars(response).keys():
+                if field in mr:
+                    try:
+                        setattr(response, field, mr[field])
+                    except Exception:
+                        pass
+            if not getattr(response, "answer", None):
+                response.answer = mr.get("answer", "")
+            if not getattr(response, "content", None):
+                response.content = mr.get("content", "")
+            if not getattr(response, "summary", None):
+                response.summary = mr.get("summary", "")
+            if not getattr(response, "render_blocks", None):
+                response.render_blocks = mr.get("render_blocks", [])
+            if not getattr(response, "artifacts", None):
+                response.artifacts = mr.get("artifacts", [])
+            return response
 
-    response=MachineResponse()
+    if isinstance(result, dict):
+        mr = result.get("machine_response", result)
+        if isinstance(mr, MachineResponse):
+            return mr
+        if not isinstance(mr, dict):
+            return None
 
-    for field in vars(response).keys():
-        if field in mr:
-            try:
-                setattr(response, field, mr[field])
-            except Exception:
-                pass
+        response = MachineResponse()
 
-    if not getattr(response,"answer",None):
-        response.answer=mr.get("answer","")
-    if not getattr(response,"content",None):
-        response.content=mr.get("content","")
-    if not getattr(response,"summary",None):
-        response.summary=mr.get("summary","")
+        for field in vars(response).keys():
+            if field in mr:
+                try:
+                    setattr(response, field, mr[field])
+                except Exception:
+                    pass
 
-    return response
+        if not getattr(response, "answer", None):
+            response.answer = mr.get("answer", "")
+        if not getattr(response, "content", None):
+            response.content = mr.get("content", "")
+        if not getattr(response, "summary", None):
+            response.summary = mr.get("summary", "")
+        if not getattr(response, "render_blocks", None):
+            response.render_blocks = mr.get("render_blocks", [])
+        if not getattr(response, "artifacts", None):
+            response.artifacts = mr.get("artifacts", [])
 
+        return response
+
+    # Last-resort attribute bridge for custom response carriers.
+    if any(hasattr(result, attr) for attr in ("answer", "content", "summary", "render_blocks", "artifacts")):
+        response = MachineResponse()
+        for field in vars(response).keys():
+            if hasattr(result, field):
+                try:
+                    setattr(response, field, getattr(result, field))
+                except Exception:
+                    pass
+
+        if not getattr(response, "answer", None):
+            response.answer = getattr(result, "answer", "")
+        if not getattr(response, "content", None):
+            response.content = getattr(result, "content", "")
+        if not getattr(response, "summary", None):
+            response.summary = getattr(result, "summary", "")
+        if not getattr(response, "render_blocks", None):
+            response.render_blocks = getattr(result, "render_blocks", [])
+        if not getattr(response, "artifacts", None):
+            response.artifacts = getattr(result, "artifacts", [])
+
+        return response
+
+    return None
+
+
+def _machine_response_strength(machine_response):
+    """Prefer richer non-empty responses over empty placeholders."""
+    if machine_response is None:
+        return -1
+
+    score = 0
+    try:
+        if getattr(machine_response, "answer", ""):
+            score += 4
+        if getattr(machine_response, "content", ""):
+            score += 3
+        if getattr(machine_response, "summary", ""):
+            score += 2
+        if list(getattr(machine_response, "render_blocks", []) or []):
+            score += 3
+        if list(getattr(machine_response, "artifacts", []) or []):
+            score += 1
+        if getattr(machine_response, "provider_original_answer", None):
+            score += 1
+    except Exception:
+        return 0
+
+    return score
+
+
+def _machine_response_is_empty(machine_response):
+    return _machine_response_strength(machine_response) <= 0
 async def execute_rooms(
     user_id,
     text,
@@ -1126,7 +1211,17 @@ async def execute_rooms(
                     getattr(room, "name", "unknown"),
                     status="ok",
                 )
-                if machine_response is None:
+
+                # Prefer the richest response so an early empty guidance reply
+                # does not block a later text/provider response.
+                if (
+                    machine_response is None
+                    or (
+                        _machine_response_is_empty(machine_response)
+                        and _machine_response_strength(extracted) > 0
+                    )
+                    or _machine_response_strength(extracted) > _machine_response_strength(machine_response)
+                ):
                     machine_response = extracted
                 continue
 
