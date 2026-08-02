@@ -951,8 +951,7 @@ def create_provider_contract(raw_text, source_request=None):
         mr["provider_original_answer"] = mr["answer"]
         mr["provider_original_content"] = mr.get("content", mr["answer"])
 
-    # STAGE4: executor handoff preserved.
-    machine = provider_finalize_for_executor(machine, source_request=source_request)
+    # Keep Provider as a first-circle transport gateway only.
     machine = attach_processor_input(machine, source_request)
     return machine
 
@@ -1456,32 +1455,15 @@ async def generate_text(
             provider_log(json.dumps(mr, ensure_ascii=False)[:100000])
             provider_log("========== FULL MACHINE RESPONSE END ==========")
         # ====================================================
-
-
         # =====================================================
-        # STAGE 5 - FINAL PROVIDER->EXECUTOR TRANSPORT
-        # Single canonical handoff with final audit.
+        # STAGE 5 - PROVIDER RETURN
+        # Keep Provider as a first-circle transport gateway only.
+        # Second-circle processing is handled downstream.
         # =====================================================
-        provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
-        contract = finalize_executor_contract(contract)
-        contract = provider_final_guard(contract)
+        provider_log({"trace_stage":"provider_contract_ready","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
         if isinstance(contract, dict):
-            mr = contract.setdefault("machine_response", {})
-            candidate = (
-                mr.get("answer")
-                or mr.get("content")
-                or mr.get("response")
-                or mr.get("summary")
-                or ""
-            )
-            if candidate:
-                mr["answer"]=candidate
-                mr["content"]=candidate
-                mr["response"]=candidate
-                mr.setdefault("summary",candidate)
-        mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
-        provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
-        provider_stage_log("EXECUTOR_HANDOFF", mr)
+            mr = contract.get("machine_response", {})
+            provider_stage_log("PROVIDER_RETURN", mr)
 
         contract = attach_processor_input(contract, source_request)
         return contract
