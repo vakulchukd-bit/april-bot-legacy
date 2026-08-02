@@ -256,6 +256,53 @@ def clamp_text(
 
 
 # =====================================================
+# 🔥 PROVIDER OUTPUT NORMALIZATION
+# =====================================================
+
+def normalize_provider_output(output):
+    """Normalize provider dict output into a single text reply and keep packet."""
+    provider_packet = None
+    reply = ""
+
+    if isinstance(output, dict):
+        provider_packet = dict(output)
+        mr = provider_packet.get("machine_response") or {}
+        if not isinstance(mr, dict):
+            mr = {}
+
+        candidate = (
+            mr.get("answer")
+            or mr.get("content")
+            or mr.get("response")
+            or mr.get("summary")
+            or provider_packet.get("answer")
+            or provider_packet.get("content")
+            or provider_packet.get("response")
+            or provider_packet.get("summary")
+            or ""
+        )
+
+        if candidate:
+            for field in ("answer", "content", "response", "summary"):
+                if not mr.get(field):
+                    mr[field] = candidate
+            provider_packet["machine_response"] = mr
+            reply = candidate
+        else:
+            reply = safe_text(
+                provider_packet.get("content")
+                or provider_packet.get("answer")
+                or provider_packet.get("summary")
+                or provider_packet.get("response")
+                or ""
+            )
+    else:
+        reply = safe_text(output)
+
+    return reply, provider_packet
+
+
+# =====================================================
 # 🔥 TXT CONFIG READY
 # =====================================================
 
@@ -824,6 +871,8 @@ async def process(
         text
     )
 
+    provider_packet = None
+
     try:
 
         semantic = state.get(
@@ -1003,24 +1052,16 @@ async def process(
 
         # Provider canonical contract validation.
         if isinstance(output, dict):
-            mr = output.get("machine_response", {})
-            candidate = (
-                mr.get("answer")
-                or mr.get("content")
-                or mr.get("response")
-                or mr.get("summary")
-                or ""
+            output, provider_packet = normalize_provider_output(output)
+            state["provider_response"] = provider_packet
+            if isinstance(provider_packet, dict):
+                state["provider_machine_response"] = provider_packet.get("machine_response", {})
+            else:
+                state["provider_machine_response"] = {}
+        else:
+            output = sanitize_model_output(
+                output
             )
-            if candidate:
-                mr.setdefault("answer", candidate)
-                mr.setdefault("content", candidate)
-                mr.setdefault("response", candidate)
-                mr.setdefault("summary", candidate)
-            return output
-
-        output = sanitize_model_output(
-            output
-        )
 
         # =================================================
         # 🔥 EXTERNAL KNOWLEDGE
