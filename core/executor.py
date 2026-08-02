@@ -2048,6 +2048,19 @@ def executor_cpu_finalize_transport(machine_response):
     conversation_space = getattr(machine_response, "conversation_space", None)
 
     executor_cpu_transport_diag('FINAL_TRANSPORT', machine_response, scene.get('scene_contract'))
+    scene_contract = scene.get("scene_contract")
+    scene_answer = getattr(machine_response, "answer", None) or scene.get("answer")
+    scene_content = getattr(machine_response, "content", None) or scene.get("content")
+    scene_summary = getattr(machine_response, "summary", None) or scene.get("summary")
+    scene_render_blocks = scene.get("render_blocks", [])
+    scene_artifacts = getattr(machine_response, "artifacts", None)
+    scene_metadata = None
+    if scene_contract is not None:
+        if isinstance(scene_contract, dict):
+            scene_metadata = scene_contract.get("metadata")
+        else:
+            scene_metadata = getattr(scene_contract, "metadata", None)
+
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3",
@@ -2056,9 +2069,14 @@ def executor_cpu_finalize_transport(machine_response):
         "conversation_space": conversation_space,
         "machine_response": machine_response,
         "machine_scene": scene.get("machine_scene"),
-        "scene_contract": scene.get("scene_contract"),
+        "scene_contract": scene_contract,
         "current_turn": conversation_space.get("current_turn") if conversation_space else None,
-        "render_blocks": scene.get("render_blocks", []),
+        "answer": scene_answer,
+        "content": scene_content,
+        "summary": scene_summary,
+        "render_blocks": scene_render_blocks,
+        "artifacts": scene_artifacts,
+        "metadata": scene_metadata,
     }
 
 CPU_COORDINATION_POLICY = {
