@@ -1075,10 +1075,26 @@ async def process(
         },
     }
 
-    return create_transport_contract(
+    transport_contract = create_transport_contract(
         artifact_type="text",
         room_source="TEXT_ROOM",
         data=artifact_data,
         user_id=user_id,
         subscription=runtime.get("plan", "Free"),
     )
+
+    # Return a transport wrapper that Executor can read directly.
+    # Keep the canonical transport object available for downstream systems.
+    return {
+        "type": "text",
+        "content": reply,
+        "answer": reply,
+        "summary": reply,
+        "machine_response": getattr(transport_contract, "machine_response", None),
+        "scene_contract": getattr(getattr(transport_contract, "payload", None), "scene", None)
+            if hasattr(transport_contract, "payload") else None,
+        "artifact_contract": transport_contract,
+        "transport_contract": transport_contract,
+        "runtime": artifact_data["runtime"],
+        "machine_channels": artifact_data["machine_channels"],
+    }
