@@ -1097,4 +1097,6 @@ async def process(
         "transport_contract": transport_contract,
         "runtime": artifact_data["runtime"],
         "machine_channels": artifact_data["machine_channels"],
+        "provider_response": provider_packet,
+        "provider_machine_response": state.get("provider_machine_response", {}),
     }
