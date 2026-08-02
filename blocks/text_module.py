@@ -70,10 +70,6 @@ from blocks.external_knowledge_provider import (
     enrich_with_external_knowledge
 )
 
-from blocks.presentation_formatter import (
-    beautify_response
-)
-
 from blocks.C_ARTIFACT_CONTRACT import (
     create_transport_contract,
 )
@@ -389,6 +385,82 @@ def sanitize_model_output(text):
         cleaned
     ).strip()
 
+
+# =====================================================
+# 🔥 RICH TEXT PRESENTATION
+# =====================================================
+
+def _normalize_word_line(line):
+    line = safe_text(line).rstrip()
+    if not line:
+        return ""
+    line = re.sub(r"[ \t]+([,.;:!?%])", r"\1", line)
+    line = re.sub(r"\s{2,}", " ", line)
+    return line.strip()
+
+def format_rich_text_for_word(text):
+    """Preserve Markdown-like structure for Word-style rendering."""
+    text = safe_text(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+
+    lines = text.split("\n")
+    out = []
+    paragraph = []
+    in_code_block = False
+
+    def flush_paragraph():
+        nonlocal paragraph
+        if paragraph:
+            combined = " ".join(paragraph)
+            combined = _normalize_word_line(combined)
+            if combined:
+                out.append(combined)
+            paragraph = []
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            out.append(stripped)
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block:
+            out.append(line)
+            continue
+
+        if not stripped:
+            flush_paragraph()
+            if not out or out[-1] != "":
+                out.append("")
+            continue
+
+        markdown_marker = re.match(r"^(#{1,6}\s+|>\s+|[-*•]\s+|\d+[.)]\s+)", stripped)
+        if markdown_marker:
+            flush_paragraph()
+            out.append(_normalize_word_line(stripped))
+            continue
+
+        paragraph.append(stripped)
+
+    flush_paragraph()
+
+    compacted = []
+    blank_streak = 0
+    for item in out:
+        if item == "":
+            blank_streak += 1
+            if blank_streak <= 1:
+                compacted.append(item)
+        else:
+            blank_streak = 0
+            compacted.append(item)
+
+    return "\n".join(compacted).strip()
+
 # =====================================================
 # 🔥 DETECTORS
 # =====================================================
@@ -684,6 +756,7 @@ def prevent_repeat_response(
 # 🔥 VISUAL BEAUTIFY
 # =====================================================
 
+
 def apply_visual_beautify(
     text,
     semantic
@@ -693,22 +766,9 @@ def apply_visual_beautify(
         return text
 
     if is_renderer_payload(text):
-
         return text
 
-    topic = semantic.get(
-        "topic_category"
-    )
-
-    if topic == "technology":
-
-        return "⚙️ " + text
-
-    if topic == "travel":
-
-        return "🌍 " + text
-
-    return text
+    return format_rich_text_for_word(text)
 
 # =====================================================
 # 🔥 SAFE MESSAGE STACK
@@ -1015,36 +1075,16 @@ async def process(
         output
     )
 
+
     # =================================================
     # 🔥 PRESENTATION
-    # =====================================================
-
-    reply = beautify_response(
-
-        reply,
-
-        semantic,
-        cognition,
-        response_decision
-    )
-
-    # =================================================
-    # 🔥 VISUAL BEAUTIFY
-    # =====================================================
-
-    reply = apply_visual_beautify(
-
-        reply,
-        semantic
-    )
-
-    # =================================================
-    # 🔥 FINAL SANITIZATION
     # =====================================================
 
     reply = sanitize_model_output(
         reply
     )
+
+    reply = format_rich_text_for_word(reply)
 
     # =================================================
     # 🔥 SAVE STATE
@@ -1062,9 +1102,11 @@ async def process(
     # 🔥 FINAL RESULT
     # =====================================================
 
+
     artifact_data = {
         "type": "text",
         "content": reply,
+        "presentation_mode": "word_markdown",
         "runtime": {
             "plan": runtime.get("plan"),
             "token_mode": runtime.get("token_mode"),
@@ -1073,6 +1115,7 @@ async def process(
             "input": TEXT_INPUT_CHANNEL,
             "output": TEXT_OUTPUT_CHANNEL,
         },
+        "provider_response": provider_packet,
     }
 
     transport_contract = create_transport_contract(
