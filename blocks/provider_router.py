@@ -123,8 +123,20 @@ print("🧠 APRIL PROVIDER ROUTER LOADED")
 import os
 import time
 import copy
+import json
 
 from openai import OpenAI
+
+try:
+    from blocks.C_ARTIFACT_CONTRACT import MachineRequest as _CanonicalMachineRequest
+except Exception:
+    _CanonicalMachineRequest = None
+
+if _CanonicalMachineRequest is not None:
+    MachineRequest = _CanonicalMachineRequest
+else:
+    class MachineRequest:
+        pass
 
 
 # =====================================================
