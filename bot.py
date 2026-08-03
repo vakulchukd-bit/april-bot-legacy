@@ -230,6 +230,39 @@ def scene_contract_to_dict(scene_contract):
 
     return scene_contract
 
+
+def resolve_canonical_scene_contract(payload):
+    if not isinstance(payload, dict):
+        return {}
+    for key in ("scene_contract", "gateway_transport", "machine_scene", "artifact"):
+        candidate = payload.get(key)
+        if isinstance(candidate, dict):
+            sc = scene_contract_to_dict(candidate)
+            if sc:
+                return sc
+    direct = {
+        "answer": payload.get("answer"),
+        "content": payload.get("content"),
+        "summary": payload.get("summary"),
+        "render_blocks": payload.get("render_blocks", []),
+        "scene": payload.get("scene", {}),
+        "graph": payload.get("graph"),
+        "formula": payload.get("formula"),
+        "table": payload.get("table"),
+        "gallery": payload.get("gallery"),
+        "layout": payload.get("layout"),
+        "visual": payload.get("visual"),
+        "renderer_state": payload.get("renderer_state", {}),
+        "active_scene": payload.get("active_scene", ""),
+        "metadata": payload.get("metadata", {}),
+    }
+    if any(v not in (None, "", [], {}) for v in direct.values()):
+        return direct
+    return {}
+
+
+# =========================================================
+# 🔥 MACHINE CLEANER
 # =========================================================
 # 🔥 MACHINE CLEANER
 # =========================================================
@@ -291,22 +324,26 @@ def machine_to_human(
     result_type="text"
 ):
     # Canonical Bot.ru bridge:
-    # Accept MachineResponse / Scene Contract dictionaries
-    # and extract the human-facing text before cleanup.
+    # Prefer the canonical scene contract, then gateway transport,
+    # then any remaining compatibility payload.
     if isinstance(payload, dict):
-        for key in (
-            "answer",
-            "response",
-            "content",
-            "final_text",
-            "summary",
-        ):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                payload = value
-                break
+        canonical = resolve_canonical_scene_contract(payload)
+        if canonical:
+            payload = canonical
         else:
-            payload = json.dumps(payload, ensure_ascii=False)
+            for key in (
+                "answer",
+                "response",
+                "content",
+                "final_text",
+                "summary",
+            ):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    payload = value
+                    break
+            else:
+                payload = json.dumps(payload, ensure_ascii=False)
 
     elif payload is None:
         payload = ""
@@ -322,22 +359,14 @@ def machine_to_human(
     )
 
     replacements = {
-
         "необходимо": "нужно",
-
         "следует": "лучше",
-
         "рекомендуется": "можно",
-
         "представлено": "видно"
     }
 
     for old, new in replacements.items():
-
-        payload = payload.replace(
-            old,
-            new
-        )
+        payload = payload.replace(old, new)
 
     return safe_truncate(
         payload,
@@ -345,6 +374,8 @@ def machine_to_human(
     )
 
 
+# =========================================================
+# 🔥 ARTIFACT → HUMAN
 # =========================================================
 # 🔥 ARTIFACT → HUMAN
 # =========================================================
@@ -827,106 +858,51 @@ def organize_multimodal_response(
     result
 ):
 
-    result_type = result.get(
-        "type",
-        "text"
-    )
-
+    result_type = result.get("type", "text")
+    scene_contract = resolve_canonical_scene_contract(result)
     final_text = machine_to_human(
-
-        result.get(
-            "final_text",
-            ""
-        ),
-
+        scene_contract or result.get("final_text", ""),
         result_type
+    )
+    canonical_text = (
+        scene_contract.get("content")
+        or scene_contract.get("answer")
+        or scene_contract.get("summary")
+        or final_text
     )
 
     organized = {
-
-        "response":
-            final_text,
-
-        "type":
-            result_type,
-
-        "blocks":
-            normalize_blocks(
-                result.get(
-                    "blocks",
-                    []
-                )
-            ),
-
-        "final_text":
-            result.get("final_text", final_text),
-
-        "graph":
-            result.get(
-                "graph"
-            ),
-
-        "formula":
-            result.get(
-                "formula"
-            ),
-
-        "scene":
-            result.get(
-                "scene"
-            ),
-
-        "layout":
-            result.get(
-                "layout"
-            ),
-
-        "visual":
-            result.get(
-                "visual"
-            ),
-
-        "table":
-            result.get(
-                "table"
-            ),
-
-        "gallery":
-            result.get(
-                "gallery"
-            ),
-
-        "links":
-            result.get(
-                "links",
-                []
-            ),
-
-        # Fiber Route transport passthrough
-        "scene_contract":
-            result.get("scene_contract"),
-
-        "gateway_transport":
-            result.get("gateway_transport"),
-
-        "render_blocks":
-            result.get("render_blocks", []),
-
-        "active_visual_scene":
-            result.get("active_visual_scene"),
-
-        "renderer_state":
-            result.get("renderer_state"),
-
-        "machine_scene":
-            result.get("machine_scene"),
-
-        "scene_plan":
-            result.get("scene_plan")
+        "type": result_type,
+        "content": canonical_text,
+        "answer": scene_contract.get("answer") or result.get("answer", ""),
+        "summary": scene_contract.get("summary") or result.get("summary", ""),
+        "blocks": normalize_blocks(
+            scene_contract.get("render_blocks", [])
+            or result.get("blocks", [])
+        ),
+        "final_text": canonical_text,
+        "graph": scene_contract.get("graph") or result.get("graph"),
+        "formula": scene_contract.get("formula") or result.get("formula"),
+        "scene": scene_contract.get("scene") or result.get("scene"),
+        "layout": scene_contract.get("layout") or result.get("layout"),
+        "visual": scene_contract.get("visual") or result.get("visual"),
+        "table": scene_contract.get("table") or result.get("table"),
+        "gallery": scene_contract.get("gallery") or result.get("gallery"),
+        "links": result.get("links", []),
+        "scene_contract": scene_contract,
+        "gateway_transport": scene_contract_to_dict(result.get("gateway_transport")) or scene_contract,
+        "render_blocks": scene_contract.get("render_blocks", []),
+        "active_visual_scene": result.get("active_visual_scene"),
+        "renderer_state": scene_contract.get("renderer_state"),
+        "machine_scene": result.get("machine_scene"),
+        "scene_plan": result.get("scene_plan"),
     }
 
     return organized
 
+
+# =========================================================
+# 🔥 APRIL REQUEST
 # =========================================================
 # 🔥 APRIL REQUEST
 # =========================================================
@@ -937,70 +913,34 @@ async def process_april_request(
     text
 ):
 
-    # =====================================================
-    # 🔥 HUMAN → MACHINE
-    # =====================================================
+    machine_request = human_to_machine(text, user_id)
 
-    machine_request = human_to_machine(
-
-        text,
-
-        user_id
-    )
-
-    # =====================================================
-    # 🔥 EXECUTOR
-    # =====================================================
-
-    # APRIL STABILIZATION PATCH
-    # Do not pass None into Executor rooms pipeline.
     async def run_with_activity(chat_id, coro):
         return await coro
 
     result = await execute(
-
         user_id=user_id,
-
-        text=machine_request[
-            "machine_text"
-        ],
-
+        text=machine_request["machine_text"],
         chat_id=0,
-
         run_with_activity=run_with_activity
     )
 
-    # =====================================================
-    # 🔥 NORMALIZE
-    # =====================================================
+    if not isinstance(result, dict):
+        result = {"content": str(result), "type": "text"}
 
-    normalized = normalize_executor_response(
-        result
-    )
+    result.setdefault("scene_contract", {})
+    result.setdefault("gateway_transport", {})
+    normalized = organize_multimodal_response(result)
 
-    normalized = preserve_executor_scene_contract(normalized)
+    # Preserve continuity only if a visual scene exists.
+    if normalized.get("scene_contract") or normalized.get("render_blocks"):
+        synchronize_scene_continuity(user_id, normalized)
 
-    # =====================================================
-    # 🔥 CONTINUITY
-    # =====================================================
+    return normalized
 
-    synchronize_scene_continuity(
 
-        user_id,
-
-        normalized
-    )
-
-    # =====================================================
-    # 🔥 MACHINE → HUMAN
-    # =====================================================
-
-    organized = organize_multimodal_response(
-        normalized
-    )
-
-    return organized
-
+# =========================================================
+# 🌐 CHAT ENDPOINT
 # =========================================================
 # 🌐 CHAT ENDPOINT
 # =========================================================
@@ -1014,108 +954,33 @@ def april_web_chat():
     try:
 
         data = request.json or {}
-
-        user_id = str(
-
-            data.get(
-                "user_id",
-                "web_user"
-            )
-        )
-
+        user_id = str(data.get("user_id", "web_user"))
         text = normalize_voice_text(data.get("text", ""))
 
-        result = asyncio.run(
-
-            process_april_request(
-
-                user_id,
-
-                text
-            )
-        )
+        result = asyncio.run(process_april_request(user_id, text))
 
         return jsonify({
-
             "success": True,
-
-            "response":
-                result.get(
-                    "response"
-                ),
-
-            "type":
-                result.get(
-                    "type"
-                ),
-
-            "blocks":
-                result.get(
-                    "blocks",
-                    []
-                ),
-
-            "graph":
-                result.get(
-                    "graph"
-                ),
-
-            "formula":
-                result.get(
-                    "formula"
-                ),
-
-            "scene":
-                result.get(
-                    "scene"
-                ),
-
-            "layout":
-                result.get(
-                    "layout"
-                ),
-
-            "visual":
-                result.get(
-                    "visual"
-                ),
-
-            "table":
-                result.get(
-                    "table"
-                ),
-
-            "gallery":
-                result.get(
-                    "gallery"
-                ),
-
-            "links":
-                result.get(
-                    "links",
-                    []
-                ),
-
-            "scene_contract":
-                result.get("scene_contract"),
-
-            "gateway_transport":
-                result.get("gateway_transport"),
-
-            "render_blocks":
-                result.get("render_blocks", []),
-
-            "renderer_state":
-                result.get("renderer_state"),
-
-            "machine_scene":
-                result.get("machine_scene"),
-
-            "scene_plan":
-                result.get("scene_plan"),
-
-            "active_visual_scene":
-                result.get("active_visual_scene")
+            "type": result.get("type"),
+            "content": result.get("content", ""),
+            "answer": result.get("answer", ""),
+            "summary": result.get("summary", ""),
+            "blocks": result.get("blocks", []),
+            "graph": result.get("graph"),
+            "formula": result.get("formula"),
+            "scene": result.get("scene"),
+            "layout": result.get("layout"),
+            "visual": result.get("visual"),
+            "table": result.get("table"),
+            "gallery": result.get("gallery"),
+            "links": result.get("links", []),
+            "scene_contract": result.get("scene_contract"),
+            "gateway_transport": result.get("gateway_transport"),
+            "render_blocks": result.get("render_blocks", []),
+            "renderer_state": result.get("renderer_state"),
+            "machine_scene": result.get("machine_scene"),
+            "scene_plan": result.get("scene_plan"),
+            "active_visual_scene": result.get("active_visual_scene")
         })
 
     except Exception as e:
@@ -1123,12 +988,13 @@ def april_web_chat():
         traceback.print_exc()
 
         return jsonify({
-
             "success": False,
-
             "error": str(e)
         }), 500
 
+
+# =========================================================
+# 🚀 START
 # =========================================================
 # 🚀 START
 # =========================================================
