@@ -433,51 +433,87 @@ def build_universal_contract(
     contract.fiber.identity.subscription = subscription
 
     if artifact is not None:
-        presentation = artifact.data.setdefault(
+        artifact_payload = dict(artifact.data or {})
+        presentation = artifact_payload.setdefault(
             "presentation",
             build_presentation_hint(
                 artifact.metadata.artifact_type,
-                artifact.data.get("complexity","balanced")
+                artifact_payload.get("complexity", "balanced")
             )
         )
-        contract.payload.artifacts.append(artifact.data)
-        contract.payload.scene["presentation"] = presentation
-        contract.machine_response.executor_hints["presentation"] = presentation
-        contract.machine_response = MachineResponse(
-            answer=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text',''),
-            content=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text',''),
-            summary=artifact.data.get('answer','') or artifact.data.get('content','') or artifact.data.get('summary','') or artifact.data.get('text','')
-        )
-        contract.fiber.metrics.block_count = 1
-        contract.fiber.metrics.payload_size = len(str(artifact.data))
-        contract.fiber.trace.room = artifact.metadata.room_source
-        contract.fiber.renderer.supported_blocks = [
-            artifact.render.web_block
-        ]
 
-        contract.metadata.setdefault("artifact_contract_stage","stage4_final")
+        canonical_text = (
+            artifact_payload.get("answer")
+            or artifact_payload.get("content")
+            or artifact_payload.get("summary")
+            or artifact_payload.get("text")
+            or ""
+        )
+
+        artifact_payload.setdefault("answer", canonical_text)
+        artifact_payload.setdefault("content", canonical_text)
+        artifact_payload.setdefault("summary", canonical_text)
+        artifact_payload.setdefault("render_blocks", artifact_payload.get("render_blocks", []))
+        artifact_payload.setdefault("scene", artifact_payload.get("scene", {}))
+        artifact_payload["presentation"] = presentation
+
+        contract.payload.artifacts.append(artifact_payload)
+        contract.payload.scene.update({
+            "presentation": presentation,
+            "answer": artifact_payload.get("answer", ""),
+            "content": artifact_payload.get("content", ""),
+            "summary": artifact_payload.get("summary", ""),
+            "render_blocks": artifact_payload.get("render_blocks", []),
+        })
+
+        machine_response = MachineResponse(
+            answer=canonical_text,
+            content=canonical_text,
+            response=canonical_text,
+            summary=canonical_text,
+            render_blocks=list(artifact_payload.get("render_blocks", []) or []),
+            artifacts=[artifact],
+            metadata={
+                "artifact_contract_stage": "stage4_final",
+                "room_source": artifact.metadata.room_source,
+                "artifact_type": artifact.metadata.artifact_type,
+                "presentation": presentation,
+            },
+        )
+        machine_response.executor_hints["presentation"] = presentation
+        contract.machine_response = machine_response
+
+        machine_scene = build_machine_scene(machine_response)
+        machine_scene.metadata.update({
+            "artifact_contract_stage": "stage4_final",
+            "presentation": presentation,
+        })
+        machine_scene.answer = canonical_text
+        machine_scene.content = canonical_text
+        machine_scene.summary = canonical_text
+        machine_scene.blocks = list(machine_response.render_blocks or [])
+        machine_scene.contract.blocks = list(machine_scene.blocks)
+        contract.machine_scene = machine_scene
+
+        scene_contract = build_scene_contract(machine_scene)
+        scene_contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
+        scene_contract.metadata.setdefault("presentation", presentation)
+        scene_contract.metadata.setdefault("answer", canonical_text)
+        scene_contract.metadata.setdefault("content", canonical_text)
+        scene_contract.metadata.setdefault("summary", canonical_text)
+        contract.scene_contract = scene_contract
+
+        contract.fiber.metrics.block_count = max(1, len(machine_response.render_blocks or []) or 1)
+        contract.fiber.metrics.payload_size = len(str(artifact_payload))
+        contract.fiber.trace.room = artifact.metadata.room_source
+        contract.fiber.renderer.supported_blocks = [artifact.render.web_block]
+        contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
+
     return contract
 
 
-def create_transport_contract(
-    artifact_type: str,
-    room_source: str,
-    data: Dict[str, Any],
-    user_id: str = "",
-    subscription: str = "Free",
-) -> UniversalArtifactContract:
-    artifact = create_artifact(
-        artifact_type=artifact_type,
-        room_source=room_source,
-        data=data,
-    )
-    return build_universal_contract(
-        artifact=artifact,
-        user_id=user_id,
-        subscription=subscription,
-    )
-
-
+# =====================================================
+# FACTORY INSPECTION API
 # =====================================================
 # FACTORY INSPECTION API
 # =====================================================
@@ -726,10 +762,14 @@ class UniversalArtifactContract:
     transport: TransportContract = field(default_factory=TransportContract)
     payload: MachinePayload = field(default_factory=MachinePayload)
     artifact: Optional[BaseArtifact] = None
+    machine_response: Optional["MachineResponse"] = None
+    machine_scene: Optional["MachineScene"] = None
+    scene_contract: Optional["SceneContract"] = None
 
 
 
-
+# =====================================================
+# STAGE 2 PRESENTATION TRANSPORT
 # =====================================================
 # STAGE 2 PRESENTATION TRANSPORT (TEST)
 # =====================================================
