@@ -1125,6 +1125,23 @@ def _extract_machine_response(result):
     return None
 
 
+
+def ensure_provider_original_answer(machine_response):
+    """Preserve the original provider answer so the canonical route can
+    recover it later if a downstream normalization step blanks text.
+    """
+    if machine_response is None:
+        return None
+
+    if not getattr(machine_response, "provider_original_answer", None):
+        for field in ("answer", "content", "summary"):
+            value = getattr(machine_response, field, "")
+            if isinstance(value, str) and value.strip():
+                setattr(machine_response, "provider_original_answer", value.strip())
+                break
+    return machine_response
+
+
 def _machine_response_strength(machine_response):
     """Prefer richer non-empty responses over empty placeholders."""
     if machine_response is None:
@@ -1202,6 +1219,7 @@ async def execute_rooms(
                             pass
 
             if extracted is not None:
+                extracted = ensure_provider_original_answer(extracted)
                 room_results.append({
                     "room": getattr(room, "name", "unknown"),
                     "machine_response": extracted,
@@ -1237,7 +1255,16 @@ async def execute_rooms(
         if orig:
             machine_response.answer = orig
         else:
-            machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
+            scene_contract = getattr(machine_response, "scene_contract", None)
+            scene_content = ""
+            if isinstance(scene_contract, dict):
+                scene_content = scene_contract.get("content") or scene_contract.get("answer") or scene_contract.get("summary") or ""
+            elif scene_contract is not None:
+                scene_content = getattr(scene_contract, "content", "") or getattr(scene_contract, "answer", "") or getattr(scene_contract, "summary", "") or ""
+            if scene_content:
+                machine_response.answer = scene_content
+            else:
+                machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
         machine_response.content = machine_response.answer
         machine_response.summary = "Пустой результат после обработки запроса."
         machine_response.render_blocks = [{
