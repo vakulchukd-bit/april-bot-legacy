@@ -129,6 +129,94 @@ def normalize_text(text):
         text or ""
     ).strip()
 
+
+
+def _executor_value_is_empty(value):
+    if value is None:
+        return True
+    if value == "":
+        return True
+    if value == []:
+        return True
+    if value == {}:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+def _executor_best_text(*values):
+    for value in values:
+        if _executor_value_is_empty(value):
+            continue
+        if isinstance(value, str):
+            text = value.strip()
+        else:
+            text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+def _executor_preserve_canonical_text(machine_response, scene_contract=None, scene=None):
+    if machine_response is None:
+        return machine_response
+
+    answer = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    if scene_contract is not None:
+        if isinstance(scene_contract, dict):
+            answer = _executor_best_text(
+                answer,
+                scene_contract.get("answer"),
+                scene_contract.get("content"),
+                scene_contract.get("summary"),
+            )
+        else:
+            answer = _executor_best_text(
+                answer,
+                getattr(scene_contract, "answer", ""),
+                getattr(scene_contract, "content", ""),
+                getattr(scene_contract, "summary", ""),
+            )
+
+    if scene is not None and not answer:
+        if isinstance(scene, dict):
+            answer = _executor_best_text(
+                scene.get("answer"),
+                scene.get("content"),
+                scene.get("summary"),
+            )
+        else:
+            answer = _executor_best_text(
+                getattr(scene, "answer", ""),
+                getattr(scene, "content", ""),
+                getattr(scene, "summary", ""),
+            )
+
+    if answer:
+        if _executor_value_is_empty(getattr(machine_response, "answer", None)):
+            machine_response.answer = answer
+        if _executor_value_is_empty(getattr(machine_response, "content", None)):
+            machine_response.content = answer
+        if _executor_value_is_empty(getattr(machine_response, "summary", None)):
+            machine_response.summary = answer
+
+        blocks = list(getattr(machine_response, "render_blocks", []) or [])
+        if not blocks:
+            blocks = [{
+                "type": "text",
+                "content": answer,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+            }]
+        machine_response.render_blocks = blocks
+
+    return machine_response
+
 def _clip_text(value, limit=4000):
     if value is None:
         return ""
@@ -1378,6 +1466,7 @@ def cpu_execution_journal():
     return list(CPU_EXECUTION_JOURNAL)
 
 EXECUTOR_CPU_TRACE = []
+EXECUTOR_CPU_SESSION = {}
 
 def executor_cpu_checkpoint(stage, **payload):
     return payload.get("machine_response")
