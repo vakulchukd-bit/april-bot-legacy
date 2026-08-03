@@ -462,7 +462,7 @@ def normalize_response_text(text):
 # 🔥 MACHINE RESPONSE WRAPPER
 # =====================================================
 
-def build_provider_machine_response(text, parsed_contract=None):
+def build_provider_machine_response(text, parsed_contract=None, source_request=None):
     """Build a unified MachineResponse transport contract."""
     parsed_contract = parsed_contract or {}
 
@@ -497,8 +497,23 @@ def build_provider_machine_response(text, parsed_contract=None):
     if response is None:
         response = answer
 
-    return {
+    processor_input = {}
+    execution_round = 1
+    execution_phase = "FIRST_CIRCLE"
+    if isinstance(source_request, dict):
+        try:
+            processor_input = copy.deepcopy(source_request)
+        except Exception:
+            processor_input = dict(source_request)
+        execution_round = source_request.get("execution_round", execution_round) or execution_round
+        execution_phase = source_request.get("execution_phase", execution_phase) or execution_phase
+
+    machine = {
         "type": "provider_response",
+        "execution_round": execution_round,
+        "execution_phase": execution_phase,
+        "processor_input": processor_input,
+        "provider_source_request": processor_input,
         "machine_response": {
             "summary": summary,
             "explanation": explanation,
@@ -514,10 +529,23 @@ def build_provider_machine_response(text, parsed_contract=None):
             "provider": "openai",
             "render_priority": parsed_contract.get("render_priority", []),
             "provider_contract": "fiber_v3",
-            "transport_contract": "scene_first"
+            "transport_contract": "scene_first",
+            "execution_round": execution_round,
+            "execution_phase": execution_phase,
         }
     }
 
+    if processor_input:
+        machine["machine_response"]["metadata"].setdefault("processor_input", processor_input)
+        machine["machine_response"]["metadata"].setdefault("provider_source_request", processor_input)
+        machine["machine_response"]["metadata"].setdefault("provider_first_circle", True)
+        machine["machine_response"]["metadata"].setdefault("second_circle_ready", True)
+        machine["machine_response"]["metadata"].setdefault("execution_round", execution_round)
+        machine["machine_response"]["metadata"].setdefault("execution_phase", execution_phase)
+
+    return machine
+
+import copy
 import json
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
@@ -710,6 +738,32 @@ def normalize_text_transport(contract):
     contract.setdefault("response", candidate)
     contract.setdefault("summary", candidate)
     contract.setdefault("explanation", contract.get("summary",""))
+
+    return contract
+
+
+def attach_processor_input(contract, source_request=None):
+    """Preserve the second-circle input for the processor without sending it
+    to OpenAI. The source request stays attached to the returned contract so
+    the executor can reuse it for memory, history, and scene integration.
+    """
+    if not isinstance(contract, dict) or source_request is None:
+        return contract
+
+    try:
+        cloned = copy.deepcopy(source_request)
+    except Exception:
+        cloned = source_request
+
+    contract.setdefault("processor_input", cloned)
+    contract.setdefault("provider_source_request", cloned)
+
+    mr = contract.setdefault("machine_response", {})
+    metadata = mr.setdefault("metadata", {})
+    metadata.setdefault("processor_input", cloned)
+    metadata.setdefault("provider_source_request", cloned)
+    metadata.setdefault("provider_first_circle", True)
+    metadata.setdefault("second_circle_ready", True)
 
     return contract
 
@@ -1001,7 +1055,7 @@ def recover_machine_contract(contract):
     contract["metadata"]["transport_stage"]="provider_stage2"
     return contract
 
-def create_provider_contract(raw_text):
+def create_provider_contract(raw_text, source_request=None):
     """Stage 3: translate every OpenAI response into one canonical MachineResponse.
     Stage 1 upgrade: avoid repeated normalization and preserve canonical transport."""
 
@@ -1024,7 +1078,7 @@ def create_provider_contract(raw_text):
 
     # STAGE 3: build one canonical provider response then perform a single executor handoff
     # STAGE4: canonical builder becomes the single assembly point.
-    machine = build_provider_machine_response(raw_text, parsed)
+    machine = build_provider_machine_response(raw_text, parsed, source_request=source_request)
 
     mr = machine.setdefault("machine_response", {})
     if mr.get("answer"):
@@ -1048,6 +1102,7 @@ def create_provider_contract(raw_text):
 
     # STAGE4: executor handoff preserved.
     machine = provider_finalize_for_executor(machine)
+    machine = attach_processor_input(machine, source_request)
     return machine
 
 
@@ -1448,7 +1503,7 @@ async def generate_text(
         )
 
         provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
-        contract = create_provider_contract(raw_text)
+        contract = create_provider_contract(raw_text, source_request=source_request)
 
         if isinstance(contract, dict):
             mr = contract.get("machine_response")
@@ -1813,3 +1868,27 @@ PROVIDER_LEGACY_MODE=False
 # [ ] Empty response handling
 # [ ] Executor rendering verification
 # ============================================================
+
+
+# =====================================================
+# 🔥 IMAGE GENERATION
+# =====================================================
+
+async def generate_image(
+    prompt: str,
+    size: str = "1024x1024",
+    quality: str = "auto",
+):
+    provider_enter("image_generation", {"size": size})
+
+    provider_log("🔒 IMAGE GENERATION DISABLED (Premium only)")
+    provider_exit("image_generation", True)
+
+    return {
+        "success": False,
+        "premium_required": True,
+        "image_generation_disabled": True,
+        "reason": "Image generation is temporarily disabled."
+    }
+
+provider_generate_image = generate_image
