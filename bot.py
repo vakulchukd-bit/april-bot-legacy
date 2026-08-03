@@ -231,15 +231,74 @@ def scene_contract_to_dict(scene_contract):
     return scene_contract
 
 
+def _value_is_present(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value not in ([], {}, ())
+
+
+def _best_text(*candidates):
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        if isinstance(candidate, dict):
+            nested = resolve_canonical_scene_contract(candidate)
+            if nested:
+                candidate = nested
+
+            for key in (
+                "answer",
+                "content",
+                "summary",
+                "final_text",
+                "text",
+                "response",
+                "data",
+            ):
+                value = candidate.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        elif isinstance(candidate, str):
+            value = candidate.strip()
+            if value:
+                return value
+
+        else:
+            value = str(candidate).strip()
+            if value:
+                return value
+
+    return ""
+
+
 def resolve_canonical_scene_contract(payload):
     if not isinstance(payload, dict):
         return {}
-    for key in ("scene_contract", "gateway_transport", "machine_scene", "artifact"):
+
+    for key in (
+        "scene_contract",
+        "gateway_transport",
+        "machine_scene",
+        "artifact",
+        "response",
+        "machine_response",
+        "payload",
+    ):
         candidate = payload.get(key)
         if isinstance(candidate, dict):
             sc = scene_contract_to_dict(candidate)
             if sc:
                 return sc
+
+            if key in ("response", "machine_response", "payload"):
+                nested = resolve_canonical_scene_contract(candidate)
+                if nested:
+                    return nested
+
     direct = {
         "answer": payload.get("answer"),
         "content": payload.get("content"),
@@ -548,7 +607,14 @@ def normalize_executor_response(
 ):
 
     result = result or {}
-    scene_contract = scene_contract_to_dict(result.get("scene_contract"))
+    embedded_response = result.get("response")
+    if isinstance(embedded_response, dict):
+        result = {
+            **embedded_response,
+            **{k: v for k, v in result.items() if k != "response"},
+        }
+
+    scene_contract = resolve_canonical_scene_contract(result)
     gateway_transport = scene_contract_to_dict(result.get("gateway_transport"))
 
     normalized = {
@@ -622,25 +688,12 @@ def normalize_executor_response(
             )
     }
 
-    final_text = (
-
-        normalized.get("content")
-
-        or normalized.get("response")
-
-        or (
-
-            normalized.get("data")
-
-            if isinstance(
-                normalized.get("data"),
-                str
-            )
-
-            else ""
-        )
-
-        or ""
+    final_text = _best_text(
+        normalized.get("content"),
+        normalized.get("response"),
+        normalized.get("data"),
+        result.get("final_text"),
+        scene_contract,
     )
 
     normalized["final_text"] = final_text
@@ -661,11 +714,11 @@ def normalize_executor_response(
 
     # Fiber Route Stage 1: preserve canonical Executor transport.
     if isinstance(scene_contract, dict):
-        normalized["final_text"] = (
-            scene_contract.get("answer")
-            or scene_contract.get("content")
-            or scene_contract.get("summary")
-            or normalized["final_text"]
+        normalized["final_text"] = _best_text(
+            scene_contract.get("answer"),
+            scene_contract.get("content"),
+            scene_contract.get("summary"),
+            normalized["final_text"],
         )
         normalized["render_blocks"] = (
             scene_contract.get("render_blocks")
@@ -858,24 +911,34 @@ def organize_multimodal_response(
     result
 ):
 
+    result = result or {}
+    if isinstance(result.get("response"), dict):
+        result = {
+            **result["response"],
+            **{k: v for k, v in result.items() if k != "response"},
+        }
+
     result_type = result.get("type", "text")
     scene_contract = resolve_canonical_scene_contract(result)
     final_text = machine_to_human(
         scene_contract or result.get("final_text", ""),
         result_type
     )
-    canonical_text = (
-        scene_contract.get("content")
-        or scene_contract.get("answer")
-        or scene_contract.get("summary")
-        or final_text
+    canonical_text = _best_text(
+        scene_contract.get("content"),
+        scene_contract.get("answer"),
+        scene_contract.get("summary"),
+        result.get("content"),
+        result.get("answer"),
+        result.get("summary"),
+        final_text,
     )
 
     organized = {
         "type": result_type,
         "content": canonical_text,
-        "answer": scene_contract.get("answer") or result.get("answer", ""),
-        "summary": scene_contract.get("summary") or result.get("summary", ""),
+        "answer": _best_text(scene_contract.get("answer"), result.get("answer", "")),
+        "summary": _best_text(scene_contract.get("summary"), result.get("summary", "")),
         "blocks": normalize_blocks(
             scene_contract.get("render_blocks", [])
             or result.get("blocks", [])
@@ -928,6 +991,7 @@ async def process_april_request(
     if not isinstance(result, dict):
         result = {"content": str(result), "type": "text"}
 
+    result = preserve_executor_scene_contract(result)
     result.setdefault("scene_contract", {})
     result.setdefault("gateway_transport", {})
     normalized = organize_multimodal_response(result)
