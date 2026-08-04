@@ -606,6 +606,218 @@ def detect_task_type(
 
     return "text"
 
+
+FOLLOWUP_CONTEXT_CHAR_LIMIT = 420
+FOLLOWUP_CONTEXT_WORD_LIMIT = 7
+
+def _executor_extract_turn_text(turn, limit=220):
+    """Return the richest visible text from a dialog turn-like payload."""
+    if not isinstance(turn, dict):
+        return ""
+
+    for key in ("summary", "content", "text", "answer", "response"):
+        value = turn.get(key)
+        if value:
+            return _clip_text(value, limit)
+
+    for nested_key in ("user", "april"):
+        nested = turn.get(nested_key)
+        if isinstance(nested, dict):
+            extracted = _executor_extract_turn_text(nested, limit=limit)
+            if extracted:
+                return extracted
+
+    return ""
+
+
+def _executor_last_turn_text(dialog, role, limit=220):
+    if not isinstance(dialog, list):
+        return ""
+
+    role = (role or "").strip().lower()
+
+    for item in reversed(dialog):
+        if not isinstance(item, dict):
+            continue
+
+        item_role = (
+            str(item.get("role") or item.get("speaker") or item.get("source") or "")
+            .strip()
+            .lower()
+        )
+        if role and item_role != role:
+            continue
+
+        extracted = _executor_extract_turn_text(item, limit=limit)
+        if extracted:
+            return extracted
+
+    return ""
+
+
+def _executor_reference_context_is_needed(text, semantic, cognition, response_decision, state):
+    """Non-triggered follow-up detection for a tiny first-circle context."""
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+    state = state or {}
+
+    normalized = normalize_text(text)
+    word_count = len(normalized.split())
+
+    if not normalized:
+        return False
+
+    if response_decision.get("should_continue_trajectory"):
+        return True
+
+    if response_decision.get("discussion_mode"):
+        return True
+
+    if cognition.get("exploration_mode"):
+        return True
+
+    for key in ("followup_candidate", "continuation_candidate", "follow_up_candidate"):
+        if semantic.get(key):
+            return True
+
+    if len(normalized) <= 24 or word_count <= 4:
+        return True
+
+    if state.get("dialog") and word_count <= FOLLOWUP_CONTEXT_WORD_LIMIT:
+        return True
+
+    return False
+
+
+def _executor_build_reference_context(text, state, semantic, cognition, response_decision):
+    """Create a compact, non-repeating context block for the first circle."""
+    if not _executor_reference_context_is_needed(text, semantic, cognition, response_decision, state):
+        return ""
+
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+    state = state or {}
+
+    active_topic = (
+        state.get("topic")
+        or semantic.get("topic")
+        or semantic.get("intent")
+        or ""
+    )
+
+    focus_source = (
+        cognition.get("dynamic_focus")
+        or state.get("focus_state")
+        or state.get("focus")
+        or response_decision.get("goal")
+        or ""
+    )
+
+    dialog = state.get("dialog", []) or []
+    last_user = _executor_last_turn_text(dialog, "user", limit=180)
+    last_april = (
+        _executor_last_turn_text(dialog, "assistant", limit=180)
+        or _executor_last_turn_text(dialog, "april", limit=180)
+    )
+
+    pieces = []
+    if active_topic:
+        pieces.append(f"topic: {_clip_text(active_topic, 80)}")
+    if focus_source:
+        pieces.append(f"focus: {_clip_text(focus_source, 140)}")
+    if last_user:
+        pieces.append(f"last_user: {_clip_text(last_user, 180)}")
+    if last_april:
+        pieces.append(f"last_april_summary: {_clip_text(last_april, 180)}")
+
+    if not pieces:
+        return ""
+
+    reference_context = "REFERENCE CONTEXT (for understanding only; do not repeat):\n- " + "\n- ".join(pieces)
+    return _clip_text(reference_context, FOLLOWUP_CONTEXT_CHAR_LIMIT * 2)
+
+
+def _executor_build_first_circle_goal(text, state, semantic, cognition, response_decision):
+    """Build the minimal upstream payload sent to Provider/OpenAI."""
+    current_text = normalize_text(text)
+    reference_context = _executor_build_reference_context(
+        text=current_text,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+
+    if reference_context:
+        goal = (
+            "CURRENT USER REQUEST:\n"
+            f"{current_text}\n\n"
+            f"{reference_context}"
+        )
+    else:
+        goal = current_text
+
+    return goal, reference_context
+
+
+def _executor_build_first_circle_intent(text, semantic, cognition, response_decision):
+    """Build a minimal intent payload for the first circle."""
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    intent_type = (
+        semantic.get("intent")
+        or response_decision.get("goal")
+        or "dialogue"
+    )
+
+    return {
+        "type": intent_type if isinstance(intent_type, str) else str(intent_type),
+        "normalized_text": normalize_text(text),
+        "source": "executor_first_circle",
+    }
+
+
+def _executor_build_second_circle_context(
+    *,
+    state,
+    semantic,
+    reasoning,
+    cognition,
+    response_decision,
+    visual_reference,
+    task_type,
+    text,
+    conversation_space,
+    machine_memory,
+    machine_conversation,
+    reference_context,
+):
+    """Keep the full context for the second circle without sending it upstream."""
+    return {
+        "state": state,
+        "semantic": semantic,
+        "reasoning": reasoning,
+        "cognition": cognition,
+        "response_decision": response_decision,
+        "visual_reference": visual_reference,
+        "task_type": task_type,
+        "text": text,
+        "conversation_space": conversation_space,
+        "memory": machine_memory,
+        "conversation": machine_conversation,
+        "reference_context": reference_context,
+        "provider_scope": {
+            "goal_only": True,
+            "memory_to_provider": False,
+            "visual_to_provider": False,
+            "conversation_to_provider": False,
+        },
+    }
+
+
 def build_conversation_space(state, semantic, cognition, response_decision, text, visual_reference):
     """
     Canonical Conversation Space shared by MachineRequest, MachineResponse and MachineScene.
@@ -2413,23 +2625,59 @@ async def execute(
         "active_visual_scene": conversation_space.get("active_visual_scene", {}),
     }
 
-    executor_provider_stage_log("PROVIDER_REQUEST", {"goal":text,"timeline":len(machine_conversation.get("timeline",[])),"memory":len(machine_memory)})
-    # First circle: provider sees only the current request payload.
-    context["machine_request"] = MachineRequest(
-        goal=current_turn.get("user", {}).get("text", text),
-        intent=semantic,
-        memory=machine_memory,
-        visual_context={
-            "visual_reference": visual_reference,
-            "active_visual_scene": conversation_space.get("active_visual_scene", {}),
-            "visual_summary": conversation_space.get("visual_summary", {}),
+    provider_goal, provider_reference_context = _executor_build_first_circle_goal(
+        text=text,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+    provider_intent = _executor_build_first_circle_intent(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+
+    executor_provider_stage_log(
+        "PROVIDER_REQUEST",
+        {
+            "goal_len": len(provider_goal),
+            "reference_context": bool(provider_reference_context),
         },
-        conversation=machine_conversation,
+    )
+
+    # First circle: provider sees only the current request payload.
+    # Second-circle context stays attached separately for executor-side reasoning.
+    context["machine_request"] = MachineRequest(
+        goal=provider_goal,
+        intent=provider_intent,
+        memory={},
+        visual_context={},
+        conversation={},
     )
     context["executor_state"] = state
     context["executor_conversation_space"] = conversation_space
+    context["second_circle_context"] = _executor_build_second_circle_context(
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+        conversation_space=conversation_space,
+        machine_memory=machine_memory,
+        machine_conversation=machine_conversation,
+        reference_context=provider_reference_context,
+    )
 
     setattr(context["machine_request"], "current_turn", current_turn)
+    setattr(context["machine_request"], "provider_reference_context", provider_reference_context)
+    setattr(context["machine_request"], "first_circle_goal", provider_goal)
+    setattr(context["machine_request"], "first_circle_only", True)
+    setattr(context["machine_request"], "second_circle_context", context["second_circle_context"])
 
     result = await execute_rooms(
         user_id=user_id,
