@@ -347,6 +347,179 @@ def _executor_mapping_score(mapping):
 
     return score
 
+
+def _executor_collect_room_candidates(room_results):
+    """Collect every response-like candidate produced by rooms."""
+    candidates = []
+
+    for item in room_results or []:
+        roots = []
+
+        if isinstance(item, dict):
+            roots.append(item)
+            machine_response = item.get("machine_response")
+            if machine_response is not None:
+                roots.append(machine_response)
+        else:
+            roots.append(item)
+
+        for root in roots:
+            for candidate in _executor_iter_payload_candidates(root, max_depth=5):
+                if isinstance(candidate, dict):
+                    candidates.append(candidate)
+
+            if isinstance(root, dict):
+                candidates.append(root)
+            else:
+                try:
+                    mapping = _executor_payload_to_mapping(root)
+                    if mapping:
+                        candidates.append(mapping)
+                except Exception:
+                    pass
+
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        fingerprint = (
+            candidate.get("answer"),
+            candidate.get("content"),
+            candidate.get("summary"),
+            candidate.get("response"),
+            candidate.get("explanation"),
+            len(candidate.get("render_blocks", []) or []),
+            len(candidate.get("artifacts", []) or []),
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(candidate)
+
+    return unique
+
+
+def _executor_recover_room_response(machine_response, room_results, machine_request=None, text=None):
+    """Keep the richest room payload alive even if a wrapper goes empty."""
+    if machine_response is None:
+        machine_response = MachineResponse()
+
+    current_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    if current_text and not _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
+        return machine_response
+
+    candidates = _executor_collect_room_candidates(room_results)
+
+    ranked = []
+    for candidate in candidates:
+        score = _executor_mapping_score(candidate)
+        text_value = _executor_best_text(
+            candidate.get("answer"),
+            candidate.get("content"),
+            candidate.get("response"),
+            candidate.get("summary"),
+            candidate.get("explanation"),
+            candidate.get("provider_original_answer"),
+            candidate.get("provider_original_content"),
+        )
+        if text_value:
+            score += len(text_value)
+        ranked.append((score, text_value, candidate))
+
+    ranked.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+
+    best_candidate = None
+    for score, text_value, candidate in ranked:
+        if text_value or candidate.get("render_blocks") or candidate.get("artifacts"):
+            best_candidate = candidate
+            break
+
+    if best_candidate is None:
+        return machine_response
+
+    answer = _executor_best_text(
+        best_candidate.get("answer"),
+        best_candidate.get("content"),
+        best_candidate.get("response"),
+        best_candidate.get("summary"),
+        best_candidate.get("explanation"),
+        best_candidate.get("provider_original_answer"),
+        best_candidate.get("provider_original_content"),
+    )
+    content = _executor_best_text(
+        best_candidate.get("content"),
+        answer,
+        best_candidate.get("response"),
+        best_candidate.get("summary"),
+        best_candidate.get("explanation"),
+    )
+    summary = _executor_best_text(
+        best_candidate.get("summary"),
+        content,
+        answer,
+        best_candidate.get("explanation"),
+    )
+
+    if answer and _executor_value_is_empty(getattr(machine_response, "answer", None)):
+        machine_response.answer = answer
+    if content and _executor_value_is_empty(getattr(machine_response, "content", None)):
+        machine_response.content = content
+    if summary and _executor_value_is_empty(getattr(machine_response, "summary", None)):
+        machine_response.summary = summary
+
+    for field in ("response", "explanation", "provider_original_answer", "provider_original_content", "provider_contract", "transport_contract", "goal", "goal_hierarchy", "focus", "visual_reference", "visual_summary", "active_visual_scene"):
+        value = best_candidate.get(field)
+        if value not in (None, "", [], {}):
+            try:
+                setattr(machine_response, field, value)
+            except Exception:
+                pass
+
+    render_blocks = best_candidate.get("render_blocks")
+    if render_blocks and _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
+        try:
+            machine_response.render_blocks = list(render_blocks)
+        except Exception:
+            pass
+
+    artifacts = best_candidate.get("artifacts")
+    if artifacts and _executor_value_is_empty(getattr(machine_response, "artifacts", None)):
+        try:
+            machine_response.artifacts = list(artifacts)
+        except Exception:
+            pass
+
+    scene = best_candidate.get("scene")
+    if scene and _executor_value_is_empty(getattr(machine_response, "scene", None)):
+        try:
+            machine_response.scene = scene
+        except Exception:
+            pass
+
+    metadata = best_candidate.get("metadata")
+    if metadata and _executor_value_is_empty(getattr(machine_response, "metadata", None)):
+        try:
+            machine_response.metadata = metadata
+        except Exception:
+            pass
+
+    if _executor_value_is_empty(getattr(machine_response, "render_blocks", None)) and _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")):
+        try:
+            machine_response.render_blocks = [{
+                "type": "text",
+                "content": _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")),
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+            }]
+        except Exception:
+            pass
+
+    return machine_response
 def _executor_response_score(value):
     """Public score helper used to order the richest response first."""
     return _executor_mapping_score(_executor_payload_to_mapping(value))
@@ -1608,6 +1781,12 @@ async def execute_rooms(
     )
 
     machine_response = best_machine_response
+    machine_response = _executor_recover_room_response(
+        machine_response,
+        room_results,
+        machine_request=machine_request,
+        text=text,
+    )
 
     # Executor no longer synthesizes fallback text here.
     # Canonical Provider output must pass through unchanged.
@@ -2306,7 +2485,9 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
         value = getattr(machine_response, field, None)
 
         if field == "metadata":
-            value = value or {}
+            value = _executor_payload_to_mapping(value)
+            if not isinstance(value, dict):
+                value = {}
             value.setdefault("answer", getattr(machine_response, "answer", ""))
             value.setdefault("content", getattr(machine_response, "content", ""))
             value.setdefault("summary", getattr(machine_response, "summary", ""))
@@ -2689,6 +2870,26 @@ async def execute(
         state=state,
         run_with_activity=run_with_activity,
     )
+
+    if isinstance(result, dict):
+        machine_response = result.get("machine_response")
+        if isinstance(machine_response, MachineResponse):
+            machine_response = _executor_recover_room_response(
+                machine_response,
+                [result],
+                machine_request=context.get("machine_request"),
+                text=text,
+            )
+            result["machine_response"] = machine_response
+            if _executor_value_is_empty(result.get("answer")):
+                result["answer"] = getattr(machine_response, "answer", "")
+            if _executor_value_is_empty(result.get("content")):
+                result["content"] = getattr(machine_response, "content", "")
+            if _executor_value_is_empty(result.get("summary")):
+                result["summary"] = getattr(machine_response, "summary", "")
+            if _executor_value_is_empty(result.get("render_blocks")):
+                result["render_blocks"] = list(getattr(machine_response, "render_blocks", []) or [])
+
     executor_provider_stage_log("PROVIDER_RESPONSE", {"has_machine_response":isinstance(result,dict) and "machine_response" in result,"has_scene_contract":isinstance(result,dict) and "scene_contract" in result,"render_blocks":len((result.get("render_blocks") if isinstance(result,dict) else []) or [])})
     result = executor_cpu_factory_bridge(result)
     result = executor_cpu_gateway_dispatch(result)
