@@ -289,8 +289,9 @@ def _executor_payload_to_mapping(value: Any) -> Dict[str, Any]:
         pass
 
     canonical_fields = (
-        "answer", "content", "summary", "response", "explanation", "scene",
-        "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
+        "answer", "content", "summary", "response", "explanation", "text",
+        "message", "output", "output_text", "data",
+        "scene", "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
         "confidence", "provider", "provider_contract", "transport_contract",
         "provider_original_answer", "provider_original_content", "processor_input",
         "provider_source_request", "scene_contract", "scene_runtime", "conversation_space",
@@ -298,6 +299,8 @@ def _executor_payload_to_mapping(value: Any) -> Dict[str, Any]:
         "visual_reference", "visual_summary", "active_visual_scene",
         "executor_decision", "executor_presentation_plan", "executor_scene_profile",
         "provider_reference_context", "second_circle_context",
+        "machine_response", "provider_response", "provider_payload", "payload",
+        "result", "response_data", "contract",
     )
     for field in canonical_fields:
         try:
@@ -368,6 +371,215 @@ def _executor_mapping_score(mapping: Any) -> int:
 
 def _executor_response_score(value: Any) -> int:
     return _executor_mapping_score(_executor_payload_to_mapping(value))
+
+
+def _executor_has_meaningful_payload(machine_response: Any) -> bool:
+    if machine_response is None:
+        return False
+    if isinstance(machine_response, MachineResponse):
+        return bool(
+            _executor_best_text(
+                getattr(machine_response, "answer", ""),
+                getattr(machine_response, "content", ""),
+                getattr(machine_response, "summary", ""),
+                getattr(machine_response, "response", ""),
+                getattr(machine_response, "explanation", ""),
+            )
+            or list(getattr(machine_response, "render_blocks", []) or [])
+            or list(getattr(machine_response, "artifacts", []) or [])
+            or getattr(machine_response, "scene", None) not in (None, {}, [])
+        )
+    if isinstance(machine_response, dict):
+        return bool(
+            _executor_best_text(
+                machine_response.get("answer"),
+                machine_response.get("content"),
+                machine_response.get("summary"),
+                machine_response.get("response"),
+                machine_response.get("explanation"),
+                machine_response.get("text"),
+                machine_response.get("message"),
+                machine_response.get("output"),
+                machine_response.get("output_text"),
+            )
+            or list(machine_response.get("render_blocks", []) or [])
+            or list(machine_response.get("artifacts", []) or [])
+            or machine_response.get("scene") not in (None, {}, [])
+        )
+    return bool(_executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")))
+
+
+def _executor_materialize_machine_response(envelope: Any) -> Optional[MachineResponse]:
+    """
+    Unwrap a response envelope into a canonical MachineResponse without losing
+    nested provider output. Prefers nested machine_response/provider_response
+    payloads, then falls back to the envelope itself.
+    """
+    if envelope is None:
+        return None
+    if isinstance(envelope, MachineResponse):
+        return envelope
+
+    try:
+        mapping = _executor_payload_to_mapping(envelope)
+    except Exception:
+        mapping = {}
+
+    if not mapping and isinstance(envelope, dict):
+        mapping = envelope
+
+    if not mapping:
+        return None
+
+    # Prefer nested canonical payloads if present.
+    for nested_key in (
+        "machine_response",
+        "provider_response",
+        "provider_payload",
+        "payload",
+        "data",
+        "result",
+        "output",
+        "response_data",
+        "contract",
+        "scene_contract",
+    ):
+        nested = mapping.get(nested_key)
+        if nested is None:
+            continue
+        nested_response = _executor_materialize_machine_response(nested)
+        if nested_response is not None and _executor_has_meaningful_payload(nested_response):
+            return nested_response
+
+    response = MachineResponse()
+    canonical_fields = (
+        "answer", "content", "summary", "response", "explanation", "text",
+        "message", "output", "output_text", "data",
+        "scene", "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
+        "confidence", "provider", "provider_contract", "transport_contract",
+        "provider_original_answer", "provider_original_content", "processor_input",
+        "provider_source_request", "scene_contract", "scene_runtime", "conversation_space",
+        "current_turn", "timeline", "dialog", "goal", "goal_hierarchy", "focus",
+        "visual_reference", "visual_summary", "active_visual_scene",
+        "executor_decision", "executor_presentation_plan", "executor_scene_profile",
+        "provider_reference_context", "second_circle_context",
+        "machine_response", "provider_response", "provider_payload", "payload",
+        "result", "response_data", "contract",
+    )
+
+    # Copy direct fields first.
+    for field in canonical_fields:
+        if field in mapping:
+            try:
+                setattr(response, field, mapping[field])
+            except Exception:
+                pass
+
+    # Derive canonical text from any available direct textual fields.
+    answer = _executor_best_text(
+        mapping.get("answer"),
+        mapping.get("content"),
+        mapping.get("response"),
+        mapping.get("summary"),
+        mapping.get("explanation"),
+        mapping.get("text"),
+        mapping.get("message"),
+        mapping.get("output"),
+        mapping.get("output_text"),
+        mapping.get("data"),
+        mapping.get("provider_original_answer"),
+        mapping.get("provider_original_content"),
+        getattr(response, "answer", ""),
+        getattr(response, "content", ""),
+        getattr(response, "summary", ""),
+    )
+    content = _executor_best_text(
+        mapping.get("content"),
+        answer,
+        mapping.get("response"),
+        mapping.get("summary"),
+        mapping.get("explanation"),
+        mapping.get("text"),
+        mapping.get("message"),
+        mapping.get("output"),
+        mapping.get("output_text"),
+        mapping.get("data"),
+        getattr(response, "content", ""),
+        getattr(response, "answer", ""),
+    )
+    summary = _executor_best_text(
+        mapping.get("summary"),
+        content,
+        answer,
+        mapping.get("explanation"),
+        getattr(response, "summary", ""),
+    )
+
+    if answer:
+        response.answer = answer
+    if content:
+        response.content = content
+    if summary:
+        response.summary = summary
+
+    for field in ("render_blocks", "artifacts", "scene", "metadata", "scene_plan", "render_priority"):
+        if field in mapping and _executor_value_is_empty(getattr(response, field, None)):
+            try:
+                setattr(response, field, mapping[field])
+            except Exception:
+                pass
+
+    for field in ("provider_original_answer", "provider_original_content", "provider_contract", "transport_contract"):
+        if field in mapping and _executor_value_is_empty(getattr(response, field, None)):
+            try:
+                setattr(response, field, mapping[field])
+            except Exception:
+                pass
+
+    # If the envelope itself is a wrapper around a nested machine_response but
+    # the candidate is still empty, recursively materialize the most meaningful
+    # nested candidate from the full payload tree.
+    if not _executor_has_meaningful_payload(response):
+        try:
+            candidates = _executor_iter_payload_candidates(envelope, max_depth=5)
+        except Exception:
+            candidates = []
+        best_candidate = None
+        best_score = -1
+        for candidate in candidates:
+            score = _executor_mapping_score(candidate)
+            if score > best_score:
+                best_candidate = candidate
+                best_score = score
+        if best_candidate is not None:
+            fallback = _executor_best_text(
+                best_candidate.get("answer"),
+                best_candidate.get("content"),
+                best_candidate.get("response"),
+                best_candidate.get("summary"),
+                best_candidate.get("explanation"),
+                best_candidate.get("text"),
+                best_candidate.get("message"),
+                best_candidate.get("output"),
+                best_candidate.get("output_text"),
+                best_candidate.get("data"),
+                best_candidate.get("provider_original_answer"),
+                best_candidate.get("provider_original_content"),
+            )
+            if fallback:
+                response.answer = fallback
+                response.content = fallback
+                response.summary = fallback
+            for field in ("render_blocks", "artifacts", "scene", "metadata", "scene_plan", "render_priority",
+                          "provider_original_answer", "provider_original_content", "provider_contract", "transport_contract"):
+                value = best_candidate.get(field)
+                if value not in (None, "", [], {}):
+                    try:
+                        setattr(response, field, value)
+                    except Exception:
+                        pass
+
+    return response
 
 
 def _executor_extract_turn_text(turn: Any, limit: int = 220) -> str:
@@ -950,8 +1162,10 @@ def _executor_preserve_canonical_text(machine_response, scene_contract=None, sce
 
 
 def _extract_machine_response(result: Any):
-    if isinstance(result, MachineResponse):
-        return result
+    materialized = _executor_materialize_machine_response(result)
+    if materialized is not None and _executor_has_meaningful_payload(materialized):
+        return materialized
+
     if result is None:
         return None
 
@@ -967,8 +1181,9 @@ def _extract_machine_response(result: Any):
 
     response = MachineResponse()
     canonical_fields = (
-        "answer", "content", "summary", "response", "explanation", "scene",
-        "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
+        "answer", "content", "summary", "response", "explanation", "text",
+        "message", "output", "output_text", "data",
+        "scene", "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
         "confidence", "provider", "provider_contract", "transport_contract",
         "provider_original_answer", "provider_original_content", "processor_input",
         "provider_source_request", "scene_contract", "scene_runtime", "conversation_space",
@@ -976,6 +1191,8 @@ def _extract_machine_response(result: Any):
         "visual_reference", "visual_summary", "active_visual_scene",
         "executor_decision", "executor_presentation_plan", "executor_scene_profile",
         "provider_reference_context", "second_circle_context",
+        "machine_response", "provider_response", "provider_payload", "payload",
+        "result", "response_data", "contract",
     )
     for field in canonical_fields:
         if field in merged:
@@ -990,6 +1207,11 @@ def _extract_machine_response(result: Any):
         merged.get("response"),
         merged.get("summary"),
         merged.get("explanation"),
+        merged.get("text"),
+        merged.get("message"),
+        merged.get("output"),
+        merged.get("output_text"),
+        merged.get("data"),
         merged.get("provider_original_answer"),
         merged.get("provider_original_content"),
         getattr(response, "answer", ""),
@@ -1002,6 +1224,11 @@ def _extract_machine_response(result: Any):
         merged.get("response"),
         merged.get("summary"),
         merged.get("explanation"),
+        merged.get("text"),
+        merged.get("message"),
+        merged.get("output"),
+        merged.get("output_text"),
+        merged.get("data"),
         getattr(response, "content", ""),
         getattr(response, "answer", ""),
     )
@@ -1033,6 +1260,20 @@ def _extract_machine_response(result: Any):
                 setattr(response, field, merged[field])
             except Exception:
                 pass
+
+    if not _executor_has_meaningful_payload(response):
+        # Try one last time on a nested machine_response payload if the merged
+        # top-level candidate was a wrapper that did not carry text yet.
+        nested = None
+        if isinstance(result, dict):
+            for key in ("machine_response", "provider_response", "provider_payload", "payload", "data", "result", "output", "response_data", "contract", "scene_contract"):
+                nested = result.get(key)
+                if nested is not None:
+                    nested_response = _executor_materialize_machine_response(nested)
+                    if nested_response is not None and _executor_has_meaningful_payload(nested_response):
+                        return nested_response
+        if nested is None:
+            return None
 
     return response
 
@@ -1580,6 +1821,29 @@ def executor_cpu_finalize_transport(machine_response):
     if not scene_summary:
         scene_summary = getattr(machine_response, "summary", None)
 
+    if not scene_answer:
+        scene_answer = _executor_best_text(
+            getattr(machine_response, "answer", ""),
+            getattr(machine_response, "content", ""),
+            getattr(machine_response, "summary", ""),
+            getattr(machine_response, "response", ""),
+            getattr(machine_response, "explanation", ""),
+        )
+    if not scene_content:
+        scene_content = scene_answer
+    if not scene_summary:
+        scene_summary = scene_answer
+
+    render_blocks = list(scene.get("render_blocks", []) or [])
+    if not render_blocks and scene_answer:
+        render_blocks = [{
+            "type": "text",
+            "content": scene_answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+        }]
+
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3",
@@ -1591,7 +1855,7 @@ def executor_cpu_finalize_transport(machine_response):
         "answer": scene_answer,
         "content": scene_content,
         "summary": scene_summary,
-        "render_blocks": scene.get("render_blocks", []),
+        "render_blocks": render_blocks,
     }
 
 
@@ -1742,17 +2006,21 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
                 run=run_with_activity,
             )
 
+            # Materialize the canonical response as early as possible so later
+            # stages always see the same object shape.
             extracted = _extract_machine_response(result)
 
             if extracted is None and isinstance(result, dict):
                 mr = result.get("machine_response")
-                if isinstance(mr, dict):
-                    extracted = MachineResponse()
-                    for k, v in mr.items():
-                        try:
-                            setattr(extracted, k, v)
-                        except Exception:
-                            pass
+                if isinstance(mr, (dict, MachineResponse)):
+                    extracted = _executor_materialize_machine_response(mr)
+                    if extracted is None and isinstance(mr, dict):
+                        extracted = MachineResponse()
+                        for k, v in mr.items():
+                            try:
+                                setattr(extracted, k, v)
+                            except Exception:
+                                pass
 
             if extracted is not None:
                 room_results.append({"room": getattr(room, "name", "unknown"), "machine_response": extracted})
