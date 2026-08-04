@@ -409,6 +409,229 @@ def _executor_has_meaningful_payload(machine_response: Any) -> bool:
     return bool(_executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")))
 
 
+
+def _executor_room_name_from_item(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return normalize_text(
+        item.get("room")
+        or item.get("room_name")
+        or item.get("source_room")
+        or item.get("name")
+        or item.get("source")
+    ).lower()
+
+
+def _executor_is_canonical_room(room_name: str, room: Any = None) -> bool:
+    room_name = normalize_text(room_name).lower()
+    if room_name == "text":
+        return True
+    if room is not None:
+        try:
+            if normalize_text(getattr(room, "name", "")).lower() == "text":
+                return True
+            if normalize_text(getattr(room, "room_type", "")).lower() == "dialog":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _executor_looks_like_internal_room_payload(text: Any) -> bool:
+    if not isinstance(text, str):
+        return False
+    payload = text.lower()
+    return (
+        "domain" in payload
+        and "topic" in payload
+        and "capabilities" in payload
+        and ("engineering" in payload or "analysis" in payload)
+    )
+
+
+def _executor_block_signature(block: Any) -> tuple:
+    if not isinstance(block, dict):
+        return ("raw", type(block).__name__, _clip_text(str(block), 500))
+    payload = block.get("payload")
+    if isinstance(payload, (dict, list, tuple, set)):
+        payload_sig = type(payload).__name__
+    else:
+        payload_sig = _clip_text(payload, 200)
+    return (
+        block.get("type"),
+        block.get("signal"),
+        block.get("renderer"),
+        block.get("viewer"),
+        block.get("label"),
+        _clip_text(block.get("content"), 500),
+        payload_sig,
+        block.get("source_room"),
+    )
+
+
+def _executor_artifact_signature(artifact: Any) -> tuple:
+    mapping = _executor_payload_to_mapping(artifact)
+    if mapping:
+        return (
+            mapping.get("artifact_id") or mapping.get("id"),
+            mapping.get("artifact_type") or mapping.get("type"),
+            _clip_text(mapping.get("content"), 500),
+            _clip_text(mapping.get("summary"), 300),
+        )
+    return ("raw", type(artifact).__name__, _clip_text(str(artifact), 500))
+
+
+def _executor_merge_room_results_into_canonical_response(
+    base_response: MachineResponse,
+    room_results: Any,
+    canonical_room_name: str = "text",
+):
+    if base_response is None:
+        base_response = MachineResponse()
+
+    if not isinstance(base_response, MachineResponse):
+        base_response = _executor_materialize_machine_response(base_response) or MachineResponse()
+
+    room_results = list(room_results or [])
+
+    existing_blocks = list(getattr(base_response, "render_blocks", []) or [])
+    existing_artifacts = list(getattr(base_response, "artifacts", []) or [])
+    existing_contributions = getattr(base_response, "contributions", None) or {}
+    if not isinstance(existing_contributions, dict):
+        existing_contributions = {}
+
+    block_seen = {_executor_block_signature(block) for block in existing_blocks}
+    artifact_seen = {_executor_artifact_signature(artifact) for artifact in existing_artifacts}
+
+    for item in room_results:
+        if not isinstance(item, dict):
+            continue
+
+        room_name = _executor_room_name_from_item(item)
+        candidate = item.get("machine_response")
+        if candidate is None:
+            continue
+
+        candidate = _executor_materialize_machine_response(candidate) or candidate
+        if not isinstance(candidate, MachineResponse):
+            continue
+
+        # Keep the canonical response text immutable; only fill empty fields.
+        if _executor_value_is_empty(getattr(base_response, "answer", None)):
+            fallback = _executor_best_text(
+                getattr(candidate, "answer", ""),
+                getattr(candidate, "content", ""),
+                getattr(candidate, "summary", ""),
+            )
+            if fallback:
+                base_response.answer = fallback
+        if _executor_value_is_empty(getattr(base_response, "content", None)):
+            fallback = _executor_best_text(
+                getattr(candidate, "content", ""),
+                getattr(candidate, "answer", ""),
+                getattr(candidate, "summary", ""),
+            )
+            if fallback:
+                base_response.content = fallback
+        if _executor_value_is_empty(getattr(base_response, "summary", None)):
+            fallback = _executor_best_text(
+                getattr(candidate, "summary", ""),
+                getattr(candidate, "content", ""),
+                getattr(candidate, "answer", ""),
+            )
+            if fallback:
+                base_response.summary = fallback
+
+        # Merge non-visible support data.
+        candidate_contributions = getattr(candidate, "contributions", None) or {}
+        if isinstance(candidate_contributions, dict) and candidate_contributions:
+            room_bucket = existing_contributions.setdefault("room_signals", {})
+            room_key = room_name or getattr(candidate, "room_source", "") or f"room_{len(room_bucket) + 1}"
+            room_bucket[room_key] = candidate_contributions
+            for key, value in candidate_contributions.items():
+                existing_contributions.setdefault(key, value)
+
+        candidate_artifacts = list(getattr(candidate, "artifacts", []) or [])
+        for artifact in candidate_artifacts:
+            sig = _executor_artifact_signature(artifact)
+            if sig in artifact_seen:
+                continue
+            existing_artifacts.append(artifact)
+            artifact_seen.add(sig)
+
+        candidate_blocks = list(getattr(candidate, "render_blocks", []) or [])
+        for block in candidate_blocks:
+            if not isinstance(block, dict):
+                block = {
+                    "type": "machine_payload",
+                    "content": str(block),
+                    "renderer": "TextBlock",
+                    "viewer": "TextBlock",
+                    "priority": 0,
+                }
+            block = dict(block)
+            block.setdefault("source_room", room_name or getattr(candidate, "room_source", ""))
+            block_type = normalize_text(block.get("type")).lower()
+
+            # Never expose raw internal engineering payloads as visible text.
+            if (
+                room_name != canonical_room_name
+                and block_type in {"text", "markdown", "formula", "function"}
+                and _executor_looks_like_internal_room_payload(block.get("content"))
+            ):
+                continue
+
+            sig = _executor_block_signature(block)
+            if sig in block_seen:
+                continue
+            existing_blocks.append(block)
+            block_seen.add(sig)
+
+        # Preserve useful metadata without overwriting canonical text.
+        for field in (
+            "response",
+            "explanation",
+            "provider_original_answer",
+            "provider_original_content",
+            "provider_contract",
+            "transport_contract",
+            "goal",
+            "goal_hierarchy",
+            "focus",
+            "visual_reference",
+            "visual_summary",
+            "active_visual_scene",
+        ):
+            if _executor_value_is_empty(getattr(base_response, field, None)):
+                value = getattr(candidate, field, None)
+                if value not in (None, "", [], {}):
+                    try:
+                        setattr(base_response, field, value)
+                    except Exception:
+                        pass
+
+    if not existing_blocks:
+        canonical_text = _executor_best_text(
+            getattr(base_response, "answer", ""),
+            getattr(base_response, "content", ""),
+            getattr(base_response, "summary", ""),
+        )
+        if canonical_text:
+            existing_blocks = [{
+                "type": "text",
+                "content": canonical_text,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+                "source_room": canonical_room_name,
+            }]
+
+    base_response.render_blocks = existing_blocks
+    base_response.artifacts = existing_artifacts
+    base_response.contributions = existing_contributions
+    return base_response
+
+
 def _executor_materialize_machine_response(envelope: Any) -> Optional[MachineResponse]:
     """
     Unwrap a response envelope into a canonical MachineResponse without losing
@@ -1008,124 +1231,168 @@ def _executor_collect_room_candidates(room_results: Any) -> list[Dict[str, Any]]
     return unique
 
 
+
 def _executor_recover_room_response(machine_response, room_results, machine_request=None, text=None):
     if machine_response is None:
         machine_response = MachineResponse()
+
+    room_results = list(room_results or [])
+
+    # Prefer the canonical text room as the single source of truth for answer/content/summary.
+    canonical_candidate = None
+    canonical_room_name = "text"
+    for item in room_results:
+        if not isinstance(item, dict):
+            continue
+        room_name = _executor_room_name_from_item(item)
+        if not _executor_is_canonical_room(room_name):
+            continue
+        candidate = item.get("machine_response")
+        candidate = _executor_materialize_machine_response(candidate)
+        if candidate is not None and _executor_has_meaningful_payload(candidate):
+            canonical_candidate = candidate
+            canonical_room_name = room_name or canonical_room_name
+            break
 
     current_text = _executor_best_text(
         getattr(machine_response, "answer", ""),
         getattr(machine_response, "content", ""),
         getattr(machine_response, "summary", ""),
     )
-    if current_text and not _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
-        return machine_response
 
-    candidates = _executor_collect_room_candidates(room_results)
-    ranked = []
-    for candidate in candidates:
-        score = _executor_mapping_score(candidate)
-        text_value = _executor_best_text(
-            candidate.get("answer"),
-            candidate.get("content"),
-            candidate.get("response"),
-            candidate.get("summary"),
-            candidate.get("explanation"),
-            candidate.get("provider_original_answer"),
-            candidate.get("provider_original_content"),
+    if canonical_candidate is not None:
+        machine_response = canonical_candidate
+        current_text = _executor_best_text(
+            getattr(machine_response, "answer", ""),
+            getattr(machine_response, "content", ""),
+            getattr(machine_response, "summary", ""),
         )
-        if text_value:
-            score += len(text_value)
-        ranked.append((score, text_value, candidate))
 
-    ranked.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+    # If the canonical room is missing, fall back to the best visible candidate.
+    if not current_text:
+        candidates = _executor_collect_room_candidates(room_results)
+        ranked = []
+        for candidate in candidates:
+            score = _executor_mapping_score(candidate)
+            text_value = _executor_best_text(
+                candidate.get("answer"),
+                candidate.get("content"),
+                candidate.get("response"),
+                candidate.get("summary"),
+                candidate.get("explanation"),
+                candidate.get("provider_original_answer"),
+                candidate.get("provider_original_content"),
+            )
+            if text_value:
+                score += len(text_value)
+            ranked.append((score, text_value, candidate))
 
-    best_candidate = None
-    for score, text_value, candidate in ranked:
-        if text_value or candidate.get("render_blocks") or candidate.get("artifacts"):
-            best_candidate = candidate
-            break
+        ranked.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
 
-    if best_candidate is None:
-        return machine_response
+        best_candidate = None
+        for score, text_value, candidate in ranked:
+            if text_value or candidate.get("render_blocks") or candidate.get("artifacts"):
+                best_candidate = candidate
+                break
 
-    answer = _executor_best_text(
-        best_candidate.get("answer"),
-        best_candidate.get("content"),
-        best_candidate.get("response"),
-        best_candidate.get("summary"),
-        best_candidate.get("explanation"),
-        best_candidate.get("provider_original_answer"),
-        best_candidate.get("provider_original_content"),
+        if best_candidate is not None:
+            answer = _executor_best_text(
+                best_candidate.get("answer"),
+                best_candidate.get("content"),
+                best_candidate.get("response"),
+                best_candidate.get("summary"),
+                best_candidate.get("explanation"),
+                best_candidate.get("provider_original_answer"),
+                best_candidate.get("provider_original_content"),
+            )
+            content = _executor_best_text(
+                best_candidate.get("content"),
+                answer,
+                best_candidate.get("response"),
+                best_candidate.get("summary"),
+                best_candidate.get("explanation"),
+            )
+            summary = _executor_best_text(
+                best_candidate.get("summary"),
+                content,
+                answer,
+                best_candidate.get("explanation"),
+            )
+
+            if answer and _executor_value_is_empty(getattr(machine_response, "answer", None)):
+                machine_response.answer = answer
+            if content and _executor_value_is_empty(getattr(machine_response, "content", None)):
+                machine_response.content = content
+            if summary and _executor_value_is_empty(getattr(machine_response, "summary", None)):
+                machine_response.summary = summary
+
+            for field in (
+                "response",
+                "explanation",
+                "provider_original_answer",
+                "provider_original_content",
+                "provider_contract",
+                "transport_contract",
+                "goal",
+                "goal_hierarchy",
+                "focus",
+                "visual_reference",
+                "visual_summary",
+                "active_visual_scene",
+            ):
+                value = best_candidate.get(field)
+                if value not in (None, "", [], {}):
+                    try:
+                        setattr(machine_response, field, value)
+                    except Exception:
+                        pass
+
+            render_blocks = best_candidate.get("render_blocks")
+            if render_blocks and _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
+                try:
+                    machine_response.render_blocks = list(render_blocks)
+                except Exception:
+                    pass
+
+            artifacts = best_candidate.get("artifacts")
+            if artifacts and _executor_value_is_empty(getattr(machine_response, "artifacts", None)):
+                try:
+                    machine_response.artifacts = list(artifacts)
+                except Exception:
+                    pass
+
+            scene = best_candidate.get("scene")
+            if scene and _executor_value_is_empty(getattr(machine_response, "scene", None)):
+                try:
+                    machine_response.scene = scene
+                except Exception:
+                    pass
+
+            metadata = best_candidate.get("metadata")
+            if metadata and _executor_value_is_empty(getattr(machine_response, "metadata", None)):
+                try:
+                    machine_response.metadata = metadata
+                except Exception:
+                    pass
+
+            if _executor_value_is_empty(getattr(machine_response, "render_blocks", None)) and _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")):
+                try:
+                    machine_response.render_blocks = [{
+                        "type": "text",
+                        "content": _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")),
+                        "renderer": "TextBlock",
+                        "viewer": "TextBlock",
+                        "priority": 0,
+                    }]
+                except Exception:
+                    pass
+
+    # Merge non-canonical room support data without ever replacing the canonical answer.
+    machine_response = _executor_merge_room_results_into_canonical_response(
+        machine_response,
+        room_results,
+        canonical_room_name=canonical_room_name,
     )
-    content = _executor_best_text(
-        best_candidate.get("content"),
-        answer,
-        best_candidate.get("response"),
-        best_candidate.get("summary"),
-        best_candidate.get("explanation"),
-    )
-    summary = _executor_best_text(
-        best_candidate.get("summary"),
-        content,
-        answer,
-        best_candidate.get("explanation"),
-    )
-
-    if answer and _executor_value_is_empty(getattr(machine_response, "answer", None)):
-        machine_response.answer = answer
-    if content and _executor_value_is_empty(getattr(machine_response, "content", None)):
-        machine_response.content = content
-    if summary and _executor_value_is_empty(getattr(machine_response, "summary", None)):
-        machine_response.summary = summary
-
-    for field in ("response", "explanation", "provider_original_answer", "provider_original_content", "provider_contract", "transport_contract", "goal", "goal_hierarchy", "focus", "visual_reference", "visual_summary", "active_visual_scene"):
-        value = best_candidate.get(field)
-        if value not in (None, "", [], {}):
-            try:
-                setattr(machine_response, field, value)
-            except Exception:
-                pass
-
-    render_blocks = best_candidate.get("render_blocks")
-    if render_blocks and _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
-        try:
-            machine_response.render_blocks = list(render_blocks)
-        except Exception:
-            pass
-
-    artifacts = best_candidate.get("artifacts")
-    if artifacts and _executor_value_is_empty(getattr(machine_response, "artifacts", None)):
-        try:
-            machine_response.artifacts = list(artifacts)
-        except Exception:
-            pass
-
-    scene = best_candidate.get("scene")
-    if scene and _executor_value_is_empty(getattr(machine_response, "scene", None)):
-        try:
-            machine_response.scene = scene
-        except Exception:
-            pass
-
-    metadata = best_candidate.get("metadata")
-    if metadata and _executor_value_is_empty(getattr(machine_response, "metadata", None)):
-        try:
-            machine_response.metadata = metadata
-        except Exception:
-            pass
-
-    if _executor_value_is_empty(getattr(machine_response, "render_blocks", None)) and _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")):
-        try:
-            machine_response.render_blocks = [{
-                "type": "text",
-                "content": _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", "")),
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "priority": 0,
-            }]
-        except Exception:
-            pass
-
     return machine_response
 
 
@@ -1615,348 +1882,10 @@ def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machi
     return machine_response
 
 
-
-
-def _executor_scalar_preview(value: Any, limit: int = 120) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, str):
-        return _clip_text(value, limit)
-    if isinstance(value, dict):
-        parts = []
-        for key, item in list(value.items())[:6]:
-            preview = _executor_scalar_preview(item, 50)
-            if preview:
-                parts.append(f"{key}: {preview}")
-        inner = ", ".join(parts)
-        if len(value) > 6:
-            inner = f"{inner}, …" if inner else "…"
-        return f"{{{inner}}}"
-    if isinstance(value, (list, tuple, set)):
-        items = []
-        for item in list(value)[:6]:
-            preview = _executor_scalar_preview(item, 50)
-            if preview:
-                items.append(preview)
-        inner = ", ".join(items)
-        if len(value) > 6:
-            inner = f"{inner}, …" if inner else "…"
-        return f"[{inner}]"
-    return _clip_text(str(value), limit)
-
-
-def _executor_mapping_is_tabular(mapping: Any) -> bool:
-    if not isinstance(mapping, dict) or not mapping:
-        return False
-    if len(mapping) > 12:
-        return False
-
-    simple = 0
-    for key, value in mapping.items():
-        if str(key).startswith("_"):
-            continue
-        if _executor_value_is_empty(value):
-            continue
-        if isinstance(value, (str, int, float, bool)):
-            simple += 1
-            continue
-        if isinstance(value, (list, tuple, set)):
-            if len(value) <= 6 and all(not isinstance(item, (dict, list, tuple, set)) for item in value):
-                simple += 1
-            continue
-        if isinstance(value, dict):
-            if len(value) <= 6 and all(not isinstance(item, (dict, list, tuple, set)) for item in value.values()):
-                simple += 1
-            continue
-
-    return simple >= max(1, min(6, len(mapping) // 2 or 1))
-
-
-def _executor_dict_rows(mapping: Any) -> list[dict]:
-    if not isinstance(mapping, dict):
-        return []
-    rows = []
-    for key, value in mapping.items():
-        if str(key).startswith("_"):
-            continue
-        if _executor_value_is_empty(value):
-            continue
-        rows.append({
-            "key": str(key),
-            "value": _executor_scalar_preview(value, 140),
-        })
-    return rows
-
-
-def _executor_payload_text(payload: Any, limit: int = 3000) -> str:
-    if payload is None:
-        return ""
-    if isinstance(payload, str):
-        return _clip_text(payload, limit)
-    if isinstance(payload, dict):
-        if _executor_mapping_is_tabular(payload):
-            rows = _executor_dict_rows(payload)
-            return "\n".join(f"{row['key']}: {row['value']}" for row in rows)
-        parts = []
-        for key, value in payload.items():
-            preview = _executor_scalar_preview(value, 180)
-            if preview:
-                parts.append(f"{key}: {preview}")
-        return _clip_text("\n".join(parts), limit)
-    if isinstance(payload, (list, tuple, set)):
-        items = [_executor_scalar_preview(item, 180) for item in list(payload)[:12]]
-        return _clip_text("\n".join(item for item in items if item), limit)
-    return _clip_text(str(payload), limit)
-
-
-def _executor_renderer_for_signal(signal: str) -> str:
-    signal = (signal or "text").strip().lower()
-    renderer_map = {
-        "text": "TextBlock",
-        "markdown": "MarkdownBlock",
-        "formula": "FormulaBlock",
-        "graph": "GraphBlock",
-        "table": "TableBlock",
-        "gallery": "GalleryBlock",
-        "diagram": "DiagramBlock",
-        "link": "LinkCard",
-        "code": "CodeBlock",
-        "function": "FunctionBlock",
-        "scene": "SceneBlock",
-        "layout": "LayoutBlock",
-        "image": "GalleryBlock",
-        "file": "FileBlock",
-        "audio": "AudioBlock",
-        "video": "VideoBlock",
-        "memory": "MemoryBlock",
-    }
-    return renderer_map.get(signal, "TextBlock")
-
-
-def _executor_detect_render_signal(block: Dict[str, Any], fallback_text: str = "") -> str:
-    values = [
-        block.get("signal"),
-        block.get("type"),
-        block.get("renderer"),
-        block.get("viewer"),
-        block.get("kind"),
-        block.get("artifact_type"),
-    ]
-    normalized = " ".join(str(value).lower() for value in values if value not in (None, ""))
-    normalized = normalized.strip()
-
-    if "formula" in normalized:
-        return "formula"
-    if any(token in normalized for token in ("graph", "chart", "plot", "curve")):
-        return "graph"
-    if any(token in normalized for token in ("table", "grid", "spreadsheet")):
-        return "table"
-    if any(token in normalized for token in ("gallery", "image", "photo", "picture")):
-        return "gallery"
-    if any(token in normalized for token in ("diagram", "scheme", "schema")):
-        return "diagram"
-    if any(token in normalized for token in ("link", "url", "card")):
-        return "link"
-    if any(token in normalized for token in ("code", "snippet", "program")):
-        return "code"
-    if "function" in normalized:
-        return "function"
-    if any(token in normalized for token in ("markdown", "md")):
-        return "markdown"
-    if any(token in normalized for token in ("scene", "layout")):
-        return "scene"
-
-    raw_payload = block.get("payload")
-    if raw_payload is None:
-        raw_payload = block.get("data")
-    if raw_payload is None:
-        raw_payload = block.get("artifact")
-
-    raw_content = block.get("content")
-    if isinstance(raw_content, (dict, list, tuple, set)):
-        raw_payload = raw_payload if raw_payload is not None else raw_content
-
-    if isinstance(raw_payload, dict):
-        if _executor_mapping_is_tabular(raw_payload):
-            return "table"
-        if any(token in " ".join(str(k).lower() for k in raw_payload.keys()) for token in ("graph", "series", "points", "labels", "table", "rows")):
-            return "table"
-        return "text"
-
-    if isinstance(raw_payload, (list, tuple, set)):
-        if len(raw_payload) and all(not isinstance(item, (dict, list, tuple, set)) for item in raw_payload):
-            return "table"
-        return "text"
-
-    text = _executor_best_text(
-        raw_content,
-        raw_payload,
-        fallback_text,
-        block.get("answer"),
-        block.get("summary"),
-        block.get("response"),
-        block.get("text"),
-    )
-
-    if _looks_like_formula_text(text):
-        return "formula"
-
-    lowered = text.lower()
-    if "http://" in lowered or "https://" in lowered:
-        return "link"
-    if lowered.startswith("[[graph") or lowered.startswith("[[chart") or lowered.startswith("[[plot"):
-        return "graph"
-    if lowered.startswith("[[table"):
-        return "table"
-    if lowered.startswith("[[image") or lowered.startswith("[[gallery"):
-        return "gallery"
-    if lowered.startswith("[[diagram"):
-        return "diagram"
-
-    return "text"
-
-
-def _executor_normalize_render_block(block: Any, machine_response: Any = None, scene: Any = None) -> Dict[str, Any]:
-    if not isinstance(block, dict):
-        fallback = _executor_best_text(
-            block,
-            getattr(machine_response, "answer", "") if machine_response is not None else "",
-            getattr(machine_response, "content", "") if machine_response is not None else "",
-            getattr(machine_response, "summary", "") if machine_response is not None else "",
-        )
-        return {
-            "type": "text",
-            "signal": "TEXT",
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "content": fallback or _executor_scalar_preview(block, 4000),
-            "payload": block,
-            "priority": 0,
-            "source_type": type(block).__name__,
-            "executor_generated": True,
-        }
-
-    normalized = dict(block)
-    original_type = str(
-        normalized.get("type")
-        or normalized.get("signal")
-        or normalized.get("renderer")
-        or normalized.get("viewer")
-        or normalized.get("kind")
-        or normalized.get("artifact_type")
-        or "text"
-    ).strip()
-
-    payload = normalized.get("payload")
-    if payload is None:
-        payload = normalized.get("data")
-    if payload is None:
-        payload = normalized.get("artifact")
-    if payload is None and isinstance(normalized.get("content"), (dict, list, tuple, set)):
-        payload = normalized.get("content")
-    if payload is None and isinstance(normalized.get("text"), (dict, list, tuple, set)):
-        payload = normalized.get("text")
-
-    fallback_text = _executor_best_text(
-        normalized.get("content"),
-        normalized.get("text"),
-        normalized.get("summary"),
-        normalized.get("answer"),
-        normalized.get("response"),
-        normalized.get("explanation"),
-        getattr(machine_response, "answer", "") if machine_response is not None else "",
-        getattr(machine_response, "content", "") if machine_response is not None else "",
-        getattr(machine_response, "summary", "") if machine_response is not None else "",
-        getattr(machine_response, "provider_original_answer", "") if machine_response is not None else "",
-        getattr(machine_response, "provider_original_content", "") if machine_response is not None else "",
-    )
-
-    signal = _executor_detect_render_signal(normalized, fallback_text=fallback_text)
-
-    # Demote false-positive formula blocks to the appropriate renderer.
-    if signal == "formula" and not _looks_like_formula_text(fallback_text):
-        if isinstance(payload, dict) and _executor_mapping_is_tabular(payload):
-            signal = "table"
-        else:
-            signal = "text"
-
-    renderer = _executor_renderer_for_signal(signal)
-    normalized["source_type"] = original_type
-    normalized["type"] = signal
-    normalized["signal"] = signal.upper()
-    normalized["renderer"] = renderer
-    normalized["viewer"] = renderer
-    normalized.setdefault("priority", 0)
-
-    if payload is None and isinstance(normalized.get("content"), (dict, list, tuple, set)):
-        payload = normalized.get("content")
-    if payload is None and isinstance(normalized.get("text"), (dict, list, tuple, set)):
-        payload = normalized.get("text")
-
-    if payload is not None:
-        normalized["payload"] = payload
-
-    if signal == "table":
-        rows = normalized.get("rows")
-        if not isinstance(rows, list) or not rows:
-            if isinstance(payload, dict):
-                rows = _executor_dict_rows(payload)
-            elif isinstance(normalized.get("content"), dict):
-                rows = _executor_dict_rows(normalized.get("content"))
-            else:
-                rows = []
-        normalized["rows"] = rows
-        normalized["content"] = _executor_payload_text(payload if payload is not None else normalized.get("content"), limit=3000)
-        normalized["table"] = {"rows": rows}
-    elif signal in ("graph", "gallery", "diagram", "code", "link", "function", "scene", "layout", "markdown"):
-        normalized["content"] = fallback_text or _executor_payload_text(payload if payload is not None else normalized.get("content"), limit=3000)
-    else:
-        if isinstance(normalized.get("content"), (dict, list, tuple, set)) or _executor_value_is_empty(normalized.get("content")):
-            normalized["content"] = fallback_text or _executor_payload_text(payload if payload is not None else normalized.get("content"), limit=3000)
-
-    if not normalized.get("label"):
-        normalized["label"] = original_type if original_type else signal
-
-    if payload is not None and isinstance(payload, (dict, list, tuple, set)):
-        normalized.setdefault("provider_payload", True)
-        normalized.setdefault("canonical_provider_payload", True)
-
-    return normalized
-
-
-def _executor_normalize_render_blocks(machine_response: Any, scene: Any = None) -> Any:
-    blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    normalized = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in blocks]
-
-    if not normalized:
-        fallback = _executor_best_text(
-            getattr(machine_response, "answer", ""),
-            getattr(machine_response, "content", ""),
-            getattr(machine_response, "summary", ""),
-            getattr(machine_response, "provider_original_answer", ""),
-            getattr(machine_response, "provider_original_content", ""),
-        )
-        if fallback:
-            normalized = [{
-                "type": "text",
-                "signal": "TEXT",
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "content": fallback,
-                "priority": 0,
-                "executor_generated": True,
-                "source_type": "fallback_text",
-            }]
-    machine_response.render_blocks = normalized
-    return machine_response
-
-
 def executor_cpu_materialize_blocks(machine_response):
-    return _executor_normalize_render_blocks(machine_response)
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    machine_response.render_blocks = render_blocks
+    return machine_response
 
 
 def executor_cpu_attach_artifact_payloads(machine_response):
@@ -1967,25 +1896,18 @@ def executor_cpu_attach_artifact_payloads(machine_response):
         artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None)
         payload = getattr(artifact, "data", None)
         if artifact_type and payload is not None:
-            artifact_index[str(artifact_type)] = payload
-
-    normalized_blocks = []
+            artifact_index[artifact_type] = payload
     for block in render_blocks:
         if not isinstance(block, dict):
-            block = _executor_normalize_render_block(block, machine_response=machine_response)
-            normalized_blocks.append(block)
             continue
-
-        provider_payload = artifact_index.get(str(block.get("type"))) or artifact_index.get(str(block.get("source_type"))) or artifact_index.get(str(block.get("renderer")))
-        if provider_payload is not None:
-            block["payload"] = provider_payload
-            block["provider_payload"] = True
-            block["canonical_provider_payload"] = True
-            block["executor_generated"] = False
-
-        normalized_blocks.append(_executor_normalize_render_block(block, machine_response=machine_response))
-
-    machine_response.render_blocks = normalized_blocks
+        provider_payload = artifact_index.get(block.get("type"))
+        if provider_payload is None:
+            continue
+        block["payload"] = provider_payload
+        block["provider_payload"] = True
+        block["canonical_provider_payload"] = True
+        block["executor_generated"] = False
+    machine_response.render_blocks = render_blocks
     return machine_response
 
 
@@ -2054,8 +1976,6 @@ def executor_cpu_transport_diag(stage: str, machine_response=None, scene_contrac
 
 def executor_cpu_scene_pipeline(machine_response):
     executor_cpu_transport_diag("BEFORE_BUILD_MACHINE_SCENE", machine_response)
-    machine_response = executor_cpu_materialize_blocks(machine_response)
-    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     scene = build_machine_scene(machine_response)
@@ -2068,15 +1988,12 @@ def executor_cpu_scene_pipeline(machine_response):
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
     if not blocks:
         blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    blocks = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in blocks]
 
     try:
         setattr(scene, "timeline", conversation_space.get("timeline", []))
         setattr(scene, "last_user_turn", conversation_space.get("last_user_turn"))
         setattr(scene, "last_april_turn", conversation_space.get("last_april_turn"))
         setattr(scene, "active_goal", conversation_space.get("response_decision", {}).get("goal"))
-        setattr(scene, "render_blocks", blocks)
-        setattr(scene, "blocks", blocks)
     except Exception:
         pass
 
@@ -2092,7 +2009,6 @@ def executor_cpu_scene_pipeline(machine_response):
         blocks = list(getattr(scene_contract, "render_blocks", []) or [])
     if not blocks:
         blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    blocks = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in blocks]
 
     try:
         if isinstance(scene_contract, dict):
@@ -2186,16 +2102,13 @@ def executor_cpu_finalize_transport(machine_response):
         scene_summary = scene_answer
 
     render_blocks = list(scene.get("render_blocks", []) or [])
-    render_blocks = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in render_blocks]
     if not render_blocks and scene_answer:
         render_blocks = [{
             "type": "text",
-            "signal": "TEXT",
             "content": scene_answer,
             "renderer": "TextBlock",
             "viewer": "TextBlock",
             "priority": 0,
-            "executor_generated": True,
         }]
 
     return {
@@ -2341,6 +2254,7 @@ def _build_second_circle_machine_request(*, text: str, semantic: dict, provider_
     return machine_request
 
 
+
 async def execute_rooms(user_id, text, context, semantic, cognition, response_decision, state, run_with_activity):
     machine_request = context.get("machine_request")
     if machine_request is None:
@@ -2350,6 +2264,8 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
     room_execution_report = []
     best_machine_response = None
     best_score = -1
+    canonical_machine_response = None
+    canonical_room_name = "text"
 
     for room in ROOMS:
         try:
@@ -2377,26 +2293,57 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
                                 pass
 
             if extracted is not None:
-                room_results.append({"room": getattr(room, "name", "unknown"), "machine_response": extracted})
-                executor_cpu_register_room(room_execution_report, getattr(room, "name", "unknown"), status="ok")
+                room_name = getattr(room, "name", "unknown")
+                room_results.append({"room": room_name, "machine_response": extracted})
+                executor_cpu_register_room(room_execution_report, room_name, status="ok")
 
                 score = _executor_response_score(extracted)
                 if best_machine_response is None or score > best_score:
                     best_machine_response = extracted
                     best_score = score
+
+                if _executor_is_canonical_room(room_name, room):
+                    if canonical_machine_response is None or _executor_has_meaningful_payload(extracted):
+                        canonical_machine_response = extracted
+                        canonical_room_name = room_name or canonical_room_name
                 continue
 
         except Exception as exc:
             room_execution_report.append({"room": getattr(room, "name", "unknown"), "status": "error", "error": str(exc)})
             continue
 
-    if best_machine_response is None:
+    if canonical_machine_response is None:
+        canonical_machine_response = best_machine_response
+
+    if canonical_machine_response is None:
         raise RuntimeError("No MachineResponse produced")
 
     room_results = sorted(room_results, key=lambda item: _executor_response_score(item.get("machine_response")), reverse=True)
 
-    machine_response = best_machine_response
-    machine_response = _executor_recover_room_response(machine_response, room_results, machine_request=machine_request, text=text)
+    machine_response = canonical_machine_response
+    machine_response = _executor_recover_room_response(
+        machine_response,
+        room_results,
+        machine_request=machine_request,
+        text=text,
+    )
+
+    # Keep the canonical answer immutable after selection.
+    canonical_answer = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    canonical_content = _executor_best_text(
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    canonical_summary = _executor_best_text(
+        getattr(machine_response, "summary", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "answer", ""),
+    )
 
     conversation_space = context.get("conversation_space") or {}
     current_turn = conversation_space.get("current_turn", {})
@@ -2414,10 +2361,6 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
         timeline.append(conversation_space["current_turn"])
     conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
-
-    _canonical_answer = getattr(machine_response, "answer", "")
-    _canonical_content = getattr(machine_response, "content", "")
-    _canonical_summary = getattr(machine_response, "summary", "")
 
     machine_response = executor_cpu_normalize_answer(machine_response)
 
@@ -2439,42 +2382,95 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
     machine_response = reflected_machine_response
 
     if registry_result is not None:
-        for _field in ("contributions", "registry_diagnostics", "artifacts", "render_blocks", "metadata"):
-            try:
-                value = getattr(registry_result, _field, None)
-                if value not in (None, "", [], {}):
-                    setattr(machine_response, _field, value)
-            except Exception:
-                pass
-        for _field in ("answer", "content", "summary"):
-            try:
-                current = getattr(machine_response, _field, "")
-                incoming = getattr(registry_result, _field, "")
-                if (not current) and incoming:
-                    setattr(machine_response, _field, incoming)
-            except Exception:
-                pass
+        try:
+            registry_contributions = getattr(registry_result, "contributions", None)
+            if isinstance(registry_contributions, dict) and registry_contributions:
+                current_contributions = getattr(machine_response, "contributions", None) or {}
+                if not isinstance(current_contributions, dict):
+                    current_contributions = {}
+                current_contributions.setdefault("registry", registry_contributions.get("registry", {}))
+                current_contributions.setdefault("registry_summary", registry_contributions.get("registry_summary", {}))
+                current_contributions.setdefault("registry_diagnostics", registry_contributions.get("registry_diagnostics", {}))
+                for key, value in registry_contributions.items():
+                    current_contributions.setdefault(key, value)
+                machine_response.contributions = current_contributions
+        except Exception:
+            pass
 
-    machine_response = executor_cpu_materialize_blocks(machine_response)
-    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+        try:
+            registry_diagnostics = getattr(registry_result, "registry_diagnostics", None)
+            if registry_diagnostics not in (None, "", [], {}):
+                machine_response.registry_diagnostics = registry_diagnostics
+        except Exception:
+            pass
+
+        try:
+            registry_artifacts = list(getattr(registry_result, "artifacts", []) or [])
+            current_artifacts = list(getattr(machine_response, "artifacts", []) or [])
+            artifact_seen = {_executor_artifact_signature(a) for a in current_artifacts}
+            for artifact in registry_artifacts:
+                sig = _executor_artifact_signature(artifact)
+                if sig in artifact_seen:
+                    continue
+                current_artifacts.append(artifact)
+                artifact_seen.add(sig)
+            machine_response.artifacts = current_artifacts
+        except Exception:
+            pass
+
+        try:
+            registry_metadata = getattr(registry_result, "metadata", None)
+            if isinstance(registry_metadata, dict) and registry_metadata:
+                current_metadata = getattr(machine_response, "metadata", None)
+                if not isinstance(current_metadata, dict):
+                    current_metadata = {}
+                for key, value in registry_metadata.items():
+                    if key in {"answer", "content", "summary", "provider_original_answer", "provider_original_content"}:
+                        current_metadata.setdefault(key, value)
+                    else:
+                        current_metadata.setdefault(key, value)
+                machine_response.metadata = current_metadata
+        except Exception:
+            pass
+
+        try:
+            registry_blocks = list(getattr(registry_result, "render_blocks", []) or [])
+            current_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+            block_seen = {_executor_block_signature(block) for block in current_blocks}
+            for block in registry_blocks:
+                if not isinstance(block, dict):
+                    block = {"type": "machine_payload", "content": str(block), "renderer": "TextBlock", "viewer": "TextBlock", "priority": 0}
+                block = dict(block)
+                block_type = normalize_text(block.get("type")).lower()
+                if block_type in {"text", "markdown", "formula", "function"} and _executor_looks_like_internal_room_payload(block.get("content")):
+                    continue
+                sig = _executor_block_signature(block)
+                if sig in block_seen:
+                    continue
+                current_blocks.append(block)
+                block_seen.add(sig)
+            machine_response.render_blocks = current_blocks
+        except Exception:
+            pass
+
     machine_response = executor_cpu_normalize_answer(machine_response)
 
-    if not getattr(machine_response, "answer", "") and _canonical_answer:
-        machine_response.answer = _canonical_answer
-    if not getattr(machine_response, "content", "") and _canonical_content:
-        machine_response.content = _canonical_content
-    if not getattr(machine_response, "summary", "") and _canonical_summary:
-        machine_response.summary = _canonical_summary
+    # Restore canonical text after all merging/syncing steps.
+    if canonical_answer:
+        machine_response.answer = canonical_answer
+    if canonical_content:
+        machine_response.content = canonical_content
+    if canonical_summary:
+        machine_response.summary = canonical_summary
 
     if not list(getattr(machine_response, "render_blocks", []) or []) and getattr(machine_response, "answer", ""):
         machine_response.render_blocks = [{
             "type": "text",
-            "signal": "TEXT",
+            "content": machine_response.answer,
             "renderer": "TextBlock",
             "viewer": "TextBlock",
-            "content": machine_response.answer,
             "priority": 0,
-            "executor_generated": True,
+            "source_room": canonical_room_name,
         }]
 
     executor_cpu_transport_diag("AFTER_REFLECT", machine_response)
