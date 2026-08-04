@@ -348,6 +348,143 @@ def build_plan_runtime(
             plan == "premium"
     }
 
+
+
+# =====================================================
+# 🔥 FIRST CIRCLE REQUEST BUILDER
+# =====================================================
+
+def _extract_turn_summary(turn, limit=120):
+    if not isinstance(turn, dict):
+        return ""
+
+    for key in (
+        "summary",
+        "content",
+        "answer",
+        "response",
+        "text",
+        "message",
+    ):
+        value = turn.get(key)
+        if value:
+            return clamp_text(value, limit)
+
+    return ""
+
+
+def _compact_dialog_turns(history, limit):
+    if not isinstance(history, list):
+        return []
+
+    result = []
+    for item in history[-limit:]:
+        if not isinstance(item, dict):
+            continue
+
+        content = sanitize_model_output(
+            trim_text(
+                item.get("content", "")
+            )
+        )
+
+        if not content:
+            continue
+
+        result.append({
+            "role": item.get("role", "user"),
+            "content": content,
+        })
+
+    return result
+
+
+def build_first_circle_request(
+    user_text,
+    state,
+    semantic,
+    cognition,
+    response_decision,
+    runtime,
+):
+    history = state.get("dialog", []) or []
+    history_limit = min(int(runtime.get("history_limit", 5) or 5), 4)
+    compact_history = _compact_dialog_turns(history, history_limit)
+
+    last_user_summary = ""
+    last_april_summary = ""
+
+    for item in reversed(compact_history):
+        role = safe_text(item.get("role", "")).lower()
+
+        if not last_april_summary and role in ("assistant", "april"):
+            last_april_summary = clamp_text(item.get("content", ""), 120)
+
+        if not last_user_summary and role == "user":
+            last_user_summary = clamp_text(item.get("content", ""), 120)
+
+        if last_user_summary and last_april_summary:
+            break
+
+    active_topic = (
+        state.get("topic")
+        or semantic.get("topic")
+        or semantic.get("intent")
+        or ""
+    )
+
+    focus = (
+        response_decision.get("dialog_focus")
+        or cognition.get("dynamic_focus")
+        or state.get("focus_state")
+        or state.get("focus")
+        or {}
+    )
+
+    if not isinstance(focus, dict):
+        focus = {"value": clamp_text(focus, 100)} if focus else {}
+
+    provider_reference_context = {
+        "active_topic": clamp_text(active_topic, 60),
+        "last_user_turn_summary": last_user_summary,
+        "last_april_turn_summary": last_april_summary,
+        "dialog_focus": focus,
+    }
+
+    provider_reference_context = {
+        k: v
+        for k, v in provider_reference_context.items()
+        if v not in ("", {}, [], None)
+    }
+
+    return {
+        "goal": trim_text(user_text),
+        "intent": {
+            "type": safe_text(
+                semantic.get("intent")
+                or response_decision.get("goal")
+                or "dialogue"
+            ),
+            "normalized_text": trim_text(user_text),
+            "source": "text_module_first_circle",
+        },
+        "provider_reference_context": provider_reference_context,
+        "conversation": {
+            "timeline": compact_history,
+            "last_user_turn": last_user_summary,
+            "last_april_turn": last_april_summary,
+            "active_topic": active_topic,
+            "focus": focus,
+        },
+        "first_circle_only": True,
+        "execution_round": 1,
+        "execution_phase": "FIRST_CIRCLE",
+        "plan": runtime.get("plan"),
+        "token_mode": runtime.get("token_mode"),
+        "web_priority": runtime.get("web_priority"),
+        "extended_memory": runtime.get("extended_memory"),
+    }
+
 # =====================================================
 # 🔥 INTERNAL LEAK PROTECTION
 # =====================================================
@@ -1001,31 +1138,29 @@ async def process(
         # 🔥 MESSAGE STACK
         # =====================================================
 
-        # LEGACY REMOVED
-        # STAGE 26 - Executor synchronization
-        machine_request = (
-            state.get("machine_request")
-            or state.get("context", {}).get("machine_request")
-            or state.get("executor_context", {}).get("machine_request")
-            or state.get("transport", {}).get("machine_request")
+        # Build a compact first-circle request.
+        # Keep the full MachineRequest inside Executor only.
+        config = get_config(
+            energy
         )
 
-        # execution_phase is now set by Executor AFTER the first provider pass.
+        first_circle_request = build_first_circle_request(
+            user_text=text,
+            state=state,
+            semantic=semantic,
+            cognition=cognition,
+            response_decision=response_decision,
+            runtime=runtime,
+        )
 
-        if machine_request is None:
-            raise RuntimeError("Canonical MachineRequest required before text generation.")
-
-        # Legacy messages stack removed
-        messages = machine_request
-
+        log_text_execution(
+            "FIRST_CIRCLE_REQUEST_BUILT",
+            first_circle_request
+        )
 
         # =================================================
         # 🔥 PROVIDER CONFIG
         # =====================================================
-
-        config = get_config(
-            energy
-        )
 
         log_text_execution(
             "PROVIDER_EXECUTION"
@@ -1037,15 +1172,15 @@ async def process(
 
         output = await generate_text(
 
-            messages=machine_request,
+            messages=first_circle_request,
 
             temperature=config[
                 "temperature"
             ],
 
-            max_output_tokens=config[
-                "max_output_tokens"
-            ],
+            # Let provider_router choose the compact token budget
+            # for the first circle instead of forcing a large cap here.
+            max_output_tokens=None,
 
             model=OPENAI_PROVIDER_MODEL
         )
@@ -1193,4 +1328,5 @@ async def process(
         "machine_channels": artifact_data["machine_channels"],
         "provider_response": provider_packet,
         "provider_machine_response": state.get("provider_machine_response", {}),
+        "first_circle_request": first_circle_request,
     }
