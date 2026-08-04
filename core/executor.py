@@ -1615,10 +1615,348 @@ def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machi
     return machine_response
 
 
-def executor_cpu_materialize_blocks(machine_response):
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    machine_response.render_blocks = render_blocks
+
+
+def _executor_scalar_preview(value: Any, limit: int = 120) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return _clip_text(value, limit)
+    if isinstance(value, dict):
+        parts = []
+        for key, item in list(value.items())[:6]:
+            preview = _executor_scalar_preview(item, 50)
+            if preview:
+                parts.append(f"{key}: {preview}")
+        inner = ", ".join(parts)
+        if len(value) > 6:
+            inner = f"{inner}, …" if inner else "…"
+        return f"{{{inner}}}"
+    if isinstance(value, (list, tuple, set)):
+        items = []
+        for item in list(value)[:6]:
+            preview = _executor_scalar_preview(item, 50)
+            if preview:
+                items.append(preview)
+        inner = ", ".join(items)
+        if len(value) > 6:
+            inner = f"{inner}, …" if inner else "…"
+        return f"[{inner}]"
+    return _clip_text(str(value), limit)
+
+
+def _executor_mapping_is_tabular(mapping: Any) -> bool:
+    if not isinstance(mapping, dict) or not mapping:
+        return False
+    if len(mapping) > 12:
+        return False
+
+    simple = 0
+    for key, value in mapping.items():
+        if str(key).startswith("_"):
+            continue
+        if _executor_value_is_empty(value):
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            simple += 1
+            continue
+        if isinstance(value, (list, tuple, set)):
+            if len(value) <= 6 and all(not isinstance(item, (dict, list, tuple, set)) for item in value):
+                simple += 1
+            continue
+        if isinstance(value, dict):
+            if len(value) <= 6 and all(not isinstance(item, (dict, list, tuple, set)) for item in value.values()):
+                simple += 1
+            continue
+
+    return simple >= max(1, min(6, len(mapping) // 2 or 1))
+
+
+def _executor_dict_rows(mapping: Any) -> list[dict]:
+    if not isinstance(mapping, dict):
+        return []
+    rows = []
+    for key, value in mapping.items():
+        if str(key).startswith("_"):
+            continue
+        if _executor_value_is_empty(value):
+            continue
+        rows.append({
+            "key": str(key),
+            "value": _executor_scalar_preview(value, 140),
+        })
+    return rows
+
+
+def _executor_payload_text(payload: Any, limit: int = 3000) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return _clip_text(payload, limit)
+    if isinstance(payload, dict):
+        if _executor_mapping_is_tabular(payload):
+            rows = _executor_dict_rows(payload)
+            return "\n".join(f"{row['key']}: {row['value']}" for row in rows)
+        parts = []
+        for key, value in payload.items():
+            preview = _executor_scalar_preview(value, 180)
+            if preview:
+                parts.append(f"{key}: {preview}")
+        return _clip_text("\n".join(parts), limit)
+    if isinstance(payload, (list, tuple, set)):
+        items = [_executor_scalar_preview(item, 180) for item in list(payload)[:12]]
+        return _clip_text("\n".join(item for item in items if item), limit)
+    return _clip_text(str(payload), limit)
+
+
+def _executor_renderer_for_signal(signal: str) -> str:
+    signal = (signal or "text").strip().lower()
+    renderer_map = {
+        "text": "TextBlock",
+        "markdown": "MarkdownBlock",
+        "formula": "FormulaBlock",
+        "graph": "GraphBlock",
+        "table": "TableBlock",
+        "gallery": "GalleryBlock",
+        "diagram": "DiagramBlock",
+        "link": "LinkCard",
+        "code": "CodeBlock",
+        "function": "FunctionBlock",
+        "scene": "SceneBlock",
+        "layout": "LayoutBlock",
+        "image": "GalleryBlock",
+        "file": "FileBlock",
+        "audio": "AudioBlock",
+        "video": "VideoBlock",
+        "memory": "MemoryBlock",
+    }
+    return renderer_map.get(signal, "TextBlock")
+
+
+def _executor_detect_render_signal(block: Dict[str, Any], fallback_text: str = "") -> str:
+    values = [
+        block.get("signal"),
+        block.get("type"),
+        block.get("renderer"),
+        block.get("viewer"),
+        block.get("kind"),
+        block.get("artifact_type"),
+    ]
+    normalized = " ".join(str(value).lower() for value in values if value not in (None, ""))
+    normalized = normalized.strip()
+
+    if "formula" in normalized:
+        return "formula"
+    if any(token in normalized for token in ("graph", "chart", "plot", "curve")):
+        return "graph"
+    if any(token in normalized for token in ("table", "grid", "spreadsheet")):
+        return "table"
+    if any(token in normalized for token in ("gallery", "image", "photo", "picture")):
+        return "gallery"
+    if any(token in normalized for token in ("diagram", "scheme", "schema")):
+        return "diagram"
+    if any(token in normalized for token in ("link", "url", "card")):
+        return "link"
+    if any(token in normalized for token in ("code", "snippet", "program")):
+        return "code"
+    if "function" in normalized:
+        return "function"
+    if any(token in normalized for token in ("markdown", "md")):
+        return "markdown"
+    if any(token in normalized for token in ("scene", "layout")):
+        return "scene"
+
+    raw_payload = block.get("payload")
+    if raw_payload is None:
+        raw_payload = block.get("data")
+    if raw_payload is None:
+        raw_payload = block.get("artifact")
+
+    raw_content = block.get("content")
+    if isinstance(raw_content, (dict, list, tuple, set)):
+        raw_payload = raw_payload if raw_payload is not None else raw_content
+
+    if isinstance(raw_payload, dict):
+        if _executor_mapping_is_tabular(raw_payload):
+            return "table"
+        if any(token in " ".join(str(k).lower() for k in raw_payload.keys()) for token in ("graph", "series", "points", "labels", "table", "rows")):
+            return "table"
+        return "text"
+
+    if isinstance(raw_payload, (list, tuple, set)):
+        if len(raw_payload) and all(not isinstance(item, (dict, list, tuple, set)) for item in raw_payload):
+            return "table"
+        return "text"
+
+    text = _executor_best_text(
+        raw_content,
+        raw_payload,
+        fallback_text,
+        block.get("answer"),
+        block.get("summary"),
+        block.get("response"),
+        block.get("text"),
+    )
+
+    if _looks_like_formula_text(text):
+        return "formula"
+
+    lowered = text.lower()
+    if "http://" in lowered or "https://" in lowered:
+        return "link"
+    if lowered.startswith("[[graph") or lowered.startswith("[[chart") or lowered.startswith("[[plot"):
+        return "graph"
+    if lowered.startswith("[[table"):
+        return "table"
+    if lowered.startswith("[[image") or lowered.startswith("[[gallery"):
+        return "gallery"
+    if lowered.startswith("[[diagram"):
+        return "diagram"
+
+    return "text"
+
+
+def _executor_normalize_render_block(block: Any, machine_response: Any = None, scene: Any = None) -> Dict[str, Any]:
+    if not isinstance(block, dict):
+        fallback = _executor_best_text(
+            block,
+            getattr(machine_response, "answer", "") if machine_response is not None else "",
+            getattr(machine_response, "content", "") if machine_response is not None else "",
+            getattr(machine_response, "summary", "") if machine_response is not None else "",
+        )
+        return {
+            "type": "text",
+            "signal": "TEXT",
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "content": fallback or _executor_scalar_preview(block, 4000),
+            "payload": block,
+            "priority": 0,
+            "source_type": type(block).__name__,
+            "executor_generated": True,
+        }
+
+    normalized = dict(block)
+    original_type = str(
+        normalized.get("type")
+        or normalized.get("signal")
+        or normalized.get("renderer")
+        or normalized.get("viewer")
+        or normalized.get("kind")
+        or normalized.get("artifact_type")
+        or "text"
+    ).strip()
+
+    payload = normalized.get("payload")
+    if payload is None:
+        payload = normalized.get("data")
+    if payload is None:
+        payload = normalized.get("artifact")
+    if payload is None and isinstance(normalized.get("content"), (dict, list, tuple, set)):
+        payload = normalized.get("content")
+    if payload is None and isinstance(normalized.get("text"), (dict, list, tuple, set)):
+        payload = normalized.get("text")
+
+    fallback_text = _executor_best_text(
+        normalized.get("content"),
+        normalized.get("text"),
+        normalized.get("summary"),
+        normalized.get("answer"),
+        normalized.get("response"),
+        normalized.get("explanation"),
+        getattr(machine_response, "answer", "") if machine_response is not None else "",
+        getattr(machine_response, "content", "") if machine_response is not None else "",
+        getattr(machine_response, "summary", "") if machine_response is not None else "",
+        getattr(machine_response, "provider_original_answer", "") if machine_response is not None else "",
+        getattr(machine_response, "provider_original_content", "") if machine_response is not None else "",
+    )
+
+    signal = _executor_detect_render_signal(normalized, fallback_text=fallback_text)
+
+    # Demote false-positive formula blocks to the appropriate renderer.
+    if signal == "formula" and not _looks_like_formula_text(fallback_text):
+        if isinstance(payload, dict) and _executor_mapping_is_tabular(payload):
+            signal = "table"
+        else:
+            signal = "text"
+
+    renderer = _executor_renderer_for_signal(signal)
+    normalized["source_type"] = original_type
+    normalized["type"] = signal
+    normalized["signal"] = signal.upper()
+    normalized["renderer"] = renderer
+    normalized["viewer"] = renderer
+    normalized.setdefault("priority", 0)
+
+    if payload is None and isinstance(normalized.get("content"), (dict, list, tuple, set)):
+        payload = normalized.get("content")
+    if payload is None and isinstance(normalized.get("text"), (dict, list, tuple, set)):
+        payload = normalized.get("text")
+
+    if payload is not None:
+        normalized["payload"] = payload
+
+    if signal == "table":
+        rows = normalized.get("rows")
+        if not isinstance(rows, list) or not rows:
+            if isinstance(payload, dict):
+                rows = _executor_dict_rows(payload)
+            elif isinstance(normalized.get("content"), dict):
+                rows = _executor_dict_rows(normalized.get("content"))
+            else:
+                rows = []
+        normalized["rows"] = rows
+        normalized["content"] = _executor_payload_text(payload if payload is not None else normalized.get("content"), limit=3000)
+        normalized["table"] = {"rows": rows}
+    elif signal in ("graph", "gallery", "diagram", "code", "link", "function", "scene", "layout", "markdown"):
+        normalized["content"] = fallback_text or _executor_payload_text(payload if payload is not None else normalized.get("content"), limit=3000)
+    else:
+        if isinstance(normalized.get("content"), (dict, list, tuple, set)) or _executor_value_is_empty(normalized.get("content")):
+            normalized["content"] = fallback_text or _executor_payload_text(payload if payload is not None else normalized.get("content"), limit=3000)
+
+    if not normalized.get("label"):
+        normalized["label"] = original_type if original_type else signal
+
+    if payload is not None and isinstance(payload, (dict, list, tuple, set)):
+        normalized.setdefault("provider_payload", True)
+        normalized.setdefault("canonical_provider_payload", True)
+
+    return normalized
+
+
+def _executor_normalize_render_blocks(machine_response: Any, scene: Any = None) -> Any:
+    blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    normalized = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in blocks]
+
+    if not normalized:
+        fallback = _executor_best_text(
+            getattr(machine_response, "answer", ""),
+            getattr(machine_response, "content", ""),
+            getattr(machine_response, "summary", ""),
+            getattr(machine_response, "provider_original_answer", ""),
+            getattr(machine_response, "provider_original_content", ""),
+        )
+        if fallback:
+            normalized = [{
+                "type": "text",
+                "signal": "TEXT",
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "content": fallback,
+                "priority": 0,
+                "executor_generated": True,
+                "source_type": "fallback_text",
+            }]
+    machine_response.render_blocks = normalized
     return machine_response
+
+
+def executor_cpu_materialize_blocks(machine_response):
+    return _executor_normalize_render_blocks(machine_response)
 
 
 def executor_cpu_attach_artifact_payloads(machine_response):
@@ -1629,18 +1967,25 @@ def executor_cpu_attach_artifact_payloads(machine_response):
         artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None)
         payload = getattr(artifact, "data", None)
         if artifact_type and payload is not None:
-            artifact_index[artifact_type] = payload
+            artifact_index[str(artifact_type)] = payload
+
+    normalized_blocks = []
     for block in render_blocks:
         if not isinstance(block, dict):
+            block = _executor_normalize_render_block(block, machine_response=machine_response)
+            normalized_blocks.append(block)
             continue
-        provider_payload = artifact_index.get(block.get("type"))
-        if provider_payload is None:
-            continue
-        block["payload"] = provider_payload
-        block["provider_payload"] = True
-        block["canonical_provider_payload"] = True
-        block["executor_generated"] = False
-    machine_response.render_blocks = render_blocks
+
+        provider_payload = artifact_index.get(str(block.get("type"))) or artifact_index.get(str(block.get("source_type"))) or artifact_index.get(str(block.get("renderer")))
+        if provider_payload is not None:
+            block["payload"] = provider_payload
+            block["provider_payload"] = True
+            block["canonical_provider_payload"] = True
+            block["executor_generated"] = False
+
+        normalized_blocks.append(_executor_normalize_render_block(block, machine_response=machine_response))
+
+    machine_response.render_blocks = normalized_blocks
     return machine_response
 
 
@@ -1709,6 +2054,8 @@ def executor_cpu_transport_diag(stage: str, machine_response=None, scene_contrac
 
 def executor_cpu_scene_pipeline(machine_response):
     executor_cpu_transport_diag("BEFORE_BUILD_MACHINE_SCENE", machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     scene = build_machine_scene(machine_response)
@@ -1721,12 +2068,15 @@ def executor_cpu_scene_pipeline(machine_response):
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
     if not blocks:
         blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    blocks = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in blocks]
 
     try:
         setattr(scene, "timeline", conversation_space.get("timeline", []))
         setattr(scene, "last_user_turn", conversation_space.get("last_user_turn"))
         setattr(scene, "last_april_turn", conversation_space.get("last_april_turn"))
         setattr(scene, "active_goal", conversation_space.get("response_decision", {}).get("goal"))
+        setattr(scene, "render_blocks", blocks)
+        setattr(scene, "blocks", blocks)
     except Exception:
         pass
 
@@ -1742,6 +2092,7 @@ def executor_cpu_scene_pipeline(machine_response):
         blocks = list(getattr(scene_contract, "render_blocks", []) or [])
     if not blocks:
         blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    blocks = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in blocks]
 
     try:
         if isinstance(scene_contract, dict):
@@ -1835,13 +2186,16 @@ def executor_cpu_finalize_transport(machine_response):
         scene_summary = scene_answer
 
     render_blocks = list(scene.get("render_blocks", []) or [])
+    render_blocks = [_executor_normalize_render_block(block, machine_response=machine_response, scene=scene) for block in render_blocks]
     if not render_blocks and scene_answer:
         render_blocks = [{
             "type": "text",
+            "signal": "TEXT",
             "content": scene_answer,
             "renderer": "TextBlock",
             "viewer": "TextBlock",
             "priority": 0,
+            "executor_generated": True,
         }]
 
     return {
@@ -2101,6 +2455,8 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
             except Exception:
                 pass
 
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     if not getattr(machine_response, "answer", "") and _canonical_answer:
@@ -2113,10 +2469,12 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
     if not list(getattr(machine_response, "render_blocks", []) or []) and getattr(machine_response, "answer", ""):
         machine_response.render_blocks = [{
             "type": "text",
-            "content": machine_response.answer,
+            "signal": "TEXT",
             "renderer": "TextBlock",
             "viewer": "TextBlock",
+            "content": machine_response.answer,
             "priority": 0,
+            "executor_generated": True,
         }]
 
     executor_cpu_transport_diag("AFTER_REFLECT", machine_response)
