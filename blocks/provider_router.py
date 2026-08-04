@@ -827,13 +827,16 @@ def sanitize_internal_reasoning(text):
 # Canonical MachineRequest -> Canonical OpenAI Request
 # =====================================================
 
+
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
 APRIL PROVIDER
 
 Return one valid JSON object only.
 
-Use only the current user request.
-Do not use conversation history, memory, visual context, previous turns, or second-circle state.
+Answer only the CURRENT USER REQUEST.
+Use REFERENCE CONTEXT only as background when it is present.
+Do not repeat, restate, or expand the reference context.
+Do not use full conversation history, memory dumps, visual context, or previous turns.
 
 Required keys:
 answer
@@ -848,16 +851,102 @@ render_priority
 confidence
 
 Rules:
-- answer/content/summary should be based on the current request only.
-- If the request does not need visuals, keep scene/artifacts/render_blocks empty.
-- No markdown, no code fences, no extra keys, no commentary.
+- Keep the response centered on the current request.
+- Use reference context only to resolve ambiguity or continuation.
+- If no visuals are needed, keep scene/artifacts/render_blocks empty.
+- No markdown, no code fences, no commentary, no extra keys.
 """
+
+
+def _provider_trim_text(value, limit=240):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if not value:
+        return ""
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _provider_turn_summary(turn, limit=240):
+    if not turn:
+        return ""
+    if isinstance(turn, dict):
+        for key in ("summary", "content", "answer", "text", "message"):
+            value = turn.get(key)
+            if value:
+                return _provider_trim_text(value, limit)
+        try:
+            return _provider_trim_text(json.dumps(turn, ensure_ascii=False), limit)
+        except Exception:
+            return _provider_trim_text(str(turn), limit)
+    return _provider_trim_text(turn, limit)
+
+
+def build_provider_reference_context(machine_request):
+    """
+    Build a tiny, non-repeating background context for continuations.
+    This is intentionally small and never includes full history.
+    """
+    if not isinstance(machine_request, dict):
+        return {}
+
+    conversation = machine_request.get("conversation") or {}
+    response_decision = machine_request.get("response_decision") or {}
+    intent = machine_request.get("intent") or {}
+
+    timeline = conversation.get("timeline")
+    if not isinstance(timeline, list):
+        timeline = []
+
+    last_user_turn = conversation.get("last_user_turn")
+    last_april_turn = conversation.get("last_april_turn")
+
+    if not last_user_turn and timeline:
+        for item in reversed(timeline):
+            if isinstance(item, dict) and item.get("user"):
+                last_user_turn = item.get("user")
+                break
+
+    if not last_april_turn and timeline:
+        for item in reversed(timeline):
+            if isinstance(item, dict) and item.get("april"):
+                last_april_turn = item.get("april")
+                break
+
+    active_topic = (
+        conversation.get("active_topic")
+        or conversation.get("topic")
+        or conversation.get("goal_hierarchy", {}).get("active_topic")
+        or response_decision.get("goal")
+        or intent.get("type")
+        or ""
+    )
+
+    focus = (
+        conversation.get("focus")
+        or conversation.get("dialog_focus")
+        or response_decision.get("dialog_focus")
+        or {}
+    )
+
+    reference_context = {
+        "active_topic": _provider_trim_text(active_topic, 120),
+        "last_user_turn_summary": _provider_turn_summary(last_user_turn, 240),
+        "last_april_turn_summary": _provider_turn_summary(last_april_turn, 240),
+        "dialog_focus": focus if isinstance(focus, dict) else _provider_trim_text(focus, 160),
+    }
+
+    return {k: v for k, v in reference_context.items() if v not in ("", {}, [], None)}
 
 
 def build_openai_request(machine_request):
     """
-    Build the smallest possible OpenAI request for the first circle.
-    Only the current user request is sent upstream.
+    Build a compact OpenAI request for the first circle.
+    The provider sees only the current request plus a tiny reference context.
     """
     if not isinstance(machine_request, dict):
         machine_request = {}
@@ -870,18 +959,32 @@ def build_openai_request(machine_request):
         or machine_request.get("content")
         or ""
     )
-
     user_text = str(user_text).strip()
 
-    provider_log("========== CURRENT USER REQUEST ==========")
-    provider_log(user_text[:4000])
+    reference_context = build_provider_reference_context(machine_request)
 
-    structured_prompt = (
-        "CURRENT USER REQUEST\n\n"
-        f"{user_text}\n\n"
-        "Return one valid JSON object only with the required keys. "
-        "Use only this request. No history, no memory, no visual context."
-    )
+    provider_log("========== CURRENT USER REQUEST ==========")
+    provider_log(_provider_trim_text(user_text, 800))
+
+    prompt_parts = [
+        "CURRENT USER REQUEST",
+        user_text,
+    ]
+
+    if reference_context:
+        prompt_parts.extend([
+            "",
+            "REFERENCE CONTEXT (background only; do not repeat it):",
+            json.dumps(reference_context, ensure_ascii=False),
+        ])
+
+    prompt_parts.extend([
+        "",
+        "Return one valid JSON object only with the required keys.",
+        "Answer only the current request.",
+    ])
+
+    structured_prompt = "\n".join(prompt_parts).strip()
 
     return {
         "role": "user",
@@ -893,6 +996,7 @@ def build_openai_request(machine_request):
 
 
 def machine_request_to_dict(machine_request):
+
     """Convert canonical MachineRequest object to provider payload."""
     if isinstance(machine_request, dict):
         return machine_request
@@ -930,6 +1034,7 @@ def normalize_provider_input(machine_request):
 
     payload = machine_request_to_dict(machine_request)
     return [system_item, build_openai_request(payload)]
+
 
 # =====================================================
 # STAGE 3 - UNIFIED PROVIDER CONTRACT
@@ -1359,7 +1464,7 @@ async def generate_text(
         provider_stage_log("OPENAI_REQUEST", {"items":len(normalized_input)})
 
         provider_log("========== OPENAI REQUEST BUILDER ==========")
-        provider_log(json.dumps(normalized_input, ensure_ascii=False)[:8000])
+        provider_log(json.dumps(normalized_input, ensure_ascii=False)[:2500])
 
         request = {
             "model": model,
@@ -1396,7 +1501,7 @@ async def generate_text(
         )
 
         provider_log("========== RAW OPENAI OUTPUT ==========")
-        provider_log(response.output_text[:8000] if response.output_text else "EMPTY")
+        provider_log(response.output_text[:2500] if response.output_text else "EMPTY")
 
         raw_text = response.output_text or ""
         provider_stage_log("OPENAI_RESPONSE", {"chars":len(raw_text)})
