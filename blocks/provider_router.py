@@ -1503,6 +1503,7 @@ async def generate_text(
         )
 
         provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
+        source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
         contract = create_provider_contract(raw_text, source_request=source_request)
 
         if isinstance(contract, dict):
