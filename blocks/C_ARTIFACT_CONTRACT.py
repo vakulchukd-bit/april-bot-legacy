@@ -511,6 +511,71 @@ def build_universal_contract(
 
     return contract
 
+def create_transport_contract(
+    artifact_type: str,
+    room_source: str,
+    data: Dict[str, Any],
+    user_id: str = "",
+    subscription: str = "Free",
+) -> UniversalArtifactContract:
+    """Canonical transport factory used by text_module and room executors.
+
+    The function accepts a plain artifact payload, converts it into a
+    BaseArtifact, and then materializes the single Fiber transport envelope
+    used throughout the April pipeline.
+    """
+    payload = dict(data or {})
+    payload.setdefault("artifact_type", artifact_type)
+    payload.setdefault("room_source", room_source)
+
+    artifact = create_artifact(
+        artifact_type=artifact_type,
+        room_source=room_source,
+        data=payload,
+    )
+
+    contract = build_universal_contract(
+        artifact=artifact,
+        user_id=user_id,
+        subscription=subscription,
+    )
+
+    # Preserve room-level payload for downstream processors.
+    contract.payload.context = {
+        "artifact_type": artifact_type,
+        "room_source": room_source,
+        "user_id": user_id,
+        "subscription": subscription,
+    }
+    contract.payload.intent = dict(payload.get("intent", {}) or {})
+    contract.payload.context.update(dict(payload.get("context", {}) or {}))
+    contract.payload.knowledge = dict(payload.get("knowledge", {}) or {})
+    contract.payload.attachments = list(payload.get("attachments", []) or [])
+    contract.payload.media = dict(payload.get("media", {}) or contract.payload.media)
+    contract.payload.executor_notes = dict(payload.get("executor_notes", {}) or {})
+
+    # Keep the canonical machine response in sync with the transport payload.
+    if contract.machine_response is None:
+        contract.machine_response = MachineResponse(
+            answer=payload.get("answer", ""),
+            content=payload.get("content", payload.get("answer", "")),
+            response=payload.get("response", payload.get("answer", "")),
+            summary=payload.get("summary", payload.get("answer", "")),
+            explanation=payload.get("explanation", payload.get("summary", payload.get("answer", ""))),
+            render_blocks=list(payload.get("render_blocks", []) or []),
+            scene=dict(payload.get("scene", {}) or {}),
+            metadata=dict(payload.get("metadata", {}) or {}),
+        )
+
+    # Ensure scene payload is exposed for compatibility checks.
+    contract.payload.scene.setdefault("answer", payload.get("answer", ""))
+    contract.payload.scene.setdefault("content", payload.get("content", payload.get("answer", "")))
+    contract.payload.scene.setdefault("summary", payload.get("summary", payload.get("answer", "")))
+    contract.payload.scene.setdefault("render_blocks", list(payload.get("render_blocks", []) or []))
+
+    return contract
+
+
 
 # =====================================================
 # FACTORY INSPECTION API
