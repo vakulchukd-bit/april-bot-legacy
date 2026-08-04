@@ -1,864 +1,184 @@
 
 # =====================================================
-# STAGE 3 - FULL RESPONSE PRESERVATION
+# APRIL PROVIDER ROUTER - COST-SAFE FIRST CIRCLE
 # =====================================================
 
-def provider_preserve_full_response(data):
-    if not isinstance(data, dict):
-        return {"content": str(data), "_provider_payload": data}
+from __future__ import annotations
 
-    if "_provider_payload" not in data:
-        data["_provider_payload"] = dict(data)
-
-    data.setdefault("provider_raw", data["_provider_payload"])
-    data.setdefault("processor_input", data["_provider_payload"])
-    return data
-
-
-# =====================================================
-# STAGE 2 - CANONICAL CONTRACT
-# =====================================================
-
-CANONICAL_PROVIDER_TEXT_FIELD = "content"
-
-def provider_canonicalize_contract(data):
-    """
-    Stage 1:
-    Preserve semantic fields. Do not overwrite answer/content/summary.
-    Only ensure the transport aliases exist.
-    """
-    if not isinstance(data, dict):
-        data = {CANONICAL_PROVIDER_TEXT_FIELD: str(data)}
-
-    if "content" not in data and "answer" in data:
-        data["content"] = data["answer"]
-    elif "answer" not in data and "content" in data:
-        data["answer"] = data["content"]
-
-    for key in ("text", "message", "output_text"):
-        if key not in data:
-            if "content" in data:
-                data[key] = data["content"]
-            elif "answer" in data:
-                data[key] = data["answer"]
-
-    return data
-
-
-# =====================================================
-# STAGE 1D - PROVIDER NORMALIZER
-# =====================================================
-
-def provider_normalize_contract(data):
-    if not isinstance(data, dict):
-        data = {"answer": str(data), "content": str(data)}
-    data.setdefault("scene", {})
-    data.setdefault("render_blocks", [])
-    data.setdefault("artifacts", [])
-    data.setdefault("summary", data.get("answer", data.get("content","")))
-    return data
-
-
-# =====================================================
-# STAGE 1C - PROVIDER VALIDATOR
-# =====================================================
-
-def provider_validate_contract(data):
-    if not isinstance(data, dict):
-        return {"answer": str(data), "content": str(data)}
-    if "answer" not in data and "content" in data:
-        data["answer"]=data["content"]
-    if "content" not in data and "answer" in data:
-        data["content"]=data["answer"]
-    return data
-
-# =====================================================
-# 🧠 APRIL PROVIDER ROUTER
-# =====================================================
-
-"""
-APRIL_FILE_ID: APRIL_PROVIDER_ROUTER
-
-ROLE:
-provider_orchestration_layer
-
-PURPOSE:
-- provider coordination
-- multimodal routing
-- fallback stabilization
-- provider recovery control
-- visual provider balancing
-- continuity-safe provider behavior
-
-INPUT:
-- text_requests
-- image_requests
-- voice_requests
-- provider_state
-- orchestration_signals
-
-OUTPUT:
-- normalized_provider_response
-- provider_safe_output
-- multimodal_response
-
-DEPENDENCIES:
-- openai
-- gemini
-- cognition
-- semantic_core
-- excrouter
-- visual_system
-
-GOLDEN RULE:
-Providers generate.
-April orchestrates.
-"""
-
-print("🧠 APRIL PROVIDER ROUTER LOADED")
-
-# =====================================================
-# 🔥 IMPORTS
-# =====================================================
-
+import copy
+import json
 import os
 import time
+from typing import Any, Dict, Optional, Tuple
 
 from openai import OpenAI
 from google import genai
 
-
-# =====================================================
-# 🔥 PROVIDERS
-# =====================================================
-
-openai_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
-
-gemini_client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
+from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
 
 # =====================================================
-# OPENAI MODEL CONFIGURATION
+# CLIENTS
 # =====================================================
+
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
 
 OPENAI_PRIMARY_MODEL = "gpt-5.6"
 OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
 OPENAI_FAST_MODEL = "gpt-5.6-luna"
 
 
-
 # =====================================================
-# 🔥 SAFE PATCH MODE
+# PATCH LOG
 # =====================================================
 
-PROVIDER_PATCH_LOG = []
+PROVIDER_PATCH_LOG: list[str] = []
 
 
-def provider_patch_log(msg):
-
+def provider_log(*args: Any) -> None:
     try:
-
-        print(
-            "APRIL PROVIDER:",
-            msg
-        )
-
-        PROVIDER_PATCH_LOG.append(
-            str(msg)
-        )
-
+        print(*args)
     except Exception:
         pass
 
 
-# =====================================================
-# 🔥 ENTRY / EXIT LOGGING
-# =====================================================
+def provider_patch_log(msg: Any) -> None:
+    try:
+        text = str(msg)
+        print("APRIL PROVIDER:", text)
+        PROVIDER_PATCH_LOG.append(text)
+    except Exception:
+        pass
 
-def provider_enter(
-    provider_type,
-    payload=None
-):
 
-    provider_patch_log(
-
-        f"ENTER PROVIDER: "
-        f"{provider_type}"
-    )
-
-    if payload:
-
-        provider_patch_log(
-            str(payload)[:120]
-        )
-
+def provider_enter(provider_type: str, payload: Any = None) -> Dict[str, Any]:
+    provider_patch_log(f"ENTER PROVIDER: {provider_type}")
+    if payload is not None:
+        provider_patch_log(str(payload)[:160])
     return {
-
         "provider_active": True,
-
-        "provider_type":
-            provider_type,
-
-        "continuity_safe": True
+        "provider_type": provider_type,
+        "continuity_safe": True,
     }
 
 
-def provider_exit(
-    provider_type,
-    success=True
-):
-
-    provider_patch_log(
-
-        f"EXIT PROVIDER: "
-        f"{provider_type} "
-        f"SUCCESS={success}"
-    )
-
+def provider_exit(provider_type: str, success: bool = True) -> Dict[str, Any]:
+    provider_patch_log(f"EXIT PROVIDER: {provider_type} SUCCESS={success}")
     return {
-
         "provider_complete": success,
-
-        "provider_type":
-            provider_type,
-
-        "response_ready": True
+        "provider_type": provider_type,
+        "response_ready": True,
     }
 
 
 # =====================================================
-# 🔥 FUTURE PLACEHOLDER
-# =====================================================
-
-def provider_future(
-    *args,
-    **kwargs
-):
-
-    return None
-
-
-# =====================================================
-# 🔥 PROVIDER STATE
+# STATE
 # =====================================================
 
 provider_state = {
-
-    # =================================================
-    # 🔥 PRIMARY ORCHESTRATION
-    # =====================================================
-
     "primary": "openai",
-
-    # =================================================
-    # 🔥 VISUAL ASSIST LAYER
-    # =====================================================
-
     "gemini_available": True,
-
-    "last_gemini_failure": 0,
-
-    "last_health_check": 0,
-
+    "last_gemini_failure": 0.0,
+    "last_health_check": 0.0,
     "recovery_cooldown": 45,
-
-    # =================================================
-    # 🔥 BEHAVIOR STABILIZATION
-    # =====================================================
-
     "visual_mode": "lightweight",
-
     "execution_mode": "calm",
-
     "route_health": 1.0,
-
-    "provider_balance": "stable"
+    "provider_balance": "stable",
 }
 
 
-# =====================================================
-# 🔥 SAFE LOG
-# =====================================================
-
-def provider_log(*args):
-
-    try:
-
-        print(*args)
-
-    except Exception:
-        pass
-
-
-# =====================================================
-# 🔥 PROVIDER BEHAVIOR
-# =====================================================
-
-def update_provider_behavior():
-
+def update_provider_behavior() -> None:
     now = time.time()
-
-    last_failure = provider_state.get(
-        "last_gemini_failure",
-        0
-    )
-
+    last_failure = provider_state.get("last_gemini_failure", 0.0)
     delta = now - last_failure
 
     if delta <= 60:
-
-        provider_state[
-            "route_health"
-        ] = 0.3
-
-        provider_state[
-            "provider_balance"
-        ] = "recovery"
-
+        provider_state["route_health"] = 0.3
+        provider_state["provider_balance"] = "recovery"
     else:
+        provider_state["route_health"] = 1.0
+        provider_state["provider_balance"] = "stable"
 
-        provider_state[
-            "route_health"
-        ] = 1.0
-
-        provider_state[
-            "provider_balance"
-        ] = "stable"
-
-    if provider_state.get(
-        "gemini_available"
-    ):
-
-        provider_state[
-            "visual_mode"
-        ] = "distributed"
-
-    else:
-
-        provider_state[
-            "visual_mode"
-        ] = "restricted"
+    provider_state["visual_mode"] = "distributed" if provider_state.get("gemini_available") else "restricted"
 
 
-# =====================================================
-# 🔥 GEMINI RESTORE CHECK
-# =====================================================
-
-def should_restore_gemini():
-
+def should_restore_gemini() -> bool:
     update_provider_behavior()
-
     if provider_state["gemini_available"]:
-
         return True
 
     now = time.time()
-
-    cooldown = provider_state[
-        "recovery_cooldown"
-    ]
-
-    last_failure = provider_state[
-        "last_gemini_failure"
-    ]
+    cooldown = provider_state["recovery_cooldown"]
+    last_failure = provider_state["last_gemini_failure"]
 
     if now - last_failure >= cooldown:
-
-        provider_log(
-            "🧠 GEMINI RECOVERY WINDOW OPEN"
-        )
-
-        provider_state[
-            "gemini_available"
-        ] = True
-
-        provider_state[
-            "last_health_check"
-        ] = now
-
-        provider_state[
-            "provider_balance"
-        ] = "probing"
-
+        provider_log("🧠 GEMINI RECOVERY WINDOW OPEN")
+        provider_state["gemini_available"] = True
+        provider_state["last_health_check"] = now
+        provider_state["provider_balance"] = "probing"
         return True
-
     return False
 
 
-# =====================================================
-# 🔥 GEMINI FAILURE
-# =====================================================
+def mark_gemini_failure() -> None:
+    provider_log("🔥 GEMINI MARKED UNAVAILABLE")
+    provider_state["gemini_available"] = False
+    provider_state["last_gemini_failure"] = time.time()
+    provider_state["provider_balance"] = "fallback"
+    provider_state["route_health"] = 0.0
 
-def mark_gemini_failure():
 
-    provider_log(
-        "🔥 GEMINI MARKED UNAVAILABLE"
-    )
-
-    provider_state[
-        "gemini_available"
-    ] = False
-
-    provider_state[
-        "last_gemini_failure"
-    ] = time.time()
-
-    provider_state[
-        "provider_balance"
-    ] = "fallback"
-
-    provider_state[
-        "route_health"
-    ] = 0.0
+def mark_gemini_success() -> None:
+    provider_state["gemini_available"] = True
+    provider_state["last_health_check"] = time.time()
+    provider_state["provider_balance"] = "stable"
+    provider_state["route_health"] = 1.0
 
 
 # =====================================================
-# 🔥 GEMINI SUCCESS
+# SAFE TEXT
 # =====================================================
 
-def mark_gemini_success():
-
-    provider_state[
-        "gemini_available"
-    ] = True
-
-    provider_state[
-        "last_health_check"
-    ] = time.time()
-
-    provider_state[
-        "provider_balance"
-    ] = "stable"
-
-    provider_state[
-        "route_health"
-    ] = 1.0
+SYSTEM_LEAK_PATTERNS = [
+    "system prompt",
+    "response_decision",
+    "cognition",
+    "semantic",
+    "trajectory protection",
+    "machine channel",
+    "provider routing",
+    "renderer-first architecture",
+]
 
 
-# =====================================================
-# 🔥 RESPONSE NORMALIZER
-# =====================================================
-
-def normalize_response_text(text):
-
+def sanitize_internal_reasoning(text: str) -> str:
     if not text:
         return ""
-
-    text = str(text).strip()
-
-    text = text.replace(
-        "\n\n\n",
-        "\n\n"
-    )
-
-    return sanitize_internal_reasoning(text).strip()
-
-
-# =====================================================
-# 🔥 MACHINE RESPONSE WRAPPER
-# =====================================================
-
-def build_provider_machine_response(text, parsed_contract=None, source_request=None):
-    """Build a unified MachineResponse transport contract."""
-    parsed_contract = parsed_contract or {}
-
-    fallback = normalize_response_text(text)
-
-    answer = (
-        parsed_contract.get("answer")
-        or parsed_contract.get("content")
-        or parsed_contract.get("response")
-        or fallback
-    )
-
-    content = (
-        parsed_contract.get("content")
-        or answer
-    )
-
-    response = (
-        parsed_contract.get("response")
-        or answer
-    )
-
-    summary = (
-        parsed_contract.get("summary")
-        or answer
-    )
-
-    explanation = (
-        parsed_contract.get("explanation")
-        or summary
-    )
-    if response is None:
-        response = answer
-
-    processor_input = {}
-    execution_round = 1
-    execution_phase = "FIRST_CIRCLE"
-    if isinstance(source_request, dict):
-        try:
-            processor_input = copy.deepcopy(source_request)
-        except Exception:
-            processor_input = dict(source_request)
-        execution_round = source_request.get("execution_round", execution_round) or execution_round
-        execution_phase = source_request.get("execution_phase", execution_phase) or execution_phase
-
-    machine = {
-        "type": "provider_response",
-        "execution_round": execution_round,
-        "execution_phase": execution_phase,
-        "processor_input": processor_input,
-        "provider_source_request": processor_input,
-        "machine_response": {
-            "summary": summary,
-            "explanation": explanation,
-            "content": content,
-            "answer": answer,
-            "response": response,
-            "scene": parsed_contract.get("scene", {}),
-            "render_blocks": parsed_contract.get("render_blocks", []),
-            "artifacts": parsed_contract.get("artifacts", []),
-            "scene_plan": parsed_contract.get("scene_plan", ["text"]),
-            "confidence": parsed_contract.get("confidence", 1.0),
-            "metadata": parsed_contract.get("metadata", {}),
-            "provider": "openai",
-            "render_priority": parsed_contract.get("render_priority", []),
-            "provider_contract": "fiber_v3",
-            "transport_contract": "scene_first",
-            "execution_round": execution_round,
-            "execution_phase": execution_phase,
-        }
-    }
-
-    if processor_input:
-        machine["machine_response"]["metadata"].setdefault("processor_input", processor_input)
-        machine["machine_response"]["metadata"].setdefault("provider_source_request", processor_input)
-        machine["machine_response"]["metadata"].setdefault("provider_first_circle", True)
-        machine["machine_response"]["metadata"].setdefault("second_circle_ready", True)
-        machine["machine_response"]["metadata"].setdefault("execution_round", execution_round)
-        machine["machine_response"]["metadata"].setdefault("execution_phase", execution_phase)
-
-    return machine
-
-import copy
-import json
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest
-
-
-
-# =====================================================
-# STAGE 1B - PROVIDER DECODER PIPELINE
-# =====================================================
-
-def provider_decode_json(raw_text):
-    try:
-        import json
-        data = json.loads(raw_text)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        return None
-    return None
-
-def provider_decode_response(raw_text):
-    """
-    Stage 1B:
-    Canonical decoder pipeline.
-    JSON -> legacy parser.
-    Future stages will add semantic decoding here.
-    """
-    parsed = provider_decode_json(raw_text)
-    if parsed is None:
-        parsed = parse_provider_machine_contract(raw_text)
-    parsed = provider_validate_contract(parsed)
-    parsed = provider_normalize_contract(parsed)
-    parsed = provider_canonicalize_contract(parsed)
-    parsed = provider_preserve_full_response(parsed)
-    return parsed
-
-
-def parse_provider_machine_contract(raw_text):
-    """Parse a MachineResponse transport contract with lightweight recovery."""
-    try:
-        data = json.loads(raw_text)
-        if isinstance(data, dict):
-            return data
-    except json.JSONDecodeError as e:
-        provider_log(f"JSON PARSE ERROR line={e.lineno} col={e.colno} pos={e.pos}")
-        start=max(0,e.pos-120)
-        end=min(len(raw_text),e.pos+120)
-        provider_log(raw_text[start:end])
-
-        repaired=(raw_text or "").strip()
-
-        first=repaired.find("{")
-        last=repaired.rfind("}")
-
-        if first!=-1 and last>first:
-            repaired=repaired[first:last+1]
-            try:
-                data=json.loads(repaired)
-                if isinstance(data,dict):
-                    provider_log("JSON RECOVERY SUCCESS")
-                    return data
-            except Exception:
-                pass
-
-        # SECOND PASS CONTINUATION:
-        # do not terminate the Provider route here.
-        provider_log("SECOND PASS: building canonical contract from raw provider text")
-        # STAGE1 NOTE: legacy TextBlock fallback scheduled for removal.
-
-        # STAGE3: legacy raw-text fallback retained only for compatibility.
-        # Future semantic extractor should construct the MachineResponse here.
-        import re
-        def _grab(name):
-            m = re.search(r'"%s"\s*:\s*"((?:\\.|[^"])*)"' % name, raw_text, re.S)
-            if not m:
-                return ""
-            value = m.group(1)
-            try:
-                value = json.loads(f'"{value}"')
-            except Exception:
-                pass
-            return value
-
-        recovered_answer=(
-            _grab("answer")
-            or _grab("content")
-            or _grab("response")
-            or raw_text.strip()
-        )
-
-        recovered_summary=(
-            _grab("summary")
-            or recovered_answer
-        )
-
-        recovered_explanation=(
-            _grab("explanation")
-            or recovered_summary
-        )
-
-        return {
-            "answer": recovered_answer,
-            "content": recovered_answer,
-            "response": recovered_answer,
-            "summary": recovered_summary,
-            "explanation": recovered_explanation,
-            "scene": {},
-            "artifacts": [],
-            "render_blocks": [
-                {
-                    "type":"text",
-                    "content": recovered_answer or recovered_summary or "",
-                    "scene_contract":True
-                }
-            ],
-            "scene_plan":["text"],
-            "render_priority":["text"],
-            "confidence":0.5,
-            "metadata":{
-                "provider_second_pass":True,
-                "parse_failed":True,
-                "raw_provider_text": raw_text
-            }
-        }
-
-
-
-
-
-# =====================================================
-# STAGE 2 - SCENE-FIRST CONTRACT
-# =====================================================
-
-def ensure_scene_first_contract(contract):
-    contract = validate_machine_response_contract(contract)
-    contract.setdefault("scene", {})
-    contract.setdefault("render_blocks", [])
-    contract.setdefault("artifacts", [])
-    return contract
-
-
-# =====================================================
-# 🔥 SAFE OVERLOAD RESPONSE
-# =====================================================
-
-
-
-def validate_machine_response_contract(contract):
-    """Guarantee a valid transport contract for Executor."""
-    if not isinstance(contract, dict):
-        contract = {}
-
-    contract.setdefault("summary", "")
-    contract.setdefault("explanation", contract["summary"])
-    contract.setdefault("artifacts", [])
-    contract.setdefault("scene_plan", ["text"])
-    contract.setdefault("render_priority", ["text"])
-    contract.setdefault("confidence", 0.0)
-    contract.setdefault("scene", {})
-    contract.setdefault("render_blocks", [])
-    contract.setdefault("metadata", {})
-
-    return contract
-
-
-
-# =====================================================
-# STAGE 1 - CANONICAL TEXT TRANSPORT
-# =====================================================
-
-def normalize_text_transport(contract):
-    """
-    Stage 2:
-    Non-destructive transport normalization.
-    Preserve semantic fields and only fill missing aliases.
-    """
-    if not isinstance(contract, dict):
-        return {}
-
-    candidate=(
-        contract.get("answer")
-        or contract.get("content")
-        or contract.get("response")
-        or contract.get("summary")
-        or contract.get("explanation")
-        or ""
-    )
-
-    contract.setdefault("answer", candidate)
-    contract.setdefault("content", candidate)
-    contract.setdefault("response", candidate)
-    contract.setdefault("summary", candidate)
-    contract.setdefault("explanation", contract.get("summary",""))
-
-    return contract
-
-
-def attach_processor_input(contract, source_request=None):
-    """Preserve the second-circle input for the processor without sending it
-    to OpenAI. The source request stays attached to the returned contract so
-    the executor can reuse it for memory, history, and scene integration.
-    """
-    if not isinstance(contract, dict) or source_request is None:
-        return contract
-
-    try:
-        cloned = copy.deepcopy(source_request)
-    except Exception:
-        cloned = source_request
-
-    contract.setdefault("processor_input", cloned)
-    contract.setdefault("provider_source_request", cloned)
-
-    mr = contract.setdefault("machine_response", {})
-    metadata = mr.setdefault("metadata", {})
-    metadata.setdefault("processor_input", cloned)
-    metadata.setdefault("provider_source_request", cloned)
-    metadata.setdefault("provider_first_circle", True)
-    metadata.setdefault("second_circle_ready", True)
-
-    return contract
-
-
-def provider_contract_ready(machine_response):
-    return machine_response
-
-
-# =====================================================
-# 🧠 ASSISTANT-AWARE PROVIDER ROUTING
-# =====================================================
-
-def build_provider_task_state(
-    cognition=None,
-    response_decision=None
-):
-
-    cognition = cognition or {}
-    response_decision = response_decision or {}
-
-    return {
-        "assistant_next_step":
-            cognition.get("assistant_next_step"),
-        "task_understanding":
-            cognition.get("task_understanding", {}),
-        "scene_confidence":
-            cognition.get("scene_confidence", 1.0),
-        "clarification_required":
-            response_decision.get(
-                "task_requires_clarification",
-                False
-            ),
-        "internal_reasoning_only":
-            response_decision.get(
-                "internal_reasoning_only",
-                False
-            )
-    }
-
-
-def sanitize_internal_reasoning(text):
-    if not text:
-        return ""
-    blocked=[
+    blocked = [
         "possibly",
         "perhaps",
         "internal reasoning",
         "chain of thought",
         "I think",
-        "I am reasoning"
+        "I am reasoning",
     ]
-    result=str(text)
+    result = str(text)
     for item in blocked:
-        result=result.replace(item,"")
+        result = result.replace(item, "")
     return result.strip()
 
 
-# =====================================================
-# PROVIDER RESPONSIBILITY — OPENAI REQUEST BUILDER
-# Stage 2 COMPLETE
-# Canonical MachineRequest -> Canonical OpenAI Request
-# =====================================================
+def normalize_response_text(text: Any) -> str:
+    if not text:
+        return ""
+    text = str(text).strip().replace("\n\n\n", "\n\n")
+    return sanitize_internal_reasoning(text).strip()
 
 
-PROVIDER_MACHINE_SYSTEM_PROMPT = """
-APRIL PROVIDER
-
-Return one valid JSON object only.
-
-Answer only the CURRENT USER REQUEST.
-Use REFERENCE CONTEXT only as background when it is present.
-Do not repeat, restate, or expand the reference context.
-Do not use full conversation history, memory dumps, visual context, or previous turns.
-
-Required keys:
-answer
-content
-summary
-explanation
-scene
-artifacts
-render_blocks
-scene_plan
-render_priority
-confidence
-
-Rules:
-- Keep the response centered on the current request.
-- Use reference context only to resolve ambiguity or continuation.
-- If no visuals are needed, keep scene/artifacts/render_blocks empty.
-- No markdown, no code fences, no commentary, no extra keys.
-"""
-
-
-def _provider_trim_text(value, limit=240):
+def _provider_trim_text(value: Any, limit: int = 240) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -871,7 +191,7 @@ def _provider_trim_text(value, limit=240):
     return value[: limit - 1].rstrip() + "…"
 
 
-def _provider_turn_summary(turn, limit=240):
+def _provider_turn_summary(turn: Any, limit: int = 240) -> str:
     if not turn:
         return ""
     if isinstance(turn, dict):
@@ -886,13 +206,59 @@ def _provider_turn_summary(turn, limit=240):
     return _provider_trim_text(turn, limit)
 
 
-def build_provider_reference_context(machine_request):
+# =====================================================
+# REQUEST BUILDING
+# =====================================================
+
+PROVIDER_MACHINE_SYSTEM_PROMPT = (
+    "APRIL PROVIDER. Return one valid JSON object only. "
+    "Use CURRENT USER REQUEST as the task. "
+    "Use REFERENCE CONTEXT only as background if present. "
+    "Do not repeat history, visuals, memory dumps, or previous turns."
+)
+
+
+def machine_request_to_dict(machine_request: Any) -> Dict[str, Any]:
+    if isinstance(machine_request, dict):
+        return dict(machine_request)
+
+    if isinstance(machine_request, MachineRequest):
+        return {
+            "goal": getattr(machine_request, "goal", None),
+            "intent": getattr(machine_request, "intent", None),
+            "conversation": getattr(machine_request, "conversation", None),
+            "memory": getattr(machine_request, "memory", None),
+            "visual_context": getattr(machine_request, "visual_context", None),
+            "available_tools": getattr(machine_request, "available_tools", None),
+            "requested_outputs": getattr(machine_request, "requested_outputs", None),
+            "required_competencies": getattr(machine_request, "required_competencies", None),
+            "required_artifacts": getattr(machine_request, "required_artifacts", None),
+            "routing": getattr(machine_request, "routing", None),
+            "constraints": getattr(machine_request, "constraints", None),
+            "response_decision": getattr(machine_request, "response_decision", None),
+            "renderer_preferences": getattr(machine_request, "renderer_preferences", None),
+            "metadata": getattr(machine_request, "metadata", None),
+            "provider_reference_context": getattr(machine_request, "provider_reference_context", None),
+            "first_circle_goal": getattr(machine_request, "first_circle_goal", None),
+            "first_circle_only": getattr(machine_request, "first_circle_only", None),
+            "second_circle_context": getattr(machine_request, "second_circle_context", None),
+        }
+
+    raise TypeError("Provider accepts only canonical MachineRequest.")
+
+
+def build_provider_reference_context(machine_request: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build a tiny, non-repeating background context for continuations.
-    This is intentionally small and never includes full history.
+    Tiny, non-repeating background context for continuations.
+    Executor can pass provider_reference_context directly; fallback uses a tiny
+    slice of conversation if available.
     """
     if not isinstance(machine_request, dict):
         return {}
+
+    direct = machine_request.get("provider_reference_context")
+    if isinstance(direct, dict) and direct:
+        return direct
 
     conversation = machine_request.get("conversation") or {}
     response_decision = machine_request.get("response_decision") or {}
@@ -934,19 +300,21 @@ def build_provider_reference_context(machine_request):
     )
 
     reference_context = {
-        "active_topic": _provider_trim_text(active_topic, 120),
-        "last_user_turn_summary": _provider_turn_summary(last_user_turn, 240),
-        "last_april_turn_summary": _provider_turn_summary(last_april_turn, 240),
-        "dialog_focus": focus if isinstance(focus, dict) else _provider_trim_text(focus, 160),
+        "active_topic": _provider_trim_text(active_topic, 80),
+        "last_user_turn_summary": _provider_turn_summary(last_user_turn, 180),
+        "last_april_turn_summary": _provider_turn_summary(last_april_turn, 180),
+        "dialog_focus": focus if isinstance(focus, dict) else _provider_trim_text(focus, 120),
     }
 
     return {k: v for k, v in reference_context.items() if v not in ("", {}, [], None)}
 
 
-def build_openai_request(machine_request):
+def build_openai_request(machine_request: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build a compact OpenAI request for the first circle.
-    The provider sees only the current request plus a tiny reference context.
+    Build a compact first-circle prompt:
+    - current user request
+    - optional tiny reference context
+    - fixed JSON contract
     """
     if not isinstance(machine_request, dict):
         machine_request = {}
@@ -963,8 +331,9 @@ def build_openai_request(machine_request):
 
     reference_context = build_provider_reference_context(machine_request)
 
-    provider_log("========== CURRENT USER REQUEST ==========")
-    provider_log(_provider_trim_text(user_text, 800))
+    provider_log("CURRENT REQUEST:", _provider_trim_text(user_text, 800))
+    if reference_context:
+        provider_log("REFERENCE CONTEXT:", _provider_trim_text(json.dumps(reference_context, ensure_ascii=False), 800))
 
     prompt_parts = [
         "CURRENT USER REQUEST",
@@ -974,86 +343,121 @@ def build_openai_request(machine_request):
     if reference_context:
         prompt_parts.extend([
             "",
-            "REFERENCE CONTEXT (background only; do not repeat it):",
+            "REFERENCE CONTEXT (background only; do not repeat):",
             json.dumps(reference_context, ensure_ascii=False),
         ])
 
     prompt_parts.extend([
         "",
-        "Return one valid JSON object only with the required keys.",
+        "Return one valid JSON object only.",
+        "Required keys: answer, content, summary, explanation, scene, artifacts, render_blocks, scene_plan, render_priority, confidence.",
         "Answer only the current request.",
     ])
-
-    structured_prompt = "\n".join(prompt_parts).strip()
 
     return {
         "role": "user",
         "content": [{
             "type": "input_text",
-            "text": structured_prompt
-        }]
+            "text": "\n".join(prompt_parts).strip(),
+        }],
     }
 
 
-def machine_request_to_dict(machine_request):
-
-    """Convert canonical MachineRequest object to provider payload."""
-    if isinstance(machine_request, dict):
-        return machine_request
-    if isinstance(machine_request, MachineRequest):
-        return {
-            "goal": getattr(machine_request, "goal", None),
-            "intent": getattr(machine_request, "intent", None),
-            "conversation": getattr(machine_request, "conversation", None),
-            "memory": getattr(machine_request, "memory", None),
-            "visual_context": getattr(machine_request, "visual_context", None),
-            "available_tools": getattr(machine_request, "available_tools", None),
-            "requested_outputs": getattr(machine_request, "requested_outputs", None),
-            "required_competencies": getattr(machine_request, "required_competencies", None),
-            "required_artifacts": getattr(machine_request, "required_artifacts", None),
-            "routing": getattr(machine_request, "routing", None),
-            "constraints": getattr(machine_request, "constraints", None),
-            "response_decision": getattr(machine_request, "response_decision", None),
-            "renderer_preferences": getattr(machine_request, "renderer_preferences", None),
-            "metadata": getattr(machine_request, "metadata", None),
-        }
-    raise TypeError("Provider accepts only canonical MachineRequest.")
-
-
-def normalize_provider_input(machine_request):
-    """Build canonical OpenAI request from MachineRequest only."""
+def normalize_provider_input(machine_request: Any) -> list[dict]:
     system_item = {
         "role": "system",
-        "content": [
-            {
-                "type": "input_text",
-                "text": PROVIDER_MACHINE_SYSTEM_PROMPT,
-            }
-        ],
+        "content": [{
+            "type": "input_text",
+            "text": PROVIDER_MACHINE_SYSTEM_PROMPT,
+        }],
     }
-
     payload = machine_request_to_dict(machine_request)
     return [system_item, build_openai_request(payload)]
 
 
 # =====================================================
-# STAGE 3 - UNIFIED PROVIDER CONTRACT
+# CONTRACT DECODING
 # =====================================================
 
-# =====================================================
-# PROVIDER RESPONSIBILITY — OPENAI RESPONSE TRANSLATOR
-# STAGE 3 COMPLETE
-# Provider is the single OpenAI→April translator.
-# Every provider response leaves this file only as a
-# validated canonical MachineResponse for the Executor.
-# =====================================================
+CANONICAL_PROVIDER_TEXT_FIELD = "content"
 
 
+def provider_validate_contract(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"answer": str(data), "content": str(data)}
+    if "answer" not in data and "content" in data:
+        data["answer"] = data["content"]
+    if "content" not in data and "answer" in data:
+        data["content"] = data["answer"]
+    return data
 
-def recover_machine_contract(contract):
-    """Recover a partial MachineResponse into a canonical contract."""
+
+def provider_normalize_contract(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {"answer": str(data), "content": str(data)}
+    data.setdefault("scene", {})
+    data.setdefault("render_blocks", [])
+    data.setdefault("artifacts", [])
+    data.setdefault("summary", data.get("answer", data.get("content", "")))
+    return data
+
+
+def provider_canonicalize_contract(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {CANONICAL_PROVIDER_TEXT_FIELD: str(data)}
+
+    if "content" not in data and "answer" in data:
+        data["content"] = data["answer"]
+    elif "answer" not in data and "content" in data:
+        data["answer"] = data["content"]
+
+    for key in ("text", "message", "output_text"):
+        if key not in data:
+            if "content" in data:
+                data[key] = data["content"]
+            elif "answer" in data:
+                data[key] = data["answer"]
+
+    return data
+
+
+def provider_preserve_full_response(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"content": str(data), "_provider_payload": data}
+    if "_provider_payload" not in data:
+        data["_provider_payload"] = dict(data)
+    data.setdefault("provider_raw", data["_provider_payload"])
+    data.setdefault("processor_input", data["_provider_payload"])
+    return data
+
+
+def validate_machine_response_contract(contract: Any) -> Dict[str, Any]:
     if not isinstance(contract, dict):
         contract = {}
+    contract.setdefault("summary", "")
+    contract.setdefault("explanation", contract["summary"])
+    contract.setdefault("artifacts", [])
+    contract.setdefault("scene_plan", ["text"])
+    contract.setdefault("render_priority", ["text"])
+    contract.setdefault("confidence", 0.0)
+    contract.setdefault("scene", {})
+    contract.setdefault("render_blocks", [])
+    contract.setdefault("metadata", {})
+    return contract
+
+
+def ensure_scene_first_contract(contract: Any) -> Dict[str, Any]:
+    contract = validate_machine_response_contract(contract)
+    contract.setdefault("scene", {})
+    contract.setdefault("render_blocks", [])
+    contract.setdefault("artifacts", [])
+    return contract
+
+
+def recover_machine_contract(contract: Any) -> Dict[str, Any]:
+    if not isinstance(contract, dict):
+        contract = {}
+
     candidate = (
         contract.get("answer")
         or contract.get("content")
@@ -1073,76 +477,181 @@ def recover_machine_contract(contract):
     contract.setdefault("scene_plan", ["text"])
     contract.setdefault("render_priority", ["text"])
     contract.setdefault("metadata", {})
-    if candidate and not any(isinstance(b, dict) and b.get("type")=="text" for b in contract["render_blocks"]):
-        pass  # inserted to preserve valid Python block
-        # STAGE2: legacy automatic TextBlock injection disabled.
-        # contract["render_blocks"].insert(0,{
-#             "type":"text",
-#             "content":candidate,
-#             "scene_contract":True
-#         })
-    # STAGE1 LEGACY: automatic recovery path retained for compatibility.
-    contract["metadata"]["contract_recovered"]=True
-    contract["metadata"]["transport_stage"]="provider_stage2"
+    contract["metadata"]["contract_recovered"] = True
+    contract["metadata"]["transport_stage"] = "provider_stage2"
     return contract
 
-def create_provider_contract(raw_text, source_request=None):
-    """Stage 3: translate every OpenAI response into one canonical MachineResponse.
-    Stage 1 upgrade: avoid repeated normalization and preserve canonical transport."""
 
-    if (
-        isinstance(raw_text, dict)
-        and raw_text.get("type") == "provider_response"
-        and isinstance(raw_text.get("machine_response"), dict)
-    ):
-        provider_log("🧠 STAGE3: canonical MachineResponse received")
-        return provider_contract_ready(raw_text)
+def provider_decode_json(raw_text: Any) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(raw_text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
 
-    parsed = raw_text if isinstance(raw_text, dict) else provider_decode_response(raw_text)
-    # STAGE 1: single canonical validation pass
-    # STAGE3: semantic-first pipeline
-    parsed = ensure_scene_first_contract(parsed)
-    parsed = normalize_text_transport(parsed)
-    # Legacy recovery kept temporarily for compatibility.
-    # STAGE4: compatibility recovery bypassed.
-    parsed = recover_machine_contract(parsed)
 
-    # STAGE 3: build one canonical provider response then perform a single executor handoff
-    # STAGE4: canonical builder becomes the single assembly point.
-    machine = build_provider_machine_response(raw_text, parsed, source_request=source_request)
+def parse_provider_machine_contract(raw_text: Any) -> Dict[str, Any]:
+    try:
+        data = json.loads(raw_text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError as e:
+        provider_log(f"JSON PARSE ERROR line={e.lineno} col={e.colno} pos={e.pos}")
+        start = max(0, e.pos - 120)
+        end = min(len(raw_text), e.pos + 120)
+        provider_log(raw_text[start:end])
 
-    mr = machine.setdefault("machine_response", {})
-    if mr.get("answer"):
-        mr["provider_original_answer"] = mr["answer"]
-        mr["provider_original_content"] = mr.get("content", mr["answer"])
-    elif mr.get("content"):
-        mr["provider_original_content"] = mr["content"]
+        repaired = (raw_text or "").strip()
+        first = repaired.find("{")
+        last = repaired.rfind("}")
 
-    candidate = (
-        mr.get("answer")
-        or mr.get("content")
-        or mr.get("response")
-        or mr.get("summary")
-        or ""
+        if first != -1 and last > first:
+            repaired = repaired[first:last + 1]
+            try:
+                data = json.loads(repaired)
+                if isinstance(data, dict):
+                    provider_log("JSON RECOVERY SUCCESS")
+                    return data
+            except Exception:
+                pass
+
+        provider_log("SECOND PASS: building canonical contract from raw provider text")
+
+        import re
+
+        def _grab(name: str) -> str:
+            m = re.search(r'"%s"\s*:\s*"((?:\\.|[^"])*)"' % name, raw_text, re.S)
+            if not m:
+                return ""
+            value = m.group(1)
+            try:
+                value = json.loads(f'"{value}"')
+            except Exception:
+                pass
+            return value
+
+        recovered_answer = _grab("answer") or _grab("content") or _grab("response") or raw_text.strip()
+        recovered_summary = _grab("summary") or recovered_answer
+        recovered_explanation = _grab("explanation") or recovered_summary
+
+        return {
+            "answer": recovered_answer,
+            "content": recovered_answer,
+            "response": recovered_answer,
+            "summary": recovered_summary,
+            "explanation": recovered_explanation,
+            "scene": {},
+            "artifacts": [],
+            "render_blocks": [{
+                "type": "text",
+                "content": recovered_answer or recovered_summary or "",
+                "scene_contract": True,
+            }],
+            "scene_plan": ["text"],
+            "render_priority": ["text"],
+            "confidence": 0.5,
+            "metadata": {
+                "provider_second_pass": True,
+                "parse_failed": True,
+                "raw_provider_text": raw_text,
+            },
+        }
+    return {}
+
+
+def provider_decode_response(raw_text: Any) -> Dict[str, Any]:
+    parsed = provider_decode_json(raw_text)
+    if parsed is None:
+        parsed = parse_provider_machine_contract(raw_text)
+    parsed = provider_validate_contract(parsed)
+    parsed = provider_normalize_contract(parsed)
+    parsed = provider_canonicalize_contract(parsed)
+    parsed = provider_preserve_full_response(parsed)
+    return parsed
+
+
+# =====================================================
+# MACHINE RESPONSE ASSEMBLY
+# =====================================================
+
+def provider_contract_ready(machine_response: Dict[str, Any]) -> Dict[str, Any]:
+    return machine_response
+
+
+def build_provider_machine_response(text: Any, parsed_contract: Optional[Dict[str, Any]] = None, source_request: Any = None) -> Dict[str, Any]:
+    parsed_contract = parsed_contract or {}
+
+    fallback = normalize_response_text(text)
+
+    answer = (
+        parsed_contract.get("answer")
+        or parsed_contract.get("content")
+        or parsed_contract.get("response")
+        or fallback
     )
-    if candidate:
-        mr.setdefault("answer", candidate)
-        mr.setdefault("content", candidate)
-        mr.setdefault("response", candidate)
-        mr.setdefault("summary", candidate)
 
-    # STAGE4: executor handoff preserved.
-    machine = provider_finalize_for_executor(machine)
-    machine = attach_processor_input(machine, source_request)
+    content = parsed_contract.get("content") or answer
+    response = parsed_contract.get("response") or answer
+    summary = parsed_contract.get("summary") or answer
+    explanation = parsed_contract.get("explanation") or summary
+    if response is None:
+        response = answer
+
+    processor_input = {}
+    execution_round = 1
+    execution_phase = "FIRST_CIRCLE"
+    if isinstance(source_request, dict):
+        try:
+            processor_input = copy.deepcopy(source_request)
+        except Exception:
+            processor_input = dict(source_request)
+        execution_round = source_request.get("execution_round", execution_round) or execution_round
+        execution_phase = source_request.get("execution_phase", execution_phase) or execution_phase
+
+    machine = {
+        "type": "provider_response",
+        "execution_round": execution_round,
+        "execution_phase": execution_phase,
+        "processor_input": processor_input,
+        "provider_source_request": processor_input,
+        "machine_response": {
+            "summary": summary,
+            "explanation": explanation,
+            "content": content,
+            "answer": answer,
+            "response": response,
+            "scene": parsed_contract.get("scene", {}),
+            "render_blocks": parsed_contract.get("render_blocks", []),
+            "artifacts": parsed_contract.get("artifacts", []),
+            "scene_plan": parsed_contract.get("scene_plan", ["text"]),
+            "confidence": parsed_contract.get("confidence", 1.0),
+            "metadata": parsed_contract.get("metadata", {}),
+            "provider": "openai",
+            "render_priority": parsed_contract.get("render_priority", []),
+            "provider_contract": "fiber_v3",
+            "transport_contract": "scene_first",
+            "execution_round": execution_round,
+            "execution_phase": execution_phase,
+        },
+    }
+
+    mr = machine["machine_response"]
+    if processor_input:
+        metadata = mr.setdefault("metadata", {})
+        metadata.setdefault("processor_input", processor_input)
+        metadata.setdefault("provider_source_request", processor_input)
+        metadata.setdefault("provider_first_circle", True)
+        metadata.setdefault("second_circle_ready", True)
+        metadata.setdefault("execution_round", execution_round)
+        metadata.setdefault("execution_phase", execution_phase)
+
     return machine
 
 
-def enrich_machine_response(contract):
-    """
-    Normalize fields expected by Executor.
-    """
+def enrich_machine_response(contract: Dict[str, Any]) -> Dict[str, Any]:
     mr = contract.setdefault("machine_response", {})
-
     content = mr.get("content") or mr.get("answer") or mr.get("summary") or ""
     if isinstance(content, dict):
         if isinstance(content.get("text"), str):
@@ -1152,7 +661,7 @@ def enrich_machine_response(contract):
         elif isinstance(content.get("summary"), str):
             mr["answer"] = content["summary"]
         else:
-            mr.setdefault("answer","")
+            mr.setdefault("answer", "")
     else:
         mr.setdefault("answer", content)
     mr["content"] = content
@@ -1166,12 +675,7 @@ def enrich_machine_response(contract):
     return contract
 
 
-
-def infer_executor_rendering(machine_response):
-    """
-    Provider validates transport only.
-    Executor decides rendering.
-    """
+def infer_executor_rendering(machine_response: Dict[str, Any]) -> Dict[str, Any]:
     mr = machine_response.setdefault("machine_response", {})
     mr.setdefault("render_blocks", [])
     mr.setdefault("scene_plan", ["text"])
@@ -1179,57 +683,25 @@ def infer_executor_rendering(machine_response):
     return machine_response
 
 
-
-def detect_executor_artifacts(machine_response):
-    """
-    Stage 3:
-    Normalize artifacts and ensure a canonical text block exists.
-    """
+def detect_executor_artifacts(machine_response: Dict[str, Any]) -> Dict[str, Any]:
     mr = machine_response.setdefault("machine_response", {})
     render_blocks = mr.setdefault("render_blocks", [])
     artifacts = mr.setdefault("artifacts", [])
     metadata = mr.setdefault("metadata", {})
 
-    answer = (
-        mr.get("answer")
-        or mr.get("content")
-        or mr.get("summary")
-        or ""
-    )
-
-    if answer and not any(
-        isinstance(b, dict) and b.get("type") == "text"
-        for b in render_blocks
-    ):
-        pass  # preserve empty branch after legacy removal
-        # STAGE2: legacy automatic executor TextBlock injection disabled.
-        # render_blocks.insert(0, {
-#             "type": "text",
-#             "content": answer,
-#             "scene_contract": True,
-#         })
-
-    # STAGE1 LEGACY: automatic TextBlock injection will be removed in Stage2.
+    answer = mr.get("answer") or mr.get("content") or mr.get("summary") or ""
     metadata["provider_stage"] = "stage3"
     metadata["canonical_handoff"] = True
     metadata["artifact_count"] = len(artifacts)
     metadata["render_block_count"] = len(render_blocks)
 
+    if answer and not any(isinstance(b, dict) and b.get("type") == "text" for b in render_blocks):
+        pass
+
     return machine_response
 
 
-
-
-
-# =====================================================
-# STAGE 2 - EXECUTOR HANDOFF
-# =====================================================
-
-def provider_finalize_for_executor(contract):
-    """
-    Canonical Provider -> Executor bridge.
-    Ensures the payload is normalized before leaving Provider.
-    """
+def provider_finalize_for_executor(contract: Dict[str, Any]) -> Dict[str, Any]:
     contract = enrich_machine_response(contract)
     contract = infer_executor_rendering(contract)
     contract = detect_executor_artifacts(contract)
@@ -1263,16 +735,7 @@ def provider_finalize_for_executor(contract):
     return contract
 
 
-
-
-# =====================================================
-# STAGE 4 - PROVIDER AUDIT
-# =====================================================
-
-def provider_transport_audit(machine_response):
-    """
-    Final verification before handing off to Executor.
-    """
+def provider_transport_audit(machine_response: Dict[str, Any]) -> Dict[str, Any]:
     mr = machine_response.setdefault("machine_response", {})
     audit = {
         "answer_length": len(mr.get("answer") or ""),
@@ -1287,10 +750,7 @@ def provider_transport_audit(machine_response):
     return machine_response
 
 
-def finalize_executor_contract(machine_response):
-    """Stage 4: final canonical Provider -> Executor transport pipeline.
-    This is the single validated handoff to the Executor."""
-    # Stage 4: execute one ordered canonical transport pipeline.
+def finalize_executor_contract(machine_response: Dict[str, Any]) -> Dict[str, Any]:
     for step in (
         enrich_machine_response,
         infer_executor_rendering,
@@ -1301,12 +761,7 @@ def finalize_executor_contract(machine_response):
     return machine_response
 
 
-
-def provider_final_guard(contract):
-    """
-    Final protection before Executor.
-    Prevents valid text responses from becoming empty contracts.
-    """
+def provider_final_guard(contract: Dict[str, Any]) -> Dict[str, Any]:
     mr = contract.setdefault("machine_response", {})
 
     candidate = (
@@ -1341,32 +796,16 @@ def provider_final_guard(contract):
     return contract
 
 
-def build_provider_overload_contract(space):
+def build_provider_overload_contract(space: Any):
     raise RuntimeError(f"Provider route failed: {space}")
 
 
 # =====================================================
-# 🔥 TEXT GENERATION
+# GENERATION
 # =====================================================
 
-# =====================================================
-# PROVIDER ROUTE
-# Canonical flow:
-# MachineRequest -> OpenAI -> MachineResponse -> Executor
-# =====================================================
-
-
-# =====================================================
-# STAGE 4 - CPU PHASE GUARD
-# =====================================================
-
-def provider_should_bypass_openai(messages):
-    """
-    Detect post-provider execution phases.
-    Returns (bypass, payload).
-    """
+def provider_should_bypass_openai(messages: Any) -> Tuple[bool, Optional[Dict[str, Any]]]:
     phase = None
-
     if isinstance(messages, dict):
         phase = messages.get("execution_phase")
     else:
@@ -1379,44 +818,42 @@ def provider_should_bypass_openai(messages):
             "execution_phase": phase,
             "provider_bypassed": True,
         }
-
     return False, None
 
 
-
-
-def provider_stage_log(stage, payload=None):
+def provider_stage_log(stage: str, payload: Any = None) -> None:
     try:
         if isinstance(payload, dict):
-            info={}
-            for k,v in payload.items():
-                if isinstance(v,str):
-                    info[k]=f"<str:{len(v)}>"
-                elif isinstance(v,(list,dict)):
-                    info[k]=f"<{type(v).__name__}:{len(v)}>"
+            info = {}
+            for k, v in payload.items():
+                if isinstance(v, str):
+                    info[k] = f"<str:{len(v)}>"
+                elif isinstance(v, (list, dict)):
+                    info[k] = f"<{type(v).__name__}:{len(v)}>"
                 else:
-                    info[k]=v
+                    info[k] = v
             provider_log(f"[PROVIDER:{stage}] {info}")
         else:
             provider_log(f"[PROVIDER:{stage}] {payload}")
     except Exception:
         pass
 
+
+def _serialize_output_text(raw_text: str) -> Dict[str, Any]:
+    parsed = provider_decode_response(raw_text)
+    parsed = ensure_scene_first_contract(parsed)
+    parsed = normalize_text_transport(parsed)
+    parsed = recover_machine_contract(parsed)
+    return parsed
+
+
 async def generate_text(
-
-    messages,
-    temperature=0.7,
-    max_output_tokens=None,
-    model=OPENAI_PRIMARY_MODEL
+    messages: Any,
+    temperature: float = 0.7,
+    max_output_tokens: Optional[int] = None,
+    model: str = OPENAI_PRIMARY_MODEL,
 ):
-
-    provider_enter(
-        "openai_text",
-        messages
-    )
-
-    # Legacy messages[] route removed.
-    # Only canonical MachineRequest is accepted beyond this point.
+    provider_enter("openai_text", messages)
 
     bypass, payload = provider_should_bypass_openai(messages)
     if bypass:
@@ -1424,8 +861,6 @@ async def generate_text(
         payload["executor_cpu_redirect"] = True
         payload["route_target"] = "executor_cpu"
         payload["next_stage"] = "EXECUTOR_CPU"
-
-        # Stage 9: preserve transport information for Executor CPU.
         if isinstance(messages, dict):
             payload["machine_response"] = messages.get("machine_response")
             payload["trace_id"] = messages.get("trace_id")
@@ -1434,37 +869,16 @@ async def generate_text(
             payload["machine_response"] = getattr(messages, "machine_response", None)
             payload["trace_id"] = getattr(messages, "trace_id", None)
             payload["fiber_pass"] = getattr(messages, "fiber_pass", 2)
-
         return payload
 
-
     try:
-
         update_provider_behavior()
-
-        provider_log(
-            "🧠 OPENAI TEXT START"
-        )
-
-        provider_log(
-            "========== PROVIDER INPUT =========="
-        )
+        provider_log("OPENAI TEXT START")
         provider_log("RAW MESSAGE TYPE:", type(messages))
-        provider_log("RAW MESSAGE:", str(messages)[:4000])
+        provider_stage_log("INPUT", {"type": type(messages).__name__})
 
-        provider_log(
-            "🧠 PROVIDER BALANCE:",
-            provider_state.get(
-                "provider_balance"
-            )
-        )
-
-        provider_stage_log("INPUT", {"type":type(messages).__name__})
         normalized_input = normalize_provider_input(messages)
-        provider_stage_log("OPENAI_REQUEST", {"items":len(normalized_input)})
-
-        provider_log("========== OPENAI REQUEST BUILDER ==========")
-        provider_log(json.dumps(normalized_input, ensure_ascii=False)[:2500])
+        provider_stage_log("OPENAI_REQUEST", {"items": len(normalized_input)})
 
         request = {
             "model": model,
@@ -1474,19 +888,13 @@ async def generate_text(
         effective_max_output_tokens = max_output_tokens if max_output_tokens is not None else 1200
         request["max_output_tokens"] = effective_max_output_tokens
 
-        # GPT-5.6 Responses API compatibility:
-        # only legacy models receive temperature.
         legacy_temperature_models = {
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-4.1",
             "gpt-4.1-mini",
         }
-
-        if (
-            temperature is not None
-            and model in legacy_temperature_models
-        ):
+        if temperature is not None and model in legacy_temperature_models:
             request["temperature"] = temperature
 
         provider_log({
@@ -1494,433 +902,198 @@ async def generate_text(
             "request_keys": list(request.keys()),
         })
 
-        response = (
-            openai_client.responses.create(
-                **request
-            )
-        )
-
-        provider_log("========== RAW OPENAI OUTPUT ==========")
-        provider_log(response.output_text[:2500] if response.output_text else "EMPTY")
+        response = openai_client.responses.create(**request)
 
         raw_text = response.output_text or ""
-        provider_stage_log("OPENAI_RESPONSE", {"chars":len(raw_text)})
+        provider_stage_log("OPENAI_RESPONSE", {"chars": len(raw_text)})
         provider_log(f"OPENAI OUTPUT LENGTH: {len(raw_text)}")
-        if hasattr(response,"incomplete_details"):
+        if hasattr(response, "incomplete_details"):
             provider_log(f"OPENAI INCOMPLETE: {response.incomplete_details}")
 
-        provider_log("TRACE STAGE: raw_provider_output", raw_text[:300])
-
         if not raw_text:
-
-            provider_log(
-                "🔥 OPENAI EMPTY RESPONSE"
-            )
-
-            provider_exit(
-                "openai_text",
-                False
-            )
-
+            provider_exit("openai_text", False)
             raise RuntimeError("Provider returned empty response")
 
-        provider_log(
-            "🧠 OPENAI TEXT SUCCESS"
-        )
+        provider_exit("openai_text", True)
 
-        provider_exit(
-            "openai_text",
-            True
-        )
-
-        provider_log({"trace_stage":"before_create_provider_contract","raw_len":len(raw_text),"preview":raw_text[:300]})
         source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
         contract = create_provider_contract(raw_text, source_request=source_request)
 
         if isinstance(contract, dict):
             mr = contract.get("machine_response")
             if isinstance(mr, dict):
-                for field in ("answer","content","summary","explanation","response"):
+                for field in ("answer", "content", "summary", "explanation", "response"):
                     if isinstance(mr.get(field), str):
                         mr[field] = normalize_response_text(mr[field])
-        provider_log({"trace_stage":"after_create_provider_contract","keys":list(contract.keys()) if isinstance(contract,dict) else str(type(contract))})
 
-        # ================= TEST DIAGNOSTICS =================
-        if isinstance(contract, dict):
-            mr = contract.get("machine_response", {})
-            provider_log("========== MACHINE RESPONSE DIAGNOSTICS ==========")
-            provider_log({
-                "answer_len": len(mr.get("answer") or ""),
-                "content_len": len(mr.get("content") or ""),
-                "summary_len": len(mr.get("summary") or ""),
-                "artifact_count": len(mr.get("artifacts", [])),
-                "render_block_count": len(mr.get("render_blocks", [])),
-            })
-
-            for i, artifact in enumerate(mr.get("artifacts", [])):
-                if isinstance(artifact, dict):
-                    atype = artifact.get("type")
-                    if atype == "table":
-                        provider_log(f"[TABLE #{i}] rows={len(artifact.get('rows', []))}")
-                        provider_log(f"[TABLE #{i}] headers={artifact.get('headers', [])}")
-                    elif atype == "graph":
-                        provider_log(f"[GRAPH #{i}] series={len(artifact.get('series', []))}")
-                    elif atype == "text":
-                        provider_log(f"[TEXT #{i}] chars={len(artifact.get('content',''))}")
-
-            provider_log("========== FULL MACHINE RESPONSE BEGIN ==========")
-            provider_log(json.dumps(mr, ensure_ascii=False)[:100000])
-            provider_log("========== FULL MACHINE RESPONSE END ==========")
-        # ====================================================
-
-
-        # =====================================================
-        # STAGE 5 - FINAL PROVIDER->EXECUTOR TRANSPORT
-        # Single canonical handoff with final audit.
-        # =====================================================
-        provider_log({"trace_stage":"before_finalize_executor","machine_keys":list(contract.get("machine_response",{}).keys()) if isinstance(contract,dict) else []})
-        contract = finalize_executor_contract(contract)
-        contract = provider_final_guard(contract)
-        mr=contract.get("machine_response",{}) if isinstance(contract,dict) else {}
-        provider_log({"trace_stage":"after_finalize_executor","answer_len":len(mr.get("answer") or ""),"content_len":len(mr.get("content") or ""),"summary_len":len(mr.get("summary") or ""),"render_blocks":len(mr.get("render_blocks",[]))})
-        provider_stage_log("EXECUTOR_HANDOFF", mr)
-
+        provider_stage_log("EXECUTOR_HANDOFF", contract.get("machine_response", {}) if isinstance(contract, dict) else {})
         return contract
 
     except Exception as e:
-
-        provider_log(
-            "🔥 OPENAI TEXT ERROR:",
-            e
-        )
-
-        provider_exit(
-            "openai_text",
-            False
-        )
-
+        provider_log("OPENAI TEXT ERROR:", e)
+        provider_exit("openai_text", False)
         raise
 
 
 # =====================================================
-# 🔥 VOICE TRANSCRIPTION
+# CONTRACT CREATION
 # =====================================================
 
-async def transcribe_voice(
-    file_path
-):
+def create_provider_contract(raw_text: Any, source_request: Any = None) -> Dict[str, Any]:
+    if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response" and isinstance(raw_text.get("machine_response"), dict):
+        provider_log("STAGE3: canonical MachineResponse received")
+        return provider_contract_ready(raw_text)
 
-    provider_enter(
-        "voice_transcription",
-        file_path
+    parsed = raw_text if isinstance(raw_text, dict) else provider_decode_response(raw_text)
+    parsed = ensure_scene_first_contract(parsed)
+    parsed = normalize_text_transport(parsed)
+    parsed = recover_machine_contract(parsed)
+
+    machine = build_provider_machine_response(raw_text, parsed, source_request=source_request)
+
+    mr = machine.setdefault("machine_response", {})
+    if mr.get("answer"):
+        mr["provider_original_answer"] = mr["answer"]
+        mr["provider_original_content"] = mr.get("content", mr["answer"])
+    elif mr.get("content"):
+        mr["provider_original_content"] = mr["content"]
+
+    candidate = (
+        mr.get("answer")
+        or mr.get("content")
+        or mr.get("response")
+        or mr.get("summary")
+        or ""
     )
+    if candidate:
+        mr.setdefault("answer", candidate)
+        mr.setdefault("content", candidate)
+        mr.setdefault("response", candidate)
+        mr.setdefault("summary", candidate)
+
+    machine = provider_finalize_for_executor(machine)
+    machine = attach_processor_input(machine, source_request)
+    return machine
+
+
+def attach_processor_input(contract: Dict[str, Any], source_request: Any = None) -> Dict[str, Any]:
+    if not isinstance(contract, dict) or source_request is None:
+        return contract
 
     try:
+        cloned = copy.deepcopy(source_request)
+    except Exception:
+        cloned = source_request
 
-        provider_log(
-            "🧠 OPENAI VOICE START"
-        )
+    contract.setdefault("processor_input", cloned)
+    contract.setdefault("provider_source_request", cloned)
 
-        provider_log(
-            "🧠 OPENAI AUDIO PATH:",
-            file_path
-        )
+    mr = contract.setdefault("machine_response", {})
+    metadata = mr.setdefault("metadata", {})
+    metadata.setdefault("processor_input", cloned)
+    metadata.setdefault("provider_source_request", cloned)
+    metadata.setdefault("provider_first_circle", True)
+    metadata.setdefault("second_circle_ready", True)
 
+    return contract
+
+
+# =====================================================
+# VOICE / IMAGE / IMAGE-GEN
+# =====================================================
+
+async def transcribe_voice(file_path: str) -> str:
+    provider_enter("voice_transcription", file_path)
+    try:
+        provider_log("OPENAI VOICE START")
         with open(file_path, "rb") as f:
-
-            transcript = (
-
-                openai_client.audio.transcriptions.create(
-
-                    model="gpt-4o-mini-transcribe",
-
-                    file=f
-                )
+            transcript = openai_client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f,
             )
 
-        text = normalize_response_text(
-
-            transcript.text
-            if transcript.text
-            else ""
-        )
-
-        provider_log(
-            "🧠 OPENAI VOICE RESPONSE:",
-            text[:120] if text else "EMPTY"
-        )
+        text = normalize_response_text(transcript.text if transcript.text else "")
+        provider_log("OPENAI VOICE RESPONSE:", text[:120] if text else "EMPTY")
 
         if text:
-
-            provider_log(
-                "🧠 OPENAI VOICE SUCCESS"
-            )
-
-            provider_exit(
-                "voice_transcription",
-                True
-            )
-
-            # Voice pipeline must return the recognized text itself.
-            # checkout_server.normalize_voice_transcript() expects a plain
-            # transcript (or a simple text field), not a provider wrapper.
+            provider_exit("voice_transcription", True)
             return text
 
-        provider_exit(
-            "voice_transcription",
-            False
-        )
-
+        provider_exit("voice_transcription", False)
         return ""
 
     except Exception as e:
-
-        provider_log(
-            "🔥 OPENAI VOICE ERROR:",
-            e
-        )
-
-        provider_exit(
-            "voice_transcription",
-            False
-        )
-
+        provider_log("OPENAI VOICE ERROR:", e)
+        provider_exit("voice_transcription", False)
         return ""
 
 
-# =====================================================
-# 🔥 IMAGE ANALYSIS
-# =====================================================
-
-async def analyze_image(
-    path,
-    prompt
-):
-
-    provider_enter(
-        "image_analysis",
-        path
-    )
-
+async def analyze_image(path: str, prompt: str):
+    provider_enter("image_analysis", path)
     update_provider_behavior()
 
-    # =================================================
-    # 🔥 GEMINI VISUAL PRIMARY
-    # =====================================================
-
     if should_restore_gemini():
-
         try:
-
-            provider_log(
-                "🧠 GEMINI IMAGE START"
+            provider_log("GEMINI IMAGE START")
+            uploaded = gemini_client.files.upload(file=path)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[uploaded, prompt],
             )
-
-            provider_log(
-                "🧠 VISUAL MODE:",
-                provider_state.get(
-                    "visual_mode"
-                )
-            )
-
-            provider_log(
-                "🧠 GEMINI IMAGE PATH:",
-                path
-            )
-
-            uploaded = gemini_client.files.upload(
-                file=path
-            )
-
-            provider_log(
-                "🧠 GEMINI IMAGE UPLOADED"
-            )
-
-            response = (
-
-                gemini_client.models.generate_content(
-
-                    model="gemini-2.5-flash",
-
-                    contents=[
-                        uploaded,
-                        prompt
-                    ]
-                )
-            )
-
-            text = normalize_response_text(
-
-                response.text
-                if response.text
-                else ""
-            )
-
-            provider_log(
-                "🧠 GEMINI IMAGE RESPONSE:",
-                text[:120] if text else "EMPTY"
-            )
-
+            text = normalize_response_text(response.text if response.text else "")
             if text:
-
                 mark_gemini_success()
-
-                provider_exit(
-                    "gemini_image",
-                    True
-                )
-
+                provider_exit("gemini_image", True)
                 return create_provider_contract(text)
-
         except Exception as e:
-
-            provider_log(
-                "🔥 GEMINI IMAGE ERROR:",
-                e
-            )
-
+            provider_log("GEMINI IMAGE ERROR:", e)
             mark_gemini_failure()
 
-    # =================================================
-    # 🔥 OPENAI VISUAL FALLBACK
-    # =====================================================
-
     try:
-
-        provider_log(
-            "OPENAI IMAGE ROUTE"
-        )
-
-        provider_log(
-            "🧠 FALLBACK PRESSURE:",
-            provider_state.get(
-                "route_health"
-            )
-        )
-
+        provider_log("OPENAI IMAGE ROUTE")
         with open(path, "rb") as image_file:
-
-            response = (
-
-                openai_client.responses.create(
-
-                    model="gpt-4o-mini",
-
-                    input=[
-
-                        {
-                            "role": "user",
-
-                            "content": [
-
-                                {
-                                    "type": "input_text",
-
-                                    "text": prompt
-                                },
-
-                                {
-                                    "type": "input_image",
-
-                                    "image":
-                                        image_file.read()
-                                }
-                            ]
-                        }
-                    ],
-
-                    max_output_tokens=250
-                )
+            response = openai_client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {"type": "input_image", "image": image_file.read()},
+                        ],
+                    }
+                ],
+                max_output_tokens=250,
             )
 
-        text = normalize_response_text(
-
-            response.output_text
-            if response.output_text
-            else ""
-        )
-
+        text = normalize_response_text(response.output_text if response.output_text else "")
         if text:
-
-            provider_exit(
-                "openai_image",
-                True
-            )
-
+            provider_exit("openai_image", True)
             return create_provider_contract(text)
 
-        provider_exit(
-            "openai_image",
-            False
-        )
-
+        provider_exit("openai_image", False)
         raise RuntimeError("Visual provider route failed")
 
     except Exception as e:
-
-        provider_log(
-            "🔥 OPENAI IMAGE ERROR:",
-            e
-        )
-
-        provider_exit(
-            "openai_image",
-            False
-        )
-
+        provider_log("OPENAI IMAGE ERROR:", e)
+        provider_exit("openai_image", False)
         raise RuntimeError("Visual provider route failed")
 
 
-PROVIDER_ROUTE_VERSION="provider_router_9"
-PROVIDER_LEGACY_MODE=False
-
-
-# ============================================================
-# STAGE9 FINAL (provider_router_9)
-# ============================================================
-# Final cleanup checkpoint.
-#
-# Goals achieved in the staged test series:
-# 1. Legacy automatic TextBlock injection disabled.
-# 2. Compatibility recovery isolated.
-# 3. Semantic-first pipeline marked as canonical.
-# 4. build_provider_machine_response() remains the single
-#    assembly point for MachineResponse.
-# 5. Provider -> Executor handoff preserved for regression tests.
-#
-# TEST CHECKLIST
-# [ ] Plain text response
-# [ ] Markdown response
-# [ ] Table artifact
-# [ ] Graph artifact
-# [ ] Formula artifact
-# [ ] Gallery artifact
-# [ ] Diagram artifact
-# [ ] Multi-artifact scene
-# [ ] Empty response handling
-# [ ] Executor rendering verification
-# ============================================================
-
-
-# =====================================================
-# 🔥 IMAGE GENERATION
-# =====================================================
-
-async def generate_image(
-    prompt: str,
-    size: str = "1024x1024",
-    quality: str = "auto",
-):
+async def generate_image(prompt: str, size: str = "1024x1024", quality: str = "auto"):
     provider_enter("image_generation", {"size": size})
-
-    provider_log("🔒 IMAGE GENERATION DISABLED (Premium only)")
+    provider_log("IMAGE GENERATION DISABLED (Premium only)")
     provider_exit("image_generation", True)
-
     return {
         "success": False,
         "premium_required": True,
         "image_generation_disabled": True,
-        "reason": "Image generation is temporarily disabled."
+        "reason": "Image generation is temporarily disabled.",
     }
 
+
 provider_generate_image = generate_image
+
+
+PROVIDER_ROUTE_VERSION = "provider_router_10"
+PROVIDER_LEGACY_MODE = False
