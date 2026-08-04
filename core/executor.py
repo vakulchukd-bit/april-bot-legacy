@@ -80,8 +80,8 @@ EXECUTOR_CPU_OBJECTS = {
     "machine_scene": {},
 }
 
-FOLLOWUP_CONTEXT_CHAR_LIMIT = 420
-FOLLOWUP_CONTEXT_WORD_LIMIT = 7
+FOLLOWUP_CONTEXT_CHAR_LIMIT = 280
+FOLLOWUP_CONTEXT_WORD_LIMIT = 5
 
 
 # =====================================================
@@ -436,13 +436,13 @@ def _executor_build_reference_context(text: str, state: dict, semantic: dict, co
 
     pieces = []
     if active_topic:
-        pieces.append(f"topic: {_clip_text(active_topic, 80)}")
+        pieces.append(f"topic: {_clip_text(active_topic, 60)}")
     if focus_source:
-        pieces.append(f"focus: {_clip_text(focus_source, 140)}")
+        pieces.append(f"focus: {_clip_text(focus_source, 100)}")
     if last_user:
-        pieces.append(f"last_user: {_clip_text(last_user, 180)}")
+        pieces.append(f"last_user: {_clip_text(last_user, 120)}")
     if last_april:
-        pieces.append(f"last_april_summary: {_clip_text(last_april, 180)}")
+        pieces.append(f"last_april_summary: {_clip_text(last_april, 120)}")
 
     if not pieces:
         return ""
