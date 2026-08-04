@@ -543,12 +543,50 @@ def build_provider_machine_response(text, parsed_contract=None, source_request=N
         machine["machine_response"]["metadata"].setdefault("execution_round", execution_round)
         machine["machine_response"]["metadata"].setdefault("execution_phase", execution_phase)
 
-    return machine
+    return mirror_machine_response_to_root(machine)
 
 import copy
 import json
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
+
+def mirror_machine_response_to_root(contract):
+    """Mirror canonical MachineResponse fields onto the top-level transport
+    contract so downstream Executor code can read either shape safely.
+    """
+    if not isinstance(contract, dict):
+        return contract
+
+    mr = contract.get("machine_response")
+    if not isinstance(mr, dict):
+        return contract
+
+    mirror_fields = (
+        "summary",
+        "explanation",
+        "content",
+        "answer",
+        "response",
+        "scene",
+        "render_blocks",
+        "artifacts",
+        "scene_plan",
+        "confidence",
+        "metadata",
+        "provider",
+        "render_priority",
+        "provider_contract",
+        "transport_contract",
+        "execution_round",
+        "execution_phase",
+        "provider_original_answer",
+        "provider_original_content",
+    )
+    for field in mirror_fields:
+        if field in mr:
+            contract[field] = mr[field]
+
+    return contract
 
 
 # =====================================================
@@ -769,7 +807,7 @@ def attach_processor_input(contract, source_request=None):
 
 
 def provider_contract_ready(machine_response):
-    return machine_response
+    return mirror_machine_response_to_root(machine_response)
 
 
 # =====================================================
@@ -1103,7 +1141,7 @@ def create_provider_contract(raw_text, source_request=None):
     # STAGE4: executor handoff preserved.
     machine = provider_finalize_for_executor(machine)
     machine = attach_processor_input(machine, source_request)
-    return machine
+    return mirror_machine_response_to_root(machine)
 
 
 def enrich_machine_response(contract):
@@ -1229,7 +1267,7 @@ def provider_finalize_for_executor(contract):
                 "scene_contract": True,
             })
 
-    return contract
+    return mirror_machine_response_to_root(contract)
 
 
 
@@ -1267,7 +1305,7 @@ def finalize_executor_contract(machine_response):
         provider_transport_audit,
     ):
         machine_response = step(machine_response)
-    return machine_response
+    return mirror_machine_response_to_root(machine_response)
 
 
 
@@ -1307,7 +1345,7 @@ def provider_final_guard(contract):
                 "scene_contract": True,
             })
 
-    return contract
+    return mirror_machine_response_to_root(contract)
 
 
 def build_provider_overload_contract(space):
@@ -1883,13 +1921,10 @@ async def generate_image(
     provider_enter("image_generation", {"size": size})
 
     provider_log("🔒 IMAGE GENERATION DISABLED (Premium only)")
-    provider_exit("image_generation", True)
+    provider_exit("image_generation", False)
 
-    return {
-        "success": False,
-        "premium_required": True,
-        "image_generation_disabled": True,
-        "reason": "Image generation is temporarily disabled."
-    }
+    # Return bytes-like output so downstream storage code does not attempt to
+    # write a dict object as binary image data.
+    return b""
 
 provider_generate_image = generate_image
