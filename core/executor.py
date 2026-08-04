@@ -204,17 +204,6 @@ def _executor_preserve_canonical_text(machine_response, scene_contract=None, sce
         if _executor_value_is_empty(getattr(machine_response, "summary", None)):
             machine_response.summary = answer
 
-        blocks = list(getattr(machine_response, "render_blocks", []) or [])
-        if not blocks:
-            blocks = [{
-                "type": "text",
-                "content": answer,
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "priority": 0,
-            }]
-        machine_response.render_blocks = blocks
-
     return machine_response
 
 def _clip_text(value, limit=4000):
@@ -1162,17 +1151,8 @@ async def execute_rooms(
     if machine_response is None:
         raise RuntimeError("No MachineResponse produced")
 
-    if not getattr(machine_response, "answer", "") and not getattr(machine_response, "content", "") and not getattr(machine_response, "summary", "") and not list(getattr(machine_response, "render_blocks", []) or []):
-        machine_response.answer = "Не удалось сформировать ответ: слишком большой контекст или пустой результат."
-        machine_response.content = machine_response.answer
-        machine_response.summary = "Пустой результат после обработки запроса."
-        machine_response.render_blocks = [{
-            "type": "text",
-            "content": machine_response.answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "priority": 0,
-        }]
+    # Executor no longer synthesizes fallback text here.
+    # Canonical Provider output must pass through unchanged.
 
     conversation_space=context.get("conversation_space") or {}
     april_turn={
@@ -1396,19 +1376,8 @@ def executor_reflection_pass(machine_response, executor_context):
         }
     planner["reflection"]=True
 
-    if not blocks:
-        rep=planner["representation"]
-        if rep not in ("text","table","graph","gallery","formula","diagram","link"):
-            rep="text"
-        blocks.append({
-            "type":rep,
-            "content":answer,
-            "executor_generated":True,
-            "executor_pass":2,
-            "planner":planner
-        })
-
-    machine_response.render_blocks=blocks
+    # Reflection is diagnostic only; it must not synthesize new blocks.
+    machine_response.render_blocks = blocks
     machine_response.executor_cpu_verified=True
     machine_response.executor_reflection={
         "pass":2,
@@ -1951,28 +1920,11 @@ def executor_cpu_scene_pipeline(machine_response):
     )
     scene_contract = executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
 
-    # If the scene still did not materialize blocks, seed a text block from the canonical answer.
+    # Keep canonical blocks exactly as received. No scene-side synthesis.
     if not blocks:
         blocks = list(getattr(scene_contract, "render_blocks", []) or [])
     if not blocks:
         blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    if not blocks:
-        best_text = _executor_best_text(
-            getattr(machine_response, "answer", ""),
-            getattr(machine_response, "content", ""),
-            getattr(machine_response, "summary", ""),
-            getattr(scene_contract, "answer", "") if not isinstance(scene_contract, dict) else scene_contract.get("answer"),
-            getattr(scene_contract, "content", "") if not isinstance(scene_contract, dict) else scene_contract.get("content"),
-            getattr(scene_contract, "summary", "") if not isinstance(scene_contract, dict) else scene_contract.get("summary"),
-        )
-        if best_text:
-            blocks = [{
-                "type": "text",
-                "content": best_text,
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "priority": 0,
-            }]
 
     try:
         if isinstance(scene_contract, dict):
