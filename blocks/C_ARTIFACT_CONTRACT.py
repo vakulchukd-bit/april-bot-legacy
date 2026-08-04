@@ -168,14 +168,17 @@ def _extract_text_candidate(value: Any, *, allow_topic: bool = False) -> str:
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()
+
         if allow_topic:
             topic = value.get("topic")
             if isinstance(topic, str) and topic.strip():
                 return topic.strip()
+
         for key in ("label", "name", "kind", "type", "renderer", "viewer"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()
+
         return ""
 
     if isinstance(value, (list, tuple, set)):
@@ -216,19 +219,24 @@ def _canonicalize_artifact_data(
         if canonical_text:
             break
 
-    # If the payload is internal-only, do not auto-promote the topic to visible text.
     machine_only = bool(payload.get("machine_only", False))
     human_visible = payload.get("human_visible")
     if human_visible is None:
         human_visible = not machine_only
 
-    # Safe display fallback: only use a topic label for visible artifacts.
-    if not canonical_text and human_visible:
+    # If the payload is purely structural, default it to machine-only before
+    # any topic/title fallback can leak internal payloads into the UI.
+    if not canonical_text and structured_payload and payload.get("human_visible") is None and payload.get("machine_only") is None:
+        machine_only = True
+        human_visible = False
+
+    if not canonical_text and not human_visible and _extract_text_candidate(payload.get("display_text")):
+        canonical_text = _extract_text_candidate(payload.get("display_text"))
+
+    if not canonical_text and human_visible and not machine_only:
         canonical_text = _extract_text_candidate(payload.get("topic"), allow_topic=True)
         if not canonical_text:
             canonical_text = _extract_text_candidate(payload.get("title"))
-    if not canonical_text and not human_visible:
-        canonical_text = _extract_text_candidate(payload.get("display_text"))
 
     normalized = dict(payload)
     normalized["artifact_type"] = artifact_type or normalized.get("artifact_type", "")
@@ -237,14 +245,12 @@ def _canonicalize_artifact_data(
     normalized["human_visible"] = bool(human_visible)
     normalized["payload"] = structured_payload
 
-    # Canonical visible text channels.
     normalized["answer"] = canonical_text
     normalized["content"] = canonical_text
     normalized["summary"] = canonical_text
     normalized["text"] = canonical_text
     normalized.setdefault("display_text", canonical_text)
 
-    # Keep an explicit signal for downstream rooms/processors.
     normalized.setdefault(
         "signal",
         {
@@ -285,16 +291,8 @@ def _scene_text_fallback(scene: Any) -> str:
 # RENDER CONTRACT
 # =====================================================
 
+
 @dataclass
-
-# =====================================================
-# STAGE 1 PRESENTATION TRANSPORT (TEST)
-# =====================================================
-# Stage 1:
-# - Introduces canonical presentation hints.
-# - No scene generation changes yet.
-# - SceneContract logic intentionally unchanged.
-
 class ArtifactRenderContract:
 
     web_block: str = ""
@@ -308,6 +306,7 @@ class ArtifactRenderContract:
     exportable: bool = True
 
     machine_only: bool = False
+
     human_visible: bool = True
 
     # Stage 1 transport hints
@@ -317,7 +316,6 @@ class ArtifactRenderContract:
     priority: int = 100
     complexity: str = "balanced"
     layout: str = "single"
-
 
 # =====================================================
 # BASE ARTIFACT
@@ -565,7 +563,6 @@ def create_artifact(
         data=normalized_data
     )
 
-
 # =====================================================
 # FIBER INSPECTION API
 # =====================================================
@@ -666,6 +663,8 @@ def build_universal_contract(
             "content": artifact_payload.get("content", ""),
             "summary": artifact_payload.get("summary", ""),
             "render_blocks": artifact_payload.get("render_blocks", []),
+            "machine_only": artifact_payload.get("machine_only", False),
+            "human_visible": artifact_payload.get("human_visible", True),
         })
 
         machine_response = MachineResponse(
@@ -716,6 +715,329 @@ def build_universal_contract(
         contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
 
     return contract
+
+
+def create_transport_contract(
+    artifact_type: str,
+    room_source: str,
+    data: Dict[str, Any],
+    user_id: str = "",
+    subscription: str = "Free",
+) -> UniversalArtifactContract:
+    """Canonical transport factory used by text_module and room executors.
+
+    The function accepts a plain artifact payload, converts it into a
+    BaseArtifact, and then materializes the single Fiber transport envelope
+    used throughout the April pipeline.
+    """
+    payload = dict(data or {})
+    payload.setdefault("artifact_type", artifact_type)
+    payload.setdefault("room_source", room_source)
+
+    artifact = create_artifact(
+        artifact_type=artifact_type,
+        room_source=room_source,
+        data=payload,
+    )
+
+    contract = build_universal_contract(
+        artifact=artifact,
+        user_id=user_id,
+        subscription=subscription,
+    )
+
+    # Preserve room-level payload for downstream processors.
+    contract.payload.context = {
+        "artifact_type": artifact_type,
+        "room_source": room_source,
+        "user_id": user_id,
+        "subscription": subscription,
+    }
+    contract.payload.intent = dict(payload.get("intent", {}) or {})
+    contract.payload.context.update(dict(payload.get("context", {}) or {}))
+    contract.payload.knowledge = dict(payload.get("knowledge", {}) or {})
+    contract.payload.attachments = list(payload.get("attachments", []) or [])
+    contract.payload.media = dict(payload.get("media", {}) or contract.payload.media)
+    contract.payload.executor_notes = dict(payload.get("executor_notes", {}) or {})
+
+    # Keep the canonical machine response in sync with the transport payload.
+    if contract.machine_response is None:
+        contract.machine_response = MachineResponse(
+            answer=payload.get("answer", ""),
+            content=payload.get("content", payload.get("answer", "")),
+            response=payload.get("response", payload.get("answer", "")),
+            summary=payload.get("summary", payload.get("answer", "")),
+            explanation=payload.get("explanation", payload.get("summary", payload.get("answer", ""))),
+            render_blocks=list(payload.get("render_blocks", []) or []),
+            scene=dict(payload.get("scene", {}) or {}),
+            metadata=dict(payload.get("metadata", {}) or {}),
+        )
+
+    # Ensure scene payload is exposed for compatibility checks.
+    contract.payload.scene.setdefault("answer", payload.get("answer", ""))
+    contract.payload.scene.setdefault("content", payload.get("content", payload.get("answer", "")))
+    contract.payload.scene.setdefault("summary", payload.get("summary", payload.get("answer", "")))
+    contract.payload.scene.setdefault("render_blocks", list(payload.get("render_blocks", []) or []))
+
+    return contract
+
+
+
+# =====================================================
+# FACTORY INSPECTION API
+# =====================================================
+# FACTORY INSPECTION API
+# =====================================================
+
+def extract_room_profile(
+    artifact
+):
+
+    if not artifact:
+
+        return {}
+
+    return {
+
+        "domain":
+            artifact.context.domain,
+
+        "specialization":
+            artifact.context.specialization,
+
+        "knowledge_class":
+            artifact.context.knowledge_class,
+
+        "knowledge_scope":
+            artifact.context.knowledge_scope,
+
+        "capabilities":
+            artifact.context.capabilities,
+
+        "research_capabilities":
+            artifact.context.research_capabilities,
+
+        "experiment_capabilities":
+            artifact.context.experiment_capabilities,
+
+        "artifact_outputs":
+            artifact.context.artifact_outputs,
+
+        "room_source":
+            artifact.metadata.room_source
+    }
+
+# =====================================================
+# FACTORY CAPABILITY API
+# =====================================================
+
+def artifact_has_capability(
+    artifact,
+    capability: str
+):
+
+    if not artifact:
+
+        return False
+
+    return capability in (
+
+        artifact.context.capabilities
+        or []
+    )
+
+# =====================================================
+# FACTORY KNOWLEDGE API
+# =====================================================
+
+def artifact_has_knowledge(
+    artifact,
+    knowledge_area: str
+):
+
+    if not artifact:
+
+        return False
+
+    return knowledge_area in (
+
+        artifact.context.knowledge_scope
+        or []
+    )
+
+# =====================================================
+# FACTORY OUTPUT API
+# =====================================================
+
+def artifact_can_output(
+    artifact,
+    output_type: str
+):
+
+    if not artifact:
+
+        return False
+
+    return output_type in (
+
+        artifact.context.artifact_outputs
+        or []
+    )
+
+
+
+# =====================================================
+# FIBER CORE FOUNDATION
+# =====================================================
+
+@dataclass
+class FiberLaneContract:
+    lane_id: str = "A"
+    lane_name: str = "Lane A"
+    active: bool = True
+    current_load: int = 0
+    max_parallel_jobs: int = 1
+    status: str = "ready"
+
+@dataclass
+class FiberRouteContract:
+    route_id: str = "APRIL_FIBER_ROUTE"
+    route_version: str = "1.0"
+    dispatcher: str = "default"
+    active_lane: str = "A"
+    lane_count: int = 3
+    transport_policy: str = "single_route_multi_lane"
+    scaling_policy: str = "horizontal_lane_scaling"
+
+@dataclass
+class DispatcherContract:
+    selected_lane: str = "A"
+    selection_reason: str = "available"
+    queue_position: int = 0
+    dispatch_time: float = field(default_factory=time.time)
+
+@dataclass
+class TraceContract:
+    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    lane: str = "A"
+    stage: str = "CONTRACT"
+    room: str = ""
+    elapsed_ms: float = 0.0
+    payload_size: int = 0
+    block_count: int = 0
+    attachment_count: int = 0
+    status: str = "ACTIVE"
+
+@dataclass
+class MetricsContract:
+    payload_size: int = 0
+    block_count: int = 0
+    attachment_count: int = 0
+    elapsed_ms: float = 0.0
+    lane: str = "A"
+
+@dataclass
+class IdentityContract:
+    user_id: str = ""
+    subscription: str = "Free"
+    capabilities: list = field(default_factory=list)
+    limits: dict = field(default_factory=dict)
+
+@dataclass
+class CapabilityContract:
+    tools: list = field(default_factory=list)
+    renderers: list = field(default_factory=list)
+    viewers: list = field(default_factory=list)
+    permissions: list = field(default_factory=list)
+
+@dataclass
+class MemoryContract:
+    working_memory: dict = field(default_factory=dict)
+    persistent_memory: dict = field(default_factory=dict)
+    scene_memory: dict = field(default_factory=dict)
+    visual_memory: dict = field(default_factory=dict)
+
+@dataclass
+class VisualContract:
+    active_images: list = field(default_factory=list)
+    anchors: list = field(default_factory=list)
+    gallery: list = field(default_factory=list)
+    focus: dict = field(default_factory=dict)
+
+@dataclass
+class RendererContract:
+    scene_renderer: str = "default"
+    supported_blocks: list = field(default_factory=list)
+    responsive: bool = True
+
+@dataclass
+class DiagnosticContract:
+    stage: str = "CONTRACT"
+    status: str = "OK"
+    message: str = ""
+
+
+@dataclass
+class FiberCoreContract:
+    route: FiberRouteContract = field(default_factory=FiberRouteContract)
+    dispatcher: DispatcherContract = field(default_factory=DispatcherContract)
+    lane: FiberLaneContract = field(default_factory=FiberLaneContract)
+    trace: TraceContract = field(default_factory=TraceContract)
+    metrics: MetricsContract = field(default_factory=MetricsContract)
+    identity: IdentityContract = field(default_factory=IdentityContract)
+    capabilities: CapabilityContract = field(default_factory=CapabilityContract)
+    memory: MemoryContract = field(default_factory=MemoryContract)
+    visual: VisualContract = field(default_factory=VisualContract)
+    renderer: RendererContract = field(default_factory=RendererContract)
+    diagnostics: DiagnosticContract = field(default_factory=DiagnosticContract)
+
+# =====================================================
+# UNIVERSAL TRANSPORT CONTRACT (APRIL FIBER CHANNEL)
+# =====================================================
+
+@dataclass
+class TransportContract:
+    """Payload envelope only. All routing belongs to FiberCore."""
+    transport_version: str = "2.0"
+
+@dataclass
+class MachinePayload:
+    intent: Dict[str, Any] = field(default_factory=dict)
+    context: Dict[str, Any] = field(default_factory=dict)
+    knowledge: Dict[str, Any] = field(default_factory=dict)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    scene: Dict[str, Any] = field(default_factory=dict)
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
+    media: Dict[str, Any] = field(default_factory=lambda:{
+        "text":[],
+        "markdown":[],
+        "tables":[],
+        "graphs":[],
+        "formulas":[],
+        "images":[],
+        "gallery":[],
+        "files":[],
+        "audio":[],
+        "video":[],
+        "code":[],
+        "links":[],
+        "diagrams":[],
+        "actions":[]
+    })
+    executor_notes: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class UniversalArtifactContract:
+    # FiberCore is the single owner of routing state.
+    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
+    transport: TransportContract = field(default_factory=TransportContract)
+    payload: MachinePayload = field(default_factory=MachinePayload)
+    artifact: Optional[BaseArtifact] = None
+    machine_response: Optional["MachineResponse"] = None
+    machine_scene: Optional["MachineScene"] = None
+    scene_contract: Optional["SceneContract"] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
 
 
 # =====================================================
@@ -992,6 +1314,7 @@ def add_room_contribution(response: MachineResponse, room: str, payload: Dict[st
 # CANONICAL MACHINE SCENE BUILDER
 # =====================================================
 
+
 def build_machine_scene(response: MachineResponse) -> MachineScene:
     """Canonical MachineResponse -> MachineScene transformation.
     The Factory owns Scene construction; Executor only invokes it.
@@ -1001,12 +1324,16 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
     # Preserve Fiber ownership.
     scene.fiber = response.fiber
 
+    response_metadata = getattr(response, "metadata", {}) or {}
+
     # Carry metadata when available.
     scene.metadata = {
         "confidence": getattr(response, "confidence", 0.0),
         "diagnostics": getattr(response, "diagnostics", {}),
         "quality": getattr(response, "quality", {}),
         "routing_decision": getattr(response, "routing_decision", {}),
+        "machine_only": bool(response_metadata.get("machine_only", False)),
+        "human_visible": response_metadata.get("human_visible", True),
     }
 
     # Reuse render blocks if Executor already materialized them.
@@ -1034,7 +1361,6 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
         setattr(scene, "conversation_space", getattr(response, "conversation_space"))
 
     return scene
-
 
 
 # =====================================================
@@ -1087,14 +1413,19 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.render_blocks = list(contract.blocks)
     contract.metadata.update(scene.metadata or {})
     # Canonical transport fields must always reflect the latest scene state.
-    contract.metadata["answer"] = _scene_text_fallback(scene)
-    contract.metadata["content"] = _scene_text_fallback(scene)
-    contract.metadata["summary"] = _scene_text_fallback(scene)
+    canonical_text = _scene_text_fallback(scene)
+    contract.metadata["answer"] = canonical_text
+    contract.metadata["content"] = canonical_text
+    contract.metadata["summary"] = canonical_text
     contract.metadata["artifact_count"] = len(getattr(scene, "artifacts", []) or [])
     contract.metadata["transport_stage"] = "artifact_contract_stage2"
     contract.metadata["canonical_scene_contract"] = True
-    contract.metadata["machine_only"] = bool(contract.metadata.get("machine_only", False))
-    contract.metadata["human_visible"] = contract.metadata.get("human_visible", True)
+    contract.metadata["machine_only"] = bool(contract.metadata.get("machine_only", False) or _scene_is_internal_only(scene))
+    contract.metadata["human_visible"] = bool(contract.metadata.get("human_visible", not contract.metadata["machine_only"]))
+    if contract.metadata["machine_only"]:
+        contract.metadata["answer"] = ""
+        contract.metadata["content"] = ""
+        contract.metadata["summary"] = ""
     contract.active_scene = getattr(scene, "active_scene", "")
     contract.space_continuity = {
         "active_scene": contract.active_scene,
