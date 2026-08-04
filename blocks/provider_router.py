@@ -828,32 +828,18 @@ def sanitize_internal_reasoning(text):
 # =====================================================
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-APRIL PROTOCOL
+APRIL PROVIDER
 
-Role:
-You are the Provider transport gateway.
+Return one valid JSON object only.
 
-Internally perform the work in this order:
-1. Understand the request.
-2. Produce the complete answer.
-3. Produce a short summary from the answer.
-4. Produce the scene.
-5. Produce render_blocks from the scene.
-6. Return ONE final JSON object only.
+Use only the current user request.
+Do not use conversation history, memory, visual context, previous turns, or second-circle state.
 
-The response MUST be valid JSON accepted by json.loads().
-
-Every newline inside string values MUST be escaped as \\n.
-Every double quote inside string values MUST be escaped.
-Return exactly one JSON object and nothing else.
-
-Never output markdown, code fences, comments, reasoning or text before/after JSON.
-
-Required semantic fields:
+Required keys:
 answer
+content
 summary
 explanation
-content
 scene
 artifacts
 render_blocks
@@ -861,101 +847,42 @@ scene_plan
 render_priority
 confidence
 
-Do not invent extra top-level fields.
-Provider transport metadata is added by Python after parsing.
-
-Behavior rules:
-- Use requested_outputs as mandatory output targets whenever present.
-- Use required_artifacts to decide which render_blocks to generate.
-- Use required_competencies to determine the professional depth of the answer.
-- If the request asks for comparison, generate a comparison table artifact.
-- If the request asks for a process, flow or route, generate a diagram/flow artifact.
-- If multiple representations are requested, generate all of them in one MachineResponse.
-- Prefer detailed explanations unless constraints explicitly require brevity.
+Rules:
+- answer/content/summary should be based on the current request only.
+- If the request does not need visuals, keep scene/artifacts/render_blocks empty.
+- No markdown, no code fences, no extra keys, no commentary.
 """
 
 
 def build_openai_request(machine_request):
     """
-    Stage 2:
-    Convert one canonical MachineRequest into one canonical
-    OpenAI Responses API request.
+    Build the smallest possible OpenAI request for the first circle.
+    Only the current user request is sent upstream.
     """
     if not isinstance(machine_request, dict):
         machine_request = {}
 
     intent = machine_request.get("intent") or {}
     user_text = (
-        intent.get("normalized_text")
+        machine_request.get("goal")
+        or intent.get("normalized_text")
         or intent.get("text")
         or machine_request.get("content")
         or ""
     )
 
-    # STAGE 2 - Compact Provider Payload
-    memory = machine_request.get("memory") or {}
-    visual = machine_request.get("visual_context") or {}
+    user_text = str(user_text).strip()
 
-    payload = {
-        "goal": machine_request.get("goal"),
-        "intent": {
-            "type": intent.get("type"),
-            "normalized_text": user_text,
-        },
-        "conversation": machine_request.get("conversation"),
-        "memory": memory,
-        "visual_context": visual,
-        "available_tools": machine_request.get("available_tools"),
-        "requested_outputs": machine_request.get("requested_outputs"),
-        "required_competencies": machine_request.get("required_competencies"),
-        "required_artifacts": machine_request.get("required_artifacts"),
-        "routing": machine_request.get("routing"),
-        "constraints": machine_request.get("constraints"),
-    }
+    provider_log("========== CURRENT USER REQUEST ==========")
+    provider_log(user_text[:4000])
 
-    def _meaningful(value):
-        if value is None:
-            return False
-        if value == "":
-            return False
-        if value == {}:
-            return False
-        if value == []:
-            return False
-        return True
-
-    payload = {k: v for k, v in payload.items() if _meaningful(v)}
-
-    provider_log("========== MACHINE REQUEST ==========")
-    provider_log(json.dumps(payload, ensure_ascii=False)[:8000])
-
-    # Always include the canonical MachineRequest payload for normal text requests.
-    # A minimal prompt causes the model to answer about the protocol itself.
-    sections=[]
-    order=[
-        ("goal","GOAL"),
-        ("intent","SEMANTIC"),
-        ("memory","MEMORY"),
-        ("conversation","CONVERSATION"),
-        ("visual_context","VISUAL_CONTEXT"),
-        ("available_tools","AVAILABLE_TOOLS"),
-        ("requested_outputs","REQUESTED_OUTPUTS"),
-        ("required_competencies","REQUIRED_COMPETENCIES"),
-        ("required_artifacts","REQUIRED_ARTIFACTS"),
-        ("routing","ROUTING"),
-        ("constraints","CONSTRAINTS"),
-    ]
-    for key,title in order:
-        if key in payload:
-            sections.append(f"{title}:\n{json.dumps(payload[key], ensure_ascii=False)}\n")
-
-    structured_prompt=(
-        "APRIL MACHINE REQUEST\n\n"
-        "Transform the following MachineRequest into exactly one MachineResponse.\n"
-        "Follow the APRIL protocol exactly.\n\n"
-        + "\n".join(sections)
-        + "\nOutput format: MachineResponse only. No markdown. No explanations."
+    structured_prompt = (
+        "CURRENT USER REQUEST\n\n"
+        f"{user_text}\n\n"
+        "Return one valid JSON object only with the required keys. "
+        "Use only this request. No history, no memory, no visual context."
     )
+
     return {
         "role": "user",
         "content": [{
@@ -963,7 +890,6 @@ def build_openai_request(machine_request):
             "text": structured_prompt
         }]
     }
-
 
 
 def machine_request_to_dict(machine_request):
@@ -1440,8 +1366,8 @@ async def generate_text(
             "input": normalized_input,
         }
 
-        if max_output_tokens is not None:
-            request["max_output_tokens"] = max_output_tokens
+        effective_max_output_tokens = max_output_tokens if max_output_tokens is not None else 1200
+        request["max_output_tokens"] = effective_max_output_tokens
 
         # GPT-5.6 Responses API compatibility:
         # only legacy models receive temperature.
