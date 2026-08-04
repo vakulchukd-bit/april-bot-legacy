@@ -1058,6 +1058,16 @@ async def process(
                 state["provider_machine_response"] = provider_packet.get("machine_response", {})
             else:
                 state["provider_machine_response"] = {}
+            # Keep the canonical answer available even when the provider packet is partial.
+            if not output:
+                mr = state.get("provider_machine_response", {}) or {}
+                output = (
+                    mr.get("answer")
+                    or mr.get("content")
+                    or mr.get("response")
+                    or mr.get("summary")
+                    or ""
+                )
         else:
             output = sanitize_model_output(
                 output
