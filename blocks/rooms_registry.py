@@ -501,14 +501,11 @@ def build_professional_room_vector(context):
 def select_professional_rooms(context):
     # Executor is the single orchestration authority.
     # Registry exposes capabilities only and does not choose winners.
-    return build_professional_room_vector(context)
-
+    vector = build_professional_room_vector(context)
     candidates = []
 
     for room_name, score in vector.items():
-
         if score > 0:
-
             candidates.append({
                 "room": room_name,
                 "score": score
@@ -1369,51 +1366,331 @@ def _machine_response_has_payload(mr):
         or list(getattr(mr, "artifacts", []) or [])
     )
 
+
+def _registry_is_text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _registry_copy_text_field(target, field, value):
+    if _registry_is_text(value):
+        try:
+            setattr(target, field, value.strip())
+        except Exception:
+            pass
+
+
+def _registry_copy_structured_field(target, field, value):
+    if value in (None, "", [], {}):
+        return
+    try:
+        setattr(target, field, value)
+    except Exception:
+        pass
+
+
+def _registry_materialize_response(result):
+    """
+    Normalize any room result into a MachineResponse without turning internal
+    dict/object payloads into human-visible answer/content text.
+    """
+    if result is None:
+        return None
+
+    if isinstance(result, MachineResponse):
+        return result
+
+    if isinstance(result, dict) and isinstance(result.get("machine_response"), MachineResponse):
+        return result["machine_response"]
+
+    response = MachineResponse()
+    payload_seen = False
+
+    # Copy contributions first so room-specific signals are preserved.
+    if isinstance(result, dict):
+        contributions = result.get("contributions")
+        if isinstance(contributions, dict):
+            try:
+                response.contributions.update(contributions)
+                payload_seen = payload_seen or bool(contributions)
+            except Exception:
+                pass
+
+        artifacts = result.get("artifacts")
+        if isinstance(artifacts, list):
+            try:
+                response.artifacts.extend(artifacts)
+                payload_seen = payload_seen or bool(artifacts)
+            except Exception:
+                pass
+
+        # Preserve canonical text fields only when they are already text.
+        for field in (
+            "answer", "content", "summary", "response", "explanation",
+            "text", "message", "output", "output_text",
+        ):
+            if field in result:
+                value = result.get(field)
+                if _registry_is_text(value):
+                    _registry_copy_text_field(response, field, value)
+                    payload_seen = True
+
+        for field in (
+            "scene", "metadata", "scene_plan", "render_priority",
+            "provider", "provider_contract", "transport_contract",
+            "provider_original_answer", "provider_original_content",
+            "processor_input", "provider_source_request",
+            "scene_contract", "scene_runtime", "conversation_space",
+            "current_turn", "timeline", "dialog", "goal", "goal_hierarchy",
+            "focus", "visual_reference", "visual_summary", "active_visual_scene",
+            "executor_decision", "executor_presentation_plan",
+            "executor_scene_profile", "provider_reference_context",
+            "second_circle_context",
+        ):
+            if field in result and result.get(field) not in (None, "", [], {}):
+                _registry_copy_structured_field(response, field, result.get(field))
+                payload_seen = True
+
+        render_blocks = result.get("render_blocks")
+        if isinstance(render_blocks, list):
+            try:
+                response.render_blocks = list(render_blocks)
+                payload_seen = payload_seen or bool(render_blocks)
+            except Exception:
+                pass
+
+        # If an artifact-shaped payload is present, keep it in artifacts rather
+        # than promoting it to human-visible text.
+        artifact = result.get("artifact")
+        if artifact is not None and not isinstance(artifact, str):
+            try:
+                response.artifacts.append(artifact)
+                payload_seen = True
+            except Exception:
+                pass
+
+        return response if payload_seen or _machine_response_has_payload(response) else None
+
+    # Fallback: inspect attributes of custom objects and preserve them safely.
+    try:
+        if hasattr(result, "__dict__"):
+            attrs = {k: v for k, v in vars(result).items() if not k.startswith("_")}
+        else:
+            attrs = {}
+    except Exception:
+        attrs = {}
+
+    if not attrs:
+        return None
+
+    for field in (
+        "answer", "content", "summary", "response", "explanation",
+        "text", "message", "output", "output_text",
+    ):
+        if field in attrs and _registry_is_text(attrs[field]):
+            _registry_copy_text_field(response, field, attrs[field])
+            payload_seen = True
+
+    for field in (
+        "scene", "metadata", "scene_plan", "render_priority",
+        "provider", "provider_contract", "transport_contract",
+        "provider_original_answer", "provider_original_content",
+        "processor_input", "provider_source_request",
+        "scene_contract", "scene_runtime", "conversation_space",
+        "current_turn", "timeline", "dialog", "goal", "goal_hierarchy",
+        "focus", "visual_reference", "visual_summary", "active_visual_scene",
+        "executor_decision", "executor_presentation_plan",
+        "executor_scene_profile", "provider_reference_context",
+        "second_circle_context",
+    ):
+        if field in attrs and attrs[field] not in (None, "", [], {}):
+            _registry_copy_structured_field(response, field, attrs[field])
+            payload_seen = True
+
+    artifacts = attrs.get("artifacts")
+    if isinstance(artifacts, list):
+        try:
+            response.artifacts.extend(artifacts)
+            payload_seen = payload_seen or bool(artifacts)
+        except Exception:
+            pass
+
+    contributions = attrs.get("contributions")
+    if isinstance(contributions, dict):
+        try:
+            response.contributions.update(contributions)
+            payload_seen = payload_seen or bool(contributions)
+        except Exception:
+            pass
+
+    render_blocks = attrs.get("render_blocks")
+    if isinstance(render_blocks, list):
+        try:
+            response.render_blocks = list(render_blocks)
+            payload_seen = payload_seen or bool(render_blocks)
+        except Exception:
+            pass
+
+    return response if payload_seen or _machine_response_has_payload(response) else None
+
+
+def _registry_response_score(response):
+    if response is None:
+        return -1
+    score = 0
+    answer = _registry_is_text(getattr(response, "answer", None))
+    content = _registry_is_text(getattr(response, "content", None))
+    summary = _registry_is_text(getattr(response, "summary", None))
+
+    if answer:
+        score += len(getattr(response, "answer")) * 5
+    if content:
+        score += len(getattr(response, "content")) * 4
+    if summary:
+        score += len(getattr(response, "summary")) * 3
+
+    blocks = list(getattr(response, "render_blocks", []) or [])
+    artifacts = list(getattr(response, "artifacts", []) or [])
+    contributions = getattr(response, "contributions", {}) or {}
+    scene = getattr(response, "scene", None)
+
+    score += len(blocks) * 150
+    score += len(artifacts) * 100
+    score += len(contributions) * 8
+
+    if scene not in (None, {}, []):
+        score += 50
+
+    if answer and content and summary:
+        score += 40
+
+    if any(
+        _registry_is_text(getattr(response, field, None))
+        for field in ("provider_original_answer", "provider_original_content")
+    ):
+        score += 20
+
+    return score
+
+
+def _registry_merge_response_payload(target, source):
+    if target is None or source is None:
+        return target
+
+    # Keep the strongest text already present unless the target is empty.
+    for field in ("answer", "content", "summary"):
+        current = getattr(target, field, None)
+        incoming = getattr(source, field, None)
+        if _registry_is_text(incoming) and not _registry_is_text(current):
+            _registry_copy_text_field(target, field, incoming)
+
+    # Merge structural fields conservatively.
+    for field in ("scene", "metadata", "scene_plan", "render_priority",
+                  "provider", "provider_contract", "transport_contract",
+                  "provider_original_answer", "provider_original_content",
+                  "processor_input", "provider_source_request",
+                  "scene_contract", "scene_runtime", "conversation_space",
+                  "current_turn", "timeline", "dialog", "goal", "goal_hierarchy",
+                  "focus", "visual_reference", "visual_summary", "active_visual_scene",
+                  "executor_decision", "executor_presentation_plan",
+                  "executor_scene_profile", "provider_reference_context",
+                  "second_circle_context"):
+        incoming = getattr(source, field, None)
+        if incoming not in (None, "", [], {}):
+            current = getattr(target, field, None)
+            if current in (None, "", [], {}):
+                _registry_copy_structured_field(target, field, incoming)
+
+    # Merge contributions and artifacts.
+    try:
+        target.contributions.update(getattr(source, "contributions", {}) or {})
+    except Exception:
+        pass
+
+    try:
+        target.artifacts.extend(getattr(source, "artifacts", []) or [])
+    except Exception:
+        pass
+
+    # Prefer explicit render blocks, but never replace an existing textual answer
+    # with a structured payload.
+    incoming_blocks = list(getattr(source, "render_blocks", []) or [])
+    if incoming_blocks:
+        current_blocks = list(getattr(target, "render_blocks", []) or [])
+        if not current_blocks:
+            try:
+                target.render_blocks = list(incoming_blocks)
+            except Exception:
+                pass
+
+    return target
+
+
 def registry_accept_request(request: MachineRequest)->MachineRequest:
     return request
 
 def registry_collect_responses(responses):
-    """Preserve the first complete MachineResponse and merge subsequent room contributions."""
+    """Preserve the strongest text-bearing MachineResponse and merge room signals."""
     mr = None
+    best_score = -1
 
     for r in responses:
         if r is None:
             continue
 
-        candidate = None
-        if isinstance(r, MachineResponse):
-            candidate = r
-        elif isinstance(r, dict) and isinstance(r.get("machine_response"), MachineResponse):
-            candidate = r["machine_response"]
-
-        if candidate is not None:
-            if mr is None:
-                mr = candidate
-            elif (not _machine_response_has_payload(mr)) and _machine_response_has_payload(candidate):
-                preserved = mr
-                mr = candidate
-                try:
-                    mr.contributions.update(getattr(preserved, "contributions", {}) or {})
-                    mr.artifacts.extend(getattr(preserved, "artifacts", []) or [])
-                except Exception:
-                    pass
-            else:
-                mr.artifacts.extend(getattr(candidate, "artifacts", []) or [])
-                mr.contributions.update(getattr(candidate, "contributions", {}) or {})
-                for field in ("answer","content","summary","render_blocks","metadata"):
-                    current = getattr(mr, field, None)
-                    incoming = getattr(candidate, field, None)
-                    if (not current) and incoming:
-                        setattr(mr, field, incoming)
+        candidate = _registry_materialize_response(r)
+        if candidate is None:
             continue
 
-        if hasattr(r, "artifacts"):
-            if mr is None:
-                mr = MachineResponse()
-            mr.artifacts.extend(getattr(r,"artifacts",[]) or [])
+        candidate_score = _registry_response_score(candidate)
+
+        if mr is None:
+            mr = candidate
+            best_score = candidate_score
+            continue
+
+        # Keep the strongest text-bearing response as the primary payload, but
+        # merge every room's contributions and artifacts into the same response.
+        if candidate_score > best_score and _machine_response_has_payload(candidate):
+            preserved = mr
+            mr = candidate
+            best_score = candidate_score
+            try:
+                mr.contributions.update(getattr(preserved, "contributions", {}) or {})
+                mr.artifacts.extend(getattr(preserved, "artifacts", []) or [])
+            except Exception:
+                pass
+        else:
+            _registry_merge_response_payload(mr, candidate)
 
     if mr is None:
         mr = MachineResponse()
+
+    # Normalize empty text fields so downstream code never treats non-text
+    # objects as a human answer.
+    for field in ("answer", "content", "summary"):
+        value = getattr(mr, field, None)
+        if not _registry_is_text(value):
+            try:
+                setattr(mr, field, "")
+            except Exception:
+                pass
+
+    # If the registry has a text answer but no blocks, provide a plain text
+    # block so the executor/web chain has a stable signal to render.
+    if _registry_is_text(getattr(mr, "answer", None)) and not list(getattr(mr, "render_blocks", []) or []):
+        try:
+            mr.render_blocks = [{
+                "type": "text",
+                "content": getattr(mr, "answer", ""),
+                "signal": "TEXT",
+                "source_type": "text",
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "label": "text",
+                "priority": 0,
+            }]
+        except Exception:
+            pass
 
     return mr
 
@@ -1422,8 +1699,18 @@ def registry_export_contract(response: MachineResponse):
     contract.transport.origin="rooms_registry"
     contract.transport.destination="executor"
     contract.transport.pipeline_stage="registry_output"
-    contract.payload.artifacts = list(response.artifacts)
-    if response.artifacts:
+    contract.payload.artifacts = list(getattr(response, "artifacts", []) or [])
+    try:
+        contract.payload.render_blocks = list(getattr(response, "render_blocks", []) or [])
+    except Exception:
+        pass
+    try:
+        contract.payload.answer = getattr(response, "answer", "")
+        contract.payload.content = getattr(response, "content", "")
+        contract.payload.summary = getattr(response, "summary", "")
+    except Exception:
+        pass
+    if getattr(response, "artifacts", []):
         contract.artifact=response.artifacts[0]
     return contract
 
@@ -1448,7 +1735,8 @@ def registry_trace(stage, **payload):
 def registry_execute(machine_request: MachineRequest, room_results):
     """
     Canonical entrypoint used by Executor.
-    Aggregates room results into one MachineResponse.
+    Aggregates room results into one MachineResponse without allowing internal
+    room payloads to replace the canonical human-facing answer.
     """
     registry_trace("request_received", request_type=type(machine_request).__name__)
 
@@ -1458,14 +1746,27 @@ def registry_execute(machine_request: MachineRequest, room_results):
         "registry",
         {
             "rooms_processed": len(room_results),
-            "artifacts": len(response.artifacts),
+            "artifacts": len(getattr(response, "artifacts", []) or []),
+            "has_text": bool(_registry_is_text(getattr(response, "answer", None))),
         },
     )
 
+    # Preserve request provenance for diagnostics without exposing it as answer.
+    try:
+        response.contributions.setdefault(
+            "request_provenance",
+            {
+                "request_type": type(machine_request).__name__,
+                "machine_request_present": machine_request is not None,
+            },
+        )
+    except Exception:
+        pass
+
     registry_trace(
         "response_ready",
-        artifacts=len(response.artifacts),
-        contributions=list(response.contributions.keys()),
+        artifacts=len(getattr(response, "artifacts", []) or []),
+        contributions=list(getattr(response, "contributions", {}).keys()),
     )
 
     response = registry_validate_response(response)
@@ -1495,9 +1796,11 @@ PARENT_ROOM_GROUPS = {
 
 def registry_execution_summary(response: MachineResponse):
     return {
-        "artifacts": len(response.artifacts),
-        "contributions": sorted(list(response.contributions.keys())),
+        "artifacts": len(getattr(response, "artifacts", []) or []),
+        "contributions": sorted(list(getattr(response, "contributions", {}).keys())),
         "parent_groups": list(PARENT_ROOM_GROUPS.keys()),
+        "has_text": bool(_registry_is_text(getattr(response, "answer", None))),
+        "has_render_blocks": bool(list(getattr(response, "render_blocks", []) or [])),
     }
 
 def registry_parent_dispatch(machine_request: MachineRequest, room_results):
@@ -1532,12 +1835,39 @@ def registry_validate_response(response: MachineResponse):
         "missing": [],
         "artifact_count": len(getattr(response, "artifacts", [])),
         "contribution_count": len(getattr(response, "contributions", {})),
+        "has_text": bool(_registry_is_text(getattr(response, "answer", None))),
+        "has_render_blocks": bool(list(getattr(response, "render_blocks", []) or [])),
     }
 
     for field in REQUIRED_RESPONSE_FIELDS:
         if not hasattr(response, field):
             diagnostics["valid"] = False
             diagnostics["missing"].append(field)
+
+    # Keep the canonical text fields safe and predictable.
+    for field in ("answer", "content", "summary"):
+        value = getattr(response, field, None)
+        if not _registry_is_text(value):
+            try:
+                setattr(response, field, "")
+            except Exception:
+                pass
+
+    # Ensure a plain text render block exists whenever a canonical answer exists.
+    if _registry_is_text(getattr(response, "answer", None)) and not list(getattr(response, "render_blocks", []) or []):
+        try:
+            response.render_blocks = [{
+                "type": "text",
+                "content": getattr(response, "answer", ""),
+                "signal": "TEXT",
+                "source_type": "text",
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "label": "text",
+                "priority": 0,
+            }]
+        except Exception:
+            pass
 
     response.contributions.setdefault(
         "registry_diagnostics",
