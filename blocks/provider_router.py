@@ -211,10 +211,9 @@ def _provider_turn_summary(turn: Any, limit: int = 240) -> str:
 # =====================================================
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = (
-    "APRIL PROVIDER. Return one valid JSON object only. "
-    "Use CURRENT USER REQUEST as the task. "
-    "Use REFERENCE CONTEXT only as background if present. "
-    "Do not repeat history, visuals, memory dumps, or previous turns."
+    "APRIL PROVIDER: answer only the current request as compact JSON. "
+    "Use reference context only to resolve continuation. "
+    "Do not include history, memory dumps, or visual context."
 )
 
 
@@ -300,10 +299,10 @@ def build_provider_reference_context(machine_request: Dict[str, Any]) -> Dict[st
     )
 
     reference_context = {
-        "active_topic": _provider_trim_text(active_topic, 80),
-        "last_user_turn_summary": _provider_turn_summary(last_user_turn, 180),
-        "last_april_turn_summary": _provider_turn_summary(last_april_turn, 180),
-        "dialog_focus": focus if isinstance(focus, dict) else _provider_trim_text(focus, 120),
+        "active_topic": _provider_trim_text(active_topic, 60),
+        "last_user_turn_summary": _provider_turn_summary(last_user_turn, 120),
+        "last_april_turn_summary": _provider_turn_summary(last_april_turn, 120),
+        "dialog_focus": focus if isinstance(focus, dict) else _provider_trim_text(focus, 100),
     }
 
     return {k: v for k, v in reference_context.items() if v not in ("", {}, [], None)}
@@ -314,7 +313,7 @@ def build_openai_request(machine_request: Dict[str, Any]) -> Dict[str, Any]:
     Build a compact first-circle prompt:
     - current user request
     - optional tiny reference context
-    - fixed JSON contract
+    - minimal JSON contract
     """
     if not isinstance(machine_request, dict):
         machine_request = {}
@@ -331,27 +330,30 @@ def build_openai_request(machine_request: Dict[str, Any]) -> Dict[str, Any]:
 
     reference_context = build_provider_reference_context(machine_request)
 
-    provider_log("CURRENT REQUEST:", _provider_trim_text(user_text, 800))
+    provider_log("CURRENT REQUEST:", _provider_trim_text(user_text, 400))
     if reference_context:
-        provider_log("REFERENCE CONTEXT:", _provider_trim_text(json.dumps(reference_context, ensure_ascii=False), 800))
+        provider_log("REFERENCE CONTEXT:", _provider_trim_text(json.dumps(reference_context, ensure_ascii=False), 400))
 
     prompt_parts = [
-        "CURRENT USER REQUEST",
+        "TASK",
         user_text,
     ]
 
     if reference_context:
         prompt_parts.extend([
             "",
-            "REFERENCE CONTEXT (background only; do not repeat):",
-            json.dumps(reference_context, ensure_ascii=False),
+            "CONTEXT (background only; do not repeat):",
+            f"topic: {reference_context.get('active_topic', '')}",
+            f"last_user: {reference_context.get('last_user_turn_summary', '')}",
+            f"last_april: {reference_context.get('last_april_turn_summary', '')}",
+            f"focus: {reference_context.get('dialog_focus', '')}",
         ])
 
     prompt_parts.extend([
         "",
-        "Return one valid JSON object only.",
-        "Required keys: answer, content, summary, explanation, scene, artifacts, render_blocks, scene_plan, render_priority, confidence.",
-        "Answer only the current request.",
+        'Return compact JSON only: {"answer":"..."}',
+        "Keep it concise unless the request asks for depth.",
+        "No markdown, no commentary, no extra keys.",
     ])
 
     return {
@@ -429,6 +431,79 @@ def provider_preserve_full_response(data: Any) -> Dict[str, Any]:
     data.setdefault("provider_raw", data["_provider_payload"])
     data.setdefault("processor_input", data["_provider_payload"])
     return data
+
+
+def normalize_text_transport(contract: Any) -> Dict[str, Any]:
+    """
+    Fill canonical text aliases without expanding the payload.
+    """
+    if not isinstance(contract, dict):
+        return {}
+
+    candidate = (
+        contract.get("answer")
+        or contract.get("content")
+        or contract.get("response")
+        or contract.get("summary")
+        or contract.get("explanation")
+        or ""
+    )
+
+    contract.setdefault("answer", candidate)
+    contract.setdefault("content", contract.get("answer", candidate))
+    contract.setdefault("response", contract.get("answer", candidate))
+    contract.setdefault("summary", contract.get("answer", candidate))
+    contract.setdefault("explanation", contract.get("summary", candidate))
+    return contract
+
+
+def _provider_select_first_circle_budget(machine_request: Dict[str, Any], requested_model: str) -> Tuple[str, int]:
+    """
+    Pick a cheaper model and smaller output budget for simple prompts.
+    """
+    if not isinstance(machine_request, dict):
+        machine_request = {}
+
+    intent = machine_request.get("intent") or {}
+    user_text = (
+        machine_request.get("goal")
+        or intent.get("normalized_text")
+        or intent.get("text")
+        or machine_request.get("content")
+        or ""
+    )
+    user_text = str(user_text).strip()
+    reference_context = build_provider_reference_context(machine_request)
+
+    words = len(user_text.split())
+    chars = len(user_text)
+    has_context = bool(reference_context)
+
+    simple = words <= 8 and chars <= 48 and not has_context
+    short = words <= 16 and chars <= 100
+    medium = words <= 32 and chars <= 180
+
+    if requested_model != OPENAI_PRIMARY_MODEL:
+        base_model = requested_model
+    elif simple:
+        base_model = OPENAI_FAST_MODEL
+    elif short:
+        base_model = OPENAI_FAST_MODEL if not has_context else OPENAI_BALANCED_MODEL
+    elif medium:
+        base_model = OPENAI_BALANCED_MODEL
+    else:
+        base_model = OPENAI_PRIMARY_MODEL
+
+    if simple:
+        budget = 128
+    elif short:
+        budget = 192 if not has_context else 256
+    elif medium:
+        budget = 320 if not has_context else 384
+    else:
+        budget = 512 if not has_context else 640
+
+    return base_model, budget
 
 
 def validate_machine_response_contract(contract: Any) -> Dict[str, Any]:
@@ -877,15 +952,21 @@ async def generate_text(
         provider_log("RAW MESSAGE TYPE:", type(messages))
         provider_stage_log("INPUT", {"type": type(messages).__name__})
 
-        normalized_input = normalize_provider_input(messages)
+        source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
+        selected_model = model
+        effective_max_output_tokens = max_output_tokens
+
+        if effective_max_output_tokens is None:
+            selected_model, effective_max_output_tokens = _provider_select_first_circle_budget(source_request, model)
+
+        normalized_input = normalize_provider_input(source_request)
         provider_stage_log("OPENAI_REQUEST", {"items": len(normalized_input)})
 
         request = {
-            "model": model,
+            "model": selected_model,
             "input": normalized_input,
         }
 
-        effective_max_output_tokens = max_output_tokens if max_output_tokens is not None else 1200
         request["max_output_tokens"] = effective_max_output_tokens
 
         legacy_temperature_models = {
@@ -916,7 +997,6 @@ async def generate_text(
 
         provider_exit("openai_text", True)
 
-        source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
         contract = create_provider_contract(raw_text, source_request=source_request)
 
         if isinstance(contract, dict):
