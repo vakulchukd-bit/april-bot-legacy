@@ -207,29 +207,149 @@ def _executor_preserve_canonical_text(machine_response, scene_contract=None, sce
     return machine_response
 
 
-def _executor_response_score(value):
-    """Prefer the richest non-empty response when multiple rooms return candidates."""
+
+_EXECUTOR_CANONICAL_FIELDS = (
+    "answer",
+    "content",
+    "summary",
+    "response",
+    "explanation",
+    "scene",
+    "artifacts",
+    "render_blocks",
+    "scene_plan",
+    "render_priority",
+    "metadata",
+    "confidence",
+    "provider",
+    "provider_contract",
+    "transport_contract",
+    "provider_original_answer",
+    "provider_original_content",
+    "processor_input",
+    "provider_source_request",
+    "scene_contract",
+    "scene_runtime",
+    "conversation_space",
+    "current_turn",
+    "timeline",
+    "dialog",
+    "goal",
+    "goal_hierarchy",
+    "focus",
+    "visual_reference",
+    "visual_summary",
+    "active_visual_scene",
+    "executor_decision",
+    "executor_presentation_plan",
+    "executor_scene_profile",
+)
+
+def _executor_payload_to_mapping(value):
+    """Convert any room/provider payload into a plain mapping."""
+    if value is None:
+        return {}
+
+    if isinstance(value, dict):
+        return value
+
+    mapping = {}
+
     try:
-        answer = _executor_best_text(getattr(value, "answer", ""))
-        content = _executor_best_text(getattr(value, "content", ""))
-        summary = _executor_best_text(getattr(value, "summary", ""))
-        response = _executor_best_text(getattr(value, "response", ""))
-        blocks = list(getattr(value, "render_blocks", []) or [])
-        artifacts = list(getattr(value, "artifacts", []) or [])
-        scene = getattr(value, "scene", None)
-        score = (
-            len(answer) * 4
-            + len(content) * 3
-            + len(summary) * 2
-            + len(response) * 2
-            + len(blocks) * 150
-            + len(artifacts) * 100
-        )
-        if scene not in (None, {}, []):
-            score += 50
-        return score
+        if hasattr(value, "__dict__"):
+            mapping.update(
+                {
+                    k: v
+                    for k, v in vars(value).items()
+                    if not k.startswith("_")
+                }
+            )
     except Exception:
+        pass
+
+    for field in _EXECUTOR_CANONICAL_FIELDS:
+        try:
+            if hasattr(value, field):
+                mapping[field] = getattr(value, field)
+        except Exception:
+            continue
+
+    return mapping
+
+def _executor_iter_payload_candidates(root, max_depth=4):
+    """Recursively collect response-like payloads from dicts, lists and objects."""
+    candidates = []
+    visited = set()
+
+    def walk(value, depth):
+        if depth < 0 or value is None:
+            return
+
+        identity = id(value)
+        if identity in visited:
+            return
+        visited.add(identity)
+
+        mapping = _executor_payload_to_mapping(value)
+        if mapping:
+            candidates.append(mapping)
+
+            for nested in mapping.values():
+                if isinstance(nested, (dict, list, tuple, set)) or hasattr(nested, "__dict__"):
+                    walk(nested, depth - 1)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                walk(item, depth - 1)
+
+    walk(root, max_depth)
+    return candidates
+
+def _executor_mapping_score(mapping):
+    """Prefer the richest non-empty mapping when multiple rooms return candidates."""
+    if not isinstance(mapping, dict):
         return 0
+
+    answer = _executor_best_text(mapping.get("answer", ""))
+    content = _executor_best_text(mapping.get("content", ""))
+    summary = _executor_best_text(mapping.get("summary", ""))
+    response = _executor_best_text(mapping.get("response", ""))
+    blocks = list(mapping.get("render_blocks", []) or [])
+    artifacts = list(mapping.get("artifacts", []) or [])
+    scene = mapping.get("scene", None)
+
+    score = (
+        len(answer) * 4
+        + len(content) * 3
+        + len(summary) * 2
+        + len(response) * 2
+        + len(blocks) * 150
+        + len(artifacts) * 100
+    )
+
+    if scene not in (None, {}, []):
+        score += 50
+
+    if answer and content and summary:
+        score += 40
+
+    if any(
+        key in mapping
+        for key in (
+            "provider_original_answer",
+            "provider_original_content",
+            "provider_source_request",
+            "processor_input",
+        )
+    ):
+        score += 20
+
+    return score
+
+def _executor_response_score(value):
+    """Public score helper used to order the richest response first."""
+    return _executor_mapping_score(_executor_payload_to_mapping(value))
 
 def _clip_text(value, limit=4000):
     if value is None:
@@ -1076,33 +1196,64 @@ def executor_cpu_register_room(report, room_name, **kwargs):
     return report
 
 
+
 def _extract_machine_response(result):
     """Stage 1 Executor: preserve Provider semantic fields without collapsing them."""
     if isinstance(result, MachineResponse):
         return result
-    if not isinstance(result, dict):
+    if result is None:
         return None
 
-    sources = []
-    for candidate in (
-        result,
-        result.get("machine_response"),
-        result.get("response"),
-        result.get("scene_contract"),
-        result.get("scene"),
-    ):
-        if isinstance(candidate, dict):
-            sources.append(candidate)
+    candidates = _executor_iter_payload_candidates(result, max_depth=5)
+    if not candidates:
+        return None
 
     merged = {}
-    for source in sources:
+    for source in sorted(candidates, key=_executor_mapping_score, reverse=True):
         for key, value in source.items():
             if key not in merged or _executor_value_is_empty(merged.get(key)):
                 merged[key] = value
 
     response = MachineResponse()
 
-    for field in vars(response).keys():
+    canonical_fields = (
+        "answer",
+        "content",
+        "summary",
+        "response",
+        "explanation",
+        "scene",
+        "artifacts",
+        "render_blocks",
+        "scene_plan",
+        "render_priority",
+        "metadata",
+        "confidence",
+        "provider",
+        "provider_contract",
+        "transport_contract",
+        "provider_original_answer",
+        "provider_original_content",
+        "processor_input",
+        "provider_source_request",
+        "scene_contract",
+        "scene_runtime",
+        "conversation_space",
+        "current_turn",
+        "timeline",
+        "dialog",
+        "goal",
+        "goal_hierarchy",
+        "focus",
+        "visual_reference",
+        "visual_summary",
+        "active_visual_scene",
+        "executor_decision",
+        "executor_presentation_plan",
+        "executor_scene_profile",
+    )
+
+    for field in canonical_fields:
         if field in merged:
             try:
                 setattr(response, field, merged[field])
@@ -1111,7 +1262,6 @@ def _extract_machine_response(result):
 
     # Merge the richest text from every visible layer.
     answer = _executor_best_text(
-        result.get("answer"),
         merged.get("answer"),
         merged.get("content"),
         merged.get("response"),
@@ -1119,21 +1269,25 @@ def _extract_machine_response(result):
         merged.get("explanation"),
         merged.get("provider_original_answer"),
         merged.get("provider_original_content"),
+        getattr(response, "answer", ""),
+        getattr(response, "content", ""),
+        getattr(response, "summary", ""),
     )
     content = _executor_best_text(
-        result.get("content"),
         merged.get("content"),
         answer,
         merged.get("response"),
         merged.get("summary"),
         merged.get("explanation"),
+        getattr(response, "content", ""),
+        getattr(response, "answer", ""),
     )
     summary = _executor_best_text(
-        result.get("summary"),
         merged.get("summary"),
         content,
         answer,
         merged.get("explanation"),
+        getattr(response, "summary", ""),
     )
 
     if answer:
@@ -1143,25 +1297,6 @@ def _extract_machine_response(result):
     if summary:
         response.summary = summary
 
-    if not getattr(response, "answer", None):
-        response.answer = _executor_best_text(
-            merged.get("answer"),
-            merged.get("content"),
-            merged.get("response"),
-        )
-    if not getattr(response, "content", None):
-        response.content = _executor_best_text(
-            merged.get("content"),
-            response.answer,
-            merged.get("response"),
-        )
-    if not getattr(response, "summary", None):
-        response.summary = _executor_best_text(
-            merged.get("summary"),
-            response.content,
-            response.answer,
-        )
-
     # Ensure canonical container fields survive even when the nested wrapper is partial.
     for field in ("render_blocks", "artifacts", "scene", "metadata", "scene_plan", "render_priority"):
         if field in merged and _executor_value_is_empty(getattr(response, field, None)):
@@ -1170,7 +1305,16 @@ def _extract_machine_response(result):
             except Exception:
                 pass
 
+    # Preserve common transport metadata as top-level fields where present.
+    for field in ("provider_original_answer", "provider_original_content", "provider_contract", "transport_contract"):
+        if field in merged and _executor_value_is_empty(getattr(response, field, None)):
+            try:
+                setattr(response, field, merged[field])
+            except Exception:
+                pass
+
     return response
+
 
 async def execute_rooms(
     user_id,
@@ -1202,9 +1346,7 @@ async def execute_rooms(
             )
 
             if isinstance(result, dict):
-
                 mr = result.get("machine_response")
-
                 if isinstance(mr, dict):
                     pass
                 elif isinstance(mr, MachineResponse):
@@ -1240,25 +1382,32 @@ async def execute_rooms(
                 continue
 
         except Exception as exc:
-            room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"error","error":str(exc)})
+            room_execution_report.append({"room": getattr(room, "name", "unknown"), "status": "error", "error": str(exc)})
             continue
 
     if best_machine_response is None:
         raise RuntimeError("No MachineResponse produced")
+
+    # Sort best-first so any downstream registry logic sees the richest payload first.
+    room_results = sorted(
+        room_results,
+        key=lambda item: _executor_response_score(item.get("machine_response")),
+        reverse=True,
+    )
 
     machine_response = best_machine_response
 
     # Executor no longer synthesizes fallback text here.
     # Canonical Provider output must pass through unchanged.
 
-    conversation_space=context.get("conversation_space") or {}
-    april_turn={
-        "answer": getattr(machine_response,"answer",None),
-        "summary": getattr(machine_response,"summary",None),
-        "render_blocks": list(getattr(machine_response,"render_blocks",[]) or []),
+    conversation_space = context.get("conversation_space") or {}
+    april_turn = {
+        "answer": getattr(machine_response, "answer", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": list(getattr(machine_response, "render_blocks", []) or []),
     }
-    conversation_space["current_turn"]["april"]=april_turn
-    conversation_space["last_april_turn"]=april_turn
+    conversation_space["current_turn"]["april"] = april_turn
+    conversation_space["last_april_turn"] = april_turn
 
     timeline = conversation_space.setdefault("timeline", [])
     timeline.append(conversation_space["current_turn"])
@@ -1280,9 +1429,9 @@ async def execute_rooms(
         machine_response=machine_response,
     )
 
-    setattr(machine_response,"room_execution_report",room_execution_report)
+    setattr(machine_response, "room_execution_report", room_execution_report)
     if not room_results:
-        room_results=[{"machine_response":machine_response}]
+        room_results = [{"machine_response": machine_response}]
     reflected_machine_response = machine_response
 
     registry_result = registry_parent_dispatch(
@@ -1307,7 +1456,7 @@ async def execute_rooms(
             except Exception:
                 pass
 
-        for _field in ("answer","content","summary"):
+        for _field in ("answer", "content", "summary"):
             try:
                 current = getattr(machine_response, _field, "")
                 incoming = getattr(registry_result, _field, "")
@@ -1325,14 +1474,16 @@ async def execute_rooms(
     if not getattr(machine_response, "summary", "") and _canonical_summary:
         machine_response.summary = _canonical_summary
 
-    if (not list(getattr(machine_response, "render_blocks", []) or [])
-        and getattr(machine_response, "answer", "")):
-        machine_response.render_blocks=[{
-            "type":"text",
-            "content":machine_response.answer,
-            "renderer":"TextBlock",
-            "viewer":"TextBlock",
-            "priority":0,
+    if (
+        not list(getattr(machine_response, "render_blocks", []) or [])
+        and getattr(machine_response, "answer", "")
+    ):
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": machine_response.answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
         }]
 
     executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
@@ -1347,13 +1498,13 @@ async def execute_rooms(
 
     if False:
         cpu_trace_success(
-        "ROOM_EXECUTION",
-        {
-            "answer": getattr(machine_response, "answer", None),
-            "artifacts": len(getattr(machine_response, "artifacts", []) or []),
-            "diagnostics": diagnostics,
-        },
-    )
+            "ROOM_EXECUTION",
+            {
+                "answer": getattr(machine_response, "answer", None),
+                "artifacts": len(getattr(machine_response, "artifacts", []) or []),
+                "diagnostics": diagnostics,
+            },
+        )
 
     return executor_cpu_finalize_transport(machine_response)
 
@@ -2229,6 +2380,17 @@ async def execute(
         task_type=task_type,
         text=text,
     )
+
+    context["second_circle_context"] = {
+        "state": state,
+        "semantic": semantic,
+        "reasoning": reasoning,
+        "cognition": cognition,
+        "response_decision": response_decision,
+        "visual_reference": visual_reference,
+        "task_type": task_type,
+        "text": text,
+    }
     conversation_space = context.get("conversation_space") or {}
     current_turn = conversation_space.get("current_turn", {})
 
@@ -2252,6 +2414,7 @@ async def execute(
     }
 
     executor_provider_stage_log("PROVIDER_REQUEST", {"goal":text,"timeline":len(machine_conversation.get("timeline",[])),"memory":len(machine_memory)})
+    # First circle: provider sees only the current request payload.
     context["machine_request"] = MachineRequest(
         goal=current_turn.get("user", {}).get("text", text),
         intent=semantic,
