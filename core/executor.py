@@ -1,73 +1,35 @@
 
+# =====================================================
+# APRIL EXECUTOR - SECOND CIRCLE ROUTE
+# =====================================================
 
-import traceback
-import time
+from __future__ import annotations
+
 import re
-
+import time
+import traceback
 from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from blocks.semantic_core import (
-    analyze as semantic_analyze
-)
-
-from blocks.goal_engine import (
-    detect_goal
-)
-
-from blocks.reasoning_state import (
-    build_reasoning_state
-)
-
-from blocks.cognitive_core import (
-    analyze_cognition
-)
-
-from blocks.response_decision import (
-    build_response_decision
-)
-
-from blocks.visual_reference_system import (
-    build_visual_reference
-)
-
-from blocks.april_personality import (
-    apply_april_personality
-)
-
-from blocks.april_authority import (
-
-    should_override,
-
-    build_authority_decision
-)
-
+from blocks.semantic_core import analyze as semantic_analyze
+from blocks.goal_engine import detect_goal
+from blocks.reasoning_state import build_reasoning_state
+from blocks.cognitive_core import analyze_cognition
+from blocks.response_decision import build_response_decision
+from blocks.visual_reference_system import build_visual_reference
+from blocks.april_personality import apply_april_personality
+from blocks.april_authority import should_override, build_authority_decision
 from blocks.state_manager import (
-
     get_state,
-
     add_dialog,
-
     update_memory_summary,
-
     get_active_flow,
-
     build_visual_memory_bridge,
-    update_dialog_context
+    update_dialog_context,
 )
-
-from blocks.mode_manager import (
-    get_mode
-)
-
-from blocks.context_system import (
-    build_deephub_context
-)
-
-from blocks.rooms_registry import (
-    ROOMS,
-    registry_parent_dispatch,
-)
-
+from blocks.mode_manager import get_mode
+from blocks.context_system import build_deephub_context
+from blocks.rooms_registry import ROOMS, registry_parent_dispatch
 from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
@@ -76,62 +38,61 @@ from blocks.C_ARTIFACT_CONTRACT import (
     build_machine_scene,
     build_scene_contract,
 )
-
 from blocks.provider_router import generate_text
+from blocks.presentation_formatter import format_response_presentation
+from blocks.energy_manager import get_energy
+from blocks.experience import update_experience, load_experience
 
-from blocks.presentation_formatter import (
-    format_response_presentation
-)
-
-from blocks.energy_manager import (
-    get_energy
-)
-
-from blocks.experience import (
-    update_experience,
-    load_experience
-)
 
 TASK_CHANNEL = {
-
     "type": "machine_task_channel",
-
     "isolated": True,
-
-    "human_access": False
+    "human_access": False,
 }
 
 RESPONSE_CHANNEL = {
-
     "type": "machine_response_channel",
-
     "isolated": True,
-
-    "human_access": False
+    "human_access": False,
 }
 
 EMAPS = {
-
     "active_rooms": set(),
-
     "active_trajectories": set(),
-
     "active_modalities": set(),
-
     "execution_sessions": [],
-
-    "machine_routes": []
+    "machine_routes": [],
 }
 
-def normalize_text(text):
 
-    return (
-        text or ""
-    ).strip()
+EXECUTOR_ROUTE_VERSION = "fiber_scene_v3"
+EXECUTOR_LEGACY_TEXT_ROUTE = False
+EXECUTOR_FIBER_CANONICAL = True
+EXECUTOR_CPU_ENABLED = True
+APRIL_CPU_TRACE_ENABLED = False
+CPU_EXECUTION_JOURNAL: list[dict[str, Any]] = []
+CPU_STAGE_REGISTRY: list[dict[str, Any]] = []
+EXECUTOR_CPU_TRACE: list[dict[str, Any]] = []
+EXECUTOR_CPU_SESSION: Dict[str, Any] = {}
+EXECUTOR_CPU_OBJECTS = {
+    "machine_request": {},
+    "machine_response": {},
+    "machine_scene": {},
+}
+
+FOLLOWUP_CONTEXT_CHAR_LIMIT = 420
+FOLLOWUP_CONTEXT_WORD_LIMIT = 7
 
 
+# =====================================================
+# SMALL HELPERS
+# =====================================================
 
-def _executor_value_is_empty(value):
+def normalize_text(text: Any) -> str:
+    return (text or "").strip() if isinstance(text, str) else str(text or "").strip()
+
+
+def _executor_value_is_empty(value: Any) -> bool:
     if value is None:
         return True
     if value == "":
@@ -144,147 +105,216 @@ def _executor_value_is_empty(value):
         return True
     return False
 
-def _executor_best_text(*values):
+
+def _executor_best_text(*values: Any) -> str:
     for value in values:
         if _executor_value_is_empty(value):
             continue
-        if isinstance(value, str):
-            text = value.strip()
-        else:
-            text = str(value).strip()
+        text = value.strip() if isinstance(value, str) else str(value).strip()
         if text:
             return text
     return ""
 
-def _executor_preserve_canonical_text(machine_response, scene_contract=None, scene=None):
-    if machine_response is None:
-        return machine_response
 
-    answer = _executor_best_text(
-        getattr(machine_response, "answer", ""),
-        getattr(machine_response, "content", ""),
-        getattr(machine_response, "summary", ""),
-    )
-
-    if scene_contract is not None:
-        if isinstance(scene_contract, dict):
-            answer = _executor_best_text(
-                answer,
-                scene_contract.get("answer"),
-                scene_contract.get("content"),
-                scene_contract.get("summary"),
-            )
-        else:
-            answer = _executor_best_text(
-                answer,
-                getattr(scene_contract, "answer", ""),
-                getattr(scene_contract, "content", ""),
-                getattr(scene_contract, "summary", ""),
-            )
-
-    if scene is not None and not answer:
-        if isinstance(scene, dict):
-            answer = _executor_best_text(
-                scene.get("answer"),
-                scene.get("content"),
-                scene.get("summary"),
-            )
-        else:
-            answer = _executor_best_text(
-                getattr(scene, "answer", ""),
-                getattr(scene, "content", ""),
-                getattr(scene, "summary", ""),
-            )
-
-    if answer:
-        if _executor_value_is_empty(getattr(machine_response, "answer", None)):
-            machine_response.answer = answer
-        if _executor_value_is_empty(getattr(machine_response, "content", None)):
-            machine_response.content = answer
-        if _executor_value_is_empty(getattr(machine_response, "summary", None)):
-            machine_response.summary = answer
-
-    return machine_response
-
-
-
-_EXECUTOR_CANONICAL_FIELDS = (
-    "answer",
-    "content",
-    "summary",
-    "response",
-    "explanation",
-    "scene",
-    "artifacts",
-    "render_blocks",
-    "scene_plan",
-    "render_priority",
-    "metadata",
-    "confidence",
-    "provider",
-    "provider_contract",
-    "transport_contract",
-    "provider_original_answer",
-    "provider_original_content",
-    "processor_input",
-    "provider_source_request",
-    "scene_contract",
-    "scene_runtime",
-    "conversation_space",
-    "current_turn",
-    "timeline",
-    "dialog",
-    "goal",
-    "goal_hierarchy",
-    "focus",
-    "visual_reference",
-    "visual_summary",
-    "active_visual_scene",
-    "executor_decision",
-    "executor_presentation_plan",
-    "executor_scene_profile",
-)
-
-def _executor_payload_to_mapping(value):
-    """Convert any room/provider payload into a plain mapping."""
+def _clip_text(value: Any, limit: int = 4000) -> str:
     if value is None:
-        return {}
-
-    if isinstance(value, dict):
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if len(value) <= limit:
         return value
+    return value[-limit:]
 
-    mapping = {}
 
+def _compact_timeline(timeline: Any, max_items: int = 14) -> list:
+    if not isinstance(timeline, list):
+        return []
+    if len(timeline) <= max_items:
+        return timeline
+    head = []
+    if timeline and isinstance(timeline[0], dict) and timeline[0].get("role") == "system":
+        head = [timeline[0]]
+        timeline = timeline[1:]
+        max_items = max(1, max_items - 1)
+    return head + timeline[-max_items:]
+
+
+def _compact_memory_bundle(memory_bundle: Any):
+    if not isinstance(memory_bundle, dict):
+        return memory_bundle
+    compacted = {}
+    for key, value in memory_bundle.items():
+        if isinstance(value, str):
+            compacted[key] = _clip_text(value, 3000)
+        elif isinstance(value, dict):
+            compacted[key] = _compact_memory_bundle(value)
+        elif isinstance(value, list):
+            compacted[key] = value[-12:]
+        else:
+            compacted[key] = value
+    return compacted
+
+
+def _compact_conversation_space(conversation_space: Any):
+    if not isinstance(conversation_space, dict):
+        return conversation_space
+    compacted = dict(conversation_space)
+    compacted["timeline"] = _compact_timeline(conversation_space.get("timeline", []), max_items=14)
+    compacted["dialog"] = _compact_timeline(conversation_space.get("dialog", []), max_items=14)
+    compacted["memory_timeline"] = _compact_memory_bundle(conversation_space.get("memory_timeline", {}))
+    compacted["memory_summary"] = _clip_text(conversation_space.get("memory_summary", ""), 3000)
+    return compacted
+
+
+def _looks_like_formula_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    compact = text.replace(" ", "")
+    if len(compact) > 120:
+        return False
+    formula_chars = sum(ch in compact for ch in "=^_±×/*√π∑∫²³⁴⁵⁶⁷⁸⁹⁰")
+    if "=" in compact and formula_chars >= 1:
+        return True
+    if re.fullmatch(r"[A-Za-zА-Яа-я0-9\s\+\-\=\^\*\/\(\)\[\]\{\}\.,:;×√π²³⁴⁵⁶⁷⁸⁹⁰]+", text):
+        return "=" in text or "^" in text
+    return False
+
+
+def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def track_room(name: str):
+    return
+
+
+def track_trajectory(name: str):
+    return
+
+
+def track_modality(name: str):
+    return
+
+
+def executor_provider_stage_log(stage: str, payload: Any = None) -> None:
     try:
-        if hasattr(value, "__dict__"):
-            mapping.update(
-                {
-                    k: v
-                    for k, v in vars(value).items()
-                    if not k.startswith("_")
-                }
-            )
+        if isinstance(payload, dict):
+            info = {}
+            for k, v in payload.items():
+                if isinstance(v, str):
+                    info[k] = f"<str:{len(v)}>"
+                elif isinstance(v, (list, dict)):
+                    info[k] = f"<{type(v).__name__}:{len(v)}>"
+                else:
+                    info[k] = v
+        else:
+            info = payload
+        print(f"[EXECUTOR:{stage}] {info}")
     except Exception:
         pass
 
-    for field in _EXECUTOR_CANONICAL_FIELDS:
+
+def cpu_stage_record(stage: str, status: str, details: Optional[dict] = None):
+    entry = {
+        "stage": stage,
+        "status": status,
+        "details": details or {},
+        "timestamp": time.time(),
+    }
+    CPU_STAGE_REGISTRY.append(entry)
+    return entry
+
+
+def cpu_stage_snapshot():
+    return list(CPU_STAGE_REGISTRY)
+
+
+def cpu_trace_begin(stage: str, payload: Optional[dict] = None):
+    if not APRIL_CPU_TRACE_ENABLED:
+        return
+    cpu_stage_record(stage, "BEGIN", payload or {})
+    CPU_EXECUTION_JOURNAL.append({"stage": stage, "status": "BEGIN", "payload": payload or {}, "timestamp": time.time()})
+
+
+def cpu_trace_success(stage: str, payload: Optional[dict] = None):
+    if not APRIL_CPU_TRACE_ENABLED:
+        return
+    cpu_stage_record(stage, "SUCCESS", payload or {})
+    CPU_EXECUTION_JOURNAL.append({"stage": stage, "status": "SUCCESS", "payload": payload or {}, "timestamp": time.time()})
+
+
+def cpu_trace_error(stage: str, error: Any):
+    if not APRIL_CPU_TRACE_ENABLED:
+        return
+    cpu_stage_record(stage, "ERROR", {"error": str(error)})
+    CPU_EXECUTION_JOURNAL.append({"stage": stage, "status": "ERROR", "error": str(error), "timestamp": time.time()})
+
+
+def cpu_execution_journal():
+    return list(CPU_EXECUTION_JOURNAL)
+
+
+def executor_cpu_mark_object(name: str, obj: Any, owner: str):
+    if obj is None:
+        return
+    EXECUTOR_CPU_OBJECTS[name] = {
+        "owner": owner,
+        "object_type": type(obj).__name__,
+        "object_id": id(obj),
+    }
+
+
+def executor_cpu_lineage_report():
+    return {
+        "session": EXECUTOR_CPU_SESSION,
+        "objects": EXECUTOR_CPU_OBJECTS,
+    }
+
+
+def _executor_payload_to_mapping(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+
+    mapping: Dict[str, Any] = {}
+    try:
+        if hasattr(value, "__dict__"):
+            mapping.update({k: v for k, v in vars(value).items() if not k.startswith("_")})
+    except Exception:
+        pass
+
+    canonical_fields = (
+        "answer", "content", "summary", "response", "explanation", "scene",
+        "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
+        "confidence", "provider", "provider_contract", "transport_contract",
+        "provider_original_answer", "provider_original_content", "processor_input",
+        "provider_source_request", "scene_contract", "scene_runtime", "conversation_space",
+        "current_turn", "timeline", "dialog", "goal", "goal_hierarchy", "focus",
+        "visual_reference", "visual_summary", "active_visual_scene",
+        "executor_decision", "executor_presentation_plan", "executor_scene_profile",
+        "provider_reference_context", "second_circle_context",
+    )
+    for field in canonical_fields:
         try:
             if hasattr(value, field):
                 mapping[field] = getattr(value, field)
         except Exception:
             continue
-
     return mapping
 
-def _executor_iter_payload_candidates(root, max_depth=4):
-    """Recursively collect response-like payloads from dicts, lists and objects."""
-    candidates = []
+
+def _executor_iter_payload_candidates(root: Any, max_depth: int = 4) -> list[Dict[str, Any]]:
+    candidates: list[Dict[str, Any]] = []
     visited = set()
 
-    def walk(value, depth):
+    def walk(value: Any, depth: int):
         if depth < 0 or value is None:
             return
-
         identity = id(value)
         if identity in visited:
             return
@@ -293,7 +323,6 @@ def _executor_iter_payload_candidates(root, max_depth=4):
         mapping = _executor_payload_to_mapping(value)
         if mapping:
             candidates.append(mapping)
-
             for nested in mapping.values():
                 if isinstance(nested, (dict, list, tuple, set)) or hasattr(nested, "__dict__"):
                     walk(nested, depth - 1)
@@ -306,8 +335,8 @@ def _executor_iter_payload_candidates(root, max_depth=4):
     walk(root, max_depth)
     return candidates
 
-def _executor_mapping_score(mapping):
-    """Prefer the richest non-empty mapping when multiple rooms return candidates."""
+
+def _executor_mapping_score(mapping: Any) -> int:
     if not isinstance(mapping, dict):
         return 0
 
@@ -330,44 +359,414 @@ def _executor_mapping_score(mapping):
 
     if scene not in (None, {}, []):
         score += 50
-
     if answer and content and summary:
         score += 40
-
-    if any(
-        key in mapping
-        for key in (
-            "provider_original_answer",
-            "provider_original_content",
-            "provider_source_request",
-            "processor_input",
-        )
-    ):
+    if any(key in mapping for key in ("provider_original_answer", "provider_original_content", "provider_source_request", "processor_input")):
         score += 20
-
     return score
 
 
-def _executor_collect_room_candidates(room_results):
-    """Collect every response-like candidate produced by rooms."""
-    candidates = []
+def _executor_response_score(value: Any) -> int:
+    return _executor_mapping_score(_executor_payload_to_mapping(value))
 
+
+def _executor_extract_turn_text(turn: Any, limit: int = 220) -> str:
+    if not isinstance(turn, dict):
+        return ""
+    for key in ("summary", "content", "text", "answer", "response"):
+        value = turn.get(key)
+        if value:
+            return _clip_text(value, limit)
+    for nested_key in ("user", "april"):
+        nested = turn.get(nested_key)
+        if isinstance(nested, dict):
+            extracted = _executor_extract_turn_text(nested, limit=limit)
+            if extracted:
+                return extracted
+    return ""
+
+
+def _executor_last_turn_text(dialog: Any, role: str, limit: int = 220) -> str:
+    if not isinstance(dialog, list):
+        return ""
+    role = (role or "").strip().lower()
+    for item in reversed(dialog):
+        if not isinstance(item, dict):
+            continue
+        item_role = str(item.get("role") or item.get("speaker") or item.get("source") or "").strip().lower()
+        if role and item_role != role:
+            continue
+        extracted = _executor_extract_turn_text(item, limit=limit)
+        if extracted:
+            return extracted
+    return ""
+
+
+def _executor_reference_context_is_needed(text: str, semantic: dict, cognition: dict, response_decision: dict, state: dict) -> bool:
+    normalized = normalize_text(text)
+    word_count = len(normalized.split())
+
+    if not normalized:
+        return False
+    if response_decision.get("should_continue_trajectory"):
+        return True
+    if response_decision.get("discussion_mode"):
+        return True
+    if cognition.get("exploration_mode"):
+        return True
+    for key in ("followup_candidate", "continuation_candidate", "follow_up_candidate"):
+        if semantic.get(key):
+            return True
+    if len(normalized) <= 24 or word_count <= 4:
+        return True
+    if state.get("dialog") and word_count <= FOLLOWUP_CONTEXT_WORD_LIMIT:
+        return True
+    return False
+
+
+def _executor_build_reference_context(text: str, state: dict, semantic: dict, cognition: dict, response_decision: dict) -> str:
+    if not _executor_reference_context_is_needed(text, semantic, cognition, response_decision, state):
+        return ""
+
+    active_topic = state.get("topic") or semantic.get("topic") or semantic.get("intent") or ""
+    focus_source = cognition.get("dynamic_focus") or state.get("focus_state") or state.get("focus") or response_decision.get("goal") or ""
+    dialog = state.get("dialog", []) or []
+    last_user = _executor_last_turn_text(dialog, "user", limit=180)
+    last_april = _executor_last_turn_text(dialog, "assistant", limit=180) or _executor_last_turn_text(dialog, "april", limit=180)
+
+    pieces = []
+    if active_topic:
+        pieces.append(f"topic: {_clip_text(active_topic, 80)}")
+    if focus_source:
+        pieces.append(f"focus: {_clip_text(focus_source, 140)}")
+    if last_user:
+        pieces.append(f"last_user: {_clip_text(last_user, 180)}")
+    if last_april:
+        pieces.append(f"last_april_summary: {_clip_text(last_april, 180)}")
+
+    if not pieces:
+        return ""
+
+    return _clip_text("REFERENCE CONTEXT (for understanding only; do not repeat):\n- " + "\n- ".join(pieces), FOLLOWUP_CONTEXT_CHAR_LIMIT * 2)
+
+
+def _executor_build_first_circle_goal(text: str, state: dict, semantic: dict, cognition: dict, response_decision: dict) -> Tuple[str, str]:
+    current_text = normalize_text(text)
+    reference_context = _executor_build_reference_context(text=current_text, state=state, semantic=semantic, cognition=cognition, response_decision=response_decision)
+    return current_text, reference_context
+
+
+def _executor_build_first_circle_intent(text: str, semantic: dict, cognition: dict, response_decision: dict) -> dict:
+    intent_type = semantic.get("intent") or response_decision.get("goal") or "dialogue"
+    return {
+        "type": intent_type if isinstance(intent_type, str) else str(intent_type),
+        "normalized_text": normalize_text(text),
+        "source": "executor_first_circle",
+    }
+
+
+def _executor_build_second_circle_context(
+    *,
+    state: dict,
+    semantic: dict,
+    reasoning: dict,
+    cognition: dict,
+    response_decision: dict,
+    visual_reference: dict,
+    task_type: str,
+    text: str,
+    conversation_space: dict,
+    machine_memory: dict,
+    machine_conversation: dict,
+    reference_context: str,
+):
+    return {
+        "state": state,
+        "semantic": semantic,
+        "reasoning": reasoning,
+        "cognition": cognition,
+        "response_decision": response_decision,
+        "visual_reference": visual_reference,
+        "task_type": task_type,
+        "text": text,
+        "conversation_space": conversation_space,
+        "memory": machine_memory,
+        "conversation": machine_conversation,
+        "reference_context": reference_context,
+        "provider_scope": {
+            "goal_only": True,
+            "memory_to_provider": False,
+            "visual_to_provider": False,
+            "conversation_to_provider": False,
+        },
+    }
+
+
+def build_conversation_space(state: dict, semantic: dict, cognition: dict, response_decision: dict, text: str, visual_reference: dict):
+    return {
+        "timeline": state.get("dialog", []),
+        "current_turn": {
+            "user": {
+                "text": text,
+                "voice": None,
+                "image": None,
+                "files": [],
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            "april": None,
+        },
+        "modalities": {"text": bool(text), "voice": False, "image": False, "files": False},
+        "last_user_turn": text,
+        "last_april_turn": state.get("last_april_turn"),
+        "semantic": semantic,
+        "cognition": cognition,
+        "response_decision": response_decision,
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "active_visual_scene": state.get("active_visual_scene", {}),
+        "visual_reference": visual_reference,
+    }
+
+
+def build_executor_user_space(state: dict, conversation_space: Optional[dict] = None):
+    conversation_space = conversation_space or {}
+    return {
+        "scene": state.get("scene_state", {}),
+        "workspace": state.get("workspace_state", {}),
+        "dialog": conversation_space.get("timeline", state.get("dialog", [])),
+        "last_user_turn": conversation_space.get("last_user_turn"),
+        "last_april_turn": conversation_space.get("last_april_turn"),
+        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "goal_hierarchy": state.get("goal_hierarchy", {}),
+        "active_flow": state.get("active_flow", {}),
+        "memory_timeline": state.get("memory_timeline", {}),
+        "visual_summary": state.get("visual_summary", {}),
+        "visual_continuity_summary": state.get("visual_continuity_summary", {}),
+        "active_visual_scene": state.get("active_visual_scene", {}),
+        "renderer_state": state.get("renderer_state", {}),
+        "task_resolution": state.get("task_resolution", {}),
+    }
+
+
+def build_executor_context(
+    user_id: str,
+    chat_id: str,
+    state: dict,
+    semantic: dict,
+    reasoning: dict,
+    cognition: dict,
+    response_decision: dict,
+    visual_reference: dict,
+    task_type: str,
+    text: str,
+):
+    user_space = build_executor_user_space(state)
+    scene_state = user_space.get("scene", {})
+    active_flow = user_space.get("active_flow", {})
+    visual_continuity_summary = user_space.get("visual_continuity_summary", {})
+    active_visual_scene = user_space.get("active_visual_scene", {})
+    visual_memory_bridge = build_visual_memory_bridge(user_id)
+
+    conversation_space = build_conversation_space(
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        text=text,
+        visual_reference=visual_reference,
+    )
+
+    return {
+        "machine_channel": TASK_CHANNEL,
+        "task_type": task_type,
+        "executor_version": "april_cpu_v1",
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "semantic": semantic,
+        "reasoning": reasoning,
+        "cognition": cognition,
+        "response_decision": response_decision,
+        "executor_awareness": {
+            "discussion_mode": response_decision.get("discussion_mode", False),
+            "reflection_mode": response_decision.get("reflection_mode", False),
+            "space_discussion": response_decision.get("space_discussion", False),
+            "tool_discussion": response_decision.get("tool_discussion", False),
+            "self_action_discussion": response_decision.get("self_action_discussion", False),
+            "explanation_mode": response_decision.get("explanation_mode", False),
+        },
+        "visual_reference": visual_reference,
+        "scene_state": scene_state,
+        "active_flow": active_flow,
+        "trajectory": scene_state.get("trajectory"),
+        "continuity_mode": scene_state.get("continuity_mode"),
+        "visual_continuity_summary": visual_continuity_summary,
+        "active_visual_scene": active_visual_scene,
+        "visual_memory_bridge": visual_memory_bridge,
+        "visual_summary": visual_memory_bridge.get("visual_summary", {}),
+        "today_visual_memory": visual_memory_bridge.get("today_visual_memory", []),
+        "visual_goal": visual_continuity_summary.get("active_goal"),
+        "machine_input": text,
+        "platform": "agnostic",
+        "state": state,
+        "user_space": user_space,
+        "conversation_space": _compact_conversation_space(conversation_space),
+        "canonical_space": _compact_conversation_space(conversation_space),
+        "memory_routing": {
+            "focus_recommendation": cognition.get("focus_recommendation", cognition.get("dynamic_focus", {})),
+            "goal_analysis": cognition.get("goal_analysis", cognition.get("goal_hierarchy", {})),
+            "loop_analysis": cognition.get("loop_analysis", cognition.get("open_loops", {})),
+            "memory_analysis": cognition.get("memory_analysis", cognition.get("memory_signals", {})),
+        },
+    }
+
+
+def build_domain_room_map():
+    return {
+        "biology": ["biology"],
+        "chemistry": ["chemistry"],
+        "physics": ["physics"],
+        "mathematics": ["mathematics"],
+        "trigonometry": ["trigonometry"],
+        "engineering": ["engineering"],
+        "it": ["it"],
+        "web": ["web"],
+        "politics": ["politics"],
+        "news": ["news"],
+        "social": ["social"],
+        "literature": ["literature"],
+        "utc": ["utc"],
+    }
+
+
+def domain_room_bonus(room, semantic):
+    required_domains = semantic.get("required_domains", [])
+    if not required_domains:
+        return 0.0
+    room_map = build_domain_room_map()
+    bonus = 0.0
+    for domain in required_domains:
+        for room_name in room_map.get(domain, []):
+            if room.name == room_name:
+                bonus += 6.0
+    return bonus
+
+
+def get_factory_required_rooms(semantic):
+    factory_order = semantic.get("factory_order", {})
+    return factory_order.get("required_rooms", [])
+
+
+def build_scene_plan(response_decision, semantic=None):
+    semantic = semantic or {}
+    artifact_scene = response_decision.get("artifact_scene", [])
+    artifact_bundle = response_decision.get("artifact_bundle", semantic.get("artifact_bundle", {}))
+    primary = artifact_bundle.get("primary", [])
+    secondary = artifact_bundle.get("secondary", [])
+    scene_order = []
+    scene_order.extend(primary)
+    scene_order.extend(secondary)
+    return {
+        "goal": semantic.get("intent", "dialogue"),
+        "primary_artifacts": primary,
+        "secondary_artifacts": secondary,
+        "artifact_scene": artifact_scene,
+        "scene_order": scene_order,
+        "composition_strategy": "artifact_first_scene_composition",
+    }
+
+
+def artifact_to_render_block(result: Any):
+    if not isinstance(result, dict):
+        return {"type": "machine_payload", "payload": result}
+    result_type = result.get("type")
+    if result_type != "artifact":
+        return result
+    artifact = result.get("artifact")
+    translated = botru_translate_artifact(artifact)
+    translated["machine_payload"] = True
+    return translated
+
+
+def botru_translate_artifact(artifact: Any):
+    if artifact is None:
+        return {"type": "artifact", "content": ""}
+    if hasattr(artifact, "data"):
+        payload = artifact.data
+        if isinstance(payload, dict):
+            for field in [
+                "answer", "response", "content", "text", "summary", "analysis",
+                "description", "research_summary", "observation_report", "topic",
+            ]:
+                value = payload.get(field)
+                if value:
+                    return {"type": "artifact", "content": str(value), "artifact": payload}
+            return {"type": "artifact", "content": str(payload), "artifact": payload}
+    if isinstance(artifact, str):
+        return {"type": "artifact", "content": artifact}
+    if isinstance(artifact, dict):
+        for field in [
+            "content", "text", "summary", "analysis", "description",
+            "research_summary", "observation_report", "topic",
+        ]:
+            value = artifact.get(field)
+            if value:
+                return {"type": "artifact", "content": str(value), "artifact": artifact}
+        return {"type": "artifact", "content": str(artifact), "artifact": artifact}
+    return {"type": "artifact", "content": str(artifact)}
+
+
+def build_task_resolution(cognition, response_decision, semantic, state):
+    task = cognition.get("task_understanding", {})
+    next_step = cognition.get("assistant_next_step", "ready_to_help")
+    confusion = cognition.get("user_confusion", 0.0)
+    clarification_required = response_decision.get("task_requires_clarification", False)
+
+    resolution = {
+        "mode": "execute",
+        "next_step": next_step,
+        "guidance_priority": False,
+        "missing_information": task.get("missing_information", []),
+    }
+
+    if clarification_required:
+        resolution["mode"] = "clarify"
+        resolution["guidance_priority"] = True
+    if confusion >= 0.5:
+        resolution["guidance_priority"] = True
+    return resolution
+
+
+def build_guidance_response(task_resolution):
+    step = task_resolution.get("next_step")
+    messages = {
+        "request_image": "Чтобы помочь точнее, пришли скриншот или изображение того, что ты видишь сейчас.",
+        "request_formula": "Напиши формулу или опиши задачу своими словами. Если формулу не знаешь, я помогу её подобрать.",
+        "request_error_details": "Покажи текст ошибки или пришли скриншот окна с ошибкой, и я проведу тебя дальше.",
+    }
+    if step not in messages:
+        return None
+    return {"type": "text", "data": messages[step]}
+
+
+def executor_cpu_register_room(report, room_name, **kwargs):
+    entry = {"room": room_name}
+    entry.update(kwargs)
+    report.append(entry)
+    return report
+
+
+def _executor_collect_room_candidates(room_results: Any) -> list[Dict[str, Any]]:
+    candidates: list[Dict[str, Any]] = []
     for item in room_results or []:
-        roots = []
-
-        if isinstance(item, dict):
-            roots.append(item)
-            machine_response = item.get("machine_response")
-            if machine_response is not None:
-                roots.append(machine_response)
-        else:
-            roots.append(item)
-
+        roots = [item]
+        if isinstance(item, dict) and item.get("machine_response") is not None:
+            roots.append(item.get("machine_response"))
         for root in roots:
             for candidate in _executor_iter_payload_candidates(root, max_depth=5):
                 if isinstance(candidate, dict):
                     candidates.append(candidate)
-
             if isinstance(root, dict):
                 candidates.append(root)
             else:
@@ -394,12 +793,10 @@ def _executor_collect_room_candidates(room_results):
             continue
         seen.add(fingerprint)
         unique.append(candidate)
-
     return unique
 
 
 def _executor_recover_room_response(machine_response, room_results, machine_request=None, text=None):
-    """Keep the richest room payload alive even if a wrapper goes empty."""
     if machine_response is None:
         machine_response = MachineResponse()
 
@@ -408,12 +805,10 @@ def _executor_recover_room_response(machine_response, room_results, machine_requ
         getattr(machine_response, "content", ""),
         getattr(machine_response, "summary", ""),
     )
-
     if current_text and not _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
         return machine_response
 
     candidates = _executor_collect_room_candidates(room_results)
-
     ranked = []
     for candidate in candidates:
         score = _executor_mapping_score(candidate)
@@ -520,1070 +915,41 @@ def _executor_recover_room_response(machine_response, room_results, machine_requ
             pass
 
     return machine_response
-def _executor_response_score(value):
-    """Public score helper used to order the richest response first."""
-    return _executor_mapping_score(_executor_payload_to_mapping(value))
 
-def _clip_text(value, limit=4000):
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        value = str(value)
-    value = value.strip()
-    if len(value) <= limit:
-        return value
-    return value[-limit:]
 
-def _compact_timeline(timeline, max_items=14):
-    if not isinstance(timeline, list):
-        return []
-    if len(timeline) <= max_items:
-        return timeline
+def _executor_preserve_canonical_text(machine_response, scene_contract=None, scene=None):
+    if machine_response is None:
+        return machine_response
 
-    head = []
-    if timeline and isinstance(timeline[0], dict) and timeline[0].get("role") == "system":
-        head = [timeline[0]]
-        timeline = timeline[1:]
-        max_items = max(1, max_items - 1)
+    answer = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
 
-    return head + timeline[-max_items:]
-
-def _compact_memory_bundle(memory_bundle):
-    if not isinstance(memory_bundle, dict):
-        return memory_bundle
-
-    compacted = {}
-    for key, value in memory_bundle.items():
-        if isinstance(value, str):
-            compacted[key] = _clip_text(value, 3000)
-        elif isinstance(value, dict):
-            compacted[key] = _compact_memory_bundle(value)
-        elif isinstance(value, list):
-            compacted[key] = value[-12:]
+    if scene_contract is not None:
+        if isinstance(scene_contract, dict):
+            answer = _executor_best_text(answer, scene_contract.get("answer"), scene_contract.get("content"), scene_contract.get("summary"))
         else:
-            compacted[key] = value
-    return compacted
+            answer = _executor_best_text(answer, getattr(scene_contract, "answer", ""), getattr(scene_contract, "content", ""), getattr(scene_contract, "summary", ""))
 
-def _compact_conversation_space(conversation_space):
-    if not isinstance(conversation_space, dict):
-        return conversation_space
+    if scene is not None and not answer:
+        if isinstance(scene, dict):
+            answer = _executor_best_text(scene.get("answer"), scene.get("content"), scene.get("summary"))
+        else:
+            answer = _executor_best_text(getattr(scene, "answer", ""), getattr(scene, "content", ""), getattr(scene, "summary", ""))
 
-    compacted = dict(conversation_space)
-    compacted["timeline"] = _compact_timeline(conversation_space.get("timeline", []), max_items=14)
-    compacted["dialog"] = _compact_timeline(conversation_space.get("dialog", []), max_items=14)
-    compacted["memory_timeline"] = _compact_memory_bundle(conversation_space.get("memory_timeline", {}))
-    compacted["memory_summary"] = _clip_text(conversation_space.get("memory_summary", ""), 3000)
-    return compacted
-
-def clamp(
-    value,
-    minimum=0.0,
-    maximum=1.0
-):
-
-    if value < minimum:
-        return minimum
-
-    if value > maximum:
-        return maximum
-
-    return value
-
-def _looks_like_formula_text(value):
-    if not isinstance(value, str):
-        return False
-
-    text = value.strip()
-    if not text:
-        return False
-
-    compact = text.replace(" ", "")
-    if len(compact) > 120:
-        return False
-
-    formula_chars = sum(ch in compact for ch in "=^_±×/*√π∑∫²³⁴⁵⁶⁷⁸⁹⁰")
-    if "=" in compact and formula_chars >= 1:
-        return True
-
-    if re.fullmatch(r"[A-Za-zА-Яа-я0-9\s\+\-\=\^\*\/\(\)\[\]\{\}\.,:;×√π²³⁴⁵⁶⁷⁸⁹⁰]+", text):
-        return "=" in text or "^" in text
-
-    return False
-
-def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
-    semantic = semantic or {}
-    response_decision = response_decision or {}
-
-    preferred = (
-        response_decision.get("preferred_representation")
-        or semantic.get("preferred_representation")
-        or ""
-    )
-
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    answer = getattr(machine_response, "answer", "") or ""
-    content = getattr(machine_response, "content", "") or ""
-    summary = getattr(machine_response, "summary", "") or ""
-
-    should_force_formula = (
-        preferred == "formula"
-        or semantic.get("math_intent")
-        or semantic.get("formula_intent")
-        or semantic.get("render_intent")
-        or "formula" in normalize_text(getattr(machine_response, "goal", "")).lower()
-        or "формул" in normalize_text(getattr(machine_response, "goal", "")).lower()
-    )
-
-    if not render_blocks:
-        candidate = answer or content or summary
-        if candidate and (_looks_like_formula_text(candidate) or should_force_formula):
-            render_blocks = [{
-                "type": "formula",
-                "content": candidate.strip() if isinstance(candidate, str) else candidate,
-                "renderer": "FormulaBlock",
-                "viewer": "FormulaBlock",
-                "priority": 100,
-            }]
-    else:
-        normalized = []
-        for block in render_blocks:
-            if not isinstance(block, dict):
-                normalized.append(block)
-                continue
-
-            block_type = str(block.get("type", "text") or "text")
-            block_content = block.get("content")
-            if (
-                block_type in ("text", "markdown")
-                and (
-                    should_force_formula
-                    or _looks_like_formula_text(block_content if isinstance(block_content, str) else "")
-                    or _looks_like_formula_text(answer)
-                    or _looks_like_formula_text(content)
-                    or _looks_like_formula_text(summary)
-                )
-            ):
-                block = dict(block)
-                block["type"] = "formula"
-                block["renderer"] = "FormulaBlock"
-                block["viewer"] = "FormulaBlock"
-                block.setdefault("priority", 100)
-            normalized.append(block)
-
-        render_blocks = normalized
-
-    machine_response.render_blocks = render_blocks
+    if answer:
+        if _executor_value_is_empty(getattr(machine_response, "answer", None)):
+            machine_response.answer = answer
+        if _executor_value_is_empty(getattr(machine_response, "content", None)):
+            machine_response.content = answer
+        if _executor_value_is_empty(getattr(machine_response, "summary", None)):
+            machine_response.summary = answer
     return machine_response
 
-def track_room(name):
-    return
 
-def track_trajectory(name):
-    return
-
-def track_modality(name):
-    return
-
-def validate_machine_response(
-    result
-):
-
-    if not result:
-        return False
-
-    from blocks.C_ARTIFACT_CONTRACT import MachineResponse
-
-    if isinstance(result, MachineResponse):
-        return True
-
-    if not isinstance(
-        result,
-        dict
-    ):
-
-        return False
-
-    blocked = [
-
-        "traceback",
-        "system prompt",
-        "internal reasoning",
-        "execution room",
-        "cognitive state"
-    ]
-
-    payload = str(result)
-
-    lower = payload.lower()
-
-    for word in blocked:
-
-        if word in lower:
-            return False
-
-    return True
-
-def detect_task_type(
-    semantic,
-    cognition,
-    state,
-    conversation_space=None,
-):
-
-    user_space = build_executor_user_space(
-        state,
-        conversation_space=conversation_space,
-    )
-
-    scene_state = user_space.get("scene", {})
-
-    trajectory = scene_state.get(
-        "trajectory"
-    )
-
-    if trajectory:
-
-        track_trajectory(
-            trajectory
-        )
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        track_modality(
-            "renderer"
-        )
-
-        return "renderer"
-
-    if semantic.get(
-        "visual_generation_needed"
-    ):
-
-        track_modality(
-            "image"
-        )
-
-        return "image"
-
-    if semantic.get(
-        "math_intent"
-    ):
-
-        track_modality(
-            "math"
-        )
-
-        return "math"
-
-    return "text"
-
-
-FOLLOWUP_CONTEXT_CHAR_LIMIT = 420
-FOLLOWUP_CONTEXT_WORD_LIMIT = 7
-
-def _executor_extract_turn_text(turn, limit=220):
-    """Return the richest visible text from a dialog turn-like payload."""
-    if not isinstance(turn, dict):
-        return ""
-
-    for key in ("summary", "content", "text", "answer", "response"):
-        value = turn.get(key)
-        if value:
-            return _clip_text(value, limit)
-
-    for nested_key in ("user", "april"):
-        nested = turn.get(nested_key)
-        if isinstance(nested, dict):
-            extracted = _executor_extract_turn_text(nested, limit=limit)
-            if extracted:
-                return extracted
-
-    return ""
-
-
-def _executor_last_turn_text(dialog, role, limit=220):
-    if not isinstance(dialog, list):
-        return ""
-
-    role = (role or "").strip().lower()
-
-    for item in reversed(dialog):
-        if not isinstance(item, dict):
-            continue
-
-        item_role = (
-            str(item.get("role") or item.get("speaker") or item.get("source") or "")
-            .strip()
-            .lower()
-        )
-        if role and item_role != role:
-            continue
-
-        extracted = _executor_extract_turn_text(item, limit=limit)
-        if extracted:
-            return extracted
-
-    return ""
-
-
-def _executor_reference_context_is_needed(text, semantic, cognition, response_decision, state):
-    """Non-triggered follow-up detection for a tiny first-circle context."""
-    semantic = semantic or {}
-    cognition = cognition or {}
-    response_decision = response_decision or {}
-    state = state or {}
-
-    normalized = normalize_text(text)
-    word_count = len(normalized.split())
-
-    if not normalized:
-        return False
-
-    if response_decision.get("should_continue_trajectory"):
-        return True
-
-    if response_decision.get("discussion_mode"):
-        return True
-
-    if cognition.get("exploration_mode"):
-        return True
-
-    for key in ("followup_candidate", "continuation_candidate", "follow_up_candidate"):
-        if semantic.get(key):
-            return True
-
-    if len(normalized) <= 24 or word_count <= 4:
-        return True
-
-    if state.get("dialog") and word_count <= FOLLOWUP_CONTEXT_WORD_LIMIT:
-        return True
-
-    return False
-
-
-def _executor_build_reference_context(text, state, semantic, cognition, response_decision):
-    """Create a compact, non-repeating context block for the first circle."""
-    if not _executor_reference_context_is_needed(text, semantic, cognition, response_decision, state):
-        return ""
-
-    semantic = semantic or {}
-    cognition = cognition or {}
-    response_decision = response_decision or {}
-    state = state or {}
-
-    active_topic = (
-        state.get("topic")
-        or semantic.get("topic")
-        or semantic.get("intent")
-        or ""
-    )
-
-    focus_source = (
-        cognition.get("dynamic_focus")
-        or state.get("focus_state")
-        or state.get("focus")
-        or response_decision.get("goal")
-        or ""
-    )
-
-    dialog = state.get("dialog", []) or []
-    last_user = _executor_last_turn_text(dialog, "user", limit=180)
-    last_april = (
-        _executor_last_turn_text(dialog, "assistant", limit=180)
-        or _executor_last_turn_text(dialog, "april", limit=180)
-    )
-
-    pieces = []
-    if active_topic:
-        pieces.append(f"topic: {_clip_text(active_topic, 80)}")
-    if focus_source:
-        pieces.append(f"focus: {_clip_text(focus_source, 140)}")
-    if last_user:
-        pieces.append(f"last_user: {_clip_text(last_user, 180)}")
-    if last_april:
-        pieces.append(f"last_april_summary: {_clip_text(last_april, 180)}")
-
-    if not pieces:
-        return ""
-
-    reference_context = "REFERENCE CONTEXT (for understanding only; do not repeat):\n- " + "\n- ".join(pieces)
-    return _clip_text(reference_context, FOLLOWUP_CONTEXT_CHAR_LIMIT * 2)
-
-
-def _executor_build_first_circle_goal(text, state, semantic, cognition, response_decision):
-    """Build the minimal upstream payload sent to Provider/OpenAI."""
-    current_text = normalize_text(text)
-    reference_context = _executor_build_reference_context(
-        text=current_text,
-        state=state,
-        semantic=semantic,
-        cognition=cognition,
-        response_decision=response_decision,
-    )
-
-    if reference_context:
-        goal = (
-            "CURRENT USER REQUEST:\n"
-            f"{current_text}\n\n"
-            f"{reference_context}"
-        )
-    else:
-        goal = current_text
-
-    return goal, reference_context
-
-
-def _executor_build_first_circle_intent(text, semantic, cognition, response_decision):
-    """Build a minimal intent payload for the first circle."""
-    semantic = semantic or {}
-    response_decision = response_decision or {}
-
-    intent_type = (
-        semantic.get("intent")
-        or response_decision.get("goal")
-        or "dialogue"
-    )
-
-    return {
-        "type": intent_type if isinstance(intent_type, str) else str(intent_type),
-        "normalized_text": normalize_text(text),
-        "source": "executor_first_circle",
-    }
-
-
-def _executor_build_second_circle_context(
-    *,
-    state,
-    semantic,
-    reasoning,
-    cognition,
-    response_decision,
-    visual_reference,
-    task_type,
-    text,
-    conversation_space,
-    machine_memory,
-    machine_conversation,
-    reference_context,
-):
-    """Keep the full context for the second circle without sending it upstream."""
-    return {
-        "state": state,
-        "semantic": semantic,
-        "reasoning": reasoning,
-        "cognition": cognition,
-        "response_decision": response_decision,
-        "visual_reference": visual_reference,
-        "task_type": task_type,
-        "text": text,
-        "conversation_space": conversation_space,
-        "memory": machine_memory,
-        "conversation": machine_conversation,
-        "reference_context": reference_context,
-        "provider_scope": {
-            "goal_only": True,
-            "memory_to_provider": False,
-            "visual_to_provider": False,
-            "conversation_to_provider": False,
-        },
-    }
-
-
-def build_conversation_space(state, semantic, cognition, response_decision, text, visual_reference):
-    """
-    Canonical Conversation Space shared by MachineRequest, MachineResponse and MachineScene.
-    Contains no rendering logic and performs no Provider/OpenAI calls.
-    """
-    return {
-        "timeline": state.get("dialog", []),
-        "current_turn": {
-            "user": {
-                "text": text,
-                "voice": None,
-                "image": None,
-                "files": [],
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-            "april": None,
-        },
-        "modalities": {
-            "text": bool(text),
-            "voice": False,
-            "image": False,
-            "files": False,
-        },
-        "last_user_turn": text,
-        "last_april_turn": state.get("last_april_turn"),
-        "semantic": semantic,
-        "cognition": cognition,
-        "response_decision": response_decision,
-        "goal_hierarchy": state.get("goal_hierarchy", {}),
-        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
-        "memory_timeline": state.get("memory_timeline", {}),
-        "visual_summary": state.get("visual_summary", {}),
-        "active_visual_scene": state.get("active_visual_scene", {}),
-        "visual_reference": visual_reference,
-    }
-
-def build_executor_context(
-
-    user_id,
-    chat_id,
-    state,
-    semantic,
-    reasoning,
-    cognition,
-    response_decision,
-    visual_reference,
-    task_type,
-    text
-):
-
-    user_space = build_executor_user_space(state)
-
-    scene_state = user_space.get("scene", {})
-
-    active_flow = user_space.get("active_flow", {})
-
-    visual_continuity_summary = user_space.get("visual_continuity_summary", {})
-
-    active_visual_scene = user_space.get("active_visual_scene", {})
-
-    visual_memory_bridge = build_visual_memory_bridge(
-        user_id
-    )
-
-    conversation_space = build_conversation_space(
-        state=state,
-        semantic=semantic,
-        cognition=cognition,
-        response_decision=response_decision,
-        text=text,
-        visual_reference=visual_reference,
-    )
-
-    return {
-
-        "machine_channel":
-            TASK_CHANNEL,
-
-        "task_type":
-            task_type,
-
-        "executor_version":
-            "april_cpu_v1",
-
-        "user_id":
-            user_id,
-
-        "chat_id":
-            chat_id,
-
-        "semantic":
-            semantic,
-
-        "reasoning":
-            reasoning,
-
-        "cognition":
-            cognition,
-
-        "response_decision":
-            response_decision,
-
-        "executor_awareness":
-            {
-                "discussion_mode":
-                    response_decision.get("discussion_mode", False),
-
-                "reflection_mode":
-                    response_decision.get("reflection_mode", False),
-
-                "space_discussion":
-                    response_decision.get("space_discussion", False),
-
-                "tool_discussion":
-                    response_decision.get("tool_discussion", False),
-
-                "self_action_discussion":
-                    response_decision.get("self_action_discussion", False),
-
-                "explanation_mode":
-                    response_decision.get("explanation_mode", False)
-            },
-
-        "visual_reference":
-            visual_reference,
-
-        "scene_state":
-            scene_state,
-
-        "active_flow":
-            active_flow,
-
-        "trajectory":
-            scene_state.get(
-                "trajectory"
-            ),
-
-        "continuity_mode":
-            scene_state.get(
-                "continuity_mode"
-            ),
-
-        "visual_continuity_summary":
-            visual_continuity_summary,
-
-        "active_visual_scene":
-            active_visual_scene,
-
-        "visual_memory_bridge":
-            visual_memory_bridge,
-
-        "visual_summary":
-            visual_memory_bridge.get(
-                "visual_summary",
-                {}
-            ),
-
-        "today_visual_memory":
-            visual_memory_bridge.get(
-                "today_visual_memory",
-                []
-            ),
-
-        "visual_goal":
-            visual_continuity_summary.get(
-                "active_goal"
-            ),
-
-        "machine_input": text,
-        "platform": "agnostic",
-
-        "state":
-            state,
-
-        "user_space":
-            user_space,
-
-        "conversation_space": _compact_conversation_space(conversation_space),
-        "canonical_space": _compact_conversation_space(conversation_space),
-
-        "memory_routing":
-            {
-                "focus_recommendation":
-                    cognition.get("focus_recommendation", cognition.get("dynamic_focus", {})),
-                "goal_analysis":
-                    cognition.get("goal_analysis", cognition.get("goal_hierarchy", {})),
-                "loop_analysis":
-                    cognition.get("loop_analysis", cognition.get("open_loops", {})),
-                "memory_analysis":
-                    cognition.get("memory_analysis", cognition.get("memory_signals", {}))
-            }
-    }
-
-def build_executor_user_space(state, conversation_space=None):
-    conversation_space = conversation_space or {}
-    return {
-        "scene": state.get("scene_state", {}),
-        "workspace": state.get("workspace_state", {}),
-        "dialog": conversation_space.get("timeline", state.get("dialog", [])),
-        "last_user_turn": conversation_space.get("last_user_turn"),
-        "last_april_turn": conversation_space.get("last_april_turn"),
-        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
-        "goal_hierarchy": state.get("goal_hierarchy", {}),
-        "active_flow": state.get("active_flow", {}),
-        "memory_timeline": state.get("memory_timeline", {}),
-        "visual_summary": state.get("visual_summary", {}),
-        "visual_continuity_summary": state.get("visual_continuity_summary", {}),
-        "active_visual_scene": state.get("active_visual_scene", {}),
-        "renderer_state": state.get("renderer_state", {}),
-        "task_resolution": state.get("task_resolution", {}),
-    }
-
-def stabilize_room_score(
-
-    room,
-    score,
-    semantic,
-    cognition,
-    response_decision,
-    state
-):
-
-    user_space = build_executor_user_space(state)
-
-    scene_state = user_space.get("scene", {})
-
-    active_room = scene_state.get(
-        "active_room"
-    )
-
-    if active_room:
-
-        if room.name == active_room:
-
-            score += 4.0
-
-    if response_decision.get(
-        "renderer_first_mode"
-    ):
-
-        if room.name in [
-
-            "science",
-            "renderer",
-            "graph"
-        ]:
-
-            score += 5.0
-
-    if response_decision.get(
-        "avoid_heavy_generation"
-    ):
-
-        if room.name in [
-
-            "image_generate",
-            "image_edit"
-        ]:
-
-            score -= 8.0
-
-    task_resolution = user_space.get(
-        "task_resolution",
-        {}
-    )
-
-    target_room = task_resolution.get(
-        "target_room"
-    )
-
-    if target_room and room.name == target_room:
-        score += 10.0
-
-    if cognition.get(
-        "trajectory_locked"
-    ):
-
-        room_type = getattr(
-            room,
-            "room_type",
-            None
-        )
-
-        active_type = scene_state.get(
-            "active_room_type"
-        )
-
-        if (
-
-            room_type
-            and active_type
-            and room_type == active_type
-        ):
-
-            score += 3.0
-
-    return clamp(
-        score,
-        -10.0,
-        20.0
-    )
-
-def build_domain_room_map():
-
-    return {
-        "biology": ["biology"],
-        "chemistry": ["chemistry"],
-        "physics": ["physics"],
-        "mathematics": ["mathematics"],
-        "trigonometry": ["trigonometry"],
-        "engineering": ["engineering"],
-        "it": ["it"],
-        "web": ["web"],
-        "politics": ["politics"],
-        "news": ["news"],
-        "social": ["social"],
-        "literature": ["literature"],
-        "utc": ["utc"]
-    }
-
-def domain_room_bonus(room, semantic):
-
-    required_domains = semantic.get(
-        "required_domains",
-        []
-    )
-
-    if not required_domains:
-        return 0.0
-
-    room_map = build_domain_room_map()
-
-    bonus = 0.0
-
-    for domain in required_domains:
-
-        for room_name in room_map.get(domain, []):
-
-            if room.name == room_name:
-                bonus += 6.0
-
-    return bonus
-
-def get_factory_required_rooms(semantic):
-
-    factory_order = semantic.get(
-        "factory_order",
-        {}
-    )
-
-    return factory_order.get(
-        "required_rooms",
-        []
-    )
-
-def build_scene_plan(response_decision, semantic=None):
-
-    semantic = semantic or {}
-
-    artifact_scene = response_decision.get(
-        "artifact_scene",
-        []
-    )
-
-    artifact_bundle = response_decision.get(
-        "artifact_bundle",
-        semantic.get("artifact_bundle", {})
-    )
-
-    primary = artifact_bundle.get(
-        "primary",
-        []
-    )
-
-    secondary = artifact_bundle.get(
-        "secondary",
-        []
-    )
-
-    scene_order = []
-
-    scene_order.extend(primary)
-    scene_order.extend(secondary)
-
-    return {
-
-        "goal":
-            semantic.get(
-                "intent",
-                "dialogue"
-            ),
-
-        "primary_artifacts":
-            primary,
-
-        "secondary_artifacts":
-            secondary,
-
-        "artifact_scene":
-            artifact_scene,
-
-        "scene_order":
-            scene_order,
-
-        "composition_strategy":
-            "artifact_first_scene_composition"
-    }
-
-def artifact_to_render_block(result):
-
-    if not isinstance(result, dict):
-        return {
-            "type": "machine_payload",
-            "payload": result
-        }
-
-    result_type = result.get("type")
-
-    if result_type != "artifact":
-        return result
-
-    artifact = result.get("artifact")
-
-    translated = botru_translate_artifact(
-        artifact
-    )
-
-    translated["machine_payload"] = True
-
-    return translated
-
-def botru_translate_artifact(artifact):
-
-    if artifact is None:
-        return {
-            "type": "artifact",
-            "content": ""
-        }
-
-    if hasattr(artifact, "data"):
-
-        payload = artifact.data
-
-        if isinstance(payload, dict):
-
-            for field in [
-                "answer",
-                "response",
-                "content",
-                "text",
-                "summary",
-                "analysis",
-                "description",
-                "research_summary",
-                "observation_report",
-                "topic"
-            ]:
-
-                value = payload.get(field)
-
-                if value:
-                    return {
-                        "type": "artifact",
-                        "content": str(value),
-                        "artifact": payload
-                    }
-
-            return {
-                "type": "artifact",
-                "content": str(payload),
-                "artifact": payload
-            }
-
-    if isinstance(artifact, str):
-        return {
-            "type": "artifact",
-            "content": artifact
-        }
-
-    if isinstance(artifact, dict):
-
-        for field in [
-            "content",
-            "text",
-            "summary",
-            "analysis",
-            "description",
-            "research_summary",
-            "observation_report",
-            "topic"
-        ]:
-            value = artifact.get(field)
-            if value:
-                return {
-                    "type": "artifact",
-                    "content": str(value),
-                    "artifact": artifact
-                }
-
-        return {
-            "type": "artifact",
-            "content": str(artifact),
-            "artifact": artifact
-        }
-
-    return {
-        "type": "artifact",
-        "content": str(artifact)
-    }
-
-def build_task_resolution(
-    cognition,
-    response_decision,
-    semantic,
-    state
-):
-
-    task = cognition.get(
-        "task_understanding",
-        {}
-    )
-
-    next_step = cognition.get(
-        "assistant_next_step",
-        "ready_to_help"
-    )
-
-    confusion = cognition.get(
-        "user_confusion",
-        0.0
-    )
-
-    clarification_required = (
-        response_decision.get(
-            "task_requires_clarification",
-            False
-        )
-    )
-
-    resolution = {
-        "mode": "execute",
-        "next_step": next_step,
-        "guidance_priority": False,
-        "missing_information": task.get(
-            "missing_information",
-            []
-        )
-    }
-
-    if clarification_required:
-        resolution["mode"] = "clarify"
-        resolution["guidance_priority"] = True
-
-    if confusion >= 0.5:
-        resolution["guidance_priority"] = True
-
-    return resolution
-
-def build_guidance_response(
-    task_resolution
-):
-
-    step = task_resolution.get(
-        "next_step"
-    )
-
-    messages = {
-        "request_image":
-            "Чтобы помочь точнее, пришли скриншот или изображение того, что ты видишь сейчас.",
-        "request_formula":
-            "Напиши формулу или опиши задачу своими словами. Если формулу не знаешь, я помогу её подобрать.",
-        "request_error_details":
-            "Покажи текст ошибки или пришли скриншот окна с ошибкой, и я проведу тебя дальше."
-    }
-
-    if step not in messages:
-        return None
-
-    return {
-        "type": "text",
-        "data": messages[step]
-    }
-
-def executor_cpu_register_room(report, room_name, **kwargs):
-    entry={"room": room_name}
-    entry.update(kwargs)
-    report.append(entry)
-    return report
-
-
-
-def _extract_machine_response(result):
-    """Stage 1 Executor: preserve Provider semantic fields without collapsing them."""
+def _extract_machine_response(result: Any):
     if isinstance(result, MachineResponse):
         return result
     if result is None:
@@ -1593,51 +959,24 @@ def _extract_machine_response(result):
     if not candidates:
         return None
 
-    merged = {}
+    merged: Dict[str, Any] = {}
     for source in sorted(candidates, key=_executor_mapping_score, reverse=True):
         for key, value in source.items():
             if key not in merged or _executor_value_is_empty(merged.get(key)):
                 merged[key] = value
 
     response = MachineResponse()
-
     canonical_fields = (
-        "answer",
-        "content",
-        "summary",
-        "response",
-        "explanation",
-        "scene",
-        "artifacts",
-        "render_blocks",
-        "scene_plan",
-        "render_priority",
-        "metadata",
-        "confidence",
-        "provider",
-        "provider_contract",
-        "transport_contract",
-        "provider_original_answer",
-        "provider_original_content",
-        "processor_input",
-        "provider_source_request",
-        "scene_contract",
-        "scene_runtime",
-        "conversation_space",
-        "current_turn",
-        "timeline",
-        "dialog",
-        "goal",
-        "goal_hierarchy",
-        "focus",
-        "visual_reference",
-        "visual_summary",
-        "active_visual_scene",
-        "executor_decision",
-        "executor_presentation_plan",
-        "executor_scene_profile",
+        "answer", "content", "summary", "response", "explanation", "scene",
+        "artifacts", "render_blocks", "scene_plan", "render_priority", "metadata",
+        "confidence", "provider", "provider_contract", "transport_contract",
+        "provider_original_answer", "provider_original_content", "processor_input",
+        "provider_source_request", "scene_contract", "scene_runtime", "conversation_space",
+        "current_turn", "timeline", "dialog", "goal", "goal_hierarchy", "focus",
+        "visual_reference", "visual_summary", "active_visual_scene",
+        "executor_decision", "executor_presentation_plan", "executor_scene_profile",
+        "provider_reference_context", "second_circle_context",
     )
-
     for field in canonical_fields:
         if field in merged:
             try:
@@ -1645,7 +984,6 @@ def _extract_machine_response(result):
             except Exception:
                 pass
 
-    # Merge the richest text from every visible layer.
     answer = _executor_best_text(
         merged.get("answer"),
         merged.get("content"),
@@ -1682,7 +1020,6 @@ def _extract_machine_response(result):
     if summary:
         response.summary = summary
 
-    # Ensure canonical container fields survive even when the nested wrapper is partial.
     for field in ("render_blocks", "artifacts", "scene", "metadata", "scene_plan", "render_priority"):
         if field in merged and _executor_value_is_empty(getattr(response, field, None)):
             try:
@@ -1690,7 +1027,6 @@ def _extract_machine_response(result):
             except Exception:
                 pass
 
-    # Preserve common transport metadata as top-level fields where present.
     for field in ("provider_original_answer", "provider_original_content", "provider_contract", "transport_contract"):
         if field in merged and _executor_value_is_empty(getattr(response, field, None)):
             try:
@@ -1701,409 +1037,92 @@ def _extract_machine_response(result):
     return response
 
 
-async def execute_rooms(
-    user_id,
-    text,
-    context,
-    semantic,
-    cognition,
-    response_decision,
-    state,
-    run_with_activity,
-):
+def executor_cpu_normalize_answer(machine_response):
+    answer = getattr(machine_response, "answer", None)
+    content = getattr(machine_response, "content", None)
+    summary = getattr(machine_response, "summary", None)
 
-    machine_request = context.get("machine_request")
-    if machine_request is None:
-        raise RuntimeError("MachineRequest missing from executor context")
+    fallback = None
+    if not (answer or content or summary):
+        for block in list(getattr(machine_response, "render_blocks", []) or []):
+            if isinstance(block, dict):
+                fallback = block.get("content") or block.get("text")
+                if fallback:
+                    break
 
-    room_results = []
-    room_execution_report = []
-    best_machine_response = None
-    best_score = -1
+    if fallback:
+        if not answer:
+            machine_response.answer = fallback
+        if not content:
+            machine_response.content = fallback
+        if not summary:
+            machine_response.summary = fallback
 
-    for room in ROOMS:
-        try:
-            result = await room.handle(
-                user_id=user_id,
-                text=text,
-                context=machine_request,
-                run=run_with_activity,
-            )
+    return machine_response
 
-            if isinstance(result, dict):
-                mr = result.get("machine_response")
-                if isinstance(mr, dict):
-                    pass
-                elif isinstance(mr, MachineResponse):
-                    pass
 
-            extracted = _extract_machine_response(result)
-
-            if extracted is None and isinstance(result, dict):
-                mr = result.get("machine_response")
-                if isinstance(mr, dict):
-                    extracted = MachineResponse()
-                    for k, v in mr.items():
-                        try:
-                            setattr(extracted, k, v)
-                        except Exception:
-                            pass
-
-            if extracted is not None:
-                room_results.append({
-                    "room": getattr(room, "name", "unknown"),
-                    "machine_response": extracted,
-                })
-                executor_cpu_register_room(
-                    room_execution_report,
-                    getattr(room, "name", "unknown"),
-                    status="ok",
-                )
-
-                score = _executor_response_score(extracted)
-                if best_machine_response is None or score > best_score:
-                    best_machine_response = extracted
-                    best_score = score
-                continue
-
-        except Exception as exc:
-            room_execution_report.append({"room": getattr(room, "name", "unknown"), "status": "error", "error": str(exc)})
-            continue
-
-    if best_machine_response is None:
-        raise RuntimeError("No MachineResponse produced")
-
-    # Sort best-first so any downstream registry logic sees the richest payload first.
-    room_results = sorted(
-        room_results,
-        key=lambda item: _executor_response_score(item.get("machine_response")),
-        reverse=True,
-    )
-
-    machine_response = best_machine_response
-    machine_response = _executor_recover_room_response(
-        machine_response,
-        room_results,
-        machine_request=machine_request,
-        text=text,
-    )
-
-    # Executor no longer synthesizes fallback text here.
-    # Canonical Provider output must pass through unchanged.
-
-    conversation_space = context.get("conversation_space") or {}
-    april_turn = {
-        "answer": getattr(machine_response, "answer", None),
-        "summary": getattr(machine_response, "summary", None),
-        "render_blocks": list(getattr(machine_response, "render_blocks", []) or []),
-    }
-    conversation_space["current_turn"]["april"] = april_turn
-    conversation_space["last_april_turn"] = april_turn
-
-    timeline = conversation_space.setdefault("timeline", [])
-    timeline.append(conversation_space["current_turn"])
-    conversation_space["dialog"] = timeline
-    setattr(machine_response, "conversation_space", conversation_space)
-
-    _canonical_answer = getattr(machine_response, "answer", "")
-    _canonical_content = getattr(machine_response, "content", "")
-    _canonical_summary = getattr(machine_response, "summary", "")
-
-    machine_response = executor_cpu_normalize_answer(machine_response)
-
-    executor_cpu_transport_diag('BEFORE_REFLECT', machine_response)
-    machine_response = executor_cpu_reflect(
-        semantic=semantic,
-        cognition=cognition,
-        response_decision=response_decision,
-        state=state,
-        machine_response=machine_response,
-    )
-
-    setattr(machine_response, "room_execution_report", room_execution_report)
-    if not room_results:
-        room_results = [{"machine_response": machine_response}]
-    reflected_machine_response = machine_response
-
-    registry_result = registry_parent_dispatch(
-        machine_request,
-        room_results,
-    )
-
-    machine_response = reflected_machine_response
-
-    if registry_result is not None:
-        for _field in (
-            "contributions",
-            "registry_diagnostics",
-            "artifacts",
-            "render_blocks",
-            "metadata",
-        ):
-            try:
-                value = getattr(registry_result, _field, None)
-                if value not in (None, "", [], {}):
-                    setattr(machine_response, _field, value)
-            except Exception:
-                pass
-
-        for _field in ("answer", "content", "summary"):
-            try:
-                current = getattr(machine_response, _field, "")
-                incoming = getattr(registry_result, _field, "")
-                if (not current) and incoming:
-                    setattr(machine_response, _field, incoming)
-            except Exception:
-                pass
-
-    machine_response = executor_cpu_normalize_answer(machine_response)
-
-    if not getattr(machine_response, "answer", "") and _canonical_answer:
-        machine_response.answer = _canonical_answer
-    if not getattr(machine_response, "content", "") and _canonical_content:
-        machine_response.content = _canonical_content
-    if not getattr(machine_response, "summary", "") and _canonical_summary:
-        machine_response.summary = _canonical_summary
-
-    if (
-        not list(getattr(machine_response, "render_blocks", []) or [])
-        and getattr(machine_response, "answer", "")
-    ):
-        machine_response.render_blocks = [{
-            "type": "text",
-            "content": machine_response.answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "priority": 0,
-        }]
-
-    executor_cpu_transport_diag('AFTER_REFLECT', machine_response)
-
-    setattr(machine_response, "provider_transport_verified", True)
-    setattr(machine_response, "provider_contract_version", "fiber_v3_stage2")
-
-    diagnostics = (
-        getattr(machine_response, "contributions", {})
-        .get("registry_diagnostics", {})
-    )
-
-    if False:
-        cpu_trace_success(
-            "ROOM_EXECUTION",
-            {
-                "answer": getattr(machine_response, "answer", None),
-                "artifacts": len(getattr(machine_response, "artifacts", []) or []),
-                "diagnostics": diagnostics,
-            },
-        )
-
-    return executor_cpu_finalize_transport(machine_response)
-
-def apply_representation_gate(blocks, response_decision=None, semantic=None):
-    response_decision = response_decision or {}
+def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
     semantic = semantic or {}
-    preferred = (
-        response_decision.get("preferred_representation")
-        or semantic.get("preferred_representation")
-    )
-    if not preferred:
-        return blocks
-    filtered=[]
-    for b in blocks:
-        if not isinstance(b, dict):
-            filtered.append(b); continue
-        t=b.get("type")
-        if t in ("graph","formula","table","diagram","gallery"):
-            if t!=preferred:
-                continue
-        filtered.append(b)
-    return filtered
+    response_decision = response_decision or {}
 
-def is_canonical_scene(scene):
-    return {
-        "single_route": True,
-        "input": "MachineRequest",
-        "output": "MachineScene",
-        "scene_contract": True,
-    }
+    preferred = response_decision.get("preferred_representation") or semantic.get("preferred_representation") or ""
 
-def normalize_provider_scene(result):
-    if not isinstance(result, dict):
-        return result
-
-    if result.get("type") == "scene_contract":
-        return result
-
-    if result.get("scene_contract") is True:
-        return {
-            "type": "scene_contract",
-            **result
-        }
-
-    return result
-
-def executor_cpu_materialize_blocks(machine_response):
-    """Stage 3: transport only.
-
-    Executor never creates, restores or synthesizes render_blocks.
-    Provider is the single owner of render_blocks.
-    """
-
-    render_blocks = list(
-        getattr(machine_response, "render_blocks", []) or []
-    )
-
-    machine_response.render_blocks = render_blocks
-    return machine_response
-
-def executor_cpu_attach_artifact_payloads(machine_response):
-    artifacts = list(getattr(machine_response, "artifacts", []) or [])
     render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    answer = getattr(machine_response, "answer", "") or ""
+    content = getattr(machine_response, "content", "") or ""
+    summary = getattr(machine_response, "summary", "") or ""
 
-    artifact_index = {}
+    should_force_formula = (
+        preferred == "formula"
+        or semantic.get("math_intent")
+        or semantic.get("formula_intent")
+        or semantic.get("render_intent")
+        or "formula" in normalize_text(getattr(machine_response, "goal", "")).lower()
+        or "формул" in normalize_text(getattr(machine_response, "goal", "")).lower()
+    )
 
-    for artifact in artifacts:
-        artifact_type = (
-            getattr(artifact, "artifact_type", None)
-            or getattr(artifact, "type", None)
-        )
-        payload = getattr(artifact, "data", None)
-        if artifact_type and payload is not None:
-            artifact_index[artifact_type] = payload
-
-    for block in render_blocks:
-        if not isinstance(block, dict):
-            continue
-
-        provider_payload = artifact_index.get(block.get("type"))
-        if provider_payload is None:
-            continue
-
-        block["payload"] = provider_payload
-        block["provider_payload"] = True
-        block["canonical_provider_payload"] = True
-        block["executor_generated"] = False
+    if not render_blocks:
+        candidate = answer or content or summary
+        if candidate and (_looks_like_formula_text(candidate) or should_force_formula):
+            render_blocks = [{
+                "type": "formula",
+                "content": candidate.strip() if isinstance(candidate, str) else candidate,
+                "renderer": "FormulaBlock",
+                "viewer": "FormulaBlock",
+                "priority": 100,
+            }]
+    else:
+        normalized = []
+        for block in render_blocks:
+            if not isinstance(block, dict):
+                normalized.append(block)
+                continue
+            block_type = str(block.get("type", "text") or "text")
+            block_content = block.get("content")
+            if (
+                block_type in ("text", "markdown")
+                and (
+                    should_force_formula
+                    or _looks_like_formula_text(block_content if isinstance(block_content, str) else "")
+                    or _looks_like_formula_text(answer)
+                    or _looks_like_formula_text(content)
+                    or _looks_like_formula_text(summary)
+                )
+            ):
+                block = dict(block)
+                block["type"] = "formula"
+                block["renderer"] = "FormulaBlock"
+                block["viewer"] = "FormulaBlock"
+                block.setdefault("priority", 100)
+            normalized.append(block)
+        render_blocks = normalized
 
     machine_response.render_blocks = render_blocks
     return machine_response
 
-def executor_reflection_pass(machine_response, executor_context):
-    if machine_response is None:
-        return machine_response
-
-    semantic=executor_context.get("semantic",{}) or {}
-    cognition=executor_context.get("cognition",{}) or {}
-    response_decision=executor_context.get("response_decision",{}) or {}
-    state=executor_context.get("state",{}) or {}
-
-    blocks=list(getattr(machine_response,"render_blocks",[]) or [])
-
-    answer=(getattr(machine_response,"answer",None)
-        or getattr(machine_response,"content",None)
-        or getattr(machine_response,"summary",None)
-        or "")
-
-    planner=getattr(machine_response,"executor_planner",None)
-    if planner is None:
-        planner={
-            "goal":semantic.get("intent"),
-            "representation":response_decision.get("preferred_representation")
-                or semantic.get("preferred_representation")
-                or "text",
-            "memory_active":bool(state.get("memory_timeline")),
-            "visual_active":bool(state.get("active_visual_scene")),
-        }
-    planner["reflection"]=True
-
-    # Reflection is diagnostic only; it must not synthesize new blocks.
-    machine_response.render_blocks = blocks
-    machine_response.executor_cpu_verified=True
-    machine_response.executor_reflection={
-        "pass":2,
-        "planner":planner,
-        "provider_reentry":False,
-        "openai_reentry":False,
-        "decision_complete":True
-    }
-    return machine_response
-
-EXECUTOR_ROUTE_VERSION="fiber_scene_v2"
-EXECUTOR_LEGACY_TEXT_ROUTE=False
-
-EXECUTOR_FIBER_CANONICAL = True
-
-EXECUTOR_CPU_ENABLED = True
-
-APRIL_CPU_TRACE_ENABLED=False
-CPU_EXECUTION_JOURNAL=[]
-
-CPU_STAGE_REGISTRY=[]
-
-def cpu_stage_record(stage,status,details=None):
-    entry={
-        "stage":stage,
-        "status":status,
-        "details":details or {},
-        "timestamp":time.time(),
-    }
-    CPU_STAGE_REGISTRY.append(entry)
-    return entry
-
-def cpu_stage_snapshot():
-    return list(CPU_STAGE_REGISTRY)
-
-def cpu_trace_begin(stage,payload=None):
-    if not APRIL_CPU_TRACE_ENABLED:
-        return
-    cpu_stage_record(stage,"BEGIN",payload or {})
-    CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"BEGIN","payload":payload or {},"timestamp":time.time()})
-
-def cpu_trace_success(stage,payload=None):
-    if not APRIL_CPU_TRACE_ENABLED:
-        return
-    cpu_stage_record(stage,"SUCCESS",payload or {})
-    CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"SUCCESS","payload":payload or {},"timestamp":time.time()})
-
-def cpu_trace_error(stage,error):
-    if not APRIL_CPU_TRACE_ENABLED:
-        return
-    cpu_stage_record(stage,"ERROR",{"error":str(error)})
-    CPU_EXECUTION_JOURNAL.append({"stage":stage,"status":"ERROR","error":str(error),"timestamp":time.time()})
-
-def cpu_execution_journal():
-    return list(CPU_EXECUTION_JOURNAL)
-
-EXECUTOR_CPU_TRACE = []
-EXECUTOR_CPU_SESSION = {}
-
-def executor_cpu_checkpoint(stage, **payload):
-    return payload.get("machine_response")
-
-def executor_cpu_integrate_presentation(machine_response):
-    decision = getattr(machine_response, "executor_decision", {}) or {}
-    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
-
-    preferred = (
-        decision.get("preferred_representation")
-        or plan.get("representation")
-        or "text"
-    )
-
-    plan["representation"] = preferred
-    plan["executor_integrated"] = True
-    plan["internal_only"] = True
-    plan["human_visible"] = False
-
-    machine_response.executor_presentation_plan = plan
-    machine_response.executor_presentation_integrated = True
-    return machine_response
 
 def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decision, state, machine_response):
-    """Internal CPU-only cognitive integration.
-    Never produces user-visible text and never calls Provider/OpenAI.
-    """
     conversation_space = getattr(machine_response, "conversation_space", {}) or {}
-
     reflection = {
         "dialog": state.get("dialog", []),
         "memory_timeline": state.get("memory_timeline", {}),
@@ -2121,49 +1140,23 @@ def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decisi
     setattr(machine_response, "executor_cognitive_context", reflection)
     return machine_response
 
+
 def executor_cpu_build_executor_decision(*, semantic, cognition, response_decision, state, machine_response):
-    """CPU-only decision layer. Produces machine decision, never user text."""
-    ctx=getattr(machine_response,"executor_cognitive_context",{}) or {}
-    decision={
-        "topic_mode":"continuation" if ctx.get("trajectory") else "new_topic",
-        "use_visual_memory":bool(ctx.get("active_visual_scene")),
-        "use_memory_timeline":bool(ctx.get("memory_timeline")),
-        "continue_scene":bool(ctx.get("active_visual_scene")),
-        "representation":response_decision.get("preferred_representation")
-            or semantic.get("preferred_representation")
-            or "text",
-        "internal_only":True,
-        "human_visible":False,
+    ctx = getattr(machine_response, "executor_cognitive_context", {}) or {}
+    decision = {
+        "topic_mode": "continuation" if ctx.get("trajectory") else "new_topic",
+        "use_visual_memory": bool(ctx.get("active_visual_scene")),
+        "use_memory_timeline": bool(ctx.get("memory_timeline")),
+        "continue_scene": bool(ctx.get("active_visual_scene")),
+        "representation": response_decision.get("preferred_representation") or semantic.get("preferred_representation") or "text",
+        "internal_only": True,
+        "human_visible": False,
     }
-    setattr(machine_response,"executor_decision",decision)
+    setattr(machine_response, "executor_decision", decision)
     return machine_response
 
-def executor_cpu_normalize_answer(machine_response):
-    """Stage 2: preserve semantic fields; only fill missing canonical values."""
-    answer=getattr(machine_response,"answer",None)
-    content=getattr(machine_response,"content",None)
-    summary=getattr(machine_response,"summary",None)
-
-    fallback=None
-    if not (answer or content or summary):
-        for block in list(getattr(machine_response,"render_blocks",[]) or []):
-            if isinstance(block,dict):
-                fallback=block.get("content") or block.get("text")
-                if fallback:
-                    break
-
-    if fallback:
-        if not answer:
-            machine_response.answer=fallback
-        if not content:
-            machine_response.content=fallback
-        if not summary:
-            machine_response.summary=fallback
-
-    return machine_response
 
 def executor_cpu_build_presentation_plan(machine_response):
-    """Stage 2: determine presentation from artifact types only."""
     plan = {
         "representation": "text",
         "blocks": [],
@@ -2172,31 +1165,14 @@ def executor_cpu_build_presentation_plan(machine_response):
     }
 
     artifacts = list(getattr(machine_response, "artifacts", []) or [])
-
     for artifact in artifacts:
-        artifact_type = (
-            getattr(artifact, "artifact_type", None)
-            or getattr(artifact, "type", None)
-            or "text"
-        )
-
+        artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None) or "text"
         if artifact_type not in plan["artifact_types"]:
             plan["artifact_types"].append(artifact_type)
-
         if artifact_type not in plan["blocks"]:
             plan["blocks"].append(artifact_type)
 
-    priority = [
-        "graph",
-        "table",
-        "formula",
-        "gallery",
-        "diagram",
-        "link",
-        "code",
-        "text",
-    ]
-
+    priority = ["graph", "table", "formula", "gallery", "diagram", "link", "code", "text"]
     for rep in priority:
         if rep in plan["artifact_types"]:
             plan["representation"] = rep
@@ -2205,11 +1181,21 @@ def executor_cpu_build_presentation_plan(machine_response):
     machine_response.executor_presentation_plan = plan
     return machine_response
 
+
+def executor_cpu_integrate_presentation(machine_response):
+    decision = getattr(machine_response, "executor_decision", {}) or {}
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    preferred = decision.get("preferred_representation") or plan.get("representation") or "text"
+    plan["representation"] = preferred
+    plan["executor_integrated"] = True
+    plan["internal_only"] = True
+    plan["human_visible"] = False
+    machine_response.executor_presentation_plan = plan
+    machine_response.executor_presentation_integrated = True
+    return machine_response
+
+
 def executor_cpu_transport_verification(machine_response):
-    """
-    Final verification before Scene pipeline.
-    Preserves the single canonical MachineResponse.
-    """
     report = {
         "verified": True,
         "single_route": True,
@@ -2218,81 +1204,63 @@ def executor_cpu_transport_verification(machine_response):
         "render_blocks": len(getattr(machine_response, "render_blocks", []) or []),
         "artifacts": len(getattr(machine_response, "artifacts", []) or []),
     }
-
     for field in ("answer", "content", "summary"):
         if getattr(machine_response, field, None) is None:
             setattr(machine_response, field, "")
-
     machine_response.executor_transport_verification = report
     return machine_response
 
+
 def executor_cpu_memory_fusion(machine_response):
-    """
-    Fuse dynamic memory, visual memory and dialog trajectory into
-    one canonical executor state. No new routes are created.
-    """
-    cs=getattr(machine_response,"conversation_space",{}) or {}
-
-    dialog_vector={
-        "timeline": cs.get("timeline",[]),
-        "memory_timeline": cs.get("memory_timeline",{}),
-        "visual_summary": cs.get("visual_summary",{}),
-        "active_visual_scene": cs.get("active_visual_scene",{}),
-        "goal_hierarchy": cs.get("goal_hierarchy",{}),
-        "focus": cs.get("focus",{}),
-        "semantic": cs.get("semantic",{}),
-        "response_decision": cs.get("response_decision",{}),
-        "vector_version":"executor_test5",
-        "single_route":True,
+    cs = getattr(machine_response, "conversation_space", {}) or {}
+    dialog_vector = {
+        "timeline": cs.get("timeline", []),
+        "memory_timeline": cs.get("memory_timeline", {}),
+        "visual_summary": cs.get("visual_summary", {}),
+        "active_visual_scene": cs.get("active_visual_scene", {}),
+        "goal_hierarchy": cs.get("goal_hierarchy", {}),
+        "focus": cs.get("focus", {}),
+        "semantic": cs.get("semantic", {}),
+        "response_decision": cs.get("response_decision", {}),
+        "vector_version": "executor_test5",
+        "single_route": True,
     }
-
-    setattr(machine_response,"dialog_vector",dialog_vector)
-
-    plan=getattr(machine_response,"executor_presentation_plan",{}) or {}
-    plan["dialog_vector"]=True
-    plan["memory_fusion"]=True
-    plan["visual_continuity"]=bool(dialog_vector["active_visual_scene"])
-    plan["dynamic_memory"]=bool(dialog_vector["memory_timeline"])
-    machine_response.executor_presentation_plan=plan
+    setattr(machine_response, "dialog_vector", dialog_vector)
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    plan["dialog_vector"] = True
+    plan["memory_fusion"] = True
+    plan["visual_continuity"] = bool(dialog_vector["active_visual_scene"])
+    plan["dynamic_memory"] = bool(dialog_vector["memory_timeline"])
+    machine_response.executor_presentation_plan = plan
     return machine_response
 
-def executor_cpu_scene_intelligence(machine_response):
-    """
-    Final executor intelligence pass.
-    Combines dialog vector, memory fusion and scene planning
-    without changing the canonical Fiber route.
-    """
-    dialog_vector=getattr(machine_response,"dialog_vector",{}) or {}
-    planner=getattr(machine_response,"executor_presentation_plan",{}) or {}
 
-    scene_profile={
+def executor_cpu_scene_intelligence(machine_response):
+    dialog_vector = getattr(machine_response, "dialog_vector", {}) or {}
+    planner = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    scene_profile = {
         "dialog_continuity": bool(dialog_vector.get("timeline")),
         "memory_continuity": bool(dialog_vector.get("memory_timeline")),
         "visual_continuity": bool(dialog_vector.get("active_visual_scene")),
         "goal_continuity": bool(dialog_vector.get("goal_hierarchy")),
         "focus_continuity": bool(dialog_vector.get("focus")),
-        "scene_strategy":"single_scene_contract",
-        "fiber_route":"single",
-        "executor_generated":True,
+        "scene_strategy": "single_scene_contract",
+        "fiber_route": "single",
+        "executor_generated": True,
     }
-
-    planner["scene_profile"]=scene_profile
-    planner["scene_intelligence"]=True
-    machine_response.executor_presentation_plan=planner
-    machine_response.executor_scene_profile=scene_profile
+    planner["scene_profile"] = scene_profile
+    planner["scene_intelligence"] = True
+    machine_response.executor_presentation_plan = planner
+    machine_response.executor_scene_profile = scene_profile
     return machine_response
 
+
 def executor_cpu_synthetic_verification(machine_response):
-    """
-    Detect internally inconsistent executor state without
-    changing the canonical Fiber route.
-    """
     report = {
         "single_route": True,
         "synthetic_detected": False,
         "issues": [],
     }
-
     dv = getattr(machine_response, "dialog_vector", {}) or {}
     plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
 
@@ -2313,13 +1281,10 @@ def executor_cpu_synthetic_verification(machine_response):
     machine_response.executor_synthetic_report = report
     return machine_response
 
+
 def executor_cpu_user_alignment(machine_response):
-    """Strengthen planning using the current conversation space.
-    Does not introduce new routes or objects.
-    """
     cs = getattr(machine_response, "conversation_space", {}) or {}
     planner = getattr(machine_response, "executor_presentation_plan", {}) or {}
-
     alignment = {
         "user_goal": cs.get("response_decision", {}).get("goal"),
         "focus": cs.get("focus", {}),
@@ -2330,12 +1295,12 @@ def executor_cpu_user_alignment(machine_response):
         "single_route": True,
         "executor_generated": True,
     }
-
     planner["user_alignment"] = alignment
     planner["adaptive"] = True
     machine_response.executor_presentation_plan = planner
     machine_response.executor_user_alignment = alignment
     return machine_response
+
 
 def executor_cpu_pipeline(machine_response):
     machine_response = executor_cpu_transport_verification(machine_response)
@@ -2349,38 +1314,22 @@ def executor_cpu_pipeline(machine_response):
     machine_response = executor_cpu_normalize_answer(machine_response)
     return machine_response
 
-def executor_cpu_finalize(machine_response):
-    """
-    Canonical final CPU pass.
-    Executes the unified pipeline once and removes transient
-    executor fields before SceneContract generation.
-    """
-    machine_response = executor_cpu_pipeline(machine_response)
 
-    transient = [
-        "executor_cognitive_context",
-        "executor_scene_profile",
-        "executor_user_alignment",
-    ]
+def executor_cpu_finalize(machine_response):
+    machine_response = executor_cpu_pipeline(machine_response)
+    transient = ["executor_cognitive_context", "executor_scene_profile", "executor_user_alignment"]
     for name in transient:
         if hasattr(machine_response, name):
             try:
                 delattr(machine_response, name)
             except Exception:
                 pass
-
     setattr(machine_response, "executor_finalized", True)
-    setattr(machine_response, "executor_pipeline_version", "TEST10_FINAL")
+    setattr(machine_response, "executor_pipeline_version", "FINAL")
     return machine_response
 
-def executor_cpu_reflect(
-    *,
-    semantic,
-    cognition,
-    response_decision,
-    state,
-    machine_response,
-):
+
+def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machine_response):
     machine_response = executor_cpu_build_cognitive_context(
         semantic=semantic,
         cognition=cognition,
@@ -2402,82 +1351,59 @@ def executor_cpu_reflect(
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
     machine_response = executor_cpu_materialize_blocks(machine_response)
-    machine_response = _canonicalize_formula_blocks(
-        machine_response,
-        semantic=semantic,
-        response_decision=response_decision,
-    )
+    machine_response = _canonicalize_formula_blocks(machine_response, semantic=semantic, response_decision=response_decision)
     machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     conversation_space = getattr(machine_response, "conversation_space", {}) or {}
-
-    semantic = conversation_space.get("semantic", semantic)
-    cognition = conversation_space.get("cognition", cognition)
-    response_decision = conversation_space.get("response_decision", response_decision)
-
     planner = {
         "goal": semantic.get("intent"),
         "conversation_space": conversation_space,
-        "representation": (
-            response_decision.get("preferred_representation")
-            or semantic.get("preferred_representation")
-            or "text"
-        ),
+        "representation": response_decision.get("preferred_representation") or semantic.get("preferred_representation") or "text",
         "memory_active": bool(state.get("memory_timeline")),
         "visual_active": bool(state.get("active_visual_scene")),
         "dialog_focus": cognition.get("dynamic_focus", {}),
     }
 
-    decision = getattr(machine_response,"executor_decision",{}) or {}
+    decision = getattr(machine_response, "executor_decision", {}) or {}
     if decision.get("representation"):
         planner["representation"] = decision["representation"]
-    planner["presentation_plan"] = getattr(machine_response,"executor_presentation_plan",{})
+    planner["presentation_plan"] = getattr(machine_response, "executor_presentation_plan", {})
     setattr(machine_response, "executor_planner", planner)
     setattr(machine_response, "executor_cpu_verified", True)
     return machine_response
-EXECUTOR_CPU_OBJECTS = {
-    "machine_request": {},
-    "machine_response": {},
-    "machine_scene": {},
-}
 
-def executor_cpu_mark_object(name, obj, owner):
-    if obj is None:
-        return
-    EXECUTOR_CPU_OBJECTS[name] = {
-        "owner": owner,
-        "object_type": type(obj).__name__,
-        "object_id": id(obj),
-    }
 
-def executor_cpu_lineage_report():
-    return {
-        "session": EXECUTOR_CPU_SESSION,
-        "objects": EXECUTOR_CPU_OBJECTS,
-    }
+def executor_cpu_materialize_blocks(machine_response):
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    machine_response.render_blocks = render_blocks
+    return machine_response
 
-def executor_cpu_transport_diag(stage, machine_response=None, scene_contract=None):
-    try:
-        if machine_response is not None:
-            print(
-                f"[EXECUTOR][{stage}] "
-                f"answer={len(getattr(machine_response,'answer','') or '')} "
-                f"content={len(getattr(machine_response,'content','') or '')} "
-                f"summary={len(getattr(machine_response,'summary','') or '')} "
-                f"blocks={len(getattr(machine_response,'render_blocks',[]) or [])} "
-                f"artifacts={len(getattr(machine_response,'artifacts',[]) or [])}"
-            )
-        if scene_contract is not None:
-            blocks = getattr(scene_contract, 'render_blocks', None)
-            if blocks is None and isinstance(scene_contract, dict):
-                blocks = scene_contract.get('render_blocks', [])
-            print(f"[EXECUTOR][{stage}] scene_contract_blocks={len(blocks or [])}")
-    except Exception as exc:
-        print(f"[EXECUTOR][{stage}] diag_error={exc}")
+
+def executor_cpu_attach_artifact_payloads(machine_response):
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    artifact_index = {}
+    for artifact in artifacts:
+        artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None)
+        payload = getattr(artifact, "data", None)
+        if artifact_type and payload is not None:
+            artifact_index[artifact_type] = payload
+    for block in render_blocks:
+        if not isinstance(block, dict):
+            continue
+        provider_payload = artifact_index.get(block.get("type"))
+        if provider_payload is None:
+            continue
+        block["payload"] = provider_payload
+        block["provider_payload"] = True
+        block["canonical_provider_payload"] = True
+        block["executor_generated"] = False
+    machine_response.render_blocks = render_blocks
+    return machine_response
+
 
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
-    """Synchronize canonical fields into SceneContract."""
     if scene_contract is None:
         return scene_contract
 
@@ -2520,19 +1446,37 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
     return scene_contract
 
 
+def executor_cpu_transport_diag(stage: str, machine_response=None, scene_contract=None):
+    try:
+        if machine_response is not None:
+            print(
+                f"[EXECUTOR][{stage}] "
+                f"answer={len(getattr(machine_response,'answer','') or '')} "
+                f"content={len(getattr(machine_response,'content','') or '')} "
+                f"summary={len(getattr(machine_response,'summary','') or '')} "
+                f"blocks={len(getattr(machine_response,'render_blocks',[]) or [])} "
+                f"artifacts={len(getattr(machine_response,'artifacts',[]) or [])}"
+            )
+        if scene_contract is not None:
+            blocks = getattr(scene_contract, "render_blocks", None)
+            if blocks is None and isinstance(scene_contract, dict):
+                blocks = scene_contract.get("render_blocks", [])
+            print(f"[EXECUTOR][{stage}] scene_contract_blocks={len(blocks or [])}")
+    except Exception as exc:
+        print(f"[EXECUTOR][{stage}] diag_error={exc}")
+
+
 def executor_cpu_scene_pipeline(machine_response):
-    executor_cpu_transport_diag('BEFORE_BUILD_MACHINE_SCENE', machine_response)
+    executor_cpu_transport_diag("BEFORE_BUILD_MACHINE_SCENE", machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     scene = build_machine_scene(machine_response)
     try:
-        setattr(scene, "conversation_space",
-                getattr(machine_response, "conversation_space", None))
+        setattr(scene, "conversation_space", getattr(machine_response, "conversation_space", None))
     except Exception:
         pass
 
     conversation_space = getattr(machine_response, "conversation_space", {}) or {}
-
     blocks = list(getattr(scene, "render_blocks", None) or getattr(scene, "blocks", []) or [])
     if not blocks:
         blocks = list(getattr(machine_response, "render_blocks", []) or [])
@@ -2545,23 +1489,14 @@ def executor_cpu_scene_pipeline(machine_response):
     except Exception:
         pass
 
-    current_turn = conversation_space.get("current_turn", {})
-    april_turn = current_turn.get("april") or {}
-
     scene_contract = build_scene_contract(scene)
-    executor_cpu_transport_diag('AFTER_BUILD_SCENE_CONTRACT', machine_response, scene_contract)
+    executor_cpu_transport_diag("AFTER_BUILD_SCENE_CONTRACT", machine_response, scene_contract)
 
     scene_contract = executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
 
-    # Final safety pass: keep the richest text before returning the scene packet.
-    machine_response = _executor_preserve_canonical_text(
-        machine_response,
-        scene_contract=scene_contract,
-        scene=scene,
-    )
+    machine_response = _executor_preserve_canonical_text(machine_response, scene_contract=scene_contract, scene=scene)
     scene_contract = executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
 
-    # Keep canonical blocks exactly as received. No scene-side synthesis.
     if not blocks:
         blocks = list(getattr(scene_contract, "render_blocks", []) or [])
     if not blocks:
@@ -2581,7 +1516,7 @@ def executor_cpu_scene_pipeline(machine_response):
     except Exception:
         pass
 
-    executor_cpu_transport_diag('AFTER_SYNC_SCENE_CONTRACT', machine_response, scene_contract)
+    executor_cpu_transport_diag("AFTER_SYNC_SCENE_CONTRACT", machine_response, scene_contract)
 
     return {
         "canonical_space": True,
@@ -2591,7 +1526,7 @@ def executor_cpu_scene_pipeline(machine_response):
         "content": getattr(machine_response, "content", None),
         "summary": getattr(machine_response, "summary", None),
         "render_blocks": blocks,
-        "scene_contract": scene_contract,  # canonical factory contract
+        "scene_contract": scene_contract,
         "scene_runtime": {
             "conversation_space": conversation_space,
             "current_turn": conversation_space.get("current_turn"),
@@ -2612,12 +1547,11 @@ def executor_cpu_scene_pipeline(machine_response):
 
 
 def executor_cpu_finalize_transport(machine_response):
-    executor_cpu_transport_diag('TRANSPORT_ENTRY', machine_response)
+    executor_cpu_transport_diag("TRANSPORT_ENTRY", machine_response)
     machine_response = executor_cpu_normalize_answer(machine_response)
     scene = executor_cpu_scene_pipeline(machine_response)
     conversation_space = getattr(machine_response, "conversation_space", None)
-
-    executor_cpu_transport_diag('FINAL_TRANSPORT', machine_response, scene.get('scene_contract'))
+    executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene.get("scene_contract"))
 
     scene_contract = scene.get("scene_contract")
     scene_answer = _executor_best_text(
@@ -2662,7 +1596,6 @@ def executor_cpu_finalize_transport(machine_response):
 
 
 def executor_cpu_factory_bridge(machine_result):
-    """Single bridge between CPU and Artifact Factory output."""
     cpu_trace_begin("FACTORY_RETURN", {})
     if isinstance(machine_result, dict):
         cpu_trace_success("FACTORY_RETURN", {
@@ -2672,61 +1605,264 @@ def executor_cpu_factory_bridge(machine_result):
         })
     return machine_result
 
+
 def executor_cpu_gateway_dispatch(result):
-    """Single exit point from CPU toward Gateway."""
-    cpu_trace_success("CPU_GATEWAY_DISPATCH",{
-        "scene_contract": isinstance(result,dict) and "scene_contract" in result
-    })
+    cpu_trace_success("CPU_GATEWAY_DISPATCH", {"scene_contract": isinstance(result, dict) and "scene_contract" in result})
     return result
 
+
 def executor_cpu_register_factory_hooks(register_hook):
-    """Attach CPU trace callbacks to Artifact Factory."""
-    register_hook(
-        begin=cpu_trace_begin,
-        success=cpu_trace_success,
-        error=cpu_trace_error,
-    )
+    register_hook(begin=cpu_trace_begin, success=cpu_trace_success, error=cpu_trace_error)
+
 
 def executor_cpu_factory_event(stage, payload=None):
     cpu_trace_begin(stage, payload or {})
 
+
 def executor_cpu_factory_complete(stage, payload=None):
     cpu_trace_success(stage, payload or {})
 
-def executor_cpu_sync_factory_bridge(factory_register):
-    """Bind CPU and Artifact Factory into one execution route."""
-    executor_cpu_register_factory_hooks(factory_register)
-    cpu_trace_success("FACTORY_BRIDGE_REGISTERED",{
-        "single_route":True
-    })
 
-def executor_provider_stage_log(stage, payload=None):
+def executor_cpu_sync_factory_bridge(factory_register):
+    executor_cpu_register_factory_hooks(factory_register)
+    cpu_trace_success("FACTORY_BRIDGE_REGISTERED", {"single_route": True})
+
+
+def apply_representation_gate(blocks, response_decision=None, semantic=None):
+    response_decision = response_decision or {}
+    semantic = semantic or {}
+    preferred = response_decision.get("preferred_representation") or semantic.get("preferred_representation")
+    if not preferred:
+        return blocks
+    filtered = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            filtered.append(b)
+            continue
+        t = b.get("type")
+        if t in ("graph", "formula", "table", "diagram", "gallery") and t != preferred:
+            continue
+        filtered.append(b)
+    return filtered
+
+
+def is_canonical_scene(scene):
+    return {
+        "single_route": True,
+        "input": "MachineRequest",
+        "output": "MachineScene",
+        "scene_contract": True,
+    }
+
+
+def normalize_provider_scene(result):
+    if not isinstance(result, dict):
+        return result
+    if result.get("type") == "scene_contract":
+        return result
+    if result.get("scene_contract") is True:
+        return {"type": "scene_contract", **result}
+    return result
+
+
+def validate_machine_response(result):
+    if not result:
+        return False
+    if isinstance(result, MachineResponse):
+        return True
+    if not isinstance(result, dict):
+        return False
+
+    blocked = ["traceback", "system prompt", "internal reasoning", "execution room", "cognitive state"]
+    payload = str(result).lower()
+    for word in blocked:
+        if word in payload:
+            return False
+    return True
+
+
+def detect_task_type(semantic, cognition, state, conversation_space=None):
+    user_space = build_executor_user_space(state, conversation_space=conversation_space)
+    scene_state = user_space.get("scene", {})
+    trajectory = scene_state.get("trajectory")
+    if trajectory:
+        track_trajectory(trajectory)
+
+    if semantic.get("render_intent"):
+        track_modality("renderer")
+        return "renderer"
+    if semantic.get("visual_generation_needed"):
+        track_modality("image")
+        return "image"
+    if semantic.get("math_intent"):
+        track_modality("math")
+        return "math"
+    return "text"
+
+
+def _build_second_circle_machine_request(*, text: str, semantic: dict, provider_goal: str, provider_reference_context: str, second_circle_context: dict):
+    """
+    Only the first circle goes upstream with a tiny payload.
+    Everything else stays attached for the executor and downstream rooms.
+    """
+    intent = _executor_build_first_circle_intent(text=text, semantic=semantic, cognition={}, response_decision={})
+    machine_request = MachineRequest(
+        goal=provider_goal,
+        intent=intent,
+        memory={},
+        visual_context={},
+        conversation={},
+    )
     try:
-        info={}
-        if isinstance(payload, dict):
-            for k,v in payload.items():
-                if isinstance(v,str):
-                    info[k]=f"<str:{len(v)}>"
-                elif isinstance(v,(list,dict)):
-                    info[k]=f"<{type(v).__name__}:{len(v)}>"
-                else:
-                    info[k]=v
-        else:
-            info=payload
-        print(f"[EXECUTOR:{stage}] {info}")
+        setattr(machine_request, "provider_reference_context", provider_reference_context)
+        setattr(machine_request, "first_circle_goal", provider_goal)
+        setattr(machine_request, "first_circle_only", True)
+        setattr(machine_request, "second_circle_context", second_circle_context)
     except Exception:
         pass
+    return machine_request
 
-async def execute(
-    user_id,
-    chat_id=None,
-    text="",
-    run_with_activity=None,  # legacy compatibility, scheduled for removal
-    **kwargs,
-):
+
+async def execute_rooms(user_id, text, context, semantic, cognition, response_decision, state, run_with_activity):
+    machine_request = context.get("machine_request")
+    if machine_request is None:
+        raise RuntimeError("MachineRequest missing from executor context")
+
+    room_results = []
+    room_execution_report = []
+    best_machine_response = None
+    best_score = -1
+
+    for room in ROOMS:
+        try:
+            result = await room.handle(
+                user_id=user_id,
+                text=text,
+                context=machine_request,
+                run=run_with_activity,
+            )
+
+            extracted = _extract_machine_response(result)
+
+            if extracted is None and isinstance(result, dict):
+                mr = result.get("machine_response")
+                if isinstance(mr, dict):
+                    extracted = MachineResponse()
+                    for k, v in mr.items():
+                        try:
+                            setattr(extracted, k, v)
+                        except Exception:
+                            pass
+
+            if extracted is not None:
+                room_results.append({"room": getattr(room, "name", "unknown"), "machine_response": extracted})
+                executor_cpu_register_room(room_execution_report, getattr(room, "name", "unknown"), status="ok")
+
+                score = _executor_response_score(extracted)
+                if best_machine_response is None or score > best_score:
+                    best_machine_response = extracted
+                    best_score = score
+                continue
+
+        except Exception as exc:
+            room_execution_report.append({"room": getattr(room, "name", "unknown"), "status": "error", "error": str(exc)})
+            continue
+
+    if best_machine_response is None:
+        raise RuntimeError("No MachineResponse produced")
+
+    room_results = sorted(room_results, key=lambda item: _executor_response_score(item.get("machine_response")), reverse=True)
+
+    machine_response = best_machine_response
+    machine_response = _executor_recover_room_response(machine_response, room_results, machine_request=machine_request, text=text)
+
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+    april_turn = {
+        "answer": getattr(machine_response, "answer", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": list(getattr(machine_response, "render_blocks", []) or []),
+    }
+    if "current_turn" in conversation_space and isinstance(conversation_space["current_turn"], dict):
+        conversation_space["current_turn"]["april"] = april_turn
+    conversation_space["last_april_turn"] = april_turn
+
+    timeline = conversation_space.setdefault("timeline", [])
+    if "current_turn" in conversation_space:
+        timeline.append(conversation_space["current_turn"])
+    conversation_space["dialog"] = timeline
+    setattr(machine_response, "conversation_space", conversation_space)
+
+    _canonical_answer = getattr(machine_response, "answer", "")
+    _canonical_content = getattr(machine_response, "content", "")
+    _canonical_summary = getattr(machine_response, "summary", "")
+
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    executor_cpu_transport_diag("BEFORE_REFLECT", machine_response)
+    machine_response = executor_cpu_reflect(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+
+    setattr(machine_response, "room_execution_report", room_execution_report)
+    if not room_results:
+        room_results = [{"machine_response": machine_response}]
+    reflected_machine_response = machine_response
+
+    registry_result = registry_parent_dispatch(machine_request, room_results)
+    machine_response = reflected_machine_response
+
+    if registry_result is not None:
+        for _field in ("contributions", "registry_diagnostics", "artifacts", "render_blocks", "metadata"):
+            try:
+                value = getattr(registry_result, _field, None)
+                if value not in (None, "", [], {}):
+                    setattr(machine_response, _field, value)
+            except Exception:
+                pass
+        for _field in ("answer", "content", "summary"):
+            try:
+                current = getattr(machine_response, _field, "")
+                incoming = getattr(registry_result, _field, "")
+                if (not current) and incoming:
+                    setattr(machine_response, _field, incoming)
+            except Exception:
+                pass
+
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    if not getattr(machine_response, "answer", "") and _canonical_answer:
+        machine_response.answer = _canonical_answer
+    if not getattr(machine_response, "content", "") and _canonical_content:
+        machine_response.content = _canonical_content
+    if not getattr(machine_response, "summary", "") and _canonical_summary:
+        machine_response.summary = _canonical_summary
+
+    if not list(getattr(machine_response, "render_blocks", []) or []) and getattr(machine_response, "answer", ""):
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": machine_response.answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+        }]
+
+    executor_cpu_transport_diag("AFTER_REFLECT", machine_response)
+    setattr(machine_response, "provider_transport_verified", True)
+    setattr(machine_response, "provider_contract_version", "fiber_v3_stage2")
+    return executor_cpu_finalize_transport(machine_response)
+
+
+async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     chat_id = chat_id or user_id
     cpu_trace_begin("EXECUTE", {"user_id": user_id})
+
     state = get_state(user_id)
+
     semantic = semantic_analyze(
         text=text,
         state=state,
@@ -2735,19 +1871,10 @@ async def execute(
         dialog_state=state.get("scene_state", {}),
     )
     update_dialog_context(user_id, semantic)
+
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
-    cognition = analyze_cognition(
-        text=text,
-        semantic=semantic,
-        reasoning=reasoning,
-        state=state,
-    )
-    visual_reference = build_visual_reference(
-        semantic=semantic,
-        cognition=cognition,
-        text=text,
-        state=state,
-    )
+    cognition = analyze_cognition(text=text, semantic=semantic, reasoning=reasoning, state=state)
+    visual_reference = build_visual_reference(semantic=semantic, cognition=cognition, text=text, state=state)
 
     response_decision = build_response_decision(
         semantic=semantic,
@@ -2755,12 +1882,8 @@ async def execute(
         state=state,
         visual_reference=visual_reference,
     )
-    task_type = detect_task_type(
-        semantic,
-        cognition,
-        state,
-        conversation_space=None,
-    )
+    task_type = detect_task_type(semantic, cognition, state, conversation_space=None)
+
     context = build_executor_context(
         user_id=user_id,
         chat_id=chat_id,
@@ -2774,21 +1897,8 @@ async def execute(
         text=text,
     )
 
-    context["second_circle_context"] = {
-        "state": state,
-        "semantic": semantic,
-        "reasoning": reasoning,
-        "cognition": cognition,
-        "response_decision": response_decision,
-        "visual_reference": visual_reference,
-        "task_type": task_type,
-        "text": text,
-    }
     conversation_space = context.get("conversation_space") or {}
     current_turn = conversation_space.get("current_turn", {})
-
-    if "factory_hook_registration" in kwargs:
-        executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
 
     machine_memory = {
         "memory_summary": _clip_text(state.get("memory_summary"), 3000),
@@ -2813,33 +1923,10 @@ async def execute(
         cognition=cognition,
         response_decision=response_decision,
     )
-    provider_intent = _executor_build_first_circle_intent(
-        text=text,
-        semantic=semantic,
-        cognition=cognition,
-        response_decision=response_decision,
-    )
 
-    executor_provider_stage_log(
-        "PROVIDER_REQUEST",
-        {
-            "goal_len": len(provider_goal),
-            "reference_context": bool(provider_reference_context),
-        },
-    )
+    executor_provider_stage_log("PROVIDER_REQUEST", {"goal_len": len(provider_goal), "reference_context": bool(provider_reference_context)})
 
-    # First circle: provider sees only the current request payload.
-    # Second-circle context stays attached separately for executor-side reasoning.
-    context["machine_request"] = MachineRequest(
-        goal=provider_goal,
-        intent=provider_intent,
-        memory={},
-        visual_context={},
-        conversation={},
-    )
-    context["executor_state"] = state
-    context["executor_conversation_space"] = conversation_space
-    context["second_circle_context"] = _executor_build_second_circle_context(
+    second_circle_context = _executor_build_second_circle_context(
         state=state,
         semantic=semantic,
         reasoning=reasoning,
@@ -2854,11 +1941,21 @@ async def execute(
         reference_context=provider_reference_context,
     )
 
+    context["machine_request"] = _build_second_circle_machine_request(
+        text=text,
+        semantic=semantic,
+        provider_goal=provider_goal,
+        provider_reference_context=provider_reference_context,
+        second_circle_context=second_circle_context,
+    )
+    context["executor_state"] = state
+    context["executor_conversation_space"] = conversation_space
+    context["second_circle_context"] = second_circle_context
+
     setattr(context["machine_request"], "current_turn", current_turn)
-    setattr(context["machine_request"], "provider_reference_context", provider_reference_context)
-    setattr(context["machine_request"], "first_circle_goal", provider_goal)
-    setattr(context["machine_request"], "first_circle_only", True)
-    setattr(context["machine_request"], "second_circle_context", context["second_circle_context"])
+
+    if "factory_hook_registration" in kwargs:
+        executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
 
     result = await execute_rooms(
         user_id=user_id,
@@ -2890,7 +1987,15 @@ async def execute(
             if _executor_value_is_empty(result.get("render_blocks")):
                 result["render_blocks"] = list(getattr(machine_response, "render_blocks", []) or [])
 
-    executor_provider_stage_log("PROVIDER_RESPONSE", {"has_machine_response":isinstance(result,dict) and "machine_response" in result,"has_scene_contract":isinstance(result,dict) and "scene_contract" in result,"render_blocks":len((result.get("render_blocks") if isinstance(result,dict) else []) or [])})
+    executor_provider_stage_log(
+        "PROVIDER_RESPONSE",
+        {
+            "has_machine_response": isinstance(result, dict) and "machine_response" in result,
+            "has_scene_contract": isinstance(result, dict) and "scene_contract" in result,
+            "render_blocks": len((result.get("render_blocks") if isinstance(result, dict) else []) or []),
+        },
+    )
+
     result = executor_cpu_factory_bridge(result)
     result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
