@@ -118,6 +118,169 @@ class ArtifactQuality:
         default_factory=list
     )
 
+
+# =====================================================
+# CANONICAL TEXT / PAYLOAD NORMALIZATION
+# =====================================================
+
+_CANONICAL_TEXT_KEYS = (
+    "answer",
+    "content",
+    "summary",
+    "text",
+    "response",
+    "explanation",
+    "display_text",
+    "title",
+    "message",
+)
+
+_STRUCTURED_PAYLOAD_KEYS = (
+    "domain",
+    "topic",
+    "analysis",
+    "capabilities",
+    "knowledge_scope",
+    "research_capabilities",
+    "experiment_capabilities",
+    "artifact_outputs",
+    "scene_contributions",
+    "focus_contributions",
+    "memory_contributions",
+    "trajectory_hints",
+    "scene_hints",
+    "room_identity",
+)
+
+def _extract_text_candidate(value: Any, *, allow_topic: bool = False) -> str:
+    """Return a safe human-readable string without stringifying raw dicts."""
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, (int, float, bool)):
+        return str(value).strip()
+
+    if isinstance(value, dict):
+        for key in _CANONICAL_TEXT_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        if allow_topic:
+            topic = value.get("topic")
+            if isinstance(topic, str) and topic.strip():
+                return topic.strip()
+        for key in ("label", "name", "kind", "type", "renderer", "viewer"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    if isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            candidate = _extract_text_candidate(item, allow_topic=allow_topic)
+            if candidate:
+                parts.append(candidate)
+        return ", ".join(parts)
+
+    try:
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _canonicalize_artifact_data(
+    data: Dict[str, Any],
+    *,
+    artifact_type: str = "",
+    room_source: str = "",
+) -> Dict[str, Any]:
+    """Keep internal payloads structured while preserving visible text fields."""
+    payload = dict(data or {})
+
+    structured_payload = payload.get("payload")
+    if structured_payload is None:
+        structured_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in _CANONICAL_TEXT_KEYS
+            and key not in ("presentation", "machine_only", "human_visible")
+        }
+
+    canonical_text = ""
+    for key in _CANONICAL_TEXT_KEYS:
+        canonical_text = _extract_text_candidate(payload.get(key))
+        if canonical_text:
+            break
+
+    # If the payload is internal-only, do not auto-promote the topic to visible text.
+    machine_only = bool(payload.get("machine_only", False))
+    human_visible = payload.get("human_visible")
+    if human_visible is None:
+        human_visible = not machine_only
+
+    # Safe display fallback: only use a topic label for visible artifacts.
+    if not canonical_text and human_visible:
+        canonical_text = _extract_text_candidate(payload.get("topic"), allow_topic=True)
+        if not canonical_text:
+            canonical_text = _extract_text_candidate(payload.get("title"))
+    if not canonical_text and not human_visible:
+        canonical_text = _extract_text_candidate(payload.get("display_text"))
+
+    normalized = dict(payload)
+    normalized["artifact_type"] = artifact_type or normalized.get("artifact_type", "")
+    normalized["room_source"] = room_source or normalized.get("room_source", "")
+    normalized["machine_only"] = machine_only
+    normalized["human_visible"] = bool(human_visible)
+    normalized["payload"] = structured_payload
+
+    # Canonical visible text channels.
+    normalized["answer"] = canonical_text
+    normalized["content"] = canonical_text
+    normalized["summary"] = canonical_text
+    normalized["text"] = canonical_text
+    normalized.setdefault("display_text", canonical_text)
+
+    # Keep an explicit signal for downstream rooms/processors.
+    normalized.setdefault(
+        "signal",
+        {
+            "artifact_type": normalized["artifact_type"],
+            "room_source": normalized["room_source"],
+            "machine_only": normalized["machine_only"],
+            "human_visible": normalized["human_visible"],
+        },
+    )
+
+    return normalized
+
+
+def _scene_is_internal_only(scene: Any) -> bool:
+    metadata = {}
+    if hasattr(scene, "metadata"):
+        metadata = getattr(scene, "metadata") or {}
+    elif isinstance(scene, dict):
+        metadata = scene.get("metadata", {}) or {}
+
+    return bool(metadata.get("machine_only")) or metadata.get("human_visible") is False
+
+
+def _scene_text_fallback(scene: Any) -> str:
+    for attr in ("answer", "content", "summary"):
+        if hasattr(scene, attr):
+            candidate = _extract_text_candidate(getattr(scene, attr))
+            if candidate:
+                return candidate
+    if isinstance(scene, dict):
+        for key in ("answer", "content", "summary"):
+            candidate = _extract_text_candidate(scene.get(key))
+            if candidate:
+                return candidate
+    return ""
+
 # =====================================================
 # RENDER CONTRACT
 # =====================================================
@@ -143,6 +306,9 @@ class ArtifactRenderContract:
     responsive: bool = True
 
     exportable: bool = True
+
+    machine_only: bool = False
+    human_visible: bool = True
 
     # Stage 1 transport hints
     payload_type: str = ""
@@ -262,15 +428,27 @@ FACTORY_STATUS = {
 # CREATE ARTIFACT
 # =====================================================
 
+
 def create_artifact(
     artifact_type: str,
     room_source: str,
     data: Dict[str, Any]
 ):
 
-    room_identity = data.get(
+    normalized_data = _canonicalize_artifact_data(
+        data,
+        artifact_type=artifact_type,
+        room_source=room_source,
+    )
+
+    room_identity = normalized_data.get(
         "room_identity",
         {}
+    )
+
+    render_block = ARTIFACT_BLOCK_MAP.get(
+        artifact_type,
+        "FunctionBlock"
     )
 
     return BaseArtifact(
@@ -286,7 +464,7 @@ def create_artifact(
 
         context=ArtifactContext(
 
-            domain=data.get(
+            domain=normalized_data.get(
                 "domain"
             ),
 
@@ -298,52 +476,52 @@ def create_artifact(
                 "knowledge_class"
             ),
 
-            knowledge_scope=data.get(
+            knowledge_scope=normalized_data.get(
                 "knowledge_scope",
                 []
             ),
 
-            capabilities=data.get(
+            capabilities=normalized_data.get(
                 "capabilities",
                 []
             ),
 
-            research_capabilities=data.get(
+            research_capabilities=normalized_data.get(
                 "research_capabilities",
                 []
             ),
 
-            experiment_capabilities=data.get(
+            experiment_capabilities=normalized_data.get(
                 "experiment_capabilities",
                 []
             ),
 
-            artifact_outputs=data.get(
+            artifact_outputs=normalized_data.get(
                 "artifact_outputs",
                 []
             ),
 
-            scene_contributions=data.get(
+            scene_contributions=normalized_data.get(
                 "scene_contributions",
                 []
             ),
 
-            focus_contributions=data.get(
+            focus_contributions=normalized_data.get(
                 "focus_contributions",
                 []
             ),
 
-            memory_contributions=data.get(
+            memory_contributions=normalized_data.get(
                 "memory_contributions",
                 []
             ),
 
-            trajectory_hints=data.get(
+            trajectory_hints=normalized_data.get(
                 "trajectory_hints",
                 []
             ),
 
-            scene_hints=data.get(
+            scene_hints=normalized_data.get(
                 "scene_hints",
                 []
             )
@@ -354,15 +532,37 @@ def create_artifact(
         render=ArtifactRenderContract(
 
             web_block=
-                ARTIFACT_BLOCK_MAP.get(
+                render_block,
 
-                    artifact_type,
+            viewer=
+                render_block,
 
-                    "FunctionBlock"
-                )
+            renderer=
+                render_block,
+
+            scene_block=
+                artifact_type,
+
+            payload_type=
+                artifact_type,
+
+            priority=
+                normalized_data.get("priority", 100),
+
+            complexity=
+                normalized_data.get("complexity", "balanced"),
+
+            layout=
+                normalized_data.get("layout", "single"),
+
+            machine_only=
+                bool(normalized_data.get("machine_only", False)),
+
+            human_visible=
+                bool(normalized_data.get("human_visible", True))
         ),
 
-        data=data
+        data=normalized_data
     )
 
 
@@ -422,6 +622,7 @@ def build_diagnostic_snapshot(diag: DiagnosticContract) -> Dict[str, Any]:
 # FIBER FACTORY INTEGRATION
 # =====================================================
 
+
 def build_universal_contract(
     artifact: Optional[BaseArtifact] = None,
     user_id: str = "",
@@ -433,7 +634,11 @@ def build_universal_contract(
     contract.fiber.identity.subscription = subscription
 
     if artifact is not None:
-        artifact_payload = dict(artifact.data or {})
+        artifact_payload = _canonicalize_artifact_data(
+            dict(artifact.data or {}),
+            artifact_type=getattr(artifact.metadata, "artifact_type", ""),
+            room_source=getattr(artifact.metadata, "room_source", ""),
+        )
         presentation = artifact_payload.setdefault(
             "presentation",
             build_presentation_hint(
@@ -442,18 +647,15 @@ def build_universal_contract(
             )
         )
 
-        canonical_text = (
-            artifact_payload.get("answer")
-            or artifact_payload.get("content")
-            or artifact_payload.get("summary")
-            or artifact_payload.get("text")
-            or ""
+        canonical_text = _extract_text_candidate(
+            artifact_payload,
+            allow_topic=not artifact_payload.get("machine_only", False),
         )
 
-        artifact_payload.setdefault("answer", canonical_text)
-        artifact_payload.setdefault("content", canonical_text)
-        artifact_payload.setdefault("summary", canonical_text)
-        artifact_payload.setdefault("render_blocks", artifact_payload.get("render_blocks", []))
+        artifact_payload["answer"] = canonical_text
+        artifact_payload["content"] = canonical_text
+        artifact_payload["summary"] = canonical_text
+        artifact_payload.setdefault("render_blocks", list(artifact_payload.get("render_blocks", []) or []))
         artifact_payload.setdefault("scene", artifact_payload.get("scene", {}))
         artifact_payload["presentation"] = presentation
 
@@ -478,6 +680,8 @@ def build_universal_contract(
                 "room_source": artifact.metadata.room_source,
                 "artifact_type": artifact.metadata.artifact_type,
                 "presentation": presentation,
+                "machine_only": artifact_payload.get("machine_only", False),
+                "human_visible": artifact_payload.get("human_visible", True),
             },
         )
         machine_response.executor_hints["presentation"] = presentation
@@ -487,6 +691,8 @@ def build_universal_contract(
         machine_scene.metadata.update({
             "artifact_contract_stage": "stage4_final",
             "presentation": presentation,
+            "machine_only": artifact_payload.get("machine_only", False),
+            "human_visible": artifact_payload.get("human_visible", True),
         })
         machine_scene.answer = canonical_text
         machine_scene.content = canonical_text
@@ -510,327 +716,6 @@ def build_universal_contract(
         contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
 
     return contract
-
-def create_transport_contract(
-    artifact_type: str,
-    room_source: str,
-    data: Dict[str, Any],
-    user_id: str = "",
-    subscription: str = "Free",
-) -> UniversalArtifactContract:
-    """Canonical transport factory used by text_module and room executors.
-
-    The function accepts a plain artifact payload, converts it into a
-    BaseArtifact, and then materializes the single Fiber transport envelope
-    used throughout the April pipeline.
-    """
-    payload = dict(data or {})
-    payload.setdefault("artifact_type", artifact_type)
-    payload.setdefault("room_source", room_source)
-
-    artifact = create_artifact(
-        artifact_type=artifact_type,
-        room_source=room_source,
-        data=payload,
-    )
-
-    contract = build_universal_contract(
-        artifact=artifact,
-        user_id=user_id,
-        subscription=subscription,
-    )
-
-    # Preserve room-level payload for downstream processors.
-    contract.payload.context = {
-        "artifact_type": artifact_type,
-        "room_source": room_source,
-        "user_id": user_id,
-        "subscription": subscription,
-    }
-    contract.payload.intent = dict(payload.get("intent", {}) or {})
-    contract.payload.context.update(dict(payload.get("context", {}) or {}))
-    contract.payload.knowledge = dict(payload.get("knowledge", {}) or {})
-    contract.payload.attachments = list(payload.get("attachments", []) or [])
-    contract.payload.media = dict(payload.get("media", {}) or contract.payload.media)
-    contract.payload.executor_notes = dict(payload.get("executor_notes", {}) or {})
-
-    # Keep the canonical machine response in sync with the transport payload.
-    if contract.machine_response is None:
-        contract.machine_response = MachineResponse(
-            answer=payload.get("answer", ""),
-            content=payload.get("content", payload.get("answer", "")),
-            response=payload.get("response", payload.get("answer", "")),
-            summary=payload.get("summary", payload.get("answer", "")),
-            explanation=payload.get("explanation", payload.get("summary", payload.get("answer", ""))),
-            render_blocks=list(payload.get("render_blocks", []) or []),
-            scene=dict(payload.get("scene", {}) or {}),
-            metadata=dict(payload.get("metadata", {}) or {}),
-        )
-
-    # Ensure scene payload is exposed for compatibility checks.
-    contract.payload.scene.setdefault("answer", payload.get("answer", ""))
-    contract.payload.scene.setdefault("content", payload.get("content", payload.get("answer", "")))
-    contract.payload.scene.setdefault("summary", payload.get("summary", payload.get("answer", "")))
-    contract.payload.scene.setdefault("render_blocks", list(payload.get("render_blocks", []) or []))
-
-    return contract
-
-
-
-# =====================================================
-# FACTORY INSPECTION API
-# =====================================================
-# FACTORY INSPECTION API
-# =====================================================
-
-def extract_room_profile(
-    artifact
-):
-
-    if not artifact:
-
-        return {}
-
-    return {
-
-        "domain":
-            artifact.context.domain,
-
-        "specialization":
-            artifact.context.specialization,
-
-        "knowledge_class":
-            artifact.context.knowledge_class,
-
-        "knowledge_scope":
-            artifact.context.knowledge_scope,
-
-        "capabilities":
-            artifact.context.capabilities,
-
-        "research_capabilities":
-            artifact.context.research_capabilities,
-
-        "experiment_capabilities":
-            artifact.context.experiment_capabilities,
-
-        "artifact_outputs":
-            artifact.context.artifact_outputs,
-
-        "room_source":
-            artifact.metadata.room_source
-    }
-
-# =====================================================
-# FACTORY CAPABILITY API
-# =====================================================
-
-def artifact_has_capability(
-    artifact,
-    capability: str
-):
-
-    if not artifact:
-
-        return False
-
-    return capability in (
-
-        artifact.context.capabilities
-        or []
-    )
-
-# =====================================================
-# FACTORY KNOWLEDGE API
-# =====================================================
-
-def artifact_has_knowledge(
-    artifact,
-    knowledge_area: str
-):
-
-    if not artifact:
-
-        return False
-
-    return knowledge_area in (
-
-        artifact.context.knowledge_scope
-        or []
-    )
-
-# =====================================================
-# FACTORY OUTPUT API
-# =====================================================
-
-def artifact_can_output(
-    artifact,
-    output_type: str
-):
-
-    if not artifact:
-
-        return False
-
-    return output_type in (
-
-        artifact.context.artifact_outputs
-        or []
-    )
-
-
-
-# =====================================================
-# FIBER CORE FOUNDATION
-# =====================================================
-
-@dataclass
-class FiberLaneContract:
-    lane_id: str = "A"
-    lane_name: str = "Lane A"
-    active: bool = True
-    current_load: int = 0
-    max_parallel_jobs: int = 1
-    status: str = "ready"
-
-@dataclass
-class FiberRouteContract:
-    route_id: str = "APRIL_FIBER_ROUTE"
-    route_version: str = "1.0"
-    dispatcher: str = "default"
-    active_lane: str = "A"
-    lane_count: int = 3
-    transport_policy: str = "single_route_multi_lane"
-    scaling_policy: str = "horizontal_lane_scaling"
-
-@dataclass
-class DispatcherContract:
-    selected_lane: str = "A"
-    selection_reason: str = "available"
-    queue_position: int = 0
-    dispatch_time: float = field(default_factory=time.time)
-
-@dataclass
-class TraceContract:
-    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    lane: str = "A"
-    stage: str = "CONTRACT"
-    room: str = ""
-    elapsed_ms: float = 0.0
-    payload_size: int = 0
-    block_count: int = 0
-    attachment_count: int = 0
-    status: str = "ACTIVE"
-
-@dataclass
-class MetricsContract:
-    payload_size: int = 0
-    block_count: int = 0
-    attachment_count: int = 0
-    elapsed_ms: float = 0.0
-    lane: str = "A"
-
-@dataclass
-class IdentityContract:
-    user_id: str = ""
-    subscription: str = "Free"
-    capabilities: list = field(default_factory=list)
-    limits: dict = field(default_factory=dict)
-
-@dataclass
-class CapabilityContract:
-    tools: list = field(default_factory=list)
-    renderers: list = field(default_factory=list)
-    viewers: list = field(default_factory=list)
-    permissions: list = field(default_factory=list)
-
-@dataclass
-class MemoryContract:
-    working_memory: dict = field(default_factory=dict)
-    persistent_memory: dict = field(default_factory=dict)
-    scene_memory: dict = field(default_factory=dict)
-    visual_memory: dict = field(default_factory=dict)
-
-@dataclass
-class VisualContract:
-    active_images: list = field(default_factory=list)
-    anchors: list = field(default_factory=list)
-    gallery: list = field(default_factory=list)
-    focus: dict = field(default_factory=dict)
-
-@dataclass
-class RendererContract:
-    scene_renderer: str = "default"
-    supported_blocks: list = field(default_factory=list)
-    responsive: bool = True
-
-@dataclass
-class DiagnosticContract:
-    stage: str = "CONTRACT"
-    status: str = "OK"
-    message: str = ""
-
-
-@dataclass
-class FiberCoreContract:
-    route: FiberRouteContract = field(default_factory=FiberRouteContract)
-    dispatcher: DispatcherContract = field(default_factory=DispatcherContract)
-    lane: FiberLaneContract = field(default_factory=FiberLaneContract)
-    trace: TraceContract = field(default_factory=TraceContract)
-    metrics: MetricsContract = field(default_factory=MetricsContract)
-    identity: IdentityContract = field(default_factory=IdentityContract)
-    capabilities: CapabilityContract = field(default_factory=CapabilityContract)
-    memory: MemoryContract = field(default_factory=MemoryContract)
-    visual: VisualContract = field(default_factory=VisualContract)
-    renderer: RendererContract = field(default_factory=RendererContract)
-    diagnostics: DiagnosticContract = field(default_factory=DiagnosticContract)
-
-# =====================================================
-# UNIVERSAL TRANSPORT CONTRACT (APRIL FIBER CHANNEL)
-# =====================================================
-
-@dataclass
-class TransportContract:
-    """Payload envelope only. All routing belongs to FiberCore."""
-    transport_version: str = "2.0"
-
-@dataclass
-class MachinePayload:
-    intent: Dict[str, Any] = field(default_factory=dict)
-    context: Dict[str, Any] = field(default_factory=dict)
-    knowledge: Dict[str, Any] = field(default_factory=dict)
-    artifacts: List[Dict[str, Any]] = field(default_factory=list)
-    scene: Dict[str, Any] = field(default_factory=dict)
-    attachments: List[Dict[str, Any]] = field(default_factory=list)
-    media: Dict[str, Any] = field(default_factory=lambda:{
-        "text":[],
-        "markdown":[],
-        "tables":[],
-        "graphs":[],
-        "formulas":[],
-        "images":[],
-        "gallery":[],
-        "files":[],
-        "audio":[],
-        "video":[],
-        "code":[],
-        "links":[],
-        "diagrams":[],
-        "actions":[]
-    })
-    executor_notes: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class UniversalArtifactContract:
-    # FiberCore is the single owner of routing state.
-    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
-    transport: TransportContract = field(default_factory=TransportContract)
-    payload: MachinePayload = field(default_factory=MachinePayload)
-    artifact: Optional[BaseArtifact] = None
-    machine_response: Optional["MachineResponse"] = None
-    machine_scene: Optional["MachineScene"] = None
-    scene_contract: Optional["SceneContract"] = None
-
 
 
 # =====================================================
@@ -1157,12 +1042,16 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
 # =====================================================
 
 
+
 def build_canonical_scene_blocks(scene):
     """
     Stage 3 (test):
     Build a default render block from presentation hints when
     no render_blocks were produced upstream.
     """
+    if _scene_is_internal_only(scene):
+        return []
+
     blocks = list(scene.blocks or [])
     if blocks:
         return blocks
@@ -1176,11 +1065,7 @@ def build_canonical_scene_blocks(scene):
         SCENE_BLOCK_REGISTRY.get(payload_type, "TextBlock")
     )
 
-    content = (
-        getattr(scene, "answer", "")
-        or getattr(scene, "content", "")
-        or getattr(scene, "summary", "")
-    )
+    content = _scene_text_fallback(scene)
 
     if not content:
         return []
@@ -1202,12 +1087,14 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.render_blocks = list(contract.blocks)
     contract.metadata.update(scene.metadata or {})
     # Canonical transport fields must always reflect the latest scene state.
-    contract.metadata["answer"] = getattr(scene, "answer", "")
-    contract.metadata["content"] = getattr(scene, "content", "")
-    contract.metadata["summary"] = getattr(scene, "summary", "")
+    contract.metadata["answer"] = _scene_text_fallback(scene)
+    contract.metadata["content"] = _scene_text_fallback(scene)
+    contract.metadata["summary"] = _scene_text_fallback(scene)
     contract.metadata["artifact_count"] = len(getattr(scene, "artifacts", []) or [])
     contract.metadata["transport_stage"] = "artifact_contract_stage2"
     contract.metadata["canonical_scene_contract"] = True
+    contract.metadata["machine_only"] = bool(contract.metadata.get("machine_only", False))
+    contract.metadata["human_visible"] = contract.metadata.get("human_visible", True)
     contract.active_scene = getattr(scene, "active_scene", "")
     contract.space_continuity = {
         "active_scene": contract.active_scene,
