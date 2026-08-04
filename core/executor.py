@@ -206,6 +206,31 @@ def _executor_preserve_canonical_text(machine_response, scene_contract=None, sce
 
     return machine_response
 
+
+def _executor_response_score(value):
+    """Prefer the richest non-empty response when multiple rooms return candidates."""
+    try:
+        answer = _executor_best_text(getattr(value, "answer", ""))
+        content = _executor_best_text(getattr(value, "content", ""))
+        summary = _executor_best_text(getattr(value, "summary", ""))
+        response = _executor_best_text(getattr(value, "response", ""))
+        blocks = list(getattr(value, "render_blocks", []) or [])
+        artifacts = list(getattr(value, "artifacts", []) or [])
+        scene = getattr(value, "scene", None)
+        score = (
+            len(answer) * 4
+            + len(content) * 3
+            + len(summary) * 2
+            + len(response) * 2
+            + len(blocks) * 150
+            + len(artifacts) * 100
+        )
+        if scene not in (None, {}, []):
+            score += 50
+        return score
+    except Exception:
+        return 0
+
 def _clip_text(value, limit=4000):
     if value is None:
         return ""
@@ -1050,6 +1075,7 @@ def executor_cpu_register_room(report, room_name, **kwargs):
     report.append(entry)
     return report
 
+
 def _extract_machine_response(result):
     """Stage 1 Executor: preserve Provider semantic fields without collapsing them."""
     if isinstance(result, MachineResponse):
@@ -1057,27 +1083,92 @@ def _extract_machine_response(result):
     if not isinstance(result, dict):
         return None
 
-    mr=result.get("machine_response", result)
-    if isinstance(mr, MachineResponse):
-        return mr
-    if not isinstance(mr, dict):
-        return None
+    sources = []
+    for candidate in (
+        result,
+        result.get("machine_response"),
+        result.get("response"),
+        result.get("scene_contract"),
+        result.get("scene"),
+    ):
+        if isinstance(candidate, dict):
+            sources.append(candidate)
 
-    response=MachineResponse()
+    merged = {}
+    for source in sources:
+        for key, value in source.items():
+            if key not in merged or _executor_value_is_empty(merged.get(key)):
+                merged[key] = value
+
+    response = MachineResponse()
 
     for field in vars(response).keys():
-        if field in mr:
+        if field in merged:
             try:
-                setattr(response, field, mr[field])
+                setattr(response, field, merged[field])
             except Exception:
                 pass
 
-    if not getattr(response,"answer",None):
-        response.answer=mr.get("answer","")
-    if not getattr(response,"content",None):
-        response.content=mr.get("content","")
-    if not getattr(response,"summary",None):
-        response.summary=mr.get("summary","")
+    # Merge the richest text from every visible layer.
+    answer = _executor_best_text(
+        result.get("answer"),
+        merged.get("answer"),
+        merged.get("content"),
+        merged.get("response"),
+        merged.get("summary"),
+        merged.get("explanation"),
+        merged.get("provider_original_answer"),
+        merged.get("provider_original_content"),
+    )
+    content = _executor_best_text(
+        result.get("content"),
+        merged.get("content"),
+        answer,
+        merged.get("response"),
+        merged.get("summary"),
+        merged.get("explanation"),
+    )
+    summary = _executor_best_text(
+        result.get("summary"),
+        merged.get("summary"),
+        content,
+        answer,
+        merged.get("explanation"),
+    )
+
+    if answer:
+        response.answer = answer
+    if content:
+        response.content = content
+    if summary:
+        response.summary = summary
+
+    if not getattr(response, "answer", None):
+        response.answer = _executor_best_text(
+            merged.get("answer"),
+            merged.get("content"),
+            merged.get("response"),
+        )
+    if not getattr(response, "content", None):
+        response.content = _executor_best_text(
+            merged.get("content"),
+            response.answer,
+            merged.get("response"),
+        )
+    if not getattr(response, "summary", None):
+        response.summary = _executor_best_text(
+            merged.get("summary"),
+            response.content,
+            response.answer,
+        )
+
+    # Ensure canonical container fields survive even when the nested wrapper is partial.
+    for field in ("render_blocks", "artifacts", "scene", "metadata", "scene_plan", "render_priority"):
+        if field in merged and _executor_value_is_empty(getattr(response, field, None)):
+            try:
+                setattr(response, field, merged[field])
+            except Exception:
+                pass
 
     return response
 
@@ -1091,14 +1182,15 @@ async def execute_rooms(
     state,
     run_with_activity,
 ):
-    
+
     machine_request = context.get("machine_request")
     if machine_request is None:
         raise RuntimeError("MachineRequest missing from executor context")
 
     room_results = []
     room_execution_report = []
-    machine_response = None
+    best_machine_response = None
+    best_score = -1
 
     for room in ROOMS:
         try:
@@ -1140,16 +1232,21 @@ async def execute_rooms(
                     getattr(room, "name", "unknown"),
                     status="ok",
                 )
-                if machine_response is None:
-                    machine_response = extracted
+
+                score = _executor_response_score(extracted)
+                if best_machine_response is None or score > best_score:
+                    best_machine_response = extracted
+                    best_score = score
                 continue
 
         except Exception as exc:
             room_execution_report.append({"room": getattr(room,"name","unknown"), "status":"error","error":str(exc)})
             continue
 
-    if machine_response is None:
+    if best_machine_response is None:
         raise RuntimeError("No MachineResponse produced")
+
+    machine_response = best_machine_response
 
     # Executor no longer synthesizes fallback text here.
     # Canonical Provider output must pass through unchanged.
