@@ -3094,3 +3094,437 @@ def executor_cpu_finalize_transport(machine_response):
 
     executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene_contract)
     return result
+
+# =====================================================
+# APRIL PROCESSOR - CANONICAL SEQUENTIAL ROUTE
+# =====================================================
+
+PROCESSOR_APRIL_NAME = "Процессор April"
+PROCESSOR_APRIL_VERSION = "april_processor_v1"
+PROCESSOR_APRIL_ROUTE = "single_canonical_stream"
+PROCESSOR_APRIL_PASSES = ("pass1_canonical", "pass2_enrich", "pass3_scene")
+PROCESSOR_APRIL_NO_FALLBACKS = True
+
+
+def _executor_payload_from_mapping_direct(mapping: Dict[str, Any]) -> MachineResponse:
+    response = MachineResponse()
+    if not isinstance(mapping, dict):
+        return response
+
+    direct_fields = (
+        "answer", "content", "summary", "response", "explanation", "text",
+        "message", "output", "output_text", "data", "scene", "artifacts",
+        "render_blocks", "scene_plan", "render_priority", "metadata",
+        "confidence", "provider", "provider_contract", "transport_contract",
+        "provider_original_answer", "provider_original_content", "processor_input",
+        "provider_source_request", "scene_contract", "scene_runtime", "conversation_space",
+        "current_turn", "timeline", "dialog", "goal", "goal_hierarchy", "focus",
+        "visual_reference", "visual_summary", "active_visual_scene",
+        "executor_decision", "executor_presentation_plan", "executor_scene_profile",
+        "provider_reference_context", "second_circle_context",
+        "machine_response", "provider_response", "provider_payload", "payload",
+        "result", "response_data", "contract",
+    )
+    for field in direct_fields:
+        if field in mapping:
+            try:
+                setattr(response, field, mapping[field])
+            except Exception:
+                pass
+
+    answer = _executor_best_text(
+        mapping.get("answer"),
+        mapping.get("content"),
+        mapping.get("summary"),
+        mapping.get("response"),
+        mapping.get("explanation"),
+        mapping.get("text"),
+        mapping.get("message"),
+        mapping.get("output"),
+        mapping.get("output_text"),
+        mapping.get("data"),
+        mapping.get("provider_original_answer"),
+        mapping.get("provider_original_content"),
+    )
+    if answer:
+        response.answer = answer
+    if _executor_value_is_empty(getattr(response, "content", None)) and answer:
+        response.content = answer
+    if _executor_value_is_empty(getattr(response, "summary", None)) and answer:
+        response.summary = answer
+
+    return response
+
+
+def _executor_materialize_machine_response(envelope: Any) -> Optional[MachineResponse]:
+    """
+    Direct unwrapping only. No nested search, no candidate recovery, no fallback tree scan.
+    """
+    if envelope is None:
+        return None
+    if isinstance(envelope, MachineResponse):
+        return envelope
+
+    if isinstance(envelope, dict):
+        nested = envelope.get("machine_response")
+        if isinstance(nested, MachineResponse):
+            return nested
+        if isinstance(nested, dict):
+            return _executor_payload_from_mapping_direct(nested)
+
+        response = _executor_payload_from_mapping_direct(envelope)
+        if _executor_has_meaningful_payload(response):
+            return response
+
+    if hasattr(envelope, "__dict__"):
+        try:
+            mapping = _executor_payload_to_mapping(envelope)
+            response = _executor_payload_from_mapping_direct(mapping)
+            if _executor_has_meaningful_payload(response):
+                return response
+        except Exception:
+            pass
+
+    return None
+
+
+def _extract_machine_response(result: Any):
+    """
+    Single route extraction only.
+    """
+    materialized = _executor_materialize_machine_response(result)
+    if materialized is not None and _executor_has_meaningful_payload(materialized):
+        return materialized
+    return None
+
+
+def _executor_recover_room_response(machine_response, room_results, machine_request=None, text=None):
+    """
+    No recovery branches. The canonical response must already exist.
+    """
+    if machine_response is None:
+        raise RuntimeError("Canonical MachineResponse is missing")
+    return machine_response
+
+
+def _executor_merge_room_results_into_canonical_response(
+    base_response: MachineResponse,
+    room_results: Any,
+    canonical_room_name: str = "text",
+):
+    """
+    Sequential enrichment only:
+    - keep canonical text untouched;
+    - merge non-visible support data;
+    - append only non-duplicate helper blocks.
+    """
+    if base_response is None:
+        base_response = MachineResponse()
+    if not isinstance(base_response, MachineResponse):
+        base_response = _executor_materialize_machine_response(base_response) or MachineResponse()
+
+    room_results = list(room_results or [])
+    existing_blocks = list(getattr(base_response, "render_blocks", []) or [])
+    existing_artifacts = list(getattr(base_response, "artifacts", []) or [])
+    existing_contributions = getattr(base_response, "contributions", None) or {}
+    if not isinstance(existing_contributions, dict):
+        existing_contributions = {}
+
+    block_seen = {_executor_block_signature(block) for block in existing_blocks}
+    artifact_seen = {_executor_artifact_signature(artifact) for artifact in existing_artifacts}
+
+    for item in room_results:
+        if not isinstance(item, dict):
+            continue
+
+        room_name = _executor_room_name_from_item(item)
+        candidate = _executor_materialize_machine_response(item.get("machine_response"))
+        if candidate is None:
+            continue
+
+        candidate_contributions = getattr(candidate, "contributions", None) or {}
+        if isinstance(candidate_contributions, dict) and candidate_contributions:
+            room_bucket = existing_contributions.setdefault("room_signals", {})
+            room_key = room_name or getattr(candidate, "room_source", "") or f"room_{len(room_bucket) + 1}"
+            room_bucket[room_key] = candidate_contributions
+            for key, value in candidate_contributions.items():
+                existing_contributions.setdefault(key, value)
+
+        for artifact in list(getattr(candidate, "artifacts", []) or []):
+            sig = _executor_artifact_signature(artifact)
+            if sig in artifact_seen:
+                continue
+            existing_artifacts.append(artifact)
+            artifact_seen.add(sig)
+
+        for block in list(getattr(candidate, "render_blocks", []) or []):
+            if not isinstance(block, dict):
+                block = {
+                    "type": "machine_payload",
+                    "content": str(block),
+                    "renderer": "TextBlock",
+                    "viewer": "TextBlock",
+                    "priority": 0,
+                }
+            block = dict(block)
+            block.setdefault("source_room", room_name or getattr(candidate, "room_source", ""))
+            block_type = normalize_text(block.get("type")).lower()
+
+            if (
+                room_name != canonical_room_name
+                and block_type in {"text", "markdown", "formula", "function"}
+                and _executor_looks_like_internal_room_payload(block.get("content"))
+            ):
+                continue
+
+            sig = _executor_block_signature(block)
+            if sig in block_seen:
+                continue
+            existing_blocks.append(block)
+            block_seen.add(sig)
+
+        for field in (
+            "response",
+            "explanation",
+            "goal",
+            "goal_hierarchy",
+            "focus",
+            "visual_reference",
+            "visual_summary",
+            "active_visual_scene",
+        ):
+            if _executor_value_is_empty(getattr(base_response, field, None)):
+                value = getattr(candidate, field, None)
+                if value not in (None, "", [], {}):
+                    try:
+                        setattr(base_response, field, value)
+                    except Exception:
+                        pass
+
+    if not existing_blocks:
+        canonical_text = _executor_best_text(
+            getattr(base_response, "answer", ""),
+            getattr(base_response, "content", ""),
+            getattr(base_response, "summary", ""),
+        )
+        if canonical_text:
+            existing_blocks = [{
+                "type": "text",
+                "content": canonical_text,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+                "source_room": canonical_room_name,
+            }]
+
+    base_response.render_blocks = existing_blocks
+    base_response.artifacts = existing_artifacts
+    base_response.contributions = existing_contributions
+    return base_response
+
+
+def executor_cpu_normalize_answer(machine_response):
+    """
+    Preserve the canonical response as-is.
+    No block-derived recovery, no alternate reconstruction.
+    """
+    if machine_response is None:
+        return None
+
+    for field in ("answer", "content", "summary"):
+        if getattr(machine_response, field, None) is None:
+            setattr(machine_response, field, "")
+    return machine_response
+
+
+def executor_cpu_scene_pipeline(machine_response):
+    """
+    Three-pass scene projection:
+    pass 1: read canonical response
+    pass 2: enrich scene contract
+    pass 3: project visible blocks
+    """
+    executor_cpu_transport_diag("BEFORE_BUILD_MACHINE_SCENE", machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    scene = build_machine_scene(machine_response)
+    try:
+        setattr(scene, "conversation_space", getattr(machine_response, "conversation_space", None))
+    except Exception:
+        pass
+
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+    try:
+        setattr(scene, "timeline", conversation_space.get("timeline", []))
+        setattr(scene, "last_user_turn", conversation_space.get("last_user_turn"))
+        setattr(scene, "last_april_turn", conversation_space.get("last_april_turn"))
+        setattr(scene, "active_goal", conversation_space.get("response_decision", {}).get("goal"))
+    except Exception:
+        pass
+
+    scene_contract = build_scene_contract(scene)
+    executor_cpu_transport_diag("AFTER_BUILD_SCENE_CONTRACT", machine_response, scene_contract)
+
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    if not blocks and visible_text:
+        blocks = [{
+            "type": "text",
+            "content": visible_text,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "source_room": "text",
+        }]
+
+    try:
+        if isinstance(scene_contract, dict):
+            scene_contract["answer"] = getattr(machine_response, "answer", "")
+            scene_contract["content"] = getattr(machine_response, "content", "")
+            scene_contract["summary"] = getattr(machine_response, "summary", "")
+            scene_contract["render_blocks"] = blocks
+        else:
+            setattr(scene_contract, "answer", getattr(machine_response, "answer", ""))
+            setattr(scene_contract, "content", getattr(machine_response, "content", ""))
+            setattr(scene_contract, "summary", getattr(machine_response, "summary", ""))
+            setattr(scene_contract, "render_blocks", blocks)
+    except Exception:
+        pass
+
+    try:
+        if isinstance(scene, dict):
+            scene["answer"] = getattr(machine_response, "answer", "")
+            scene["content"] = getattr(machine_response, "content", "")
+            scene["summary"] = getattr(machine_response, "summary", "")
+            scene["render_blocks"] = blocks
+        else:
+            setattr(scene, "answer", getattr(machine_response, "answer", ""))
+            setattr(scene, "content", getattr(machine_response, "content", ""))
+            setattr(scene, "summary", getattr(machine_response, "summary", ""))
+            setattr(scene, "render_blocks", blocks)
+    except Exception:
+        pass
+
+    executor_cpu_transport_diag("AFTER_SYNC_SCENE_CONTRACT", machine_response, scene_contract)
+
+    return {
+        "canonical_space": True,
+        "machine_response": machine_response,
+        "machine_scene": scene,
+        "answer": getattr(machine_response, "answer", None),
+        "content": getattr(machine_response, "content", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": blocks,
+        "scene_contract": scene_contract,
+        "scene_runtime": {
+            "conversation_space": conversation_space,
+            "current_turn": conversation_space.get("current_turn"),
+            "timeline": conversation_space.get("timeline", []),
+            "last_user_turn": conversation_space.get("last_user_turn"),
+            "last_april_turn": conversation_space.get("last_april_turn"),
+            "machine_scene": scene,
+            "render_blocks": blocks,
+            "answer": getattr(machine_response, "answer", None),
+            "content": getattr(machine_response, "content", None),
+            "summary": getattr(machine_response, "summary", None),
+            "modalities": conversation_space.get("modalities", {}),
+            "dialog": conversation_space.get("dialog", []),
+            "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
+            "focus": conversation_space.get("focus", {}),
+        },
+    }
+
+
+def executor_cpu_finalize_transport(machine_response):
+    """
+    Final processor pass:
+    - keep the canonical answer untouched,
+    - project exactly one visible route,
+    - dedupe visible render blocks,
+    - never rebuild from fallback branches.
+    """
+    executor_cpu_transport_diag("TRANSPORT_ENTRY", machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+
+    scene = executor_cpu_scene_pipeline(machine_response)
+    conversation_space = getattr(machine_response, "conversation_space", None)
+    scene_contract = scene.get("scene_contract")
+
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    source_blocks = list(getattr(machine_response, "render_blocks", []) or []) or list(scene.get("render_blocks", []) or [])
+    blocks = _executor_deduplicate_visible_render_blocks(source_blocks, visible_text=visible_text)
+
+    if visible_text:
+        machine_response.answer = visible_text
+        machine_response.content = visible_text
+        machine_response.summary = visible_text
+
+    _executor_store_canonical_text_metadata(
+        machine_response,
+        answer=visible_text,
+        content=visible_text,
+        summary=visible_text,
+        original_answer=getattr(machine_response, "provider_original_answer", "") or "",
+        original_content=getattr(machine_response, "provider_original_content", "") or "",
+    )
+
+    if scene_contract is not None:
+        _executor_store_canonical_text_metadata(
+            scene_contract,
+            answer=visible_text,
+            content=visible_text,
+            summary=visible_text,
+            original_answer=getattr(machine_response, "provider_original_answer", "") if machine_response is not None else "",
+            original_content=getattr(machine_response, "provider_original_content", "") if machine_response is not None else "",
+        )
+        try:
+            if isinstance(scene_contract, dict):
+                scene_contract["answer"] = visible_text
+                scene_contract["content"] = visible_text
+                scene_contract["summary"] = visible_text
+                scene_contract["render_blocks"] = blocks
+            else:
+                setattr(scene_contract, "answer", visible_text)
+                setattr(scene_contract, "content", visible_text)
+                setattr(scene_contract, "summary", visible_text)
+                setattr(scene_contract, "render_blocks", blocks)
+        except Exception:
+            pass
+
+    result = {
+        "transport_contract": "scene_first",
+        "provider_contract": "fiber_v3",
+        "conversation_space": conversation_space,
+        "machine_response": machine_response,
+        "machine_scene": scene.get("machine_scene"),
+        "scene_contract": scene_contract,
+        "current_turn": conversation_space.get("current_turn") if conversation_space else None,
+        "answer": visible_text,
+        "content": visible_text,
+        "summary": visible_text,
+        "render_blocks": blocks,
+    }
+
+    _executor_strip_duplicate_visible_fields(result, visible_text, blocks)
+
+    if isinstance(scene, dict):
+        scene["answer"] = visible_text
+        scene["content"] = visible_text
+        scene["summary"] = visible_text
+        scene["render_blocks"] = blocks
+
+    executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene_contract)
+    return result
+
