@@ -2622,3 +2622,423 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     result = executor_cpu_gateway_dispatch(result)
     cpu_trace_success("EXECUTE")
     return result
+
+
+# =====================================================
+# EXECUTOR PROMPT CANONICALIZER / FINAL VISIBILITY DEDUP
+# =====================================================
+
+_EXECUTOR_ORIGINAL_BUILD_FIRST_CIRCLE_GOAL = _executor_build_first_circle_goal
+_EXECUTOR_ORIGINAL_BUILD_SECOND_CIRCLE_MACHINE_REQUEST = _build_second_circle_machine_request
+_EXECUTOR_ORIGINAL_FINALIZE_TRANSPORT = executor_cpu_finalize_transport
+
+
+def _executor_split_multi_question_parts(text: Any) -> list[str]:
+    if not isinstance(text, str):
+        text = str(text or "")
+    raw = text.strip()
+    if not raw:
+        return []
+
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in raw.split("\n"):
+        line = re.sub(r"^\s*[-*•\d]+[\).\:-]?\s*", "", line).strip()
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return []
+
+    candidates: list[str] = []
+    for line in lines:
+        # Prefer question-mark segmentation for multi-question prompts.
+        if line.count("?") >= 1:
+            parts = [p.strip() for p in re.split(r"(?<=\?)\s+", line) if p.strip()]
+            if len(parts) > 1:
+                candidates.extend(parts)
+            else:
+                candidates.append(line)
+        elif any(sep in line for sep in (";", " и ", " and ", " then ", " потом ", " затем ")):
+            parts = [p.strip() for p in re.split(r"\s*(?:;|\band\b|\bи\b|\bthen\b|\bпотом\b|\bзатем\b)\s*", line, flags=re.IGNORECASE) if p.strip()]
+            if len(parts) > 1:
+                candidates.extend(parts)
+            else:
+                candidates.append(line)
+        else:
+            candidates.append(line)
+
+    cleaned: list[str] = []
+    seen = set()
+    for part in candidates:
+        part = part.strip(" \t-–—")
+        if not part:
+            continue
+        norm = re.sub(r"\s+", " ", part).strip().lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        cleaned.append(part)
+
+    return cleaned
+
+
+def _executor_build_canonical_prompt_plan(
+    text: Any,
+    *,
+    semantic: Optional[dict] = None,
+    cognition: Optional[dict] = None,
+    response_decision: Optional[dict] = None,
+) -> dict:
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+
+    normalized_text = normalize_text(text)
+    parts = _executor_split_multi_question_parts(normalized_text)
+
+    # Fallback: treat as a single task when no clear segmentation is found.
+    if not parts and normalized_text:
+        parts = [normalized_text]
+
+    # Build a compact, non-repeating mission/task plan.
+    is_multi = len(parts) > 1
+
+    mission = _executor_best_text(
+        response_decision.get("goal"),
+        semantic.get("intent"),
+        semantic.get("topic"),
+        normalized_text,
+    )
+    if not mission:
+        mission = normalized_text
+
+    # Reduce repetition by selecting only the most useful reference markers.
+    topic = _executor_best_text(
+        semantic.get("topic"),
+        response_decision.get("goal"),
+        cognition.get("dynamic_focus", {}).get("topic") if isinstance(cognition.get("dynamic_focus"), dict) else "",
+    )
+
+    tasks = []
+    for idx, part in enumerate(parts, start=1):
+        task_text = part.strip()
+        if not task_text:
+            continue
+        tasks.append(f"{idx}. {task_text}")
+
+    output_policy = (
+        "Answer each task once."
+        if is_multi
+        else "Answer the request once."
+    )
+
+    return {
+        "is_multi_question": is_multi,
+        "mission": mission,
+        "topic": topic,
+        "tasks": tasks,
+        "output_policy": output_policy,
+        "original_text": normalized_text,
+        "task_count": len(tasks),
+    }
+
+
+def _executor_format_canonical_prompt(plan: dict) -> str:
+    if not isinstance(plan, dict):
+        return normalize_text(plan)
+
+    mission = normalize_text(plan.get("mission"))
+    topic = normalize_text(plan.get("topic"))
+    tasks = [normalize_text(item) for item in (plan.get("tasks") or []) if normalize_text(item)]
+
+    if not mission and not tasks:
+        return normalize_text(plan.get("original_text"))
+
+    pieces = []
+    if mission:
+        pieces.append("MISSION")
+        pieces.append(mission)
+
+    if topic and topic.lower() != mission.lower():
+        pieces.extend(["", "TOPIC", topic])
+
+    if tasks:
+        pieces.extend(["", "TASKS"])
+        pieces.extend(tasks)
+
+    pieces.extend([
+        "",
+        "OUTPUT",
+        plan.get("output_policy") or "Answer once.",
+        "Do not repeat the same fact in multiple sections.",
+        "Keep each task answer distinct and in order.",
+    ])
+
+    return "\n".join(pieces).strip()
+
+
+def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str = "") -> list:
+    if not isinstance(blocks, list):
+        blocks = list(blocks or [])
+
+    result = []
+    seen_text = set()
+    seen_struct = set()
+    canonical_visible = normalize_text(visible_text)
+    canonical_visible_norm = re.sub(r"\s+", " ", canonical_visible).strip().lower() if canonical_visible else ""
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            block = {"type": "machine_payload", "content": str(block), "renderer": "TextBlock", "viewer": "TextBlock", "priority": 0}
+
+        block = dict(block)
+        block_type = normalize_text(block.get("type")).lower()
+        content = block.get("content")
+        content_text = normalize_text(content)
+        content_norm = re.sub(r"\s+", " ", content_text).strip().lower() if content_text else ""
+
+        # Filter out internal payloads that would reappear as visible text.
+        if block_type in {"text", "markdown", "formula", "function"} and _executor_looks_like_internal_room_payload(content_text):
+            continue
+
+        # Strong dedupe for visible text-like blocks.
+        if block_type in {"text", "markdown"}:
+            key = (block_type, content_norm)
+            if not content_norm:
+                continue
+            if key in seen_text:
+                continue
+            seen_text.add(key)
+            result.append(block)
+            continue
+
+        # Non-text blocks dedupe by structure.
+        sig = _executor_block_signature(block)
+        if sig in seen_struct:
+            continue
+        seen_struct.add(sig)
+        result.append(block)
+
+    # Guarantee a single canonical visible text block when a text answer exists.
+    if canonical_visible:
+        canonical_key = ("text", canonical_visible_norm)
+        if canonical_key not in seen_text:
+            result.insert(0, {
+                "type": "text",
+                "content": canonical_visible,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+            })
+
+    return result
+
+
+def _executor_store_canonical_text_metadata(target: Any, *, answer: str, content: str, summary: str, original_answer: str = "", original_content: str = "") -> None:
+    if target is None:
+        return
+
+    try:
+        metadata = getattr(target, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if answer:
+            metadata.setdefault("canonical_answer", answer)
+        if content:
+            metadata.setdefault("canonical_content", content)
+        if summary:
+            metadata.setdefault("canonical_summary", summary)
+        if original_answer:
+            metadata.setdefault("provider_original_answer", original_answer)
+        if original_content:
+            metadata.setdefault("provider_original_content", original_content)
+        setattr(target, "metadata", metadata)
+    except Exception:
+        pass
+
+
+def _executor_strip_duplicate_visible_fields(result: dict, visible_text: str, render_blocks: list) -> dict:
+    if not isinstance(result, dict):
+        return result
+
+    # Keep canonical fields synchronized instead of clearing them.
+    canonical = visible_text or result.get("answer", "") or result.get("content", "") or result.get("summary", "")
+    result["answer"] = canonical
+    result["content"] = canonical
+    result["summary"] = canonical
+    result["render_blocks"] = render_blocks
+
+    machine_response = result.get("machine_response")
+    if machine_response is not None:
+        try:
+            canonical = visible_text or getattr(machine_response, "answer", "") or getattr(machine_response, "content", "") or getattr(machine_response, "summary", "")
+            if hasattr(machine_response, "answer"):
+                machine_response.answer = canonical
+            if hasattr(machine_response, "content"):
+                machine_response.content = canonical
+            if hasattr(machine_response, "summary"):
+                machine_response.summary = canonical
+            if hasattr(machine_response, "render_blocks"):
+                machine_response.render_blocks = render_blocks
+        except Exception:
+            pass
+
+    scene_contract = result.get("scene_contract")
+    if scene_contract is not None:
+        try:
+            if isinstance(scene_contract, dict):
+                canonical = visible_text or scene_contract.get("answer", "") or scene_contract.get("content", "") or scene_contract.get("summary", "")
+                scene_contract["answer"] = canonical
+                scene_contract["content"] = canonical
+                scene_contract["summary"] = canonical
+                scene_contract["render_blocks"] = render_blocks
+            else:
+                canonical = visible_text or getattr(scene_contract, "answer", "") or getattr(scene_contract, "content", "") or getattr(scene_contract, "summary", "")
+                setattr(scene_contract, "answer", canonical)
+                setattr(scene_contract, "content", canonical)
+                setattr(scene_contract, "summary", canonical)
+                setattr(scene_contract, "render_blocks", render_blocks)
+        except Exception:
+            pass
+
+    scene_runtime = result.get("scene_runtime")
+    if isinstance(scene_runtime, dict):
+        scene_runtime.setdefault("canonical_answer", visible_text)
+        scene_runtime.setdefault("canonical_content", result.get("content", ""))
+        scene_runtime.setdefault("canonical_summary", result.get("summary", ""))
+        scene_runtime["render_blocks"] = render_blocks
+
+    return result
+
+
+def _executor_build_first_circle_goal(text: str, state: dict, semantic: dict, cognition: dict, response_decision: dict) -> Tuple[str, str]:
+    canonical_plan = _executor_build_canonical_prompt_plan(
+        text,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+    current_text = _executor_format_canonical_prompt(canonical_plan)
+    if not current_text:
+        current_text = normalize_text(text)
+
+    reference_context = _executor_build_reference_context(
+        text=current_text,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+
+    if canonical_plan.get("is_multi_question"):
+        extra = "Answer each task once. Do not repeat the same fact in multiple sections."
+        if reference_context:
+            reference_context = _clip_text(reference_context + "\n" + extra, FOLLOWUP_CONTEXT_CHAR_LIMIT * 2)
+        else:
+            reference_context = extra
+
+    return current_text, reference_context
+
+
+def _build_second_circle_machine_request(
+    *,
+    text: str,
+    semantic: dict,
+    provider_goal: str,
+    provider_reference_context: str,
+    second_circle_context: dict,
+):
+    """
+    Only the first circle goes upstream with a tiny payload.
+    Everything else stays attached for the executor and downstream rooms.
+    """
+    canonical_plan = _executor_build_canonical_prompt_plan(
+        text,
+        semantic=semantic,
+        cognition=second_circle_context.get("cognition", {}) if isinstance(second_circle_context, dict) else {},
+        response_decision=second_circle_context.get("response_decision", {}) if isinstance(second_circle_context, dict) else {},
+    )
+
+    intent = _executor_build_first_circle_intent(text=text, semantic=semantic, cognition={}, response_decision={})
+    machine_request = MachineRequest(
+        goal=provider_goal,
+        intent=intent,
+        memory={},
+        visual_context={},
+        conversation={},
+    )
+    try:
+        setattr(machine_request, "provider_reference_context", provider_reference_context)
+        setattr(machine_request, "first_circle_goal", provider_goal)
+        setattr(machine_request, "first_circle_only", True)
+        setattr(machine_request, "second_circle_context", second_circle_context)
+        setattr(machine_request, "canonical_prompt_plan", canonical_plan)
+        setattr(machine_request, "canonical_prompt_text", provider_goal)
+    except Exception:
+        pass
+    return machine_request
+
+
+def executor_cpu_finalize_transport(machine_response):
+    """
+    Final transport wrapper:
+    - keeps one canonical visible text;
+    - deduplicates visible blocks;
+    - preserves internal canonical data in metadata;
+    - avoids repeating the same answer in answer/content/summary/render_blocks.
+    """
+    result = _EXECUTOR_ORIGINAL_FINALIZE_TRANSPORT(machine_response)
+
+    if not isinstance(result, dict):
+        return result
+
+    scene = result.get("machine_scene")
+    machine_response_obj = result.get("machine_response")
+    scene_contract = result.get("scene_contract")
+    visible_text = _executor_best_text(
+        result.get("answer"),
+        result.get("content"),
+        result.get("summary"),
+        getattr(machine_response_obj, "answer", "") if machine_response_obj is not None else "",
+        getattr(machine_response_obj, "content", "") if machine_response_obj is not None else "",
+        getattr(machine_response_obj, "summary", "") if machine_response_obj is not None else "",
+        getattr(scene_contract, "answer", "") if scene_contract is not None and not isinstance(scene_contract, dict) else (scene_contract or {}).get("answer") if isinstance(scene_contract, dict) else "",
+        getattr(scene_contract, "content", "") if scene_contract is not None and not isinstance(scene_contract, dict) else (scene_contract or {}).get("content") if isinstance(scene_contract, dict) else "",
+        getattr(scene_contract, "summary", "") if scene_contract is not None and not isinstance(scene_contract, dict) else (scene_contract or {}).get("summary") if isinstance(scene_contract, dict) else "",
+    )
+
+    blocks = _executor_deduplicate_visible_render_blocks(result.get("render_blocks", []), visible_text=visible_text)
+
+    # Preserve canonical data internally before we collapse the visible transport.
+    if machine_response_obj is not None:
+        _executor_store_canonical_text_metadata(
+            machine_response_obj,
+            answer=visible_text,
+            content=result.get("content", ""),
+            summary=result.get("summary", ""),
+            original_answer=getattr(machine_response_obj, "provider_original_answer", "") or "",
+            original_content=getattr(machine_response_obj, "provider_original_content", "") or "",
+        )
+
+    if scene_contract is not None:
+        _executor_store_canonical_text_metadata(
+            scene_contract,
+            answer=visible_text,
+            content=result.get("content", ""),
+            summary=result.get("summary", ""),
+            original_answer=getattr(machine_response_obj, "provider_original_answer", "") if machine_response_obj is not None else "",
+            original_content=getattr(machine_response_obj, "provider_original_content", "") if machine_response_obj is not None else "",
+        )
+
+    _executor_strip_duplicate_visible_fields(result, visible_text, blocks)
+
+    # Keep the scene wrapper aligned with the same single visible text.
+    if isinstance(scene, dict):
+        scene["answer"] = visible_text
+        scene["content"] = visible_text
+        scene["summary"] = visible_text
+        scene["render_blocks"] = blocks
+
+    return result
+
