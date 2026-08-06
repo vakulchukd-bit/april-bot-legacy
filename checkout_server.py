@@ -358,200 +358,74 @@ def canonical_scene_metadata(contract):
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
 
+
 def normalize_executor_response(
     result
 ):
 
     if not isinstance(result, dict):
-
         return {
-
             "type": "text",
-
             "content": str(result),
-
             "space": {}
         }
 
     print("========== NORMALIZE EXECUTOR RESPONSE ==========")
     print("RESULT TYPE:", type(result))
-    if isinstance(result, dict):
-        print("RESULT KEYS:", list(result.keys()))
-        scene_obj = result.get("scene")
-        print("ROOT RENDER_BLOCKS:", bool(result.get("render_blocks")))
-        if isinstance(scene_obj, dict):
-            print("SCENE KEYS:", list(scene_obj.keys()))
-            print("SCENE RENDER_BLOCKS:", bool(scene_obj.get("render_blocks")))
-            print("SCENE BLOCKS:", bool(scene_obj.get("blocks")))
-    
+    print("RESULT KEYS:", list(result.keys()))
+    scene_obj = result.get("scene")
+    print("ROOT RENDER_BLOCKS:", bool(result.get("render_blocks")))
+    if isinstance(scene_obj, dict):
+        print("SCENE KEYS:", list(scene_obj.keys()))
+        print("SCENE RENDER_BLOCKS:", bool(scene_obj.get("render_blocks")))
+        print("SCENE BLOCKS:", bool(scene_obj.get("blocks")))
+
+    scene_contract = scene_contract_view(result.get("scene_contract"))
+    content = resolve_scene_content(result)
+
     normalized = {
-
-        # =================================================
-        # 🔥 CORE
-        # =================================================
-
-        "type":
-            result.get(
-                "type",
-                "text"
-            ),
-
-        "content":
-            resolve_scene_content(result),
-
-        "answer":
-            safe_json(result.get("answer") or scene_contract.get("answer")),
-
-        "summary":
-            safe_json(result.get("summary") or scene_contract.get("summary")),
-
-        "scene_present":
-            bool(
-                scene_contract or result.get("scene")
-            ),
-
-        "blocks_present":
-            bool(
-                scene_contract.get("render_blocks")
-                or result.get("render_blocks")
-                or result.get("blocks")
-            ),
-
-        "artifact_present":
-            bool(
-                result.get("artifact")
-            ),
-
-        # =================================================
-        # 🔥 RENDER
-        # =================================================
-
-        "render_blocks":
-            safe_json(
-                scene_contract.get("render_blocks")
-                or result.get("render_blocks")
-                or scene_contract.get("blocks")
-                or result.get("blocks", [])
-            ),
-
-        "scene":
-            safe_json(root_scene.get("scene", result.get("scene", {}))),
-
-        "space":
-            safe_json(
-                result.get(
-                    "space",
-                    {}
-                )
-            ),
-
-        # =================================================
-        # 🔥 SCIENCE RENDERERS
-        # =================================================
-
-        "graph":
-            safe_json(
-                result.get("graph") or scene_contract.get("graph")
-            ),
-
-        "formula":
-            safe_json(
-                result.get("formula") or scene_contract.get("formula")
-            ),
-
-        "table":
-            safe_json(
-                result.get("table") or scene_contract.get("table")
-            ),
-
-        "gallery":
-            safe_json(
-                result.get("gallery") or scene_contract.get("gallery")
-            ),
-
-        "layout":
-            safe_json(
-                result.get("layout") or scene_contract.get("layout")
-            ),
-
-        "visual":
-            safe_json(
-                result.get("visual") or scene_contract.get("visual")
-            ),
-
-        # =================================================
-        # 🔥 CONTINUITY
-        # =================================================
-
-        "continuity":
-            safe_json(
-                result.get(
-                    "continuity",
-                    {}
-                )
-            ),
-
-        "trajectory":
-            safe_json(
-                result.get(
-                    "trajectory",
-                    {}
-                )
-            ),
-
-        # =================================================
-        # 🔥 MULTIMODAL
-        # =================================================
-
-        "visual_blocks":
-            safe_json(
-                result.get(
-                    "visual_blocks",
-                    []
-                )
-            ),
-
-        "ui_actions":
-            safe_json(
-                result.get(
-                    "ui_actions",
-                    []
-                )
-            ),
-
-        "renderer_state":
-            safe_json(scene_contract.get("renderer_state", result.get("renderer_state", {}))),
-
-        "artifact_packet":
-            safe_json(
-                build_artifact_packet(result)
-            ) if result.get("artifact") else None
+        "type": result.get("type", "text"),
+        "content": content,
+        "answer": scene_contract.get("answer") or content,
+        "summary": scene_contract.get("summary") or content,
+        "scene_present": bool(scene_contract or result.get("scene")),
+        "blocks_present": bool(
+            scene_contract.get("render_blocks")
+            or result.get("render_blocks")
+            or result.get("blocks")
+        ),
+        "artifact_present": bool(result.get("artifact")),
+        "render_blocks": list(
+            scene_contract.get("render_blocks")
+            or result.get("render_blocks")
+            or scene_contract.get("blocks")
+            or result.get("blocks", [])
+        ),
+        "scene": scene_contract.get("scene") or result.get("scene", {}),
+        "space": result.get("space", {}),
+        "graph": result.get("graph") or scene_contract.get("graph"),
+        "formula": result.get("formula") or scene_contract.get("formula"),
+        "table": result.get("table") or scene_contract.get("table"),
+        "gallery": result.get("gallery") or scene_contract.get("gallery"),
+        "layout": result.get("layout") or scene_contract.get("layout"),
+        "visual": result.get("visual") or scene_contract.get("visual"),
+        "continuity": result.get("continuity", {}),
+        "trajectory": result.get("trajectory", {}),
+        "visual_blocks": result.get("visual_blocks", []),
+        "ui_actions": result.get("ui_actions", []),
+        "renderer_state": scene_contract.get("renderer_state", result.get("renderer_state", {})),
+        "artifact_packet": build_artifact_packet(result) if result.get("artifact") else None,
     }
 
-    # =====================================================
-    # 🔥 LEGACY TEXT SAFETY
-    # =====================================================
-
-    if (
-
-        not ALLOW_TEXT_COLLAPSE
-
-        and normalized["render_blocks"]
-    ):
-
-        normalized[
-            "preserve_render_space"
-        ] = True
-
+    if not ALLOW_TEXT_COLLAPSE and normalized["render_blocks"]:
+        normalized["preserve_render_space"] = True
 
     print(
         "🌐 WIDESCENE:",
         {
             "scene_contract": bool(result.get("scene_contract")),
             "artifact": bool(result.get("artifact")),
-            "blocks": bool(
-                scene_contract.get("render_blocks")
-            )
+            "blocks": bool(scene_contract.get("render_blocks"))
         }
     )
 
@@ -561,25 +435,16 @@ def normalize_executor_response(
     print("🌐 NORMALIZED:")
     print(normalized)
 
-    
-    canonical = scene_contract_view(result.get("scene_contract")) if isinstance(result, dict) else None
-    executor_final = False
+    canonical = scene_contract_view(result.get("scene_contract"))
     if canonical:
-        executor_final = canonical.get("scene_contract_final") or result.get("scene_contract_final")
-
-    if canonical:
-        canonical = scene_contract_view(canonical)
         canonical.setdefault("content", normalized.get("content"))
         canonical.setdefault("answer", normalized.get("answer"))
         canonical.setdefault("summary", normalized.get("summary"))
         canonical.setdefault("render_blocks", normalized.get("render_blocks", []))
         normalized["scene_contract"] = canonical
-    elif not executor_final:
-        normalized["scene_contract"] = build_gateway_scene_contract(normalized)
     else:
-        normalized["scene_contract"] = canonical
+        normalized["scene_contract"] = build_gateway_scene_contract(normalized)
 
-    
     normalized["legacy_renderers"] = {
         "graph": normalized.get("graph"),
         "formula": normalized.get("formula"),
@@ -595,12 +460,8 @@ def normalize_executor_response(
     return gateway_return_cpu_result(normalized)
 
 
-
-# =========================================================
-# 🏭 ARTIFACT REPRESENTATION RESOLVER
-# =========================================================
-
 def build_artifact_packet(result):
+
 
     artifact = result.get("artifact")
 
@@ -1127,6 +988,8 @@ def voice_chat():
             )
         )
 
+        gateway_transport = build_gateway_transport_payload(result)
+
         return jsonify({
 
             "success": True,
@@ -1134,8 +997,38 @@ def voice_chat():
             "transcript":
                 transcript,
 
+            "gateway_transport":
+                safe_json(gateway_transport),
+
+            "scene_contract":
+                safe_json(gateway_transport.get("scene_contract", {})),
+
+            "render_blocks":
+                safe_json(gateway_transport.get("render_blocks", [])),
+
+            "content":
+                gateway_transport.get("content", ""),
+
+            "answer":
+                gateway_transport.get("answer", ""),
+
+            "summary":
+                gateway_transport.get("summary", ""),
+
             "response":
-                result
+                gateway_transport.get("content", ""),
+
+            "renderer_mode":
+                WEB_RENDERER_MODE,
+
+            "scene_mode":
+                WEB_SCENE_MODE,
+
+            "visual_summary":
+                safe_json({
+                    "voice": True,
+                    "transcript": transcript
+                })
 
         })
 
@@ -1828,246 +1721,3 @@ if __name__ == "__main__":
         use_reloader=False
     )
 
-# =========================================================
-# FINAL CANONICAL OVERRIDES
-# The gateway becomes a transparent transport shim.
-# =========================================================
-
-
-def scene_contract_view(contract):
-    contract = scene_contract_to_dict(contract)
-    if not contract:
-        return {}
-    view = dict(contract)
-    if "render_blocks" not in view or view.get("render_blocks") in (None, ""):
-        view["render_blocks"] = view.get("blocks", []) or []
-    if "blocks" not in view:
-        view["blocks"] = view.get("render_blocks", []) or []
-    view.setdefault("active_scene", "")
-    view.setdefault("space_continuity", {})
-    view.setdefault("renderer_state", {})
-    view.setdefault("metadata", {})
-    return view
-
-
-def resolve_scene_content(result):
-    result = result if isinstance(result, dict) else {}
-    contract = scene_contract_view(result.get("scene_contract"))
-    gateway = scene_contract_view(result.get("gateway_transport"))
-    for candidate in (
-        contract.get("content"), contract.get("answer"), contract.get("summary"),
-        gateway.get("content"), gateway.get("answer"), gateway.get("summary"),
-        result.get("content"), result.get("answer"), result.get("summary"),
-    ):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-    blocks = contract.get("render_blocks") or gateway.get("render_blocks") or result.get("render_blocks") or []
-    if isinstance(blocks, list):
-        for block in blocks:
-            if isinstance(block, dict):
-                for field in ("content", "text", "description"):
-                    value = block.get(field)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-    return ""
-
-
-def normalize_executor_response(result):
-    if not isinstance(result, dict):
-        return {"type": "text", "content": str(result), "space": {}}
-    scene_contract = scene_contract_view(result.get("scene_contract"))
-    content = resolve_scene_content(result)
-    normalized = {
-        "type": result.get("type", "text"),
-        "content": content,
-        "answer": scene_contract.get("answer") or content,
-        "summary": scene_contract.get("summary") or content,
-        "scene_present": bool(scene_contract or result.get("scene")),
-        "blocks_present": bool(scene_contract.get("render_blocks") or result.get("render_blocks") or result.get("blocks")),
-        "artifact_present": bool(result.get("artifact")),
-        "render_blocks": list(scene_contract.get("render_blocks") or result.get("render_blocks") or result.get("blocks") or []),
-        "scene": scene_contract.get("scene") or result.get("scene", {}),
-        "space": result.get("space", {}),
-        "graph": result.get("graph") or scene_contract.get("graph"),
-        "formula": result.get("formula") or scene_contract.get("formula"),
-        "table": result.get("table") or scene_contract.get("table"),
-        "gallery": result.get("gallery") or scene_contract.get("gallery"),
-        "layout": result.get("layout") or scene_contract.get("layout"),
-        "visual": result.get("visual") or scene_contract.get("visual"),
-        "continuity": result.get("continuity", {}),
-        "trajectory": result.get("trajectory", {}),
-        "visual_blocks": result.get("visual_blocks", []),
-        "ui_actions": result.get("ui_actions", []),
-        "renderer_state": scene_contract.get("renderer_state", result.get("renderer_state", {})),
-        "artifact_packet": build_artifact_packet(result) if result.get("artifact") else None,
-        "scene_contract": scene_contract or build_gateway_scene_contract(result),
-        "legacy_renderers": {
-            "graph": result.get("graph"),
-            "formula": result.get("formula"),
-            "table": result.get("table"),
-            "gallery": result.get("gallery"),
-            "layout": result.get("layout"),
-            "visual": result.get("visual"),
-        },
-        "preferred_transport": "scene_contract",
-        "transport_role": "gateway_only",
-        "gateway_mutation": False,
-    }
-    if not ALLOW_TEXT_COLLAPSE and normalized["render_blocks"]:
-        normalized["preserve_render_space"] = True
-    return gateway_return_cpu_result(normalized)
-
-
-def build_gateway_scene_contract(normalized):
-    if normalized.get("scene_contract"):
-        return normalized["scene_contract"]
-    return {
-        "version": 1,
-        "scene": normalized.get("scene", {}),
-        "render_blocks": normalized.get("render_blocks", []),
-        "renderer_state": normalized.get("renderer_state", {}),
-        "artifact_packet": normalized.get("artifact_packet"),
-        "continuity": normalized.get("continuity", {}),
-        "trajectory": normalized.get("trajectory", {}),
-        "space": normalized.get("space", {}),
-        "content": normalized.get("content"),
-        "answer": normalized.get("answer"),
-        "summary": normalized.get("summary"),
-    }
-
-
-def build_gateway_transport_payload(normalized):
-    contract = scene_contract_view(normalized.get("scene_contract"))
-    contract.setdefault("gateway_transport_only", True)
-    contract.setdefault("gateway_owner", "checkout_server")
-    return {
-        "scene_contract": contract,
-        "contract_version": contract.get("version", 1),
-        "transport_mode": "passthrough",
-        "gateway_rebuild": False,
-        "space_continuity": normalized.get("space_continuity", {}),
-        "render_blocks": contract.get("render_blocks", []),
-        "renderer_state": contract.get("renderer_state", {}),
-        "content": contract.get("content", ""),
-        "answer": contract.get("answer", normalized.get("answer", "")),
-        "summary": contract.get("summary", normalized.get("summary", "")),
-    }
-
-
-def process_web_message(user_id, text):
-    async def run_with_activity(chat_id, coro):
-        print("🔥 ACTIVITY WRAPPER START")
-        print("🔥 CHAT:", chat_id)
-        result = await coro
-        print("🔥 ACTIVITY WRAPPER END")
-        print("🔥 RESULT TYPE:", type(result))
-        return result
-
-    result = asyncio.run(gateway_cpu_execute(user_id=user_id, text=text, run_with_activity=run_with_activity))
-    result = executor_contract_passthrough(result)
-    if isinstance(result, dict) and result.get("scene_contract"):
-        scene_view = scene_contract_view(result["scene_contract"])
-        normalized = {
-            "scene_contract": scene_view,
-            "content": scene_view.get("content") or scene_view.get("answer") or scene_view.get("summary") or "",
-            "answer": scene_view.get("answer") or scene_view.get("content") or "",
-            "summary": scene_view.get("summary") or scene_view.get("content") or "",
-            "render_blocks": scene_view.get("render_blocks", []),
-            "scene": scene_view.get("machine_scene") or scene_view.get("scene", {}),
-            "graph": scene_view.get("graph"),
-            "formula": scene_view.get("formula"),
-            "table": scene_view.get("table"),
-            "gallery": scene_view.get("gallery"),
-            "layout": scene_view.get("layout"),
-            "visual": scene_view.get("visual"),
-            "renderer_state": scene_view.get("renderer_state", {}),
-            "space": scene_view.get("space", {}),
-        }
-        normalized["space_continuity"] = build_space_continuity(normalized)
-        return normalized
-    normalized = normalize_executor_response(result)
-    normalized["space_continuity"] = build_space_continuity(normalized)
-    return normalized
-
-
-def web_chat():
-    try:
-        data = request.json or {}
-        user_id = data.get("user_id")
-        text = data.get("text", "")
-        visual_ledger = data.get("visual_ledger", [])
-        package = data.get("package", "free")
-        session_started_utc = data.get("session_started_utc")
-
-        visual_summary = {
-            "user_id": user_id,
-            "package": package,
-            "session_started_utc": session_started_utc,
-            "scene_events_count": len(visual_ledger),
-            "last_event": visual_ledger[-1] if visual_ledger else None,
-        }
-
-        update_visual_summary(user_id, visual_summary)
-        state_after_update = get_state(user_id)
-        print("🧠 VISUAL STATE UPDATED", state_after_update.get("active_visual_scene"))
-
-        if not user_id:
-            return jsonify({"success": False, "error": "user_id required"}), 400
-
-        result = process_web_message(user_id, text)
-        result["gateway_transport"] = build_gateway_transport_payload(result)
-        gt = result.get("gateway_transport", {})
-        return jsonify({
-            "success": True,
-            "gateway_transport": safe_json(gt),
-            "scene_contract": safe_json(gt.get("scene_contract", {})),
-            "render_blocks": safe_json(gt.get("render_blocks", [])),
-            "content": gt.get("content", ""),
-            "answer": gt.get("answer", ""),
-            "summary": gt.get("summary", ""),
-            "renderer_mode": WEB_RENDERER_MODE,
-            "scene_mode": WEB_SCENE_MODE,
-            "visual_summary": safe_json(visual_summary),
-            "active_visual_scene": safe_json(gt.get("active_visual_scene")),
-        })
-    except Exception as e:
-        print("WEB EXECUTION ERROR:", e)
-        return jsonify({"success": False, "error": str(e)}), 500
-
-# --- patch: process_web_message must remain awaitable because routes call asyncio.run(...) ---
-async def process_web_message(user_id, text):
-    async def run_with_activity(chat_id, coro):
-        print("🔥 ACTIVITY WRAPPER START")
-        print("🔥 CHAT:", chat_id)
-        result = await coro
-        print("🔥 ACTIVITY WRAPPER END")
-        print("🔥 RESULT TYPE:", type(result))
-        return result
-
-    result = await gateway_cpu_execute(user_id=user_id, text=text, run_with_activity=run_with_activity)
-    result = executor_contract_passthrough(result)
-
-    if isinstance(result, dict) and result.get("scene_contract"):
-        scene_view = scene_contract_view(result["scene_contract"])
-        normalized = {
-            "scene_contract": scene_view,
-            "content": scene_view.get("content") or scene_view.get("answer") or scene_view.get("summary") or "",
-            "answer": scene_view.get("answer") or scene_view.get("content") or "",
-            "summary": scene_view.get("summary") or scene_view.get("content") or "",
-            "render_blocks": scene_view.get("render_blocks", []),
-            "scene": scene_view.get("machine_scene") or scene_view.get("scene", {}),
-            "graph": scene_view.get("graph"),
-            "formula": scene_view.get("formula"),
-            "table": scene_view.get("table"),
-            "gallery": scene_view.get("gallery"),
-            "layout": scene_view.get("layout"),
-            "visual": scene_view.get("visual"),
-            "renderer_state": scene_view.get("renderer_state", {}),
-            "space": scene_view.get("space", {}),
-        }
-        normalized["space_continuity"] = build_space_continuity(normalized)
-        return normalized
-
-    normalized = normalize_executor_response(result)
-    normalized["space_continuity"] = build_space_continuity(normalized)
-    return normalized
