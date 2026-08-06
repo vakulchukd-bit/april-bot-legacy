@@ -1036,17 +1036,6 @@ def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str =
         seen_struct.add(sig)
         result.append(block)
 
-    if canonical_visible:
-        canonical_key = ("text", canonical_visible_norm)
-        if canonical_key not in seen_text:
-            result.insert(0, {
-                "type": "text",
-                "content": canonical_visible,
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "priority": 0,
-            })
-
     return result
 
 
@@ -1558,15 +1547,6 @@ def executor_cpu_scene_pipeline(machine_response):
     )
 
     blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    if not blocks and visible_text:
-        blocks = [{
-            "type": "text",
-            "content": visible_text,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "priority": 0,
-            "source_room": "text",
-        }]
 
     try:
         if isinstance(scene_contract, dict):
@@ -1650,6 +1630,15 @@ def executor_cpu_finalize_transport(machine_response):
     )
 
     source_blocks = list(getattr(machine_response, "render_blocks", []) or []) or list(scene.get("render_blocks", []) or [])
+    if not source_blocks and visible_text:
+        source_blocks = [{
+            "type": "text",
+            "content": visible_text,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "source_room": "text",
+        }]
     blocks = _executor_deduplicate_visible_render_blocks(source_blocks, visible_text=visible_text)
 
     if visible_text:
@@ -1804,7 +1793,22 @@ def _executor_merge_room_results_into_canonical_response(
             "visual_reference",
             "visual_summary",
             "active_visual_scene",
+            "metadata",
         ):
+            if field == "metadata":
+                candidate_metadata = getattr(candidate, "metadata", None)
+                if isinstance(candidate_metadata, dict) and candidate_metadata:
+                    base_metadata = getattr(base_response, "metadata", None)
+                    if not isinstance(base_metadata, dict):
+                        base_metadata = {}
+                    for key, value in candidate_metadata.items():
+                        base_metadata.setdefault(key, value)
+                    try:
+                        base_response.metadata = base_metadata
+                    except Exception:
+                        pass
+                continue
+
             if _executor_value_is_empty(getattr(base_response, field, None)):
                 value = getattr(candidate, field, None)
                 if value not in (None, "", [], {}):
@@ -1812,22 +1816,6 @@ def _executor_merge_room_results_into_canonical_response(
                         setattr(base_response, field, value)
                     except Exception:
                         pass
-
-    if not existing_blocks:
-        canonical_text = _executor_best_text(
-            getattr(base_response, "answer", ""),
-            getattr(base_response, "content", ""),
-            getattr(base_response, "summary", ""),
-        )
-        if canonical_text:
-            existing_blocks = [{
-                "type": "text",
-                "content": canonical_text,
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "priority": 0,
-                "source_room": canonical_room_name,
-            }]
 
     base_response.render_blocks = existing_blocks
     base_response.artifacts = existing_artifacts
@@ -1974,21 +1962,6 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
 
     if registry_result is not None:
         try:
-            registry_contributions = getattr(registry_result, "contributions", None)
-            if isinstance(registry_contributions, dict) and registry_contributions:
-                current_contributions = getattr(machine_response, "contributions", None) or {}
-                if not isinstance(current_contributions, dict):
-                    current_contributions = {}
-                current_contributions.setdefault("registry", registry_contributions.get("registry", {}))
-                current_contributions.setdefault("registry_summary", registry_contributions.get("registry_summary", {}))
-                current_contributions.setdefault("registry_diagnostics", registry_contributions.get("registry_diagnostics", {}))
-                for key, value in registry_contributions.items():
-                    current_contributions.setdefault(key, value)
-                machine_response.contributions = current_contributions
-        except Exception:
-            pass
-
-        try:
             registry_diagnostics = getattr(registry_result, "registry_diagnostics", None)
             if registry_diagnostics not in (None, "", [], {}):
                 machine_response.registry_diagnostics = registry_diagnostics
@@ -1996,48 +1969,13 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
             pass
 
         try:
-            registry_artifacts = list(getattr(registry_result, "artifacts", []) or [])
-            current_artifacts = list(getattr(machine_response, "artifacts", []) or [])
-            artifact_seen = {_executor_artifact_signature(a) for a in current_artifacts}
-            for artifact in registry_artifacts:
-                sig = _executor_artifact_signature(artifact)
-                if sig in artifact_seen:
-                    continue
-                current_artifacts.append(artifact)
-                artifact_seen.add(sig)
-            machine_response.artifacts = current_artifacts
-        except Exception:
-            pass
-
-        try:
-            registry_metadata = getattr(registry_result, "metadata", None)
-            if isinstance(registry_metadata, dict) and registry_metadata:
-                current_metadata = getattr(machine_response, "metadata", None)
-                if not isinstance(current_metadata, dict):
-                    current_metadata = {}
-                for key, value in registry_metadata.items():
-                    current_metadata.setdefault(key, value)
-                machine_response.metadata = current_metadata
-        except Exception:
-            pass
-
-        try:
-            registry_blocks = list(getattr(registry_result, "render_blocks", []) or [])
-            current_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-            block_seen = {_executor_block_signature(block) for block in current_blocks}
-            for block in registry_blocks:
-                if not isinstance(block, dict):
-                    block = {"type": "machine_payload", "content": str(block), "renderer": "TextBlock", "viewer": "TextBlock", "priority": 0}
-                block = dict(block)
-                block_type = normalize_text(block.get("type")).lower()
-                if block_type in {"text", "markdown", "formula", "function"} and _executor_looks_like_internal_room_payload(block.get("content")):
-                    continue
-                sig = _executor_block_signature(block)
-                if sig in block_seen:
-                    continue
-                current_blocks.append(block)
-                block_seen.add(sig)
-            machine_response.render_blocks = current_blocks
+            merge_inputs = list(room_results)
+            merge_inputs.append({"room": "registry", "machine_response": registry_result})
+            machine_response = _executor_merge_room_results_into_canonical_response(
+                machine_response,
+                merge_inputs,
+                canonical_room_name=canonical_room_name,
+            )
         except Exception:
             pass
 
