@@ -1177,3 +1177,223 @@ provider_generate_image = generate_image
 
 PROVIDER_ROUTE_VERSION = "provider_router_10"
 PROVIDER_LEGACY_MODE = False
+
+# =====================================================
+# FINAL CANONICAL OVERRIDES
+# These overrides make the first-circle route single-pass:
+# one parse, one canonical answer, one text block.
+# =====================================================
+
+
+def provider_decode_response(raw_text: Any) -> Dict[str, Any]:
+    parsed = provider_decode_json(raw_text)
+    if parsed is None:
+        try:
+            parsed = json.loads(raw_text)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    answer = normalize_response_text(
+        parsed.get("answer")
+        or parsed.get("content")
+        or parsed.get("response")
+        or parsed.get("summary")
+        or parsed.get("explanation")
+        or raw_text
+    )
+    parsed = {
+        "answer": answer,
+        "content": answer,
+        "response": answer,
+        "summary": answer,
+        "explanation": answer,
+        "scene": parsed.get("scene", {}) if isinstance(parsed, dict) else {},
+        "artifacts": list(parsed.get("artifacts", []) or []) if isinstance(parsed, dict) else [],
+        "render_blocks": list(parsed.get("render_blocks", []) or []) if isinstance(parsed, dict) else [],
+        "scene_plan": list(parsed.get("scene_plan", ["text"])) if isinstance(parsed, dict) else ["text"],
+        "render_priority": list(parsed.get("render_priority", ["text"])) if isinstance(parsed, dict) else ["text"],
+        "confidence": float(parsed.get("confidence", 1.0) if isinstance(parsed, dict) else 1.0),
+        "metadata": dict(parsed.get("metadata", {}) or {}) if isinstance(parsed, dict) else {},
+    }
+    if not parsed["render_blocks"] and answer:
+        parsed["render_blocks"] = [{
+            "type": "text",
+            "content": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "scene_contract": True,
+        }]
+    return parsed
+
+
+def provider_finalize_for_executor(contract: Dict[str, Any]) -> Dict[str, Any]:
+    contract = dict(contract or {})
+    answer = normalize_response_text(
+        contract.get("answer")
+        or contract.get("content")
+        or contract.get("response")
+        or contract.get("summary")
+        or contract.get("explanation")
+    )
+    contract["answer"] = answer
+    contract["content"] = answer
+    contract["response"] = answer
+    contract["summary"] = answer
+    contract["explanation"] = answer
+    blocks = list(contract.get("render_blocks", []) or [])
+    if not blocks and answer:
+        blocks = [{
+            "type": "text",
+            "content": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "scene_contract": True,
+        }]
+    seen = set()
+    unique = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            block = {"type": "text", "content": str(block), "renderer": "TextBlock", "viewer": "TextBlock", "priority": 0}
+        sig = (block.get("type"), normalize_response_text(block.get("content")), block.get("renderer"), block.get("viewer"))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        unique.append(block)
+    contract["render_blocks"] = unique
+    contract.setdefault("scene", {})
+    contract.setdefault("artifacts", [])
+    contract.setdefault("scene_plan", ["text"])
+    contract.setdefault("render_priority", ["text"])
+    contract.setdefault("metadata", {})
+    contract["provider_original_answer"] = answer
+    contract["provider_original_content"] = answer
+    return contract
+
+
+def create_provider_contract(raw_text: Any, source_request: Any = None) -> Dict[str, Any]:
+    parsed = provider_decode_response(raw_text)
+    parsed = provider_finalize_for_executor(parsed)
+    parsed = attach_processor_input(parsed, source_request)
+    parsed.setdefault("type", "provider_response")
+    parsed.setdefault("provider", "openai")
+    parsed.setdefault("provider_contract", "fiber_v3")
+    parsed.setdefault("transport_contract", "scene_first")
+    parsed.setdefault("execution_round", 1)
+    parsed.setdefault("execution_phase", "FIRST_CIRCLE")
+    return parsed
+
+
+async def generate_text(
+    messages: Any,
+    temperature: float = 0.7,
+    max_output_tokens: Optional[int] = None,
+    model: str = OPENAI_PRIMARY_MODEL,
+):
+    provider_enter("openai_text", messages)
+    try:
+        update_provider_behavior()
+        source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
+        if max_output_tokens is None:
+            model = OPENAI_FAST_MODEL if len(str(source_request.get("goal") or "")) <= 48 else OPENAI_BALANCED_MODEL
+            max_output_tokens = 256 if model == OPENAI_FAST_MODEL else 384
+        normalized_input = normalize_provider_input(source_request)
+        response = openai_client.responses.create(
+            model=model,
+            input=normalized_input,
+            max_output_tokens=max_output_tokens,
+        )
+        raw_text = response.output_text or ""
+        provider_log(f"OPENAI OUTPUT LENGTH: {len(raw_text)}")
+        if not raw_text:
+            provider_exit("openai_text", False)
+            raise RuntimeError("Provider returned empty response")
+        provider_exit("openai_text", True)
+        contract = create_provider_contract(raw_text, source_request=source_request)
+        provider_stage_log("EXECUTOR_HANDOFF", contract)
+        return contract
+    except Exception as e:
+        provider_log("OPENAI TEXT ERROR:", e)
+        provider_exit("openai_text", False)
+        raise
+
+
+async def transcribe_voice(file_path: str) -> str:
+    provider_enter("voice_transcription", file_path)
+    try:
+        with open(file_path, "rb") as f:
+            transcript = openai_client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=f,
+            )
+        text = normalize_response_text(transcript.text if transcript.text else "")
+        provider_exit("voice_transcription", bool(text))
+        return text
+    except Exception as e:
+        provider_log("OPENAI VOICE ERROR:", e)
+        provider_exit("voice_transcription", False)
+        return ""
+
+
+async def analyze_image(path: str, prompt: str):
+    provider_enter("image_analysis", path)
+    update_provider_behavior()
+    if should_restore_gemini():
+        try:
+            uploaded = gemini_client.files.upload(file=path)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[uploaded, prompt],
+            )
+            text = normalize_response_text(response.text if response.text else "")
+            if text:
+                mark_gemini_success()
+                provider_exit("gemini_image", True)
+                return create_provider_contract(text)
+        except Exception as e:
+            provider_log("GEMINI IMAGE ERROR:", e)
+            mark_gemini_failure()
+    try:
+        with open(path, "rb") as image_file:
+            response = openai_client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {"type": "input_image", "image": image_file.read()},
+                        ],
+                    }
+                ],
+                max_output_tokens=250,
+            )
+        text = normalize_response_text(response.output_text if response.output_text else "")
+        if text:
+            provider_exit("openai_image", True)
+            return create_provider_contract(text)
+        provider_exit("openai_image", False)
+        raise RuntimeError("Visual provider route failed")
+    except Exception as e:
+        provider_log("OPENAI IMAGE ERROR:", e)
+        provider_exit("openai_image", False)
+        raise RuntimeError("Visual provider route failed")
+
+
+async def generate_image(prompt: str, size: str = "1024x1024", quality: str = "auto"):
+    provider_enter("image_generation", {"size": size})
+    provider_log("IMAGE GENERATION DISABLED (Premium only)")
+    provider_exit("image_generation", True)
+    return {
+        "success": False,
+        "premium_required": True,
+        "image_generation_disabled": True,
+        "reason": "Image generation is temporarily disabled.",
+    }
+
+
+provider_generate_image = generate_image
