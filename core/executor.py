@@ -1280,31 +1280,1129 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
     return machine_response
 
 
-def executor_cpu_build_presentation_plan(machine_response):
-    plan = {
-        "representation": "text",
-        "blocks": [],
-        "artifact_types": [],
-        "provider_owned": True,
+
+# =====================================================
+# 🧩 SCENE PLANNING HELPERS
+# =====================================================
+
+def _executor_request_text_from_response(machine_response: Any) -> str:
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+    current_turn = conversation_space.get("current_turn", {}) if isinstance(conversation_space, dict) else {}
+    user_turn = current_turn.get("user", {}) if isinstance(current_turn, dict) else {}
+
+    second_circle_context = getattr(machine_response, "second_circle_context", {}) or {}
+    if not isinstance(second_circle_context, dict):
+        second_circle_context = {}
+
+    candidates = [
+        getattr(machine_response, "executor_input_text", ""),
+        getattr(machine_response, "input_text", ""),
+        getattr(machine_response, "canonical_prompt_text", ""),
+        getattr(machine_response, "provider_source_request", ""),
+        getattr(machine_response, "processor_input", ""),
+        getattr(machine_response, "goal", ""),
+        getattr(machine_response, "machine_input", ""),
+        getattr(machine_response, "text", ""),
+        getattr(machine_response, "query", ""),
+        user_turn.get("text", ""),
+        conversation_space.get("last_user_turn", ""),
+        second_circle_context.get("text", ""),
+        second_circle_context.get("reference_context", ""),
+    ]
+    return _executor_best_text(*candidates)
+
+
+def _executor_extract_first_url(text: Any) -> str:
+    if not isinstance(text, str):
+        text = str(text or "")
+    match = re.search(r'(https?://[^\s\]\)>"\']+|www\.[^\s\]\)>"\']+)', text, re.IGNORECASE)
+    return match.group(1).rstrip(".,;:!") if match else ""
+
+
+def _executor_guess_language(text: Any, request_text: str = "") -> str:
+    blob = f"{normalize_text(request_text)}\n{normalize_text(text)}".lower()
+    if any(token in blob for token in ("import ", "def ", "class ", "plt.", "python", "matplotlib", "pip ", "lambda ", "print(")):
+        return "python"
+    if any(token in blob for token in ("```js", "javascript", "typescript", "const ", "let ", "function ")):
+        return "javascript"
+    if any(token in blob for token in ("```html", "<div", "<span", "</body>", "</html>")):
+        return "html"
+    if any(token in blob for token in ("```css", "display:", "position:", "margin:", "padding:")):
+        return "css"
+    return "text"
+
+
+def _executor_parse_plot_arrays(text: Any) -> dict:
+    if not isinstance(text, str):
+        text = str(text or "")
+    compact = re.sub(r"\s+", "", text)
+    match = re.search(r'plot\(\[([^\]]+)\],\[([^\]]+)\]', compact, re.IGNORECASE)
+    if not match:
+        return {}
+
+    def _to_numbers(chunk: str):
+        values = []
+        for item in chunk.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                num = float(item)
+                if num.is_integer():
+                    num = int(num)
+                values.append(num)
+            except Exception:
+                return []
+        return values
+
+    xs = _to_numbers(match.group(1))
+    ys = _to_numbers(match.group(2))
+    if not xs or not ys or len(xs) != len(ys):
+        return {}
+
+    return {
+        "x": xs,
+        "y": ys,
+        "points": [{"x": x, "y": y} for x, y in zip(xs, ys)],
     }
 
-    artifacts = list(getattr(machine_response, "artifacts", []) or [])
-    for artifact in artifacts:
-        artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None) or "text"
-        if artifact_type not in plan["artifact_types"]:
-            plan["artifact_types"].append(artifact_type)
-        if artifact_type not in plan["blocks"]:
-            plan["blocks"].append(artifact_type)
 
-    priority = ["graph", "table", "formula", "gallery", "diagram", "link", "code", "text"]
-    for rep in priority:
-        if rep in plan["artifact_types"]:
-            plan["representation"] = rep
-            break
+def _executor_multiplication_table_rows(size: int = 10) -> dict:
+    size = max(1, min(int(size or 10), 12))
+    headers = ["×"] + [str(i) for i in range(1, size + 1)]
+    rows = []
+    for i in range(1, size + 1):
+        rows.append([str(i)] + [str(i * j) for j in range(1, size + 1)])
+    return {"headers": headers, "rows": rows, "size": size}
 
-    machine_response.executor_presentation_plan = plan
+
+def _executor_detect_scene_kind(machine_response: Any) -> str:
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    state = getattr(machine_response, "executor_state", {}) or {}
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    blob = f"{request_text}\n{visible_text}".lower()
+
+    preferred = _executor_best_text(
+        response_decision.get("preferred_representation"),
+        semantic.get("preferred_representation"),
+        getattr(machine_response, "executor_presentation_plan", {}).get("representation") if isinstance(getattr(machine_response, "executor_presentation_plan", {}), dict) else "",
+    ).lower()
+
+    preferred_map = {
+        "markdown": "text",
+        "text": "text",
+        "table": "table",
+        "graph": "graph",
+        "formula": "formula",
+        "link": "link",
+        "code": "code",
+        "gallery": "gallery",
+        "diagram": "graph",
+        "visual": "gallery",
+    }
+    if preferred in preferred_map:
+        return preferred_map[preferred]
+
+    if semantic.get("visual_generation_needed"):
+        return "gallery"
+    if semantic.get("math_intent") or semantic.get("formula_intent"):
+        return "formula"
+    if semantic.get("render_intent") and semantic.get("preferred_representation"):
+        return preferred_map.get(normalize_text(semantic.get("preferred_representation")).lower(), "text")
+
+    if any(url_kw in blob for url_kw in ("http://", "https://", "www.", "facebook", "linkedin", "telegram", "youtube", "instagram", "x.com", "t.me")):
+        return "link"
+    if any(code_kw in blob for code_kw in ("```", "import ", "def ", "class ", "plt.", "print(", "matplotlib", "python", "javascript", "typescript")):
+        return "code"
+    if any(table_kw in blob for table_kw in ("таблица умножения", "таблицу умножения", "multiplication table", "таблица менделеева", "table", "таблица", "rows", "columns")):
+        return "table"
+    if any(graph_kw in blob for graph_kw in ("график", "graph", "plot", "chart", "diagram", "функц", "trajectory")):
+        return "graph"
+    if any(formula_kw in blob for formula_kw in ("формул", "formula", "equation", "уравнен", "x^", "=", "√", "∑", "∫")):
+        return "formula"
+    if any(image_kw in blob for image_kw in ("картин", "изображ", "image", "photo", "pic", "screenshot", "gallery", "галере")):
+        return "gallery"
+
+    if state.get("active_visual_scene"):
+        return "gallery"
+    return "text"
+
+
+def _executor_block_signal_for_kind(kind: str) -> str:
+    kind = normalize_text(kind).lower()
+    return {
+        "table": "render.table",
+        "graph": "render.graph",
+        "formula": "render.formula",
+        "link": "render.link",
+        "code": "render.code",
+        "gallery": "render.gallery",
+        "text": "render.text",
+    }.get(kind, "render.text")
+
+
+def _executor_build_text_block(content: str, *, source_room: str = "text", caption: str = "", signal: str = "render.text") -> dict:
+    content = normalize_text(content)
+    block = {
+        "type": "text",
+        "artifactType": "text",
+        "render_type": "text",
+        "signal": signal,
+        "renderer": "MarkdownBlock",
+        "viewer": "MessageTextBlock",
+        "content": content,
+        "payload": {"content": content},
+        "priority": 10,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_formula_block(content: str, *, source_room: str = "math", caption: str = "") -> dict:
+    content = normalize_text(content)
+    block = {
+        "type": "formula",
+        "artifactType": "formula",
+        "render_type": "formula",
+        "signal": _executor_block_signal_for_kind("formula"),
+        "renderer": "FormulaBlock",
+        "viewer": "FormulaBlock",
+        "content": content,
+        "payload": {"expression": content, "content": content},
+        "priority": 100,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_code_block(code_text: str, *, source_room: str = "code", language: str = "python", caption: str = "") -> dict:
+    code_text = normalize_text(code_text)
+    block = {
+        "type": "code",
+        "artifactType": "code",
+        "render_type": "code",
+        "signal": _executor_block_signal_for_kind("code"),
+        "renderer": "CodeBlock",
+        "viewer": "CodeBlock",
+        "content": code_text,
+        "payload": {"language": language, "code": code_text, "content": code_text},
+        "priority": 90,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_link_block(url: str, *, source_room: str = "link", title: str = "", label: str = "", caption: str = "") -> dict:
+    url = normalize_text(url)
+    title = normalize_text(title) or url
+    label = normalize_text(label) or title or url
+    block = {
+        "type": "link",
+        "artifactType": "link",
+        "render_type": "link",
+        "signal": _executor_block_signal_for_kind("link"),
+        "renderer": "LinkCard",
+        "viewer": "LinkCard",
+        "content": url,
+        "payload": {"url": url, "title": title, "label": label, "content": url},
+        "priority": 80,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_table_block(machine_response: Any, *, source_room: str = "table") -> dict:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    blob = f"{request_text}\n{visible_text}".lower()
+    caption = "Таблица"
+
+    if any(phrase in blob for phrase in ("таблица умножения", "multiplication table", "таблицу умножения", "умножения")):
+        data = _executor_multiplication_table_rows(10)
+        caption = "Таблица умножения 1–10"
+        payload = {
+            "caption": caption,
+            "headers": data["headers"],
+            "rows": data["rows"],
+            "layout": {"mode": "grid", "density": "comfortable", "wrap": True},
+            "context": request_text,
+        }
+        return {
+            "type": "table",
+            "artifactType": "table",
+            "render_type": "table",
+            "signal": _executor_block_signal_for_kind("table"),
+            "renderer": "TableBlock",
+            "viewer": "TableBlock",
+            "caption": caption,
+            "context": request_text,
+            "content": caption,
+            "headers": data["headers"],
+            "rows": data["rows"],
+            "payload": payload,
+            "layout": payload["layout"],
+            "priority": 100,
+            "source_room": source_room,
+        }
+
+    lines = [line.strip() for line in re.split(r"[\n;]+", visible_text) if line.strip()]
+    rows = []
+    for line in lines:
+        parts = [part.strip() for part in re.split(r"\s{2,}|,\s*(?=\S)", line) if part.strip()]
+        if len(parts) > 1:
+            rows.append(parts)
+
+    if not rows and visible_text:
+        rows = [[part.strip() for part in re.split(r",\s*", visible_text) if part.strip()]] if "," in visible_text else [[visible_text]]
+
+    headers = []
+    if rows:
+        max_len = max(len(r) for r in rows)
+        headers = [f"C{i}" for i in range(1, max_len + 1)]
+
+    payload = {
+        "caption": caption,
+        "headers": headers,
+        "rows": rows,
+        "layout": {"mode": "grid", "density": "comfortable", "wrap": True},
+        "context": request_text,
+    }
+    return {
+        "type": "table",
+        "artifactType": "table",
+        "render_type": "table",
+        "signal": _executor_block_signal_for_kind("table"),
+        "renderer": "TableBlock",
+        "viewer": "TableBlock",
+        "caption": caption,
+        "context": request_text,
+        "content": visible_text or caption,
+        "headers": headers,
+        "rows": rows,
+        "payload": payload,
+        "layout": payload["layout"],
+        "priority": 100,
+        "source_room": source_room,
+    }
+
+
+def _executor_build_graph_block(machine_response: Any, *, source_room: str = "graph") -> dict:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    plot_data = _executor_parse_plot_arrays(f"{request_text}\n{visible_text}")
+    code_like = normalize_text(visible_text)
+    language = _executor_guess_language(code_like, request_text=request_text)
+
+    payload = {
+        "expression": visible_text or request_text,
+        "context": request_text,
+        "series": [],
+        "points": [],
+        "layout": {"mode": "line", "density": "comfortable"},
+    }
+
+    if plot_data:
+        payload["series"] = [{"name": "series_1", "points": plot_data["points"]}]
+        payload["points"] = plot_data["points"]
+        payload["x"] = plot_data["x"]
+        payload["y"] = plot_data["y"]
+    else:
+        payload["series"] = [{"name": "demo", "points": []}]
+        if code_like:
+            payload["code"] = code_like
+            payload["language"] = language
+
+    return {
+        "type": "graph",
+        "artifactType": "graph",
+        "render_type": "graph",
+        "signal": _executor_block_signal_for_kind("graph"),
+        "renderer": "GraphBlock",
+        "viewer": "GraphBlock",
+        "caption": request_text or "График",
+        "context": request_text,
+        "content": visible_text or request_text or "График",
+        "payload": payload,
+        "layout": payload["layout"],
+        "priority": 95,
+        "source_room": source_room,
+    }
+
+
+def _executor_build_gallery_block(machine_response: Any, *, source_room: str = "gallery") -> dict:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    payload = {
+        "items": [],
+        "context": request_text,
+        "layout": {"mode": "gallery", "density": "comfortable"},
+    }
+    return {
+        "type": "gallery",
+        "artifactType": "gallery",
+        "render_type": "gallery",
+        "signal": _executor_block_signal_for_kind("gallery"),
+        "renderer": "GalleryBlock",
+        "viewer": "GalleryBlock",
+        "caption": request_text or "Галерея",
+        "context": request_text,
+        "content": visible_text or request_text or "Галерея",
+        "payload": payload,
+        "layout": payload["layout"],
+        "priority": 85,
+        "source_room": source_room,
+    }
+
+
+def _executor_build_scene_render_blocks(machine_response: Any) -> list[dict]:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    kind = _executor_detect_scene_kind(machine_response)
+    blocks: list[dict] = []
+
+    if kind == "table":
+        blocks.append(_executor_build_table_block(machine_response))
+        if visible_text and normalize_text(visible_text).lower() != normalize_text(blocks[0].get("content", "")).lower():
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Пояснение к таблице"))
+        return blocks
+
+    if kind == "link":
+        url = _executor_extract_first_url(f"{request_text}\n{visible_text}")
+        if not url:
+            request_lower = request_text.lower()
+            if "facebook" in request_lower:
+                url = "https://www.facebook.com/"
+            elif "linkedin" in request_lower:
+                url = "https://www.linkedin.com/"
+            elif "telegram" in request_lower or "t.me" in request_lower:
+                url = "https://t.me/"
+            elif "youtube" in request_lower:
+                url = "https://www.youtube.com/"
+        if url:
+            blocks.append(_executor_build_link_block(url, title=url, label=url, caption=request_text or "Ссылка"))
+        if visible_text and visible_text != url:
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Описание ссылки"))
+        return blocks
+
+    if kind == "code":
+        language = _executor_guess_language(visible_text or request_text, request_text=request_text)
+        blocks.append(_executor_build_code_block(visible_text or request_text, language=language, caption=request_text or "Код"))
+        if visible_text and any(token in visible_text.lower() for token in ("plot(", "matplotlib", "graph", "chart", "figure")):
+            blocks.append(_executor_build_graph_block(machine_response, source_room="graph"))
+        elif visible_text:
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Пояснение к коду"))
+        return blocks
+
+    if kind == "graph":
+        blocks.append(_executor_build_graph_block(machine_response))
+        if visible_text and any(token in visible_text.lower() for token in ("import ", "plt.", "plot(", "matplotlib")):
+            blocks.append(_executor_build_code_block(visible_text, language=_executor_guess_language(visible_text, request_text=request_text), caption="Код графика"))
+        elif visible_text:
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Описание графика"))
+        return blocks
+
+    if kind == "formula":
+        blocks.append(_executor_build_formula_block(visible_text or request_text, caption=request_text or "Формула"))
+        if visible_text and normalize_text(visible_text) != normalize_text(request_text):
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Пояснение к формуле"))
+        return blocks
+
+    if kind == "gallery":
+        blocks.append(_executor_build_gallery_block(machine_response))
+        if visible_text and normalize_text(visible_text) != normalize_text(request_text):
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Описание изображения"))
+        return blocks
+
+    if visible_text:
+        blocks.append(_executor_build_text_block(visible_text, source_room="text", caption=request_text))
+    elif request_text:
+        blocks.append(_executor_build_text_block(request_text, source_room="text", caption="Запрос"))
+    return blocks
+
+
+def executor_cpu_attach_execution_context(machine_response: Any, *, text: str = "", semantic: Optional[dict] = None, cognition: Optional[dict] = None, response_decision: Optional[dict] = None, state: Optional[dict] = None, conversation_space: Optional[dict] = None, task_type: str = "") -> Any:
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+    state = state or {}
+    conversation_space = conversation_space or getattr(machine_response, "conversation_space", {}) or {}
+
+    try:
+        setattr(machine_response, "executor_input_text", text or _executor_best_text(getattr(machine_response, "executor_input_text", ""), conversation_space.get("last_user_turn", "")))
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+        setattr(machine_response, "executor_task_type", task_type or getattr(machine_response, "executor_task_type", ""))
+        setattr(machine_response, "executor_conversation_space", conversation_space)
+    except Exception:
+        pass
+
     return machine_response
 
+
+def executor_cpu_scene_planning(machine_response: Any) -> Any:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    kind = _executor_detect_scene_kind(machine_response)
+    blocks = _executor_build_scene_render_blocks(machine_response)
+
+    plan = {
+        "single_route": True,
+        "scene_kind": kind,
+        "request_text": request_text,
+        "visible_text": visible_text,
+        "preferred_representation": kind,
+        "signals": [_executor_block_signal_for_kind(kind)],
+        "renderer_targets": [block.get("renderer") for block in blocks if isinstance(block, dict)],
+        "requires_text_explanation": kind != "text",
+        "semantic": {
+            "intent": semantic.get("intent"),
+            "topic": semantic.get("topic"),
+            "preferred_representation": semantic.get("preferred_representation"),
+        },
+        "decision": {
+            "goal": response_decision.get("goal"),
+            "preferred_representation": response_decision.get("preferred_representation"),
+        },
+        "blocks": blocks,
+    }
+
+    try:
+        setattr(machine_response, "scene_plan", plan)
+        setattr(machine_response, "executor_scene_plan", plan)
+    except Exception:
+        pass
+
+    existing_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    existing_special = any(
+        isinstance(block, dict) and normalize_text(block.get("type")).lower() not in {"text", "markdown"}
+        for block in existing_blocks
+    )
+
+    if not existing_blocks or not existing_special:
+        machine_response.render_blocks = blocks
+    else:
+        merged = existing_blocks[:]
+        seen = {_executor_block_signature(block) for block in merged if isinstance(block, dict)}
+        for block in blocks:
+            sig = _executor_block_signature(block)
+            if sig not in seen:
+                merged.append(block)
+                seen.add(sig)
+        machine_response.render_blocks = merged
+
+    return machine_response
+
+
+
+
+# =====================================================
+# 🧩 SCENE PLANNING HELPERS
+# =====================================================
+
+def _executor_request_text_from_response(machine_response: Any) -> str:
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+    current_turn = conversation_space.get("current_turn", {}) if isinstance(conversation_space, dict) else {}
+    user_turn = current_turn.get("user", {}) if isinstance(current_turn, dict) else {}
+
+    second_circle_context = getattr(machine_response, "second_circle_context", {}) or {}
+    if not isinstance(second_circle_context, dict):
+        second_circle_context = {}
+
+    candidates = [
+        getattr(machine_response, "executor_input_text", ""),
+        getattr(machine_response, "input_text", ""),
+        getattr(machine_response, "canonical_prompt_text", ""),
+        getattr(machine_response, "provider_source_request", ""),
+        getattr(machine_response, "processor_input", ""),
+        getattr(machine_response, "goal", ""),
+        getattr(machine_response, "machine_input", ""),
+        getattr(machine_response, "text", ""),
+        getattr(machine_response, "query", ""),
+        user_turn.get("text", ""),
+        conversation_space.get("last_user_turn", ""),
+        second_circle_context.get("text", ""),
+        second_circle_context.get("reference_context", ""),
+    ]
+    return _executor_best_text(*candidates)
+
+
+def _executor_extract_first_url(text: Any) -> str:
+    if not isinstance(text, str):
+        text = str(text or "")
+    match = re.search(r'(https?://[^\s\]\)>"\']+|www\.[^\s\]\)>"\']+)', text, re.IGNORECASE)
+    return match.group(1).rstrip(".,;:!") if match else ""
+
+
+def _executor_guess_language(text: Any, request_text: str = "") -> str:
+    blob = f"{normalize_text(request_text)}\n{normalize_text(text)}".lower()
+    if any(token in blob for token in ("import ", "def ", "class ", "plt.", "python", "matplotlib", "pip ", "lambda ", "print(")):
+        return "python"
+    if any(token in blob for token in ("```js", "javascript", "typescript", "const ", "let ", "function ")):
+        return "javascript"
+    if any(token in blob for token in ("```html", "<div", "<span", "</body>", "</html>")):
+        return "html"
+    if any(token in blob for token in ("```css", "display:", "position:", "margin:", "padding:")):
+        return "css"
+    return "text"
+
+
+def _executor_parse_plot_arrays(text: Any) -> dict:
+    if not isinstance(text, str):
+        text = str(text or "")
+    compact = re.sub(r"\s+", "", text)
+    match = re.search(r'plot\(\[([^\]]+)\],\[([^\]]+)\]', compact, re.IGNORECASE)
+    if not match:
+        return {}
+
+    def _to_numbers(chunk: str):
+        values = []
+        for item in chunk.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                num = float(item)
+                if num.is_integer():
+                    num = int(num)
+                values.append(num)
+            except Exception:
+                return []
+        return values
+
+    xs = _to_numbers(match.group(1))
+    ys = _to_numbers(match.group(2))
+    if not xs or not ys or len(xs) != len(ys):
+        return {}
+
+    return {"x": xs, "y": ys, "points": [{"x": x, "y": y} for x, y in zip(xs, ys)]}
+
+
+def _executor_multiplication_table_rows(size: int = 10) -> dict:
+    size = max(1, min(int(size or 10), 12))
+    headers = ["×"] + [str(i) for i in range(1, size + 1)]
+    rows = []
+    for i in range(1, size + 1):
+        rows.append([str(i)] + [str(i * j) for j in range(1, size + 1)])
+    return {"headers": headers, "rows": rows, "size": size}
+
+
+def _executor_block_signal_for_kind(kind: str) -> str:
+    kind = normalize_text(kind).lower()
+    return {
+        "table": "render.table",
+        "graph": "render.graph",
+        "formula": "render.formula",
+        "link": "render.link",
+        "code": "render.code",
+        "gallery": "render.gallery",
+        "text": "render.text",
+    }.get(kind, "render.text")
+
+
+def _executor_build_text_block(content: str, *, source_room: str = "text", caption: str = "", signal: str = "render.text") -> dict:
+    content = normalize_text(content)
+    block = {
+        "type": "text",
+        "artifactType": "text",
+        "render_type": "text",
+        "signal": signal,
+        "renderer": "MarkdownBlock",
+        "viewer": "MessageTextBlock",
+        "content": content,
+        "payload": {"content": content},
+        "priority": 10,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_formula_block(content: str, *, source_room: str = "math", caption: str = "") -> dict:
+    content = normalize_text(content)
+    block = {
+        "type": "formula",
+        "artifactType": "formula",
+        "render_type": "formula",
+        "signal": _executor_block_signal_for_kind("formula"),
+        "renderer": "FormulaBlock",
+        "viewer": "FormulaBlock",
+        "content": content,
+        "payload": {"expression": content, "content": content},
+        "priority": 100,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_code_block(code_text: str, *, source_room: str = "code", language: str = "python", caption: str = "") -> dict:
+    code_text = normalize_text(code_text)
+    block = {
+        "type": "code",
+        "artifactType": "code",
+        "render_type": "code",
+        "signal": _executor_block_signal_for_kind("code"),
+        "renderer": "CodeBlock",
+        "viewer": "CodeBlock",
+        "content": code_text,
+        "payload": {"language": language, "code": code_text, "content": code_text},
+        "priority": 90,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_link_block(url: str, *, source_room: str = "link", title: str = "", label: str = "", caption: str = "") -> dict:
+    url = normalize_text(url)
+    title = normalize_text(title) or url
+    label = normalize_text(label) or title or url
+    block = {
+        "type": "link",
+        "artifactType": "link",
+        "render_type": "link",
+        "signal": _executor_block_signal_for_kind("link"),
+        "renderer": "LinkCard",
+        "viewer": "LinkCard",
+        "content": url,
+        "payload": {"url": url, "title": title, "label": label, "content": url},
+        "priority": 80,
+        "source_room": source_room,
+    }
+    if caption:
+        block["caption"] = caption
+        block["context"] = caption
+    return block
+
+
+def _executor_build_table_block(machine_response: Any, *, source_room: str = "table") -> dict:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""))
+    blob = f"{request_text}\n{visible_text}".lower()
+    caption = "Таблица"
+
+    if any(phrase in blob for phrase in ("таблица умножения", "multiplication table", "таблицу умножения", "умножения")):
+        data = _executor_multiplication_table_rows(10)
+        caption = "Таблица умножения 1–10"
+        payload = {"caption": caption, "headers": data["headers"], "rows": data["rows"], "layout": {"mode": "grid", "density": "comfortable", "wrap": True}, "context": request_text}
+        return {
+            "type": "table",
+            "artifactType": "table",
+            "render_type": "table",
+            "signal": _executor_block_signal_for_kind("table"),
+            "renderer": "TableBlock",
+            "viewer": "TableBlock",
+            "caption": caption,
+            "context": request_text,
+            "content": caption,
+            "headers": data["headers"],
+            "rows": data["rows"],
+            "payload": payload,
+            "layout": payload["layout"],
+            "priority": 100,
+            "source_room": source_room,
+        }
+
+    lines = [line.strip() for line in re.split(r"[\n;]+", visible_text) if line.strip()]
+    rows = []
+    for line in lines:
+        parts = [part.strip() for part in re.split(r"\s{2,}|,\s*(?=\S)", line) if part.strip()]
+        if len(parts) > 1:
+            rows.append(parts)
+
+    if not rows and visible_text:
+        rows = [[part.strip() for part in re.split(r",\s*", visible_text) if part.strip()]] if "," in visible_text else [[visible_text]]
+
+    headers = []
+    if rows:
+        max_len = max(len(r) for r in rows)
+        headers = [f"C{i}" for i in range(1, max_len + 1)]
+
+    payload = {"caption": caption, "headers": headers, "rows": rows, "layout": {"mode": "grid", "density": "comfortable", "wrap": True}, "context": request_text}
+    return {
+        "type": "table",
+        "artifactType": "table",
+        "render_type": "table",
+        "signal": _executor_block_signal_for_kind("table"),
+        "renderer": "TableBlock",
+        "viewer": "TableBlock",
+        "caption": caption,
+        "context": request_text,
+        "content": visible_text or caption,
+        "headers": headers,
+        "rows": rows,
+        "payload": payload,
+        "layout": payload["layout"],
+        "priority": 100,
+        "source_room": source_room,
+    }
+
+
+def _executor_build_graph_block(machine_response: Any, *, source_room: str = "graph") -> dict:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""))
+    plot_data = _executor_parse_plot_arrays(f"{request_text}\n{visible_text}")
+    code_like = normalize_text(visible_text)
+    language = _executor_guess_language(code_like, request_text=request_text)
+
+    payload = {"expression": visible_text or request_text, "context": request_text, "series": [], "points": [], "layout": {"mode": "line", "density": "comfortable"}}
+    if plot_data:
+        payload["series"] = [{"name": "series_1", "points": plot_data["points"]}]
+        payload["points"] = plot_data["points"]
+        payload["x"] = plot_data["x"]
+        payload["y"] = plot_data["y"]
+    else:
+        payload["series"] = [{"name": "demo", "points": []}]
+        if code_like:
+            payload["code"] = code_like
+            payload["language"] = language
+
+    return {
+        "type": "graph",
+        "artifactType": "graph",
+        "render_type": "graph",
+        "signal": _executor_block_signal_for_kind("graph"),
+        "renderer": "GraphBlock",
+        "viewer": "GraphBlock",
+        "caption": request_text or "График",
+        "context": request_text,
+        "content": visible_text or request_text or "График",
+        "payload": payload,
+        "layout": payload["layout"],
+        "priority": 95,
+        "source_room": source_room,
+    }
+
+
+def _executor_build_gallery_block(machine_response: Any, *, source_room: str = "gallery") -> dict:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""))
+    payload = {"items": [], "context": request_text, "layout": {"mode": "gallery", "density": "comfortable"}}
+    return {
+        "type": "gallery",
+        "artifactType": "gallery",
+        "render_type": "gallery",
+        "signal": _executor_block_signal_for_kind("gallery"),
+        "renderer": "GalleryBlock",
+        "viewer": "GalleryBlock",
+        "caption": request_text or "Галерея",
+        "context": request_text,
+        "content": visible_text or request_text or "Галерея",
+        "payload": payload,
+        "layout": payload["layout"],
+        "priority": 85,
+        "source_room": source_room,
+    }
+
+
+def _executor_detect_scene_kind(machine_response: Any) -> str:
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    state = getattr(machine_response, "executor_state", {}) or {}
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""))
+    blob = f"{request_text}\n{visible_text}".lower()
+
+    preferred = _executor_best_text(
+        response_decision.get("preferred_representation"),
+        semantic.get("preferred_representation"),
+        getattr(machine_response, "executor_presentation_plan", {}).get("representation") if isinstance(getattr(machine_response, "executor_presentation_plan", {}), dict) else "",
+    ).lower()
+
+    preferred_map = {"markdown": "text", "text": "text", "table": "table", "graph": "graph", "formula": "formula", "link": "link", "code": "code", "gallery": "gallery", "diagram": "graph", "visual": "gallery"}
+    if preferred in preferred_map:
+        return preferred_map[preferred]
+
+    if semantic.get("visual_generation_needed"):
+        return "gallery"
+    if semantic.get("math_intent") or semantic.get("formula_intent"):
+        return "formula"
+    if semantic.get("render_intent") and semantic.get("preferred_representation"):
+        return preferred_map.get(normalize_text(semantic.get("preferred_representation")).lower(), "text")
+
+    if any(url_kw in blob for url_kw in ("http://", "https://", "www.", "facebook", "linkedin", "telegram", "youtube", "instagram", "x.com", "t.me")):
+        return "link"
+    if any(code_kw in blob for code_kw in ("```", "import ", "def ", "class ", "plt.", "print(", "matplotlib", "python", "javascript", "typescript")):
+        return "code"
+    if any(table_kw in blob for table_kw in ("таблица умножения", "таблицу умножения", "multiplication table", "таблица менделеева", "table", "таблица", "rows", "columns")):
+        return "table"
+    if any(graph_kw in blob for graph_kw in ("график", "graph", "plot", "chart", "diagram", "функц", "trajectory")):
+        return "graph"
+    if any(formula_kw in blob for formula_kw in ("формул", "formula", "equation", "уравнен", "x^", "=", "√", "∑", "∫")):
+        return "formula"
+    if any(image_kw in blob for image_kw in ("картин", "изображ", "image", "photo", "pic", "screenshot", "gallery", "галере")):
+        return "gallery"
+    if state.get("active_visual_scene"):
+        return "gallery"
+    return "text"
+
+
+def _executor_build_scene_render_blocks(machine_response: Any) -> list[dict]:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""))
+    kind = _executor_detect_scene_kind(machine_response)
+    blocks: list[dict] = []
+
+    if kind == "table":
+        blocks.append(_executor_build_table_block(machine_response))
+        if visible_text and normalize_text(visible_text).lower() != normalize_text(blocks[0].get("content", "")).lower():
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Пояснение к таблице"))
+        return blocks
+
+    if kind == "link":
+        url = _executor_extract_first_url(f"{request_text}\n{visible_text}")
+        if not url:
+            request_lower = request_text.lower()
+            if "facebook" in request_lower:
+                url = "https://www.facebook.com/"
+            elif "linkedin" in request_lower:
+                url = "https://www.linkedin.com/"
+            elif "telegram" in request_lower or "t.me" in request_lower:
+                url = "https://t.me/"
+            elif "youtube" in request_lower:
+                url = "https://www.youtube.com/"
+        if url:
+            blocks.append(_executor_build_link_block(url, title=url, label=url, caption=request_text or "Ссылка"))
+        if visible_text and visible_text != url:
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Описание ссылки"))
+        return blocks
+
+    if kind == "code":
+        language = _executor_guess_language(visible_text or request_text, request_text=request_text)
+        blocks.append(_executor_build_code_block(visible_text or request_text, language=language, caption=request_text or "Код"))
+        if visible_text and any(token in visible_text.lower() for token in ("plot(", "matplotlib", "graph", "chart", "figure")):
+            blocks.append(_executor_build_graph_block(machine_response, source_room="graph"))
+        elif visible_text:
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Пояснение к коду"))
+        return blocks
+
+    if kind == "graph":
+        blocks.append(_executor_build_graph_block(machine_response))
+        if visible_text and any(token in visible_text.lower() for token in ("import ", "plt.", "plot(", "matplotlib")):
+            blocks.append(_executor_build_code_block(visible_text, language=_executor_guess_language(visible_text, request_text=request_text), caption="Код графика"))
+        elif visible_text:
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Описание графика"))
+        return blocks
+
+    if kind == "formula":
+        blocks.append(_executor_build_formula_block(visible_text or request_text, caption=request_text or "Формула"))
+        if visible_text and normalize_text(visible_text) != normalize_text(request_text):
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Пояснение к формуле"))
+        return blocks
+
+    if kind == "gallery":
+        blocks.append(_executor_build_gallery_block(machine_response))
+        if visible_text and normalize_text(visible_text) != normalize_text(request_text):
+            blocks.append(_executor_build_text_block(visible_text, source_room="text", caption="Описание изображения"))
+        return blocks
+
+    if visible_text:
+        blocks.append(_executor_build_text_block(visible_text, source_room="text", caption=request_text))
+    elif request_text:
+        blocks.append(_executor_build_text_block(request_text, source_room="text", caption="Запрос"))
+    return blocks
+
+
+def executor_cpu_attach_execution_context(machine_response: Any, *, text: str = "", semantic: Optional[dict] = None, cognition: Optional[dict] = None, response_decision: Optional[dict] = None, state: Optional[dict] = None, conversation_space: Optional[dict] = None, task_type: str = "") -> Any:
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+    state = state or {}
+    conversation_space = conversation_space or getattr(machine_response, "conversation_space", {}) or {}
+
+    try:
+        setattr(machine_response, "executor_input_text", text or _executor_best_text(getattr(machine_response, "executor_input_text", ""), conversation_space.get("last_user_turn", "")))
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+        setattr(machine_response, "executor_task_type", task_type or getattr(machine_response, "executor_task_type", ""))
+        setattr(machine_response, "executor_conversation_space", conversation_space)
+    except Exception:
+        pass
+    return machine_response
+
+
+def executor_cpu_scene_planning(machine_response: Any) -> Any:
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""))
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    kind = _executor_detect_scene_kind(machine_response)
+    blocks = _executor_build_scene_render_blocks(machine_response)
+
+    plan = {
+        "single_route": True,
+        "scene_kind": kind,
+        "request_text": request_text,
+        "visible_text": visible_text,
+        "preferred_representation": kind,
+        "signals": [_executor_block_signal_for_kind(kind)],
+        "renderer_targets": [block.get("renderer") for block in blocks if isinstance(block, dict)],
+        "requires_text_explanation": kind != "text",
+        "semantic": {"intent": semantic.get("intent"), "topic": semantic.get("topic"), "preferred_representation": semantic.get("preferred_representation")},
+        "decision": {"goal": response_decision.get("goal"), "preferred_representation": response_decision.get("preferred_representation")},
+        "blocks": blocks,
+    }
+
+    try:
+        setattr(machine_response, "scene_plan", plan)
+        setattr(machine_response, "executor_scene_plan", plan)
+    except Exception:
+        pass
+
+    existing_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    existing_special = any(isinstance(block, dict) and normalize_text(block.get("type")).lower() not in {"text", "markdown"} for block in existing_blocks)
+
+    if not existing_blocks or not existing_special:
+        machine_response.render_blocks = blocks
+    else:
+        merged = existing_blocks[:]
+        seen = {_executor_block_signature(block) for block in merged if isinstance(block, dict)}
+        for block in blocks:
+            sig = _executor_block_signature(block)
+            if sig not in seen:
+                merged.append(block)
+                seen.add(sig)
+        machine_response.render_blocks = merged
+
+    return machine_response
+
+
+def executor_cpu_build_presentation_plan(machine_response):
+    request_text = _executor_request_text_from_response(machine_response)
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    cognition = getattr(machine_response, "executor_cognition", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    kind = _executor_detect_scene_kind(machine_response)
+
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+    artifact_types = []
+    for artifact in artifacts:
+        artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None) or "text"
+        if artifact_type not in artifact_types:
+            artifact_types.append(artifact_type)
+
+    plan = {
+        "representation": kind,
+        "scene_kind": kind,
+        "single_route": True,
+        "request_text": request_text,
+        "visible_text": visible_text,
+        "blocks": [],
+        "artifact_types": artifact_types,
+        "provider_owned": True,
+        "signals": [_executor_block_signal_for_kind(kind)],
+        "renderer_targets": [],
+        "semantic": {
+            "intent": semantic.get("intent"),
+            "topic": semantic.get("topic"),
+            "preferred_representation": semantic.get("preferred_representation"),
+        },
+        "decision": {
+            "goal": response_decision.get("goal"),
+            "preferred_representation": response_decision.get("preferred_representation"),
+        },
+        "cognition": {
+            "dynamic_focus": cognition.get("dynamic_focus"),
+            "exploration_mode": cognition.get("exploration_mode"),
+        },
+    }
+
+    if kind == "text":
+        plan["renderer_targets"] = ["MarkdownBlock", "MessageTextBlock"]
+    elif kind == "table":
+        plan["renderer_targets"] = ["TableBlock", "MessageTextBlock"]
+    elif kind == "graph":
+        plan["renderer_targets"] = ["GraphBlock", "MessageTextBlock"]
+    elif kind == "formula":
+        plan["renderer_targets"] = ["FormulaBlock", "MessageTextBlock"]
+    elif kind == "link":
+        plan["renderer_targets"] = ["LinkCard", "MessageTextBlock"]
+    elif kind == "code":
+        plan["renderer_targets"] = ["CodeBlock", "MessageTextBlock"]
+    elif kind == "gallery":
+        plan["renderer_targets"] = ["GalleryBlock", "MessageTextBlock"]
+    else:
+        plan["renderer_targets"] = ["MarkdownBlock", "MessageTextBlock"]
+
+    blocks = _executor_build_scene_render_blocks(machine_response)
+    plan["blocks"] = blocks
+
+    machine_response.executor_presentation_plan = plan
+    machine_response.scene_plan = plan
+    machine_response.executor_presentation_representation = kind
+    return machine_response
+
+
+def executor_cpu_integrate_presentation(machine_response):
+    decision = getattr(machine_response, "executor_decision", {}) or {}
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    preferred = decision.get("preferred_representation") or plan.get("representation") or plan.get("scene_kind") or "text"
+    plan["representation"] = preferred
+    plan["scene_kind"] = preferred
+    plan["executor_integrated"] = True
+    plan["internal_only"] = True
+    plan["human_visible"] = False
+    machine_response.executor_presentation_plan = plan
+    machine_response.scene_plan = plan
+    machine_response.executor_presentation_integrated = True
+    return machine_response
 
 def executor_cpu_integrate_presentation(machine_response):
     decision = getattr(machine_response, "executor_decision", {}) or {}
@@ -1410,18 +2508,60 @@ def executor_cpu_user_alignment(machine_response):
     return machine_response
 
 
+
+def executor_cpu_transport_verification(machine_response):
+    """
+    Second-circle ingress gate:
+    keep the incoming canonical object intact and ensure the route is usable
+    before presentation planning starts.
+    """
+    if machine_response is None:
+        raise RuntimeError("Canonical MachineResponse is missing")
+
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    try:
+        if getattr(machine_response, "render_blocks", None) is None:
+            setattr(machine_response, "render_blocks", [])
+        if getattr(machine_response, "artifacts", None) is None:
+            setattr(machine_response, "artifacts", [])
+        if getattr(machine_response, "contributions", None) is None:
+            setattr(machine_response, "contributions", {})
+        setattr(machine_response, "executor_transport_verified", True)
+    except Exception:
+        pass
+
+    return machine_response
+
+
+def executor_cpu_second_circle(machine_response, *, semantic=None, response_decision=None):
+    """
+    Canonical second working circle:
+    - detect scene kind,
+    - build scene plan,
+    - materialize render blocks,
+    - keep the canonical answer unchanged.
+    """
+    machine_response = executor_cpu_scene_planning(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(
+        machine_response,
+        semantic=semantic,
+        response_decision=response_decision,
+    )
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+    return machine_response
+
+
 def executor_cpu_pipeline(machine_response):
     machine_response = executor_cpu_transport_verification(machine_response)
     machine_response = executor_cpu_memory_fusion(machine_response)
     machine_response = executor_cpu_scene_intelligence(machine_response)
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
-    machine_response = executor_cpu_materialize_blocks(machine_response)
-    machine_response = _canonicalize_formula_blocks(machine_response)
-    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
-    machine_response = executor_cpu_normalize_answer(machine_response)
+    machine_response = executor_cpu_second_circle(machine_response)
     return machine_response
-
 
 def executor_cpu_finalize(machine_response):
     machine_response = executor_cpu_pipeline(machine_response)
@@ -1437,7 +2577,23 @@ def executor_cpu_finalize(machine_response):
     return machine_response
 
 
+
+
 def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machine_response):
+    machine_response = executor_cpu_attach_execution_context(
+        machine_response,
+        text=_executor_best_text(
+            getattr(machine_response, "executor_input_text", ""),
+            getattr(machine_response, "provider_source_request", ""),
+            getattr(machine_response, "processor_input", ""),
+        ),
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        conversation_space=getattr(machine_response, "conversation_space", {}) or {},
+        task_type=getattr(machine_response, "executor_task_type", ""),
+    )
     machine_response = executor_cpu_build_cognitive_context(
         semantic=semantic,
         cognition=cognition,
@@ -1458,28 +2614,116 @@ def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machi
     machine_response = executor_cpu_scene_intelligence(machine_response)
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
-    machine_response = executor_cpu_materialize_blocks(machine_response)
-    machine_response = _canonicalize_formula_blocks(machine_response, semantic=semantic, response_decision=response_decision)
-    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
-    machine_response = executor_cpu_normalize_answer(machine_response)
+    machine_response = executor_cpu_second_circle(
+        machine_response,
+        semantic=semantic,
+        response_decision=response_decision,
+    )
     return machine_response
-
 
 def executor_cpu_materialize_blocks(machine_response):
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    existing_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    kind = normalize_text(plan.get("scene_kind") or plan.get("representation") or "").lower()
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    if not kind or kind == "text":
+        kind = _executor_detect_scene_kind(machine_response)
+
+    synthesized = _executor_build_scene_render_blocks(machine_response)
+
+    existing_special = any(
+        isinstance(block, dict) and normalize_text(block.get("type")).lower() not in {"text", "markdown"}
+        for block in existing_blocks
+    )
+
+    if not existing_blocks:
+        render_blocks = synthesized
+    elif existing_special:
+        render_blocks = existing_blocks
+        seen = {_executor_block_signature(block) for block in render_blocks if isinstance(block, dict)}
+        for block in synthesized:
+            sig = _executor_block_signature(block)
+            if sig not in seen:
+                render_blocks.append(block)
+                seen.add(sig)
+    else:
+        render_blocks = synthesized or existing_blocks
+
+    if not render_blocks and visible_text:
+        render_blocks = [_executor_build_text_block(visible_text, source_room="text", caption="Ответ")]
+
     machine_response.render_blocks = render_blocks
+    machine_response.scene_plan = getattr(machine_response, "scene_plan", {}) or {
+        "single_route": True,
+        "scene_kind": kind,
+        "request_text": _executor_request_text_from_response(machine_response),
+        "visible_text": visible_text,
+        "signals": [_executor_block_signal_for_kind(kind or "text")],
+        "renderer_targets": [],
+        "blocks": render_blocks,
+    }
+    return machine_response
+
+def executor_cpu_materialize_blocks(machine_response):
+    existing_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    plan = getattr(machine_response, "executor_presentation_plan", {}) or {}
+    kind = normalize_text(plan.get("scene_kind") or plan.get("representation") or "").lower()
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    if not kind or kind == "text":
+        kind = _executor_detect_scene_kind(machine_response)
+
+    synthesized = _executor_build_scene_render_blocks(machine_response)
+
+    existing_special = any(
+        isinstance(block, dict) and normalize_text(block.get("type")).lower() not in {"text", "markdown"}
+        for block in existing_blocks
+    )
+
+    if not existing_blocks:
+        render_blocks = synthesized
+    elif existing_special:
+        render_blocks = existing_blocks
+        seen = {_executor_block_signature(block) for block in render_blocks if isinstance(block, dict)}
+        for block in synthesized:
+            sig = _executor_block_signature(block)
+            if sig not in seen:
+                render_blocks.append(block)
+                seen.add(sig)
+    else:
+        render_blocks = synthesized or existing_blocks
+
+    if not render_blocks and visible_text:
+        render_blocks = [_executor_build_text_block(visible_text, source_room="text", caption="Ответ")]
+
+    machine_response.render_blocks = render_blocks
+    machine_response.scene_plan = getattr(machine_response, "scene_plan", {}) or {
+        "single_route": True,
+        "scene_kind": kind,
+        "request_text": _executor_request_text_from_response(machine_response),
+        "visible_text": visible_text,
+        "signals": [_executor_block_signal_for_kind(kind or "text")],
+        "renderer_targets": [],
+        "blocks": render_blocks,
+    }
     return machine_response
 
 
-# =====================================================
-# SCENE PIPELINE
-# =====================================================
 
 def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
     if scene_contract is None:
         return scene_contract
 
-    for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata"):
+    for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata", "scene_plan", "executor_presentation_plan"):
         value = getattr(machine_response, field, None)
 
         if field == "metadata":
@@ -1595,6 +2839,8 @@ def executor_cpu_scene_pipeline(machine_response):
             "last_april_turn": conversation_space.get("last_april_turn"),
             "machine_scene": scene,
             "render_blocks": blocks,
+            "scene_plan": getattr(machine_response, "scene_plan", None),
+            "executor_presentation_plan": getattr(machine_response, "executor_presentation_plan", None),
             "answer": getattr(machine_response, "answer", None),
             "content": getattr(machine_response, "content", None),
             "summary": getattr(machine_response, "summary", None),
@@ -1604,6 +2850,8 @@ def executor_cpu_scene_pipeline(machine_response):
             "focus": conversation_space.get("focus", {}),
         },
     }
+
+
 
 
 def executor_cpu_finalize_transport(machine_response):
@@ -1630,12 +2878,14 @@ def executor_cpu_finalize_transport(machine_response):
     )
 
     source_blocks = list(getattr(machine_response, "render_blocks", []) or []) or list(scene.get("render_blocks", []) or [])
+    if not source_blocks:
+        source_blocks = _executor_build_scene_render_blocks(machine_response)
     if not source_blocks and visible_text:
         source_blocks = [{
             "type": "text",
             "content": visible_text,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
+            "renderer": "MarkdownBlock",
+            "viewer": "MessageTextBlock",
             "priority": 0,
             "source_room": "text",
         }]
@@ -1685,6 +2935,8 @@ def executor_cpu_finalize_transport(machine_response):
         "machine_response": machine_response,
         "machine_scene": scene.get("machine_scene"),
         "scene_contract": scene_contract,
+        "scene_plan": getattr(machine_response, "scene_plan", None),
+        "executor_presentation_plan": getattr(machine_response, "executor_presentation_plan", None),
         "current_turn": conversation_space.get("current_turn") if conversation_space else None,
         "answer": visible_text,
         "content": visible_text,
@@ -1702,11 +2954,6 @@ def executor_cpu_finalize_transport(machine_response):
 
     executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene_contract)
     return result
-
-
-# =====================================================
-# ROOM SELECTION / MERGE
-# =====================================================
 
 def _executor_merge_room_results_into_canonical_response(
     base_response: MachineResponse,
@@ -1843,6 +3090,7 @@ def executor_cpu_register_room(report, room_name, **kwargs):
     return report
 
 
+
 async def execute_rooms(user_id, text, context, semantic, cognition, response_decision, state, run_with_activity):
     machine_request = context.get("machine_request")
     if machine_request is None:
@@ -1908,6 +3156,18 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
         text=text,
     )
 
+    conversation_space = context.get("conversation_space") or {}
+    machine_response = executor_cpu_attach_execution_context(
+        machine_response,
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        conversation_space=conversation_space,
+        task_type=context.get("task_type", ""),
+    )
+
     canonical_answer = _executor_best_text(
         getattr(machine_response, "answer", ""),
         getattr(machine_response, "content", ""),
@@ -1924,7 +3184,6 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
         getattr(machine_response, "answer", ""),
     )
 
-    conversation_space = context.get("conversation_space") or {}
     current_turn = conversation_space.get("current_turn", {})
     april_turn = {
         "answer": getattr(machine_response, "answer", None),
@@ -1989,24 +3248,12 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
         machine_response.summary = canonical_summary
 
     if not list(getattr(machine_response, "render_blocks", []) or []) and getattr(machine_response, "answer", ""):
-        machine_response.render_blocks = [{
-            "type": "text",
-            "content": machine_response.answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "priority": 0,
-            "source_room": canonical_room_name,
-        }]
+        machine_response.render_blocks = [_executor_build_text_block(machine_response.answer, source_room=canonical_room_name, caption="Ответ")]
 
     executor_cpu_transport_diag("AFTER_REFLECT", machine_response)
     setattr(machine_response, "provider_transport_verified", True)
     setattr(machine_response, "provider_contract_version", "fiber_v3_super")
     return executor_cpu_finalize_transport(machine_response)
-
-
-# =====================================================
-# HIGH-LEVEL EXECUTION
-# =====================================================
 
 def validate_machine_response(result):
     if not result:
