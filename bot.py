@@ -91,6 +91,7 @@ machine structure integrity.
 # =========================================================
 
 import asyncio
+import ast
 import json
 import os
 import re
@@ -209,12 +210,26 @@ def safe_truncate(
     return text[:limit] + "..."
 
 
+
 def scene_contract_to_dict(scene_contract):
     if scene_contract is None:
         return None
 
     if isinstance(scene_contract, dict):
         return scene_contract
+
+    if isinstance(scene_contract, str):
+        text = scene_contract.strip()
+        if text:
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    parsed = parser(text)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+                if isinstance(parsed, list):
+                    return {"items": parsed}
 
     if is_dataclass(scene_contract):
         try:
@@ -237,6 +252,78 @@ def _value_is_present(value):
     if isinstance(value, str):
         return bool(value.strip())
     return value not in ([], {}, ())
+
+
+RICH_TRANSPORT_KEYS = (
+    "scene_contract",
+    "gateway_transport",
+    "render_blocks",
+    "blocks",
+    "renderer_state",
+    "machine_scene",
+    "scene_plan",
+    "graph",
+    "formula",
+    "table",
+    "gallery",
+    "layout",
+    "visual",
+    "scene",
+    "links",
+    "signals",
+    "payload",
+    "artifact",
+)
+
+HUMAN_HINT_KEYS = (
+    "answer",
+    "content",
+    "summary",
+    "final_text",
+    "text",
+    "response",
+    "message",
+    "error",
+    "detail",
+    "reason",
+)
+
+
+def is_rich_transport_payload(payload):
+    if not isinstance(payload, dict):
+        return False
+    return any(_value_is_present(payload.get(key)) for key in RICH_TRANSPORT_KEYS)
+
+
+def compact_mapping_hint(mapping):
+    if not isinstance(mapping, dict):
+        return ""
+
+    for key in HUMAN_HINT_KEYS:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None and not isinstance(value, (dict, list, tuple, set)):
+            text = safe_string(value).strip()
+            if text and text not in ("{}", "[]"):
+                return text
+
+    fragments = []
+    for key, value in mapping.items():
+        if key in RICH_TRANSPORT_KEYS:
+            continue
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
+        if value is None:
+            continue
+        text = safe_string(value).strip()
+        if not text:
+            continue
+        fragments.append(f"{key}={text}")
+        if len(fragments) >= 3:
+            break
+
+    return "; ".join(fragments)
 
 
 def _best_text(*candidates):
@@ -276,6 +363,13 @@ def _best_text(*candidates):
 
 
 def resolve_canonical_scene_contract(payload):
+    if isinstance(payload, str):
+        parsed = scene_contract_to_dict(payload)
+        if isinstance(parsed, dict):
+            payload = parsed
+        else:
+            return {}
+
     if not isinstance(payload, dict):
         return {}
 
@@ -289,9 +383,15 @@ def resolve_canonical_scene_contract(payload):
         "payload",
     ):
         candidate = payload.get(key)
+        if isinstance(candidate, str):
+            candidate = scene_contract_to_dict(candidate)
+
         if isinstance(candidate, dict):
             sc = scene_contract_to_dict(candidate)
             if sc:
+                nested = resolve_canonical_scene_contract(sc)
+                if nested:
+                    return nested
                 return sc
 
             if key in ("response", "machine_response", "payload"):
@@ -318,8 +418,6 @@ def resolve_canonical_scene_contract(payload):
     if any(v not in (None, "", [], {}) for v in direct.values()):
         return direct
     return {}
-
-
 # =========================================================
 # 🔥 MACHINE CLEANER
 # =========================================================
@@ -378,6 +476,7 @@ def remove_machine_garbage(
 # 🔥 HUMAN TRANSLATOR
 # =========================================================
 
+
 def machine_to_human(
     payload,
     result_type="text"
@@ -387,22 +486,33 @@ def machine_to_human(
     # then any remaining compatibility payload.
     if isinstance(payload, dict):
         canonical = resolve_canonical_scene_contract(payload)
-        if canonical:
-            payload = canonical
+        source_mapping = canonical if isinstance(canonical, dict) and canonical else payload
+
+        if result_type in RENDERER_TYPES:
+            return payload
+
+        candidate_text = _best_text(
+            source_mapping.get("answer"),
+            source_mapping.get("content"),
+            source_mapping.get("summary"),
+            source_mapping.get("final_text"),
+            source_mapping.get("text"),
+            source_mapping.get("response"),
+            source_mapping.get("message"),
+            source_mapping.get("error"),
+            source_mapping.get("detail"),
+            source_mapping.get("reason"),
+        )
+
+        if candidate_text:
+            payload = candidate_text
         else:
-            for key in (
-                "answer",
-                "response",
-                "content",
-                "final_text",
-                "summary",
-            ):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    payload = value
-                    break
-            else:
-                payload = json.dumps(payload, ensure_ascii=False)
+            if is_rich_transport_payload(source_mapping):
+                return ""
+            payload = compact_mapping_hint(source_mapping)
+
+        if not payload:
+            return ""
 
     elif payload is None:
         payload = ""
@@ -431,8 +541,6 @@ def machine_to_human(
         payload,
         8000
     )
-
-
 # =========================================================
 # 🔥 ARTIFACT → HUMAN
 # =========================================================
@@ -907,6 +1015,7 @@ def normalize_blocks(
 # 🔥 MULTIMODAL ORGANIZER
 # =========================================================
 
+
 def organize_multimodal_response(
     result
 ):
@@ -920,19 +1029,23 @@ def organize_multimodal_response(
 
     result_type = result.get("type", "text")
     scene_contract = resolve_canonical_scene_contract(result)
-    final_text = machine_to_human(
-        scene_contract or result.get("final_text", ""),
-        result_type
-    )
+
     canonical_text = _best_text(
         scene_contract.get("content"),
         scene_contract.get("answer"),
         scene_contract.get("summary"),
+        scene_contract.get("final_text"),
         result.get("content"),
         result.get("answer"),
         result.get("summary"),
-        final_text,
+        result.get("final_text"),
+        result.get("response"),
     )
+
+    final_text = machine_to_human(
+        canonical_text,
+        result_type
+    ) if canonical_text else ""
 
     organized = {
         "type": result_type,
@@ -943,7 +1056,7 @@ def organize_multimodal_response(
             scene_contract.get("render_blocks", [])
             or result.get("blocks", [])
         ),
-        "final_text": canonical_text,
+        "final_text": final_text or canonical_text,
         "graph": scene_contract.get("graph") or result.get("graph"),
         "formula": scene_contract.get("formula") or result.get("formula"),
         "scene": scene_contract.get("scene") or result.get("scene"),
@@ -962,8 +1075,6 @@ def organize_multimodal_response(
     }
 
     return organized
-
-
 # =========================================================
 # 🔥 APRIL REQUEST
 # =========================================================
@@ -1082,6 +1193,7 @@ if __name__ == "__main__":
     )
 
 
+
 # =====================================================
 # FIBER ROUTE STAGE 2
 # Canonical transport passthrough helper.
@@ -1092,6 +1204,9 @@ def preserve_executor_scene_contract(payload: dict) -> dict:
         return payload
 
     scene = payload.get("scene_contract")
+    if isinstance(scene, str):
+        scene = scene_contract_to_dict(scene)
+
     if not isinstance(scene, dict):
         return payload
 
@@ -1141,6 +1256,10 @@ Enable the legacy path only if rollback is required.
 # organized = organize_multimodal_response(normalized)
 # response = machine_to_human(organized)
 '''
+
+# ACTIVE CANONICAL PATH DISABLED AT IMPORT TIME.
+# The endpoint above is the single canonical route.
+# If a rollback is needed, the legacy path can be re-enabled in a guarded block.
 
 # ACTIVE CANONICAL PATH DISABLED AT IMPORT TIME.
 # The endpoint above is the single canonical route.
