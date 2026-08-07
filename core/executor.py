@@ -2509,58 +2509,17 @@ def executor_cpu_user_alignment(machine_response):
 
 
 
-def executor_cpu_transport_verification(machine_response):
-    """
-    Second-circle ingress gate:
-    keep the incoming canonical object intact and ensure the route is usable
-    before presentation planning starts.
-    """
-    if machine_response is None:
-        raise RuntimeError("Canonical MachineResponse is missing")
-
-    machine_response = executor_cpu_normalize_answer(machine_response)
-
-    try:
-        if getattr(machine_response, "render_blocks", None) is None:
-            setattr(machine_response, "render_blocks", [])
-        if getattr(machine_response, "artifacts", None) is None:
-            setattr(machine_response, "artifacts", [])
-        if getattr(machine_response, "contributions", None) is None:
-            setattr(machine_response, "contributions", {})
-        setattr(machine_response, "executor_transport_verified", True)
-    except Exception:
-        pass
-
-    return machine_response
-
-
-def executor_cpu_second_circle(machine_response, *, semantic=None, response_decision=None):
-    """
-    Canonical second working circle:
-    - detect scene kind,
-    - build scene plan,
-    - materialize render blocks,
-    - keep the canonical answer unchanged.
-    """
-    machine_response = executor_cpu_scene_planning(machine_response)
-    machine_response = executor_cpu_materialize_blocks(machine_response)
-    machine_response = _canonicalize_formula_blocks(
-        machine_response,
-        semantic=semantic,
-        response_decision=response_decision,
-    )
-    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
-    machine_response = executor_cpu_normalize_answer(machine_response)
-    return machine_response
-
-
 def executor_cpu_pipeline(machine_response):
     machine_response = executor_cpu_transport_verification(machine_response)
     machine_response = executor_cpu_memory_fusion(machine_response)
     machine_response = executor_cpu_scene_intelligence(machine_response)
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
-    machine_response = executor_cpu_second_circle(machine_response)
+    machine_response = executor_cpu_scene_planning(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
     return machine_response
 
 def executor_cpu_finalize(machine_response):
@@ -2582,11 +2541,7 @@ def executor_cpu_finalize(machine_response):
 def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machine_response):
     machine_response = executor_cpu_attach_execution_context(
         machine_response,
-        text=_executor_best_text(
-            getattr(machine_response, "executor_input_text", ""),
-            getattr(machine_response, "provider_source_request", ""),
-            getattr(machine_response, "processor_input", ""),
-        ),
+        text=_executor_best_text(getattr(machine_response, "executor_input_text", ""), getattr(machine_response, "provider_source_request", ""), getattr(machine_response, "processor_input", "")),
         semantic=semantic,
         cognition=cognition,
         response_decision=response_decision,
@@ -2610,15 +2565,15 @@ def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machi
     )
     machine_response = executor_cpu_build_presentation_plan(machine_response)
     machine_response = executor_cpu_integrate_presentation(machine_response)
+    machine_response = executor_cpu_scene_planning(machine_response)
     machine_response = executor_cpu_memory_fusion(machine_response)
     machine_response = executor_cpu_scene_intelligence(machine_response)
     machine_response = executor_cpu_user_alignment(machine_response)
     machine_response = executor_cpu_synthetic_verification(machine_response)
-    machine_response = executor_cpu_second_circle(
-        machine_response,
-        semantic=semantic,
-        response_decision=response_decision,
-    )
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(machine_response, semantic=semantic, response_decision=response_decision)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
     return machine_response
 
 def executor_cpu_materialize_blocks(machine_response):
@@ -2723,7 +2678,7 @@ def executor_cpu_sync_scene_contract(scene_contract, machine_response, scene):
     if scene_contract is None:
         return scene_contract
 
-    for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata", "scene_plan", "executor_presentation_plan"):
+    for field in ("answer", "content", "summary", "render_blocks", "artifacts", "metadata"):
         value = getattr(machine_response, field, None)
 
         if field == "metadata":
@@ -2839,8 +2794,6 @@ def executor_cpu_scene_pipeline(machine_response):
             "last_april_turn": conversation_space.get("last_april_turn"),
             "machine_scene": scene,
             "render_blocks": blocks,
-            "scene_plan": getattr(machine_response, "scene_plan", None),
-            "executor_presentation_plan": getattr(machine_response, "executor_presentation_plan", None),
             "answer": getattr(machine_response, "answer", None),
             "content": getattr(machine_response, "content", None),
             "summary": getattr(machine_response, "summary", None),
@@ -2935,8 +2888,6 @@ def executor_cpu_finalize_transport(machine_response):
         "machine_response": machine_response,
         "machine_scene": scene.get("machine_scene"),
         "scene_contract": scene_contract,
-        "scene_plan": getattr(machine_response, "scene_plan", None),
-        "executor_presentation_plan": getattr(machine_response, "executor_presentation_plan", None),
         "current_turn": conversation_space.get("current_turn") if conversation_space else None,
         "answer": visible_text,
         "content": visible_text,
