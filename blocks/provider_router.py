@@ -291,6 +291,22 @@ def build_provider_reference_context(machine_request: Dict[str, Any]) -> Dict[st
         or ""
     )
 
+    # Generic topics should not inflate the budget selector.
+    if isinstance(active_topic, str):
+        normalized_active_topic = active_topic.strip().lower()
+        if normalized_active_topic in {
+            "",
+            "dialogue",
+            "conversation",
+            "chat",
+            "text",
+            "message",
+            "prompt",
+            "general",
+            "default",
+        }:
+            active_topic = ""
+
     focus = (
         conversation.get("focus")
         or conversation.get("dialog_focus")
@@ -1288,40 +1304,65 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> Dict[
     return parsed
 
 
-async def generate_text(
-    messages: Any,
-    temperature: float = 0.7,
-    max_output_tokens: Optional[int] = None,
-    model: str = OPENAI_PRIMARY_MODEL,
-):
-    provider_enter("openai_text", messages)
-    try:
-        update_provider_behavior()
-        source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
-        if max_output_tokens is None:
-            model = OPENAI_FAST_MODEL if len(str(source_request.get("goal") or "")) <= 48 else OPENAI_BALANCED_MODEL
-            max_output_tokens = 256 if model == OPENAI_FAST_MODEL else 384
-        normalized_input = normalize_provider_input(source_request)
-        response = openai_client.responses.create(
-            model=model,
-            input=normalized_input,
-            max_output_tokens=max_output_tokens,
-        )
-        raw_text = response.output_text or ""
-        provider_log(f"OPENAI OUTPUT LENGTH: {len(raw_text)}")
-        if not raw_text:
-            provider_exit("openai_text", False)
-            raise RuntimeError("Provider returned empty response")
-        provider_exit("openai_text", True)
-        contract = create_provider_contract(raw_text, source_request=source_request)
-        provider_stage_log("EXECUTOR_HANDOFF", contract)
-        return contract
-    except Exception as e:
-        provider_log("OPENAI TEXT ERROR:", e)
-        provider_exit("openai_text", False)
-        raise
-
-
+# ================================================================
+# TEMPORARILY DISABLED: duplicate second generate_text implementation.
+# The first implementation remains active for controlled cost-route testing.
+# Restore by uncommenting this exact block after comparison.
+# ================================================================
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST] async def generate_text(
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     messages: Any,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     temperature: float = 0.7,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     max_output_tokens: Optional[int] = None,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     model: str = OPENAI_PRIMARY_MODEL,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST] ):
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     provider_enter("openai_text", messages)
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     try:
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         update_provider_behavior()
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         source_request = machine_request_to_dict(messages) if not isinstance(messages, dict) else dict(messages)
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         selected_model = model
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         effective_max_output_tokens = max_output_tokens
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         if effective_max_output_tokens is None:
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             selected_model, effective_max_output_tokens = _provider_select_first_circle_budget(
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]                 source_request,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]                 model,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             )
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         normalized_input = normalize_provider_input(source_request)
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         provider_log(
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             {
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]                 "requested_model": model,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]                 "selected_model": selected_model,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]                 "max_output_tokens": effective_max_output_tokens,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             }
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         )
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         response = openai_client.responses.create(
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             model=selected_model,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             input=normalized_input,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             max_output_tokens=effective_max_output_tokens,
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         )
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         raw_text = response.output_text or ""
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         provider_log(f"OPENAI OUTPUT LENGTH: {len(raw_text)}")
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         if not raw_text:
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             provider_exit("openai_text", False)
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]             raise RuntimeError("Provider returned empty response")
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         provider_exit("openai_text", True)
+#
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         contract = create_provider_contract(raw_text, source_request=source_request)
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         provider_stage_log("EXECUTOR_HANDOFF", contract)
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         return contract
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]     except Exception as e:
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         provider_log("OPENAI TEXT ERROR:", e)
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         provider_exit("openai_text", False)
+# [DISABLED_FOR_FIRST_GENERATE_TEXT_TEST]         raise
+#
+#
 async def transcribe_voice(file_path: str) -> str:
     provider_enter("voice_transcription", file_path)
     try:
