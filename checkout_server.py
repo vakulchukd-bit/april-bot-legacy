@@ -790,6 +790,58 @@ def build_gateway_transport_payload(normalized):
         "summary": canonical_summary,
     }
 
+
+
+def build_web_api_payload(result, *, include_legacy_fields=False):
+    """Build the public Flask JSON payload without duplicating canonical text
+    across multiple top-level aliases.
+
+    The canonical transport remains inside gateway_transport.
+    Legacy aliases are disabled by default because they can cause the frontend
+    to reconstruct the same assistant text more than once.
+    """
+    gateway_transport = result.get("gateway_transport")
+    if not isinstance(gateway_transport, dict):
+        gateway_transport = build_gateway_transport_payload(result)
+    payload = {
+        "success": True,
+        "gateway_transport": gateway_transport,
+        "renderer_mode": WEB_RENDERER_MODE,
+        "scene_mode": WEB_SCENE_MODE,
+        "visual_summary": safe_json(
+            result.get("visual_summary")
+            or {
+                "user_id": result.get("user_id"),
+                "package": result.get("package"),
+                "session_started_utc": result.get("session_started_utc"),
+                "scene_events_count": result.get("scene_events_count"),
+                "last_event": result.get("last_event"),
+            }
+        ),
+        "active_visual_scene": safe_json(
+            gateway_transport.get("scene_contract", {}).get("active_scene")
+        ),
+    }
+
+    if include_legacy_fields:
+        # Kept only for compatibility experiments.
+        payload.update(
+            {
+                "scene_contract": safe_json(
+                    gateway_transport.get("scene_contract", {})
+                ),
+                "render_blocks": safe_json(
+                    gateway_transport.get("render_blocks", [])
+                ),
+                "content": gateway_transport.get("content", ""),
+                "answer": gateway_transport.get("answer", ""),
+                "summary": gateway_transport.get("summary", ""),
+                "response": gateway_transport.get("content", ""),
+            }
+        )
+
+    return payload
+
 # =========================================================
 # 🎨 SUCCESS HTML
 # =========================================================
@@ -1061,47 +1113,30 @@ def voice_chat():
             )
         )
 
-        gateway_transport = build_gateway_transport_payload(result)
+        gateway_transport = result.get("gateway_transport")
+        if not isinstance(gateway_transport, dict):
+            gateway_transport = build_gateway_transport_payload(result)
 
         return jsonify({
 
             "success": True,
 
-            "transcript":
-                transcript,
+            "transcript": transcript,
 
-            "gateway_transport":
-                safe_json(gateway_transport),
+            "gateway_transport": gateway_transport,
 
-            "scene_contract":
-                safe_json(gateway_transport.get("scene_contract", {})),
+            "renderer_mode": WEB_RENDERER_MODE,
 
-            "render_blocks":
-                safe_json(gateway_transport.get("render_blocks", [])),
+            "scene_mode": WEB_SCENE_MODE,
 
-            "content":
-                gateway_transport.get("content", ""),
+            "visual_summary": safe_json({
+                "voice": True,
+                "transcript": transcript
+            }),
 
-            "answer":
-                gateway_transport.get("answer", ""),
-
-            "summary":
-                gateway_transport.get("summary", ""),
-
-            "response":
-                gateway_transport.get("content", ""),
-
-            "renderer_mode":
-                WEB_RENDERER_MODE,
-
-            "scene_mode":
-                WEB_SCENE_MODE,
-
-            "visual_summary":
-                safe_json({
-                    "voice": True,
-                    "transcript": transcript
-                })
+            "active_visual_scene": safe_json(
+                gateway_transport.get("scene_contract", {}).get("active_scene")
+            )
 
         })
 
@@ -1249,26 +1284,27 @@ VISUAL_ANALYSIS:
             )
         )
 
+        gateway_transport = build_gateway_transport_payload(april_result)
+
         return jsonify({
 
             "success": True,
 
-            "space_response":
-                safe_json(april_result),
+            "space_response": safe_json(april_result),
 
-            "analysis":
-                analysis_payload,
+            "analysis": analysis_payload,
 
-            "renderer_mode":
-                WEB_RENDERER_MODE,
+            "gateway_transport": gateway_transport,
 
-            "scene_mode":
-                WEB_SCENE_MODE,
+            "renderer_mode": WEB_RENDERER_MODE,
 
-            "visual_summary":
-                safe_json(
-                    visual_summary
-                )
+            "scene_mode": WEB_SCENE_MODE,
+
+            "visual_summary": safe_json(visual_summary),
+
+            "active_visual_scene": safe_json(
+                gateway_transport.get("scene_contract", {}).get("active_scene")
+            )
         })
 
     except Exception as e:
@@ -1384,41 +1420,13 @@ def web_chat():
             )
         )
 
+        result["visual_summary"] = visual_summary
         result["gateway_transport"] = build_gateway_transport_payload(result)
 
-        # =========================================================
-        # LEGACY TRANSPORT (TEMPORARILY DISABLED)
-        # =========================================================
-        #
-        # The legacy response below unpacked Scene Contract back into
-        # graph/formula/table/gallery/layout/visual/blocks fields.
-        # This creates a parallel transport route and conflicts with
-        # the canonical Fiber Route.
-        #
-        # Keep this block only as historical reference while migrating
-        # AprilWeb. If testing confirms it is unnecessary, delete it
-        # permanently. If a required capability is discovered, restore
-        # it through Scene Contract rather than separate transport
-        # fields.
-        #
-        # return jsonify({... legacy transport ...})
-        #
-        # =========================================================
-
-        gt=result.get("gateway_transport",{})
-        return jsonify({
-            "success": True,
-            "gateway_transport": safe_json(gt),
-            "scene_contract": safe_json(gt.get("scene_contract", {})),
-            "render_blocks": safe_json(gt.get("render_blocks", [])),
-            "content": gt.get("content",""),
-            "answer": gt.get("answer",""),
-            "summary": gt.get("summary",""),
-            "renderer_mode": WEB_RENDERER_MODE,
-            "scene_mode": WEB_SCENE_MODE,
-            "visual_summary": safe_json(visual_summary),
-            "active_visual_scene": safe_json(gt.get("active_visual_scene")),
-        })
+        # The gateway now returns only one canonical rich payload:
+        # gateway_transport.  This prevents AprilWeb from reconstructing the
+        # same assistant text through multiple top-level aliases.
+        return jsonify(build_web_api_payload(result))
 
     except Exception as e:
 
