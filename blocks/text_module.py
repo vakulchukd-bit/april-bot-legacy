@@ -259,8 +259,63 @@ def clamp_text(
 # 🔥 PROVIDER OUTPUT NORMALIZATION
 # =====================================================
 
+def _visible_provider_text(value):
+    """Extract canonical visible text from a provider value without leaking JSON."""
+    if value is None:
+        return ""
+
+    if isinstance(value, dict):
+        for key in (
+            "answer", "content", "response", "summary",
+            "explanation", "text", "display_text",
+        ):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    if not isinstance(value, str):
+        return safe_text(value).strip()
+
+    text = value.strip()
+    if not text:
+        return ""
+
+    candidate = text
+    if candidate.startswith("```") and candidate.endswith("```"):
+        lines = candidate.splitlines()
+        if len(lines) >= 3:
+            candidate = "\n".join(lines[1:-1]).strip()
+            if candidate.lower().startswith("json\n"):
+                candidate = candidate[5:].lstrip()
+
+    current = candidate
+    for _ in range(3):
+        if not isinstance(current, str):
+            break
+        try:
+            parsed = json.loads(current)
+        except Exception:
+            break
+        if isinstance(parsed, dict):
+            for key in (
+                "answer", "content", "response", "summary",
+                "explanation", "text", "display_text",
+            ):
+                field = parsed.get(key)
+                if isinstance(field, str) and field.strip():
+                    return field.strip()
+            break
+        if isinstance(parsed, str):
+            current = parsed.strip()
+            continue
+        break
+
+    return text
+
+
 def normalize_provider_output(output):
-    """Normalize provider dict output into a single text reply and keep packet."""
+    """Normalize provider dict output into one canonical visible reply and keep packet."""
     provider_packet = None
     reply = ""
 
@@ -270,7 +325,7 @@ def normalize_provider_output(output):
         if not isinstance(mr, dict):
             mr = {}
 
-        candidate = (
+        candidate = _visible_provider_text(
             mr.get("answer")
             or mr.get("content")
             or mr.get("response")
@@ -284,12 +339,11 @@ def normalize_provider_output(output):
 
         if candidate:
             for field in ("answer", "content", "response", "summary"):
-                if not mr.get(field):
-                    mr[field] = candidate
+                mr[field] = candidate
             provider_packet["machine_response"] = mr
             reply = candidate
         else:
-            reply = safe_text(
+            reply = _visible_provider_text(
                 provider_packet.get("content")
                 or provider_packet.get("answer")
                 or provider_packet.get("summary")
@@ -297,7 +351,7 @@ def normalize_provider_output(output):
                 or ""
             )
     else:
-        reply = safe_text(output)
+        reply = _visible_provider_text(output)
 
     return reply, provider_packet
 
