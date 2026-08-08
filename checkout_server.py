@@ -165,9 +165,57 @@ def safe_json(value):
 
 
 def _checkout_best_text(*values):
+    """Return canonical human-visible text, never a raw JSON envelope."""
     for value in values:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if value is None:
+            continue
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                continue
+
+            candidate = text
+            if candidate.startswith("```") and candidate.endswith("```"):
+                lines = candidate.splitlines()
+                if len(lines) >= 3:
+                    candidate = "\n".join(lines[1:-1]).strip()
+                    if candidate.lower().startswith("json\n"):
+                        candidate = candidate[5:].lstrip()
+
+            current = candidate
+            for _ in range(3):
+                if not isinstance(current, str):
+                    break
+                try:
+                    parsed = json.loads(current)
+                except Exception:
+                    break
+                if isinstance(parsed, dict):
+                    for key in (
+                        "answer", "content", "response", "summary",
+                        "explanation", "text", "display_text",
+                    ):
+                        nested = parsed.get(key)
+                        if isinstance(nested, str) and nested.strip():
+                            return nested.strip()
+                    break
+                if isinstance(parsed, str):
+                    current = parsed.strip()
+                    continue
+                break
+
+            return text
+
+        if isinstance(value, dict):
+            for key in (
+                "answer", "content", "response", "summary",
+                "explanation", "text", "display_text",
+            ):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+
     return ""
 
 
@@ -699,22 +747,47 @@ def gateway_return_cpu_result(cpu_result):
 # =========================================================
 
 def build_gateway_transport_payload(normalized):
-    
-    # Forward canonical contract without rebuilding.
+    # Forward the canonical contract without rebuilding scene semantics.
     contract = scene_contract_view(normalized.get("scene_contract"))
     contract.setdefault("gateway_transport_only", True)
     contract.setdefault("gateway_owner", "checkout_server")
+
+    # Transport guard: provider JSON envelopes must never become visible text.
+    canonical_content = _checkout_best_text(
+        contract.get("content"),
+        contract.get("answer"),
+        contract.get("summary"),
+        normalized.get("content"),
+        normalized.get("answer"),
+        normalized.get("summary"),
+    )
+    canonical_answer = _checkout_best_text(
+        contract.get("answer"),
+        normalized.get("answer"),
+        canonical_content,
+    )
+    canonical_summary = _checkout_best_text(
+        contract.get("summary"),
+        normalized.get("summary"),
+        canonical_answer,
+        canonical_content,
+    )
+
+    contract["content"] = canonical_content
+    contract["answer"] = canonical_answer
+    contract["summary"] = canonical_summary
+
     return {
         "scene_contract": contract,
         "contract_version": contract.get("version", 1),
-        "transport_mode":"passthrough",
-        "gateway_rebuild":False,
+        "transport_mode": "passthrough",
+        "gateway_rebuild": False,
         "space_continuity": normalized.get("space_continuity", {}),
         "render_blocks": contract.get("render_blocks", []),
         "renderer_state": contract.get("renderer_state", {}),
-        "content": contract.get("content", ""),
-        "answer": contract.get("answer", normalized.get("answer")),
-        "summary": contract.get("summary", normalized.get("summary")),
+        "content": canonical_content,
+        "answer": canonical_answer,
+        "summary": canonical_summary,
     }
 
 # =========================================================
