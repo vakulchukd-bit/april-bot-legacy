@@ -1440,20 +1440,30 @@ def interpret_request(
     # 🔥 CONTINUATION
     # =====================================================
 
+    continuation_markers = (
+        "о чём мы говорили",
+        "о чем мы говорили",
+        "о чём я тебя спрашивал",
+        "о чем я тебя спрашивал",
+        "что я тебя только что спрашивал",
+        "что мы обсуждали",
+        "помнишь",
+        "вспомни",
+        "продолжи",
+        "дальше",
+    )
+
     if (
         semantic_evidence_continuation(t)
-        or cognition.get(
-            "needs_continuation"
-        )
+        or cognition.get("needs_continuation")
+        or any(marker in t for marker in continuation_markers)
     ):
 
-        result[
-            "continuation"
-        ] = True
+        result["continuation"] = True
+        result["prefer_continuation"] = True
 
-        result[
-            "prefer_continuation"
-        ] = True
+        if result.get("current_topic") and not result.get("continuation_target"):
+            result["continuation_target"] = result.get("current_topic")
 
         safe_patch_log(
             "CONTINUATION DETECTED"
@@ -1588,29 +1598,14 @@ def interpret_request(
     # =====================================================
 
     elif (
-
-        semantic_evidence_information(text) or semantic_evidence_code(text) or semantic_evidence_renderer(text)
-
-        or cognition.get(
-            "math_reasoning"
-        )
+        semantic_evidence_math(t)
+        or cognition.get("math_reasoning")
     ):
 
-        result[
-            "type"
-        ] = "math"
-
-        result[
-            "subtype"
-        ] = "graph"
-
-        result[
-            "renderer_intent"
-        ] = True
-
-        result[
-            "prefer_renderer"
-        ] = True
+        result["type"] = "math"
+        result["subtype"] = "graph"
+        result["renderer_intent"] = True
+        result["prefer_renderer"] = True
 
         safe_patch_log(
             "MATH INTERPRETATION"
