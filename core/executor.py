@@ -766,8 +766,47 @@ def _executor_format_canonical_prompt(plan: dict) -> str:
 
 
 def build_conversation_space(state: dict, semantic: dict, cognition: dict, response_decision: dict, text: str, visual_reference: dict):
+    timeline = state.get("dialog", [])
+    if not isinstance(timeline, list) or not timeline:
+        timeline = state.get("timeline", [])
+    if not isinstance(timeline, list) or not timeline:
+        dialog_state = state.get("dialog_state", {})
+        if isinstance(dialog_state, dict):
+            timeline = dialog_state.get("timeline", []) or []
+    if not isinstance(timeline, list):
+        timeline = []
+
+    meta = state.get("meta", {}) if isinstance(state.get("meta", {}), dict) else {}
+    focus_state = state.get("focus_state", state.get("dynamic_focus", {}))
+    if not isinstance(focus_state, dict) or not focus_state:
+        focus_state = state.get("focus_snapshot", {}) if isinstance(state.get("focus_snapshot", {}), dict) else {}
+
+    active_topic = (
+        state.get("active_topic")
+        or state.get("topic")
+        or state.get("current_topic")
+        or (focus_state.get("topic") if isinstance(focus_state, dict) else None)
+        or (state.get("dialog_state", {}).get("active_topic") if isinstance(state.get("dialog_state", {}), dict) else None)
+        or semantic.get("topic")
+        or response_decision.get("goal")
+        or ""
+    )
+
+    last_user_turn = (
+        state.get("last_user_turn")
+        or meta.get("last_user_message")
+        or (state.get("dialog_state", {}).get("last_user_turn") if isinstance(state.get("dialog_state", {}), dict) else None)
+        or text
+    )
+    last_april_turn = (
+        state.get("last_april_turn")
+        or meta.get("last_bot_message")
+        or (state.get("dialog_state", {}).get("last_april_turn") if isinstance(state.get("dialog_state", {}), dict) else None)
+        or ""
+    )
+
     return {
-        "timeline": state.get("dialog", []),
+        "timeline": timeline,
         "current_turn": {
             "user": {
                 "text": text,
@@ -779,13 +818,14 @@ def build_conversation_space(state: dict, semantic: dict, cognition: dict, respo
             "april": None,
         },
         "modalities": {"text": bool(text), "voice": False, "image": False, "files": False},
-        "last_user_turn": text,
-        "last_april_turn": state.get("last_april_turn"),
+        "last_user_turn": last_user_turn,
+        "last_april_turn": last_april_turn,
+        "active_topic": active_topic,
         "semantic": semantic,
         "cognition": cognition,
         "response_decision": response_decision,
         "goal_hierarchy": state.get("goal_hierarchy", {}),
-        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "focus": focus_state,
         "memory_timeline": state.get("memory_timeline", {}),
         "visual_summary": state.get("visual_summary", {}),
         "active_visual_scene": state.get("active_visual_scene", {}),
@@ -795,13 +835,23 @@ def build_conversation_space(state: dict, semantic: dict, cognition: dict, respo
 
 def build_executor_user_space(state: dict, conversation_space: Optional[dict] = None):
     conversation_space = conversation_space or {}
+    dialog = conversation_space.get("timeline")
+    if not isinstance(dialog, list) or not dialog:
+        dialog = state.get("dialog", [])
+    if not isinstance(dialog, list) or not dialog:
+        dialog_state = state.get("dialog_state", {})
+        if isinstance(dialog_state, dict):
+            dialog = dialog_state.get("timeline", []) or []
+    if not isinstance(dialog, list):
+        dialog = []
+
     return {
         "scene": state.get("scene_state", {}),
         "workspace": state.get("workspace_state", {}),
-        "dialog": conversation_space.get("timeline", state.get("dialog", [])),
-        "last_user_turn": conversation_space.get("last_user_turn"),
-        "last_april_turn": conversation_space.get("last_april_turn"),
-        "focus": state.get("focus_state", state.get("dynamic_focus", {})),
+        "dialog": dialog,
+        "last_user_turn": conversation_space.get("last_user_turn") or state.get("last_user_turn"),
+        "last_april_turn": conversation_space.get("last_april_turn") or state.get("last_april_turn"),
+        "focus": state.get("focus_state", state.get("dynamic_focus", state.get("focus_snapshot", {}))),
         "goal_hierarchy": state.get("goal_hierarchy", {}),
         "active_flow": state.get("active_flow", {}),
         "memory_timeline": state.get("memory_timeline", {}),
@@ -997,6 +1047,42 @@ def _build_second_circle_context(
 # VISIBLE BLOCK NORMALIZATION
 # =====================================================
 
+def _executor_infer_render_block_type(block: dict) -> str:
+    if not isinstance(block, dict):
+        return "text"
+    candidates = [
+        block.get("type"),
+        block.get("renderer"),
+        block.get("viewer"),
+        block.get("artifact_type"),
+        block.get("payload", {}).get("type") if isinstance(block.get("payload"), dict) else None,
+        block.get("artifact", {}).get("type") if isinstance(block.get("artifact"), dict) else None,
+    ]
+    for candidate in candidates:
+        text = normalize_text(candidate).lower()
+        if text in {"table", "graph", "diagram", "formula", "gallery", "image", "link", "code", "markdown", "text"}:
+            if text == "markdown":
+                return "text"
+            return text
+        if "table" in text:
+            return "table"
+        if "graph" in text or "chart" in text:
+            return "graph"
+        if "diagram" in text or "schema" in text:
+            return "diagram"
+        if "formula" in text or "equation" in text:
+            return "formula"
+        if "gallery" in text or "carousel" in text:
+            return "gallery"
+        if "link" in text or "url" in text:
+            return "link"
+        if "code" in text:
+            return "code"
+        if "image" in text or "picture" in text:
+            return "image"
+    return normalize_text(block.get("type", "text")).lower() or "text"
+
+
 def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str = "") -> list:
     if not isinstance(blocks, list):
         blocks = list(blocks or [])
@@ -1012,10 +1098,15 @@ def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str =
             block = {"type": "machine_payload", "content": str(block), "renderer": "TextBlock", "viewer": "TextBlock", "priority": 0}
 
         block = dict(block)
-        block_type = normalize_text(block.get("type")).lower()
+        block_type = _executor_infer_render_block_type(block)
         content = block.get("content")
         content_text = normalize_text(content)
         content_norm = re.sub(r"\s+", " ", content_text).strip().lower() if content_text else ""
+
+        # Preserve the renderer/viewer hints so downstream UI knows which block
+        # should be rendered by which component.
+        if block_type != "text":
+            block["type"] = block_type
 
         if block_type in {"text", "markdown", "formula", "function"} and _executor_looks_like_internal_room_payload(content_text):
             continue
@@ -1263,13 +1354,22 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
     if not continuation and semantic.get("topic") and semantic.get("topic") == state.get("topic"):
         topic_mode = "same_topic"
 
+    preferred_representation = (
+        response_decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+        or semantic.get("requested_representation")
+        or semantic.get("current_representation")
+        or "text"
+    )
+
     decision = {
         "topic_mode": topic_mode,
         "use_visual_memory": bool(ctx.get("active_visual_scene")),
         "use_memory_timeline": bool(ctx.get("memory_timeline")),
         "continue_scene": bool(ctx.get("active_visual_scene")),
-        "representation": response_decision.get("preferred_representation") or semantic.get("preferred_representation") or "text",
-        "history_match": bool(state.get("dialog")),
+        "preferred_representation": preferred_representation,
+        "representation": preferred_representation,
+        "history_match": bool(state.get("dialog") or state.get("dialog_state", {}).get("timeline")),
         "visual_match": bool(ctx.get("active_visual_scene")),
         "topic_relation": topic_mode,
         "continuation_probability": 0.8 if continuation else 0.2,
@@ -1281,8 +1381,9 @@ def executor_cpu_build_executor_decision(*, semantic, cognition, response_decisi
 
 
 def executor_cpu_build_presentation_plan(machine_response):
+    decision = getattr(machine_response, "executor_decision", {}) or {}
     plan = {
-        "representation": "text",
+        "representation": decision.get("preferred_representation") or "text",
         "blocks": [],
         "artifact_types": [],
         "provider_owned": True,
@@ -1296,11 +1397,20 @@ def executor_cpu_build_presentation_plan(machine_response):
         if artifact_type not in plan["blocks"]:
             plan["blocks"].append(artifact_type)
 
+    preferred = decision.get("preferred_representation")
+    if preferred and preferred not in plan["artifact_types"]:
+        plan["artifact_types"].insert(0, preferred)
+    if preferred and preferred not in plan["blocks"]:
+        plan["blocks"].insert(0, preferred)
+
     priority = ["graph", "table", "formula", "gallery", "diagram", "link", "code", "text"]
     for rep in priority:
         if rep in plan["artifact_types"]:
             plan["representation"] = rep
             break
+
+    if preferred:
+        plan["representation"] = preferred
 
     machine_response.executor_presentation_plan = plan
     return machine_response
@@ -1606,6 +1716,7 @@ def executor_cpu_scene_pipeline(machine_response):
     }
 
 
+
 def executor_cpu_finalize_transport(machine_response):
     """
     Final processor pass:
@@ -1629,7 +1740,21 @@ def executor_cpu_finalize_transport(machine_response):
         getattr(machine_response, "summary", ""),
     )
 
-    source_blocks = list(getattr(machine_response, "render_blocks", []) or []) or list(scene.get("render_blocks", []) or [])
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+
+    scene_blocks = []
+    if scene_contract is not None:
+        if isinstance(scene_contract, dict):
+            scene_blocks = list(scene_contract.get("render_blocks", []) or [])
+        else:
+            scene_blocks = list(getattr(scene_contract, "render_blocks", []) or [])
+
+    source_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    if scene_blocks:
+        source_blocks = scene_blocks + [block for block in source_blocks if block not in scene_blocks]
+    if not source_blocks:
+        source_blocks = list(scene.get("render_blocks", []) or [])
     if not source_blocks and visible_text:
         source_blocks = [{
             "type": "text",
@@ -1639,6 +1764,8 @@ def executor_cpu_finalize_transport(machine_response):
             "priority": 0,
             "source_room": "text",
         }]
+
+    source_blocks = apply_representation_gate(source_blocks, response_decision=response_decision, semantic=semantic)
     blocks = _executor_deduplicate_visible_render_blocks(source_blocks, visible_text=visible_text)
 
     if visible_text:
@@ -1702,8 +1829,6 @@ def executor_cpu_finalize_transport(machine_response):
 
     executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene_contract)
     return result
-
-
 # =====================================================
 # ROOM SELECTION / MERGE
 # =====================================================
