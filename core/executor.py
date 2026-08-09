@@ -390,6 +390,469 @@ def _executor_artifact_signature(artifact: Any) -> tuple:
     return ("raw", type(artifact).__name__, _clip_text(str(artifact), 500))
 
 
+
+def _executor_renderer_for_type(block_type: Any) -> str:
+    block_type = normalize_text(block_type).lower()
+    return {
+        "text": "TextBlock",
+        "markdown": "TextBlock",
+        "table": "TableBlock",
+        "graph": "GraphBlock",
+        "diagram": "GraphBlock",
+        "visual": "GraphBlock",
+        "renderer_scene": "GraphBlock",
+        "formula": "FormulaBlock",
+        "gallery": "GalleryBlock",
+        "image": "GalleryBlock",
+        "link": "LinkCard",
+        "code": "CodeBlock",
+    }.get(block_type, "TextBlock")
+
+
+def _executor_requested_representation(semantic: Optional[dict], response_decision: Optional[dict]) -> str:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    candidates = (
+        semantic.get("requested_representation"),
+        semantic.get("current_representation"),
+        semantic.get("preferred_representation"),
+        response_decision.get("preferred_representation"),
+        response_decision.get("representation"),
+        response_decision.get("render_intent_representation"),
+    )
+
+    for candidate in candidates:
+        text = normalize_text(candidate).lower()
+        if not text:
+            continue
+        if text in {"markdown", "text"}:
+            return "text"
+        return text
+
+    return "text"
+
+
+def _executor_select_room_names(
+    text: Any,
+    semantic: Optional[dict],
+    cognition: Optional[dict],
+    response_decision: Optional[dict],
+    state: Optional[dict],
+    task_type: str,
+) -> list[str]:
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+    state = state or {}
+
+    selected: list[str] = ["text"]
+
+    explicit_room = normalize_text(
+        semantic.get("room")
+        or response_decision.get("preferred_room")
+        or response_decision.get("room")
+        or ""
+    ).lower()
+    if explicit_room:
+        selected.append(explicit_room)
+
+    requested_representation = _executor_requested_representation(semantic, response_decision)
+    representation_room_map = {
+        "table": "table",
+        "graph": "graph",
+        "formula": "formula",
+        "diagram": "diagram",
+        "link": "link",
+        "code": "code",
+        "gallery": "gallery",
+        "image": "image_generate",
+        "image_edit": "image_edit",
+    }
+    rep_room = representation_room_map.get(requested_representation)
+    if rep_room:
+        selected.append(rep_room)
+
+    if semantic.get("visual_generation_needed") or semantic.get("explicit_image_generation_only"):
+        selected.append("image_generate")
+
+    if semantic.get("explicit_image_edit_only") or semantic.get("image_edit_needed"):
+        selected.append("image_edit")
+
+    required_domains = list(semantic.get("required_domains", []) or [])
+    candidate_domains = list(semantic.get("candidate_domains", []) or [])
+    all_domains = list(dict.fromkeys(required_domains + candidate_domains))
+
+    domain_room_map = build_domain_room_map()
+    for domain in all_domains:
+        for room_name in domain_room_map.get(domain, []):
+            selected.append(room_name)
+
+    if task_type == "image":
+        selected.append("image_generate")
+
+    if task_type == "math" and "formula" not in selected:
+        selected.append("formula")
+
+    if task_type == "renderer" and requested_representation in representation_room_map:
+        selected.append(representation_room_map[requested_representation])
+
+    # Keep only unique names while preserving order.
+    deduped = []
+    seen = set()
+    for name in selected:
+        name = normalize_text(name).lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+
+    return deduped
+
+
+def _executor_room_is_selected(room_name: str, selected_room_names: list[str]) -> bool:
+    room_name = normalize_text(room_name).lower()
+    return room_name in set(selected_room_names or [])
+
+
+def _executor_strip_code_fence(text: str) -> str:
+    value = normalize_text(text)
+    if not value:
+        return ""
+    if value.startswith("```") and value.endswith("```"):
+        lines = value.splitlines()
+        if len(lines) >= 3:
+            return "\n".join(lines[1:-1]).strip()
+    return value
+
+
+def _executor_looks_like_markdown_table(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    has_pipe = any("|" in line for line in lines)
+    has_separator = any(re.fullmatch(r"[:\-\|\s]+", line) and "-" in line for line in lines)
+    return has_pipe and has_separator
+
+
+def _executor_parse_markdown_table(text: str) -> dict:
+    lines = [line.strip() for line in normalize_text(text).splitlines() if line.strip()]
+    if not lines:
+        return {"headers": [], "rows": [], "raw": text}
+
+    rows = []
+    for line in lines:
+        if re.fullmatch(r"[:\-\|\s]+", line) and "-" in line:
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if cells:
+            rows.append(cells)
+
+    headers = rows[0] if rows else []
+    body = rows[1:] if len(rows) > 1 else []
+    return {
+        "headers": headers,
+        "rows": body,
+        "raw": text,
+        "caption": "",
+    }
+
+
+def _executor_has_url(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    return bool(re.search(r"https?://\S+", text.strip()))
+
+
+def _executor_make_text_block(text: str, index: int = 0, source_room: str = "text", title: str = "") -> dict:
+    block = {
+        "type": "text",
+        "content": text,
+        "text": text,
+        "renderer": "TextBlock",
+        "viewer": "TextBlock",
+        "priority": 0,
+        "source_room": source_room,
+        "sequence_index": index,
+    }
+    if title:
+        block["title"] = title
+    return block
+
+
+def _executor_make_table_block(table_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
+    table_object = table_payload if isinstance(table_payload, dict) else {"raw": table_payload}
+    table_object.setdefault("raw", source_text)
+    table_object.setdefault("source", source_text)
+    return {
+        "type": "table",
+        "table": table_object,
+        "content": source_text,
+        "text": source_text,
+        "renderer": "TableBlock",
+        "viewer": "TableBlock",
+        "priority": 90,
+        "source_room": source_room,
+        "sequence_index": index,
+        "artifactType": "table",
+    }
+
+
+def _executor_make_graph_block(graph_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
+    graph_object = graph_payload if isinstance(graph_payload, dict) else {"raw": graph_payload}
+    graph_object.setdefault("source", source_text)
+    return {
+        "type": "graph",
+        "graph": graph_object,
+        "content": source_text,
+        "text": source_text,
+        "renderer": "GraphBlock",
+        "viewer": "GraphBlock",
+        "priority": 80,
+        "source_room": source_room,
+        "sequence_index": index,
+    }
+
+
+def _executor_make_formula_block(formula_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
+    formula = normalize_text(formula_payload) or source_text
+    return {
+        "type": "formula",
+        "content": formula,
+        "text": formula,
+        "renderer": "FormulaBlock",
+        "viewer": "FormulaBlock",
+        "priority": 85,
+        "source_room": source_room,
+        "sequence_index": index,
+    }
+
+
+def _executor_make_link_block(link_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
+    url = normalize_text(link_payload) or source_text
+    return {
+        "type": "link",
+        "url": url,
+        "content": source_text,
+        "text": source_text,
+        "renderer": "LinkCard",
+        "viewer": "LinkCard",
+        "priority": 70,
+        "source_room": source_room,
+        "sequence_index": index,
+    }
+
+
+def _executor_make_code_block(code_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
+    code = normalize_text(code_payload) or source_text
+    return {
+        "type": "code",
+        "content": code,
+        "text": code,
+        "renderer": "CodeBlock",
+        "viewer": "CodeBlock",
+        "priority": 88,
+        "source_room": source_room,
+        "sequence_index": index,
+    }
+
+
+def _executor_make_gallery_block(images_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
+    images_object = images_payload if isinstance(images_payload, dict) else {"raw": images_payload}
+    images_object.setdefault("source", source_text)
+    return {
+        "type": "gallery",
+        "images": images_object,
+        "content": source_text,
+        "text": source_text,
+        "renderer": "GalleryBlock",
+        "viewer": "GalleryBlock",
+        "priority": 75,
+        "source_room": source_room,
+        "sequence_index": index,
+    }
+
+
+def _executor_contribution_to_block(key: str, value: Any, index: int = 0, source_room: str = "registry") -> Optional[dict]:
+    block_type = normalize_text(key).lower()
+    payload = value if isinstance(value, dict) else {"value": value}
+    payload = _executor_payload_to_mapping(payload)
+
+    if not block_type:
+        block_type = normalize_text(payload.get("type")).lower()
+
+    if block_type in {"table", "table_artifact", "tabular"} or {"rows", "columns"} & set(payload.keys()):
+        table_payload = payload.get("table", payload)
+        return _executor_make_table_block(table_payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+
+    if block_type in {"graph", "diagram", "visual", "renderer_scene"} or any(k in payload for k in ("graph", "nodes", "edges")):
+        graph_payload = payload.get("graph", payload)
+        return _executor_make_graph_block(graph_payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+
+    if block_type == "formula" or any(k in payload for k in ("latex", "formula")):
+        return _executor_make_formula_block(payload.get("formula") or payload.get("latex") or payload.get("content") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+
+    if block_type == "link" or any(k in payload for k in ("url", "href")):
+        return _executor_make_link_block(payload.get("url") or payload.get("href") or payload.get("content") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+
+    if block_type == "code" or any(k in payload for k in ("language", "filename", "line_numbers")):
+        return _executor_make_code_block(payload.get("content") or payload.get("source") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+
+    if block_type in {"gallery", "image"} or "images" in payload:
+        return _executor_make_gallery_block(payload.get("images") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+
+    if block_type in {"text", "markdown"}:
+        return _executor_make_text_block(normalize_text(payload.get("content") or payload.get("text") or payload.get("answer") or payload.get("summary") or payload.get("value") or ""), index, source_room)
+
+    if payload.get("content") or payload.get("text") or payload.get("answer") or payload.get("summary"):
+        return _executor_make_text_block(
+            normalize_text(
+                payload.get("content") or payload.get("text") or payload.get("answer") or payload.get("summary")
+            ),
+            index,
+            source_room,
+        )
+
+    return None
+
+
+def _executor_text_to_logical_blocks(text: str, source_room: str = "text") -> list[dict]:
+    normalized = normalize_text(text)
+    if not normalized:
+        return []
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", normalized) if p.strip()]
+    if not paragraphs:
+        paragraphs = [normalized]
+
+    blocks: list[dict] = []
+    for idx, paragraph in enumerate(paragraphs):
+        current = paragraph.strip()
+
+        if _executor_looks_like_markdown_table(current):
+            blocks.append(_executor_make_table_block(_executor_parse_markdown_table(current), current, idx, source_room))
+            continue
+
+        if current.startswith("```") and current.endswith("```"):
+            blocks.append(_executor_make_code_block(_executor_strip_code_fence(current), current, idx, source_room))
+            continue
+
+        if _looks_like_formula_text(current):
+            blocks.append(_executor_make_formula_block(current, current, idx, source_room))
+            continue
+
+        if _executor_has_url(current):
+            blocks.append(_executor_make_link_block(current, current, idx, source_room))
+            continue
+
+        blocks.append(_executor_make_text_block(current, idx, source_room))
+
+    return blocks
+
+
+def _executor_build_logical_scene_blocks(machine_response: Any, semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> list[dict]:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    contributions = getattr(machine_response, "contributions", None) or {}
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+
+    canonical_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+        getattr(machine_response, "response", ""),
+        getattr(machine_response, "explanation", ""),
+    )
+
+    requested_representation = _executor_requested_representation(semantic, response_decision)
+    preferred_room = normalize_text(
+        response_decision.get("preferred_room")
+        or semantic.get("room")
+        or ""
+    ).lower()
+
+    blocks: list[dict] = []
+
+    if render_blocks:
+        blocks.extend(render_blocks)
+    elif canonical_text:
+        blocks.extend(_executor_text_to_logical_blocks(canonical_text, source_room="text"))
+
+    # Merge contributions into the logical scene as real artifacts.
+    if isinstance(contributions, dict) and contributions:
+        for idx, (key, value) in enumerate(contributions.items()):
+            block = _executor_contribution_to_block(key, value, index=idx, source_room=preferred_room or "registry")
+            if block:
+                blocks.append(block)
+
+    # Preserve artifacts when they exist.
+    for idx, artifact in enumerate(artifacts):
+        mapping = _executor_payload_to_mapping(artifact)
+        if not mapping:
+            continue
+        block = _executor_contribution_to_block(
+            normalize_text(mapping.get("artifact_type") or mapping.get("type") or ""),
+            mapping,
+            index=idx,
+            source_room="artifact",
+        )
+        if block:
+            blocks.append(block)
+
+    if not blocks and canonical_text:
+        blocks = _executor_text_to_logical_blocks(canonical_text, source_room="text")
+
+    # If a representation was requested, keep matching artifacts but never drop the canonical text.
+    if requested_representation and requested_representation != "text":
+        preferred = requested_representation.lower()
+        filtered: list[dict] = []
+        for block in blocks:
+            block_type = normalize_text(block.get("type")).lower()
+            if block_type == "text":
+                filtered.append(block)
+            elif block_type == preferred:
+                filtered.append(block)
+            elif preferred == "diagram" and block_type == "graph":
+                filtered.append(block)
+            elif preferred == "image" and block_type == "gallery":
+                filtered.append(block)
+        blocks = filtered or blocks
+
+    visible_text = canonical_text
+    blocks = _executor_deduplicate_visible_render_blocks(blocks, visible_text=visible_text)
+
+    if visible_text and not any(normalize_text(b.get("type")).lower() == "text" for b in blocks):
+        blocks.insert(
+            0,
+            _executor_make_text_block(visible_text, 0, "text")
+        )
+
+    return blocks
+
+
+def _executor_scene_presentation_hint(blocks: list[dict], semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> dict:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    preferred_representation = _executor_requested_representation(semantic, response_decision)
+    block_type = "text"
+    if blocks:
+        block_type = normalize_text(blocks[0].get("type")).lower() or "text"
+
+    return {
+        "preferred_representation": preferred_representation,
+        "payload_type": block_type,
+        "renderer": _executor_renderer_for_type(block_type),
+        "viewer": _executor_renderer_for_type(block_type),
+        "priority": blocks[0].get("priority", 0) if blocks else 0,
+    }
+
+
+
 def _executor_room_name_from_item(item: Any) -> str:
     if not isinstance(item, dict):
         return ""
@@ -942,10 +1405,15 @@ def detect_task_type(semantic, cognition, state, conversation_space=None):
     if trajectory:
         track_trajectory(trajectory)
 
+    requested_representation = _executor_requested_representation(semantic, {})
+    if requested_representation in {"graph", "table", "formula", "diagram", "link", "code", "gallery"}:
+        track_modality("renderer")
+        return "renderer"
+
     if semantic.get("render_intent"):
         track_modality("renderer")
         return "renderer"
-    if semantic.get("visual_generation_needed"):
+    if semantic.get("visual_generation_needed") or semantic.get("explicit_image_generation_only"):
         track_modality("image")
         return "image"
     if semantic.get("math_intent"):
@@ -1324,6 +1792,28 @@ def executor_cpu_transport_diag(stage: str, machine_response=None, scene_contrac
         print(f"[EXECUTOR][{stage}] diag_error={exc}")
 
 
+
+def executor_cpu_transport_verification(machine_response):
+    """
+    Final safety barrier before scene projection.
+    Keeps the canonical machine response intact and ensures a
+    render block list exists for downstream scene construction.
+    """
+    if machine_response is None:
+        return None
+
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    if _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
+        machine_response = executor_cpu_materialize_blocks(machine_response)
+
+    if _executor_value_is_empty(getattr(machine_response, "render_blocks", None)):
+        machine_response.render_blocks = []
+
+    return machine_response
+
+
+
 def executor_cpu_attach_artifact_payloads(machine_response):
     artifacts = list(getattr(machine_response, "artifacts", []) or [])
     render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
@@ -1656,8 +2146,12 @@ def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machi
 
 
 def executor_cpu_materialize_blocks(machine_response):
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    machine_response.render_blocks = render_blocks
+    blocks = _executor_build_logical_scene_blocks(
+        machine_response,
+        semantic=getattr(machine_response, "executor_semantic", {}) or {},
+        response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+    )
+    machine_response.render_blocks = blocks
     return machine_response
 
 
@@ -1736,7 +2230,11 @@ def executor_cpu_scene_pipeline(machine_response):
         getattr(machine_response, "summary", ""),
     )
 
-    blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    blocks = _executor_build_logical_scene_blocks(
+        machine_response,
+        semantic=getattr(machine_response, "executor_semantic", {}) or {},
+        response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+    )
 
     try:
         if isinstance(scene_contract, dict):
@@ -1744,11 +2242,30 @@ def executor_cpu_scene_pipeline(machine_response):
             scene_contract["content"] = getattr(machine_response, "content", "")
             scene_contract["summary"] = getattr(machine_response, "summary", "")
             scene_contract["render_blocks"] = blocks
+            scene_contract.setdefault("metadata", {})
+            if isinstance(scene_contract["metadata"], dict):
+                scene_contract["metadata"]["presentation"] = _executor_scene_presentation_hint(
+                    blocks,
+                    semantic=getattr(machine_response, "executor_semantic", {}) or {},
+                    response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+                )
         else:
             setattr(scene_contract, "answer", getattr(machine_response, "answer", ""))
             setattr(scene_contract, "content", getattr(machine_response, "content", ""))
             setattr(scene_contract, "summary", getattr(machine_response, "summary", ""))
             setattr(scene_contract, "render_blocks", blocks)
+            try:
+                metadata = getattr(scene_contract, "metadata", None)
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata["presentation"] = _executor_scene_presentation_hint(
+                    blocks,
+                    semantic=getattr(machine_response, "executor_semantic", {}) or {},
+                    response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+                )
+                setattr(scene_contract, "metadata", metadata)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -1801,8 +2318,8 @@ def executor_cpu_finalize_transport(machine_response):
     """
     Final processor pass:
     - keep the canonical answer untouched,
-    - project exactly one visible route,
-    - dedupe visible render blocks,
+    - analyze the whole answer as one logical scene,
+    - project one visible route,
     - never rebuild from fallback branches.
     """
     executor_cpu_transport_diag("TRANSPORT_ENTRY", machine_response)
@@ -1829,6 +2346,12 @@ def executor_cpu_finalize_transport(machine_response):
     # MachineResponse.render_blocks is the single canonical visible list.
     # SceneContract is only its projection; never concatenate both representations.
     source_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    if not source_blocks:
+        source_blocks = _executor_build_logical_scene_blocks(
+            machine_response,
+            semantic=semantic,
+            response_decision=response_decision,
+        )
     if not source_blocks and visible_text:
         source_blocks = [{
             "type": "text",
@@ -1876,16 +2399,32 @@ def executor_cpu_finalize_transport(machine_response):
             original_content=getattr(machine_response, "provider_original_content", "") if machine_response is not None else "",
         )
         try:
+            presentation_hint = _executor_scene_presentation_hint(
+                blocks,
+                semantic=semantic,
+                response_decision=response_decision,
+            )
             if isinstance(scene_contract, dict):
                 scene_contract["answer"] = visible_text
                 scene_contract["content"] = visible_text
                 scene_contract["summary"] = visible_text
                 scene_contract["render_blocks"] = blocks
+                scene_contract.setdefault("metadata", {})
+                if isinstance(scene_contract["metadata"], dict):
+                    scene_contract["metadata"]["presentation"] = presentation_hint
             else:
                 setattr(scene_contract, "answer", visible_text)
                 setattr(scene_contract, "content", visible_text)
                 setattr(scene_contract, "summary", visible_text)
                 setattr(scene_contract, "render_blocks", blocks)
+                try:
+                    metadata = getattr(scene_contract, "metadata", None)
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata["presentation"] = presentation_hint
+                    setattr(scene_contract, "metadata", metadata)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1901,6 +2440,11 @@ def executor_cpu_finalize_transport(machine_response):
         "content": visible_text,
         "summary": visible_text,
         "render_blocks": blocks,
+        "presentation": _executor_scene_presentation_hint(
+            blocks,
+            semantic=semantic,
+            response_decision=response_decision,
+        ),
     }
 
     _executor_strip_duplicate_visible_fields(result, visible_text, blocks)
@@ -2062,6 +2606,15 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
     if machine_request is None:
         raise RuntimeError("MachineRequest missing from executor context")
 
+    selected_room_names = _executor_select_room_names(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        task_type=detect_task_type(semantic, cognition, state, conversation_space=context.get("conversation_space")),
+    )
+
     room_results = []
     room_execution_report = []
     best_machine_response = None
@@ -2070,33 +2623,52 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
     canonical_room_name = "text"
 
     for room in ROOMS:
+        room_name = normalize_text(getattr(room, "name", "unknown")).lower()
+
+        if not _executor_room_is_selected(room_name, selected_room_names):
+            executor_cpu_register_room(
+                room_execution_report,
+                room_name,
+                status="skipped",
+                reason="not_selected",
+            )
+            continue
+
         try:
-            # Rooms are capability nodes, not broadcast listeners.
-            # Evaluate relevance before execution so an ordinary text request
-            # cannot accidentally execute image/code/link/graph side effects.
-            # TextRoom intentionally evaluates as the universal text fallback.
+            can_handle = True
+            if hasattr(room, "can_handle"):
+                try:
+                    can_handle = bool(room.can_handle(text, context))
+                except Exception:
+                    can_handle = True
+
             room_score = 0.0
-            try:
-                room_score = float(
-                    room.evaluate(
-                        text,
-                        context,
-                    ) or 0.0
-                )
-            except Exception as evaluation_error:
+            if hasattr(room, "evaluate"):
+                try:
+                    room_score = float(room.evaluate(text, context) or 0.0)
+                except Exception as evaluation_error:
+                    executor_cpu_register_room(
+                        room_execution_report,
+                        room_name,
+                        status="skipped",
+                        reason="evaluation_error",
+                        error=str(evaluation_error),
+                    )
+                    continue
+
+            if not can_handle and room_name != "text":
                 executor_cpu_register_room(
                     room_execution_report,
-                    getattr(room, "name", "unknown"),
+                    room_name,
                     status="skipped",
-                    reason="evaluation_error",
-                    error=str(evaluation_error),
+                    reason="can_handle_false",
                 )
                 continue
 
-            if room_score <= 0.0:
+            if room_name != "text" and room_score <= 0.0:
                 executor_cpu_register_room(
                     room_execution_report,
-                    getattr(room, "name", "unknown"),
+                    room_name,
                     status="skipped",
                     reason="not_relevant",
                 )
@@ -2118,23 +2690,26 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
                         extracted = _executor_payload_from_mapping_direct(mr)
 
             if extracted is not None:
-                room_name = getattr(room, "name", "unknown")
                 room_results.append({"room": room_name, "machine_response": extracted})
-                executor_cpu_register_room(room_execution_report, room_name, status="ok")
+                executor_cpu_register_room(room_execution_report, room_name, status="ok", score=room_score)
 
                 score = _executor_response_score(extracted)
                 if best_machine_response is None or score > best_score:
                     best_machine_response = extracted
                     best_score = score
 
-                if _executor_is_canonical_room(room_name, room):
-                    if canonical_machine_response is None or _executor_has_meaningful_payload(extracted):
-                        canonical_machine_response = extracted
-                        canonical_room_name = room_name or canonical_room_name
+                if room_name == "text":
+                    canonical_machine_response = extracted
+                    canonical_room_name = room_name
+                elif canonical_machine_response is None and _executor_has_meaningful_payload(extracted):
+                    canonical_machine_response = extracted
+                    canonical_room_name = room_name
                 continue
 
+            executor_cpu_register_room(room_execution_report, room_name, status="empty", score=room_score)
+
         except Exception as exc:
-            room_execution_report.append({"room": getattr(room, "name", "unknown"), "status": "error", "error": str(exc)})
+            room_execution_report.append({"room": room_name, "status": "error", "error": str(exc)})
             continue
 
     if canonical_machine_response is None:
@@ -2142,8 +2717,6 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
 
     if canonical_machine_response is None:
         raise RuntimeError("No MachineResponse produced")
-
-    room_results = sorted(room_results, key=lambda item: _executor_response_score(item.get("machine_response")), reverse=True)
 
     machine_response = canonical_machine_response
     machine_response = _executor_recover_room_response(
@@ -2186,6 +2759,18 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
     conversation_space["dialog"] = timeline
     setattr(machine_response, "conversation_space", conversation_space)
 
+    # Canonical route metadata for all later transport layers.
+    try:
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+        setattr(machine_response, "executor_room_selection", selected_room_names)
+        setattr(machine_response, "executor_selected_room", canonical_room_name)
+        setattr(machine_response, "executor_room_execution_report", room_execution_report)
+    except Exception:
+        pass
+
     machine_response = executor_cpu_normalize_answer(machine_response)
 
     executor_cpu_transport_diag("BEFORE_REFLECT", machine_response)
@@ -2202,27 +2787,17 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
         room_results = [{"machine_response": machine_response}]
     reflected_machine_response = machine_response
 
-    registry_result = registry_parent_dispatch(machine_request, room_results)
-    machine_response = reflected_machine_response
-
-    if registry_result is not None:
-        try:
-            registry_diagnostics = getattr(registry_result, "registry_diagnostics", None)
-            if registry_diagnostics not in (None, "", [], {}):
-                machine_response.registry_diagnostics = registry_diagnostics
-        except Exception:
-            pass
-
-        try:
-            merge_inputs = list(room_results)
-            merge_inputs.append({"room": "registry", "machine_response": registry_result})
-            machine_response = _executor_merge_room_results_into_canonical_response(
-                machine_response,
-                merge_inputs,
-                canonical_room_name=canonical_room_name,
-            )
-        except Exception:
-            pass
+    # Canonical single route: merge only the selected room results.
+    # No parent registry broadcast is allowed here because it can
+    # re-open unrelated rooms and re-introduce duplicate visible text.
+    try:
+        machine_response = _executor_merge_room_results_into_canonical_response(
+            machine_response,
+            room_results,
+            canonical_room_name=canonical_room_name,
+        )
+    except Exception:
+        pass
 
     machine_response = executor_cpu_normalize_answer(machine_response)
 
@@ -2276,10 +2851,15 @@ def detect_task_type(semantic, cognition, state, conversation_space=None):
     if trajectory:
         track_trajectory(trajectory)
 
+    requested_representation = _executor_requested_representation(semantic, {})
+    if requested_representation in {"graph", "table", "formula", "diagram", "link", "code", "gallery"}:
+        track_modality("renderer")
+        return "renderer"
+
     if semantic.get("render_intent"):
         track_modality("renderer")
         return "renderer"
-    if semantic.get("visual_generation_needed"):
+    if semantic.get("visual_generation_needed") or semantic.get("explicit_image_generation_only"):
         track_modality("image")
         return "image"
     if semantic.get("math_intent"):
@@ -2408,6 +2988,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     context["second_circle_context"] = second_circle_context
 
     setattr(context["machine_request"], "current_turn", current_turn)
+    try:
+        setattr(context["machine_request"], "semantic", semantic)
+        setattr(context["machine_request"], "cognition", cognition)
+        setattr(context["machine_request"], "response_decision", response_decision)
+        setattr(context["machine_request"], "conversation_space", conversation_space)
+        setattr(context["machine_request"], "state", state)
+    except Exception:
+        pass
 
     # Make the canonical MachineRequest self-describing for room adapters.
     # Rooms must never use the MachineRequest object itself as a StateManager
@@ -2700,3 +3288,2248 @@ def executor_cpu_pipeline_compat(machine_response):
 
 def executor_cpu_scene_contract(scene_contract, machine_response, scene):
     return executor_cpu_sync_scene_contract(scene_contract, machine_response, scene)
+
+
+# =====================================================
+# APRIL PROCESSOR V6 — LOGICAL / CONTRADICTION-AWARE OVERRIDES
+# =====================================================
+
+from difflib import SequenceMatcher
+
+
+def _executor_normalize_for_compare(value: Any) -> str:
+    text = normalize_text(value).lower()
+    text = text.replace("\u00ad", "")
+    text = re.sub(r"[“”«»\"'`]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _executor_token_set(text: Any) -> set[str]:
+    normalized = _executor_normalize_for_compare(text)
+    if not normalized:
+        return set()
+    tokens = re.findall(r"[a-zа-яё0-9]+", normalized, flags=re.IGNORECASE)
+    stop = {
+        "и", "в", "во", "на", "но", "а", "что", "это", "как", "к", "ко",
+        "из", "у", "о", "об", "от", "по", "за", "для", "the", "and", "or",
+        "to", "of", "a", "an", "is", "are", "was", "were", "be", "been",
+    }
+    return {t for t in tokens if t not in stop and len(t) > 1}
+
+
+def _executor_similarity(a: Any, b: Any) -> float:
+    aa = _executor_normalize_for_compare(a)
+    bb = _executor_normalize_for_compare(b)
+    if not aa or not bb:
+        return 0.0
+    ratio = SequenceMatcher(None, aa, bb).ratio()
+    ta = _executor_token_set(aa)
+    tb = _executor_token_set(bb)
+    if ta and tb:
+        jaccard = len(ta & tb) / max(1, len(ta | tb))
+        ratio = max(ratio, jaccard)
+    return ratio
+
+
+def _executor_sentence_split(text: str) -> list[str]:
+    normalized = normalize_text(text)
+    if not normalized:
+        return []
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", normalized) if p.strip()]
+    sentences: list[str] = []
+    for paragraph in paragraphs or [normalized]:
+        parts = re.split(r"(?<=[.!?…])\s+", paragraph)
+        parts = [p.strip() for p in parts if p.strip()]
+        if parts:
+            sentences.extend(parts)
+        else:
+            sentences.append(paragraph.strip())
+    cleaned: list[str] = []
+    seen = set()
+    for sent in sentences:
+        norm = _executor_normalize_for_compare(sent)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        cleaned.append(sent)
+    return cleaned
+
+
+def _executor_has_negation(sentence: str) -> bool:
+    s = _executor_normalize_for_compare(sentence)
+    return bool(re.search(r"\b(не|нет|ни|without|no|not)\b", s, flags=re.IGNORECASE))
+
+
+def _executor_internal_contradiction_report(
+    machine_response: Any,
+    *,
+    semantic: Optional[dict] = None,
+    response_decision: Optional[dict] = None,
+    state: Optional[dict] = None,
+    blocks: Optional[list] = None,
+) -> dict:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+    state = state or {}
+    blocks = list(blocks or getattr(machine_response, "render_blocks", []) or [])
+
+    answer = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+    )
+    summary = _executor_best_text(getattr(machine_response, "summary", ""))
+    canonical_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+        getattr(machine_response, "response", ""),
+        getattr(machine_response, "explanation", ""),
+    )
+
+    requested_representation = _executor_requested_representation(semantic, response_decision)
+    block_types = [normalize_text(b.get("type")).lower() for b in blocks if isinstance(b, dict)]
+    text_blocks = [
+        _executor_normalize_for_compare(b.get("content") or b.get("text") or "")
+        for b in blocks
+        if isinstance(b, dict) and normalize_text(b.get("type")).lower() in {"text", "markdown"}
+    ]
+
+    report = {
+        "answer_content_similarity": _executor_similarity(getattr(machine_response, "answer", ""), getattr(machine_response, "content", "")),
+        "answer_summary_similarity": _executor_similarity(getattr(machine_response, "answer", ""), getattr(machine_response, "summary", "")),
+        "summary_content_similarity": _executor_similarity(getattr(machine_response, "summary", ""), getattr(machine_response, "content", "")),
+        "duplicate_text_blocks": False,
+        "duplicated_text_count": 0,
+        "has_structure_mismatch": False,
+        "missing_requested_representation": False,
+        "contradiction_signals": [],
+        "repair_hints": [],
+        "canonical_text_length": len(canonical_text),
+        "block_types": block_types,
+        "requested_representation": requested_representation,
+        "dialog_focus": state.get("focus_state", state.get("focus", {})),
+        "active_topic": state.get("active_topic") or state.get("current_topic") or "",
+    }
+
+    # Duplicate text detection
+    if text_blocks:
+        unique_texts = []
+        seen = set()
+        for t in text_blocks:
+            if t and t not in seen:
+                seen.add(t)
+                unique_texts.append(t)
+        if len(text_blocks) != len(unique_texts):
+            report["duplicate_text_blocks"] = True
+            report["duplicated_text_count"] = len(text_blocks) - len(unique_texts)
+            report["contradiction_signals"].append("duplicate_visible_text")
+            report["repair_hints"].append("collapse_duplicate_text_blocks")
+
+    # Mismatch between canonical text and blocks
+    if canonical_text and blocks:
+        visible_text_blocks = [b for b in blocks if isinstance(b, dict) and normalize_text(b.get("type")).lower() in {"text", "markdown"}]
+        if visible_text_blocks:
+            best = max(
+                visible_text_blocks,
+                key=lambda b: _executor_similarity(
+                    canonical_text,
+                    b.get("content") or b.get("text") or "",
+                ),
+            )
+            best_score = _executor_similarity(canonical_text, best.get("content") or best.get("text") or "")
+            report["answer_content_similarity"] = max(report["answer_content_similarity"], best_score)
+
+    # Structure mismatch: the text talks about a structure, but no matching block exists.
+    if requested_representation and requested_representation != "text":
+        if requested_representation not in block_types and not (
+            requested_representation == "diagram" and "graph" in block_types
+        ) and not (
+            requested_representation == "image" and "gallery" in block_types
+        ):
+            report["missing_requested_representation"] = True
+            report["has_structure_mismatch"] = True
+            report["contradiction_signals"].append(f"missing_{requested_representation}_block")
+            report["repair_hints"].append(f"promote_or_build_{requested_representation}_block")
+
+    # Linguistic contradiction heuristic: same subject appears in negated and affirmative sentences.
+    sentences = _executor_sentence_split(canonical_text)
+    entities = {}
+    for sent in sentences:
+        tokens = _executor_token_set(sent)
+        neg = _executor_has_negation(sent)
+        for token in tokens:
+            bucket = entities.setdefault(token, {"neg": 0, "pos": 0, "examples": []})
+            if neg:
+                bucket["neg"] += 1
+            else:
+                bucket["pos"] += 1
+            if len(bucket["examples"]) < 2:
+                bucket["examples"].append(sent)
+
+    contradictions = []
+    for token, bucket in entities.items():
+        if bucket["neg"] and bucket["pos"]:
+            contradictions.append(
+                {
+                    "token": token,
+                    "neg": bucket["neg"],
+                    "pos": bucket["pos"],
+                    "examples": bucket["examples"],
+                }
+            )
+    if contradictions:
+        report["contradiction_signals"].append("negation_affirmation_mix")
+        report["repair_hints"].append("separate_conflicting_claims")
+        report["logical_contradictions"] = contradictions
+    else:
+        report["logical_contradictions"] = []
+
+    # Heuristic: if answer and content differ too much, preserve but mark the mismatch.
+    if answer and getattr(machine_response, "content", "") and _executor_similarity(answer, getattr(machine_response, "content", "")) < 0.55:
+        report["has_structure_mismatch"] = True
+        report["contradiction_signals"].append("answer_content_mismatch")
+        report["repair_hints"].append("reconcile_answer_content")
+
+    if summary and answer and _executor_similarity(summary, answer) > 0.90 and len(summary) >= max(120, int(len(answer) * 0.75)):
+        report["contradiction_signals"].append("summary_echoes_answer")
+        report["repair_hints"].append("keep_summary_compact")
+
+    return report
+
+
+def _executor_compact_scene_summary(
+    canonical_text: str,
+    blocks: list,
+    report: Optional[dict] = None,
+) -> str:
+    report = report or {}
+    block_types = []
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        t = normalize_text(block.get("type")).lower()
+        if t and t not in block_types:
+            block_types.append(t)
+
+    text = _executor_normalize_for_compare(canonical_text)
+    if not text:
+        text = "logical scene"
+
+    if block_types:
+        hint = ", ".join(block_types[:4])
+        summary = f"{_clip_text(canonical_text, 140)} | scene: {hint}"
+    else:
+        summary = _clip_text(canonical_text, 180)
+
+    if report.get("missing_requested_representation"):
+        rep = report.get("requested_representation") or "representation"
+        summary = f"{summary} | pending: {rep}"
+
+    return _clip_text(summary, 260)
+
+
+def _executor_parse_scene_units(text: str) -> list[dict]:
+    raw = normalize_text(text)
+    if not raw:
+        return []
+
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", raw) if p.strip()]
+    if not parts:
+        parts = [raw]
+
+    units: list[dict] = []
+    for idx, part in enumerate(parts):
+        stripped = part.strip()
+
+        if _executor_looks_like_markdown_table(stripped):
+            units.append(_executor_make_table_block(_executor_parse_markdown_table(stripped), stripped, idx, "text"))
+            continue
+
+        if stripped.startswith("```") and stripped.endswith("```"):
+            units.append(_executor_make_code_block(_executor_strip_code_fence(stripped), stripped, idx, "text"))
+            continue
+
+        if _looks_like_formula_text(stripped):
+            units.append(_executor_make_formula_block(stripped, stripped, idx, "text"))
+            continue
+
+        if _executor_has_url(stripped):
+            units.append(_executor_make_link_block(stripped, stripped, idx, "text"))
+            continue
+
+        # Preserve headings and lists as text, but annotate them for downstream scene logic.
+        block = _executor_make_text_block(stripped, idx, "text")
+        if re.match(r"^(#+\s+|[A-ZА-ЯЁ0-9\s]{4,}:$)", stripped):
+            block["subtype"] = "heading"
+        elif re.match(r"^(\-|\*|•|\d+[\.\)])\s+", stripped, flags=re.IGNORECASE):
+            block["subtype"] = "list"
+        units.append(block)
+
+    return units
+
+
+def _executor_normalize_scene_blocks(blocks: list[dict], canonical_text: str = "") -> list[dict]:
+    normalized: list[dict] = []
+    seen = set()
+
+    for idx, block in enumerate(blocks or []):
+        if not isinstance(block, dict):
+            block = _executor_make_text_block(normalize_text(block), idx, "text")
+
+        block = dict(block)
+        block_type = normalize_text(block.get("type")).lower() or "text"
+        if block_type == "markdown":
+            block_type = "text"
+            block["type"] = "text"
+
+        if block_type in {"text", "formula", "function"} and _executor_looks_like_internal_room_payload(block.get("content")):
+            continue
+
+        # Ensure canonical renderer hints are always present.
+        block["renderer"] = block.get("renderer") or _executor_renderer_for_type(block_type)
+        block["viewer"] = block.get("viewer") or block["renderer"]
+
+        content_norm = _executor_normalize_for_compare(block.get("content") or block.get("text") or block.get("answer") or "")
+        key = (
+            block_type,
+            content_norm,
+            block.get("source_room"),
+            block.get("label"),
+        )
+
+        if key in seen:
+            continue
+        seen.add(key)
+
+        block.setdefault("sequence_index", idx)
+        normalized.append(block)
+
+    if canonical_text:
+        canonical_norm = _executor_normalize_for_compare(canonical_text)
+        has_text = any(
+            normalize_text(b.get("type")).lower() in {"text", "markdown"} and _executor_normalize_for_compare(b.get("content") or b.get("text") or "") == canonical_norm
+            for b in normalized
+        )
+        if canonical_norm and not has_text:
+            normalized.insert(0, _executor_make_text_block(canonical_text, 0, "text"))
+
+    return normalized
+
+
+def _executor_build_logical_scene_blocks(machine_response: Any, semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> list[dict]:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    canonical_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+        getattr(machine_response, "response", ""),
+        getattr(machine_response, "explanation", ""),
+    )
+
+    existing_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    contributions = getattr(machine_response, "contributions", None) or {}
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+
+    parsed_blocks = _executor_parse_scene_units(canonical_text)
+    blocks = []
+
+    if existing_blocks:
+        blocks.extend(existing_blocks)
+    if parsed_blocks:
+        blocks.extend(parsed_blocks)
+
+    # Contributions become first-class scene artifacts, never arbitrary text echoes.
+    if isinstance(contributions, dict) and contributions:
+        for idx, (key, value) in enumerate(contributions.items()):
+            block = _executor_contribution_to_block(key, value, index=idx, source_room="registry")
+            if block:
+                blocks.append(block)
+
+    # Provider artifacts are preserved as real blocks where possible.
+    for idx, artifact in enumerate(artifacts):
+        mapping = _executor_payload_to_mapping(artifact)
+        if not mapping:
+            continue
+        block = _executor_contribution_to_block(
+            normalize_text(mapping.get("artifact_type") or mapping.get("type") or ""),
+            mapping,
+            index=idx,
+            source_room="artifact",
+        )
+        if block:
+            blocks.append(block)
+
+    # If the request explicitly asks for a representation, keep it as a hint,
+    # but never drop the rest of the logical scene.
+    requested_representation = _executor_requested_representation(semantic, response_decision)
+    if requested_representation and requested_representation != "text":
+        requested = requested_representation.lower()
+        prioritized = []
+        others = []
+        for block in blocks:
+            block_type = normalize_text(block.get("type")).lower()
+            if block_type == requested or (requested == "diagram" and block_type == "graph") or (requested == "image" and block_type == "gallery"):
+                prioritized.append(block)
+            else:
+                others.append(block)
+        if prioritized:
+            blocks = prioritized + others
+
+    blocks = _executor_normalize_scene_blocks(blocks, canonical_text=canonical_text)
+
+    # A purely duplicated text scene is an execution smell; collapse it to one.
+    if canonical_text:
+        blocks = _executor_deduplicate_visible_render_blocks(blocks, visible_text=canonical_text)
+
+    return blocks
+
+
+def _executor_scene_presentation_hint(blocks: list[dict], semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> dict:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    preferred_representation = _executor_requested_representation(semantic, response_decision)
+    block_type = "text"
+    if blocks:
+        block_type = normalize_text(blocks[0].get("type")).lower() or "text"
+
+    return {
+        "preferred_representation": preferred_representation,
+        "payload_type": block_type,
+        "renderer": _executor_renderer_for_type(block_type),
+        "viewer": _executor_renderer_for_type(block_type),
+        "priority": blocks[0].get("priority", 0) if blocks else 0,
+    }
+
+
+def apply_representation_gate(blocks, response_decision=None, semantic=None):
+    """
+    V6: representation is a hint, not a destructive gate.
+    Keep the full logical scene and only reorder blocks so the
+    requested representation appears earlier when present.
+    """
+    response_decision = response_decision or {}
+    semantic = semantic or {}
+    preferred = normalize_text(
+        response_decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+        or ""
+    ).lower()
+
+    blocks = list(blocks or [])
+    if not preferred or not blocks:
+        return blocks
+
+    preferred_blocks = []
+    other_blocks = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            other_blocks.append(block)
+            continue
+        t = normalize_text(block.get("type")).lower()
+        if t == preferred or (preferred == "diagram" and t == "graph") or (preferred == "image" and t == "gallery"):
+            preferred_blocks.append(block)
+        else:
+            other_blocks.append(block)
+
+    return preferred_blocks + other_blocks if preferred_blocks else blocks
+
+
+def executor_cpu_materialize_blocks(machine_response):
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    blocks = _executor_build_logical_scene_blocks(
+        machine_response,
+        semantic=semantic,
+        response_decision=response_decision,
+    )
+    machine_response.render_blocks = blocks
+    machine_response.logical_scene_blocks = blocks
+    machine_response.logical_scene_presentation = _executor_scene_presentation_hint(
+        blocks,
+        semantic=semantic,
+        response_decision=response_decision,
+    )
+    return machine_response
+
+
+def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machine_response):
+    # Attach the route context first so the materializer can reason from the same scene.
+    try:
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+    except Exception:
+        pass
+
+    machine_response = executor_cpu_build_cognitive_context(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+    machine_response = executor_cpu_build_executor_decision(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+
+    # Deep logical analysis happens before the plan is compressed into visible blocks.
+    logical_report = _executor_internal_contradiction_report(
+        machine_response,
+        semantic=semantic,
+        response_decision=response_decision,
+        state=state,
+    )
+
+    machine_response = executor_cpu_build_presentation_plan(machine_response)
+    machine_response = executor_cpu_integrate_presentation(machine_response)
+    machine_response = executor_cpu_memory_fusion(machine_response)
+    machine_response = executor_cpu_scene_intelligence(machine_response)
+    machine_response = executor_cpu_user_alignment(machine_response)
+    machine_response = executor_cpu_synthetic_verification(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(machine_response, semantic=semantic, response_decision=response_decision)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    try:
+        machine_response.executor_logical_report = logical_report
+        metadata = getattr(machine_response, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["logical_report"] = logical_report
+        metadata["scene_presentation"] = _executor_scene_presentation_hint(
+            list(getattr(machine_response, "render_blocks", []) or []),
+            semantic=semantic,
+            response_decision=response_decision,
+        )
+        setattr(machine_response, "metadata", metadata)
+    except Exception:
+        pass
+
+    return machine_response
+
+
+def executor_cpu_scene_pipeline(machine_response):
+    executor_cpu_transport_diag("BEFORE_BUILD_MACHINE_SCENE", machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    scene = build_machine_scene(machine_response)
+    try:
+        setattr(scene, "conversation_space", getattr(machine_response, "conversation_space", None))
+    except Exception:
+        pass
+
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+    try:
+        setattr(scene, "timeline", conversation_space.get("timeline", []))
+        setattr(scene, "last_user_turn", conversation_space.get("last_user_turn"))
+        setattr(scene, "last_april_turn", conversation_space.get("last_april_turn"))
+        setattr(scene, "active_goal", conversation_space.get("response_decision", {}).get("goal"))
+    except Exception:
+        pass
+
+    scene_contract = build_scene_contract(scene)
+    executor_cpu_transport_diag("AFTER_BUILD_SCENE_CONTRACT", machine_response, scene_contract)
+
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    blocks = _executor_build_logical_scene_blocks(
+        machine_response,
+        semantic=getattr(machine_response, "executor_semantic", {}) or {},
+        response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+    )
+
+    try:
+        presentation_hint = _executor_scene_presentation_hint(
+            blocks,
+            semantic=getattr(machine_response, "executor_semantic", {}) or {},
+            response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+        )
+        if isinstance(scene_contract, dict):
+            scene_contract["answer"] = getattr(machine_response, "answer", "")
+            scene_contract["content"] = getattr(machine_response, "content", "")
+            scene_contract["summary"] = getattr(machine_response, "summary", "")
+            scene_contract["render_blocks"] = blocks
+            scene_contract.setdefault("metadata", {})
+            if isinstance(scene_contract["metadata"], dict):
+                scene_contract["metadata"]["presentation"] = presentation_hint
+        else:
+            setattr(scene_contract, "answer", getattr(machine_response, "answer", ""))
+            setattr(scene_contract, "content", getattr(machine_response, "content", ""))
+            setattr(scene_contract, "summary", getattr(machine_response, "summary", ""))
+            setattr(scene_contract, "render_blocks", blocks)
+            try:
+                metadata = getattr(scene_contract, "metadata", None)
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata["presentation"] = presentation_hint
+                setattr(scene_contract, "metadata", metadata)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        if isinstance(scene, dict):
+            scene["answer"] = getattr(machine_response, "answer", "")
+            scene["content"] = getattr(machine_response, "content", "")
+            scene["summary"] = getattr(machine_response, "summary", "")
+            scene["render_blocks"] = blocks
+        else:
+            setattr(scene, "answer", getattr(machine_response, "answer", ""))
+            setattr(scene, "content", getattr(machine_response, "content", ""))
+            setattr(scene, "summary", getattr(machine_response, "summary", ""))
+            setattr(scene, "render_blocks", blocks)
+    except Exception:
+        pass
+
+    executor_cpu_transport_diag("AFTER_SYNC_SCENE_CONTRACT", machine_response, scene_contract)
+
+    return {
+        "canonical_space": True,
+        "machine_response": machine_response,
+        "machine_scene": scene,
+        "answer": getattr(machine_response, "answer", None),
+        "content": getattr(machine_response, "content", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": blocks,
+        "scene_contract": scene_contract,
+        "scene_runtime": {
+            "conversation_space": conversation_space,
+            "current_turn": conversation_space.get("current_turn"),
+            "timeline": conversation_space.get("timeline", []),
+            "last_user_turn": conversation_space.get("last_user_turn"),
+            "last_april_turn": conversation_space.get("last_april_turn"),
+            "machine_scene": scene,
+            "render_blocks": blocks,
+            "answer": getattr(machine_response, "answer", None),
+            "content": getattr(machine_response, "content", None),
+            "summary": getattr(machine_response, "summary", None),
+            "modalities": conversation_space.get("modalities", {}),
+            "dialog": conversation_space.get("dialog", []),
+            "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
+            "focus": conversation_space.get("focus", {}),
+        },
+    }
+
+
+def executor_cpu_finalize_transport(machine_response):
+    """
+    Final processor pass:
+    - keep the canonical answer untouched,
+    - analyze the whole answer as one logical scene,
+    - keep a compact summary for context,
+    - project one visible route,
+    - never rebuild from fallback branches.
+    """
+    executor_cpu_transport_diag("TRANSPORT_ENTRY", machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+
+    scene = executor_cpu_scene_pipeline(machine_response)
+    conversation_space = getattr(machine_response, "conversation_space", None)
+    scene_contract = scene.get("scene_contract")
+
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+
+    source_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    if not source_blocks:
+        source_blocks = _executor_build_logical_scene_blocks(
+            machine_response,
+            semantic=semantic,
+            response_decision=response_decision,
+        )
+    if not source_blocks and visible_text:
+        source_blocks = [{
+            "type": "text",
+            "content": visible_text,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "source_room": "text",
+        }]
+
+    source_blocks = apply_representation_gate(
+        source_blocks,
+        response_decision=response_decision,
+        semantic=semantic,
+    )
+    blocks = _executor_deduplicate_visible_render_blocks(
+        source_blocks,
+        visible_text=visible_text,
+    )
+
+    machine_response.render_blocks = blocks
+
+    # Preserve the visible answer, but keep summary compact and scene-aware.
+    if visible_text:
+        machine_response.answer = visible_text
+        machine_response.content = visible_text
+    machine_response.summary = _executor_compact_scene_summary(
+        visible_text,
+        blocks,
+        report=getattr(machine_response, "executor_logical_report", {}) or {},
+    )
+
+    _executor_store_canonical_text_metadata(
+        machine_response,
+        answer=visible_text,
+        content=visible_text,
+        summary=getattr(machine_response, "summary", ""),
+        original_answer=getattr(machine_response, "provider_original_answer", "") or "",
+        original_content=getattr(machine_response, "provider_original_content", "") or "",
+    )
+
+    if scene_contract is not None:
+        _executor_store_canonical_text_metadata(
+            scene_contract,
+            answer=visible_text,
+            content=visible_text,
+            summary=getattr(machine_response, "summary", ""),
+            original_answer=getattr(machine_response, "provider_original_answer", "") if machine_response is not None else "",
+            original_content=getattr(machine_response, "provider_original_content", "") if machine_response is not None else "",
+        )
+        try:
+            presentation_hint = _executor_scene_presentation_hint(
+                blocks,
+                semantic=semantic,
+                response_decision=response_decision,
+            )
+            if isinstance(scene_contract, dict):
+                scene_contract["answer"] = visible_text
+                scene_contract["content"] = visible_text
+                scene_contract["summary"] = getattr(machine_response, "summary", "")
+                scene_contract["render_blocks"] = blocks
+                scene_contract.setdefault("metadata", {})
+                if isinstance(scene_contract["metadata"], dict):
+                    scene_contract["metadata"]["presentation"] = presentation_hint
+                    scene_contract["metadata"]["logical_report"] = getattr(machine_response, "executor_logical_report", {})
+            else:
+                setattr(scene_contract, "answer", visible_text)
+                setattr(scene_contract, "content", visible_text)
+                setattr(scene_contract, "summary", getattr(machine_response, "summary", ""))
+                setattr(scene_contract, "render_blocks", blocks)
+                try:
+                    metadata = getattr(scene_contract, "metadata", None)
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata["presentation"] = presentation_hint
+                    metadata["logical_report"] = getattr(machine_response, "executor_logical_report", {})
+                    setattr(scene_contract, "metadata", metadata)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    result = {
+        "transport_contract": "scene_first",
+        "provider_contract": "fiber_v3",
+        "conversation_space": conversation_space,
+        "machine_response": machine_response,
+        "machine_scene": scene.get("machine_scene"),
+        "scene_contract": scene_contract,
+        "current_turn": conversation_space.get("current_turn") if conversation_space else None,
+        "answer": visible_text,
+        "content": visible_text,
+        "summary": getattr(machine_response, "summary", ""),
+        "render_blocks": blocks,
+        "presentation": _executor_scene_presentation_hint(
+            blocks,
+            semantic=semantic,
+            response_decision=response_decision,
+        ),
+        "logical_report": getattr(machine_response, "executor_logical_report", {}),
+    }
+
+    _executor_strip_duplicate_visible_fields(result, visible_text, blocks)
+
+    if isinstance(scene, dict):
+        scene["answer"] = visible_text
+        scene["content"] = visible_text
+        scene["summary"] = getattr(machine_response, "summary", "")
+        scene["render_blocks"] = blocks
+
+    executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene_contract)
+    return result
+
+
+async def execute_rooms(user_id, text, context, semantic, cognition, response_decision, state, run_with_activity):
+    """
+    V6 override:
+    - use the same single route,
+    - select rooms by relevance,
+    - keep the canonical text room as the anchor,
+    - attach logical diagnostics to the response,
+    - never reintroduce a registry broadcast that can duplicate the scene.
+    """
+    machine_request = context.get("machine_request")
+    if machine_request is None:
+        raise RuntimeError("MachineRequest missing from executor context")
+
+    selected_room_names = _executor_select_room_names(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        task_type=detect_task_type(semantic, cognition, state, conversation_space=context.get("conversation_space")),
+    )
+
+    room_results = []
+    room_execution_report = []
+    best_machine_response = None
+    best_score = -1
+    canonical_machine_response = None
+    canonical_room_name = "text"
+
+    for room in ROOMS:
+        room_name = normalize_text(getattr(room, "name", "unknown")).lower()
+
+        if not _executor_room_is_selected(room_name, selected_room_names):
+            executor_cpu_register_room(
+                room_execution_report,
+                room_name,
+                status="skipped",
+                reason="not_selected",
+            )
+            continue
+
+        try:
+            can_handle = True
+            if hasattr(room, "can_handle"):
+                try:
+                    can_handle = bool(room.can_handle(text, context))
+                except Exception:
+                    can_handle = True
+
+            room_score = 0.0
+            if hasattr(room, "evaluate"):
+                try:
+                    room_score = float(room.evaluate(text, context) or 0.0)
+                except Exception as evaluation_error:
+                    executor_cpu_register_room(
+                        room_execution_report,
+                        room_name,
+                        status="skipped",
+                        reason="evaluation_error",
+                        error=str(evaluation_error),
+                    )
+                    continue
+
+            if not can_handle and room_name != "text":
+                executor_cpu_register_room(
+                    room_execution_report,
+                    room_name,
+                    status="skipped",
+                    reason="can_handle_false",
+                )
+                continue
+
+            if room_name != "text" and room_score <= 0.0:
+                executor_cpu_register_room(
+                    room_execution_report,
+                    room_name,
+                    status="skipped",
+                    reason="not_relevant",
+                )
+                continue
+
+            result = await room.handle(
+                user_id=user_id,
+                text=text,
+                context=machine_request,
+                run=run_with_activity,
+            )
+
+            extracted = _extract_machine_response(result)
+            if extracted is None and isinstance(result, dict):
+                mr = result.get("machine_response")
+                if isinstance(mr, (dict, MachineResponse)):
+                    extracted = _executor_materialize_machine_response(mr)
+                    if extracted is None and isinstance(mr, dict):
+                        extracted = _executor_payload_from_mapping_direct(mr)
+
+            if extracted is not None:
+                room_results.append({"room": room_name, "machine_response": extracted})
+                executor_cpu_register_room(room_execution_report, room_name, status="ok", score=room_score)
+
+                score = _executor_response_score(extracted)
+                if best_machine_response is None or score > best_score:
+                    best_machine_response = extracted
+                    best_score = score
+
+                if room_name == "text":
+                    canonical_machine_response = extracted
+                    canonical_room_name = room_name
+                elif canonical_machine_response is None and _executor_has_meaningful_payload(extracted):
+                    canonical_machine_response = extracted
+                    canonical_room_name = room_name
+                continue
+
+            executor_cpu_register_room(room_execution_report, room_name, status="empty", score=room_score)
+
+        except Exception as exc:
+            room_execution_report.append({"room": room_name, "status": "error", "error": str(exc)})
+            continue
+
+    if canonical_machine_response is None:
+        canonical_machine_response = best_machine_response
+
+    if canonical_machine_response is None:
+        raise RuntimeError("No MachineResponse produced")
+
+    machine_response = canonical_machine_response
+    machine_response = _executor_recover_room_response(
+        machine_response,
+        room_results,
+        machine_request=machine_request,
+        text=text,
+    )
+
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+    april_turn = {
+        "answer": getattr(machine_response, "answer", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": list(getattr(machine_response, "render_blocks", []) or []),
+    }
+    if "current_turn" in conversation_space and isinstance(conversation_space["current_turn"], dict):
+        conversation_space["current_turn"]["april"] = april_turn
+    conversation_space["last_april_turn"] = april_turn
+
+    timeline = conversation_space.setdefault("timeline", [])
+    if "current_turn" in conversation_space:
+        timeline.append(conversation_space["current_turn"])
+    conversation_space["dialog"] = timeline
+    setattr(machine_response, "conversation_space", conversation_space)
+
+    try:
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+        setattr(machine_response, "executor_room_selection", selected_room_names)
+        setattr(machine_response, "executor_selected_room", canonical_room_name)
+        setattr(machine_response, "executor_room_execution_report", room_execution_report)
+    except Exception:
+        pass
+
+    machine_response = executor_cpu_normalize_answer(machine_response)
+    executor_cpu_transport_diag("BEFORE_REFLECT", machine_response)
+    machine_response = executor_cpu_reflect(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+
+    setattr(machine_response, "room_execution_report", room_execution_report)
+    if not room_results:
+        room_results = [{"machine_response": machine_response}]
+
+    try:
+        machine_response = _executor_merge_room_results_into_canonical_response(
+            machine_response,
+            room_results,
+            canonical_room_name=canonical_room_name,
+        )
+    except Exception:
+        pass
+
+    if getattr(machine_response, "answer", ""):
+        canonical_answer = _executor_best_text(
+            getattr(machine_response, "answer", ""),
+            getattr(machine_response, "content", ""),
+        )
+        machine_response.answer = canonical_answer
+        machine_response.content = canonical_answer
+    machine_response.summary = _executor_compact_scene_summary(
+        getattr(machine_response, "answer", ""),
+        list(getattr(machine_response, "render_blocks", []) or []),
+        report=getattr(machine_response, "executor_logical_report", {}) or {},
+    )
+
+    if not list(getattr(machine_response, "render_blocks", []) or []) and getattr(machine_response, "answer", ""):
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": machine_response.answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "source_room": canonical_room_name,
+        }]
+
+    executor_cpu_transport_diag("AFTER_REFLECT", machine_response)
+    setattr(machine_response, "provider_transport_verified", True)
+    setattr(machine_response, "provider_contract_version", "fiber_v3_super")
+    return executor_cpu_finalize_transport(machine_response)
+
+
+async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
+    """
+    V6 override:
+    keeps the existing single route, but attaches the same semantic context
+    to the machine_request and response pipeline more explicitly so the processor
+    can reason over contradictions, scene structure, and dialog continuity.
+    """
+    chat_id = chat_id or user_id
+    cpu_trace_begin("EXECUTE", {"user_id": user_id})
+
+    state = get_state(user_id)
+
+    semantic = semantic_analyze(
+        text=text,
+        state=state,
+        history=state.get("dialog", []),
+        active_flow=state.get("active_flow", {}),
+        dialog_state=state.get("scene_state", {}),
+    )
+    update_dialog_context(user_id, semantic)
+
+    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
+    cognition = analyze_cognition(text=text, semantic=semantic, reasoning=reasoning, state=state)
+    visual_reference = build_visual_reference(semantic=semantic, cognition=cognition, text=text, state=state)
+
+    response_decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        state=state,
+        visual_reference=visual_reference,
+    )
+    task_type = detect_task_type(semantic, cognition, state, conversation_space=None)
+
+    context = build_executor_context(
+        user_id=user_id,
+        chat_id=chat_id,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+    )
+
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+
+    machine_memory = _build_executor_machine_memory(state, conversation_space)
+    machine_conversation = _build_executor_machine_conversation(conversation_space, text)
+
+    provider_goal, provider_reference_context = _executor_build_first_circle_goal(
+        text=text,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+
+    executor_provider_stage_log("PROVIDER_REQUEST", {"goal_len": len(provider_goal), "reference_context": bool(provider_reference_context)})
+
+    second_circle_context = _build_second_circle_context(
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+        conversation_space=conversation_space,
+        machine_memory=machine_memory,
+        machine_conversation=machine_conversation,
+        reference_context=provider_reference_context,
+    )
+
+    context["machine_request"] = _build_second_circle_machine_request(
+        text=text,
+        semantic=semantic,
+        provider_goal=provider_goal,
+        provider_reference_context=provider_reference_context,
+        second_circle_context=second_circle_context,
+    )
+    context["executor_state"] = state
+    context["executor_conversation_space"] = conversation_space
+    context["second_circle_context"] = second_circle_context
+
+    setattr(context["machine_request"], "current_turn", current_turn)
+    try:
+        setattr(context["machine_request"], "semantic", semantic)
+        setattr(context["machine_request"], "cognition", cognition)
+        setattr(context["machine_request"], "response_decision", response_decision)
+        setattr(context["machine_request"], "conversation_space", conversation_space)
+        setattr(context["machine_request"], "state", state)
+        setattr(context["machine_request"], "user_id", user_id)
+        setattr(context["machine_request"], "chat_id", chat_id)
+    except Exception:
+        pass
+
+    if "factory_hook_registration" in kwargs:
+        executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
+
+    result = await execute_rooms(
+        user_id=user_id,
+        text=text,
+        context=context,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        run_with_activity=run_with_activity,
+    )
+
+    if isinstance(result, dict):
+        machine_response = result.get("machine_response")
+        if isinstance(machine_response, MachineResponse):
+            result["machine_response"] = machine_response
+            if _executor_value_is_empty(result.get("answer")):
+                result["answer"] = getattr(machine_response, "answer", "")
+            if _executor_value_is_empty(result.get("content")):
+                result["content"] = getattr(machine_response, "content", "")
+            if _executor_value_is_empty(result.get("summary")):
+                result["summary"] = getattr(machine_response, "summary", "")
+            if _executor_value_is_empty(result.get("render_blocks")):
+                result["render_blocks"] = list(getattr(machine_response, "render_blocks", []) or [])
+
+    executor_provider_stage_log(
+        "PROVIDER_RESPONSE",
+        {
+            "has_machine_response": isinstance(result, dict) and "machine_response" in result,
+            "has_scene_contract": isinstance(result, dict) and "scene_contract" in result,
+            "render_blocks": len((result.get("render_blocks") if isinstance(result, dict) else []) or []),
+        },
+    )
+
+    result = executor_cpu_factory_bridge(result)
+    result = executor_cpu_gateway_dispatch(result)
+    cpu_trace_success("EXECUTE")
+    return result
+
+
+
+# =====================================================
+# APRIL QUANTUM PROCESSOR 1.0 — CONTRADICTION-AWARE OVERRIDES
+# =====================================================
+
+APRIL_QUANTUM_PROCESSOR_VERSION = "april_quantum_1_0"
+APRIL_QUANTUM_PROCESSOR_NAME = "APRIL Quantum Processor"
+APRIL_QUANTUM_SINGLE_ROUTE = True
+APRIL_QUANTUM_NO_FALLBACKS = True
+
+
+def _quantum_norm(value: Any) -> str:
+    text = normalize_text(value).lower()
+    text = text.replace("\u00ad", "")
+    text = re.sub(r"[“”«»\"'`]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _quantum_tokens(text: Any) -> set[str]:
+    normalized = _quantum_norm(text)
+    if not normalized:
+        return set()
+    tokens = re.findall(r"[a-zа-яё0-9]+", normalized, flags=re.IGNORECASE)
+    stop = {
+        "и", "в", "во", "на", "но", "а", "что", "это", "как", "к", "ко",
+        "из", "у", "о", "об", "от", "по", "за", "для", "the", "and", "or",
+        "to", "of", "a", "an", "is", "are", "was", "were", "be", "been",
+    }
+    return {t for t in tokens if t not in stop and len(t) > 1}
+
+
+def _quantum_similarity(a: Any, b: Any) -> float:
+    aa = _quantum_norm(a)
+    bb = _quantum_norm(b)
+    if not aa or not bb:
+        return 0.0
+    ratio = SequenceMatcher(None, aa, bb).ratio()
+    ta = _quantum_tokens(aa)
+    tb = _quantum_tokens(bb)
+    if ta and tb:
+        ratio = max(ratio, len(ta & tb) / max(1, len(ta | tb)))
+    return ratio
+
+
+def _quantum_sentence_split(text: Any) -> list[str]:
+    raw = normalize_text(text)
+    if not raw:
+        return []
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", raw) if p.strip()]
+    if not parts:
+        parts = [raw]
+    sentences: list[str] = []
+    for part in parts:
+        local = re.split(r"(?<=[.!?…])\s+", part)
+        local = [x.strip() for x in local if x.strip()]
+        sentences.extend(local or [part.strip()])
+    cleaned: list[str] = []
+    seen = set()
+    for sent in sentences:
+        norm = _quantum_norm(sent)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        cleaned.append(sent)
+    return cleaned
+
+
+def _quantum_has_negation(sentence: str) -> bool:
+    s = _quantum_norm(sentence)
+    return bool(re.search(r"\b(не|нет|ни|без|without|no|not)\b", s, flags=re.IGNORECASE))
+
+
+def _quantum_compact_scene_summary(canonical_text: str, blocks: list, report: Optional[dict] = None) -> str:
+    report = report or {}
+    block_types = []
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        t = normalize_text(block.get("type")).lower()
+        if t and t not in block_types:
+            block_types.append(t)
+    if not canonical_text:
+        canonical_text = "logical scene"
+    base = _clip_text(canonical_text, 180)
+    if block_types:
+        base = f"{base} | scene: {', '.join(block_types[:5])}"
+    if report.get("missing_requested_representation"):
+        base = f"{base} | pending: {report.get('requested_representation') or 'representation'}"
+    return _clip_text(base, 260)
+
+
+def _quantum_requested_representation(semantic: Optional[dict], response_decision: Optional[dict]) -> str:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+    candidates = (
+        semantic.get("requested_representation"),
+        semantic.get("current_representation"),
+        semantic.get("preferred_representation"),
+        response_decision.get("preferred_representation"),
+        response_decision.get("representation"),
+        response_decision.get("render_intent_representation"),
+    )
+    for candidate in candidates:
+        text = normalize_text(candidate).lower()
+        if not text:
+            continue
+        return "text" if text in {"markdown", "text"} else text
+    return "text"
+
+
+def _quantum_select_room_names(text: Any, semantic: Optional[dict], cognition: Optional[dict], response_decision: Optional[dict], state: Optional[dict], task_type: str) -> list[str]:
+    semantic = semantic or {}
+    cognition = cognition or {}
+    response_decision = response_decision or {}
+    state = state or {}
+
+    selected: list[str] = ["text"]
+
+    representation = _quantum_requested_representation(semantic, response_decision)
+    room_map = {
+        "table": "table",
+        "graph": "graph",
+        "formula": "formula",
+        "diagram": "diagram",
+        "link": "link",
+        "code": "code",
+        "gallery": "gallery",
+        "image": "image_generate",
+        "image_edit": "image_edit",
+    }
+    if representation in room_map:
+        selected.append(room_map[representation])
+
+    if semantic.get("visual_generation_needed") or semantic.get("explicit_image_generation_only"):
+        selected.append("image_generate")
+    if semantic.get("explicit_image_edit_only") or semantic.get("image_edit_needed"):
+        selected.append("image_edit")
+
+    for domain in list(dict.fromkeys((semantic.get("required_domains", []) or []) + (semantic.get("candidate_domains", []) or []))):
+        for room_name in build_domain_room_map().get(domain, []):
+            selected.append(room_name)
+
+    if task_type == "image":
+        selected.append("image_generate")
+    if task_type == "math":
+        selected.append("formula")
+    if task_type == "renderer":
+        selected.append(room_map.get(representation, "text"))
+
+    # Keep unique order.
+    result = []
+    seen = set()
+    for name in selected:
+        name = normalize_text(name).lower()
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _quantum_infer_block_type(block: dict) -> str:
+    if not isinstance(block, dict):
+        return "text"
+    candidates = [
+        block.get("type"),
+        block.get("renderer"),
+        block.get("viewer"),
+        block.get("artifact_type"),
+        block.get("payload", {}).get("type") if isinstance(block.get("payload"), dict) else None,
+        block.get("artifact", {}).get("type") if isinstance(block.get("artifact"), dict) else None,
+    ]
+    for candidate in candidates:
+        text = normalize_text(candidate).lower()
+        if text in {"table", "graph", "diagram", "formula", "gallery", "image", "link", "code", "markdown", "text"}:
+            return "text" if text == "markdown" else text
+        if "table" in text:
+            return "table"
+        if "graph" in text or "chart" in text:
+            return "graph"
+        if "diagram" in text or "schema" in text:
+            return "diagram"
+        if "formula" in text or "equation" in text:
+            return "formula"
+        if "gallery" in text or "carousel" in text:
+            return "gallery"
+        if "link" in text or "url" in text:
+            return "link"
+        if "code" in text:
+            return "code"
+        if "image" in text or "picture" in text:
+            return "image"
+    return normalize_text(block.get("type", "text")).lower() or "text"
+
+
+def _quantum_parse_scene_units(text: str) -> list[dict]:
+    raw = normalize_text(text)
+    if not raw:
+        return []
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", raw) if p.strip()]
+    if not parts:
+        parts = [raw]
+    units: list[dict] = []
+    for idx, part in enumerate(parts):
+        current = part.strip()
+        if _executor_looks_like_markdown_table(current):
+            units.append(_executor_make_table_block(_executor_parse_markdown_table(current), current, idx, "text"))
+            continue
+        if current.startswith("```") and current.endswith("```"):
+            units.append(_executor_make_code_block(_executor_strip_code_fence(current), current, idx, "text"))
+            continue
+        if _looks_like_formula_text(current):
+            units.append(_executor_make_formula_block(current, current, idx, "text"))
+            continue
+        if _executor_has_url(current):
+            units.append(_executor_make_link_block(current, current, idx, "text"))
+            continue
+        block = _executor_make_text_block(current, idx, "text")
+        if re.match(r"^(#+\s+|[A-ZА-ЯЁ0-9\s]{4,}:$)", current):
+            block["subtype"] = "heading"
+        elif re.match(r"^(\-|\*|•|\d+[\.\)])\s+", current, flags=re.IGNORECASE):
+            block["subtype"] = "list"
+        units.append(block)
+    return units
+
+
+def _quantum_normalize_scene_blocks(blocks: list[dict], canonical_text: str = "") -> list[dict]:
+    normalized: list[dict] = []
+    seen = set()
+    for idx, block in enumerate(blocks or []):
+        if not isinstance(block, dict):
+            block = _executor_make_text_block(normalize_text(block), idx, "text")
+        block = dict(block)
+        t = normalize_text(block.get("type")).lower() or "text"
+        if t == "markdown":
+            t = "text"
+            block["type"] = "text"
+        if t in {"text", "formula", "function"} and _executor_looks_like_internal_room_payload(block.get("content")):
+            continue
+        block["renderer"] = block.get("renderer") or _executor_renderer_for_type(t)
+        block["viewer"] = block.get("viewer") or block["renderer"]
+        content_norm = _quantum_norm(block.get("content") or block.get("text") or block.get("answer") or "")
+        key = (t, content_norm, block.get("source_room"), block.get("label"))
+        if key in seen:
+            continue
+        seen.add(key)
+        block.setdefault("sequence_index", idx)
+        normalized.append(block)
+    if canonical_text:
+        canonical_norm = _quantum_norm(canonical_text)
+        if canonical_norm and not any(
+            normalize_text(b.get("type")).lower() in {"text", "markdown"} and _quantum_norm(b.get("content") or b.get("text") or "") == canonical_norm
+            for b in normalized
+        ):
+            normalized.insert(0, _executor_make_text_block(canonical_text, 0, "text"))
+    return normalized
+
+
+def _quantum_contribution_to_block(key: str, value: Any, index: int = 0, source_room: str = "registry") -> Optional[dict]:
+    block_type = normalize_text(key).lower()
+    payload = value if isinstance(value, dict) else {"value": value}
+    payload = _executor_payload_to_mapping(payload)
+    if not block_type:
+        block_type = normalize_text(payload.get("type")).lower()
+
+    if block_type in {"table", "table_artifact", "tabular"} or {"rows", "columns"} & set(payload.keys()):
+        return _executor_make_table_block(payload.get("table", payload), normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+    if block_type in {"graph", "diagram", "visual", "renderer_scene"} or any(k in payload for k in ("graph", "nodes", "edges")):
+        return _executor_make_graph_block(payload.get("graph", payload), normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+    if block_type == "formula" or any(k in payload for k in ("latex", "formula")):
+        return _executor_make_formula_block(payload.get("formula") or payload.get("latex") or payload.get("content") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+    if block_type == "link" or any(k in payload for k in ("url", "href")):
+        return _executor_make_link_block(payload.get("url") or payload.get("href") or payload.get("content") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+    if block_type == "code" or any(k in payload for k in ("language", "filename", "line_numbers")):
+        return _executor_make_code_block(payload.get("content") or payload.get("source") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+    if block_type in {"gallery", "image"} or "images" in payload:
+        return _executor_make_gallery_block(payload.get("images") or payload, normalize_text(payload.get("source") or payload.get("content") or ""), index, source_room)
+    if block_type in {"text", "markdown"}:
+        return _executor_make_text_block(normalize_text(payload.get("content") or payload.get("text") or payload.get("answer") or payload.get("summary") or payload.get("value") or ""), index, source_room)
+    if payload.get("content") or payload.get("text") or payload.get("answer") or payload.get("summary"):
+        return _executor_make_text_block(normalize_text(payload.get("content") or payload.get("text") or payload.get("answer") or payload.get("summary")), index, source_room)
+    return None
+
+
+def _quantum_logical_scene_blocks(machine_response: Any, semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> list[dict]:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+
+    canonical_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+        getattr(machine_response, "response", ""),
+        getattr(machine_response, "explanation", ""),
+    )
+
+    blocks: list[dict] = []
+    existing_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    if existing_blocks:
+        blocks.extend(existing_blocks)
+    if canonical_text:
+        blocks.extend(_quantum_parse_scene_units(canonical_text))
+
+    contributions = getattr(machine_response, "contributions", None) or {}
+    if isinstance(contributions, dict) and contributions:
+        for idx, (key, value) in enumerate(contributions.items()):
+            block = _quantum_contribution_to_block(key, value, index=idx, source_room="registry")
+            if block:
+                blocks.append(block)
+
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+    for idx, artifact in enumerate(artifacts):
+        mapping = _executor_payload_to_mapping(artifact)
+        if not mapping:
+            continue
+        block = _quantum_contribution_to_block(
+            normalize_text(mapping.get("artifact_type") or mapping.get("type") or ""),
+            mapping,
+            index=idx,
+            source_room="artifact",
+        )
+        if block:
+            blocks.append(block)
+
+    requested_representation = _quantum_requested_representation(semantic, response_decision)
+    if requested_representation and requested_representation != "text":
+        preferred = requested_representation.lower()
+        prioritized, others = [], []
+        for block in blocks:
+            block_type = normalize_text(block.get("type")).lower()
+            if block_type == preferred or (preferred == "diagram" and block_type == "graph") or (preferred == "image" and block_type == "gallery"):
+                prioritized.append(block)
+            else:
+                others.append(block)
+        if prioritized:
+            blocks = prioritized + others
+
+    return _quantum_normalize_scene_blocks(blocks, canonical_text=canonical_text)
+
+
+def _quantum_contradiction_report(machine_response: Any, *, semantic: Optional[dict] = None, response_decision: Optional[dict] = None, state: Optional[dict] = None, blocks: Optional[list] = None) -> dict:
+    semantic = semantic or {}
+    response_decision = response_decision or {}
+    state = state or {}
+    blocks = list(blocks or getattr(machine_response, "render_blocks", []) or [])
+
+    answer = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""))
+    summary = _executor_best_text(getattr(machine_response, "summary", ""))
+    canonical_text = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""), getattr(machine_response, "summary", ""), getattr(machine_response, "response", ""), getattr(machine_response, "explanation", ""))
+    requested_representation = _quantum_requested_representation(semantic, response_decision)
+    block_types = [normalize_text(b.get("type")).lower() for b in blocks if isinstance(b, dict)]
+
+    text_blocks = [
+        _quantum_norm(b.get("content") or b.get("text") or "")
+        for b in blocks
+        if isinstance(b, dict) and normalize_text(b.get("type")).lower() in {"text", "markdown"}
+    ]
+    unique_texts = []
+    seen = set()
+    for t in text_blocks:
+        if t and t not in seen:
+            seen.add(t)
+            unique_texts.append(t)
+
+    report = {
+        "answer_content_similarity": _quantum_similarity(getattr(machine_response, "answer", ""), getattr(machine_response, "content", "")),
+        "answer_summary_similarity": _quantum_similarity(getattr(machine_response, "answer", ""), getattr(machine_response, "summary", "")),
+        "summary_content_similarity": _quantum_similarity(getattr(machine_response, "summary", ""), getattr(machine_response, "content", "")),
+        "duplicate_text_blocks": len(text_blocks) != len(unique_texts),
+        "duplicated_text_count": max(0, len(text_blocks) - len(unique_texts)),
+        "has_structure_mismatch": False,
+        "missing_requested_representation": False,
+        "contradiction_signals": [],
+        "repair_hints": [],
+        "canonical_text_length": len(canonical_text),
+        "block_types": block_types,
+        "requested_representation": requested_representation,
+        "dialog_focus": state.get("focus_state", state.get("focus", {})),
+        "active_topic": state.get("active_topic") or state.get("current_topic") or "",
+        "logical_contradictions": [],
+    }
+
+    if report["duplicate_text_blocks"]:
+        report["contradiction_signals"].append("duplicate_visible_text")
+        report["repair_hints"].append("collapse_duplicate_text_blocks")
+
+    if requested_representation and requested_representation != "text":
+        if requested_representation not in block_types and not (requested_representation == "diagram" and "graph" in block_types) and not (requested_representation == "image" and "gallery" in block_types):
+            report["missing_requested_representation"] = True
+            report["has_structure_mismatch"] = True
+            report["contradiction_signals"].append(f"missing_{requested_representation}_block")
+            report["repair_hints"].append(f"promote_or_build_{requested_representation}_block")
+
+    sentences = _quantum_sentence_split(canonical_text)
+    entities = {}
+    for sent in sentences:
+        tokens = _quantum_tokens(sent)
+        neg = _quantum_has_negation(sent)
+        for token in tokens:
+            bucket = entities.setdefault(token, {"neg": 0, "pos": 0, "examples": []})
+            if neg:
+                bucket["neg"] += 1
+            else:
+                bucket["pos"] += 1
+            if len(bucket["examples"]) < 2:
+                bucket["examples"].append(sent)
+
+    contradictions = []
+    for token, bucket in entities.items():
+        if bucket["neg"] and bucket["pos"]:
+            contradictions.append({"token": token, "neg": bucket["neg"], "pos": bucket["pos"], "examples": bucket["examples"]})
+    if contradictions:
+        report["contradiction_signals"].append("negation_affirmation_mix")
+        report["repair_hints"].append("separate_conflicting_claims")
+        report["logical_contradictions"] = contradictions
+
+    if answer and getattr(machine_response, "content", "") and _quantum_similarity(answer, getattr(machine_response, "content", "")) < 0.55:
+        report["has_structure_mismatch"] = True
+        report["contradiction_signals"].append("answer_content_mismatch")
+        report["repair_hints"].append("reconcile_answer_content")
+
+    if summary and answer and _quantum_similarity(summary, answer) > 0.90 and len(summary) >= max(120, int(len(answer) * 0.75)):
+        report["contradiction_signals"].append("summary_echoes_answer")
+        report["repair_hints"].append("keep_summary_compact")
+
+    return report
+
+
+def _quantum_summary(canonical_text: str, blocks: list, report: Optional[dict] = None) -> str:
+    return _quantum_compact_scene_summary(canonical_text, blocks, report=report)
+
+
+def apply_representation_gate(blocks, response_decision=None, semantic=None):
+    """
+    Quantum override: representation is only a priority hint.
+    It must not delete the rest of the logical scene.
+    """
+    response_decision = response_decision or {}
+    semantic = semantic or {}
+    preferred = normalize_text(
+        response_decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+        or ""
+    ).lower()
+    blocks = list(blocks or [])
+    if not preferred or not blocks:
+        return blocks
+
+    preferred_blocks = []
+    other_blocks = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            other_blocks.append(block)
+            continue
+        t = normalize_text(block.get("type")).lower()
+        if t == preferred or (preferred == "diagram" and t == "graph") or (preferred == "image" and t == "gallery"):
+            preferred_blocks.append(block)
+        else:
+            other_blocks.append(block)
+    return preferred_blocks + other_blocks if preferred_blocks else blocks
+
+
+def detect_task_type(semantic, cognition, state, conversation_space=None):
+    user_space = build_executor_user_space(state, conversation_space=conversation_space)
+    scene_state = user_space.get("scene", {})
+    trajectory = scene_state.get("trajectory")
+    if trajectory:
+        track_trajectory(trajectory)
+
+    requested_representation = _quantum_requested_representation(semantic, {})
+    if requested_representation in {"graph", "table", "formula", "diagram", "link", "code", "gallery"}:
+        track_modality("renderer")
+        return "renderer"
+
+    if semantic.get("render_intent"):
+        track_modality("renderer")
+        return "renderer"
+    if semantic.get("visual_generation_needed") or semantic.get("explicit_image_generation_only"):
+        track_modality("image")
+        return "image"
+    if semantic.get("math_intent"):
+        track_modality("math")
+        return "math"
+    return "text"
+
+
+def executor_cpu_materialize_blocks(machine_response):
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+    blocks = _quantum_logical_scene_blocks(machine_response, semantic=semantic, response_decision=response_decision)
+    machine_response.render_blocks = blocks
+    machine_response.logical_scene_blocks = blocks
+    machine_response.logical_scene_presentation = {
+        "preferred_representation": _quantum_requested_representation(semantic, response_decision),
+        "payload_type": normalize_text(blocks[0].get("type")).lower() if blocks else "text",
+        "renderer": _executor_renderer_for_type(normalize_text(blocks[0].get("type")).lower() if blocks else "text"),
+        "viewer": _executor_renderer_for_type(normalize_text(blocks[0].get("type")).lower() if blocks else "text"),
+    }
+    return machine_response
+
+
+def executor_cpu_reflect(*, semantic, cognition, response_decision, state, machine_response):
+    try:
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+    except Exception:
+        pass
+
+    machine_response = executor_cpu_build_cognitive_context(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+    machine_response = executor_cpu_build_executor_decision(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+
+    logical_report = _quantum_contradiction_report(
+        machine_response,
+        semantic=semantic,
+        response_decision=response_decision,
+        state=state,
+    )
+
+    machine_response = executor_cpu_build_presentation_plan(machine_response)
+    machine_response = executor_cpu_integrate_presentation(machine_response)
+    machine_response = executor_cpu_memory_fusion(machine_response)
+    machine_response = executor_cpu_scene_intelligence(machine_response)
+    machine_response = executor_cpu_user_alignment(machine_response)
+    machine_response = executor_cpu_synthetic_verification(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = _canonicalize_formula_blocks(machine_response, semantic=semantic, response_decision=response_decision)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    try:
+        machine_response.executor_logical_report = logical_report
+        metadata = getattr(machine_response, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["logical_report"] = logical_report
+        metadata["scene_presentation"] = machine_response.logical_scene_presentation
+        setattr(machine_response, "metadata", metadata)
+    except Exception:
+        pass
+
+    return machine_response
+
+
+def executor_cpu_scene_pipeline(machine_response):
+    executor_cpu_transport_diag("BEFORE_BUILD_MACHINE_SCENE", machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+
+    scene = build_machine_scene(machine_response)
+    try:
+        setattr(scene, "conversation_space", getattr(machine_response, "conversation_space", None))
+    except Exception:
+        pass
+
+    conversation_space = getattr(machine_response, "conversation_space", {}) or {}
+    try:
+        setattr(scene, "timeline", conversation_space.get("timeline", []))
+        setattr(scene, "last_user_turn", conversation_space.get("last_user_turn"))
+        setattr(scene, "last_april_turn", conversation_space.get("last_april_turn"))
+        setattr(scene, "active_goal", conversation_space.get("response_decision", {}).get("goal"))
+    except Exception:
+        pass
+
+    scene_contract = build_scene_contract(scene)
+    executor_cpu_transport_diag("AFTER_BUILD_SCENE_CONTRACT", machine_response, scene_contract)
+
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    blocks = _quantum_logical_scene_blocks(
+        machine_response,
+        semantic=getattr(machine_response, "executor_semantic", {}) or {},
+        response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
+    )
+    presentation_hint = {
+        "preferred_representation": _quantum_requested_representation(getattr(machine_response, "executor_semantic", {}) or {}, getattr(machine_response, "executor_response_decision", {}) or {}),
+        "payload_type": normalize_text(blocks[0].get("type")).lower() if blocks else "text",
+        "renderer": _executor_renderer_for_type(normalize_text(blocks[0].get("type")).lower() if blocks else "text"),
+        "viewer": _executor_renderer_for_type(normalize_text(blocks[0].get("type")).lower() if blocks else "text"),
+    }
+
+    try:
+        if isinstance(scene_contract, dict):
+            scene_contract["answer"] = getattr(machine_response, "answer", "")
+            scene_contract["content"] = getattr(machine_response, "content", "")
+            scene_contract["summary"] = getattr(machine_response, "summary", "")
+            scene_contract["render_blocks"] = blocks
+            scene_contract.setdefault("metadata", {})
+            if isinstance(scene_contract["metadata"], dict):
+                scene_contract["metadata"]["presentation"] = presentation_hint
+                scene_contract["metadata"]["logical_report"] = getattr(machine_response, "executor_logical_report", {})
+        else:
+            setattr(scene_contract, "answer", getattr(machine_response, "answer", ""))
+            setattr(scene_contract, "content", getattr(machine_response, "content", ""))
+            setattr(scene_contract, "summary", getattr(machine_response, "summary", ""))
+            setattr(scene_contract, "render_blocks", blocks)
+            try:
+                metadata = getattr(scene_contract, "metadata", None)
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata["presentation"] = presentation_hint
+                metadata["logical_report"] = getattr(machine_response, "executor_logical_report", {})
+                setattr(scene_contract, "metadata", metadata)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        if isinstance(scene, dict):
+            scene["answer"] = getattr(machine_response, "answer", "")
+            scene["content"] = getattr(machine_response, "content", "")
+            scene["summary"] = getattr(machine_response, "summary", "")
+            scene["render_blocks"] = blocks
+        else:
+            setattr(scene, "answer", getattr(machine_response, "answer", ""))
+            setattr(scene, "content", getattr(machine_response, "content", ""))
+            setattr(scene, "summary", getattr(machine_response, "summary", ""))
+            setattr(scene, "render_blocks", blocks)
+    except Exception:
+        pass
+
+    executor_cpu_transport_diag("AFTER_SYNC_SCENE_CONTRACT", machine_response, scene_contract)
+
+    return {
+        "canonical_space": True,
+        "machine_response": machine_response,
+        "machine_scene": scene,
+        "answer": getattr(machine_response, "answer", None),
+        "content": getattr(machine_response, "content", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": blocks,
+        "scene_contract": scene_contract,
+        "scene_runtime": {
+            "conversation_space": conversation_space,
+            "current_turn": conversation_space.get("current_turn"),
+            "timeline": conversation_space.get("timeline", []),
+            "last_user_turn": conversation_space.get("last_user_turn"),
+            "last_april_turn": conversation_space.get("last_april_turn"),
+            "machine_scene": scene,
+            "render_blocks": blocks,
+            "answer": getattr(machine_response, "answer", None),
+            "content": getattr(machine_response, "content", None),
+            "summary": getattr(machine_response, "summary", None),
+            "modalities": conversation_space.get("modalities", {}),
+            "dialog": conversation_space.get("dialog", []),
+            "goal_hierarchy": conversation_space.get("goal_hierarchy", {}),
+            "focus": conversation_space.get("focus", {}),
+        },
+    }
+
+
+def executor_cpu_finalize_transport(machine_response):
+    executor_cpu_transport_diag("TRANSPORT_ENTRY", machine_response)
+    machine_response = executor_cpu_normalize_answer(machine_response)
+    machine_response = executor_cpu_materialize_blocks(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
+
+    scene = executor_cpu_scene_pipeline(machine_response)
+    conversation_space = getattr(machine_response, "conversation_space", None)
+    scene_contract = scene.get("scene_contract")
+
+    visible_text = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+        getattr(machine_response, "summary", ""),
+    )
+    semantic = getattr(machine_response, "executor_semantic", {}) or {}
+    response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
+
+    source_blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    if not source_blocks and visible_text:
+        source_blocks = [_executor_make_text_block(visible_text, 0, "text")]
+    source_blocks = apply_representation_gate(source_blocks, response_decision=response_decision, semantic=semantic)
+    blocks = _executor_deduplicate_visible_render_blocks(source_blocks, visible_text=visible_text)
+
+    machine_response.render_blocks = blocks
+    machine_response.summary = _quantum_summary(
+        visible_text,
+        blocks,
+        report=getattr(machine_response, "executor_logical_report", {}) or {},
+    )
+    if visible_text:
+        machine_response.answer = visible_text
+        machine_response.content = visible_text
+
+    _executor_store_canonical_text_metadata(
+        machine_response,
+        answer=visible_text,
+        content=visible_text,
+        summary=getattr(machine_response, "summary", ""),
+        original_answer=getattr(machine_response, "provider_original_answer", "") or "",
+        original_content=getattr(machine_response, "provider_original_content", "") or "",
+    )
+
+    if scene_contract is not None:
+        _executor_store_canonical_text_metadata(
+            scene_contract,
+            answer=visible_text,
+            content=visible_text,
+            summary=getattr(machine_response, "summary", ""),
+            original_answer=getattr(machine_response, "provider_original_answer", "") if machine_response is not None else "",
+            original_content=getattr(machine_response, "provider_original_content", "") if machine_response is not None else "",
+        )
+        try:
+            if isinstance(scene_contract, dict):
+                scene_contract["answer"] = visible_text
+                scene_contract["content"] = visible_text
+                scene_contract["summary"] = getattr(machine_response, "summary", "")
+                scene_contract["render_blocks"] = blocks
+                scene_contract.setdefault("metadata", {})
+                if isinstance(scene_contract["metadata"], dict):
+                    scene_contract["metadata"]["presentation"] = machine_response.logical_scene_presentation
+                    scene_contract["metadata"]["logical_report"] = getattr(machine_response, "executor_logical_report", {})
+            else:
+                setattr(scene_contract, "answer", visible_text)
+                setattr(scene_contract, "content", visible_text)
+                setattr(scene_contract, "summary", getattr(machine_response, "summary", ""))
+                setattr(scene_contract, "render_blocks", blocks)
+                try:
+                    metadata = getattr(scene_contract, "metadata", None)
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata["presentation"] = machine_response.logical_scene_presentation
+                    metadata["logical_report"] = getattr(machine_response, "executor_logical_report", {})
+                    setattr(scene_contract, "metadata", metadata)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    result = {
+        "transport_contract": "scene_first",
+        "provider_contract": "fiber_v3",
+        "conversation_space": conversation_space,
+        "machine_response": machine_response,
+        "machine_scene": scene.get("machine_scene"),
+        "scene_contract": scene_contract,
+        "current_turn": conversation_space.get("current_turn") if conversation_space else None,
+        "answer": visible_text,
+        "content": visible_text,
+        "summary": getattr(machine_response, "summary", ""),
+        "render_blocks": blocks,
+        "presentation": machine_response.logical_scene_presentation if hasattr(machine_response, "logical_scene_presentation") else {
+            "preferred_representation": _quantum_requested_representation(semantic, response_decision),
+            "payload_type": normalize_text(blocks[0].get("type")).lower() if blocks else "text",
+            "renderer": _executor_renderer_for_type(normalize_text(blocks[0].get("type")).lower() if blocks else "text"),
+            "viewer": _executor_renderer_for_type(normalize_text(blocks[0].get("type")).lower() if blocks else "text"),
+        },
+        "logical_report": getattr(machine_response, "executor_logical_report", {}),
+    }
+
+    _executor_strip_duplicate_visible_fields(result, visible_text, blocks)
+
+    if isinstance(scene, dict):
+        scene["answer"] = visible_text
+        scene["content"] = visible_text
+        scene["summary"] = getattr(machine_response, "summary", "")
+        scene["render_blocks"] = blocks
+
+    executor_cpu_transport_diag("FINAL_TRANSPORT", machine_response, scene_contract)
+    return result
+
+
+async def execute_rooms(user_id, text, context, semantic, cognition, response_decision, state, run_with_activity):
+    machine_request = context.get("machine_request")
+    if machine_request is None:
+        raise RuntimeError("MachineRequest missing from executor context")
+
+    selected_room_names = _quantum_select_room_names(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        task_type=detect_task_type(semantic, cognition, state, conversation_space=context.get("conversation_space")),
+    )
+
+    room_results = []
+    room_execution_report = []
+    best_machine_response = None
+    best_score = -1
+    canonical_machine_response = None
+    canonical_room_name = "text"
+
+    for room in ROOMS:
+        room_name = normalize_text(getattr(room, "name", "unknown")).lower()
+
+        if room_name not in selected_room_names:
+            executor_cpu_register_room(room_execution_report, room_name, status="skipped", reason="not_selected")
+            continue
+
+        try:
+            can_handle = True
+            if hasattr(room, "can_handle"):
+                try:
+                    can_handle = bool(room.can_handle(text, context))
+                except Exception:
+                    can_handle = True
+
+            room_score = 0.0
+            if hasattr(room, "evaluate"):
+                try:
+                    room_score = float(room.evaluate(text, context) or 0.0)
+                except Exception as evaluation_error:
+                    executor_cpu_register_room(
+                        room_execution_report,
+                        room_name,
+                        status="skipped",
+                        reason="evaluation_error",
+                        error=str(evaluation_error),
+                    )
+                    continue
+
+            if not can_handle and room_name != "text":
+                executor_cpu_register_room(room_execution_report, room_name, status="skipped", reason="can_handle_false")
+                continue
+
+            if room_name != "text" and room_score <= 0.0:
+                executor_cpu_register_room(room_execution_report, room_name, status="skipped", reason="not_relevant")
+                continue
+
+            result = await room.handle(
+                user_id=user_id,
+                text=text,
+                context=machine_request,
+                run=run_with_activity,
+            )
+
+            extracted = _extract_machine_response(result)
+            if extracted is None and isinstance(result, dict):
+                mr = result.get("machine_response")
+                if isinstance(mr, (dict, MachineResponse)):
+                    extracted = _executor_materialize_machine_response(mr)
+                    if extracted is None and isinstance(mr, dict):
+                        extracted = _executor_payload_from_mapping_direct(mr)
+
+            if extracted is not None:
+                room_results.append({"room": room_name, "machine_response": extracted})
+                executor_cpu_register_room(room_execution_report, room_name, status="ok", score=room_score)
+
+                score = _executor_response_score(extracted)
+                if best_machine_response is None or score > best_score:
+                    best_machine_response = extracted
+                    best_score = score
+
+                if room_name == "text":
+                    canonical_machine_response = extracted
+                    canonical_room_name = room_name
+                elif canonical_machine_response is None and _executor_has_meaningful_payload(extracted):
+                    canonical_machine_response = extracted
+                    canonical_room_name = room_name
+                continue
+
+            executor_cpu_register_room(room_execution_report, room_name, status="empty", score=room_score)
+
+        except Exception as exc:
+            room_execution_report.append({"room": room_name, "status": "error", "error": str(exc)})
+            continue
+
+    if canonical_machine_response is None:
+        canonical_machine_response = best_machine_response
+
+    if canonical_machine_response is None:
+        raise RuntimeError("No MachineResponse produced")
+
+    machine_response = canonical_machine_response
+    machine_response = _executor_recover_room_response(
+        machine_response,
+        room_results,
+        machine_request=machine_request,
+        text=text,
+    )
+
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+    april_turn = {
+        "answer": getattr(machine_response, "answer", None),
+        "summary": getattr(machine_response, "summary", None),
+        "render_blocks": list(getattr(machine_response, "render_blocks", []) or []),
+    }
+    if "current_turn" in conversation_space and isinstance(conversation_space["current_turn"], dict):
+        conversation_space["current_turn"]["april"] = april_turn
+    conversation_space["last_april_turn"] = april_turn
+    timeline = conversation_space.setdefault("timeline", [])
+    if "current_turn" in conversation_space:
+        timeline.append(conversation_space["current_turn"])
+    conversation_space["dialog"] = timeline
+    setattr(machine_response, "conversation_space", conversation_space)
+
+    try:
+        setattr(machine_response, "executor_semantic", semantic)
+        setattr(machine_response, "executor_cognition", cognition)
+        setattr(machine_response, "executor_response_decision", response_decision)
+        setattr(machine_response, "executor_state", state)
+        setattr(machine_response, "executor_room_selection", selected_room_names)
+        setattr(machine_response, "executor_selected_room", canonical_room_name)
+        setattr(machine_response, "executor_room_execution_report", room_execution_report)
+    except Exception:
+        pass
+
+    machine_response = executor_cpu_normalize_answer(machine_response)
+    executor_cpu_transport_diag("BEFORE_REFLECT", machine_response)
+    machine_response = executor_cpu_reflect(
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        machine_response=machine_response,
+    )
+
+    setattr(machine_response, "room_execution_report", room_execution_report)
+    if not room_results:
+        room_results = [{"machine_response": machine_response}]
+
+    try:
+        machine_response = _executor_merge_room_results_into_canonical_response(
+            machine_response,
+            room_results,
+            canonical_room_name=canonical_room_name,
+        )
+    except Exception:
+        pass
+
+    if getattr(machine_response, "answer", ""):
+        canonical_answer = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "content", ""))
+        machine_response.answer = canonical_answer
+        machine_response.content = canonical_answer
+    machine_response.summary = _quantum_summary(
+        getattr(machine_response, "answer", ""),
+        list(getattr(machine_response, "render_blocks", []) or []),
+        report=getattr(machine_response, "executor_logical_report", {}) or {},
+    )
+
+    if not list(getattr(machine_response, "render_blocks", []) or []) and getattr(machine_response, "answer", ""):
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": machine_response.answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "source_room": canonical_room_name,
+        }]
+
+    executor_cpu_transport_diag("AFTER_REFLECT", machine_response)
+    setattr(machine_response, "provider_transport_verified", True)
+    setattr(machine_response, "provider_contract_version", "fiber_v3_super")
+    return executor_cpu_finalize_transport(machine_response)
+
+
+async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
+    chat_id = chat_id or user_id
+    cpu_trace_begin("EXECUTE", {"user_id": user_id})
+
+    state = get_state(user_id)
+
+    semantic = semantic_analyze(
+        text=text,
+        state=state,
+        history=state.get("dialog", []),
+        active_flow=state.get("active_flow", {}),
+        dialog_state=state.get("scene_state", {}),
+    )
+    update_dialog_context(user_id, semantic)
+
+    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
+    cognition = analyze_cognition(text=text, semantic=semantic, reasoning=reasoning, state=state)
+    visual_reference = build_visual_reference(semantic=semantic, cognition=cognition, text=text, state=state)
+
+    response_decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        state=state,
+        visual_reference=visual_reference,
+    )
+    task_type = detect_task_type(semantic, cognition, state, conversation_space=None)
+
+    context = build_executor_context(
+        user_id=user_id,
+        chat_id=chat_id,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+    )
+
+    conversation_space = context.get("conversation_space") or {}
+    current_turn = conversation_space.get("current_turn", {})
+
+    machine_memory = _build_executor_machine_memory(state, conversation_space)
+    machine_conversation = _build_executor_machine_conversation(conversation_space, text)
+
+    provider_goal, provider_reference_context = _executor_build_first_circle_goal(
+        text=text,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+
+    executor_provider_stage_log("PROVIDER_REQUEST", {"goal_len": len(provider_goal), "reference_context": bool(provider_reference_context)})
+
+    second_circle_context = _build_second_circle_context(
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+        conversation_space=conversation_space,
+        machine_memory=machine_memory,
+        machine_conversation=machine_conversation,
+        reference_context=provider_reference_context,
+    )
+
+    context["machine_request"] = _build_second_circle_machine_request(
+        text=text,
+        semantic=semantic,
+        provider_goal=provider_goal,
+        provider_reference_context=provider_reference_context,
+        second_circle_context=second_circle_context,
+    )
+    context["executor_state"] = state
+    context["executor_conversation_space"] = conversation_space
+    context["second_circle_context"] = second_circle_context
+
+    setattr(context["machine_request"], "current_turn", current_turn)
+    try:
+        setattr(context["machine_request"], "semantic", semantic)
+        setattr(context["machine_request"], "cognition", cognition)
+        setattr(context["machine_request"], "response_decision", response_decision)
+        setattr(context["machine_request"], "conversation_space", conversation_space)
+        setattr(context["machine_request"], "state", state)
+        setattr(context["machine_request"], "user_id", user_id)
+        setattr(context["machine_request"], "chat_id", chat_id)
+    except Exception:
+        pass
+
+    if "factory_hook_registration" in kwargs:
+        executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
+
+    result = await execute_rooms(
+        user_id=user_id,
+        text=text,
+        context=context,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        run_with_activity=run_with_activity,
+    )
+
+    if isinstance(result, dict):
+        machine_response = result.get("machine_response")
+        if isinstance(machine_response, MachineResponse):
+            result["machine_response"] = machine_response
+            if _executor_value_is_empty(result.get("answer")):
+                result["answer"] = getattr(machine_response, "answer", "")
+            if _executor_value_is_empty(result.get("content")):
+                result["content"] = getattr(machine_response, "content", "")
+            if _executor_value_is_empty(result.get("summary")):
+                result["summary"] = getattr(machine_response, "summary", "")
+            if _executor_value_is_empty(result.get("render_blocks")):
+                result["render_blocks"] = list(getattr(machine_response, "render_blocks", []) or [])
+
+    executor_provider_stage_log(
+        "PROVIDER_RESPONSE",
+        {
+            "has_machine_response": isinstance(result, dict) and "machine_response" in result,
+            "has_scene_contract": isinstance(result, dict) and "scene_contract" in result,
+            "render_blocks": len((result.get("render_blocks") if isinstance(result, dict) else []) or []),
+        },
+    )
+
+    result = executor_cpu_factory_bridge(result)
+    result = executor_cpu_gateway_dispatch(result)
+    cpu_trace_success("EXECUTE")
+    return result
+
