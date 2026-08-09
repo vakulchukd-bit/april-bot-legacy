@@ -189,17 +189,55 @@ def unlock_image(state):
 # =====================================================
 
 def get_executor_context(context):
+    """
+    Resolve the real Executor context behind a MachineRequest.
 
-    # Canonical MachineRequest support
+    MachineRequest is a transport object, not a user/state key. The previous
+    implementation replaced the real StateManager state with a synthetic
+    {"machine_request": context} dictionary. That detached rooms from dialog
+    history, focus, topic and memory.
+    """
     if isinstance(context, MachineRequest):
-        return {
+        second_circle = getattr(
+            context,
+            "second_circle_context",
+            None,
+        )
+        if not isinstance(second_circle, dict):
+            second_circle = {}
+
+        executor_state = second_circle.get("state")
+        if not isinstance(executor_state, dict):
+            executor_state = {}
+
+        executor_context = {
             "machine_request": context,
-            "state": {"machine_request": context},
-            "chat_id": getattr(getattr(context, "identity", None), "user_id", None),
-            "energy": "MEDIUM",
-            "cognition": {},
-            "semantic": {},
+            "state": executor_state,
+            "chat_id": (
+                getattr(context, "chat_id", None)
+                or getattr(context, "user_id", None)
+                or getattr(getattr(context, "identity", None), "user_id", None)
+            ),
+            "energy": second_circle.get("energy", "MEDIUM"),
+            "cognition": second_circle.get("cognition", {}),
+            "semantic": second_circle.get("semantic", {}),
+            "conversation_space": second_circle.get("conversation_space", {}),
+            "memory": second_circle.get("memory", {}),
+            "conversation": second_circle.get("conversation", {}),
         }
+
+        for key in (
+            "reasoning",
+            "response_decision",
+            "visual_reference",
+            "task_type",
+            "reference_context",
+            "text",
+        ):
+            if key in second_circle:
+                executor_context[key] = second_circle.get(key)
+
+        return executor_context
 
     if not isinstance(context, dict):
         return {}
@@ -208,7 +246,6 @@ def get_executor_context(context):
         "context",
         context
     )
-
 
 def get_chat_id(context):
 
@@ -229,11 +266,9 @@ def get_state(context):
 
     state = executor_context.get("state", {})
 
-    if isinstance(context, MachineRequest):
-        state["machine_request"] = context
-
-    return state
-
+    # StateManager owns the real user state. Never key state by a
+    # MachineRequest instance and never create a parallel state here.
+    return state if isinstance(state, dict) else {}
 
 def get_cognition(context):
 
