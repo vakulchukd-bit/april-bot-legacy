@@ -2071,6 +2071,37 @@ async def execute_rooms(user_id, text, context, semantic, cognition, response_de
 
     for room in ROOMS:
         try:
+            # Rooms are capability nodes, not broadcast listeners.
+            # Evaluate relevance before execution so an ordinary text request
+            # cannot accidentally execute image/code/link/graph side effects.
+            # TextRoom intentionally evaluates as the universal text fallback.
+            room_score = 0.0
+            try:
+                room_score = float(
+                    room.evaluate(
+                        text,
+                        context,
+                    ) or 0.0
+                )
+            except Exception as evaluation_error:
+                executor_cpu_register_room(
+                    room_execution_report,
+                    getattr(room, "name", "unknown"),
+                    status="skipped",
+                    reason="evaluation_error",
+                    error=str(evaluation_error),
+                )
+                continue
+
+            if room_score <= 0.0:
+                executor_cpu_register_room(
+                    room_execution_report,
+                    getattr(room, "name", "unknown"),
+                    status="skipped",
+                    reason="not_relevant",
+                )
+                continue
+
             result = await room.handle(
                 user_id=user_id,
                 text=text,
@@ -2377,6 +2408,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     context["second_circle_context"] = second_circle_context
 
     setattr(context["machine_request"], "current_turn", current_turn)
+
+    # Make the canonical MachineRequest self-describing for room adapters.
+    # Rooms must never use the MachineRequest object itself as a StateManager
+    # key. The authoritative state remains inside second_circle_context.
+    try:
+        setattr(context["machine_request"], "user_id", user_id)
+        setattr(context["machine_request"], "chat_id", chat_id)
+    except Exception:
+        pass
 
     if "factory_hook_registration" in kwargs:
         executor_cpu_sync_factory_bridge(kwargs["factory_hook_registration"])
