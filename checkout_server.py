@@ -76,6 +76,8 @@ from storage import (
 from core.executor import execute
 from blocks.state_manager import (
     get_state,
+    add_dialog,
+    update_memory_summary,
     update_visual_summary
 )
 from blocks.provider_router import (
@@ -1455,6 +1457,13 @@ def web_chat():
                     "user_id required"
             }), 400
 
+        # Persist the user turn before CPU execution so the next request can
+        # recover dialog continuity, focus and trajectory.
+        try:
+            add_dialog(user_id, "user", text)
+        except Exception as dialog_error:
+            print("DIALOG SAVE ERROR (user):", dialog_error)
+
         print(
             "🧠 VISUAL SUMMARY:",
             visual_summary
@@ -1467,6 +1476,23 @@ def web_chat():
                 text
             )
         )
+
+        # Persist the assistant turn after CPU execution so the conversation
+        # history remains available to the next request.
+        try:
+            assistant_text = resolve_scene_content(result)
+            if not assistant_text:
+                assistant_text = _checkout_best_text(
+                    result.get("answer"),
+                    result.get("content"),
+                    result.get("summary"),
+                    result.get("response"),
+                )
+            if assistant_text:
+                add_dialog(user_id, "assistant", assistant_text)
+                update_memory_summary(get_state(user_id), text, assistant_text)
+        except Exception as dialog_error:
+            print("DIALOG SAVE ERROR (assistant):", dialog_error)
 
         result["visual_summary"] = visual_summary
         result["gateway_transport"] = build_gateway_transport_payload(result)
