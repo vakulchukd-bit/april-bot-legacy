@@ -1125,6 +1125,15 @@ def _executor_infer_render_block_type(block: dict) -> str:
 
 
 def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str = "") -> list:
+    """
+    Canonical visible-block projection.
+
+    Rules:
+    - one visible text block for the canonical answer;
+    - never expose duplicate text aliases;
+    - preserve distinct non-text artifacts (graph/table/gallery/formula/etc.);
+    - internal room payloads never become visible blocks.
+    """
     if not isinstance(blocks, list):
         blocks = list(blocks or [])
 
@@ -1133,31 +1142,45 @@ def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str =
     seen_struct = set()
     canonical_visible = normalize_text(visible_text)
     canonical_visible_norm = re.sub(r"\s+", " ", canonical_visible).strip().lower() if canonical_visible else ""
+    canonical_text_emitted = False
 
     for block in blocks:
         if not isinstance(block, dict):
-            block = {"type": "machine_payload", "content": str(block), "renderer": "TextBlock", "viewer": "TextBlock", "priority": 0}
+            block = {
+                "type": "text",
+                "content": str(block),
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+            }
 
         block = dict(block)
         block_type = _executor_infer_render_block_type(block)
-        content = block.get("content")
-        content_text = normalize_text(content)
+        content_text = normalize_text(block.get("content"))
         content_norm = re.sub(r"\s+", " ", content_text).strip().lower() if content_text else ""
 
-        # Preserve the renderer/viewer hints so downstream UI knows which block
-        # should be rendered by which component.
-        if block_type != "text":
-            block["type"] = block_type
+        if block_type == "markdown":
+            block_type = "text"
+            block["type"] = "text"
 
-        if block_type in {"text", "markdown", "formula", "function"} and _executor_looks_like_internal_room_payload(content_text):
+        if block_type in {"text", "formula", "function"} and _executor_looks_like_internal_room_payload(content_text):
             continue
 
-        if block_type in {"text", "markdown"}:
-            key = (block_type, content_norm)
+        if block_type == "text":
             if not content_norm:
                 continue
+
+            # The answer/content/summary fields are one canonical visible text.
+            # Do not render the same answer again through another text alias.
+            if canonical_visible_norm and content_norm == canonical_visible_norm:
+                if canonical_text_emitted:
+                    continue
+                canonical_text_emitted = True
+
+            key = ("text", content_norm)
             if key in seen_text:
                 continue
+
             seen_text.add(key)
             result.append(block)
             continue
@@ -1165,8 +1188,24 @@ def _executor_deduplicate_visible_render_blocks(blocks: Any, visible_text: str =
         sig = _executor_block_signature(block)
         if sig in seen_struct:
             continue
+
         seen_struct.add(sig)
+        block["type"] = block_type
         result.append(block)
+
+    # If the canonical answer exists but no text block survived, materialize exactly one.
+    if canonical_visible and not canonical_text_emitted:
+        result.insert(
+            0,
+            {
+                "type": "text",
+                "content": canonical_visible,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "priority": 0,
+                "source_room": "text",
+            },
+        )
 
     return result
 
@@ -1784,18 +1823,12 @@ def executor_cpu_finalize_transport(machine_response):
     semantic = getattr(machine_response, "executor_semantic", {}) or {}
     response_decision = getattr(machine_response, "executor_response_decision", {}) or {}
 
-    scene_blocks = []
-    if scene_contract is not None:
-        if isinstance(scene_contract, dict):
-            scene_blocks = list(scene_contract.get("render_blocks", []) or [])
-        else:
-            scene_blocks = list(getattr(scene_contract, "render_blocks", []) or [])
+    # scene_contract.render_blocks is intentionally not read back as a second source.
+    # It is overwritten below from the canonical MachineResponse list.
 
+    # MachineResponse.render_blocks is the single canonical visible list.
+    # SceneContract is only its projection; never concatenate both representations.
     source_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    if scene_blocks:
-        source_blocks = scene_blocks + [block for block in source_blocks if block not in scene_blocks]
-    if not source_blocks:
-        source_blocks = list(scene.get("render_blocks", []) or [])
     if not source_blocks and visible_text:
         source_blocks = [{
             "type": "text",
@@ -1806,8 +1839,18 @@ def executor_cpu_finalize_transport(machine_response):
             "source_room": "text",
         }]
 
-    source_blocks = apply_representation_gate(source_blocks, response_decision=response_decision, semantic=semantic)
-    blocks = _executor_deduplicate_visible_render_blocks(source_blocks, visible_text=visible_text)
+    source_blocks = apply_representation_gate(
+        source_blocks,
+        response_decision=response_decision,
+        semantic=semantic,
+    )
+    blocks = _executor_deduplicate_visible_render_blocks(
+        source_blocks,
+        visible_text=visible_text,
+    )
+
+    # From this point forward there is exactly one canonical visible block list.
+    machine_response.render_blocks = blocks
 
     if visible_text:
         machine_response.answer = visible_text
@@ -1937,9 +1980,14 @@ def _executor_merge_room_results_into_canonical_response(
             block.setdefault("source_room", room_name or getattr(candidate, "room_source", ""))
             block_type = normalize_text(block.get("type")).lower()
 
+            # The canonical text response owns visible prose.
+            # Secondary rooms/registry may enrich the scene with real artifacts,
+            # but must never append another text/formula/function answer.
+            if room_name != canonical_room_name and block_type in {"text", "markdown", "formula", "function"}:
+                continue
+
             if (
-                room_name != canonical_room_name
-                and block_type in {"text", "markdown", "formula", "function"}
+                block_type in {"text", "markdown", "formula", "function"}
                 and _executor_looks_like_internal_room_payload(block.get("content"))
             ):
                 continue
