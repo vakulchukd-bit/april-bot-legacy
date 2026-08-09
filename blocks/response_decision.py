@@ -296,6 +296,16 @@ def build_response_decision(
         "interaction_mode"
     )
 
+    requested_representation = semantic.get(
+        "requested_representation"
+    ) or semantic.get(
+        "current_representation"
+    ) or representation.get(
+        "requested_representation"
+    )
+
+    preferred_representation = requested_representation or None
+
     # =================================================
     # 🔥 ARTIFACT UNDERSTANDING
     # =====================================================
@@ -418,6 +428,14 @@ def build_response_decision(
     if unresolved_intent:
         dialog_priority_active = True
 
+    if preferred_representation in {"table", "graph", "diagram", "formula", "gallery", "link"}:
+        # A direct representation request should not be downgraded to a plain talk reply.
+        dialog_priority_active = False
+        render_intent = True
+        prefer_renderer = True
+        renderer_request = True
+        unresolved_intent = False
+
     # =================================================
     # 🔥 ASSISTANT TASK AWARENESS
     # =====================================================
@@ -517,6 +535,7 @@ def build_response_decision(
         or prefer_renderer
         or renderer_request
         or render_type
+        or preferred_representation in {"table", "graph", "diagram", "formula", "gallery", "link"}
     )
 
     if prefer_text_explanation:
@@ -856,6 +875,28 @@ def build_response_decision(
             cognition.get(
                 "prefer_reference_over_generation",
                 False
+            ),
+
+        "preferred_representation":
+            preferred_representation,
+
+        "requested_representation":
+            requested_representation,
+
+        "required_representations":
+            list(
+                dict.fromkeys(
+                    list(semantic.get("required_representations", []))
+                    + ([preferred_representation] if preferred_representation else [])
+                )
+            ),
+
+        "candidate_representations":
+            list(
+                dict.fromkeys(
+                    list(semantic.get("candidate_representations", []))
+                    + ([preferred_representation] if preferred_representation else [])
+                )
             ),
 
         # =================================================
