@@ -151,16 +151,68 @@ CORS(app)
 # 🧠 SAFE JSON
 # =========================================================
 
-def safe_json(value):
+def _json_transport_copy(value, _active=None):
+    """Create an acyclic JSON-compatible transport copy.
 
-    try:
+    April keeps the canonical SceneContract internally. The HTTP boundary must
+    never expose Python object aliases/cycles (for example SceneContract ->
+    space_continuity -> SceneContract). Shared objects are copied normally;
+    only an object encountered again on the current recursion path is cut.
+    """
+    if _active is None:
+        _active = set()
 
-        json.dumps(value)
-
+    if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
-    except:
+    object_id = id(value)
+    if object_id in _active:
+        print("⚠️ JSON TRANSPORT CYCLE CUT")
+        return None
 
+    if isinstance(value, dict):
+        _active.add(object_id)
+        try:
+            result = {}
+            for key, item in value.items():
+                safe_key = key if isinstance(key, str) else str(key)
+                result[safe_key] = _json_transport_copy(item, _active)
+            return result
+        finally:
+            _active.remove(object_id)
+
+    if isinstance(value, (list, tuple, set)):
+        _active.add(object_id)
+        try:
+            return [_json_transport_copy(item, _active) for item in value]
+        finally:
+            _active.remove(object_id)
+
+    if is_dataclass(value):
+        _active.add(object_id)
+        try:
+            return _json_transport_copy(vars(value), _active)
+        finally:
+            _active.remove(object_id)
+
+    if hasattr(value, "__dict__"):
+        _active.add(object_id)
+        try:
+            return _json_transport_copy(vars(value), _active)
+        finally:
+            _active.remove(object_id)
+
+    return str(value)
+
+
+def safe_json(value):
+    """Return a JSON-compatible, cycle-safe copy without collapsing payloads to text."""
+    try:
+        safe_value = _json_transport_copy(value)
+        json.dumps(safe_value, ensure_ascii=False)
+        return safe_value
+    except Exception as exc:
+        print("⚠️ SAFE JSON FALLBACK:", exc)
         return str(value)
 
 
@@ -777,12 +829,27 @@ def build_gateway_transport_payload(normalized):
     contract["answer"] = canonical_answer
     contract["summary"] = canonical_summary
 
+    # Keep continuity as a transport projection only. The canonical
+    # SceneContract is already a sibling field; nesting the whole contract
+    # inside space_continuity creates an unnecessary recursive graph.
+    continuity = normalized.get("space_continuity", {})
+    if not isinstance(continuity, dict):
+        continuity = {}
+    continuity = {
+        "active_scene": continuity.get("active_scene", contract.get("active_scene", {})),
+        "renderer_state": continuity.get("renderer_state", contract.get("renderer_state", {})),
+        "workspace": continuity.get("workspace", {}),
+        "continuity": continuity.get("continuity", {}),
+        "trajectory": continuity.get("trajectory", {}),
+        "render_blocks": continuity.get("render_blocks", contract.get("render_blocks", [])),
+    }
+
     return {
         "scene_contract": contract,
         "contract_version": contract.get("version", 1),
         "transport_mode": "passthrough",
         "gateway_rebuild": False,
-        "space_continuity": normalized.get("space_continuity", {}),
+        "space_continuity": continuity,
         "render_blocks": contract.get("render_blocks", []),
         "renderer_state": contract.get("renderer_state", {}),
         "content": canonical_content,
@@ -805,7 +872,9 @@ def build_web_api_payload(result, *, include_legacy_fields=False):
         gateway_transport = build_gateway_transport_payload(result)
     payload = {
         "success": True,
-        "gateway_transport": gateway_transport,
+        # HTTP boundary: always send a cycle-safe copy. Never expose the
+        # internal Python transport graph directly to Flask jsonify().
+        "gateway_transport": safe_json(gateway_transport),
         "renderer_mode": WEB_RENDERER_MODE,
         "scene_mode": WEB_SCENE_MODE,
         "visual_summary": safe_json(
@@ -1103,41 +1172,20 @@ def voice_chat():
             transcript
         )
 
-        result = asyncio.run(
+        if not transcript:
+            return jsonify({
+                "success": False,
+                "error": "empty transcript",
+                "transcript": "",
+            }), 422
 
-            process_web_message(
-
-                user_id="web_voice",
-
-                text=transcript
-            )
-        )
-
-        gateway_transport = result.get("gateway_transport")
-        if not isinstance(gateway_transport, dict):
-            gateway_transport = build_gateway_transport_payload(result)
-
+        # Voice is an input modality, not a second response route. Return the
+        # recognized text only; AprilWeb sends that text through the same
+        # /api/v1/chat -> Executor -> SceneContract route as typed text.
         return jsonify({
-
             "success": True,
-
             "transcript": transcript,
-
-            "gateway_transport": gateway_transport,
-
-            "renderer_mode": WEB_RENDERER_MODE,
-
-            "scene_mode": WEB_SCENE_MODE,
-
-            "visual_summary": safe_json({
-                "voice": True,
-                "transcript": transcript
-            }),
-
-            "active_visual_scene": safe_json(
-                gateway_transport.get("scene_contract", {}).get("active_scene")
-            )
-
+            "voice_input": True,
         })
 
     except Exception as e:
