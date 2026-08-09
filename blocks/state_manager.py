@@ -946,6 +946,20 @@ def add_dialog(
             state_obj
         )
 
+        # Compression is a memory operation, not a loss of canonical
+        # continuity. Keep the compacted timeline mirrored in dialog_state so
+        # the next Executor pass can still recover the conversation.
+        state_obj["dialog_state"] = {
+            "timeline": state_obj.get("dialog", []),
+            "last_user_turn": state_obj.get("last_user_turn", ""),
+            "last_april_turn": state_obj.get("last_april_turn", ""),
+            "active_topic": state_obj.get("active_topic", ""),
+            "focus": state_obj.get(
+                "focus_state",
+                state_obj.get("dynamic_focus", {}),
+            ),
+        }
+
     trim_image_memory(
         state_obj
     )
