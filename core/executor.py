@@ -961,12 +961,52 @@ def _build_second_circle_machine_request(*, text: str, semantic: dict, provider_
         "normalized_text": normalize_text(text),
         "source": "executor_first_circle",
     }
+
+    conversation_space = second_circle_context.get("conversation_space", {}) or {}
+    machine_memory = second_circle_context.get("memory", {}) or {}
+    machine_conversation = second_circle_context.get("conversation", {}) or {}
+    visual_reference = second_circle_context.get("visual_reference", {}) or {}
+
+    requested_outputs = list(dict.fromkeys(
+        list(semantic.get("required_representations", []) or [])
+        + list(semantic.get("candidate_representations", []) or [])
+        + ([semantic.get("requested_representation")] if semantic.get("requested_representation") else [])
+    ))
+    required_artifacts = list(dict.fromkeys(
+        list(requested_outputs)
+        + list(semantic.get("required_domains", []) or [])
+    ))
+
     machine_request = MachineRequest(
         goal=provider_goal,
         intent=intent,
-        memory={},
-        visual_context={},
-        conversation={},
+        conversation=machine_conversation,
+        memory=machine_memory,
+        visual_context={
+            "visual_reference": visual_reference,
+            "visual_summary": machine_memory.get("visual_summary", {}),
+            "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+            "scene_state": conversation_space.get("scene_state", {}),
+            "trajectory": conversation_space.get("trajectory") or (conversation_space.get("scene_state", {}) or {}).get("trajectory"),
+            "dialog_state": machine_memory.get("dialog_state", {}),
+            "active_topic": machine_memory.get("active_topic", ""),
+        },
+        available_tools=list(second_circle_context.get("cognition", {}).get("available_tools", []) or []),
+        requested_outputs=requested_outputs,
+        required_competencies=list(dict.fromkeys(
+            list(semantic.get("required_domains", []) or [])
+            + list(semantic.get("candidate_domains", []) or [])
+        )),
+        required_artifacts=required_artifacts,
+        routing={
+            "provider_reference_context": provider_reference_context,
+            "task_type": second_circle_context.get("task_type"),
+        },
+        constraints={
+            "single_route": True,
+            "preserve_dialog_continuity": True,
+            "preserve_visual_continuity": True,
+        },
     )
     try:
         setattr(machine_request, "provider_reference_context", provider_reference_context)
@@ -974,6 +1014,7 @@ def _build_second_circle_machine_request(*, text: str, semantic: dict, provider_
         setattr(machine_request, "first_circle_only", True)
         setattr(machine_request, "second_circle_context", second_circle_context)
         setattr(machine_request, "canonical_prompt_text", provider_goal)
+        setattr(machine_request, "conversation_space", conversation_space)
     except Exception:
         pass
     return machine_request
@@ -1035,10 +1076,10 @@ def _build_second_circle_context(
         "conversation": machine_conversation,
         "reference_context": reference_context,
         "provider_scope": {
-            "goal_only": True,
-            "memory_to_provider": False,
-            "visual_to_provider": False,
-            "conversation_to_provider": False,
+            "goal_only": False,
+            "memory_to_provider": True,
+            "visual_to_provider": True,
+            "conversation_to_provider": True,
         },
     }
 
@@ -2169,23 +2210,39 @@ def detect_task_type(semantic, cognition, state, conversation_space=None):
 
 
 def _build_executor_machine_memory(state: dict, conversation_space: dict) -> dict:
+    scene_state = state.get("scene_state", {}) if isinstance(state.get("scene_state", {}), dict) else {}
+    dialog_state = state.get("dialog_state", {}) if isinstance(state.get("dialog_state", {}), dict) else {}
     return {
         "memory_summary": _clip_text(state.get("memory_summary"), 3000),
         "active_flow": state.get("active_flow"),
         "memory_timeline": _compact_memory_bundle(conversation_space.get("memory_timeline", {})),
         "goal_hierarchy": state.get("goal_hierarchy", {}),
-        "focus": state.get("focus", state.get("focus_state", {})),
+        "focus": state.get("focus_state", state.get("focus", {})),
+        "active_topic": state.get("active_topic") or state.get("current_topic") or dialog_state.get("active_topic", ""),
+        "current_topic": state.get("current_topic"),
+        "current_object": state.get("current_object"),
+        "last_user_turn": state.get("last_user_turn") or dialog_state.get("last_user_turn", ""),
+        "last_april_turn": state.get("last_april_turn") or dialog_state.get("last_april_turn", ""),
+        "trajectory": scene_state.get("trajectory", ""),
+        "dialog_state": _compact_memory_bundle(dialog_state),
         "visual_summary": _compact_memory_bundle(conversation_space.get("visual_summary", {})),
     }
 
 
 def _build_executor_machine_conversation(conversation_space: dict, text: str) -> dict:
     current_turn = conversation_space.get("current_turn", {})
+    dialog_state = conversation_space.get("dialog_state", {}) if isinstance(conversation_space.get("dialog_state", {}), dict) else {}
     return {
         "timeline": _compact_timeline(conversation_space.get("timeline", []), max_items=14),
+        "dialog": _compact_timeline(conversation_space.get("dialog", []), max_items=14),
         "last_user_turn": current_turn.get("user", {}).get("text", text),
-        "last_april_turn": conversation_space.get("last_april_turn"),
+        "last_april_turn": conversation_space.get("last_april_turn") or dialog_state.get("last_april_turn"),
+        "active_topic": conversation_space.get("active_topic") or dialog_state.get("active_topic", ""),
+        "focus": _compact_memory_bundle(conversation_space.get("focus", dialog_state.get("focus", {}))),
+        "memory_summary": _clip_text(conversation_space.get("memory_summary", ""), 3000),
+        "trajectory": conversation_space.get("trajectory") or (conversation_space.get("scene_state", {}) or {}).get("trajectory"),
         "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+        "scene_state": _compact_memory_bundle(conversation_space.get("scene_state", {})),
     }
 
 
