@@ -1025,6 +1025,15 @@ def analyze(
             result["factory_targets"].append(requested_representation)
         result["current_representation"] = requested_representation
 
+        # Promote explicit rendering requests into the renderer path so the
+        # decision layer and executor do not silently downgrade them to plain text.
+        if requested_representation in {"table", "graph", "diagram", "formula", "gallery", "link"}:
+            result["render_intent"] = True
+            result["prefer_renderer"] = True
+            result["renderer_scene_object"] = True
+            result["renderer_lightweight"] = True
+            result["preferred_representation"] = requested_representation
+
     result["graph_action"] = detect_graph_action(text)
 
     last_math = state.get("last_math", {})
