@@ -876,13 +876,27 @@ def add_dialog(
         []
     )
 
-    dialog.append(
-
-        compact_dialog_message(
-            role,
-            content
-        )
+    message = compact_dialog_message(
+        role,
+        content
     )
+    dialog.append(message)
+
+    # Keep canonical dialog continuity mirrors available to the executor.
+    state_obj["dialog"] = dialog
+    state_obj["last_user_turn"] = (
+        safe_trim_text(content, 320) if role == "user" else state_obj.get("last_user_turn", "")
+    )
+    state_obj["last_april_turn"] = (
+        safe_trim_text(content, 320) if role != "user" else state_obj.get("last_april_turn", "")
+    )
+    state_obj["dialog_state"] = {
+        "timeline": dialog,
+        "last_user_turn": state_obj.get("last_user_turn", ""),
+        "last_april_turn": state_obj.get("last_april_turn", ""),
+        "active_topic": state_obj.get("active_topic", ""),
+        "focus": state_obj.get("focus_state", state_obj.get("dynamic_focus", {})),
+    }
 
     # =================================================
     # 🔥 META
