@@ -156,6 +156,77 @@ PROVIDER_DUPLICATE_TTL_SECONDS = 90
 PROVIDER_COST_LOG_VERSION = "cost_guard_v3"
 
 
+# ============================================================
+# APRIL QUANTUM PROVIDER — CANONICAL SYSTEM CONTRACT
+# ============================================================
+# The Provider owns this prompt locally. It must never depend on Executor
+# helpers or globals for request construction.
+PROVIDER_MACHINE_SYSTEM_PROMPT = """
+APRIL PROVIDER PROTOCOL
+
+Role: canonical OpenAI transport provider for April.
+
+Process exactly one MachineRequest into exactly one MachineResponse.
+Use the current request plus the supplied conversation/memory/context.
+Return ONE valid JSON object only.
+
+Required top-level fields:
+answer
+summary
+explanation
+content
+scene
+artifacts
+render_blocks
+scene_plan
+render_priority
+confidence
+
+Rules:
+- answer/content contain the complete visible answer.
+- summary is metadata only and must never repeat as a visible block.
+- preserve Markdown, headings, paragraphs, lists and inline LaTeX inside text.
+- create structured render_blocks only when the requested result actually needs them.
+- preserve multiple requested representations in one MachineResponse.
+- never create a second answer.
+- never call another model.
+- never invent a fallback route.
+"""
+
+
+def _provider_clip_text(value, limit=120):
+    text = _safe_text(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _provider_looks_like_markdown_table(text):
+    if not isinstance(text, str):
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    if not any("|" in line for line in lines):
+        return False
+    return any(re.fullmatch(r"[:\\-|\\s]+", line) and "-" in line for line in lines)
+
+
+def _provider_looks_like_formula_text(text):
+    if not isinstance(text, str):
+        return False
+    value = text.strip()
+    if not value or len(value) > 160:
+        return False
+    return bool("=" in value and any(ch in value for ch in "=^_/*\\√π∑∫²³⁴⁵⁶⁷⁸⁹⁰"))
+
+
+def _provider_has_url(text):
+    if not isinstance(text, str):
+        return False
+    return bool(re.search(r"https?://\\S+", text))
+
+
 
 # =====================================================
 # 🔥 SAFE PATCH MODE
@@ -2053,7 +2124,7 @@ provider_generate_image = generate_image
 # Structured render_blocks from Luna are preserved. Summary is metadata only.
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_1_1"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_1_4"
 APRIL_QUANTUM_PROVIDER_MODEL = "gpt-5.6-luna"
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
