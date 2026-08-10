@@ -7074,3 +7074,296 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         })
 
     return result
+
+# =========================================================
+# APRIL EXECUTOR CANONICAL ROUTE V2
+# =========================================================
+# Final definitions intentionally override legacy duplicated definitions above.
+# The file keeps one runtime entry point: this last execute().
+
+def _canonical_executor_dialog_contract(semantic, cognition, response_decision):
+    for source in (semantic, cognition, response_decision):
+        if isinstance(source, dict):
+            contract = source.get("dialogue_contract")
+            if isinstance(contract, dict):
+                return contract
+    return {}
+
+def _canonical_executor_goal(text, semantic, cognition, response_decision):
+    contract = _canonical_executor_dialog_contract(semantic, cognition, response_decision)
+    goal = contract.get("active_goal")
+    if not goal and isinstance(response_decision, dict):
+        goal = response_decision.get("active_goal")
+    if not goal and isinstance(cognition, dict):
+        goal = cognition.get("active_goal")
+    if not goal and isinstance(semantic, dict):
+        goal = semantic.get("active_goal") or semantic.get("resolved_request")
+    return normalize_text(goal or text)
+
+def _canonical_executor_reference(contract):
+    if not isinstance(contract, dict):
+        return ""
+    previous = normalize_text(contract.get("previous_april_turn"))
+    if not previous:
+        return ""
+    return _clip_text(
+        "PREVIOUS APRIL TURN (context only):\n" + previous,
+        FOLLOWUP_CONTEXT_CHAR_LIMIT * 2,
+    )
+
+def _executor_build_first_circle_goal(text: str, state: dict, semantic: dict, cognition: dict, response_decision: dict):
+    contract = _canonical_executor_dialog_contract(semantic, cognition, response_decision)
+    current = normalize_text(text)
+    resolved = normalize_text(contract.get("resolved_request") or current)
+    goal = _canonical_executor_goal(current, semantic, cognition, response_decision)
+    dialog_act = contract.get("dialog_act", "statement")
+    continuation = bool(contract.get("continuation"))
+    topic = normalize_text(contract.get("active_topic") or semantic.get("active_topic") or "")
+    previous = normalize_text(contract.get("previous_april_turn"))
+
+    # This is a provider instruction, not a second prompt/route.
+    lines = [
+        "Respond naturally as April to the user's current turn.",
+        f"CURRENT USER REQUEST: {current}",
+        f"DIALOG ACT: {dialog_act}",
+        f"RESOLVED REQUEST: {resolved}",
+        f"ACTIVE GOAL: {goal}",
+    ]
+    if topic:
+        lines.append(f"ACTIVE TOPIC: {topic}")
+    if continuation:
+        lines.append("CONTINUATION: true — interpret the current message as a response to the previous April turn.")
+    if previous:
+        lines.append(f"PREVIOUS APRIL TURN: {previous}")
+    lines.append(
+        "Answer the current turn directly. Do not echo the machine contract. "
+        "Do not invent a new task. If the user is continuing the previous turn, "
+        "continue that task naturally."
+    )
+    return "\n".join(lines), _canonical_executor_reference(contract)
+
+def _build_second_circle_machine_request(*, text: str, semantic: dict, provider_goal: str, provider_reference_context: str, second_circle_context: dict):
+    contract = _canonical_executor_dialog_contract(
+        semantic,
+        second_circle_context.get("cognition", {}),
+        second_circle_context.get("response_decision", {}),
+    )
+    conversation_space = second_circle_context.get("conversation_space", {}) or {}
+    machine_memory = second_circle_context.get("memory", {}) or {}
+    machine_conversation = second_circle_context.get("conversation", {}) or {}
+    visual_reference = second_circle_context.get("visual_reference", {}) or {}
+
+    requested_outputs = _executor_explicit_requested_outputs(text, semantic)
+    required_artifacts = list(dict.fromkeys(requested_outputs))
+    required_capabilities = list(
+        dict.fromkeys(
+            list(semantic.get("required_capabilities", []) or [])
+            + list(semantic.get("required_domains", []) or [])
+            + list(semantic.get("candidate_domains", []) or [])
+        )
+    )
+
+    intent = {
+        "type": str(semantic.get("intent") or "text"),
+        "normalized_text": normalize_text(text),
+        "dialog_act": contract.get("dialog_act", "statement"),
+        "continuation": bool(contract.get("continuation")),
+        "reply_to": contract.get("reply_to"),
+        "resolved_request": contract.get("resolved_request") or normalize_text(text),
+        "active_goal": contract.get("active_goal") or semantic.get("active_goal"),
+        "active_topic": contract.get("active_topic") or semantic.get("active_topic"),
+        "previous_april_turn": contract.get("previous_april_turn", ""),
+        "required_capabilities": required_capabilities,
+        "source": "executor_canonical_dialogue_v2",
+    }
+
+    machine_request = MachineRequest(
+        goal=_canonical_executor_goal(text, semantic, second_circle_context.get("cognition", {}), second_circle_context.get("response_decision", {})),
+        intent=intent,
+        conversation=machine_conversation,
+        memory=machine_memory,
+        visual_context={
+            "visual_reference": visual_reference,
+            "visual_summary": machine_memory.get("visual_summary", {}),
+            "active_visual_scene": conversation_space.get("active_visual_scene", {}),
+            "scene_state": conversation_space.get("scene_state", {}),
+            "trajectory": conversation_space.get("trajectory") or (conversation_space.get("scene_state", {}) or {}).get("trajectory"),
+            "dialog_state": machine_memory.get("dialog_state", {}),
+            "active_topic": machine_memory.get("active_topic", ""),
+        },
+        available_tools=list(second_circle_context.get("cognition", {}).get("available_tools", []) or []),
+        requested_outputs=requested_outputs,
+        required_competencies=required_capabilities,
+        required_artifacts=required_artifacts,
+        routing={
+            "provider_reference_context": provider_reference_context,
+            "task_type": second_circle_context.get("task_type"),
+            "single_route": True,
+        },
+        constraints={
+            "single_route": True,
+            "preserve_dialog_continuity": True,
+            "preserve_goal_trajectory": True,
+            "preserve_visual_continuity": True,
+            "one_visible_answer": True,
+            "summary_is_metadata_only": True,
+        },
+    )
+    # Runtime metadata is intentionally attached to the same MachineRequest.
+    for key, value in {
+        "dialogue_contract": contract,
+        "response_decision": second_circle_context.get("response_decision", {}),
+        "cognition": second_circle_context.get("cognition", {}),
+        "semantic": semantic,
+        "conversation_space": conversation_space,
+        "provider_reference_context": provider_reference_context,
+        "canonical_prompt_text": provider_goal,
+        "single_route": True,
+        "provider_calls_allowed": 1,
+    }.items():
+        try:
+            setattr(machine_request, key, value)
+        except Exception:
+            pass
+    return machine_request
+
+def _executor_force_visible_answer(result):
+    if not isinstance(result, dict):
+        return result
+    mr = result.get("machine_response")
+    if isinstance(mr, MachineResponse):
+        answer = normalize_text(getattr(mr, "answer", ""))
+        content = normalize_text(getattr(mr, "content", ""))
+        if not answer and content:
+            mr.answer = content
+            answer = content
+        if not answer:
+            for block in list(getattr(mr, "render_blocks", []) or []):
+                if isinstance(block, dict):
+                    value = _executor_best_text(
+                        block.get("content"),
+                        block.get("text"),
+                        block.get("answer"),
+                    )
+                    if value:
+                        mr.answer = value
+                        mr.content = mr.content or value
+                        answer = value
+                        break
+        if answer:
+            if not getattr(mr, "content", ""):
+                mr.content = answer
+            result["answer"] = answer
+            result["content"] = getattr(mr, "content", "") or answer
+            result["summary"] = getattr(mr, "summary", "") or answer
+    return result
+
+async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
+    """Canonical April CPU: understand -> decide -> one MachineRequest -> Luna -> one Scene."""
+    chat_id = chat_id or user_id
+    state = get_state(user_id)
+    if isinstance(state, dict):
+        state["_user_id"] = user_id
+
+    semantic = semantic_analyze(
+        text=text,
+        state=state,
+        history=state.get("dialog", []),
+        active_flow=state.get("active_flow", {}),
+        dialog_state=state.get("scene_state", {}),
+    )
+
+    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
+    cognition = analyze_cognition(
+        text=text,
+        semantic=semantic,
+        reasoning=reasoning,
+        state=state,
+    )
+    visual_reference = build_visual_reference(
+        semantic=semantic,
+        cognition=cognition,
+        text=text,
+        state=state,
+    )
+    response_decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        state=state,
+        visual_reference=visual_reference,
+    )
+    task_type = detect_task_type(semantic, cognition, state, conversation_space=None)
+
+    context = build_executor_context(
+        user_id=user_id,
+        chat_id=chat_id,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+    )
+
+    conversation_space = context.get("conversation_space") or {}
+    machine_memory = _build_executor_machine_memory(state, conversation_space)
+    machine_conversation = _build_executor_machine_conversation(conversation_space, text)
+
+    provider_goal, provider_reference_context = _executor_build_first_circle_goal(
+        text=text,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+    )
+    second_circle_context = _build_second_circle_context(
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        response_decision=response_decision,
+        visual_reference=visual_reference,
+        task_type=task_type,
+        text=text,
+        conversation_space=conversation_space,
+        machine_memory=machine_memory,
+        machine_conversation=machine_conversation,
+        reference_context=provider_reference_context,
+    )
+    context["machine_request"] = _build_second_circle_machine_request(
+        text=text,
+        semantic=semantic,
+        provider_goal=provider_goal,
+        provider_reference_context=provider_reference_context,
+        second_circle_context=second_circle_context,
+    )
+    context["executor_state"] = state
+    context["executor_conversation_space"] = conversation_space
+    context["second_circle_context"] = second_circle_context
+
+    result = await execute_rooms(
+        user_id=user_id,
+        text=text,
+        context=context,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        state=state,
+        run_with_activity=run_with_activity,
+    )
+    result = _executor_force_visible_answer(result)
+
+    if isinstance(result, dict):
+        result["single_route"] = True
+        result["provider_calls_per_request"] = 1
+        result.setdefault("route_diagnostics", {}).update({
+            "provider_called_once": True,
+            "processor_analyzed_first": True,
+            "dialogue_contract_active": True,
+            "scene_projected_once": True,
+            "summary_visible": False,
+            "formula_inline_markdown_owned_by_web": True,
+        })
+    return result
