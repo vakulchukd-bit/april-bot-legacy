@@ -76,8 +76,6 @@ from storage import (
 from core.executor import execute
 from blocks.state_manager import (
     get_state,
-    add_dialog,
-    update_memory_summary,
     update_visual_summary
 )
 from blocks.provider_router import (
@@ -153,142 +151,57 @@ CORS(app)
 # 🧠 SAFE JSON
 # =========================================================
 
-def _json_transport_copy(value, _active=None):
-    """Create an acyclic JSON-compatible transport copy.
+def safe_json(value):
 
-    April keeps the canonical SceneContract internally. The HTTP boundary must
-    never expose Python object aliases/cycles (for example SceneContract ->
-    space_continuity -> SceneContract). Shared objects are copied normally;
-    only an object encountered again on the current recursion path is cut.
-    """
-    if _active is None:
-        _active = set()
+    try:
 
-    if value is None or isinstance(value, (str, int, float, bool)):
+        json.dumps(value)
+
         return value
 
-    object_id = id(value)
-    if object_id in _active:
-        print("⚠️ JSON TRANSPORT CYCLE CUT")
-        return None
+    except:
 
-    if isinstance(value, dict):
-        _active.add(object_id)
-        try:
-            result = {}
-            for key, item in value.items():
-                safe_key = key if isinstance(key, str) else str(key)
-                result[safe_key] = _json_transport_copy(item, _active)
-            return result
-        finally:
-            _active.remove(object_id)
-
-    if isinstance(value, (list, tuple, set)):
-        _active.add(object_id)
-        try:
-            return [_json_transport_copy(item, _active) for item in value]
-        finally:
-            _active.remove(object_id)
-
-    if is_dataclass(value):
-        _active.add(object_id)
-        try:
-            return _json_transport_copy(vars(value), _active)
-        finally:
-            _active.remove(object_id)
-
-    if hasattr(value, "__dict__"):
-        _active.add(object_id)
-        try:
-            return _json_transport_copy(vars(value), _active)
-        finally:
-            _active.remove(object_id)
-
-    return str(value)
-
-
-def safe_json(value):
-    """Return a JSON-compatible, cycle-safe copy without collapsing payloads to text."""
-    try:
-        safe_value = _json_transport_copy(value)
-        json.dumps(safe_value, ensure_ascii=False)
-        return safe_value
-    except Exception as exc:
-        print("⚠️ SAFE JSON FALLBACK:", exc)
         return str(value)
 
 
 def _checkout_best_text(*values):
-    """Return canonical human-visible text, never a raw JSON envelope."""
     for value in values:
-        if value is None:
-            continue
-
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                continue
-
-            candidate = text
-            if candidate.startswith("```") and candidate.endswith("```"):
-                lines = candidate.splitlines()
-                if len(lines) >= 3:
-                    candidate = "\n".join(lines[1:-1]).strip()
-                    if candidate.lower().startswith("json\n"):
-                        candidate = candidate[5:].lstrip()
-
-            current = candidate
-            for _ in range(3):
-                if not isinstance(current, str):
-                    break
-                try:
-                    parsed = json.loads(current)
-                except Exception:
-                    break
-                if isinstance(parsed, dict):
-                    for key in (
-                        "answer", "content", "response", "summary",
-                        "explanation", "text", "display_text",
-                    ):
-                        nested = parsed.get(key)
-                        if isinstance(nested, str) and nested.strip():
-                            return nested.strip()
-                    break
-                if isinstance(parsed, str):
-                    current = parsed.strip()
-                    continue
-                break
-
-            return text
-
-        if isinstance(value, dict):
-            for key in (
-                "answer", "content", "response", "summary",
-                "explanation", "text", "display_text",
-            ):
-                nested = value.get(key)
-                if isinstance(nested, str) and nested.strip():
-                    return nested.strip()
-
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return ""
 
 
 def scene_contract_to_dict(contract):
+    """Return a shallow transport view of SceneContract.
+
+    Do not call dataclasses.asdict() here: asdict() recursively deep-copies
+    every nested field and can invoke custom container implementations. In
+    the current production payload that boundary was able to surface
+    ``slice(None, 5, None)`` after the provider had already produced a valid
+    MachineResponse. The canonical contract must be projected without
+    recursively rebuilding its nested payloads.
+    """
     if contract is None:
         return {}
 
     if isinstance(contract, dict):
         return contract
 
+    try:
+        values = vars(contract)
+        if isinstance(values, dict):
+            return dict(values)
+    except Exception:
+        pass
+
     if is_dataclass(contract):
         try:
-            return asdict(contract)
-        except Exception:
-            pass
-
-    if hasattr(contract, "__dict__"):
-        try:
-            return dict(vars(contract))
+            # Dataclass fields are read directly rather than using asdict(),
+            # preserving nested machine payload objects untouched.
+            return {
+                field_name: getattr(contract, field_name)
+                for field_name in contract.__dataclass_fields__
+            }
         except Exception:
             pass
 
@@ -460,74 +373,200 @@ def canonical_scene_metadata(contract):
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
 
-
 def normalize_executor_response(
     result
 ):
 
     if not isinstance(result, dict):
+
         return {
+
             "type": "text",
+
             "content": str(result),
+
             "space": {}
         }
 
     print("========== NORMALIZE EXECUTOR RESPONSE ==========")
     print("RESULT TYPE:", type(result))
-    print("RESULT KEYS:", list(result.keys()))
-    scene_obj = result.get("scene")
-    print("ROOT RENDER_BLOCKS:", bool(result.get("render_blocks")))
-    if isinstance(scene_obj, dict):
-        print("SCENE KEYS:", list(scene_obj.keys()))
-        print("SCENE RENDER_BLOCKS:", bool(scene_obj.get("render_blocks")))
-        print("SCENE BLOCKS:", bool(scene_obj.get("blocks")))
-
-    scene_contract = scene_contract_view(result.get("scene_contract"))
-    content = resolve_scene_content(result)
-
+    if isinstance(result, dict):
+        print("RESULT KEYS:", list(result.keys()))
+        scene_obj = result.get("scene")
+        print("ROOT RENDER_BLOCKS:", bool(result.get("render_blocks")))
+        if isinstance(scene_obj, dict):
+            print("SCENE KEYS:", list(scene_obj.keys()))
+            print("SCENE RENDER_BLOCKS:", bool(scene_obj.get("render_blocks")))
+            print("SCENE BLOCKS:", bool(scene_obj.get("blocks")))
+    
     normalized = {
-        "type": result.get("type", "text"),
-        "content": content,
-        "answer": scene_contract.get("answer") or content,
-        "summary": scene_contract.get("summary") or content,
-        "scene_present": bool(scene_contract or result.get("scene")),
-        "blocks_present": bool(
-            scene_contract.get("render_blocks")
-            or result.get("render_blocks")
-            or result.get("blocks")
-        ),
-        "artifact_present": bool(result.get("artifact")),
-        "render_blocks": list(
-            scene_contract.get("render_blocks")
-            or result.get("render_blocks")
-            or scene_contract.get("blocks")
-            or result.get("blocks", [])
-        ),
-        "scene": scene_contract.get("scene") or result.get("scene", {}),
-        "space": result.get("space", {}),
-        "graph": result.get("graph") or scene_contract.get("graph"),
-        "formula": result.get("formula") or scene_contract.get("formula"),
-        "table": result.get("table") or scene_contract.get("table"),
-        "gallery": result.get("gallery") or scene_contract.get("gallery"),
-        "layout": result.get("layout") or scene_contract.get("layout"),
-        "visual": result.get("visual") or scene_contract.get("visual"),
-        "continuity": result.get("continuity", {}),
-        "trajectory": result.get("trajectory", {}),
-        "visual_blocks": result.get("visual_blocks", []),
-        "ui_actions": result.get("ui_actions", []),
-        "renderer_state": scene_contract.get("renderer_state", result.get("renderer_state", {})),
-        "artifact_packet": build_artifact_packet(result) if result.get("artifact") else None,
+
+        # =================================================
+        # 🔥 CORE
+        # =================================================
+
+        "type":
+            result.get(
+                "type",
+                "text"
+            ),
+
+        "content":
+            resolve_scene_content(result),
+
+        "answer":
+            safe_json(result.get("answer") or scene_contract.get("answer")),
+
+        "summary":
+            safe_json(result.get("summary") or scene_contract.get("summary")),
+
+        "scene_present":
+            bool(
+                scene_contract or result.get("scene")
+            ),
+
+        "blocks_present":
+            bool(
+                scene_contract.get("render_blocks")
+                or result.get("render_blocks")
+                or result.get("blocks")
+            ),
+
+        "artifact_present":
+            bool(
+                result.get("artifact")
+            ),
+
+        # =================================================
+        # 🔥 RENDER
+        # =================================================
+
+        "render_blocks":
+            safe_json(
+                scene_contract.get("render_blocks")
+                or result.get("render_blocks")
+                or scene_contract.get("blocks")
+                or result.get("blocks", [])
+            ),
+
+        "scene":
+            safe_json(root_scene.get("scene", result.get("scene", {}))),
+
+        "space":
+            safe_json(
+                result.get(
+                    "space",
+                    {}
+                )
+            ),
+
+        # =================================================
+        # 🔥 SCIENCE RENDERERS
+        # =================================================
+
+        "graph":
+            safe_json(
+                result.get("graph") or scene_contract.get("graph")
+            ),
+
+        "formula":
+            safe_json(
+                result.get("formula") or scene_contract.get("formula")
+            ),
+
+        "table":
+            safe_json(
+                result.get("table") or scene_contract.get("table")
+            ),
+
+        "gallery":
+            safe_json(
+                result.get("gallery") or scene_contract.get("gallery")
+            ),
+
+        "layout":
+            safe_json(
+                result.get("layout") or scene_contract.get("layout")
+            ),
+
+        "visual":
+            safe_json(
+                result.get("visual") or scene_contract.get("visual")
+            ),
+
+        # =================================================
+        # 🔥 CONTINUITY
+        # =================================================
+
+        "continuity":
+            safe_json(
+                result.get(
+                    "continuity",
+                    {}
+                )
+            ),
+
+        "trajectory":
+            safe_json(
+                result.get(
+                    "trajectory",
+                    {}
+                )
+            ),
+
+        # =================================================
+        # 🔥 MULTIMODAL
+        # =================================================
+
+        "visual_blocks":
+            safe_json(
+                result.get(
+                    "visual_blocks",
+                    []
+                )
+            ),
+
+        "ui_actions":
+            safe_json(
+                result.get(
+                    "ui_actions",
+                    []
+                )
+            ),
+
+        "renderer_state":
+            safe_json(scene_contract.get("renderer_state", result.get("renderer_state", {}))),
+
+        "artifact_packet":
+            safe_json(
+                build_artifact_packet(result)
+            ) if result.get("artifact") else None
     }
 
-    if not ALLOW_TEXT_COLLAPSE and normalized["render_blocks"]:
-        normalized["preserve_render_space"] = True
+    # =====================================================
+    # 🔥 LEGACY TEXT SAFETY
+    # =====================================================
+
+    if (
+
+        not ALLOW_TEXT_COLLAPSE
+
+        and normalized["render_blocks"]
+    ):
+
+        normalized[
+            "preserve_render_space"
+        ] = True
+
 
     print(
         "🌐 WIDESCENE:",
         {
             "scene_contract": bool(result.get("scene_contract")),
             "artifact": bool(result.get("artifact")),
-            "blocks": bool(scene_contract.get("render_blocks"))
+            "blocks": bool(
+                scene_contract.get("render_blocks")
+            )
         }
     )
 
@@ -537,16 +576,25 @@ def normalize_executor_response(
     print("🌐 NORMALIZED:")
     print(normalized)
 
-    canonical = scene_contract_view(result.get("scene_contract"))
+    
+    canonical = scene_contract_view(result.get("scene_contract")) if isinstance(result, dict) else None
+    executor_final = False
     if canonical:
+        executor_final = canonical.get("scene_contract_final") or result.get("scene_contract_final")
+
+    if canonical:
+        canonical = scene_contract_view(canonical)
         canonical.setdefault("content", normalized.get("content"))
         canonical.setdefault("answer", normalized.get("answer"))
         canonical.setdefault("summary", normalized.get("summary"))
         canonical.setdefault("render_blocks", normalized.get("render_blocks", []))
         normalized["scene_contract"] = canonical
-    else:
+    elif not executor_final:
         normalized["scene_contract"] = build_gateway_scene_contract(normalized)
+    else:
+        normalized["scene_contract"] = canonical
 
+    
     normalized["legacy_renderers"] = {
         "graph": normalized.get("graph"),
         "formula": normalized.get("formula"),
@@ -562,8 +610,12 @@ def normalize_executor_response(
     return gateway_return_cpu_result(normalized)
 
 
-def build_artifact_packet(result):
 
+# =========================================================
+# 🏭 ARTIFACT REPRESENTATION RESOLVER
+# =========================================================
+
+def build_artifact_packet(result):
 
     artifact = result.get("artifact")
 
@@ -801,117 +853,23 @@ def gateway_return_cpu_result(cpu_result):
 # =========================================================
 
 def build_gateway_transport_payload(normalized):
-    # Forward the canonical contract without rebuilding scene semantics.
+    
+    # Forward canonical contract without rebuilding.
     contract = scene_contract_view(normalized.get("scene_contract"))
     contract.setdefault("gateway_transport_only", True)
     contract.setdefault("gateway_owner", "checkout_server")
-
-    # Transport guard: provider JSON envelopes must never become visible text.
-    canonical_content = _checkout_best_text(
-        contract.get("content"),
-        contract.get("answer"),
-        contract.get("summary"),
-        normalized.get("content"),
-        normalized.get("answer"),
-        normalized.get("summary"),
-    )
-    canonical_answer = _checkout_best_text(
-        contract.get("answer"),
-        normalized.get("answer"),
-        canonical_content,
-    )
-    canonical_summary = _checkout_best_text(
-        contract.get("summary"),
-        normalized.get("summary"),
-        canonical_answer,
-        canonical_content,
-    )
-
-    contract["content"] = canonical_content
-    contract["answer"] = canonical_answer
-    contract["summary"] = canonical_summary
-
-    # Keep continuity as a transport projection only. The canonical
-    # SceneContract is already a sibling field; nesting the whole contract
-    # inside space_continuity creates an unnecessary recursive graph.
-    continuity = normalized.get("space_continuity", {})
-    if not isinstance(continuity, dict):
-        continuity = {}
-    continuity = {
-        "active_scene": continuity.get("active_scene", contract.get("active_scene", {})),
-        "renderer_state": continuity.get("renderer_state", contract.get("renderer_state", {})),
-        "workspace": continuity.get("workspace", {}),
-        "continuity": continuity.get("continuity", {}),
-        "trajectory": continuity.get("trajectory", {}),
-        "render_blocks": continuity.get("render_blocks", contract.get("render_blocks", [])),
-    }
-
     return {
         "scene_contract": contract,
         "contract_version": contract.get("version", 1),
-        "transport_mode": "passthrough",
-        "gateway_rebuild": False,
-        "space_continuity": continuity,
+        "transport_mode":"passthrough",
+        "gateway_rebuild":False,
+        "space_continuity": normalized.get("space_continuity", {}),
         "render_blocks": contract.get("render_blocks", []),
         "renderer_state": contract.get("renderer_state", {}),
-        "content": canonical_content,
-        "answer": canonical_answer,
-        "summary": canonical_summary,
+        "content": contract.get("content", ""),
+        "answer": contract.get("answer", normalized.get("answer")),
+        "summary": contract.get("summary", normalized.get("summary")),
     }
-
-
-
-def build_web_api_payload(result, *, include_legacy_fields=False):
-    """Build the public Flask JSON payload without duplicating canonical text
-    across multiple top-level aliases.
-
-    The canonical transport remains inside gateway_transport.
-    Legacy aliases are disabled by default because they can cause the frontend
-    to reconstruct the same assistant text more than once.
-    """
-    gateway_transport = result.get("gateway_transport")
-    if not isinstance(gateway_transport, dict):
-        gateway_transport = build_gateway_transport_payload(result)
-    payload = {
-        "success": True,
-        # HTTP boundary: always send a cycle-safe copy. Never expose the
-        # internal Python transport graph directly to Flask jsonify().
-        "gateway_transport": safe_json(gateway_transport),
-        "renderer_mode": WEB_RENDERER_MODE,
-        "scene_mode": WEB_SCENE_MODE,
-        "visual_summary": safe_json(
-            result.get("visual_summary")
-            or {
-                "user_id": result.get("user_id"),
-                "package": result.get("package"),
-                "session_started_utc": result.get("session_started_utc"),
-                "scene_events_count": result.get("scene_events_count"),
-                "last_event": result.get("last_event"),
-            }
-        ),
-        "active_visual_scene": safe_json(
-            gateway_transport.get("scene_contract", {}).get("active_scene")
-        ),
-    }
-
-    if include_legacy_fields:
-        # Kept only for compatibility experiments.
-        payload.update(
-            {
-                "scene_contract": safe_json(
-                    gateway_transport.get("scene_contract", {})
-                ),
-                "render_blocks": safe_json(
-                    gateway_transport.get("render_blocks", [])
-                ),
-                "content": gateway_transport.get("content", ""),
-                "answer": gateway_transport.get("answer", ""),
-                "summary": gateway_transport.get("summary", ""),
-                "response": gateway_transport.get("content", ""),
-            }
-        )
-
-    return payload
 
 # =========================================================
 # 🎨 SUCCESS HTML
@@ -1174,20 +1132,26 @@ def voice_chat():
             transcript
         )
 
-        if not transcript:
-            return jsonify({
-                "success": False,
-                "error": "empty transcript",
-                "transcript": "",
-            }), 422
+        result = asyncio.run(
 
-        # Voice is an input modality, not a second response route. Return the
-        # recognized text only; AprilWeb sends that text through the same
-        # /api/v1/chat -> Executor -> SceneContract route as typed text.
+            process_web_message(
+
+                user_id="web_voice",
+
+                text=transcript
+            )
+        )
+
         return jsonify({
+
             "success": True,
-            "transcript": transcript,
-            "voice_input": True,
+
+            "transcript":
+                transcript,
+
+            "response":
+                result
+
         })
 
     except Exception as e:
@@ -1334,27 +1298,26 @@ VISUAL_ANALYSIS:
             )
         )
 
-        gateway_transport = build_gateway_transport_payload(april_result)
-
         return jsonify({
 
             "success": True,
 
-            "space_response": safe_json(april_result),
+            "space_response":
+                safe_json(april_result),
 
-            "analysis": analysis_payload,
+            "analysis":
+                analysis_payload,
 
-            "gateway_transport": gateway_transport,
+            "renderer_mode":
+                WEB_RENDERER_MODE,
 
-            "renderer_mode": WEB_RENDERER_MODE,
+            "scene_mode":
+                WEB_SCENE_MODE,
 
-            "scene_mode": WEB_SCENE_MODE,
-
-            "visual_summary": safe_json(visual_summary),
-
-            "active_visual_scene": safe_json(
-                gateway_transport.get("scene_contract", {}).get("active_scene")
-            )
+            "visual_summary":
+                safe_json(
+                    visual_summary
+                )
         })
 
     except Exception as e:
@@ -1457,13 +1420,6 @@ def web_chat():
                     "user_id required"
             }), 400
 
-        # Persist the user turn before CPU execution so the next request can
-        # recover dialog continuity, focus and trajectory.
-        try:
-            add_dialog(user_id, "user", text)
-        except Exception as dialog_error:
-            print("DIALOG SAVE ERROR (user):", dialog_error)
-
         print(
             "🧠 VISUAL SUMMARY:",
             visual_summary
@@ -1477,37 +1433,50 @@ def web_chat():
             )
         )
 
-        # Persist the assistant turn after CPU execution so the conversation
-        # history remains available to the next request.
-        try:
-            assistant_text = resolve_scene_content(result)
-            if not assistant_text:
-                assistant_text = _checkout_best_text(
-                    result.get("answer"),
-                    result.get("content"),
-                    result.get("summary"),
-                    result.get("response"),
-                )
-            if assistant_text:
-                add_dialog(user_id, "assistant", assistant_text)
-                update_memory_summary(get_state(user_id), text, assistant_text)
-        except Exception as dialog_error:
-            print("DIALOG SAVE ERROR (assistant):", dialog_error)
-
-        result["visual_summary"] = visual_summary
         result["gateway_transport"] = build_gateway_transport_payload(result)
 
-        # The gateway now returns only one canonical rich payload:
-        # gateway_transport.  This prevents AprilWeb from reconstructing the
-        # same assistant text through multiple top-level aliases.
-        return jsonify(build_web_api_payload(result))
+        # =========================================================
+        # LEGACY TRANSPORT (TEMPORARILY DISABLED)
+        # =========================================================
+        #
+        # The legacy response below unpacked Scene Contract back into
+        # graph/formula/table/gallery/layout/visual/blocks fields.
+        # This creates a parallel transport route and conflicts with
+        # the canonical Fiber Route.
+        #
+        # Keep this block only as historical reference while migrating
+        # AprilWeb. If testing confirms it is unnecessary, delete it
+        # permanently. If a required capability is discovered, restore
+        # it through Scene Contract rather than separate transport
+        # fields.
+        #
+        # return jsonify({... legacy transport ...})
+        #
+        # =========================================================
+
+        gt=result.get("gateway_transport",{})
+        return jsonify({
+            "success": True,
+            "gateway_transport": safe_json(gt),
+            "scene_contract": safe_json(gt.get("scene_contract", {})),
+            "render_blocks": safe_json(gt.get("render_blocks", [])),
+            "content": gt.get("content",""),
+            "answer": gt.get("answer",""),
+            "summary": gt.get("summary",""),
+            "renderer_mode": WEB_RENDERER_MODE,
+            "scene_mode": WEB_SCENE_MODE,
+            "visual_summary": safe_json(visual_summary),
+            "active_visual_scene": safe_json(gt.get("active_visual_scene")),
+        })
 
     except Exception as e:
 
+        import traceback as _traceback
         print(
             "WEB EXECUTION ERROR:",
             e
         )
+        _traceback.print_exc()
 
         return jsonify({
 
@@ -1875,4 +1844,3 @@ if __name__ == "__main__":
 
         use_reloader=False
     )
-
