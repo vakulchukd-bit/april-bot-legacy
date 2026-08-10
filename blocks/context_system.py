@@ -2121,3 +2121,760 @@ def build_dialog_focus_block(state,current_text):
         f"Vector: {f['focus_vector']}\n"
         f"Direction: {f['direction_vector']}"
     )
+
+
+# =====================================================
+# 🧠 APRIL QUANTUM CONTEXT FIX V7
+# =====================================================
+#
+# PURPOSE:
+# Prevent stale scene/context contamination.
+#
+# SINGLE ROUTE:
+# current user request
+#   -> context coordination
+#   -> executor
+#   -> provider
+#   -> canonical response
+#
+# IMPORTANT:
+# This is a context upgrade, not a second memory or route.
+# =====================================================
+
+_CONTEXT_STOPWORDS = {
+    "и", "а", "но", "или", "да", "же", "ли", "не", "ни",
+    "что", "это", "этот", "эта", "эти", "тот", "та", "те",
+    "как", "так", "про", "для", "при", "из", "на", "в", "во",
+    "с", "со", "к", "у", "о", "об", "по", "до", "от", "за",
+    "мне", "меня", "ты", "тебя", "я", "мы", "вы", "он", "она",
+    "они", "его", "ее", "её", "их", "мой", "моя", "мое", "моё",
+    "можешь", "можно", "нужно", "надо", "есть", "был", "была",
+    "быть", "будет", "расскажи", "покажи", "скажи", "дай",
+    "пожалуйста", "привет", "здравствуйте"
+}
+
+_REFERENCE_MARKERS_V7 = {
+    "помнишь", "вернемся", "вернёмся", "продолжим", "предыдущ",
+    "прошлый", "прошлая", "прошлое", "прошлые", "тот", "та",
+    "те", "его", "ее", "её", "это", "такой", "такая",
+    "как раньше", "как тогда", "дальше", "снова", "повтори",
+    "перепиши", "продолжи", "таблицу", "график", "формулу"
+}
+
+_LOW_INFORMATION_V7 = {
+    "привет",
+    "здравствуй",
+    "как дела",
+    "ты как",
+    "как ты",
+    "понятно",
+    "ясно",
+    "спасибо",
+    "ок",
+    "ага",
+    "да",
+    "нет",
+    "хорошо"
+}
+
+
+def _v7_tokens(value):
+    import re
+
+    text = normalize_lower(value)
+    words = re.findall(r"[a-zа-яё0-9]{4,}", text)
+
+    return {
+        w for w in words
+        if w not in _CONTEXT_STOPWORDS_V7()
+    }
+
+
+def _CONTEXT_STOPWORDS_V7():
+    return _CONTEXT_STOPWORDS
+
+
+def _v7_is_reference(text):
+    lowered = normalize_lower(text)
+
+    return any(
+        marker in lowered
+        for marker in _REFERENCE_MARKERS_V7
+    )
+
+
+def _v7_is_low_information(text):
+    lowered = normalize_lower(text)
+
+    if not lowered:
+        return True
+
+    if lowered in _LOW_INFORMATION_V7:
+        return True
+
+    return len(_v7_tokens(lowered)) == 0
+
+
+def _v7_latest_substantive_user_message(dialog):
+    for msg in reversed(dialog or []):
+        if str(msg.get("role", "")).lower() not in {
+            "user", "human"
+        }:
+            continue
+
+        content = normalize_text(
+            msg.get("content", "")
+        )
+
+        if not content:
+            continue
+
+        if _v7_is_low_information(content):
+            continue
+
+        return content
+
+    return ""
+
+
+def _v7_topic_overlap(current_text, previous_text):
+    current = _v7_tokens(current_text)
+    previous = _v7_tokens(previous_text)
+
+    if not current or not previous:
+        return 0.0
+
+    intersection = len(current & previous)
+
+    return intersection / max(
+        1,
+        min(len(current), len(previous))
+    )
+
+
+def _v7_clear_stale_scene(state, current_text):
+    """
+    Clears only stale scene/focus bindings when a genuinely new
+    substantive request arrives.
+
+    Persistent dialog/memory remain untouched.
+    """
+
+    scene = state.get("scene_state")
+
+    if not isinstance(scene, dict):
+        scene = {}
+
+    focus = state.get("focus_state")
+
+    if not isinstance(focus, dict):
+        focus = {}
+
+    dynamic_focus = state.get("dynamic_focus")
+
+    if not isinstance(dynamic_focus, dict):
+        dynamic_focus = {}
+
+    old_topic = (
+        scene.get("trajectory")
+        or focus.get("active_topic")
+        or focus.get("primary_focus")
+        or dynamic_focus.get("primary_focus")
+        or ""
+    )
+
+    old_topic = normalize_text(old_topic)
+
+    if not old_topic:
+        return False
+
+    if _v7_is_low_information(current_text):
+        return False
+
+    if _v7_is_reference(current_text):
+        return False
+
+    overlap = _v7_topic_overlap(
+        current_text,
+        old_topic
+    )
+
+    # A topic encoded as one long phrase is allowed to survive
+    # when at least one meaningful term is explicitly present.
+    old_tokens = _v7_tokens(old_topic)
+    current_tokens = _v7_tokens(current_text)
+
+    if old_tokens and current_tokens:
+        common = old_tokens & current_tokens
+        if common:
+            return False
+
+    # No lexical connection + substantive request = new context.
+    if overlap == 0.0:
+        scene["previous_topic"] = old_topic
+        scene["previous_scene"] = dict(scene)
+
+        scene["trajectory"] = ""
+        scene["goal"] = ""
+        scene["active_topic"] = ""
+        scene["active_room"] = ""
+        scene["active_scene_id"] = ""
+        scene["topic_signature"] = ""
+
+        # Visual scene belongs to the old scene unless the new
+        # request explicitly references it.
+        if not _v7_is_reference(current_text):
+            state["active_visual_scene"] = None
+            state["visual_focus"] = {}
+            state["visual_summary"] = {}
+
+        # Focus is recalculated downstream rather than carrying
+        # the old topic into the new request.
+        focus.clear()
+        dynamic_focus.clear()
+
+        state["scene_state"] = scene
+        state["focus_state"] = focus
+        state["dynamic_focus"] = dynamic_focus
+
+        return True
+
+    return False
+
+
+def detect_topic_shift(
+    text,
+    active_flow,
+    scene_state
+):
+    """
+    V7: topic shift is determined from the actual current request,
+    recent dialog, and scene binding—not only from flow type.
+    """
+
+    text = normalize_text(text)
+    if not text or _v7_is_low_information(text):
+        return False
+
+    if _v7_is_reference(text):
+        return False
+
+    scene_state = (
+        scene_state
+        if isinstance(scene_state, dict)
+        else {}
+    )
+
+    old_topic = normalize_text(
+        scene_state.get("trajectory")
+        or scene_state.get("active_topic")
+        or ""
+    )
+
+    if not old_topic:
+        return False
+
+    return _v7_topic_overlap(
+        text,
+        old_topic
+    ) == 0.0
+
+
+def build_relevant_dialog(
+    dialog,
+    text,
+    active_flow,
+    scene_state
+):
+    """
+    V7 relevance:
+    - current request is always authoritative;
+    - recent dialog is retained;
+    - old unrelated topics are excluded;
+    - reference requests can intentionally reopen context.
+    """
+
+    dialog = dialog or []
+    current = normalize_text(text)
+    reference = _v7_is_reference(current)
+
+    scene_state = (
+        scene_state
+        if isinstance(scene_state, dict)
+        else {}
+    )
+
+    active_topic = normalize_text(
+        scene_state.get("trajectory")
+        or scene_state.get("active_topic")
+        or ""
+    )
+
+    dynamic_focus = (
+        {}
+        if not isinstance(scene_state.get("dynamic_focus"), dict)
+        else scene_state.get("dynamic_focus")
+    )
+
+    visual_focus = {}
+
+    relevant = []
+
+    recent = dialog[-MAX_DIALOG_SCAN:]
+
+    for index, msg in enumerate(reversed(recent)):
+        content = normalize_text(
+            msg.get("content", "")
+        )
+
+        if not content:
+            continue
+
+        lowered = content.lower()
+
+        score = 0
+
+        # The latest turns are the strongest evidence.
+        if index == 0:
+            score += 12
+        elif index < 3:
+            score += 8
+        elif index < 6:
+            score += 4
+
+        # Explicit reference allows previous context back in.
+        overlap = _v7_topic_overlap(
+            current,
+            content
+        )
+
+        if overlap > 0:
+            score += 8
+
+        if active_topic:
+            topic_overlap = _v7_topic_overlap(
+                active_topic,
+                content
+            )
+            if topic_overlap > 0:
+                score += 6
+
+        if reference and any(
+            marker in lowered
+            for marker in _REFERENCE_MARKERS_V7
+        ):
+            score += 4
+
+        if score >= 6:
+            relevant.append(
+                (
+                    index,
+                    f"{msg.get('role', 'user')}: "
+                    f"{safe_slice(content, 500)}"
+                )
+            )
+
+    relevant.sort(key=lambda item: item[0], reverse=True)
+
+    selected = [
+        value
+        for _, value in relevant[:MAX_RELEVANT_MESSAGES]
+    ]
+
+    selected.reverse()
+
+    return "\n".join(selected)
+
+
+def build_current_request(text, scene_state):
+    """
+    Current request is deliberately separated from historical context.
+    It is the highest-priority semantic input.
+    """
+
+    text = normalize_text(text)
+
+    return (
+        "CURRENT REQUEST — AUTHORITATIVE:\n"
+        f"{text}\n"
+        "RULE: answer the current request first. "
+        "Historical context may clarify it, but must not replace it."
+    )
+
+
+def build_context_focus_snapshot(text, state):
+    focus = state.get("focus_state")
+    if not isinstance(focus, dict) or not focus:
+        focus = state.get("dynamic_focus", {})
+
+    if not isinstance(focus, dict):
+        focus = {}
+
+    scene = state.get("scene_state", {})
+    if not isinstance(scene, dict):
+        scene = {}
+
+    return {
+        "active_topic": (
+            focus.get("active_topic")
+            or focus.get("primary_focus")
+            or scene.get("trajectory")
+            or ""
+        ),
+        "secondary_topic": focus.get(
+            "secondary_focus",
+            ""
+        ),
+        "focus_strength": focus.get(
+            "focus_strength",
+            0.0
+        ),
+        "current_request": safe_slice(
+            text,
+            500
+        ),
+        "context_policy": "CURRENT_REQUEST_FIRST"
+    }
+
+
+def build_context_text(
+    user_id,
+    text,
+    state
+):
+    """
+    Canonical V7 context assembly.
+
+    The current request is never allowed to disappear behind:
+    memory_summary, stale scene, visual memory, or passive memory.
+    """
+
+    APRIL_LOG_IN(
+        "CONTEXT_ROOM",
+        {
+            "action": "build_context_text_v7",
+            "user_id": user_id
+        }
+    )
+
+    text = normalize_text(text)
+
+    dialog = state.get("dialog", [])
+    summary = state.get("memory_summary", "")
+    active_flow = state.get("active_flow")
+    scene_state = state.get("scene_state", {})
+
+    if not isinstance(scene_state, dict):
+        scene_state = {}
+        state["scene_state"] = scene_state
+
+    # Store the authoritative request in the existing state space.
+    state["current_request"] = text
+    state["context_focus_snapshot"] = (
+        build_context_focus_snapshot(
+            text,
+            state
+        )
+    )
+
+    # Do not let an old AI/image/etc. scene contaminate a new
+    # substantive request.
+    shifted = _v7_clear_stale_scene(
+        state,
+        text
+    )
+
+    if shifted:
+        scene_state = state.get(
+            "scene_state",
+            {}
+        )
+
+        if isinstance(active_flow, dict):
+            active_flow["scene_bound"] = False
+            active_flow["stale"] = True
+
+    # A low-information message keeps the current scene.
+    # A reference message explicitly keeps the current scene.
+    topic_shift = detect_topic_shift(
+        text,
+        active_flow,
+        scene_state
+    )
+
+    if topic_shift and not _v7_is_reference(text):
+        if active_flow:
+            archive_completed_flow(
+                state,
+                active_flow
+            )
+
+        state["active_flow"] = None
+        active_flow = None
+
+    stabilize_active_flow(
+        state,
+        scene_state
+    )
+
+    base = build_base_context()
+
+    scene_block = build_scene_block(
+        scene_state
+    )
+
+    active_visual_scene = state.get(
+        "active_visual_scene"
+    )
+
+    visual_scene_block = (
+        build_visual_scene_block(
+            active_visual_scene
+        )
+    )
+
+    visual_focus_block = build_visual_focus_block(
+        state
+    )
+
+    visual_summary_block = build_visual_summary_block(
+        state
+    )
+
+    visual_memory_block = build_visual_memory_block(
+        state
+    )
+
+    # Recent dialog remains available, but it can never outrank
+    # CURRENT REQUEST — AUTHORITATIVE.
+    active_dialog = build_active_dialog(
+        state,
+        text
+    )
+
+    relevant_dialog = build_relevant_dialog(
+        dialog,
+        text,
+        active_flow,
+        scene_state
+    )
+
+    current_request = build_current_request(
+        text,
+        scene_state
+    )
+
+    image_block = ""
+    image_context = state.get("image_context")
+
+    if isinstance(image_context, dict):
+        hint = (
+            image_context.get("hint")
+            or image_context.get("prompt")
+        )
+
+        if hint and (
+            _v7_is_reference(text)
+            or _v7_topic_overlap(text, str(hint)) > 0
+        ):
+            image_block = (
+                "\nIMAGE CONTEXT:\n"
+                + safe_slice(
+                    hint,
+                    MAX_IMAGE_HINT
+                )
+            )
+
+    math_block = ""
+    last_math = state.get("last_math")
+
+    if isinstance(last_math, dict):
+        expr = last_math.get("expr")
+
+        if expr:
+            math_block = (
+                "\nMATH CONTEXT:\n"
+                + safe_slice(
+                    expr,
+                    MAX_MATH_EXPR
+                )
+            )
+
+    passive_block = ""
+
+    if (
+        state.get("passive_memory")
+        and should_include_archived_memory(
+            text,
+            state
+        )
+    ):
+        passive_block = (
+            "\nARCHIVED TRAJECTORIES "
+            "(REFERENCE ONLY):\n"
+            + "\n".join(
+                state["passive_memory"][-4:]
+            )
+        )
+
+    summary_block = ""
+
+    if summary and (
+        _v7_is_reference(text)
+        or _v7_topic_overlap(
+            text,
+            summary
+        ) > 0
+    ):
+        summary_block = (
+            "\nMEMORY SUMMARY "
+            "(REFERENCE ONLY):\n"
+            + safe_slice(
+                summary,
+                800
+            )
+        )
+
+    dialog_focus = build_dialog_focus_block(
+        state,
+        text
+    )
+
+    dynamic_focus = build_dynamic_focus_block(
+        state
+    )
+
+    memory_timeline = build_memory_timeline_block(
+        state
+    )
+
+    full_context = f"""
+{base}
+
+{current_request}
+
+CONTEXT POLICY:
+- CURRENT REQUEST has highest priority.
+- Recent dialog is used only when relevant.
+- Old scene/focus is ignored after a substantive topic change.
+- Archived memory is reference-only.
+- Visual context is included only when relevant to the request.
+- Do not answer from stale context.
+
+{scene_block}
+
+{dynamic_focus}
+
+{dialog_focus}
+
+{visual_scene_block}
+
+{visual_focus_block}
+
+{visual_summary_block}
+
+{visual_memory_block}
+
+{memory_timeline}
+
+{summary_block}
+
+ACTIVE DIALOG:
+{active_dialog}
+
+RELEVANT DIALOG:
+{relevant_dialog}
+
+{passive_block}
+
+{image_block}
+
+{math_block}
+"""
+
+    APRIL_LOG_OUT(
+        "CONTEXT_ROOM",
+        {
+            "context": "built_v7",
+            "topic_shift": topic_shift,
+            "scene_cleared": shifted,
+            "current_request_length": len(text),
+            "relevant_dialog_length": len(relevant_dialog)
+        }
+    )
+
+    return full_context
+
+
+def build_deephub_context(
+    user_id,
+    text,
+    state
+):
+    """
+    V7 canonical entrypoint.
+    No parallel context route is introduced.
+    """
+
+    APRIL_LOG_IN(
+        "CONTEXT_ROOM",
+        {
+            "action": "build_deephub_context_v7",
+            "user_id": user_id
+        }
+    )
+
+    if not isinstance(state, dict):
+        state = {}
+
+    state["current_request"] = normalize_text(text)
+
+    synchronize_scene_state(state)
+
+    machine_payload = build_machine_context_payload(
+        trajectory=state.get(
+            "scene_state",
+            {}
+        ).get("trajectory"),
+        scene_state=state.get(
+            "scene_state",
+            {}
+        ),
+        active_flow=state.get(
+            "active_flow"
+        ),
+        visual_scene=state.get(
+            "active_visual_scene"
+        )
+    )
+
+    # Keep the existing canonical packet; add only authoritative
+    # current-request metadata to the same packet.
+    state["_machine_context"] = machine_payload
+
+    packet = build_executor_context_packet(state)
+
+    packet["current_request"] = state["current_request"]
+    packet["context_focus"] = build_context_focus_snapshot(
+        text,
+        state
+    )
+    packet["context_policy"] = "CURRENT_REQUEST_FIRST"
+
+    state["_executor_context_packet"] = packet
+
+    payload = build_context_text(
+        user_id,
+        text,
+        state
+    )
+
+    APRIL_LOG_OUT(
+        "CONTEXT_ROOM",
+        {
+            "deephub_context": "ready_v7",
+            "current_request": state["current_request"]
+        }
+    )
+
+    return payload
