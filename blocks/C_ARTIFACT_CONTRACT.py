@@ -1534,7 +1534,7 @@ def factory_machine_response_ready(response):
 #    a second semantic reconstruction.
 # =====================================================
 
-APRIL_ARTIFACT_CONTRACT_VERSION = "quantum_1_2"
+APRIL_ARTIFACT_CONTRACT_VERSION = "quantum_1_4"
 APRIL_ARTIFACT_SINGLE_ROUTE = True
 APRIL_ARTIFACT_SUMMARY_VISIBLE = False
 
@@ -1748,6 +1748,11 @@ def build_universal_contract(
         "single_route": True,
         "render_block_count": len(render_blocks),
         "block_types": block_types,
+        "renderer_state": {
+            "keys": [],
+            "source": "provider_blocks",
+            "single_route": True,
+        },
     })
     contract.scene_contract = scene_contract
 
