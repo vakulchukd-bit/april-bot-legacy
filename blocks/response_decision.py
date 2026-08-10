@@ -1098,3 +1098,57 @@ def build_response_decision(
     return result
 
 # APRIL PATCH: internal reasoning never becomes final answer.
+
+# =========================================================
+# APRIL RESPONSE DECISION V2
+# =========================================================
+# Preserve the existing decision engine and enrich its final decision with the
+# semantic dialogue contract.  This is not a second router.
+
+_legacy_build_response_decision = build_response_decision
+
+def build_response_decision(semantic: dict, cognition: dict, visual_reference: dict, state: dict):
+    result = _legacy_build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        visual_reference=visual_reference,
+        state=state,
+    )
+    result = result if isinstance(result, dict) else {}
+
+    contract = semantic.get("dialogue_contract", {}) if isinstance(semantic, dict) else {}
+    if not isinstance(contract, dict):
+        contract = {}
+
+    dialog_act = contract.get("dialog_act", "statement")
+    continuation = bool(contract.get("continuation"))
+    active_goal = contract.get("active_goal") or cognition.get("active_goal")
+    active_topic = contract.get("active_topic") or cognition.get("active_topic")
+
+    if dialog_act in {"affirmation", "continuation"} and continuation:
+        result["final_action"] = "talk"
+        result["response_mode"] = "continuation"
+        result["should_continue_trajectory"] = True
+        result["maintain_dialog_continuity"] = True
+    elif dialog_act == "rejection":
+        result["final_action"] = "clarify"
+        result["response_mode"] = "correction"
+    elif dialog_act == "correction":
+        result["final_action"] = "correct"
+        result["response_mode"] = "correction"
+
+    result["dialogue_contract"] = contract
+    result["dialog_act"] = dialog_act
+    result["reply_to"] = contract.get("reply_to")
+    result["active_goal"] = active_goal
+    result["active_topic"] = active_topic
+    result["resolved_request"] = contract.get("resolved_request") or semantic.get("normalized_text", "")
+    result["response_goal"] = active_goal or result.get("goal") or semantic.get("normalized_text", "")
+    result["response_strategy"] = (
+        "continue_previous_turn" if continuation else "answer_current_request"
+    )
+    result["avoid_machine_echo"] = True
+    result["avoid_duplicate_answer"] = True
+    result["single_canonical_answer"] = True
+
+    return result
