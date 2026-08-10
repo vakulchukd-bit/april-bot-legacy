@@ -1,3 +1,5 @@
+import re
+
 
 # =====================================================
 # STAGE 3 - FULL RESPONSE PRESERVATION
@@ -2055,6 +2057,7 @@ async def analyze_image(
         raise RuntimeError("Visual provider route failed")
 
 
+PROVIDER_RUNTIME_PATCH_VERSION = "provider_router_quantum_1_7_re_runtime_fix"
 PROVIDER_ROUTE_VERSION="provider_router_luna_cost_guard_v1"
 PROVIDER_LEGACY_MODE=False
 
