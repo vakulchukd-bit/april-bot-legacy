@@ -116,7 +116,8 @@ from core.executor import execute
 # =========================================================
 
 from blocks.state_manager import (
-    get_state
+    get_state,
+    add_dialog,
 )
 
 # =========================================================
@@ -1089,6 +1090,16 @@ async def process_april_request(
 
     machine_request = human_to_machine(text, user_id)
 
+    # Canonical dialog write: the Executor must see the user's real turn
+    # before semantic/cognitive analysis. No parallel history is created.
+    if text:
+        add_dialog(
+            user_id,
+            "user",
+            text,
+            metadata={"source": "april_web", "modality": "text"},
+        )
+
     async def run_with_activity(chat_id, coro):
         return await coro
 
@@ -1106,6 +1117,22 @@ async def process_april_request(
     result.setdefault("scene_contract", {})
     result.setdefault("gateway_transport", {})
     normalized = organize_multimodal_response(result)
+
+    # Write April's final human-visible answer back into the SAME dialog.
+    # This closes the turn pair used by the next request.
+    visible_answer = (
+        normalized.get("answer")
+        or normalized.get("content")
+        or normalized.get("final_text")
+        or ""
+    )
+    if visible_answer:
+        add_dialog(
+            user_id,
+            "assistant",
+            visible_answer,
+            metadata={"source": "april_web", "modality": "text"},
+        )
 
     # Preserve continuity only if a visual scene exists.
     if normalized.get("scene_contract") or normalized.get("render_blocks"):
