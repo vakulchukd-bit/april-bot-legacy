@@ -2002,3 +2002,54 @@ def build_contribution_cognition_bridge(artifacts):
         "contribution_pipeline_active":
             True
     }
+
+# =========================================================
+# APRIL COGNITION DIALOGUE V2
+# =========================================================
+# Existing cognition remains the engine; this wrapper makes its output depend
+# on the canonical semantic dialogue contract and persists the resulting focus.
+
+_legacy_analyze_cognition = analyze_cognition
+
+def analyze_cognition(text: str, state: dict, semantic: dict, reasoning: dict):
+    cognition = _legacy_analyze_cognition(
+        text=text,
+        state=state,
+        semantic=semantic,
+        reasoning=reasoning,
+    )
+    cognition = cognition if isinstance(cognition, dict) else {}
+
+    contract = semantic.get("dialogue_contract", {}) if isinstance(semantic, dict) else {}
+    if not isinstance(contract, dict):
+        contract = {}
+
+    active_goal = contract.get("active_goal") or cognition.get("goal_analysis", {}).get("active_goal")
+    active_topic = contract.get("active_topic") or semantic.get("active_topic") or semantic.get("current_topic")
+
+    cognition["dialogue_contract"] = contract
+    cognition["dialog_act"] = contract.get("dialog_act", "statement")
+    cognition["reply_to"] = contract.get("reply_to")
+    cognition["continuation"] = bool(contract.get("continuation"))
+    cognition["active_goal"] = active_goal
+    cognition["active_topic"] = active_topic
+    cognition["resolved_request"] = contract.get("resolved_request") or text
+    cognition["previous_april_turn"] = contract.get("previous_april_turn", "")
+    cognition["response_should_feel_human"] = True
+    cognition["response_should_flow_naturally"] = True
+    cognition["response_should_continue_naturally"] = bool(contract.get("continuation"))
+    cognition["avoid_topic_loss"] = True
+
+    # The cognitive state becomes the source for the next turn, not a detached
+    # telemetry object.
+    if isinstance(state, dict):
+        state["cognition"] = cognition
+        if active_goal:
+            state["active_goal"] = active_goal
+            state["current_goal"] = active_goal
+        if active_topic:
+            state["active_topic"] = active_topic
+            state["current_topic"] = active_topic
+        state["last_dialog_contract"] = contract
+
+    return cognition
