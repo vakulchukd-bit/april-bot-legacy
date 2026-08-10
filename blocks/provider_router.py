@@ -145,17 +145,15 @@ gemini_client = genai.Client(
 # OPENAI MODEL CONFIGURATION
 # =====================================================
 
-# COST POLICY — April text generation is Luna-first.
-# Terra is reserved for genuinely multi-question requests (5+ explicit questions).
-# Sol is intentionally not used by this router.
+# COST POLICY — April text generation is Luna-only.
+# Sol/Terra switching is disabled in this router.
 OPENAI_PRIMARY_MODEL = "gpt-5.6-luna"
-OPENAI_BALANCED_MODEL = "gpt-5.6-terra"
+OPENAI_BALANCED_MODEL = "gpt-5.6-luna"
 OPENAI_FAST_MODEL = "gpt-5.6-luna"
 OPENAI_PREMIUM_MODEL = "gpt-5.6-luna"
 
-TERRA_MIN_QUESTIONS = 5
 PROVIDER_DUPLICATE_TTL_SECONDS = 90
-PROVIDER_COST_LOG_VERSION = "cost_guard_v2"
+PROVIDER_COST_LOG_VERSION = "cost_guard_v3"
 
 
 
@@ -241,15 +239,11 @@ def _count_explicit_questions(text):
 
 
 def _select_cost_model(machine_request, requested_model=None):
-    """Luna by default; Terra only for 5+ explicit questions in this request."""
+    """Luna only. No provider-side model escalation."""
     current_text = _extract_request_text(machine_request)
     question_count = _count_explicit_questions(current_text)
-    if question_count >= TERRA_MIN_QUESTIONS:
-        selected = OPENAI_BALANCED_MODEL
-        tier = "TERRA_5PLUS_QUESTIONS"
-    else:
-        selected = OPENAI_FAST_MODEL
-        tier = "LUNA_DEFAULT"
+    selected = OPENAI_PRIMARY_MODEL
+    tier = "LUNA_ONLY"
 
     provider_log({
         "cost_policy": PROVIDER_COST_LOG_VERSION,
@@ -258,7 +252,7 @@ def _select_cost_model(machine_request, requested_model=None):
         "tier": tier,
         "question_count": question_count,
         "current_request_chars": len(current_text),
-        "context_does_not_upgrade_model": True,
+        "model_escalation_disabled": True,
     })
     return selected, question_count, tier
 
@@ -361,8 +355,7 @@ def _extract_usage(response):
 # Standard API rates per 1M tokens. These are used only for telemetry; the
 # provider remains the source of truth for the actual billed amount.
 _MODEL_PRICING_PER_MTOK = {
-    OPENAI_FAST_MODEL: {"input": 1.00, "cached_input": 0.10, "output": 6.00},
-    OPENAI_BALANCED_MODEL: {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+    OPENAI_PRIMARY_MODEL: {"input": 1.00, "cached_input": 0.10, "output": 6.00},
 }
 
 
@@ -688,12 +681,13 @@ def build_provider_machine_response(text, parsed_contract=None, source_request=N
 
     summary = (
         parsed_contract.get("summary")
-        or answer
+        or provider_compact_summary(answer, parsed_contract)
     )
 
     explanation = (
         parsed_contract.get("explanation")
         or summary
+        or provider_compact_summary(answer, parsed_contract)
     )
     if response is None:
         response = answer
@@ -1022,6 +1016,53 @@ def sanitize_internal_reasoning(text):
     return result.strip()
 
 
+def provider_compact_summary(answer, parsed_contract=None):
+    """Build a short scene summary that does not mirror the visible answer."""
+    parsed_contract = parsed_contract or {}
+    source_text = _safe_text(
+        parsed_contract.get("provider_original_content")
+        or parsed_contract.get("provider_original_answer")
+        or parsed_contract.get("content")
+        or parsed_contract.get("answer")
+        or answer
+    ).strip()
+    if not source_text:
+        return ""
+
+    source_kind = "text"
+    low = source_text.lower()
+    if _executor_looks_like_markdown_table(source_text):
+        source_kind = "table"
+    elif re.search(r"```[\s\S]*```", source_text):
+        source_kind = "code"
+    elif re.search(r"<!doctype\s+html|<html\b|<script\b|<style\b|<div\b|<span\b", low, flags=re.IGNORECASE):
+        source_kind = "code"
+    elif re.search(r"\b(import\s+\w+|from\s+\w+\s+import|def\s+\w+|class\s+\w+|print\s*\(|if __name__ == ['\"]__main__['\"])\b", low):
+        source_kind = "code"
+    elif re.search(r"\b(function|const|let|var|console\.log|=>)\b", low):
+        source_kind = "code"
+    elif re.search(r"\b(select|insert|update|delete|create table|drop table|alter table)\b", low):
+        source_kind = "code"
+    elif _looks_like_formula_text(source_text):
+        source_kind = "formula"
+    elif _executor_has_url(source_text):
+        source_kind = "link"
+    elif re.search(r"\b(graph|chart|plot|diagram|schema)\b", low):
+        source_kind = "graph"
+    elif re.search(r"\bimage\b|\bpicture\b|\bgallery\b", low):
+        source_kind = "gallery"
+
+    word_count = len(re.findall(r"\S+", source_text))
+    if word_count == 0:
+        return f"scene: {source_kind}"
+    if word_count <= 6:
+        return f"scene: {source_kind}"
+    snippet = _clip_text(source_text.split("\n", 1)[0], 120)
+    if snippet and _safe_text(answer).strip() and _safe_text(snippet).strip().lower() != _safe_text(answer).strip().lower():
+        return f"{snippet} | scene: {source_kind}"
+    return f"scene: {source_kind}"
+
+
 # =====================================================
 # PROVIDER RESPONSIBILITY — OPENAI REQUEST BUILDER
 # Stage 2 COMPLETE
@@ -1235,7 +1276,7 @@ def recover_machine_contract(contract):
     contract.setdefault("answer", candidate)
     contract.setdefault("content", contract.get("answer", candidate))
     contract.setdefault("response", contract.get("answer", candidate))
-    contract.setdefault("summary", candidate)
+    contract.setdefault("summary", provider_compact_summary(candidate, contract))
     contract.setdefault("explanation", contract["summary"])
     contract.setdefault("scene", {})
     contract.setdefault("artifacts", [])
@@ -1299,7 +1340,7 @@ def create_provider_contract(raw_text, source_request=None):
         mr.setdefault("answer", candidate)
         mr.setdefault("content", candidate)
         mr.setdefault("response", candidate)
-        mr.setdefault("summary", candidate)
+        mr["summary"] = mr.get("summary") or provider_compact_summary(candidate, mr)
 
     # STAGE4: executor handoff preserved.
     machine = provider_finalize_for_executor(machine)
@@ -1420,7 +1461,7 @@ def provider_finalize_for_executor(contract):
         mr["answer"] = candidate
         mr["content"] = candidate
         mr["response"] = candidate
-        mr.setdefault("summary", candidate)
+        mr["summary"] = mr.get("summary") or provider_compact_summary(candidate, mr)
 
         blocks = mr.setdefault("render_blocks", [])
         if not any(isinstance(b, dict) and b.get("type") == "text" for b in blocks):
@@ -1498,7 +1539,7 @@ def provider_final_guard(contract):
         mr["answer"] = candidate
         mr["content"] = candidate
         mr["response"] = candidate
-        mr.setdefault("summary", candidate)
+        mr["summary"] = mr.get("summary") or provider_compact_summary(candidate, mr)
 
         blocks = mr.setdefault("render_blocks", [])
         if not any(isinstance(b, dict) and b.get("type") == "text" for b in blocks):
