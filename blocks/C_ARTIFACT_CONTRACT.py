@@ -1841,43 +1841,32 @@ def create_transport_contract(
     return contract
 
 def build_canonical_scene_blocks(scene):
-    """
-    Do not synthesize a new renderer block from summary/content when no upstream
-    render_blocks exist. The caller must decide representation; the contract only
-    transports explicit signals.
-    """
+    """Strict projection; never invent a renderer block from text/summary."""
     if _scene_is_internal_only(scene):
         return []
-    blocks = _artifact_clean_render_blocks(list(getattr(scene, "blocks", []) or []))
-    return blocks
+    return _artifact_clean_render_blocks(list(getattr(scene,"blocks",[]) or []))
 
 def build_scene_contract(scene: MachineScene) -> SceneContract:
-    """Strict scene projection: MachineScene -> SceneContract, no semantic rewrite."""
-    contract = scene.contract or create_default_scene_contract()
-    blocks = build_canonical_scene_blocks(scene)
-    contract.blocks = list(blocks)
-    contract.render_blocks = list(blocks)
+    """Strict projection of MachineScene -> SceneContract."""
+    contract=scene.contract or create_default_scene_contract()
+    blocks=build_canonical_scene_blocks(scene)
+    contract.blocks=list(blocks)
+    contract.render_blocks=list(blocks)
     contract.metadata.update(scene.metadata or {})
-    answer = _scene_text_fallback(scene)
-    block_types = [_artifact_block_type(b) for b in blocks]
+    answer=_scene_text_fallback(scene)
+    types=[_artifact_block_type(b) for b in blocks]
     contract.metadata.update({
-        "answer": answer,
-        "content": answer,
-        "summary": _artifact_compact_summary(answer, block_types),
-        "artifact_count": len(getattr(scene, "artifacts", []) or []),
-        "transport_stage": "artifact_quantum_1_2",
-        "canonical_scene_contract": True,
-        "single_route": True,
-        "summary_visible": False,
-        "render_block_count": len(blocks),
-        "block_types": block_types,
+        "answer":answer,"content":answer,
+        "summary":_artifact_compact_summary(answer,types),
+        "artifact_count":len(getattr(scene,"artifacts",[]) or []),
+        "transport_stage":"artifact_quantum_1_3",
+        "canonical_scene_contract":True,"single_route":True,
+        "summary_visible":False,"render_block_count":len(blocks),
+        "block_types":types,
     })
-    contract.active_scene = getattr(scene, "active_scene", "")
-    contract.space_continuity = {
-        "active_scene": contract.active_scene,
-        "render_blocks": list(blocks),
-    }
-    scene.contract = contract
+    contract.active_scene=getattr(scene,"active_scene","")
+    contract.space_continuity={"active_scene":contract.active_scene,"render_blocks":list(blocks)}
+    scene.contract=contract
     return contract
 
 def validate_quantum_artifact_contract(contract):
