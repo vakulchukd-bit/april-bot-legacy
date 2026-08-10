@@ -764,40 +764,28 @@ def _executor_contribution_to_block(key: str, value: Any, index: int = 0, source
 
 
 def _executor_text_to_logical_blocks(text: str, source_room: str = "text") -> list[dict]:
+    """Keep ordinary provider text intact.
+
+    Markdown (including headings, lists, code fences and inline LaTeX) stays
+    one textual signal. Structured renderer blocks are accepted only when
+    the Provider/Artifact layer explicitly supplies them.
+    """
     normalized = normalize_text(text)
     if not normalized:
         return []
+    return [_executor_make_text_block(normalized, 0, source_room)]
 
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", normalized) if p.strip()]
-    if not paragraphs:
-        paragraphs = [normalized]
+def _executor_build_logical_scene_blocks(
+    machine_response: Any,
+    semantic: Optional[dict] = None,
+    response_decision: Optional[dict] = None,
+) -> list[dict]:
+    """Build the scene without reinterpreting canonical provider text.
 
-    blocks: list[dict] = []
-    for idx, paragraph in enumerate(paragraphs):
-        current = paragraph.strip()
-
-        if _executor_looks_like_markdown_table(current):
-            blocks.append(_executor_make_table_block(_executor_parse_markdown_table(current), current, idx, source_room))
-            continue
-
-        if current.startswith("```") and current.endswith("```"):
-            blocks.append(_executor_make_code_block(_executor_strip_code_fence(current), current, idx, source_room))
-            continue
-
-        if _looks_like_formula_text(current):
-            blocks.append(_executor_make_formula_block(current, current, idx, source_room))
-            continue
-
-        if _executor_has_url(current):
-            blocks.append(_executor_make_link_block(current, current, idx, source_room))
-            continue
-
-        blocks.append(_executor_make_text_block(current, idx, source_room))
-
-    return blocks
-
-
-def _executor_build_logical_scene_blocks(machine_response: Any, semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> list[dict]:
+    Provider-owned render_blocks are canonical. When none exist, the complete
+    answer becomes one text/Markdown signal for April Web. Structured room
+    contributions and explicit artifacts remain structured.
+    """
     semantic = semantic or {}
     response_decision = response_decision or {}
 
@@ -808,33 +796,23 @@ def _executor_build_logical_scene_blocks(machine_response: Any, semantic: Option
     canonical_text = _executor_best_text(
         getattr(machine_response, "answer", ""),
         getattr(machine_response, "content", ""),
-        getattr(machine_response, "summary", ""),
         getattr(machine_response, "response", ""),
-        getattr(machine_response, "explanation", ""),
     )
 
-    requested_representation = _executor_requested_representation(semantic, response_decision)
-    preferred_room = normalize_text(
-        response_decision.get("preferred_room")
-        or semantic.get("room")
-        or ""
-    ).lower()
-
     blocks: list[dict] = []
-
     if render_blocks:
         blocks.extend(render_blocks)
     elif canonical_text:
         blocks.extend(_executor_text_to_logical_blocks(canonical_text, source_room="text"))
 
-    # Merge contributions into the logical scene as real artifacts.
-    if isinstance(contributions, dict) and contributions:
+    if isinstance(contributions, dict):
         for idx, (key, value) in enumerate(contributions.items()):
-            block = _executor_contribution_to_block(key, value, index=idx, source_room=preferred_room or "registry")
+            block = _executor_contribution_to_block(
+                key, value, index=idx, source_room="registry"
+            )
             if block:
                 blocks.append(block)
 
-    # Preserve artifacts when they exist.
     for idx, artifact in enumerate(artifacts):
         mapping = _executor_payload_to_mapping(artifact)
         if not mapping:
@@ -851,33 +829,10 @@ def _executor_build_logical_scene_blocks(machine_response: Any, semantic: Option
     if not blocks and canonical_text:
         blocks = _executor_text_to_logical_blocks(canonical_text, source_room="text")
 
-    # If a representation was requested, keep matching artifacts but never drop the canonical text.
-    if requested_representation and requested_representation != "text":
-        preferred = requested_representation.lower()
-        filtered: list[dict] = []
-        for block in blocks:
-            block_type = normalize_text(block.get("type")).lower()
-            if block_type == "text":
-                filtered.append(block)
-            elif block_type == preferred:
-                filtered.append(block)
-            elif preferred == "diagram" and block_type == "graph":
-                filtered.append(block)
-            elif preferred == "image" and block_type == "gallery":
-                filtered.append(block)
-        blocks = filtered or blocks
-
-    visible_text = canonical_text
-    blocks = _executor_deduplicate_visible_render_blocks(blocks, visible_text=visible_text)
-
-    if visible_text and not any(normalize_text(b.get("type")).lower() == "text" for b in blocks):
-        blocks.insert(
-            0,
-            _executor_make_text_block(visible_text, 0, "text")
-        )
-
-    return blocks
-
+    return _executor_deduplicate_visible_render_blocks(
+        blocks,
+        visible_text=canonical_text,
+    )
 
 def _executor_scene_presentation_hint(blocks: list[dict], semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> dict:
     semantic = semantic or {}
@@ -1876,64 +1831,12 @@ def executor_cpu_attach_artifact_payloads(machine_response):
 
 
 def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
-    semantic = semantic or {}
-    response_decision = response_decision or {}
+    """Compatibility identity.
 
-    preferred = response_decision.get("preferred_representation") or semantic.get("preferred_representation") or ""
-
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    answer = getattr(machine_response, "answer", "") or ""
-    content = getattr(machine_response, "content", "") or ""
-    summary = getattr(machine_response, "summary", "") or ""
-
-    should_force_formula = (
-        preferred == "formula"
-        or semantic.get("math_intent")
-        or semantic.get("formula_intent")
-        or semantic.get("render_intent")
-        or "formula" in normalize_text(getattr(machine_response, "goal", "")).lower()
-        or "формул" in normalize_text(getattr(machine_response, "goal", "")).lower()
-    )
-
-    if not render_blocks:
-        candidate = answer or content or summary
-        if candidate and (_looks_like_formula_text(candidate) or should_force_formula):
-            render_blocks = [{
-                "type": "formula",
-                "content": candidate.strip() if isinstance(candidate, str) else candidate,
-                "renderer": "FormulaBlock",
-                "viewer": "FormulaBlock",
-                "priority": 100,
-            }]
-    else:
-        normalized = []
-        for block in render_blocks:
-            if not isinstance(block, dict):
-                normalized.append(block)
-                continue
-            block_type = str(block.get("type", "text") or "text")
-            block_content = block.get("content")
-            if (
-                block_type in ("text", "markdown")
-                and (
-                    should_force_formula
-                    or _looks_like_formula_text(block_content if isinstance(block_content, str) else "")
-                    or _looks_like_formula_text(answer)
-                    or _looks_like_formula_text(content)
-                    or _looks_like_formula_text(summary)
-                )
-            ):
-                block = dict(block)
-                block["type"] = "formula"
-                block["renderer"] = "FormulaBlock"
-                block["viewer"] = "FormulaBlock"
-                block.setdefault("priority", 100)
-            normalized.append(block)
-        render_blocks = normalized
-
-    machine_response.render_blocks = render_blocks
+    Formula semantics are owned by Provider/Artifact/Web signals. Inline
+    LaTeX inside Markdown is deliberately left inside the text block.
+    """
     return machine_response
-
 
 def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decision, state, machine_response):
     conversation_space = getattr(machine_response, "conversation_space", {}) or {}
@@ -2416,13 +2319,16 @@ def executor_cpu_finalize_transport(machine_response):
     if visible_text:
         machine_response.answer = visible_text
         machine_response.content = visible_text
-        machine_response.summary = visible_text
+        machine_response.summary = _executor_scene_summary_metadata(
+            visible_text,
+            blocks,
+        )
 
     _executor_store_canonical_text_metadata(
         machine_response,
         answer=visible_text,
         content=visible_text,
-        summary=visible_text,
+        summary=getattr(machine_response, "summary", "") or "",
         original_answer=getattr(machine_response, "provider_original_answer", "") or "",
         original_content=getattr(machine_response, "provider_original_content", "") or "",
     )
@@ -3128,21 +3034,26 @@ def executor_cpu_sync_factory_bridge(factory_register):
 # =====================================================
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
+    """Non-destructive presentation hint.
+
+    The processor may prioritize the requested representation, but it must
+    never delete valid render signals from the canonical scene. April Web
+    receives the complete provider scene and decides how each block renders.
+    """
     response_decision = response_decision or {}
     semantic = semantic or {}
-    preferred = response_decision.get("preferred_representation") or semantic.get("preferred_representation")
+    preferred = (
+        response_decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+        or semantic.get("requested_representation")
+    )
+    result = list(blocks or [])
     if not preferred:
-        return blocks
-    filtered = []
-    for b in blocks:
-        if not isinstance(b, dict):
-            filtered.append(b)
-            continue
-        t = b.get("type")
-        if t in ("graph", "formula", "table", "diagram", "gallery") and t != preferred:
-            continue
-        filtered.append(b)
-    return filtered
+        return result
+    for block in result:
+        if isinstance(block, dict):
+            block.setdefault("presentation_hint", preferred)
+    return result
 
 
 def is_canonical_scene(scene):
