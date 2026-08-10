@@ -6514,3 +6514,125 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     cpu_trace_success("EXECUTE")
     return result
 
+
+
+# =====================================================
+# APRIL QUANTUM PROCESSOR 1.2 — NO DUPLICATE VISIBLE SUMMARY
+# =====================================================
+
+APRIL_QUANTUM_PROCESSOR_VERSION = "april_quantum_1_2"
+
+
+def _quantum_compact_scene_summary(canonical_text: str, blocks: list, report: Optional[dict] = None) -> str:
+    """
+    Metadata-only summary.
+
+    It must never repeat the canonical answer text itself, otherwise the UI
+    can render the same response twice when it shows both answer and summary.
+    """
+    report = report or {}
+
+    block_types: list[str] = []
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        block_type = normalize_text(block.get("type")).lower()
+        if block_type and block_type not in block_types:
+            block_types.append(block_type)
+
+    parts: list[str] = []
+    if block_types:
+        parts.append(f"scene: {', '.join(block_types[:5])}")
+    else:
+        parts.append("scene: text")
+
+    if report.get("duplicate_text_blocks"):
+        parts.append(f"dedupe: {int(report.get('duplicated_text_count') or 0)}")
+
+    if report.get("missing_requested_representation"):
+        pending = normalize_text(report.get("requested_representation") or "representation")
+        parts.append(f"pending: {pending}")
+
+    if report.get("logical_contradictions"):
+        parts.append("logical review needed")
+
+    return _clip_text(" | ".join(parts), 260)
+
+
+# Keep the public summary helper aligned with the metadata-only summary.
+_quantum_summary = _quantum_compact_scene_summary
+
+
+def _executor_strip_duplicate_visible_fields(result: dict, visible_text: str, render_blocks: list) -> dict:
+    """
+    Keep the canonical answer visible exactly once.
+    The summary becomes metadata-only and never repeats the answer.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    canonical = normalize_text(
+        visible_text
+        or result.get("answer", "")
+        or result.get("content", "")
+        or result.get("summary", "")
+    )
+
+    result["answer"] = canonical
+    result["content"] = canonical
+
+    logical_report = result.get("logical_report", {})
+    if not isinstance(logical_report, dict):
+        logical_report = {}
+
+    summary = result.get("summary", "")
+    summary_text = normalize_text(summary)
+
+    if not summary_text or _quantum_norm(summary_text) == _quantum_norm(canonical):
+        summary_text = _quantum_compact_scene_summary(canonical, render_blocks, report=logical_report)
+
+    # Never let summary become a duplicate of the visible answer.
+    if _quantum_norm(summary_text) == _quantum_norm(canonical):
+        summary_text = "scene: text"
+
+    result["summary"] = summary_text
+    result["render_blocks"] = render_blocks
+
+    machine_response = result.get("machine_response")
+    if machine_response is not None:
+        try:
+            if hasattr(machine_response, "answer"):
+                machine_response.answer = canonical
+            if hasattr(machine_response, "content"):
+                machine_response.content = canonical
+            if hasattr(machine_response, "summary"):
+                machine_response.summary = summary_text
+            if hasattr(machine_response, "render_blocks"):
+                machine_response.render_blocks = render_blocks
+        except Exception:
+            pass
+
+    scene_contract = result.get("scene_contract")
+    if scene_contract is not None:
+        try:
+            if isinstance(scene_contract, dict):
+                scene_contract["answer"] = canonical
+                scene_contract["content"] = canonical
+                scene_contract["summary"] = summary_text
+                scene_contract["render_blocks"] = render_blocks
+            else:
+                setattr(scene_contract, "answer", canonical)
+                setattr(scene_contract, "content", canonical)
+                setattr(scene_contract, "summary", summary_text)
+                setattr(scene_contract, "render_blocks", render_blocks)
+        except Exception:
+            pass
+
+    scene_runtime = result.get("scene_runtime")
+    if isinstance(scene_runtime, dict):
+        scene_runtime.setdefault("canonical_answer", canonical)
+        scene_runtime.setdefault("canonical_content", canonical)
+        scene_runtime.setdefault("canonical_summary", summary_text)
+        scene_runtime["render_blocks"] = render_blocks
+
+    return result
