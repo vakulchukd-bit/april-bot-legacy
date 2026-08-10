@@ -1518,3 +1518,388 @@ def factory_room_selected(room_name:str):
 
 def factory_machine_response_ready(response):
     factory_response_complete(response)
+
+
+# =====================================================
+# APRIL QUANTUM ARTIFACT CONTRACT 1.2 — FINAL CANONICAL OVERRIDES
+# =====================================================
+# Design laws:
+# 1. One Fiber route.
+# 2. MachineResponse is the canonical response object.
+# 3. render_blocks are preserved exactly when supplied upstream.
+# 4. Summary is metadata/context only; never a visible render block.
+# 5. Text/Markdown are not reclassified into FormulaBlock/CodeBlock/etc.
+# 6. Structured artifacts remain structured payloads for AprilWeb.
+# 7. SceneContract is a projection of the canonical MachineResponse, never
+#    a second semantic reconstruction.
+# =====================================================
+
+APRIL_ARTIFACT_CONTRACT_VERSION = "quantum_1_2"
+APRIL_ARTIFACT_SINGLE_ROUTE = True
+APRIL_ARTIFACT_SUMMARY_VISIBLE = False
+
+_ARTIFACT_RENDERER_MAP = {
+    "text": "TextBlock",
+    "markdown": "MarkdownBlock",
+    "table": "TableBlock",
+    "graph": "GraphBlock",
+    "diagram": "DiagramBlock",
+    "formula": "FormulaBlock",
+    "code": "CodeBlock",
+    "link": "LinkCard",
+    "gallery": "GalleryBlock",
+    "image": "ImageBlock",
+    "file": "FileBlock",
+    "audio": "AudioBlock",
+    "video": "VideoBlock",
+    "action": "ActionBlock",
+}
+
+def _artifact_norm_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+def _artifact_block_type(block):
+    if not isinstance(block, dict):
+        return "text"
+    value = block.get("type") or block.get("artifact_type") or "text"
+    value = _artifact_norm_text(value).lower()
+    if value == "markdown":
+        return "markdown"
+    return value if value in _ARTIFACT_RENDERER_MAP else "text"
+
+def _artifact_block_signature(block):
+    if not isinstance(block, dict):
+        return ("text", _artifact_norm_text(block))
+    btype = _artifact_block_type(block)
+    payload = block.get("payload")
+    if isinstance(payload, (dict, list)):
+        try:
+            payload_key = repr(payload)
+        except Exception:
+            payload_key = str(payload)
+    else:
+        payload_key = _artifact_norm_text(
+            block.get("content") or block.get("text") or block.get("url") or ""
+        )
+    return (btype, payload_key[:4000])
+
+def _artifact_clean_render_blocks(blocks):
+    """Preserve order and distinct artifact types; collapse only exact duplicates."""
+    if not isinstance(blocks, list):
+        return []
+    result = []
+    seen = set()
+    for raw in blocks:
+        if not isinstance(raw, dict):
+            raw = {"type": "text", "content": _artifact_norm_text(raw)}
+        block = dict(raw)
+        btype = _artifact_block_type(block)
+        block["type"] = btype
+        renderer = block.get("renderer") or block.get("viewer") or _ARTIFACT_RENDERER_MAP.get(btype, "TextBlock")
+        block["renderer"] = renderer
+        block["viewer"] = block.get("viewer") or renderer
+        sig = _artifact_block_signature(block)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        result.append(block)
+    return result
+
+def _artifact_visible_text_from_response(response):
+    if response is None:
+        return ""
+    for field in ("answer", "content", "response"):
+        value = getattr(response, field, "")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if isinstance(response, dict):
+        for field in ("answer", "content", "response"):
+            value = response.get(field, "")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+def _artifact_compact_summary(response_or_text, block_types=None):
+    if isinstance(response_or_text, str):
+        text = response_or_text.strip()
+    else:
+        text = _artifact_visible_text_from_response(response_or_text)
+
+    block_types = [b for b in (block_types or []) if b]
+    if not text:
+        return f"scene: {', '.join(block_types[:5])}" if block_types else ""
+    first_line = text.split("\n", 1)[0].strip()
+    if len(first_line) > 120:
+        first_line = first_line[:117] + "..."
+    if block_types:
+        return f"{first_line} | scene: {', '.join(dict.fromkeys(block_types))}"
+    return first_line
+
+def build_universal_contract(
+    artifact: Optional[BaseArtifact] = None,
+    user_id: str = "",
+    subscription: str = "Free",
+) -> UniversalArtifactContract:
+    """Canonical artifact -> single Fiber envelope; never invent a second visible scene."""
+    contract = UniversalArtifactContract()
+    contract.artifact = artifact
+    contract.fiber.identity.user_id = user_id
+    contract.fiber.identity.subscription = subscription
+    contract.metadata["artifact_contract_version"] = APRIL_ARTIFACT_CONTRACT_VERSION
+    contract.metadata["single_route"] = True
+
+    if artifact is None:
+        return contract
+
+    data = dict(getattr(artifact, "data", {}) or {})
+    artifact_type = getattr(artifact.metadata, "artifact_type", "") or data.get("artifact_type", "")
+    room_source = getattr(artifact.metadata, "room_source", "") or data.get("room_source", "")
+
+    # Preserve structured provider render signals exactly.
+    render_blocks = _artifact_clean_render_blocks(data.get("render_blocks", []) or [])
+    artifact_payload = _canonicalize_artifact_data(
+        data,
+        artifact_type=artifact_type,
+        room_source=room_source,
+    )
+    artifact_payload["render_blocks"] = render_blocks
+    artifact_payload["scene"] = dict(data.get("scene", {}) or {})
+    artifact_payload["artifacts"] = list(data.get("artifacts", []) or [])
+
+    canonical_text = (
+        _artifact_norm_text(data.get("answer"))
+        or _artifact_norm_text(data.get("content"))
+        or _artifact_norm_text(data.get("response"))
+        or _artifact_norm_text(data.get("display_text"))
+    )
+
+    block_types = [_artifact_block_type(b) for b in render_blocks]
+    summary = _artifact_compact_summary(canonical_text, block_types)
+
+    artifact_payload["answer"] = canonical_text
+    artifact_payload["content"] = canonical_text
+    artifact_payload["summary"] = summary
+    artifact_payload["text"] = canonical_text
+    artifact_payload["presentation"] = data.get(
+        "presentation",
+        build_presentation_hint(artifact_type or "text", data.get("complexity", "balanced")),
+    )
+
+    contract.payload.artifacts.append(artifact_payload)
+    contract.payload.scene = dict(artifact_payload.get("scene", {}) or {})
+    contract.payload.scene.update({
+        "answer": canonical_text,
+        "content": canonical_text,
+        "summary": summary,
+        "render_blocks": render_blocks,
+        "presentation": artifact_payload["presentation"],
+        "machine_only": bool(artifact_payload.get("machine_only", False)),
+        "human_visible": bool(artifact_payload.get("human_visible", True)),
+    })
+
+    machine_response = MachineResponse(
+        answer=canonical_text,
+        content=canonical_text,
+        response=canonical_text,
+        summary=summary,
+        explanation=_artifact_norm_text(data.get("explanation")),
+        render_blocks=render_blocks,
+        artifacts=[artifact],
+        scene=dict(artifact_payload.get("scene", {}) or {}),
+        scene_plan=list(data.get("scene_plan", []) or block_types or ["text"]),
+        render_priority=list(data.get("render_priority", []) or block_types or ["text"]),
+        confidence=float(data.get("confidence", 1.0) or 1.0),
+        metadata={
+            "artifact_contract_version": APRIL_ARTIFACT_CONTRACT_VERSION,
+            "room_source": room_source,
+            "artifact_type": artifact_type,
+            "summary_visible": False,
+            "single_route": True,
+            "render_block_count": len(render_blocks),
+            "block_types": block_types,
+        },
+    )
+    machine_response.executor_hints["presentation"] = artifact_payload["presentation"]
+    contract.machine_response = machine_response
+
+    machine_scene = build_machine_scene(machine_response)
+    machine_scene.metadata.update(machine_response.metadata)
+    machine_scene.answer = canonical_text
+    machine_scene.content = canonical_text
+    machine_scene.summary = summary
+    machine_scene.blocks = list(render_blocks)
+    machine_scene.contract.blocks = list(render_blocks)
+    machine_scene.contract.render_blocks = list(render_blocks)
+    contract.machine_scene = machine_scene
+
+    scene_contract = build_scene_contract(machine_scene)
+    scene_contract.blocks = list(render_blocks)
+    scene_contract.render_blocks = list(render_blocks)
+    scene_contract.metadata.update({
+        "artifact_contract_version": APRIL_ARTIFACT_CONTRACT_VERSION,
+        "answer": canonical_text,
+        "content": canonical_text,
+        "summary": summary,
+        "summary_visible": False,
+        "single_route": True,
+        "render_block_count": len(render_blocks),
+        "block_types": block_types,
+    })
+    contract.scene_contract = scene_contract
+
+    contract.fiber.metrics.block_count = len(render_blocks)
+    contract.fiber.metrics.payload_size = len(repr(artifact_payload))
+    contract.fiber.trace.room = room_source
+    contract.fiber.trace.block_count = len(render_blocks)
+    contract.fiber.trace.status = "READY"
+    contract.fiber.renderer.supported_blocks = sorted(set(block_types or [artifact.render.web_block]))
+
+    return contract
+
+def create_transport_contract(
+    artifact_type: str,
+    room_source: str,
+    data: Dict[str, Any],
+    user_id: str = "",
+    subscription: str = "Free",
+) -> UniversalArtifactContract:
+    """Single canonical Fiber transport builder used by text rooms and other rooms."""
+    payload = dict(data or {})
+    payload.setdefault("artifact_type", artifact_type)
+    payload.setdefault("room_source", room_source)
+
+    # The provider owns the structured scene. The artifact layer only transports it.
+    render_blocks = _artifact_clean_render_blocks(payload.get("render_blocks", []) or [])
+    payload["render_blocks"] = render_blocks
+    payload["scene"] = dict(payload.get("scene", {}) or {})
+    payload["scene"]["render_blocks"] = render_blocks
+    payload["scene"]["answer"] = _artifact_norm_text(payload.get("answer") or payload.get("content"))
+    payload["scene"]["content"] = payload["scene"]["answer"]
+    payload["scene"]["summary"] = _artifact_compact_summary(payload["scene"]["answer"], [_artifact_block_type(b) for b in render_blocks])
+    payload["summary_visible"] = False
+    payload["single_route"] = True
+
+    artifact = create_artifact(
+        artifact_type=artifact_type,
+        room_source=room_source,
+        data=payload,
+    )
+
+    contract = build_universal_contract(
+        artifact=artifact,
+        user_id=user_id,
+        subscription=subscription,
+    )
+
+    contract.payload.context = {
+        "artifact_type": artifact_type,
+        "room_source": room_source,
+        "user_id": user_id,
+        "subscription": subscription,
+        "single_route": True,
+    }
+    contract.payload.context.update(dict(payload.get("context", {}) or {}))
+    contract.payload.intent = dict(payload.get("intent", {}) or {})
+    contract.payload.knowledge = dict(payload.get("knowledge", {}) or {})
+    contract.payload.attachments = list(payload.get("attachments", []) or [])
+    contract.payload.media = dict(payload.get("media", {}) or contract.payload.media)
+    contract.payload.executor_notes = dict(payload.get("executor_notes", {}) or {})
+
+    # Keep canonical MachineResponse aligned with the exact provider scene.
+    if contract.machine_response is None:
+        contract.machine_response = MachineResponse(
+            answer=payload["scene"].get("answer", ""),
+            content=payload["scene"].get("content", ""),
+            response=payload["scene"].get("answer", ""),
+            summary=payload["scene"].get("summary", ""),
+            render_blocks=render_blocks,
+            scene=payload["scene"],
+            metadata={
+                "artifact_contract_version": APRIL_ARTIFACT_CONTRACT_VERSION,
+                "summary_visible": False,
+                "single_route": True,
+            },
+        )
+    else:
+        contract.machine_response.render_blocks = list(render_blocks)
+        contract.machine_response.scene = dict(payload["scene"])
+        contract.machine_response.summary = payload["scene"].get("summary", "")
+        contract.machine_response.metadata["summary_visible"] = False
+        contract.machine_response.metadata["single_route"] = True
+
+    # Final SceneContract is strictly a projection.
+    if contract.scene_contract is not None:
+        contract.scene_contract.render_blocks = list(render_blocks)
+        contract.scene_contract.blocks = list(render_blocks)
+        contract.scene_contract.metadata["summary_visible"] = False
+        contract.scene_contract.metadata["single_route"] = True
+
+    return contract
+
+def build_canonical_scene_blocks(scene):
+    """
+    Do not synthesize a new renderer block from summary/content when no upstream
+    render_blocks exist. The caller must decide representation; the contract only
+    transports explicit signals.
+    """
+    if _scene_is_internal_only(scene):
+        return []
+    blocks = _artifact_clean_render_blocks(list(getattr(scene, "blocks", []) or []))
+    return blocks
+
+def build_scene_contract(scene: MachineScene) -> SceneContract:
+    """Strict scene projection: MachineScene -> SceneContract, no semantic rewrite."""
+    contract = scene.contract or create_default_scene_contract()
+    blocks = build_canonical_scene_blocks(scene)
+    contract.blocks = list(blocks)
+    contract.render_blocks = list(blocks)
+    contract.metadata.update(scene.metadata or {})
+    answer = _scene_text_fallback(scene)
+    block_types = [_artifact_block_type(b) for b in blocks]
+    contract.metadata.update({
+        "answer": answer,
+        "content": answer,
+        "summary": _artifact_compact_summary(answer, block_types),
+        "artifact_count": len(getattr(scene, "artifacts", []) or []),
+        "transport_stage": "artifact_quantum_1_2",
+        "canonical_scene_contract": True,
+        "single_route": True,
+        "summary_visible": False,
+        "render_block_count": len(blocks),
+        "block_types": block_types,
+    })
+    contract.active_scene = getattr(scene, "active_scene", "")
+    contract.space_continuity = {
+        "active_scene": contract.active_scene,
+        "render_blocks": list(blocks),
+    }
+    scene.contract = contract
+    return contract
+
+def validate_quantum_artifact_contract(contract):
+    """Explicit invariant check for the four-file quantum route."""
+    response = getattr(contract, "machine_response", None)
+    scene = getattr(contract, "machine_scene", None)
+    scene_contract = getattr(contract, "scene_contract", None)
+    response_blocks = list(getattr(response, "render_blocks", []) or []) if response else []
+    scene_blocks = list(getattr(scene, "blocks", []) or []) if scene else []
+    contract_blocks = list(getattr(scene_contract, "render_blocks", []) or []) if scene_contract else []
+    return {
+        "single_route": True,
+        "machine_response_present": response is not None,
+        "machine_scene_present": scene is not None,
+        "scene_contract_present": scene_contract is not None,
+        "render_blocks_consistent": response_blocks == scene_blocks == contract_blocks,
+        "summary_visible": False,
+        "response_block_count": len(response_blocks),
+        "scene_block_count": len(scene_blocks),
+        "contract_block_count": len(contract_blocks),
+        "block_types": [_artifact_block_type(b) for b in contract_blocks],
+    }
+
+# Keep a public alias used by diagnostics.
+validate_universal_quantum_contract = validate_quantum_artifact_contract
