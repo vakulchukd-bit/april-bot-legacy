@@ -2192,3 +2192,427 @@ async def generate_image(
     }
 
 provider_generate_image = generate_image
+
+
+
+# ============================================================
+# APRIL QUANTUM PROVIDER 1.1 — LUNA SINGLE CALL CORE
+# ============================================================
+# Final definitions intentionally override earlier staged functions.
+#
+# Contract:
+#   MachineRequest -> ONE GPT-5.6 Luna call -> canonical MachineResponse
+#
+# The Provider generates/translates transport. It does not execute a second
+# AI pass, call another text model, or create a second visible answer.
+# Structured render_blocks from Luna are preserved. Summary is metadata only.
+# ============================================================
+
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_1_1"
+APRIL_QUANTUM_PROVIDER_MODEL = "gpt-5.6-luna"
+APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
+APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
+APRIL_QUANTUM_PROVIDER_NO_TEXT_FALLBACK_MODELS = True
+
+OPENAI_PRIMARY_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
+OPENAI_BALANCED_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
+OPENAI_FAST_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
+OPENAI_PREMIUM_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
+
+_PROVIDER_INFLIGHT = set()
+
+
+def _quantum_provider_compact_summary(answer, parsed_contract=None):
+    """
+    Metadata-only summary. It deliberately does not contain the full answer.
+    """
+    parsed_contract = parsed_contract or {}
+    if not isinstance(answer, str):
+        answer = str(answer or "")
+    text = answer.strip()
+    if not text:
+        return ""
+
+    block_types = []
+    for block in parsed_contract.get("render_blocks", []) if isinstance(parsed_contract, dict) else []:
+        if isinstance(block, dict):
+            t = normalize_response_text(block.get("type") or block.get("artifact_type") or "text").lower()
+            if t not in block_types:
+                block_types.append(t)
+    if not block_types:
+        block_types = ["text"]
+
+    first_line = text.split("\n", 1)[0].strip()
+    if len(first_line) > 110:
+        first_line = first_line[:107] + "..."
+    return f"{first_line} | scene: {', '.join(block_types[:5])}"
+
+
+def _quantum_provider_clean_blocks(blocks):
+    """
+    Preserve provider-owned structured blocks and collapse equivalent visible
+    text blocks. No conversion of Markdown/formula text to FormulaBlock.
+    """
+    if not isinstance(blocks, list):
+        return []
+
+    result = []
+    seen_text = set()
+    seen_structured = set()
+
+    for raw in blocks:
+        block = dict(raw) if isinstance(raw, dict) else {
+            "type": "text",
+            "content": str(raw),
+        }
+
+        block_type = normalize_response_text(
+            block.get("type") or block.get("artifact_type") or "text"
+        ).lower()
+        if block_type == "markdown":
+            block_type = "text"
+        block["type"] = block_type
+
+        content = ""
+        for key in ("content", "text", "answer", "message", "value"):
+            value = block.get(key)
+            if isinstance(value, str) and value.strip():
+                content = value.strip()
+                break
+
+        if block_type == "text":
+            key = re.sub(r"\s+", " ", content).strip().lower()
+            if not key or key in seen_text:
+                continue
+            seen_text.add(key)
+            block.setdefault("renderer", "TextBlock")
+            block.setdefault("viewer", "TextBlock")
+            result.append(block)
+            continue
+
+        payload = (
+            block.get("table")
+            or block.get("graph")
+            or block.get("images")
+            or block.get("url")
+            or block.get("payload")
+            or content
+        )
+        try:
+            payload_key = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            payload_key = str(payload)
+        key = (block_type, payload_key[:4000])
+        if key in seen_structured:
+            continue
+        seen_structured.add(key)
+
+        renderer_map = {
+            "code": "CodeBlock",
+            "table": "TableBlock",
+            "graph": "GraphBlock",
+            "diagram": "GraphBlock",
+            "formula": "FormulaBlock",
+            "gallery": "GalleryBlock",
+            "image": "GalleryBlock",
+            "link": "LinkCard",
+        }
+        block.setdefault("renderer", renderer_map.get(block_type, "TextBlock"))
+        block.setdefault("viewer", block["renderer"])
+        result.append(block)
+
+    return result
+
+
+def _quantum_provider_parse(raw_text):
+    """
+    Strict one-pass JSON decode. No second OpenAI call and no alternate model.
+    If Luna returns plain text, keep it as one text response.
+    """
+    raw_text = (raw_text or "").strip()
+    if not raw_text:
+        raise RuntimeError("Provider returned empty response")
+
+    try:
+        data = json.loads(raw_text)
+        if not isinstance(data, dict):
+            raise ValueError("MachineResponse JSON must be an object")
+        return data
+    except Exception:
+        # Transport-level normalization only: preserve Luna's complete answer as
+        # text rather than inventing a second semantic/AI route.
+        return {
+            "answer": raw_text,
+            "content": raw_text,
+            "response": raw_text,
+            "summary": _quantum_provider_compact_summary(raw_text, {}),
+            "explanation": "",
+            "scene": {},
+            "artifacts": [],
+            "render_blocks": [{
+                "type": "text",
+                "content": raw_text,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "scene_contract": True,
+            }],
+            "scene_plan": ["text"],
+            "render_priority": ["text"],
+            "confidence": 0.5,
+            "metadata": {"provider_json_invalid": True},
+        }
+
+
+def _quantum_provider_canonical_response(parsed, source_request):
+    parsed = parsed if isinstance(parsed, dict) else {}
+
+    answer = normalize_response_text(
+        parsed.get("answer")
+        or parsed.get("content")
+        or parsed.get("response")
+        or ""
+    )
+    content_value = parsed.get("content")
+    if isinstance(content_value, dict):
+        content = normalize_response_text(
+            content_value.get("text")
+            or content_value.get("content")
+            or content_value.get("answer")
+            or ""
+        )
+    else:
+        content = normalize_response_text(content_value or answer)
+
+    if not answer:
+        answer = content
+
+    response = normalize_response_text(parsed.get("response") or answer)
+
+    # Summary is never allowed to replace visible answer/content.
+    summary = normalize_response_text(
+        parsed.get("summary")
+        or _quantum_provider_compact_summary(answer, parsed)
+    )
+
+    render_blocks = _quantum_provider_clean_blocks(parsed.get("render_blocks", []))
+    artifacts = list(parsed.get("artifacts", []) or [])
+
+    # If provider returned artifacts but no render_blocks, keep artifacts intact;
+    # Executor will materialize them without creating another provider request.
+    metadata = parsed.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    metadata.update({
+        "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
+        "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
+        "provider_calls": 1,
+        "summary_visible": False,
+        "render_blocks_source": "luna",
+        "single_route": True,
+    })
+
+    machine = {
+        "type": "provider_response",
+        "execution_round": getattr(source_request, "execution_round", 1) if source_request is not None else 1,
+        "execution_phase": getattr(source_request, "execution_phase", "FIRST_CIRCLE") if source_request is not None else "FIRST_CIRCLE",
+        "processor_input": machine_request_to_dict(source_request),
+        "provider_source_request": machine_request_to_dict(source_request),
+        "machine_response": {
+            "summary": summary,
+            "explanation": normalize_response_text(parsed.get("explanation") or ""),
+            "content": content,
+            "answer": answer,
+            "response": response,
+            "scene": parsed.get("scene", {}) if isinstance(parsed.get("scene", {}), dict) else {},
+            "render_blocks": render_blocks,
+            "artifacts": artifacts,
+            "scene_plan": list(parsed.get("scene_plan") or ["text"]),
+            "confidence": parsed.get("confidence", 1.0),
+            "metadata": metadata,
+            "provider": "openai",
+            "render_priority": list(parsed.get("render_priority") or []),
+            "provider_contract": "fiber_v3_quantum",
+            "transport_contract": "scene_first",
+            "provider_calls": 1,
+            "provider_original_answer": answer,
+            "provider_original_content": content,
+        },
+        "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
+        "provider_calls": 1,
+        "single_route": True,
+    }
+
+    # Keep processor input available for continuity without resending it.
+    mr = machine["machine_response"]
+    metadata.setdefault("processor_input", machine["processor_input"])
+    metadata.setdefault("provider_source_request", machine["provider_source_request"])
+
+    return machine
+
+
+def create_provider_contract(raw_text, source_request=None):
+    # Accept an already canonical MachineResponse only; otherwise decode exactly once.
+    if (
+        isinstance(raw_text, dict)
+        and raw_text.get("type") == "provider_response"
+        and isinstance(raw_text.get("machine_response"), dict)
+    ):
+        return raw_text
+
+    parsed = raw_text if isinstance(raw_text, dict) else _quantum_provider_parse(raw_text)
+    return _quantum_provider_canonical_response(parsed, source_request)
+
+
+def provider_finalize_for_executor(contract):
+    """
+    Single Provider -> Executor handoff. No automatic text block insertion when
+    structured blocks already exist, and summary never becomes visible content.
+    """
+    if not isinstance(contract, dict):
+        raise RuntimeError("Provider contract must be a dict")
+
+    mr = contract.setdefault("machine_response", {})
+    answer = normalize_response_text(mr.get("answer") or mr.get("content") or "")
+    content = normalize_response_text(mr.get("content") or answer)
+
+    mr["answer"] = answer
+    mr["content"] = content
+    mr["response"] = normalize_response_text(mr.get("response") or answer)
+    mr["summary"] = normalize_response_text(
+        mr.get("summary") or _quantum_provider_compact_summary(answer, mr)
+    )
+    mr.setdefault("explanation", "")
+    mr["render_blocks"] = _quantum_provider_clean_blocks(mr.get("render_blocks", []))
+    mr["artifacts"] = list(mr.get("artifacts", []) or [])
+    mr.setdefault("scene", {})
+    mr.setdefault("scene_plan", ["text"])
+    mr.setdefault("render_priority", [])
+    mr.setdefault("metadata", {})
+
+    if not mr["render_blocks"] and not mr["artifacts"] and answer:
+        mr["render_blocks"] = [{
+            "type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "scene_contract": True,
+        }]
+
+    mr["metadata"]["provider_model"] = APRIL_QUANTUM_PROVIDER_MODEL
+    mr["metadata"]["provider_calls"] = 1
+    mr["metadata"]["summary_visible"] = False
+    mr["metadata"]["single_route"] = True
+
+    return contract
+
+
+def provider_transport_audit(machine_response):
+    mr = machine_response.setdefault("machine_response", {})
+    audit = {
+        "answer_length": len(mr.get("answer") or ""),
+        "content_length": len(mr.get("content") or ""),
+        "summary_length": len(mr.get("summary") or ""),
+        "artifact_count": len(mr.get("artifacts") or []),
+        "render_block_count": len(mr.get("render_blocks") or []),
+        "model": APRIL_QUANTUM_PROVIDER_MODEL,
+        "provider_calls": 1,
+        "single_route": True,
+        "summary_visible": False,
+    }
+    mr.setdefault("metadata", {})["provider_audit"] = audit
+    provider_log(f"[PROVIDER:FINAL_AUDIT] {audit}")
+    return machine_response
+
+
+async def generate_text(messages, temperature=0.7, max_output_tokens=None, model=APRIL_QUANTUM_PROVIDER_MODEL):
+    """
+    Exactly one OpenAI text generation call for one canonical MachineRequest.
+    """
+    if isinstance(messages, dict):
+        machine_request = messages
+    else:
+        machine_request = messages
+
+    source_request = machine_request_to_dict(machine_request)
+
+    # Exact duplicate suppression for accidental re-entry of the same request.
+    cached = _get_duplicate_cached_response(machine_request)
+    if cached is not None:
+        provider_log("[PROVIDER] DUPLICATE_GUARD: returned cached canonical response")
+        return cached
+
+    request_fingerprint = _request_identity(machine_request)
+    lock_key = request_fingerprint[1] if request_fingerprint and request_fingerprint[1] else None
+    if lock_key in _PROVIDER_INFLIGHT:
+        raise RuntimeError("Provider request already in flight for this canonical request")
+    if lock_key:
+        _PROVIDER_INFLIGHT.add(lock_key)
+
+    try:
+        normalized_input = normalize_provider_input(machine_request)
+
+        request = {
+            "model": APRIL_QUANTUM_PROVIDER_MODEL,
+            "input": normalized_input,
+            "max_output_tokens": (
+                max_output_tokens
+                if isinstance(max_output_tokens, int) and max_output_tokens > 0
+                else 1800
+            ),
+        }
+
+        provider_log({
+            "quantum_provider": APRIL_QUANTUM_PROVIDER_VERSION,
+            "model": APRIL_QUANTUM_PROVIDER_MODEL,
+            "one_openai_call": True,
+            "model_escalation": False,
+            "secondary_model": None,
+            "request_items": len(normalized_input),
+        })
+
+        response = openai_client.responses.create(**request)
+
+        usage = _extract_usage(response)
+        estimated_cost_usd = _estimate_usage_cost(APRIL_QUANTUM_PROVIDER_MODEL, usage)
+
+        raw_text = getattr(response, "output_text", "") or ""
+        provider_log({
+            "billing_trace": PROVIDER_COST_LOG_VERSION,
+            "model_billed_route": APRIL_QUANTUM_PROVIDER_MODEL,
+            "usage": usage,
+            "estimated_cost_usd": estimated_cost_usd,
+            "provider_calls": 1,
+        })
+
+        contract = create_provider_contract(raw_text, source_request=machine_request)
+        contract = provider_finalize_for_executor(contract)
+        contract = provider_transport_audit(contract)
+
+        mr = contract.setdefault("machine_response", {})
+        mr.setdefault("metadata", {}).update({
+            "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
+            "provider_usage": usage,
+            "provider_estimated_cost_usd": estimated_cost_usd,
+            "provider_response_id": getattr(response, "id", None),
+            "provider_calls": 1,
+            "single_route": True,
+            "summary_visible": False,
+        })
+
+        _cache_provider_response(machine_request, contract)
+        provider_log({
+            "trace_stage": "EXECUTOR_HANDOFF",
+            "answer_len": len(mr.get("answer") or ""),
+            "content_len": len(mr.get("content") or ""),
+            "summary_len": len(mr.get("summary") or ""),
+            "render_blocks": len(mr.get("render_blocks") or []),
+            "artifacts": len(mr.get("artifacts") or []),
+            "model": APRIL_QUANTUM_PROVIDER_MODEL,
+        })
+        return contract
+
+    finally:
+        if lock_key:
+            _PROVIDER_INFLIGHT.discard(lock_key)
