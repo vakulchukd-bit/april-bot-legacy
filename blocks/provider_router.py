@@ -778,100 +778,22 @@ def provider_decode_response(raw_text):
 
 
 def parse_provider_machine_contract(raw_text):
-    """Parse a MachineResponse transport contract with lightweight recovery."""
+    """One local decode only. No second provider/model pass."""
+    raw_text = raw_text if isinstance(raw_text, str) else str(raw_text or "")
     try:
-        data = json.loads(raw_text)
-        if isinstance(data, dict):
-            return data
-    except json.JSONDecodeError as e:
-        provider_log(f"JSON PARSE ERROR line={e.lineno} col={e.colno} pos={e.pos}")
-        start=max(0,e.pos-120)
-        end=min(len(raw_text),e.pos+120)
-        provider_log(raw_text[start:end])
-
-        repaired=(raw_text or "").strip()
-
-        first=repaired.find("{")
-        last=repaired.rfind("}")
-
-        if first!=-1 and last>first:
-            repaired=repaired[first:last+1]
-            try:
-                data=json.loads(repaired)
-                if isinstance(data,dict):
-                    provider_log("JSON RECOVERY SUCCESS")
-                    return data
-            except Exception:
-                pass
-
-        # SECOND PASS CONTINUATION:
-        # do not terminate the Provider route here.
-        provider_log("SECOND PASS: building canonical contract from raw provider text")
-        # STAGE1 NOTE: legacy TextBlock fallback scheduled for removal.
-
-        # STAGE3: legacy raw-text fallback retained only for compatibility.
-        # Future semantic extractor should construct the MachineResponse here.
-        import re
-        def _grab(name):
-            m = re.search(r'"%s"\s*:\s*"((?:\\.|[^"])*)"' % name, raw_text, re.S)
-            if not m:
-                return ""
-            value = m.group(1)
-            try:
-                value = json.loads(f'"{value}"')
-            except Exception:
-                pass
-            return value
-
-        recovered_answer=(
-            _grab("answer")
-            or _grab("content")
-            or _grab("response")
-            or raw_text.strip()
-        )
-
-        recovered_summary=(
-            _grab("summary")
-            or recovered_answer
-        )
-
-        recovered_explanation=(
-            _grab("explanation")
-            or recovered_summary
-        )
-
+        data=json.loads(raw_text)
+        return data if isinstance(data,dict) else {}
+    except Exception as exc:
+        provider_log(f"PROVIDER JSON DECODE ERROR: {exc}")
+        text=raw_text.strip()
         return {
-            "answer": recovered_answer,
-            "content": recovered_answer,
-            "response": recovered_answer,
-            "summary": recovered_summary,
-            "explanation": recovered_explanation,
-            "scene": {},
-            "artifacts": [],
-            "render_blocks": [
-                {
-                    "type":"text",
-                    "content": recovered_answer or recovered_summary or "",
-                    "scene_contract":True
-                }
-            ],
-            "scene_plan":["text"],
-            "render_priority":["text"],
-            "confidence":0.5,
-            "metadata":{
-                "provider_second_pass":True,
-                "parse_failed":True,
-                "raw_provider_text": raw_text
-            }
+            "answer":text,"content":text,"response":text,
+            "summary":provider_compact_summary(text,{}),
+            "explanation":"","scene":{},"artifacts":[],
+            "render_blocks":[{"type":"text","content":text,"renderer":"TextBlock","viewer":"TextBlock","scene_contract":True}] if text else [],
+            "scene_plan":["text"],"render_priority":["text"],
+            "confidence":0.5,"metadata":{"provider_json_invalid":True}
         }
-
-
-
-
-
-# =====================================================
-# STAGE 2 - SCENE-FIRST CONTRACT
-# =====================================================
 
 def ensure_scene_first_contract(contract):
     contract = validate_machine_response_contract(contract)
@@ -1017,105 +939,28 @@ def sanitize_internal_reasoning(text):
 
 
 def provider_compact_summary(answer, parsed_contract=None):
-    """Build a short scene summary that does not mirror the visible answer."""
-    parsed_contract = parsed_contract or {}
-    source_text = _safe_text(
+    """Provider-local summary; never depends on Executor helpers."""
+    parsed_contract = parsed_contract if isinstance(parsed_contract, dict) else {}
+    text = _safe_text(
         parsed_contract.get("provider_original_content")
         or parsed_contract.get("provider_original_answer")
         or parsed_contract.get("content")
         or parsed_contract.get("answer")
         or answer
     ).strip()
-    if not source_text:
+    if not text:
         return ""
-
-    source_kind = "text"
-    low = source_text.lower()
-    if _executor_looks_like_markdown_table(source_text):
-        source_kind = "table"
-    elif re.search(r"```[\s\S]*```", source_text):
-        source_kind = "code"
-    elif re.search(r"<!doctype\s+html|<html\b|<script\b|<style\b|<div\b|<span\b", low, flags=re.IGNORECASE):
-        source_kind = "code"
-    elif re.search(r"\b(import\s+\w+|from\s+\w+\s+import|def\s+\w+|class\s+\w+|print\s*\(|if __name__ == ['\"]__main__['\"])\b", low):
-        source_kind = "code"
-    elif re.search(r"\b(function|const|let|var|console\.log|=>)\b", low):
-        source_kind = "code"
-    elif re.search(r"\b(select|insert|update|delete|create table|drop table|alter table)\b", low):
-        source_kind = "code"
-    elif _looks_like_formula_text(source_text):
-        source_kind = "formula"
-    elif _executor_has_url(source_text):
-        source_kind = "link"
-    elif re.search(r"\b(graph|chart|plot|diagram|schema)\b", low):
-        source_kind = "graph"
-    elif re.search(r"\bimage\b|\bpicture\b|\bgallery\b", low):
-        source_kind = "gallery"
-
-    word_count = len(re.findall(r"\S+", source_text))
-    if word_count == 0:
-        return f"scene: {source_kind}"
-    if word_count <= 6:
-        return f"scene: {source_kind}"
-    snippet = _clip_text(source_text.split("\n", 1)[0], 120)
-    if snippet and _safe_text(answer).strip() and _safe_text(snippet).strip().lower() != _safe_text(answer).strip().lower():
-        return f"{snippet} | scene: {source_kind}"
-    return f"scene: {source_kind}"
-
-
-# =====================================================
-# PROVIDER RESPONSIBILITY — OPENAI REQUEST BUILDER
-# Stage 2 COMPLETE
-# Canonical MachineRequest -> Canonical OpenAI Request
-# =====================================================
-
-PROVIDER_MACHINE_SYSTEM_PROMPT = """
-APRIL PROTOCOL
-
-Role:
-You are the Provider transport gateway.
-
-Internally perform the work in this order:
-1. Understand the request.
-2. Produce the complete answer.
-3. Produce a short summary from the answer.
-4. Produce the scene.
-5. Produce render_blocks from the scene.
-6. Return ONE final JSON object only.
-
-The response MUST be valid JSON accepted by json.loads().
-
-Every newline inside string values MUST be escaped as \\n.
-Every double quote inside string values MUST be escaped.
-Return exactly one JSON object and nothing else.
-
-Never output markdown, code fences, comments, reasoning or text before/after JSON.
-
-Required semantic fields:
-answer
-summary
-explanation
-content
-scene
-artifacts
-render_blocks
-scene_plan
-render_priority
-confidence
-
-Do not invent extra top-level fields.
-Provider transport metadata is added by Python after parsing.
-
-Behavior rules:
-- Use requested_outputs as mandatory output targets whenever present.
-- Use required_artifacts to decide which render_blocks to generate.
-- Use required_competencies to determine the professional depth of the answer.
-- If the request asks for comparison, generate a comparison table artifact.
-- If the request asks for a process, flow or route, generate a diagram/flow artifact.
-- If multiple representations are requested, generate all of them in one MachineResponse.
-- Prefer detailed explanations unless constraints explicitly require brevity.
-"""
-
+    low=text.lower()
+    kind="text"
+    if re.search(r"\|.*\|\s*\n\s*\|?\s*[-:| ]+\|",text):
+        kind="table"
+    elif "```" in text or re.search(r"</?(html|script|style|div)\b",low):
+        kind="code"
+    elif re.search(r"https?://\S+",text):
+        kind="link"
+    first=text.split("\n",1)[0].strip()
+    if len(first)>110: first=first[:107]+"..."
+    return f"{first} | scene: {kind}"
 
 def build_openai_request(machine_request):
     """
