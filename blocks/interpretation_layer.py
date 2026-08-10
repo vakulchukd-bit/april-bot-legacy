@@ -2407,3 +2407,195 @@ def build_transport_diagnostics(result):
         "has_scene_contract": "scene_contract" in result,
         "normalized": bool(result.get("normalized")),
     }
+
+# =====================================================
+# APRIL CANONICAL DIALOGUE CONTRACT V2
+# =====================================================
+# This is an extension of the existing interpretation layer, not a new route.
+# It converts the current turn + immediate conversation context into one
+# machine-readable dialogue decision.
+
+def _dialog_turn_text(turn, role=None):
+    if not isinstance(turn, dict):
+        return ""
+    if "content" in turn and isinstance(turn.get("content"), str):
+        return turn.get("content", "").strip()
+    if role and isinstance(turn.get(role), dict):
+        value = turn[role]
+        if isinstance(value, dict):
+            return str(value.get("text") or value.get("content") or value.get("answer") or "").strip()
+    for key in ("text", "answer", "content", "response", "message"):
+        value = turn.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+def _dialog_history_pairs(history):
+    pairs = []
+    if not isinstance(history, list):
+        return pairs
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").lower()
+        if role in {"user", "human"}:
+            pairs.append(("user", _dialog_turn_text(item), item))
+            continue
+        if role in {"assistant", "april", "bot"}:
+            pairs.append(("assistant", _dialog_turn_text(item), item))
+            continue
+        if isinstance(item.get("user"), dict):
+            pairs.append(("user", _dialog_turn_text(item, "user"), item))
+        if isinstance(item.get("april"), dict):
+            pairs.append(("assistant", _dialog_turn_text(item, "april"), item))
+    return [(r, t, raw) for r, t, raw in pairs if t]
+
+def _canonical_dialogue_contract(text, history=None, state=None, semantic=None):
+    text = normalize_text(text)
+    history = history if isinstance(history, list) else []
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+
+    turns = _dialog_history_pairs(history)
+    last_assistant = next((x for x in reversed(turns) if x[0] == "assistant"), None)
+    last_user = next((x for x in reversed(turns) if x[0] == "user" and x[1] != text), None)
+
+    low = text.lower().strip()
+    affirmation = {
+        "да", "ага", "угу", "ок", "окей", "хорошо", "конечно",
+        "давай", "поехали", "согласен", "согласна", "верно", "точно"
+    }
+    rejection = {
+        "нет", "не надо", "не хочу", "отмена", "отмени", "не то"
+    }
+    continuation = {
+        "продолжай", "продолжить", "дальше", "ещё", "еще",
+        "идём дальше", "идем дальше", "поехали дальше"
+    }
+    correction_markers = (
+        "я имел в виду", "я имела в виду", "не это", "точнее",
+        "исправь", "поправь", "я хотел сказать", "я хотела сказать"
+    )
+
+    if low in affirmation:
+        dialog_act = "affirmation"
+    elif low in rejection:
+        dialog_act = "rejection"
+    elif low in continuation:
+        dialog_act = "continuation"
+    elif any(marker in low for marker in correction_markers):
+        dialog_act = "correction"
+    elif low.startswith(("кто ", "что ", "как ", "почему ", "зачем ", "где ", "когда ", "сколько ")) or "?" in text:
+        dialog_act = "question"
+    elif low.startswith(("покажи", "создай", "сделай", "напиши", "построй", "реши", "найди", "расскажи", "объясни", "проанализируй")):
+        dialog_act = "request"
+    else:
+        dialog_act = "statement"
+
+    previous_id = None
+    previous_text = ""
+    if last_assistant:
+        previous_text = last_assistant[1]
+        raw = last_assistant[2]
+        previous_id = raw.get("turn_id") if isinstance(raw, dict) else None
+
+    is_continuation = dialog_act in {"affirmation", "rejection", "continuation", "correction"}
+    if not is_continuation and previous_text:
+        # Short references should inherit the previous conversational target.
+        if len(text.split()) <= 6 and any(x in low for x in (
+            "это", "этот", "эта", "этом", "него", "неё", "ее", "его",
+            "сюда", "там", "тогда", "так", "ещё", "еще"
+        )):
+            is_continuation = True
+            dialog_act = "reference"
+
+    active_goal = (
+        state.get("active_goal")
+        or state.get("current_goal")
+        or (state.get("goal_hierarchy") or {}).get("active_goal")
+        or semantic.get("active_goal")
+        or semantic.get("goal")
+        or ""
+    )
+    active_topic = (
+        state.get("active_topic")
+        or state.get("current_topic")
+        or state.get("topic")
+        or semantic.get("current_topic")
+        or semantic.get("topic")
+        or ""
+    )
+
+    # A direct substantive request starts/updates the goal. A short dialog act
+    # inherits the previous goal instead of becoming its own goal.
+    if not is_continuation or not active_goal:
+        if dialog_act in {"request", "question", "statement"} and len(text.split()) > 1:
+            resolved_goal = text
+        else:
+            resolved_goal = active_goal or (last_user[1] if last_user else text)
+    else:
+        resolved_goal = active_goal or (last_user[1] if last_user else text)
+
+    topic = active_topic
+    if not topic:
+        topic = semantic.get("current_object") or semantic.get("continuation_target") or ""
+
+    required_capabilities = []
+    if any(x in low for x in ("создать ии", "создать ai", "искусственный интеллект", "нейросет", "бот", "приложение", "код")):
+        required_capabilities.extend(["software", "architecture", "dialogue"])
+    if any(x in low for x in ("график", "графика", "таблица", "схема", "диаграмма", "формула", "изображение", "картин")):
+        required_capabilities.append("structured_rendering")
+    if any(x in low for x in ("проанализ", "сравни", "почему", "разбери", "объясни")):
+        required_capabilities.append("analysis")
+    required_capabilities = list(dict.fromkeys(required_capabilities))
+
+    return {
+        "dialog_act": dialog_act,
+        "current_request": text,
+        "resolved_request": (
+            f"Continue the previous task naturally. User said: {text}"
+            if is_continuation and previous_text
+            else text
+        ),
+        "continuation": is_continuation,
+        "reply_to": previous_id,
+        "previous_april_turn": previous_text,
+        "previous_user_turn": last_user[1] if last_user else "",
+        "active_goal": resolved_goal,
+        "active_topic": topic,
+        "topic_shift": bool(topic and text and topic.lower() not in low and not is_continuation),
+        "required_capabilities": required_capabilities,
+        "confidence": 0.96 if dialog_act in {"affirmation", "rejection", "continuation"} and previous_text else 0.78,
+        "history_available": bool(turns),
+        "turn_count": len(turns),
+        "canonical": True,
+        "version": "dialogue_v2",
+    }
+
+_legacy_interpret_request = interpret_request
+
+def interpret_request(text: str, cognition: dict = None, semantic: dict = None,
+                      history=None, state=None):
+    result = _legacy_interpret_request(text, cognition=cognition, semantic=semantic)
+    if result is None:
+        return result
+
+    contract = _canonical_dialogue_contract(
+        text,
+        history=history or [],
+        state=state or {},
+        semantic=result,
+    )
+    result["dialogue_contract"] = contract
+    result["dialog_act"] = contract["dialog_act"]
+    result["continuation"] = bool(contract["continuation"])
+    result["continuation_target"] = contract["previous_april_turn"] or contract["active_topic"]
+    result["active_goal"] = contract["active_goal"]
+    result["active_topic"] = contract["active_topic"]
+    result["resolved_request"] = contract["resolved_request"]
+    result["reply_to"] = contract["reply_to"]
+    result["required_capabilities"] = contract["required_capabilities"]
+    result["dialogue_understanding"] = contract
+    result["goal_stage"] = "continuation" if contract["continuation"] else "current_request"
+    result["unresolved_intent"] = False if contract["dialog_act"] in {"affirmation", "rejection", "continuation"} else result.get("unresolved_intent", False)
+    return result
