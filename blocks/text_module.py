@@ -1,1352 +1,434 @@
 # =====================================================
-# 🧠 APRIL TEXT ORCHESTRATION MODULE
+# APRIL TEXT MODULE QUANTUM 1.2
 # =====================================================
-
 """
-APRIL WEB-TEXT EXECUTION LAYER
-STABILIZED WEB-FIRST EDITION
+TEXT MODULE RESPONSIBILITY:
+- receive the canonical MachineRequest prepared by Executor
+- call the canonical Provider exactly once
+- preserve the Provider's full MachineResponse
+- preserve Markdown/text verbatim enough for Web rendering
+- build the Artifact/Fiber transport envelope
+- never classify text into FormulaBlock/CodeBlock/TableBlock/etc.
+- never create a second AI request
+- never turn summary into visible content
+- never create a second visible answer
 
-ROLE:
-- text orchestration layer
-- provider-safe executor
-- continuity-aware response builder
-- renderer-safe coordinator
-- web-first dialog processor
-- TXT-config compatible executor
-- admin-aware response layer
-- multimodal-safe text transport
-
-IMPORTANT:
-Этот слой НЕ:
-- orchestration authority
-- cognition engine
-- semantic analyzer
-- renderer engine
-- room router
-
-Этот слой:
-- генерирует текст
-- стабилизирует output
-- сохраняет continuity
-- безопасно передаёт результат
+Single route:
+Executor -> TextModule -> Quantum Provider -> TextModule -> Artifact Contract -> Executor
 """
 
-# =====================================================
-# 🔥 FILE ID
-# =====================================================
+from __future__ import annotations
 
-APRIL_FILE_ID = "APRIL_TEXT_ORCHESTRATION_MODULE"
-
-APRIL_VERSION = "WEB_STABILIZED"
-
-# =====================================================
-# 🔥 IMPORTS
-# =====================================================
-
+import json
 import re
 import time
 import traceback
+from typing import Any, Dict, Optional
 
 from storage import get_user_plan
-
-from blocks.ai_config import (
-    TEXT_MODEL
-)
-
-# Canonical provider model comes from ai_config.
-# Keep text_module and provider_router synchronized.
-OPENAI_PROVIDER_MODEL = TEXT_MODEL
-
-from blocks.provider_router import (
-    generate_text
-)
-
-from blocks.external_knowledge_provider import (
-
-    should_use_external_knowledge,
-
-    fetch_external_knowledge,
-
-    enrich_with_external_knowledge
-)
-
+from blocks.provider_router import generate_text
 from blocks.C_ARTIFACT_CONTRACT import (
+    MachineResponse,
     create_transport_contract,
 )
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
+APRIL_FILE_ID = "APRIL_TEXT_ORCHESTRATION_MODULE"
+APRIL_VERSION = "QUANTUM_1_2"
+
+TEXT_QUANTUM_SINGLE_ROUTE = True
+TEXT_QUANTUM_ONE_PROVIDER_CALL = True
+TEXT_QUANTUM_MODEL = "gpt-5.6-luna"
+TEXT_QUANTUM_SUMMARY_VISIBLE = False
 
 TEXT_INPUT_CHANNEL = {
-
-    "source": "rooms_router",
+    "source": "executor",
     "target": "text_module",
-
-    "mode": "machine_input",
-
-    "isolated": True
+    "mode": "machine_request",
+    "single_route": True,
 }
 
 TEXT_OUTPUT_CHANNEL = {
-
     "source": "text_module",
-    "target": "presentation_formatter",
-
-    "mode": "machine_output",
-
-    "isolated": True
+    "target": "artifact_contract",
+    "mode": "machine_response",
+    "single_route": True,
 }
 
-# =====================================================
-# 🔥 PATCH LOG
-# =====================================================
-
-PATCH_LOG = []
+PATCH_LOG: list[str] = []
+TEXT_EXECUTION_LOG: list[dict[str, Any]] = []
 
 
-def safe_patch_log(msg):
-
+def safe_patch_log(message: Any) -> None:
     try:
-
-        print(
-            "TEXT MODULE:",
-            msg
-        )
-
-        PATCH_LOG.append(
-            str(msg)
-        )
-
-    except:
+        text = str(message)
+        PATCH_LOG.append(text)
+        print("TEXT MODULE:", text)
+    except Exception:
         pass
 
 
-# =====================================================
-# 🔥 EXECUTION LOG
-# =====================================================
-
-TEXT_EXECUTION_LOG = []
-
-
-def log_text_execution(
-    stage,
-    payload=None
-):
-
+def log_text_execution(stage: str, payload: Any = None) -> None:
     try:
-
         entry = {
-
             "time": time.time(),
-
             "stage": stage,
-
-            "payload":
-
-                str(payload)[:240]
-
-                if payload is not None
-                else None
+            "payload": str(payload)[:500] if payload is not None else None,
         }
-
-        TEXT_EXECUTION_LOG.append(
-            entry
-        )
-
-        print(
-            "🧠 TEXT:",
-            stage
-        )
-
-    except:
+        TEXT_EXECUTION_LOG.append(entry)
+        print("🧠 TEXT:", stage)
+    except Exception:
         pass
 
 
-# =====================================================
-# 🔥 SYSTEM PROMPT
-# =====================================================
-
-SYSTEM_PROMPT = """
-
-Ты — April.
-
-Главное:
-- помогать человеку;
-- сохранять continuity;
-- удерживать trajectory;
-- отвечать естественно;
-- двигаться к результату.
-
-Правила:
-- renderer-first architecture
-- visual continuity важнее повторной генерации
-- не раскрывай внутренние системы
-- не говори как AI model
-- не ломай continuity сцены
-
-Стиль:
-- спокойно
-- кратко
-- полезно
-- естественно
-"""
-
-# =====================================================
-# 🔥 LIMITS
-# =====================================================
-
-MAX_MESSAGE_CHARS = 1000
-
-MAX_TOTAL_CHARS = 5000
-
-MAX_MEMORY_BLOCK = 3000
-
-# =====================================================
-# 🔥 PLAN CONFIG
-# =====================================================
-
-PLAN_HISTORY_LIMITS = {
-
-    "free": 15,
-
-    "lite": 30,
-
-    "premium": 999999
-}
-
-PLAN_TOKEN_MODES = {
-
-    "free": "compact",
-
-    "lite": "balanced",
-
-    "premium": "extended"
-}
-
-# =====================================================
-# 🔥 SAFE HELPERS
-# =====================================================
-
-def safe_text(value):
-
+def safe_text(value: Any) -> str:
     if value is None:
         return ""
-
+    if isinstance(value, str):
+        return value
     try:
-
         return str(value)
-
-    except:
-
+    except Exception:
         return ""
 
 
-def clamp_text(
-    text,
-    limit
-):
-
-    text = safe_text(text)
-
-    if len(text) <= limit:
-        return text
-
-    return text[:limit] + "…"
-
-
-# =====================================================
-# 🔥 PROVIDER OUTPUT NORMALIZATION
-# =====================================================
-
-def _visible_provider_text(value):
-    """Extract canonical visible text from a provider value without leaking JSON."""
+def _compact_visible_text(value: Any) -> str:
+    """Extract visible answer without stringifying a MachineResponse object."""
     if value is None:
         return ""
 
-    if isinstance(value, dict):
-        for key in (
-            "answer", "content", "response", "summary",
-            "explanation", "text", "display_text",
-        ):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
+    if isinstance(value, MachineResponse):
+        for key in ("answer", "content", "response"):
+            candidate = safe_text(getattr(value, key, ""))
+            if candidate.strip():
                 return candidate.strip()
         return ""
 
-    if not isinstance(value, str):
-        return safe_text(value).strip()
-
-    text = value.strip()
-    if not text:
+    if isinstance(value, dict):
+        mr = value.get("machine_response")
+        if isinstance(mr, dict):
+            for key in ("answer", "content", "response"):
+                candidate = safe_text(mr.get(key, ""))
+                if candidate.strip():
+                    return candidate.strip()
+        for key in ("answer", "content", "response", "text", "display_text", "markdown"):
+            candidate = safe_text(value.get(key, ""))
+            if candidate.strip():
+                return candidate.strip()
         return ""
 
-    candidate = text
-    if candidate.startswith("```") and candidate.endswith("```"):
-        lines = candidate.splitlines()
-        if len(lines) >= 3:
-            candidate = "\n".join(lines[1:-1]).strip()
-            if candidate.lower().startswith("json\n"):
-                candidate = candidate[5:].lstrip()
-
-    current = candidate
-    for _ in range(3):
-        if not isinstance(current, str):
-            break
-        try:
-            parsed = json.loads(current)
-        except Exception:
-            break
-        if isinstance(parsed, dict):
-            for key in (
-                "answer", "content", "response", "summary",
-                "explanation", "text", "display_text",
-            ):
-                field = parsed.get(key)
-                if isinstance(field, str) and field.strip():
-                    return field.strip()
-            break
-        if isinstance(parsed, str):
-            current = parsed.strip()
-            continue
-        break
-
-    return text
+    return safe_text(value).strip()
 
 
-def normalize_provider_output(output):
-    """Normalize provider dict output into one canonical visible reply and keep packet."""
-    provider_packet = None
-    reply = ""
-
-    if isinstance(output, dict):
-        provider_packet = dict(output)
-        mr = provider_packet.get("machine_response") or {}
-        if not isinstance(mr, dict):
-            mr = {}
-
-        candidate = _visible_provider_text(
-            mr.get("answer")
-            or mr.get("content")
-            or mr.get("response")
-            or mr.get("summary")
-            or provider_packet.get("answer")
-            or provider_packet.get("content")
-            or provider_packet.get("response")
-            or provider_packet.get("summary")
-            or ""
-        )
-
-        if candidate:
-            for field in ("answer", "content", "response", "summary"):
-                mr[field] = candidate
-            provider_packet["machine_response"] = mr
-            reply = candidate
-        else:
-            reply = _visible_provider_text(
-                provider_packet.get("content")
-                or provider_packet.get("answer")
-                or provider_packet.get("summary")
-                or provider_packet.get("response")
-                or ""
-            )
-    else:
-        reply = _visible_provider_text(output)
-
-    return reply, provider_packet
+def _clean_provider_packet(packet: Any) -> Dict[str, Any]:
+    """Keep provider packet structured; never collapse it to one text string."""
+    if isinstance(packet, dict):
+        return packet
+    return {}
 
 
-# =====================================================
-# 🔥 TXT CONFIG READY
-# =====================================================
-
-def build_plan_runtime(
-    plan
-):
-
-    plan = (
-
-        safe_text(plan)
-        .lower()
-        .strip()
-    )
-
-    return {
-
-        "plan": plan,
-
-        "history_limit":
-
-            PLAN_HISTORY_LIMITS.get(
-                plan,
-                5
-            ),
-
-        "token_mode":
-
-            PLAN_TOKEN_MODES.get(
-                plan,
-                "balanced"
-            ),
-
-        "web_priority":
-
-            plan in [
-
-                "lite",
-                "premium"
-            ],
-
-        "extended_memory":
-
-            plan == "premium"
-    }
+def _machine_response_from_packet(packet: Dict[str, Any]) -> Dict[str, Any]:
+    mr = packet.get("machine_response")
+    if isinstance(mr, dict):
+        return mr
+    return packet
 
 
-
-# =====================================================
-# 🔥 FIRST CIRCLE REQUEST BUILDER
-# =====================================================
-
-def _extract_turn_summary(turn, limit=120):
-    if not isinstance(turn, dict):
-        return ""
-
-    for key in (
-        "summary",
-        "content",
-        "answer",
-        "response",
-        "text",
-        "message",
-    ):
-        value = turn.get(key)
-        if value:
-            return clamp_text(value, limit)
-
+def _canonical_answer_from_packet(packet: Dict[str, Any]) -> str:
+    mr = _machine_response_from_packet(packet)
+    for key in ("answer", "content", "response"):
+        value = mr.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return ""
 
 
-def _compact_dialog_turns(history, limit):
-    if not isinstance(history, list):
-        return []
+def _compact_scene_summary(packet: Dict[str, Any], answer: str) -> str:
+    """
+    Summary is metadata only.
+    It must never equal a complete visible answer.
+    """
+    mr = _machine_response_from_packet(packet)
+    blocks = mr.get("render_blocks", [])
+    types: list[str] = []
 
-    result = []
-    for item in history[-limit:]:
+    if isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = safe_text(
+                block.get("type") or block.get("artifact_type") or "text"
+            ).lower()
+            if block_type not in types:
+                types.append(block_type)
+
+    first_line = answer.split("\n", 1)[0].strip() if answer else ""
+    if len(first_line) > 110:
+        first_line = first_line[:107] + "..."
+
+    if types:
+        return f"{first_line} | scene: {', '.join(types[:5])}".strip(" |")
+    return first_line
+
+
+def _clean_markdown_preserving_content(text: Any) -> str:
+    """
+    Minimal normalization only:
+    preserve headings, paragraphs, lists, code fences and inline LaTeX/Markdown.
+    Do NOT classify formulas or code here.
+    """
+    value = safe_text(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not value:
+        return ""
+
+    # Remove accidental JSON fences only when the entire provider output is a
+    # JSON wrapper; ordinary Markdown code fences remain untouched.
+    if value.startswith("```json") and value.endswith("```"):
+        body = value[7:-3].strip()
+        try:
+            decoded = json.loads(body)
+            if isinstance(decoded, dict):
+                return _canonical_answer_from_packet(decoded)
+        except Exception:
+            pass
+
+    # Collapse excessive blank lines, but keep paragraph structure.
+    value = re.sub(r"\n{4,}", "\n\n", value)
+    # Remove trailing spaces, not Markdown markers.
+    value = "\n".join(line.rstrip() for line in value.split("\n"))
+    return value.strip()
+
+
+def sanitize_model_output(value: Any) -> str:
+    """Presentation-safe text cleanup without flattening Markdown."""
+    text = _clean_markdown_preserving_content(value)
+    if not text:
+        return ""
+
+    blocked_prefixes = (
+        "internal reasoning:",
+        "chain of thought:",
+        "system prompt:",
+        "execution room:",
+        "cognitive state:",
+    )
+
+    cleaned: list[str] = []
+    for line in text.split("\n"):
+        lowered = line.strip().lower()
+        if any(lowered.startswith(prefix) for prefix in blocked_prefixes):
+            continue
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip()
+
+
+def format_rich_text_for_word(text: Any) -> str:
+    """
+    Compatibility name retained.
+    This is deliberately Markdown-preserving; it no longer flattens paragraphs
+    or converts formulas into special renderer blocks.
+    """
+    return sanitize_model_output(text)
+
+
+def apply_visual_beautify(text: Any, semantic: Optional[dict] = None) -> str:
+    # Web owns renderer selection. Text module only preserves the payload.
+    return sanitize_model_output(text)
+
+
+def is_structured_payload(value: Any) -> bool:
+    return isinstance(value, (dict, list, tuple))
+
+
+def is_renderer_payload(text: Any) -> bool:
+    # Kept as a compatibility predicate. It does not perform routing.
+    if not isinstance(text, str):
+        return False
+    return any(marker in text for marker in ("[[graph", "[[formula", "[[diagram", "<svg", "<canvas"))
+
+
+def trim_text(text: Any, limit: int = 5000) -> str:
+    value = safe_text(text)
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
+def trim_messages(messages: Any, limit: int = 10) -> list[dict[str, str]]:
+    if not isinstance(messages, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in messages[-limit:]:
         if not isinstance(item, dict):
             continue
-
-        content = sanitize_model_output(
-            trim_text(
-                item.get("content", "")
-            )
-        )
-
+        content = sanitize_model_output(item.get("content", ""))
         if not content:
             continue
-
         result.append({
-            "role": item.get("role", "user"),
+            "role": safe_text(item.get("role") or "user"),
             "content": content,
         })
-
     return result
 
 
-def build_first_circle_request(
-    user_text,
-    state,
-    semantic,
-    cognition,
-    response_decision,
-    runtime,
-):
-    history = state.get("dialog", []) or []
-    history_limit = min(int(runtime.get("history_limit", 5) or 5), 4)
-    compact_history = _compact_dialog_turns(history, history_limit)
-
-    last_user_summary = ""
-    last_april_summary = ""
-
-    for item in reversed(compact_history):
-        role = safe_text(item.get("role", "")).lower()
-
-        if not last_april_summary and role in ("assistant", "april"):
-            last_april_summary = clamp_text(item.get("content", ""), 120)
-
-        if not last_user_summary and role == "user":
-            last_user_summary = clamp_text(item.get("content", ""), 120)
-
-        if last_user_summary and last_april_summary:
-            break
-
-    active_topic = (
-        state.get("topic")
-        or semantic.get("topic")
-        or semantic.get("intent")
-        or ""
-    )
-
-    focus = (
-        response_decision.get("dialog_focus")
-        or cognition.get("dynamic_focus")
-        or state.get("focus_state")
-        or state.get("focus")
-        or {}
-    )
-
-    if not isinstance(focus, dict):
-        focus = {"value": clamp_text(focus, 100)} if focus else {}
-
-    provider_reference_context = {
-        "active_topic": clamp_text(active_topic, 60),
-        "last_user_turn_summary": last_user_summary,
-        "last_april_turn_summary": last_april_summary,
-        "dialog_focus": focus,
-    }
-
-    provider_reference_context = {
-        k: v
-        for k, v in provider_reference_context.items()
-        if v not in ("", {}, [], None)
-    }
-
-    return {
-        "goal": trim_text(user_text),
-        "intent": {
-            "type": safe_text(
-                semantic.get("intent")
-                or response_decision.get("goal")
-                or "dialogue"
-            ),
-            "normalized_text": trim_text(user_text),
-            "source": "text_module_first_circle",
-        },
-        "provider_reference_context": provider_reference_context,
-        "conversation": {
-            "timeline": compact_history,
-            "last_user_turn": last_user_summary,
-            "last_april_turn": last_april_summary,
-            "active_topic": active_topic,
-            "focus": focus,
-        },
-        "first_circle_only": True,
-        "execution_round": 1,
-        "execution_phase": "FIRST_CIRCLE",
-        "plan": runtime.get("plan"),
-        "token_mode": runtime.get("token_mode"),
-        "web_priority": runtime.get("web_priority"),
-        "extended_memory": runtime.get("extended_memory"),
-    }
-
-# =====================================================
-# 🔥 INTERNAL LEAK PROTECTION
-# =====================================================
-
-SYSTEM_LEAK_PATTERNS = [
-
-    "system prompt",
-    "response_decision",
-    "cognition",
-    "semantic",
-    "trajectory protection",
-    "machine channel",
-    "provider routing",
-    "renderer-first architecture"
-]
-
-
-def sanitize_model_output(text):
-
-    if not text:
-        return ""
-
-    text = safe_text(text)
-
-    lowered = text.lower()
-
-    hits = 0
-
-    for pattern in SYSTEM_LEAK_PATTERNS:
-
-        if pattern in lowered:
-            hits += 1
-
-    if hits >= 2:
-
-        log_text_execution(
-            "SYSTEM_LEAK_BLOCKED"
-        )
-
-        return (
-
-            "Ответ сформировался нестабильно. "
-            "Попробуй уточнить запрос."
-        )
-
-    blocked_prefixes = [
-
-        "system:",
-        "developer:",
-        "assistant:",
-        "semantic:",
-        "cognition:"
+def build_message_stack(system_state: str, history: list[dict], user_text: str):
+    # Compatibility helper only. The quantum route does NOT use this to call OpenAI.
+    return [
+        {"role": "system", "content": safe_text(system_state)},
+        *trim_messages(history),
+        {"role": "user", "content": sanitize_model_output(user_text)},
     ]
 
-    cleaned = []
 
-    for line in text.split("\n"):
-
-        lowered_line = (
-
-            line.strip()
-            .lower()
-        )
-
-        blocked = False
-
-        for prefix in blocked_prefixes:
-
-            if lowered_line.startswith(
-                prefix
-            ):
-
-                blocked = True
-
-                break
-
-        if not blocked:
-
-            cleaned.append(line)
-
-    return "\n".join(
-        cleaned
-    ).strip()
-
-
-# =====================================================
-# 🔥 RICH TEXT PRESENTATION
-# =====================================================
-
-def _normalize_word_line(line):
-    line = safe_text(line).rstrip()
-    if not line:
-        return ""
-    line = re.sub(r"[ \t]+([,.;:!?%])", r"\1", line)
-    line = re.sub(r"\s{2,}", " ", line)
-    return line.strip()
-
-def format_rich_text_for_word(text):
-    """Preserve Markdown-like structure for Word-style rendering."""
-    text = safe_text(text).replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not text:
-        return ""
-
-    lines = text.split("\n")
-    out = []
-    paragraph = []
-    in_code_block = False
-
-    def flush_paragraph():
-        nonlocal paragraph
-        if paragraph:
-            combined = " ".join(paragraph)
-            combined = _normalize_word_line(combined)
-            if combined:
-                out.append(combined)
-            paragraph = []
-
-    for raw_line in lines:
-        line = raw_line.rstrip()
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            flush_paragraph()
-            out.append(stripped)
-            in_code_block = not in_code_block
-            continue
-
-        if in_code_block:
-            out.append(line)
-            continue
-
-        if not stripped:
-            flush_paragraph()
-            if not out or out[-1] != "":
-                out.append("")
-            continue
-
-        markdown_marker = re.match(r"^(#{1,6}\s+|>\s+|[-*•]\s+|\d+[.)]\s+)", stripped)
-        if markdown_marker:
-            flush_paragraph()
-            out.append(_normalize_word_line(stripped))
-            continue
-
-        paragraph.append(stripped)
-
-    flush_paragraph()
-
-    compacted = []
-    blank_streak = 0
-    for item in out:
-        if item == "":
-            blank_streak += 1
-            if blank_streak <= 1:
-                compacted.append(item)
-        else:
-            blank_streak = 0
-            compacted.append(item)
-
-    return "\n".join(compacted).strip()
-
-# =====================================================
-# 🔥 DETECTORS
-# =====================================================
-
-def is_renderer_payload(text):
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return False
-
-    checks = [
-
-        "[[graph",
-        "[[formula",
-        "[[diagram",
-        "<svg",
-        "<canvas"
-    ]
-
-    return any(
-        x in text
-        for x in checks
-    )
-
-
-def is_structured_payload(value):
-
-    if isinstance(
-        value,
-        dict
-    ):
-
-        return True
-
-    if isinstance(
-        value,
-        list
-    ):
-
-        return True
-
-    return False
-
-
-# =====================================================
-# 🔥 MESSAGE TRIMMING
-# =====================================================
-
-def trim_text(text):
-
-    return clamp_text(
-        text,
-        MAX_MESSAGE_CHARS
-    )
-
-
-def trim_messages(messages):
-
-    total = 0
-
-    result = []
-
-    for msg in reversed(messages):
-
-        content = trim_text(
-
-            msg.get(
-                "content",
-                ""
-            )
-        )
-
-        total += len(content)
-
-        if total > MAX_TOTAL_CHARS:
-            break
-
-        result.append({
-
-            "role":
-
-                msg.get(
-                    "role",
-                    "user"
-                ),
-
-            "content":
-                content
-        })
-
-    return list(
-        reversed(result)
-    )
-
-# =====================================================
-# 🔥 ENERGY CONFIG
-# =====================================================
-
-def get_config(energy):
-
-    if energy == "LOW":
-
-        return {
-
-            "temperature": 0.45,
-
-            "max_output_tokens": 3000
-        }
-
-    if energy == "HIGH":
-
-        return {
-
-            "temperature": 0.82,
-
-            "max_output_tokens": 8000
-        }
-
+def build_plan_runtime(plan: Any) -> dict[str, Any]:
+    plan_value = safe_text(plan).lower().strip()
+    history_limits = {"free": 15, "lite": 30, "premium": 999999}
+    token_modes = {"free": "compact", "lite": "balanced", "premium": "extended"}
     return {
-
-        "temperature": 0.68,
-
-        "max_output_tokens": 5000
+        "plan": plan_value,
+        "history_limit": history_limits.get(plan_value, 15),
+        "token_mode": token_modes.get(plan_value, "compact"),
+        "web_priority": plan_value in {"lite", "premium"},
+        "extended_memory": plan_value == "premium",
     }
 
-# =====================================================
-# 🔥 TOPIC MEMORY
-# =====================================================
 
-def extract_topic(text):
+def build_cognitive_state(state: dict, semantic: dict, cognition: dict, response_decision: dict) -> str:
+    """
+    Compatibility metadata for existing callers.
+    Executor is the authoritative cognitive layer.
+    """
+    blocks: list[str] = []
 
-    t = safe_text(text).lower()
+    active_flow = state.get("active_flow")
+    if isinstance(active_flow, dict) and active_flow.get("type"):
+        blocks.append(f"Trajectory: {active_flow['type']}")
 
-    if "сайт" in t:
-        return "website"
-
-    if "бот" in t:
-        return "bot"
-
-    if "дизайн" in t:
-        return "design"
-
-    if "код" in t:
-        return "code"
-
-    return None
-
-
-def update_topic(
-    state,
-    text
-):
-
-    topic = extract_topic(
-        text
-    )
-
-    if topic:
-
-        state["topic"] = topic
-
-# =====================================================
-# 🔥 COGNITIVE STATE
-# =====================================================
-
-def build_cognitive_state(
-
-    state,
-    semantic,
-    cognition,
-    response_decision
-):
-
-    blocks = []
-
-    active_flow = state.get(
-        "active_flow"
-    )
-
-    if active_flow:
-
-        flow_type = active_flow.get(
-            "type"
-        )
-
-        if flow_type:
-
-            blocks.append(
-
-                f"Trajectory: "
-                f"{flow_type}"
-            )
-
-    behavior = []
-
-    if response_decision.get(
-        "should_reduce_talking"
-    ):
-
-        behavior.append(
-            "отвечай кратко"
-        )
-
-    if response_decision.get(
-        "should_continue_trajectory"
-    ):
-
-        behavior.append(
-            "сохраняй continuity"
-        )
-
-    if cognition.get(
-        "exploration_mode"
-    ):
-
-        behavior.append(
-            "поддерживай exploration"
-        )
+    behavior: list[str] = []
+    if response_decision.get("should_reduce_talking"):
+        behavior.append("отвечай кратко")
+    if response_decision.get("should_continue_trajectory"):
+        behavior.append("сохраняй continuity")
+    if cognition.get("exploration_mode"):
+        behavior.append("поддерживай exploration")
 
     if behavior:
+        blocks.append("Поведение: " + ", ".join(behavior))
 
+    active_visual_scene = state.get("active_visual_scene")
+    if isinstance(active_visual_scene, dict) and active_visual_scene:
         blocks.append(
-
-            "Поведение: "
-            + ", ".join(behavior)
+            f"Visual continuity active: {active_visual_scene.get('scene_type', 'unknown')}"
         )
 
-    active_visual_scene = state.get(
-        "active_visual_scene"
-    )
-
-    if active_visual_scene:
-
-        scene_type = active_visual_scene.get(
-            "scene_type",
-            "unknown"
-        )
-
-        blocks.append(
-
-            f"Visual continuity active: "
-            f"{scene_type}"
-        )
-
-    summary = state.get(
-        "memory_summary"
-    )
-
+    summary = safe_text(state.get("memory_summary"))
     if summary:
+        blocks.append("Память: " + trim_text(summary, 1800))
 
-        blocks.append(
+    return "\n".join(blocks)
 
-            "Память: "
-            + clamp_text(
-                summary,
-                MAX_MEMORY_BLOCK
-            )
-        )
 
-    return "\n".join(
-        blocks
+def prevent_repeat_response(state: dict, reply: Any) -> str:
+    """
+    Old behavior added '(continuing)' and created a second visible string.
+    New behavior never mutates a valid answer into a second answer.
+    """
+    value = sanitize_model_output(reply)
+    state["last_reply_duplicate_suppressed"] = bool(
+        safe_text(state.get("last_reply")).strip() and
+        safe_text(state.get("last_reply")).strip() == value.strip()
+    )
+    return value
+
+
+def update_topic(state: dict, text: Any) -> None:
+    value = safe_text(text).lower()
+    if "код" in value:
+        state["topic"] = "code"
+    elif "бот" in value:
+        state["topic"] = "bot"
+    elif "сайт" in value:
+        state["topic"] = "website"
+    elif "дизайн" in value:
+        state["topic"] = "design"
+
+
+def _extract_canonical_machine_request(state: dict) -> Any:
+    """
+    The Executor is the sole owner of MachineRequest construction.
+    TextModule must never invent a parallel request.
+    """
+    candidates = (
+        state.get("machine_request"),
+        (state.get("context") or {}).get("machine_request"),
+        (state.get("executor_context") or {}).get("machine_request"),
+        (state.get("transport") or {}).get("machine_request"),
     )
 
-# =====================================================
-# 🔥 REPEAT PROTECTION
-# =====================================================
+    for candidate in candidates:
+        if candidate is not None:
+            return candidate
 
-def prevent_repeat_response(
-    state,
-    reply
-):
+    raise RuntimeError("Canonical MachineRequest missing: Executor must supply it.")
 
-    last = state.get(
-        "last_reply"
-    )
 
-    if not last:
-        return reply
+def normalize_provider_output(output: Any):
+    """
+    Preserve the full provider packet and return its canonical visible answer.
+    No summary promotion, no renderer reclassification.
+    """
+    packet = _clean_provider_packet(output)
 
-    if last.strip() == reply.strip():
+    if packet:
+        mr = _machine_response_from_packet(packet)
+        answer = _canonical_answer_from_packet(packet)
 
-        return (
-            reply
-            + "\n\n(continuing)"
-        )
+        # Keep canonical fields only when missing; do not overwrite structured content.
+        if isinstance(mr, dict):
+            if answer:
+                mr.setdefault("answer", answer)
+                mr.setdefault("content", answer)
+                mr.setdefault("response", answer)
+            render_blocks = mr.get("render_blocks")
+            if isinstance(render_blocks, list):
+                packet["render_blocks"] = render_blocks
 
-    return reply
+        packet["machine_response"] = mr
+        return answer, packet
 
-# =====================================================
-# 🔥 VISUAL BEAUTIFY
-# =====================================================
+    return sanitize_model_output(output), None
 
 
-def apply_visual_beautify(
-    text,
-    semantic
-):
+def _provider_packet_render_blocks(packet: Dict[str, Any]) -> list[dict]:
+    mr = _machine_response_from_packet(packet)
+    blocks = mr.get("render_blocks", [])
+    return [dict(b) for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
 
-    if not text:
-        return text
 
-    if is_renderer_payload(text):
-        return text
+def _provider_packet_artifacts(packet: Dict[str, Any]) -> list[Any]:
+    mr = _machine_response_from_packet(packet)
+    artifacts = mr.get("artifacts", [])
+    return list(artifacts) if isinstance(artifacts, list) else []
 
-    return format_rich_text_for_word(text)
 
-# =====================================================
-# 🔥 SAFE MESSAGE STACK
-# =====================================================
+def _build_text_artifact_data(reply: str, packet: Dict[str, Any], runtime: dict) -> dict:
+    mr = _machine_response_from_packet(packet)
+    blocks = _provider_packet_render_blocks(packet)
+    artifacts = _provider_packet_artifacts(packet)
 
-def build_message_stack(
-
-    system_state,
-    history,
-    user_text
-):
-
-    messages = [
-
-        {
-            "role": "system",
-
-            "content": system_state
-        }
-    ]
-
-    messages.extend(
-
-        trim_messages(
-            history
-        )
-    )
-
-    messages.append({
-
-        "role": "user",
-
-        "content":
-            trim_text(user_text)
-    })
-
-    return messages
-
-# =====================================================
-# 🔥 MAIN PROCESS
-# =====================================================
-
-async def process(
-
-    user_id,
-    text,
-    state,
-    energy="MEDIUM"
-):
-
-    log_text_execution(
-        "TEXT_MODULE_ENTER",
-        text
-    )
-
-    provider_packet = None
-
-    try:
-
-        semantic = state.get(
-            "semantic",
-            {}
-        )
-
-        cognition = state.get(
-            "cognition",
-            {}
-        )
-
-        response_decision = state.get(
-            "response_decision",
-            {}
-        )
-
-        # =================================================
-        # 🔥 PAYLOAD SAFETY
-        # =====================================================
-
-        if is_structured_payload(
-            text
-        ):
-
-            log_text_execution(
-                "STRUCTURED_BYPASS"
-            )
-
-            return {
-
-                "type": "text",
-
-                "content":
-                    "⚠️ Structured payload bypassed."
-            }
-
-        # =================================================
-        # 🔥 TOPIC
-        # =====================================================
-
-        update_topic(
-            state,
-            text
-        )
-
-        # =================================================
-        # 🔥 PLAN
-        # =====================================================
-
-        plan = get_user_plan(
-            user_id
-        )
-
-        runtime = build_plan_runtime(
-            plan
-        )
-
-        history_limit = runtime[
-            "history_limit"
-        ]
-
-        # =================================================
-        # 🔥 COGNITIVE STATE
-        # =====================================================
-
-        cognitive_state = (
-
-            build_cognitive_state(
-
-                state,
-                semantic,
-                cognition,
-                response_decision
-            )
-        )
-
-        system_state = trim_text(
-
-            SYSTEM_PROMPT
-            + "\n\n"
-            + cognitive_state
-        )
-
-        # =================================================
-        # 🔥 HISTORY
-        # =====================================================
-
-        history = state.get(
-            "dialog",
-            []
-        )
-
-        safe_history = []
-
-        for item in history[-history_limit:]:
-
-            content = sanitize_model_output(
-
-                trim_text(
-
-                    item.get(
-                        "content",
-                        ""
-                    )
-                )
-            )
-
-            if not content:
-                continue
-
-            safe_history.append({
-
-                "role":
-
-                    item.get(
-                        "role",
-                        "user"
-                    ),
-
-                "content":
-                    content
-            })
-
-        # =================================================
-        # 🔥 MESSAGE STACK
-        # =====================================================
-
-        # Build a compact first-circle request.
-        # Keep the full MachineRequest inside Executor only.
-        config = get_config(
-            energy
-        )
-
-        first_circle_request = build_first_circle_request(
-            user_text=text,
-            state=state,
-            semantic=semantic,
-            cognition=cognition,
-            response_decision=response_decision,
-            runtime=runtime,
-        )
-
-        log_text_execution(
-            "FIRST_CIRCLE_REQUEST_BUILT",
-            first_circle_request
-        )
-
-        # =================================================
-        # 🔥 PROVIDER CONFIG
-        # =====================================================
-
-        log_text_execution(
-            "PROVIDER_EXECUTION"
-        )
-
-        # =================================================
-        # 🔥 GENERATION
-        # =====================================================
-
-        output = await generate_text(
-
-            messages=first_circle_request,
-
-            temperature=config[
-                "temperature"
-            ],
-
-            # Let provider_router choose the compact token budget
-            # for the first circle instead of forcing a large cap here.
-            max_output_tokens=None,
-
-            model=OPENAI_PROVIDER_MODEL
-        )
-
-        # Provider canonical contract validation.
-        if isinstance(output, dict):
-            output, provider_packet = normalize_provider_output(output)
-            state["provider_response"] = provider_packet
-            if isinstance(provider_packet, dict):
-                state["provider_machine_response"] = provider_packet.get("machine_response", {})
-            else:
-                state["provider_machine_response"] = {}
-            # Keep the canonical answer available even when the provider packet is partial.
-            if not output:
-                mr = state.get("provider_machine_response", {}) or {}
-                output = (
-                    mr.get("answer")
-                    or mr.get("content")
-                    or mr.get("response")
-                    or mr.get("summary")
-                    or ""
-                )
-        else:
-            output = sanitize_model_output(
-                output
-            )
-
-        # =================================================
-        # 🔥 EXTERNAL KNOWLEDGE
-        # =====================================================
-
-        if should_use_external_knowledge(
-
-            text,
-            semantic,
-            cognition,
-            response_decision
-        ):
-
-            knowledge = fetch_external_knowledge(
-
-                text,
-                semantic,
-                cognition
-            )
-
-            output = enrich_with_external_knowledge(
-
-                output,
-                knowledge
-            )
-
-        if not output:
-
-            output = "⚠️ Пустой ответ."
-
-    except Exception as e:
-
-        traceback.print_exc()
-
-        log_text_execution(
-            "TEXT_MODULE_ERROR",
-            e
-        )
-
-        output = (
-
-            "⚠️ Ошибка text module: "
-            + str(e)
-        )
-
-    # =================================================
-    # 🔥 REPEAT PROTECTION
-    # =====================================================
-
-    reply = prevent_repeat_response(
-        state,
-        output
-    )
-
-
-    # =================================================
-    # 🔥 PRESENTATION
-    # =====================================================
-
-    reply = sanitize_model_output(
-        reply
-    )
-
-    reply = format_rich_text_for_word(reply)
-
-    # =================================================
-    # 🔥 SAVE STATE
-    # =====================================================
-
-    state["last_reply"] = reply
-
-    state["last_text_time"] = time.time()
-
-    log_text_execution(
-        "TEXT_ARTIFACT_READY"
-    )
-
-    # =================================================
-    # 🔥 FINAL RESULT
-    # =====================================================
-
-
-    artifact_data = {
+    return {
+        # "text" identifies the source room, not the visual renderer.
         "type": "text",
+        "artifact_type": "text",
         "content": reply,
-        "presentation_mode": "word_markdown",
+        "answer": reply,
+        "summary": _compact_scene_summary(packet, reply),
+        "presentation_mode": "markdown",
+        "render_blocks": blocks,
+        "artifacts": artifacts,
+        "scene": mr.get("scene", {}) if isinstance(mr, dict) else {},
+        "scene_plan": list(mr.get("scene_plan", []) or []) if isinstance(mr, dict) else [],
+        "render_priority": list(mr.get("render_priority", []) or []) if isinstance(mr, dict) else [],
+        "provider_response": packet,
+        "provider_machine_response": mr,
         "runtime": {
             "plan": runtime.get("plan"),
             "token_mode": runtime.get("token_mode"),
@@ -1355,9 +437,91 @@ async def process(
             "input": TEXT_INPUT_CHANNEL,
             "output": TEXT_OUTPUT_CHANNEL,
         },
-        "provider_response": provider_packet,
+        "single_route": True,
+        "summary_visible": False,
     }
 
+
+async def process(
+    user_id,
+    text,
+    state,
+    energy="MEDIUM",
+):
+    """
+    Canonical Text Room operation.
+
+    IMPORTANT:
+    - No first-circle request is built here.
+    - No external knowledge request is issued here.
+    - No second OpenAI request is issued here.
+    - No renderer is selected here.
+    - No FormulaBlock/CodeBlock/TableBlock is created here.
+    """
+    log_text_execution("TEXT_MODULE_ENTER", text)
+
+    state = state if isinstance(state, dict) else {}
+    provider_packet: Optional[dict] = None
+    machine_request = _extract_canonical_machine_request(state)
+
+    update_topic(state, text)
+    plan = get_user_plan(user_id)
+    runtime = build_plan_runtime(plan)
+
+    log_text_execution(
+        "CANONICAL_MACHINE_REQUEST_READY",
+        {"type": type(machine_request).__name__, "model": TEXT_QUANTUM_MODEL},
+    )
+    log_text_execution("PROVIDER_EXECUTION")
+
+    try:
+        # Exactly one call into the Quantum Provider.
+        output = await generate_text(
+            messages=machine_request,
+            temperature=None,
+            max_output_tokens=None,
+            model=TEXT_QUANTUM_MODEL,
+        )
+
+        if isinstance(output, dict):
+            reply, provider_packet = normalize_provider_output(output)
+            state["provider_response"] = provider_packet
+            mr = provider_packet.get("machine_response", {}) if provider_packet else {}
+            state["provider_machine_response"] = mr if isinstance(mr, dict) else {}
+        else:
+            reply = sanitize_model_output(output)
+
+        if not reply and provider_packet:
+            reply = _canonical_answer_from_packet(provider_packet)
+
+        if not reply:
+            raise RuntimeError("Quantum Provider returned an empty canonical answer.")
+
+    except Exception as exc:
+        traceback.print_exc()
+        log_text_execution("TEXT_MODULE_ERROR", exc)
+        raise
+
+    # Keep answer text intact. Do not flatten or beautify it into a different representation.
+    reply = prevent_repeat_response(state, reply)
+    reply = apply_visual_beautify(reply, state.get("semantic", {}))
+
+    state["last_reply"] = reply
+    state["last_text_time"] = time.time()
+
+    packet = provider_packet or {
+        "machine_response": {
+            "answer": reply,
+            "content": reply,
+            "response": reply,
+            "summary": "",
+            "render_blocks": [],
+            "artifacts": [],
+            "scene": {},
+        }
+    }
+
+    artifact_data = _build_text_artifact_data(reply, packet, runtime)
     transport_contract = create_transport_contract(
         artifact_type="text",
         room_source="TEXT_ROOM",
@@ -1366,21 +530,65 @@ async def process(
         subscription=runtime.get("plan", "Free"),
     )
 
-    # Return a transport wrapper that Executor can read directly.
-    # Keep the canonical transport object available for downstream systems.
+    canonical_mr = getattr(transport_contract, "machine_response", None)
+    canonical_scene_contract = getattr(transport_contract, "scene_contract", None)
+
+    log_text_execution(
+        "TEXT_ARTIFACT_READY",
+        {
+            "answer_len": len(reply),
+            "render_blocks": len(getattr(canonical_mr, "render_blocks", []) or []) if canonical_mr else 0,
+            "artifacts": len(getattr(canonical_mr, "artifacts", []) or []) if canonical_mr else 0,
+            "provider_calls": 1,
+            "model": TEXT_QUANTUM_MODEL,
+        },
+    )
+
+    # One transport result. There is no duplicate "reply + scene" message.
     return {
         "type": "text",
         "content": reply,
         "answer": reply,
-        "summary": reply,
-        "machine_response": getattr(transport_contract, "machine_response", None),
-        "scene_contract": getattr(getattr(transport_contract, "payload", None), "scene", None)
-            if hasattr(transport_contract, "payload") else None,
+        "summary": getattr(canonical_mr, "summary", "") if canonical_mr else _compact_scene_summary(packet, reply),
+        "machine_response": canonical_mr,
+        "scene_contract": canonical_scene_contract,
         "artifact_contract": transport_contract,
         "transport_contract": transport_contract,
         "runtime": artifact_data["runtime"],
         "machine_channels": artifact_data["machine_channels"],
-        "provider_response": provider_packet,
+        "provider_response": packet,
         "provider_machine_response": state.get("provider_machine_response", {}),
-        "first_circle_request": first_circle_request,
+        "render_blocks": list(getattr(canonical_mr, "render_blocks", []) or []) if canonical_mr else _provider_packet_render_blocks(packet),
+        "artifacts": list(getattr(canonical_mr, "artifacts", []) or []) if canonical_mr else _provider_packet_artifacts(packet),
+        "single_route": True,
+        "provider_calls": 1,
+        "provider_model": TEXT_QUANTUM_MODEL,
+        "summary_visible": False,
     }
+
+
+# Compatibility aliases used by older text-room callers.
+generate = process
+execute = process
+
+
+def get_text_execution_log() -> list[dict[str, Any]]:
+    return list(TEXT_EXECUTION_LOG)
+
+
+def get_text_patch_log() -> list[str]:
+    return list(PATCH_LOG)
+
+
+__all__ = [
+    "process",
+    "generate",
+    "execute",
+    "normalize_provider_output",
+    "format_rich_text_for_word",
+    "apply_visual_beautify",
+    "create_transport_contract",
+    "TEXT_QUANTUM_MODEL",
+    "TEXT_QUANTUM_SINGLE_ROUTE",
+    "TEXT_QUANTUM_ONE_PROVIDER_CALL",
+]
