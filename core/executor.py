@@ -526,6 +526,51 @@ def _executor_strip_code_fence(text: str) -> str:
     return value
 
 
+def _executor_explicit_requested_outputs(text: Any, semantic: Optional[dict] = None) -> list[str]:
+    """Return only render outputs explicitly requested by the current turn.
+
+    This is an Executor-local interpretation helper. It does not call a model,
+    does not inspect old turns, and does not create fallback routes.
+    """
+    value = normalize_text(text).lower()
+    semantic = semantic or {}
+    requested = []
+
+    # Prefer explicit semantic signals when already produced by Semantic Core.
+    for key in (
+        "required_representations",
+        "candidate_representations",
+        "requested_outputs",
+        "requested_representation",
+    ):
+        item = semantic.get(key)
+        if isinstance(item, str):
+            item = [item]
+        if isinstance(item, (list, tuple, set)):
+            for entry in item:
+                name = normalize_text(entry).lower()
+                if name in {"table", "graph", "diagram", "formula", "code", "gallery", "image", "link"}:
+                    if name not in requested:
+                        requested.append(name)
+
+    # Then add only representations explicitly requested in the current text.
+    explicit_map = {
+        "table": ("таблиц", "таблица", "таблицу", "таблице", "table"),
+        "graph": ("график", "графика", "графикe", "графике", "graph", "chart", "plot"),
+        "diagram": ("схем", "диаграмм", "diagram", "flowchart"),
+        "formula": ("формул", "formula", "equation"),
+        "code": ("код", "code", "python", "javascript", "typescript", "html", "css"),
+        "gallery": ("галере", "gallery", "несколько изображений", "картинок"),
+        "image": ("изображен", "картин", "фото", "image", "picture"),
+        "link": ("ссылк", "link", "url"),
+    }
+    for output_type, markers in explicit_map.items():
+        if any(marker in value for marker in markers) and output_type not in requested:
+            requested.append(output_type)
+
+    return requested
+
+
 def _executor_looks_like_markdown_table(text: str) -> bool:
     if not isinstance(text, str):
         return False
