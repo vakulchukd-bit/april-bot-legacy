@@ -818,15 +818,11 @@ def analyze(
     # =====================================================
 
     interpreted = interpret_request(
-
         text,
-
-        cognition=state.get(
-            "cognition",
-            {}
-        ),
-
-        semantic=result
+        cognition=state.get("cognition", {}),
+        semantic=result,
+        history=history,
+        state=state,
     )
 
     if interpreted:
@@ -842,6 +838,18 @@ def analyze(
         )
 
         result["confidence"] = 0.82
+
+        # Canonical dialogue contract is now part of the same semantic packet.
+        dialogue_contract = interpreted.get("dialogue_contract", {})
+        if isinstance(dialogue_contract, dict):
+            result["dialogue_contract"] = dialogue_contract
+            result["dialog_act"] = dialogue_contract.get("dialog_act")
+            result["active_goal"] = dialogue_contract.get("active_goal")
+            result["active_topic"] = dialogue_contract.get("active_topic")
+            result["resolved_request"] = dialogue_contract.get("resolved_request")
+            result["reply_to"] = dialogue_contract.get("reply_to")
+            result["required_capabilities"] = dialogue_contract.get("required_capabilities", [])
+            result["history_available"] = dialogue_contract.get("history_available", False)
 
         result[
             "possible_scene_type"
