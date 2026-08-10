@@ -166,20 +166,26 @@ def safe_list(value):
 
 def compact_dialog_message(
     role,
-    content
+    content,
+    *,
+    turn_id=None,
+    reply_to=None,
+    metadata=None,
 ):
-
-    return {
-
+    """Create one canonical dialog turn with stable continuity metadata."""
+    item = {
         "role": role,
-
-        "content":
-
-            safe_trim_text(
-                content,
-                320
-            )
+        "content": safe_trim_text(content, 1200),
     }
+    if turn_id is not None:
+        item["turn_id"] = turn_id
+    if reply_to is not None:
+        item["reply_to"] = reply_to
+    if isinstance(metadata, dict):
+        item["metadata"] = dict(metadata)
+    return item
+
+
 
 # =====================================================
 # 🔥 DEFAULT SCENE
@@ -344,6 +350,8 @@ def build_default_state():
         "current_object": None,
         "current_topic": None,
         "active_entity": None,
+        "dialog_sequence": 0,
+        "dialog_history_version": "canonical_turn_v2",
 
         # =================================================
         # 🔥 MACHINE FLAGS
@@ -866,119 +874,71 @@ def trim_visual_history(
 def add_dialog(
     user_id,
     role,
-    content
+    content,
+    metadata=None,
+    reply_to=None,
 ):
-
+    """Append one canonical turn and persist it."""
     state_obj = get_state(user_id)
+    dialog = state_obj.get("dialog", [])
+    if not isinstance(dialog, list):
+        dialog = []
 
-    dialog = state_obj.get(
-        "dialog",
-        []
-    )
+    sequence = int(state_obj.get("dialog_sequence", 0) or 0) + 1
+    state_obj["dialog_sequence"] = sequence
+
+    if reply_to is None and dialog:
+        previous = dialog[-1]
+        if isinstance(previous, dict):
+            previous_id = previous.get("turn_id")
+            previous_role = previous.get("role")
+            if previous_id is not None and previous_role != role:
+                reply_to = previous_id
 
     message = compact_dialog_message(
         role,
-        content
+        content,
+        turn_id=sequence,
+        reply_to=reply_to,
+        metadata=metadata,
     )
     dialog.append(message)
+    state_obj["dialog"] = dialog[-80:]
 
-    # Keep canonical dialog continuity mirrors available to the executor.
-    state_obj["dialog"] = dialog
-    state_obj["last_user_turn"] = (
-        safe_trim_text(content, 320) if role == "user" else state_obj.get("last_user_turn", "")
-    )
-    state_obj["last_april_turn"] = (
-        safe_trim_text(content, 320) if role != "user" else state_obj.get("last_april_turn", "")
-    )
+    if role == "user":
+        state_obj["last_user_turn"] = safe_trim_text(content, 1200)
+    else:
+        state_obj["last_april_turn"] = safe_trim_text(content, 1200)
+
     state_obj["dialog_state"] = {
-        "timeline": dialog,
+        "timeline": state_obj["dialog"],
         "last_user_turn": state_obj.get("last_user_turn", ""),
         "last_april_turn": state_obj.get("last_april_turn", ""),
+        "last_turn_id": sequence,
         "active_topic": state_obj.get("active_topic", ""),
         "focus": state_obj.get("focus_state", state_obj.get("dynamic_focus", {})),
     }
 
-    # =================================================
-    # 🔥 META
-    # =====================================================
-
-    meta = state_obj.get(
-        "meta",
-        {}
-    )
-
+    meta = state_obj.get("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
     if role == "user":
-
-        meta[
-            "last_user_message"
-        ] = safe_trim_text(
-            content,
-            320
-        )
-
+        meta["last_user_message"] = safe_trim_text(content, 1200)
+        meta["last_user_turn_id"] = sequence
     else:
-
-        meta[
-            "last_bot_message"
-        ] = safe_trim_text(
-            content,
-            320
-        )
-
+        meta["last_bot_message"] = safe_trim_text(content, 1200)
+        meta["last_april_turn_id"] = sequence
     state_obj["meta"] = meta
+    state_obj["continuity_alive"] = True
+    state_obj["dialog_history_version"] = "canonical_turn_v2"
 
-    # =================================================
-    # 🔥 LIMIT
-    # =====================================================
+    try:
+        persist_state(user_id)
+    except Exception as exc:
+        safe_state_log(f"DIALOG PERSIST ERROR: {exc}")
 
-    plan = get_user_plan(
-        user_id
-    )
+    return message
 
-    limit = get_dialog_limit(
-        user_id,
-        plan
-    )
-
-    if len(dialog) > limit:
-
-        compress_dialog_to_summary(
-            state_obj
-        )
-
-        # Compression is a memory operation, not a loss of canonical
-        # continuity. Keep the compacted timeline mirrored in dialog_state so
-        # the next Executor pass can still recover the conversation.
-        state_obj["dialog_state"] = {
-            "timeline": state_obj.get("dialog", []),
-            "last_user_turn": state_obj.get("last_user_turn", ""),
-            "last_april_turn": state_obj.get("last_april_turn", ""),
-            "active_topic": state_obj.get("active_topic", ""),
-            "focus": state_obj.get(
-                "focus_state",
-                state_obj.get("dynamic_focus", {}),
-            ),
-        }
-
-    trim_image_memory(
-        state_obj
-    )
-
-    trim_visual_history(
-        state_obj
-    )
-    
-    trim_topic_memory(
-        state_obj
-    )
-
-    state_obj["active_scene"] = refresh_unified_scene(user_id)
-
-    persist_state(user_id) 
-
-# =====================================================
-# 🔥 DIALOG STATE
-# =====================================================
 
 def get_dialog_state(user_id):
 
