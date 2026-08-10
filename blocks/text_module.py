@@ -444,19 +444,35 @@ def _build_text_artifact_data(reply: str, packet: Dict[str, Any], runtime: dict)
 
 
 async def process(user_id, text, state, energy="MEDIUM"):
-    """Canonical TextModule bridge: Executor request -> one Luna call -> one transport envelope."""
+    """Canonical TextModule bridge.
+
+    Executor owns interpretation and MachineRequest creation. TextModule only
+    performs the one Luna Provider call and passes the canonical response
+    envelope forward without semantic reclassification or duplicate wrapping.
+    """
     log_text_execution("TEXT_MODULE_ENTER", text)
     state = state if isinstance(state, dict) else {}
+
     machine_request = _extract_canonical_machine_request(state)
     plan = get_user_plan(user_id)
     runtime = build_plan_runtime(plan)
 
-    log_text_execution("CANONICAL_MACHINE_REQUEST_READY", {"type":type(machine_request).__name__, "model":TEXT_QUANTUM_MODEL})
-    output = await generate_text(messages=machine_request, temperature=None, max_output_tokens=None, model=TEXT_QUANTUM_MODEL)
+    log_text_execution(
+        "CANONICAL_MACHINE_REQUEST_READY",
+        {"type": type(machine_request).__name__, "model": TEXT_QUANTUM_MODEL},
+    )
+
+    output = await generate_text(
+        messages=machine_request,
+        temperature=None,
+        max_output_tokens=None,
+        model=TEXT_QUANTUM_MODEL,
+    )
 
     packet = _clean_provider_packet(output)
     reply, packet = normalize_provider_output(packet)
     reply = sanitize_model_output(reply)
+
     if not reply:
         raise RuntimeError("Quantum Provider returned an empty canonical answer.")
 
@@ -466,31 +482,72 @@ async def process(user_id, text, state, energy="MEDIUM"):
     state["provider_response"] = packet
     state["provider_machine_response"] = _machine_response_from_packet(packet)
 
-    artifact_data = _build_text_artifact_data(reply, packet, runtime)
-    transport_contract = create_transport_contract(
-        artifact_type="text",
-        room_source="TEXT_ROOM",
-        data=artifact_data,
-        user_id=user_id,
-        subscription=runtime.get("plan","Free"),
+    # If Provider already supplied the canonical Fiber/Scene envelope, preserve it.
+    existing_contract = packet.get("artifact_contract") if isinstance(packet, dict) else None
+    if existing_contract is None and isinstance(packet, dict):
+        existing_contract = packet.get("transport_contract")
+
+    if existing_contract is not None:
+        transport_contract = existing_contract
+    else:
+        artifact_data = _build_text_artifact_data(reply, packet, runtime)
+        transport_contract = create_transport_contract(
+            artifact_type="text",
+            room_source="TEXT_ROOM",
+            data=artifact_data,
+            user_id=user_id,
+            subscription=runtime.get("plan", "Free"),
+        )
+
+    mr = getattr(transport_contract, "machine_response", None)
+    sc = getattr(transport_contract, "scene_contract", None)
+    blocks = (
+        list(getattr(mr, "render_blocks", []) or [])
+        if mr is not None
+        else _provider_packet_render_blocks(packet)
+    )
+    artifacts = (
+        list(getattr(mr, "artifacts", []) or [])
+        if mr is not None
+        else _provider_packet_artifacts(packet)
     )
 
-    mr=getattr(transport_contract,"machine_response",None)
-    sc=getattr(transport_contract,"scene_contract",None)
-    blocks=list(getattr(mr,"render_blocks",[]) or []) if mr else _provider_packet_render_blocks(packet)
-    artifacts=list(getattr(mr,"artifacts",[]) or []) if mr else _provider_packet_artifacts(packet)
-
-    log_text_execution("TEXT_ARTIFACT_READY", {"answer_len":len(reply),"render_blocks":len(blocks),"artifacts":len(artifacts),"provider_calls":1,"model":TEXT_QUANTUM_MODEL})
+    log_text_execution(
+        "TEXT_ARTIFACT_READY",
+        {
+            "answer_len": len(reply),
+            "render_blocks": len(blocks),
+            "artifacts": len(artifacts),
+            "provider_calls": 1,
+            "model": TEXT_QUANTUM_MODEL,
+        },
+    )
 
     return {
-        "type":"text","content":reply,"answer":reply,
-        "summary":getattr(mr,"summary","") if mr else _compact_scene_summary(packet,reply),
-        "machine_response":mr,"scene_contract":sc,
-        "artifact_contract":transport_contract,"transport_contract":transport_contract,
-        "runtime":artifact_data["runtime"],"machine_channels":artifact_data["machine_channels"],
-        "provider_response":packet,"provider_machine_response":state.get("provider_machine_response",{}),
-        "render_blocks":blocks,"artifacts":artifacts,
-        "single_route":True,"provider_calls":1,"provider_model":TEXT_QUANTUM_MODEL,"summary_visible":False,
+        "type": "text",
+        "content": reply,
+        "answer": reply,
+        "summary": getattr(mr, "summary", "") if mr else _compact_scene_summary(packet, reply),
+        "machine_response": mr,
+        "scene_contract": sc,
+        "artifact_contract": transport_contract,
+        "transport_contract": transport_contract,
+        "runtime": {
+            "plan": runtime.get("plan"),
+            "token_mode": runtime.get("token_mode"),
+        },
+        "machine_channels": {
+            "input": TEXT_INPUT_CHANNEL,
+            "output": TEXT_OUTPUT_CHANNEL,
+        },
+        "provider_response": packet,
+        "provider_machine_response": state.get("provider_machine_response", {}),
+        "render_blocks": blocks,
+        "artifacts": artifacts,
+        "single_route": True,
+        "provider_calls": 1,
+        "provider_model": TEXT_QUANTUM_MODEL,
+        "summary_visible": False,
     }
 
 def get_text_execution_log() -> list[dict[str, Any]]:
@@ -513,3 +570,10 @@ __all__ = [
     "TEXT_QUANTUM_SINGLE_ROUTE",
     "TEXT_QUANTUM_ONE_PROVIDER_CALL",
 ]
+
+
+def generate(*args, **kwargs):
+    return process(*args, **kwargs)
+
+def execute(*args, **kwargs):
+    return process(*args, **kwargs)
