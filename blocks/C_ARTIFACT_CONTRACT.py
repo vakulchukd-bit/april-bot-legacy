@@ -341,7 +341,8 @@ class BaseArtifact:
 # =====================================================
 
 ARTIFACT_BLOCK_MAP = {
-
+    "text": "TextBlock",
+    "markdown": "MarkdownBlock",
     "graph": "GraphBlock",
 
     "formula": "FormulaBlock",
@@ -1624,6 +1625,7 @@ def _artifact_visible_text_from_response(response):
     return ""
 
 def _artifact_compact_summary(response_or_text, block_types=None):
+    """Metadata-only scene summary; never the visible answer itself."""
     if isinstance(response_or_text, str):
         text = response_or_text.strip()
     else:
@@ -1632,11 +1634,13 @@ def _artifact_compact_summary(response_or_text, block_types=None):
     block_types = [b for b in (block_types or []) if b]
     if not text:
         return f"scene: {', '.join(block_types[:5])}" if block_types else ""
+
     first_line = text.split("\n", 1)[0].strip()
-    if len(first_line) > 120:
-        first_line = first_line[:117] + "..."
+    if len(first_line) > 110:
+        first_line = first_line[:107] + "..."
+
     if block_types:
-        return f"{first_line} | scene: {', '.join(dict.fromkeys(block_types))}"
+        return f"{first_line} | scene: {', '.join(dict.fromkeys(block_types)[:5])}"
     return first_line
 
 def build_universal_contract(
