@@ -52,7 +52,7 @@ RESPONSE_CHANNEL = {
 
 EXECUTOR_ROUTE_VERSION = "super_single_canonical_route_v1"
 PROCESSOR_APRIL_NAME = "Процессор April"
-PROCESSOR_APRIL_VERSION = "april_super_processor_v1"
+PROCESSOR_APRIL_VERSION = "april_quantum_processor_v1_4"
 PROCESSOR_APRIL_ROUTE = "single_canonical_stream"
 PROCESSOR_APRIL_PASSES = ("pass1_canonical", "pass2_enrich", "pass3_scene")
 PROCESSOR_APRIL_NO_FALLBACKS = True
@@ -1435,15 +1435,8 @@ def _build_second_circle_machine_request(*, text: str, semantic: dict, provider_
     machine_conversation = second_circle_context.get("conversation", {}) or {}
     visual_reference = second_circle_context.get("visual_reference", {}) or {}
 
-    requested_outputs = list(dict.fromkeys(
-        list(semantic.get("required_representations", []) or [])
-        + list(semantic.get("candidate_representations", []) or [])
-        + ([semantic.get("requested_representation")] if semantic.get("requested_representation") else [])
-    ))
-    required_artifacts = list(dict.fromkeys(
-        list(requested_outputs)
-        + list(semantic.get("required_domains", []) or [])
-    ))
+    requested_outputs = _executor_explicit_requested_outputs(text, semantic)
+    required_artifacts = list(dict.fromkeys(requested_outputs))
 
     machine_request = MachineRequest(
         goal=provider_goal,
@@ -6706,19 +6699,38 @@ def _executor_build_logical_scene_blocks(machine_response, semantic=None, respon
     return _executor_deduplicate_visible_render_blocks(blocks,visible_text=canonical_text)
 
 def executor_cpu_materialize_blocks(machine_response):
-    """Only materialize when Provider supplied no explicit render blocks."""
+    """Canonical materializer: preserve Provider blocks; otherwise emit one Markdown/text block."""
     if machine_response is None:
         return machine_response
-    existing=list(getattr(machine_response,"render_blocks",[]) or [])
+    existing = list(getattr(machine_response, "render_blocks", []) or [])
+    answer = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+    )
     if existing:
-        machine_response.render_blocks=_executor_deduplicate_visible_render_blocks(existing,visible_text=getattr(machine_response,"answer",""))
+        machine_response.render_blocks = _executor_deduplicate_visible_render_blocks(
+            existing, visible_text=answer
+        )
         return machine_response
-    answer=_executor_best_text(getattr(machine_response,"answer",""),getattr(machine_response,"content",""))
-    machine_response.render_blocks=_executor_text_to_logical_blocks(answer,source_room="text") if answer else []
+    if answer:
+        machine_response.render_blocks = [{
+            "type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "priority": 0,
+            "source_room": "text",
+            "sequence_index": 0,
+            "markdown_preserved": True,
+            "executor_generated": True,
+        }]
+    else:
+        machine_response.render_blocks = []
     return machine_response
 
 def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
-    """No-op: formulas embedded in Markdown stay Markdown/text. Explicit formula artifacts remain formula."""
+    """Formulas inside Markdown remain Markdown/text; explicit formula artifacts stay formula."""
     return machine_response
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
