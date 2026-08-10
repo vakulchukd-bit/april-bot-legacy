@@ -6564,104 +6564,34 @@ _quantum_summary = _quantum_compact_scene_summary
 
 
 def _executor_strip_duplicate_visible_fields(result: dict, visible_text: str, render_blocks: list) -> dict:
-    """
-    Keep the canonical answer visible exactly once.
-    The summary becomes metadata-only and never repeats the answer.
-    """
-    if not isinstance(result, dict):
+    """Do not copy summary into visible answer; only synchronize canonical visible text and blocks."""
+    if not isinstance(result,dict):
         return result
-
-    canonical = normalize_text(
-        visible_text
-        or result.get("answer", "")
-        or result.get("content", "")
-        or result.get("summary", "")
-    )
-
-    result["answer"] = canonical
-    result["content"] = canonical
-
-    logical_report = result.get("logical_report", {})
-    if not isinstance(logical_report, dict):
-        logical_report = {}
-
-    summary = result.get("summary", "")
-    summary_text = normalize_text(summary)
-
-    if not summary_text or _quantum_norm(summary_text) == _quantum_norm(canonical):
-        summary_text = _quantum_compact_scene_summary(canonical, render_blocks, report=logical_report)
-
-    # Never let summary become a duplicate of the visible answer.
-    if _quantum_norm(summary_text) == _quantum_norm(canonical):
-        summary_text = "scene: text"
-
-    result["summary"] = summary_text
-    result["render_blocks"] = render_blocks
-
-    machine_response = result.get("machine_response")
-    if machine_response is not None:
+    canonical=visible_text or result.get("answer","") or result.get("content","")
+    if canonical:
+        result["answer"]=canonical
+        result["content"]=canonical
+    result["render_blocks"]=list(render_blocks or [])
+    mr=result.get("machine_response")
+    if mr is not None:
         try:
-            if hasattr(machine_response, "answer"):
-                machine_response.answer = canonical
-            if hasattr(machine_response, "content"):
-                machine_response.content = canonical
-            if hasattr(machine_response, "summary"):
-                machine_response.summary = summary_text
-            if hasattr(machine_response, "render_blocks"):
-                machine_response.render_blocks = render_blocks
-        except Exception:
-            pass
-
-    scene_contract = result.get("scene_contract")
-    if scene_contract is not None:
+            if canonical:
+                mr.answer=canonical; mr.content=canonical
+            mr.render_blocks=list(render_blocks or [])
+        except Exception: pass
+    sc=result.get("scene_contract")
+    if sc is not None:
         try:
-            if isinstance(scene_contract, dict):
-                scene_contract["answer"] = canonical
-                scene_contract["content"] = canonical
-                scene_contract["summary"] = summary_text
-                scene_contract["render_blocks"] = render_blocks
+            if isinstance(sc,dict):
+                if canonical:
+                    sc["answer"]=canonical; sc["content"]=canonical
+                sc["render_blocks"]=list(render_blocks or [])
             else:
-                setattr(scene_contract, "answer", canonical)
-                setattr(scene_contract, "content", canonical)
-                setattr(scene_contract, "summary", summary_text)
-                setattr(scene_contract, "render_blocks", render_blocks)
-        except Exception:
-            pass
-
-    scene_runtime = result.get("scene_runtime")
-    if isinstance(scene_runtime, dict):
-        scene_runtime.setdefault("canonical_answer", canonical)
-        scene_runtime.setdefault("canonical_content", canonical)
-        scene_runtime.setdefault("canonical_summary", summary_text)
-        scene_runtime["render_blocks"] = render_blocks
-
+                if canonical:
+                    sc.answer=canonical; sc.content=canonical
+                sc.render_blocks=list(render_blocks or [])
+        except Exception: pass
     return result
-
-
-
-# ============================================================
-# APRIL QUANTUM PROCESSOR 1.1 — FINAL SINGLE-ROUTE CORE
-# ============================================================
-# This final layer supersedes previous staged/legacy definitions.
-#
-# Invariants:
-#   USER -> semantic/context analysis -> ONE MachineRequest
-#        -> ONE Provider call -> ONE MachineResponse
-#        -> ONE logical SceneContract -> AprilWeb
-#
-# The processor diagnoses and organizes; it does not render.
-# Inline Markdown/formulas remain text/markdown and are rendered by Web.
-# Structured render_blocks produced by the Provider are preserved.
-# No secondary room broadcast, no second Provider pass, no presentation gate
-# that destroys other block types, and no FormulaBlock coercion.
-# ============================================================
-
-APRIL_QUANTUM_PROCESSOR_VERSION = "april_quantum_1_1_single_route"
-APRIL_QUANTUM_PROCESSOR_NAME = "APRIL Quantum Processor"
-APRIL_QUANTUM_SINGLE_ROUTE = True
-APRIL_QUANTUM_NO_FALLBACKS = True
-APRIL_QUANTUM_PROVIDER_CALLS_PER_REQUEST = 1
-APRIL_QUANTUM_RENDER_SOURCE = "provider_render_blocks"
 
 def _quantum_final_block_type(block):
     if not isinstance(block, dict):
@@ -6757,83 +6687,39 @@ def _quantum_final_dedup_blocks(blocks):
 
 
 def _executor_build_logical_scene_blocks(machine_response, semantic=None, response_decision=None):
-    """
-    Canonical block projection.
-
-    Priority:
-      1. Provider-owned render_blocks.
-      2. Provider artifacts mapped to blocks.
-      3. Exactly one plain text block when the answer has no blocks.
-
-    The processor does NOT reinterpret inline formulas, Markdown, or prose into
-    another renderer. AprilWeb owns Markdown rendering.
-    """
-    semantic = semantic or {}
-    response_decision = response_decision or {}
-
-    provider_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    artifacts = list(getattr(machine_response, "artifacts", []) or [])
-
-    if provider_blocks:
-        return _quantum_final_dedup_blocks(provider_blocks)
-
-    artifact_blocks = []
-    for artifact in artifacts:
-        mapping = _executor_payload_to_mapping(artifact)
-        if not mapping:
-            continue
-        block = _executor_contribution_to_block(
-            normalize_text(mapping.get("artifact_type") or mapping.get("type") or ""),
-            mapping,
-            index=len(artifact_blocks),
-            source_room="artifact",
-        )
-        if block:
-            artifact_blocks.append(block)
-
-    if artifact_blocks:
-        return _quantum_final_dedup_blocks(artifact_blocks)
-
-    answer = _executor_best_text(
-        getattr(machine_response, "answer", ""),
-        getattr(machine_response, "content", ""),
+    """Preserve Provider-owned render_blocks and only synthesize text when none exist."""
+    canonical_text=_executor_best_text(
+        getattr(machine_response,"answer",""),
+        getattr(machine_response,"content",""),
+        getattr(machine_response,"response",""),
     )
-    if answer:
-        return [{
-            "type": "text",
-            "content": answer,
-            "text": answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "priority": 0,
-            "source_room": "text",
-            "sequence_index": 0,
-        }]
-
-    return []
-
+    blocks=list(getattr(machine_response,"render_blocks",[]) or [])
+    if not blocks and canonical_text:
+        blocks=_executor_text_to_logical_blocks(canonical_text,source_room="text")
+    existing={_executor_block_signature(b) for b in blocks if isinstance(b,dict)}
+    contributions=getattr(machine_response,"contributions",{}) or {}
+    if isinstance(contributions,dict):
+        for idx,(key,value) in enumerate(contributions.items()):
+            block=_executor_contribution_to_block(str(key),value,index=idx,source_room="registry")
+            if block and _executor_block_signature(block) not in existing:
+                blocks.append(block); existing.add(_executor_block_signature(block))
+    return _executor_deduplicate_visible_render_blocks(blocks,visible_text=canonical_text)
 
 def executor_cpu_materialize_blocks(machine_response):
-    blocks = _executor_build_logical_scene_blocks(
-        machine_response,
-        semantic=getattr(machine_response, "executor_semantic", {}) or {},
-        response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
-    )
-    machine_response.render_blocks = blocks
-    machine_response.logical_scene_blocks = blocks
-    machine_response.logical_scene_presentation = _executor_scene_presentation_hint(
-        blocks,
-        semantic=getattr(machine_response, "executor_semantic", {}) or {},
-        response_decision=getattr(machine_response, "executor_response_decision", {}) or {},
-    )
+    """Only materialize when Provider supplied no explicit render blocks."""
+    if machine_response is None:
+        return machine_response
+    existing=list(getattr(machine_response,"render_blocks",[]) or [])
+    if existing:
+        machine_response.render_blocks=_executor_deduplicate_visible_render_blocks(existing,visible_text=getattr(machine_response,"answer",""))
+        return machine_response
+    answer=_executor_best_text(getattr(machine_response,"answer",""),getattr(machine_response,"content",""))
+    machine_response.render_blocks=_executor_text_to_logical_blocks(answer,source_room="text") if answer else []
     return machine_response
-
 
 def _canonicalize_formula_blocks(machine_response, semantic=None, response_decision=None):
-    # Deliberately a no-op. Inline formulas inside text/Markdown remain text.
-    # Web Markdown/Math rendering owns the visual treatment.
+    """No-op: formulas embedded in Markdown stay Markdown/text. Explicit formula artifacts remain formula."""
     return machine_response
-
 
 def apply_representation_gate(blocks, response_decision=None, semantic=None):
     # Representation is metadata/prioritization only. Never remove a valid block.
