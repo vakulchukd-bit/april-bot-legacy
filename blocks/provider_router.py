@@ -2829,3 +2829,428 @@ async def generate_text(messages, temperature=None, max_output_tokens=None, mode
     finally:
         if lock_key:
             _PROVIDER_INFLIGHT.discard(lock_key)
+
+# ============================================================
+# APRIL QUANTUM PROVIDER — CANONICAL LUNA ROUTE V2
+# ============================================================
+# Final runtime overrides.  Legacy definitions above remain inert; Python uses
+# these final definitions for the single Provider path.
+
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_2_0"
+APRIL_QUANTUM_PROVIDER_MODEL = "gpt-5.6-luna"
+APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
+APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
+APRIL_QUANTUM_PROVIDER_NO_TEXT_FALLBACK_MODELS = True
+
+PROVIDER_MACHINE_SYSTEM_PROMPT = """
+You are April's single text-generation provider, GPT-5.6 Luna.
+
+You receive ONE canonical MachineRequest that has already been interpreted by
+April's local processor. Do not reinterpret the architecture and do not invent
+a second task.
+
+Return EXACTLY ONE JSON object:
+{
+  "answer": "...",
+  "content": "...",
+  "summary": "...",
+  "scene": {},
+  "render_blocks": [],
+  "artifacts": [],
+  "scene_plan": ["text"],
+  "render_priority": ["text"],
+  "confidence": 0.0
+}
+
+Rules:
+- answer and content are the complete human-visible answer.
+- Write a natural, coherent, useful answer as April, not a machine/status report.
+- Preserve the current conversational context and the user's actual goal.
+- If dialog_act is affirmation/continuation/reference, answer the CURRENT turn in
+  relation to the immediately preceding April turn. Never treat "Да", "Ок",
+  "Продолжай" or similar as an independent subject.
+- Do not repeat the same answer twice.
+- Do not expose MachineRequest, cognition, routing, telemetry or internal names.
+- Markdown is allowed INSIDE answer/content when it improves readability.
+- Inline LaTeX remains text/Markdown; do not require a FormulaBlock for inline math.
+- Use render_blocks only when the request actually calls for a structured artifact
+  such as a table, graph, diagram, gallery, image, link or code.
+- For ordinary prose, return one text render block containing the same complete
+  answer.
+- summary is metadata only and must never replace answer/content.
+- Never call another model. Never create a fallback model route.
+"""
+
+def machine_request_to_dict(machine_request):
+    if isinstance(machine_request, dict):
+        payload = dict(machine_request)
+    elif isinstance(machine_request, MachineRequest):
+        payload = {
+            "request_id": getattr(machine_request, "request_id", None),
+            "goal": getattr(machine_request, "goal", None),
+            "intent": getattr(machine_request, "intent", None),
+            "conversation": getattr(machine_request, "conversation", None),
+            "memory": getattr(machine_request, "memory", None),
+            "visual_context": getattr(machine_request, "visual_context", None),
+            "available_tools": getattr(machine_request, "available_tools", None),
+            "requested_outputs": getattr(machine_request, "requested_outputs", None),
+            "required_competencies": getattr(machine_request, "required_competencies", None),
+            "required_artifacts": getattr(machine_request, "required_artifacts", None),
+            "routing": getattr(machine_request, "routing", None),
+            "constraints": getattr(machine_request, "constraints", None),
+            "metadata": getattr(machine_request, "metadata", None),
+        }
+        # These are attributes attached by Executor to the SAME request.
+        for name in (
+            "dialogue_contract",
+            "semantic",
+            "cognition",
+            "response_decision",
+            "conversation_space",
+            "provider_reference_context",
+            "canonical_prompt_text",
+            "single_route",
+            "provider_calls_allowed",
+        ):
+            value = getattr(machine_request, name, None)
+            if value not in (None, "", [], {}):
+                payload[name] = value
+    else:
+        raise TypeError("Provider accepts only canonical MachineRequest.")
+    return payload
+
+def build_openai_request(machine_request):
+    payload = machine_request_to_dict(machine_request)
+    intent = payload.get("intent") or {}
+    dialogue = payload.get("dialogue_contract") or {}
+    decision = payload.get("response_decision") or {}
+
+    sections = [
+        ("CURRENT REQUEST", intent.get("normalized_text") or payload.get("content") or ""),
+        ("DIALOGUE CONTRACT", dialogue),
+        ("RESOLVED GOAL", payload.get("goal") or dialogue.get("active_goal")),
+        ("ACTIVE TOPIC", dialogue.get("active_topic")),
+        ("PREVIOUS APRIL TURN", dialogue.get("previous_april_turn")),
+        ("CONVERSATION", payload.get("conversation")),
+        ("MEMORY", payload.get("memory")),
+        ("SEMANTIC STATE", payload.get("semantic")),
+        ("COGNITIVE STATE", payload.get("cognition")),
+        ("RESPONSE DECISION", decision),
+        ("REQUESTED OUTPUTS", payload.get("requested_outputs")),
+        ("REQUIRED COMPETENCIES", payload.get("required_competencies")),
+        ("VISUAL CONTEXT", payload.get("visual_context")),
+        ("CONSTRAINTS", payload.get("constraints")),
+    ]
+
+    text_parts = [
+        "APRIL CANONICAL REQUEST",
+        "",
+        "Generate the one human-visible answer for the CURRENT REQUEST.",
+    ]
+    for title, value in sections:
+        if value not in (None, "", [], {}):
+            try:
+                rendered = json.dumps(value, ensure_ascii=False, default=str)
+            except Exception:
+                rendered = str(value)
+            text_parts.extend(["", title + ":", rendered])
+
+    text_parts.extend([
+        "",
+        "Return JSON only. The answer field must contain the complete natural-language response.",
+    ])
+    return {
+        "role": "user",
+        "content": [{
+            "type": "input_text",
+            "text": "\n".join(text_parts),
+        }],
+    }
+
+def normalize_provider_input(machine_request):
+    return [
+        {
+            "role": "system",
+            "content": [{
+                "type": "input_text",
+                "text": PROVIDER_MACHINE_SYSTEM_PROMPT,
+            }],
+        },
+        build_openai_request(machine_request),
+    ]
+
+def _extract_openai_text(response):
+    """Read the Responses API text without depending on one SDK convenience field."""
+    direct = getattr(response, "output_text", None)
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    output = getattr(response, "output", None)
+    pieces = []
+    if isinstance(output, (list, tuple)):
+        for item in output:
+            content = getattr(item, "content", None)
+            if isinstance(content, (list, tuple)):
+                for part in content:
+                    value = getattr(part, "text", None)
+                    if isinstance(value, str) and value.strip():
+                        pieces.append(value.strip())
+                    elif isinstance(part, dict):
+                        value = part.get("text") or part.get("value")
+                        if isinstance(value, str) and value.strip():
+                            pieces.append(value.strip())
+            elif isinstance(item, dict):
+                for part in item.get("content", []) or []:
+                    if isinstance(part, dict):
+                        value = part.get("text") or part.get("value")
+                        if isinstance(value, str) and value.strip():
+                            pieces.append(value.strip())
+    return "\n".join(pieces).strip()
+
+def _canonical_provider_parse(raw_text):
+    raw = str(raw_text or "").strip()
+    if not raw:
+        raise RuntimeError("GPT-5.6 Luna returned no textual output.")
+
+    candidate = raw
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.I)
+        candidate = re.sub(r"\s*```$", "", candidate)
+
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        parsed = None
+
+    if not isinstance(parsed, dict):
+        return {
+            "answer": raw,
+            "content": raw,
+            "summary": _quantum_provider_final_compact_summary(raw, {}),
+            "scene": {},
+            "render_blocks": [{
+                "type": "text",
+                "content": raw,
+                "text": raw,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+            }],
+            "artifacts": [],
+            "scene_plan": ["text"],
+            "render_priority": ["text"],
+            "confidence": 0.5,
+            "metadata": {"provider_json_invalid": True},
+        }
+    return parsed
+
+def create_provider_contract(raw_text, source_request=None):
+    if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response":
+        return raw_text
+
+    parsed = _canonical_provider_parse(raw_text)
+    answer = normalize_response_text(
+        parsed.get("answer")
+        or parsed.get("content")
+        or parsed.get("response")
+        or ""
+    )
+
+    if not answer:
+        # A structured text block is still the same canonical answer.
+        for block in parsed.get("render_blocks", []) or []:
+            if isinstance(block, dict):
+                candidate = normalize_response_text(
+                    block.get("content")
+                    or block.get("text")
+                    or block.get("answer")
+                    or ""
+                )
+                if candidate:
+                    answer = candidate
+                    break
+
+    if not answer:
+        answer = normalize_response_text(
+            parsed.get("explanation")
+            or parsed.get("summary")
+            or ""
+        )
+
+    if not answer:
+        raise RuntimeError("GPT-5.6 Luna returned an empty canonical answer.")
+
+    blocks = _quantum_provider_final_clean_blocks(parsed.get("render_blocks", []) or [])
+    if not blocks:
+        blocks = [{
+            "type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "scene_contract": True,
+        }]
+
+    content = normalize_response_text(parsed.get("content") or answer)
+    summary = normalize_response_text(
+        parsed.get("summary")
+        or _quantum_provider_final_compact_summary(answer, {"render_blocks": blocks})
+    )
+
+    metadata = dict(parsed.get("metadata", {}) or {})
+    metadata.update({
+        "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
+        "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
+        "provider_calls": 1,
+        "single_route": True,
+        "summary_visible": False,
+        "render_blocks_source": "luna",
+        "canonical_answer_verified": True,
+    })
+
+    return {
+        "type": "provider_response",
+        "machine_response": {
+            "answer": answer,
+            "content": content,
+            "response": answer,
+            "summary": summary,
+            "explanation": normalize_response_text(parsed.get("explanation") or ""),
+            "scene": dict(parsed.get("scene", {}) or {}),
+            "artifacts": list(parsed.get("artifacts", []) or []),
+            "render_blocks": blocks,
+            "scene_plan": list(parsed.get("scene_plan") or ["text"]),
+            "render_priority": list(parsed.get("render_priority") or ["text"]),
+            "confidence": parsed.get("confidence", 1.0),
+            "provider": "openai",
+            "provider_contract": "fiber_v5_quantum",
+            "transport_contract": "scene_first",
+            "provider_original_answer": answer,
+            "provider_original_content": content,
+            "metadata": metadata,
+        },
+        "processor_input": machine_request_to_dict(source_request) if source_request is not None else {},
+        "provider_source_request": machine_request_to_dict(source_request) if source_request is not None else {},
+        "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
+        "provider_calls": 1,
+        "single_route": True,
+    }
+
+def provider_finalize_for_executor(contract):
+    if not isinstance(contract, dict):
+        raise RuntimeError("Provider contract must be a dict.")
+    mr = contract.setdefault("machine_response", {})
+    answer = normalize_response_text(
+        mr.get("answer") or mr.get("content") or mr.get("response") or ""
+    )
+    if not answer:
+        for block in mr.get("render_blocks", []) or []:
+            if isinstance(block, dict):
+                answer = normalize_response_text(
+                    block.get("content") or block.get("text") or block.get("answer") or ""
+                )
+                if answer:
+                    break
+    if not answer:
+        raise RuntimeError("Canonical MachineResponse contains no visible answer.")
+
+    mr["answer"] = answer
+    mr["content"] = normalize_response_text(mr.get("content") or answer)
+    mr["response"] = normalize_response_text(mr.get("response") or answer)
+    mr["summary"] = normalize_response_text(mr.get("summary") or _quantum_provider_final_compact_summary(answer, mr))
+    mr["render_blocks"] = _quantum_provider_final_clean_blocks(mr.get("render_blocks", []) or [])
+    if not mr["render_blocks"]:
+        mr["render_blocks"] = [{
+            "type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "scene_contract": True,
+        }]
+    mr.setdefault("artifacts", [])
+    mr.setdefault("scene", {})
+    mr.setdefault("scene_plan", ["text"])
+    mr.setdefault("render_priority", ["text"])
+    mr.setdefault("metadata", {})
+    mr["metadata"].update({
+        "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
+        "provider_calls": 1,
+        "single_route": True,
+        "summary_visible": False,
+        "canonical_answer_verified": True,
+    })
+    return contract
+
+async def generate_text(messages, temperature=None, max_output_tokens=None, model=APRIL_QUANTUM_PROVIDER_MODEL):
+    source_request = machine_request_to_dict(messages)
+    cached = _get_duplicate_cached_response(messages)
+    if cached is not None:
+        provider_log("[PROVIDER] DUPLICATE_GUARD: canonical cached response")
+        return cached
+
+    identity = _request_identity(messages)
+    lock_key = identity[1] if identity and identity[1] else None
+    if lock_key in _PROVIDER_INFLIGHT:
+        raise RuntimeError("Duplicate in-flight Provider request for canonical request.")
+    if lock_key:
+        _PROVIDER_INFLIGHT.add(lock_key)
+
+    try:
+        normalized_input = normalize_provider_input(messages)
+        request = {
+            "model": APRIL_QUANTUM_PROVIDER_MODEL,
+            "input": normalized_input,
+            "max_output_tokens": (
+                max_output_tokens
+                if isinstance(max_output_tokens, int) and max_output_tokens > 0
+                else 1800
+            ),
+        }
+        provider_log({
+            "quantum_provider": APRIL_QUANTUM_PROVIDER_VERSION,
+            "model": APRIL_QUANTUM_PROVIDER_MODEL,
+            "one_openai_call": True,
+            "model_escalation": False,
+            "secondary_model": None,
+            "request_items": len(normalized_input),
+            "dialog_act": (source_request.get("dialogue_contract") or {}).get("dialog_act"),
+            "reply_to": (source_request.get("dialogue_contract") or {}).get("reply_to"),
+        })
+
+        response = openai_client.responses.create(**request)
+        usage = _extract_usage(response)
+        estimated_cost_usd = _estimate_usage_cost(APRIL_QUANTUM_PROVIDER_MODEL, usage)
+        raw_text = _extract_openai_text(response)
+
+        provider_log({
+            "billing_trace": PROVIDER_COST_LOG_VERSION,
+            "model_billed_route": APRIL_QUANTUM_PROVIDER_MODEL,
+            "usage": usage,
+            "estimated_cost_usd": estimated_cost_usd,
+            "provider_calls": 1,
+            "raw_output_length": len(raw_text),
+        })
+
+        contract = create_provider_contract(raw_text, source_request=messages)
+        contract = provider_finalize_for_executor(contract)
+        mr = contract["machine_response"]
+        mr.setdefault("metadata", {}).update({
+            "provider_usage": usage,
+            "provider_estimated_cost_usd": estimated_cost_usd,
+            "provider_response_id": getattr(response, "id", None),
+        })
+
+        _cache_provider_response(messages, contract)
+        provider_log({
+            "trace_stage": "EXECUTOR_HANDOFF",
+            "answer_len": len(mr.get("answer") or ""),
+            "content_len": len(mr.get("content") or ""),
+            "summary_len": len(mr.get("summary") or ""),
+            "render_blocks": len(mr.get("render_blocks") or []),
+            "artifacts": len(mr.get("artifacts") or []),
+            "model": APRIL_QUANTUM_PROVIDER_MODEL,
+        })
+        return contract
+    finally:
+        if lock_key:
+            _PROVIDER_INFLIGHT.discard(lock_key)
