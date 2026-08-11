@@ -296,7 +296,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     # Keep user/flow identity in metadata for Provider duplicate/in-flight guard
     # without creating another route.
     if isinstance(state, dict):
-        flow_id = state.get("flow_id") or state.get("active_flow", {}).get("flow_id")
+        active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
+        flow_id = state.get("flow_id") or active_flow.get("flow_id")
         if flow_id:
             request_metadata["flow_id"] = flow_id
 
