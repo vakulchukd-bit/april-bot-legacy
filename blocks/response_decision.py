@@ -168,7 +168,7 @@ DECISION_MODES = [
 # 🔥 RESPONSE DECISION
 # =====================================================
 
-def build_response_decision(
+def _base_build_response_decision(
 
     semantic: dict,
     cognition: dict,
@@ -1105,7 +1105,7 @@ def build_response_decision(
 # Preserve the existing decision engine and enrich its final decision with the
 # semantic dialogue contract.  This is not a second router.
 
-_legacy_build_response_decision = build_response_decision
+_legacy_build_response_decision = _base_build_response_decision
 
 def build_response_decision(semantic: dict, cognition: dict, visual_reference: dict, state: dict):
     result = _legacy_build_response_decision(
@@ -1150,5 +1150,17 @@ def build_response_decision(semantic: dict, cognition: dict, visual_reference: d
     result["avoid_machine_echo"] = True
     result["avoid_duplicate_answer"] = True
     result["single_canonical_answer"] = True
+    result["context_dependency"] = (
+        contract.get("context_dependency")
+        or semantic.get("context_dependency")
+        or ("continuation" if continuation else "independent")
+    )
+    result["context_policy"] = semantic.get("context_policy", {
+        "current_request": True,
+        "dialogue_vector": continuation,
+        "previous_turn": bool(contract.get("reply_to") or contract.get("previous_april_turn")),
+        "active_goal": bool(active_goal and continuation),
+        "full_history": False,
+    })
 
     return result
