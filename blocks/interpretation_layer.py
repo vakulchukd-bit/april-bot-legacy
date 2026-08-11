@@ -1023,15 +1023,24 @@ RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 def estimate_action_count(result):
-    """
-    Stage 1.
-
-    Infrastructure only.
-
-    Real calculation will be connected
-    during Stage 2.
-    """
-    return 1
+    """Estimate independent work units from already-computed semantic evidence."""
+    if not isinstance(result, dict):
+        return 0
+    count = 0
+    reps = result.get("required_representations", []) or []
+    domains = result.get("required_domains", []) or []
+    if reps:
+        count += max(1, len(set(reps)))
+    if domains:
+        count += max(1, len(set(domains)))
+    contract = result.get("dialogue_contract") or {}
+    if contract.get("continuation"):
+        count += 1
+    if result.get("contains_analysis") or result.get("contains_explanation"):
+        count += 1
+    if result.get("explicit_image_generation"):
+        count += 2
+    return max(1, count)
 
 def determine_response_complexity(result):
     actions = estimate_action_count(result)
@@ -1046,7 +1055,7 @@ def determine_response_complexity(result):
 
 # RU-43: removed duplicate stub override
 
-def interpret_request(
+def _base_interpret_request(
     text: str,
     cognition: dict = None,
     semantic: dict = None
@@ -2572,7 +2581,7 @@ def _canonical_dialogue_contract(text, history=None, state=None, semantic=None):
         "version": "dialogue_v2",
     }
 
-_legacy_interpret_request = interpret_request
+_legacy_interpret_request = _base_interpret_request
 
 def interpret_request(text: str, cognition: dict = None, semantic: dict = None,
                       history=None, state=None):
@@ -2597,5 +2606,19 @@ def interpret_request(text: str, cognition: dict = None, semantic: dict = None,
     result["required_capabilities"] = contract["required_capabilities"]
     result["dialogue_understanding"] = contract
     result["goal_stage"] = "continuation" if contract["continuation"] else "current_request"
+    # Context selection is driven by semantic relation, not by history size.
+    result["context_dependency"] = (
+        "continuation" if contract.get("continuation")
+        else "reference" if contract.get("dialog_act") == "reference"
+        else "new_topic" if contract.get("topic_shift")
+        else "independent"
+    )
+    result["context_policy"] = {
+        "current_request": True,
+        "dialogue_vector": bool(contract.get("continuation") or contract.get("dialog_act") == "reference"),
+        "previous_turn": bool(contract.get("reply_to") or contract.get("previous_april_turn")),
+        "active_goal": bool(contract.get("active_goal") and (contract.get("continuation") or contract.get("topic_shift"))),
+        "full_history": False,
+    }
     result["unresolved_intent"] = False if contract["dialog_act"] in {"affirmation", "rejection", "continuation"} else result.get("unresolved_intent", False)
     return result
