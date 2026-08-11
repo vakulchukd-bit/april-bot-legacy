@@ -1,47 +1,59 @@
-# blocks/semantic_core.py
-
-from blocks.interpretation_layer import (
-    interpret_request
-)
+# blocks/state_manager.py
 
 # =====================================================
-# 🧠 APRIL SEMANTIC CORE
+# 🧠 APRIL STATE MANAGER
 # =====================================================
 
 """
-APRIL SEMANTIC CORE
+APRIL STATE MANAGER
 
 ROLE:
-- lightweight semantic analysis
-- memory-aware semantic analysis
-- renderer-first semantic hints
-- continuity-safe interpretation
-- machine-safe orchestration support
-- execution pressure estimation
+- continuity-safe runtime storage
+- lightweight dialog memory
+- visual scene persistence
+- renderer continuity support
+- active flow stabilization
+- dynamic memory hierarchy
+- focus persistence
+- open-loop tracking
+- trajectory memory core
 
-SEMANTIC CORE НЕ:
-- authority system
-- hard router
-- renderer executor
-- generation trigger
-- orchestration owner
+SYSTEM DOES NOT:
+- perform orchestration
+- mutate cognition
+- own routing authority
+- generate renderer payloads
+- execute provider logic
 """
+
+# =====================================================
+# 🔥 IMPORTS
+# =====================================================
+
+import time
+
+try:
+    from storage import get_user_plan, load_memory, save_memory
+    _STORAGE_IMPORT_ERROR = None
+except Exception as exc:
+    get_user_plan = None
+    load_memory = None
+    save_memory = None
+    _STORAGE_IMPORT_ERROR = exc
 
 # =====================================================
 # 🔥 MACHINE IDENTITY
 # =====================================================
 
-APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
+APRIL_FILE_ID = "APRIL_STATE_MANAGER"
 
-SEMANTIC_MACHINE_CHANNEL = {
+STATE_MACHINE_CHANNEL = {
 
-    "type": "semantic_core",
+    "type": "state_runtime",
 
-    "mode": "machine_understanding",
+    "mode": "machine_memory",
 
     "isolated": True,
-
-    "continuity_safe": True,
 
     "renderer_safe": True,
 
@@ -52,1336 +64,1771 @@ SEMANTIC_MACHINE_CHANNEL = {
 # 🔥 PATCH LOG
 # =====================================================
 
-SEMANTIC_PATCH_LOG = []
+STATE_PATCH_LOG = []
 
-def safe_semantic_log(msg):
+def safe_state_log(msg):
 
     try:
 
         print(
-            "SEMANTIC CORE:",
+            "STATE:",
             msg
         )
 
-        SEMANTIC_PATCH_LOG.append(
+        STATE_PATCH_LOG.append(
             str(msg)
         )
 
     except:
         pass
 
-safe_semantic_log(
-    "SEMANTIC CORE INITIALIZED"
+safe_state_log(
+    "STATE MANAGER INITIALIZED"
 )
 
 # =====================================================
-# 🔥 HELPERS
+# 🔥 RUNTIME STATE
 # =====================================================
 
-def clamp(
-    value,
-    minimum=0.0,
-    maximum=1.0
+state = {}
+
+# =====================================================
+# 🔥 STABLE IMAGE STORAGE
+# =====================================================
+
+image_storage = {}
+
+# =====================================================
+# 🔥 ADMIN
+# =====================================================
+
+ADMIN_ID = 2016592532
+
+# =====================================================
+# 🔥 LIMITS
+# =====================================================
+
+SESSION_MEMORY_LIMIT = 1600
+
+VISUAL_HISTORY_LIMIT = 8
+
+IMAGE_MEMORY_LIMIT = 5
+
+TOPIC_MEMORY_LIMIT = 5
+
+# =====================================================
+# 🔥 DIALOG LIMITS
+# =====================================================
+
+def get_dialog_limit(
+    user_id,
+    plan
 ):
 
-    if value < minimum:
-        return minimum
+    if user_id == ADMIN_ID:
 
-    if value > maximum:
-        return maximum
-
-    return value
-
-
-def contains_any(
-    text,
-    words
-):
-
-    return any(
-        w in text
-        for w in words
-    )
-
-
-def safe_probability(
-    value,
-    boost=0.0
-):
-
-    return clamp(
-        value + boost
-    )
-
-# =====================================================
-# 🔥 MACHINE SIGNALS
-# =====================================================
-
-def detect_renderer_probability(
-    text
-):
-
-    t = (text or "").lower()
-
-    probability = 0.0
-
-    renderer_words = [
-
-        "график",
-        "графика",
-        "функция",
-        "формула",
-        "уравнение",
-        "таблица",
-        "сетка",
-        "layout",
-        "diagram",
-        "схема",
-        "line",
-        "стрелка",
-        "plot",
-        "chart",
-        "y=",
-        "f(x)",
-        "sin(",
-        "cos(",
-        "tan("
-    ]
-
-    for word in renderer_words:
-
-        if word in t:
-            probability += 0.12
-
-    return clamp(probability)
-
-
-def detect_image_generation_probability(
-    text
-):
-
-    t = (text or "").lower()
-
-    probability = 0.0
-
-    generation_words = [
-
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "создай арт",
-        "draw image",
-        "generate image"
-    ]
-
-    for word in generation_words:
-
-        if word in t:
-            probability += 0.25
-
-    return clamp(probability)
-
-
-def detect_visual_probability(
-    text
-):
-
-    t = (text or "").lower()
-
-    probability = 0.0
-
-    visual_words = [
-
-        "пример",
-        "визуально",
-        "референс",
-        "атмосфера",
-        "концепт",
-        "дизайн",
-        "стиль",
-        "схема",
-        "чертеж",
-        "layout"
-    ]
-
-    for word in visual_words:
-
-        if word in t:
-            probability += 0.1
-
-    return clamp(probability)
-
-
-def detect_execution_probability(
-    text
-):
-
-    t = (text or "").lower()
-
-    probability = 0.0
-
-    execution_words = [
-
-        "сделай",
-        "создай",
-        "выполни",
-        "отправь",
-        "построй",
-        "покажи"
-    ]
-
-    for word in execution_words:
-
-        if word in t:
-            probability += 0.12
-
-    return clamp(probability)
-
-
-
-# =====================================================
-# 🔥 DIALOGUE AWARENESS
-# =====================================================
-
-def detect_discussion_probability(text):
-
-    t = (text or "").lower()
-
-    words = [
-        "давай обсудим",
-        "как думаешь",
-        "что думаешь",
-        "поговорим",
-        "обсудим",
-        "подскажи",
-        "посоветуй",
-        "объясни",
-        "расскажи",
-        "помоги понять",
-        "можешь показать",
-        "интересно",
-        "хочу понять",
-        "какой лучше",
-        "какой график",
-        "какая функция"
-    ]
-
-    probability = 0.0
-
-    for word in words:
-        if word in t:
-            probability += 0.18
-
-    return clamp(probability)
-
-
-def detect_reflection_probability(text):
-
-    t = (text or "").lower()
-
-    words = [
-        "почему",
-        "объясни",
-        "рассуждай",
-        "размышляй",
-        "как ты пришла"
-    ]
-
-    probability = 0.0
-
-    for word in words:
-        if word in t:
-            probability += 0.15
-
-    return clamp(probability)
-
-
-def detect_space_discussion_probability(text):
-
-    t = (text or "").lower()
-
-    words = [
-        "пространство",
-        "scene",
-        "renderer",
-        "блок",
-        "галерея",
-        "график"
-    ]
-
-    probability = 0.0
-
-    for word in words:
-        if word in t:
-            probability += 0.12
-
-    return clamp(probability)
-
-
-# =====================================================
-# 🧠 REPRESENTATION ANALYSIS
-# =====================================================
-
-def detect_representation_request(text):
-
-    t = (text or "").lower()
-
-    graph_words = [
-        "график",
-        "построй график",
-        "функция",
-        "plot",
-        "chart"
-    ]
-
-    table_words = [
-        "таблица",
-        "таблицу",
-        "таблич",
-        "периодическая",
-        "менделеева",
-        "значения"
-    ]
-
-    link_words = [
-        "источник",
-        "ссылка",
-        "документация"
-    ]
-
-    if any(w in t for w in graph_words):
-        return "graph"
-
-    if any(w in t for w in table_words):
-        return "table"
-
-    if any(w in t for w in link_words):
-        return "link"
-
-    return None
-
-# =====================================================
-# 🧠 GRAPH ACTION DETECTION
-# =====================================================
-
-def detect_graph_action(text):
-
-    t = (text or "").lower()
-
-    if "почему" in t:
-        return "explain"
-
-    if "исправ" in t:
-        return "fix"
-
-    if "анализ" in t:
-        return "analyze"
-
-    if "сравни" in t:
-        return "compare"
-
-    if (
-        "построй" in t
-        or "нарисуй" in t
-    ):
-        return "build"
-
-    return "unknown"
-
-
-# =====================================================
-# 🔥 ARTIFACT UNDERSTANDING
-# =====================================================
-
-def build_artifact_bundle():
+        return 50
 
     return {
 
-        "domain": "general",
+        "free": 10,
 
-        "primary": [],
+        "lite": 20,
 
-        "secondary": []
-    }
+        "premium": 30
 
-
-def enrich_artifact_bundle(
-    bundle,
-    semantic_result
-):
-
-    if semantic_result.get("contains_object"):
-        bundle["primary"].append("artifact")
-
-    if semantic_result.get("contains_explanation"):
-        bundle["secondary"].append("explanation")
-
-    if semantic_result.get("contains_analysis"):
-        bundle["secondary"].append("analysis")
-
-    if semantic_result.get("contains_legend"):
-        bundle["secondary"].append("legend")
-
-    return bundle
-
+    }.get(plan, 10)
 
 # =====================================================
-# 🔥 ANALYZE
+# 🔥 SAFE HELPERS
 # =====================================================
 
-def analyze(
-    text: str,
-    state: dict = None,
-    history: list = None,
-    active_flow: dict = None,
-    dialog_state: dict = None
+def safe_trim_text(
+    text,
+    limit=120
 ):
 
-    text = (text or "").strip()
+    text = str(
+        text or ""
+    ).strip()
 
-    t = text.lower()
+    if len(text) <= limit:
 
-    state = state or {}
-    history = history or []
-    active_flow = active_flow or {}
-    dialog_state = dialog_state or {}
+        return text
 
-    # =====================================================
-    # 🔥 GOLDEN MEMORY INPUT
-    # =====================================================
+    return text[:limit]
 
-    cognition_state = state.get("cognition", {})
 
-    dynamic_focus = cognition_state.get("dynamic_focus", {})
+def safe_list(value):
 
-    goal_hierarchy = cognition_state.get("goal_hierarchy", {})
+    if isinstance(
+        value,
+        list
+    ):
 
-    open_loops = cognition_state.get("open_loops", {})
+        return value
 
-    memory_signals = cognition_state.get("memory_signals", {})
+    return []
 
-    # =====================================================
-    # 🧠 TOPIC MEMORY INPUT
-    # =====================================================
 
-    visual_topic_registry = state.get(
-        "visual_topic_registry",
-        []
-    )
+def compact_dialog_message(
+    role,
+    content
+):
 
-    task_context_storage = state.get(
-        "task_context_storage",
-        []
-    )
+    return {
 
-    continuity_context_storage = state.get(
-        "continuity_context_storage",
-        []
-    )
+        "role": role,
 
-    memory_anchor_storage = state.get(
-        "memory_anchor_storage",
-        []
-    )
+        "content":
 
-    active_topic_slot = state.get(
-        "active_topic_slot",
-        "A"
-    )
-
-    if not isinstance(open_loops, dict):
-
-        open_loops = {
-            "has_open_loops": bool(open_loops)
-        }
-
-    safe_semantic_log(
-        f"INPUT: {t[:80]}"
-    )
-
-    # =====================================================
-    # 🧠 CONVERSATION VECTOR ENGINE
-    # =====================================================
-
-    conversation_vector = {
-        "focus": dynamic_focus,
-        "goal": goal_hierarchy,
-        "memory_signals": memory_signals,
-        "open_loops": open_loops,
-        "history_depth": len(history),
-        "active_flow": active_flow,
-        "active_visual_scene": state.get("active_visual_scene"),
-        "continuity_active": bool(continuity_context_storage),
-        "memory_anchor_active": bool(memory_anchor_storage),
-        "topic_slot": active_topic_slot
+            safe_trim_text(
+                content,
+                320
+            )
     }
 
-    semantic_state = {
-        "conversation_vector": conversation_vector,
-        "active_scene": state.get("active_visual_scene"),
-        "focus": dynamic_focus,
-        "goal": goal_hierarchy,
-        "trajectory_active": bool(active_flow) or bool(continuity_context_storage),
-        "memory_alignment": bool(memory_signals)
+# =====================================================
+# 🔥 DEFAULT SCENE
+# =====================================================
+
+def build_default_scene():
+
+    return {
+
+        # =================================================
+        # 🔥 CORE
+        # =====================================================
+
+        "mode": "idle",
+
+        "type": None,
+
+        "goal": None,
+
+        "continuity_mode": None,
+
+        # =================================================
+        # 🔥 RENDER
+        # =====================================================
+
+        "render_type": None,
+
+        "renderer_active": False,
+
+        "visual_active": False,
+
+        # =================================================
+        # 🔥 FLOW
+        # =====================================================
+
+        "active_flow": None,
+
+        "trajectory_locked": False,
+
+        # =================================================
+        # 🔥 ANCHOR
+        # =====================================================
+
+        "anchor": None,
+
+        "anchor_type": None,
+
+        # =================================================
+        # 🔥 STATE
+        # =====================================================
+
+        "confidence": 0.0,
+
+        "updated_at": time.time()
     }
 
+# =====================================================
+# 🔥 DEFAULT STATE
+# =====================================================
 
-    # =====================================================
-    # 🔥 MACHINE PROBABILITIES
-    # =====================================================
+def build_default_state():
 
-    renderer_probability = (
-        detect_renderer_probability(text)
-    )
-
-    image_generation_probability = (
-        detect_image_generation_probability(text)
-    )
-
-    visual_probability = (
-        detect_visual_probability(text)
-    )
-
-    execution_probability = (
-        detect_execution_probability(text)
-    )
-
-    discussion_probability = (
-        detect_discussion_probability(text)
-    )
-
-    reflection_probability = (
-        detect_reflection_probability(text)
-    )
-
-    space_discussion_probability = (
-        detect_space_discussion_probability(text)
-    )
-
-    # =====================================================
-    # 🔥 BASE RESULT
-    # =====================================================
-
-    result = {
+    return {
 
         # =================================================
-        # 🧠 MACHINE
+        # 🔥 DIALOG
         # =====================================================
 
-        "machine_channel":
-            SEMANTIC_MACHINE_CHANNEL,
+        "dialog": [],
 
-        "semantic_core_active":
-            True,
+        "memory_summary": "",
 
-        "web_safe":
-            True,
-
-        "renderer_safe":
-            True,
-
-        "provider_safe":
-            True,
+        "active_scene": {},
+        "scene_history": [],
+        "scene_stack": [],
+        "scene_relation": {},
 
         # =================================================
-        # 🧠 CORE
+        # 🔥 GOLDEN MEMORY
         # =====================================================
 
-        "intent": "text",
+        "dynamic_focus": {},
 
-        "confidence": 0.5,
+        "goal_hierarchy": {},
 
-        "normalized_text": text,
+        "open_loops": [],
+
+        "memory_signals": {},
 
         # =================================================
-        # 🧠 MACHINE LANGUAGE
+        # 🔥 IMAGE
         # =====================================================
 
-        "semantic_role": "understanding_only",
+        "image_context": None,
 
-        "semantic_authority": False,
-
-        "semantic_machine_layer": True,
-
-        "semantic_probability_based": True,
-
-        "semantic_executor_expected": True,
+        "image_memory": [],
 
         # =================================================
-        # 🧠 MACHINE SIGNALS
+        # 🔥 VISUAL
         # =====================================================
 
-        "renderer_probability":
-            renderer_probability,
+        "active_visual_scene": None,
 
-        "image_generation_probability":
-            image_generation_probability,
-
-        "visual_probability":
-            visual_probability,
-
-        "execution_probability":
-            execution_probability,
+        "visual_scene_history": [],
         
-        "discussion_probability":
-            discussion_probability,
-
-        "reflection_probability":
-            reflection_probability,
-
-        "space_discussion_probability":
-            space_discussion_probability,
-
-        # =================================================
-        # 🧠 SOFT HINTS
-        # =====================================================
-
-        "possible_room": None,
-
-        "possible_output": None,
-
-        "possible_scene_type": None,
-
-        "possible_capability": None,
-
-        "required_domains": [],
-        "candidate_domains": [],
-        "required_representations": [],
-        "candidate_representations": [],
+        "visual_topic_registry": [],
+        
+        "task_context_storage": [],
+        
+        "continuity_context_storage": [],
+        
+        "memory_anchor_storage": [],
+        
+        "active_topic_slot": "A",
 
         # =================================================
-        # 🧠 CONTINUITY
+        # 🔥 FLOW
         # =====================================================
 
-        "continuation": False,
-
-        "continuation_target": None,
-
-        "trajectory_active": True,
-
-        "trajectory_strength": 0.5,
-
-        "preserve_flow": True,
-
-        "conversation_alive": True,
+        "active_flow": None,
 
         # =================================================
-        # 🧠 REPRESENTATION CONTEXT
+        # 🔥 EXECUTION
         # =====================================================
 
-        "current_topic": None,
+        "awaiting": False,
+
+        "last_prompt": None,
+
+        "task_type": None,
+
+        # =================================================
+        # 🔥 SCENE
+        # =====================================================
+
+        "scene_state":
+            build_default_scene(),
+
+        # =================================================
+        # 🔥 CACHE
+        # =====================================================
+
+        "image_analysis": None,
+
+        "image_analysis_path": None,
+
+        # =================================================
+        # 🔥 META
+        # =====================================================
+
+        "meta": {
+
+            "last_user_message": None,
+
+            "last_bot_message": None,
+
+            "last_entity": None,
+
+            "last_intent": None
+        },
 
         "current_object": None,
-
-        "current_representation": "text",
-
-        "requested_representation": None,
+        "current_topic": None,
+        "active_entity": None,
 
         # =================================================
-        # 🧠 SCENE COMPOSITION
+        # 🔥 MACHINE FLAGS
         # =====================================================
 
-        "content_role": None,
+        "machine_runtime": True,
 
-        "contains_object": False,
+        "renderer_safe": True,
 
-        "contains_explanation": False,
+        "continuity_alive": True,
 
-        "contains_analysis": False,
-
-        "contains_legend": False,
-
-        "scene_composition_ready": False,
-
-        "same_task": False,
-
-        "representation_shift": False,
-
-        "context_visual_followup": False,
-
-        "unresolved_intent": True,
-
-        # =================================================
-        # 🧠 VISUAL
-        # =====================================================
-
-        "visual_continuity": False,
-
-        "visual_routing": False,
-
-        "active_visual_scene_detected": False,
-
-        "scene_reference_detected": False,
-
-        # =================================================
-        # 🧠 RENDERER-FIRST
-        # =====================================================
-
-        "render_intent": False,
-
-        "prefer_renderer": False,
-
-        "renderer_scene_object": False,
-
-        "renderer_lightweight": True,
-
-        "renderer_priority": 0.0,
-
-        "prefer_local_rendering": False,
-
-        # =================================================
-        # 🧠 IMAGE SAFETY
-        # =====================================================
-
-        "visual_generation_needed": False,
-
-        "explicit_image_generation_only": False,
-
-        "avoid_image_generation_fallback": True,
-
-        # =================================================
-        # 🧠 EXECUTION
-        # =====================================================
-
-        "should_execute": False,
-
-        "execution_pressure": 0.0,
-
-        "execution_readiness": 0.0,
-
-        # =================================================
-        # 🧠 RESPONSE
-        # =====================================================
-
-        "response_mode": "talk",
-
-        "response_economy": "balanced",
-
-        # =================================================
-        # 🧠 PROVIDER SAFETY
-        # =====================================================
-
-        "provider_safe_mode": True,
-
-        "provider_aware": True,
-
-        "renderer_first": True,
-
-        "anti_trigger_behavior": True,
-
-        "anti_room_wars": True,
-
-        "anti_hidden_escalation": True,
-
-        # =================================================
-        # 🧠 MEMORY AWARENESS
-        # =====================================================
-
-        "dynamic_focus":
-            dynamic_focus,
-
-        "goal_hierarchy":
-            goal_hierarchy,
-
-        "open_loops":
-            open_loops,
-
-        "memory_signals":
-            memory_signals,
-
-        "visual_topic_registry":
-            visual_topic_registry,
-
-        "task_context_storage":
-            task_context_storage,
-
-        "continuity_context_storage":
-            continuity_context_storage,
-
-        "memory_anchor_storage":
-            memory_anchor_storage,
-
-        "active_topic_slot":
-            active_topic_slot,
-
-        # =====================================================
-        # 🧠 CONVERSATION VECTOR
-        # =====================================================
-
-        "conversation_vector": conversation_vector,
-        "semantic_state": semantic_state,
-        "factory_targets": []
+        "web_safe": True
     }
 
-    # =====================================================
-    # 🔥 INTERPRETATION
-    # =====================================================
-
-    interpreted = interpret_request(
-        text,
-        cognition=state.get("cognition", {}),
-        semantic=result,
-        history=history,
-        state=state,
-    )
-
-    if interpreted:
-
-        result["intent"] = interpreted.get(
-            "type",
-            "text"
-        )
-
-        result["normalized_text"] = interpreted.get(
-            "normalized",
-            text
-        )
-
-        result["confidence"] = 0.82
-
-        # Canonical dialogue contract is now part of the same semantic packet.
-        dialogue_contract = interpreted.get("dialogue_contract", {})
-        if isinstance(dialogue_contract, dict):
-            result["dialogue_contract"] = dialogue_contract
-            result["dialog_act"] = dialogue_contract.get("dialog_act")
-            result["active_goal"] = dialogue_contract.get("active_goal")
-            result["active_topic"] = dialogue_contract.get("active_topic")
-            result["resolved_request"] = dialogue_contract.get("resolved_request")
-            result["reply_to"] = dialogue_contract.get("reply_to")
-            result["required_capabilities"] = dialogue_contract.get("required_capabilities", [])
-            result["history_available"] = dialogue_contract.get("history_available", False)
-
-        result[
-            "possible_scene_type"
-        ] = interpreted.get(
-            "scene_type"
-        )
-
-        # ================================================
-        # 🔥 CONTINUATION
-        # ================================================
-
-        if interpreted.get(
-            "continuation"
-        ):
-
-            result[
-                "continuation"
-            ] = True
-
-        # ================================================
-        # 🔥 RENDERER
-        # ================================================
-
-        if interpreted.get(
-            "prefer_renderer"
-        ):
-
-            result[
-                "prefer_renderer"
-            ] = True
-
-            result[
-                "render_intent"
-            ] = True
-
-            result[
-                "renderer_scene_object"
-            ] = True
-
-        # ================================================
-        # 🔥 IMAGE
-        # ================================================
-
-        if interpreted.get(
-            "explicit_image_generation"
-        ):
-
-            result[
-                "visual_generation_needed"
-            ] = True
-
-            result[
-                "explicit_image_generation_only"
-            ] = True
-
-        # ================================================
-        # 🔥 SCENE COMPOSITION HINTS
-        # ================================================
-
-        result["content_role"] = interpreted.get(
-            "content_role"
-        )
-
-        result["contains_object"] = interpreted.get(
-            "contains_object",
-            False
-        )
-
-        result["contains_explanation"] = interpreted.get(
-            "contains_explanation",
-            False
-        )
-
-        result["contains_analysis"] = interpreted.get(
-            "contains_analysis",
-            False
-        )
-
-        result["contains_legend"] = interpreted.get(
-            "contains_legend",
-            False
-        )
-
-        result["scene_composition_ready"] = interpreted.get(
-            "scene_composition_ready",
-            False
-        )
-
-        result["required_domains"] = interpreted.get(
-            "required_domains",
-            []
-        )
-
-        result["candidate_domains"] = interpreted.get(
-            "candidate_domains",
-            []
-        )
-
-        result["required_representations"] = interpreted.get(
-            "required_representations",
-            []
-        )
-
-        result["candidate_representations"] = interpreted.get(
-            "candidate_representations",
-            []
-        )
-
-        result["factory_order"] = {}
-
-        safe_semantic_log("FACTORY ORDER DEFERRED TO EXECUTOR")
-
-    # =====================================================
-    # 🔥 ACTIVE FLOW
-    # =====================================================
-
-    # =====================================================
-    # 🧠 DIALOG ENTITY CONTINUITY
-    # =====================================================
-    last_user = history[-1].get("user", {}) if history else {}
-    last_april = history[-1].get("april", {}) if history else {}
-
-    active_entity = (
-        state.get("current_object")
-        or state.get("current_topic")
-        or state.get("active_entity")
-        or dialog_state.get("current_object")
-        or active_flow.get("current_object")
-    )
-
-    pronouns = ("его","её","их","об этом","об этом?","этом","ней","нём")
-
-    if active_entity:
-        result["current_object"] = active_entity
-        result["current_topic"] = active_entity
-
-    if any(p in t for p in pronouns) and active_entity:
-        result["continuation"] = True
-        result["continuation_target"] = active_entity
-        result["trajectory_active"] = True
-
-    flow_type = active_flow.get(
-        "type"
-    )
-
-    if flow_type:
-
-        result["continuation"] = True
-
-        result["continuation_target"] = (
-            flow_type
-        )
-
-        result["trajectory_strength"] = (
-            safe_probability(
-                result[
-                    "trajectory_strength"
-                ],
-                0.2
-            )
-        )
-
-    
-    # =====================================================
-    # 🧠 REPRESENTATION CONTINUITY
-    # =====================================================
-
-    requested_representation = detect_representation_request(text)
-
-    
-    result["requested_representation"] = requested_representation
-
-    # Stage2: promote requested representation into machine requirements
-    if requested_representation:
-        result["unresolved_intent"] = False
-        if requested_representation not in result["required_representations"]:
-            result["required_representations"].append(requested_representation)
-        if requested_representation not in result["candidate_representations"]:
-            result["candidate_representations"].append(requested_representation)
-        if requested_representation not in result["factory_targets"]:
-            result["factory_targets"].append(requested_representation)
-        result["current_representation"] = requested_representation
-
-        # Promote explicit rendering requests into the renderer path so the
-        # decision layer and executor do not silently downgrade them to plain text.
-        if requested_representation in {"table", "graph", "diagram", "formula", "gallery", "link"}:
-            result["render_intent"] = True
-            result["prefer_renderer"] = True
-            result["renderer_scene_object"] = True
-            result["renderer_lightweight"] = True
-            result["preferred_representation"] = requested_representation
-
-    result["graph_action"] = detect_graph_action(text)
-
-    last_math = state.get("last_math", {})
-
-    if last_math:
-
-        result["same_task"] = True
-
-        result["current_object"] = last_math.get("type")
-
-        if requested_representation:
-
-            result["representation_shift"] = True
-            result["context_visual_followup"] = True
-            result["render_intent"] = True
-            result["prefer_renderer"] = True
-
 # =====================================================
-    # 🔥 VISUAL CONTINUITY
-    # =====================================================
+# 🔥 SCENE STATE
+# =====================================================
 
-    active_visual_scene = state.get(
+def get_scene_state(user_id):
+
+    return get_state(user_id).get(
+        "scene_state",
+        {}
+    )
+
+
+def update_scene_state(
+    user_id,
+    updates
+):
+
+    if not isinstance(
+        updates,
+        dict
+    ):
+
+        return
+
+    state_obj = get_state(user_id)
+
+    scene = state_obj.get(
+        "scene_state",
+        {}
+    )
+
+    allowed_keys = [
+
+        "mode",
+        "type",
+        "goal",
+        "continuity_mode",
+        "render_type",
+        "renderer_active",
+        "visual_active",
+        "active_flow",
+        "trajectory_locked",
+        "anchor",
+        "anchor_type",
+        "confidence",
+        "updated_at"
+    ]
+
+    for key, value in updates.items():
+
+        if key in allowed_keys:
+
+            scene[key] = value
+
+    scene["updated_at"] = time.time()
+
+    state_obj[
+        "scene_state"
+    ] = scene
+
+    safe_state_log(
+        f"SCENE UPDATED: {user_id}"
+    )
+
+    persist_state(user_id)
+
+
+def clear_scene_state(user_id):
+
+    state_obj = get_state(user_id)
+
+    visual_scene = state_obj.get(
         "active_visual_scene"
     )
 
-    if active_visual_scene:
+    new_scene = build_default_scene()
 
-        result[
-            "active_visual_scene_detected"
+    # =================================================
+    # 🔥 VISUAL CONTINUITY
+    # =====================================================
+
+    if visual_scene:
+
+        new_scene[
+            "visual_active"
         ] = True
 
-        if len(t) <= 120:
+        new_scene[
+            "continuity_mode"
+        ] = "visual"
 
-            result[
-                "visual_continuity"
-            ] = True
+    state_obj[
+        "scene_state"
+    ] = new_scene
 
-            result[
-                "scene_reference_detected"
-            ] = True
-
-            result[
-                "visual_routing"
-            ] = True
-
-            result[
-                "trajectory_strength"
-            ] = safe_probability(
-                result[
-                    "trajectory_strength"
-                ],
-                0.25
-            )
-
-    # =====================================================
-    # 🔥 RENDERER MACHINE LOGIC
-    # =====================================================
-
-    if (
-
-        renderer_probability >= 0.45
-
-        and not discussion_probability >= 0.25
-
-        and not reflection_probability >= 0.25
-
-    ):
-
-        result["render_intent"] = True
-
-        result["prefer_renderer"] = True
-
-        result[
-            "renderer_scene_object"
-        ] = True
-
-        result[
-            "prefer_local_rendering"
-        ] = True
-
-        result[
-            "renderer_priority"
-        ] = renderer_probability
-
-        result[
-            "possible_capability"
-        ] = "renderer"
-
-        result[
-            "possible_room"
-        ] = "science"
-
-        result[
-            "possible_output"
-        ] = "renderer"
-
-        result[
-            "visual_generation_needed"
-        ] = False
-
-    # =====================================================
-    # 🔥 IMAGE GENERATION
-    # =====================================================
-
-    if image_generation_probability >= 0.45:
-
-        result[
-            "explicit_image_generation_only"
-        ] = True
-
-        result[
-            "visual_generation_needed"
-        ] = True
-
-        result[
-            "possible_room"
-        ] = "image_generate"
-
-        result[
-            "possible_output"
-        ] = "image"
-
-        result[
-            "possible_capability"
-        ] = "image_generation"
-
-    # =====================================================
-    # 🔥 VISUAL GUIDANCE
-    # =====================================================
-
-    if visual_probability >= 0.3:
-
-        result[
-            "visual_routing"
-        ] = True
-
-        result[
-            "renderer_lightweight"
-        ] = True
-
-    # =====================================================
-    # 🔥 EXECUTION MODEL
-    # =====================================================
-
-    pressure = execution_probability
-
-    if renderer_probability >= 0.45:
-        pressure += 0.25
-
-    if flow_type:
-        pressure += 0.08
-
-    result["execution_pressure"] = clamp(
-        pressure
+    safe_state_log(
+        f"SCENE CLEARED: {user_id}"
     )
 
-    result["execution_readiness"] = clamp(
-        pressure
+    persist_state(user_id)
+
+# =====================================================
+# 🔥 IMAGE CONTEXT
+# =====================================================
+
+def set_image_context(
+    user_id,
+    ctx
+):
+
+    image_storage[user_id] = ctx
+
+    state_obj = get_state(user_id)
+
+    state_obj[
+        "image_context"
+    ] = ctx
+
+    # =================================================
+    # 🔥 SCENE SYNC
+    # =====================================================
+
+    scene = state_obj.get(
+        "scene_state",
+        {}
     )
 
-    # =====================================================
-    # 🔥 SAFE EXECUTION
-    # =====================================================
+    scene[
+        "visual_active"
+    ] = True
 
-    if (
+    scene[
+        "continuity_mode"
+    ] = "visual"
 
-        result[
-            "execution_pressure"
-        ] >= 0.72
+    scene[
+        "updated_at"
+    ] = time.time()
 
-        and not result[
-            "visual_generation_needed"
-        ]
+    state_obj[
+        "scene_state"
+    ] = scene
 
-    ):
+    safe_state_log(
+        f"IMAGE CONTEXT: {user_id}"
+    )
 
-        result[
-            "should_execute"
-        ] = True
-
-    # =====================================================
-    # 🔥 RESPONSE ECONOMY
-    # =====================================================
-
-    if result[
-        "execution_pressure"
-    ] >= 0.75:
-
-        result[
-            "response_economy"
-        ] = "minimal"
-
-    elif result[
-        "visual_probability"
-    ] >= 0.55:
-
-        result[
-            "response_economy"
-        ] = "expanded"
+    persist_state(user_id)
 
 
-    # =====================================================
-    # 🔥 MEMORY REINFORCEMENT
-    # =====================================================
+def get_image_context(user_id):
 
-    if memory_signals.get("memory_priority", 0) >= 0.7:
-        result["trajectory_strength"] = safe_probability(
-            result["trajectory_strength"],
-            0.15
+    ctx = image_storage.get(
+        user_id
+    )
+
+    if ctx:
+
+        return ctx
+
+    return get_state(user_id).get(
+        "image_context"
+    )
+
+# =====================================================
+# 🔥 AWAITING
+# =====================================================
+
+def set_awaiting(
+    user_id,
+    value
+):
+
+    get_state(user_id)[
+        "awaiting"
+    ] = value
+
+
+def get_awaiting(user_id):
+
+    return get_state(user_id).get(
+        "awaiting",
+        False
+    )
+
+# =====================================================
+# 🔥 LAST PROMPT
+# =====================================================
+
+def set_last_prompt(
+    user_id,
+    prompt
+):
+
+    get_state(user_id)[
+        "last_prompt"
+    ] = prompt
+
+
+def get_last_prompt(user_id):
+
+    return get_state(user_id).get(
+        "last_prompt"
+    )
+
+# =====================================================
+# 🔥 MEMORY SUMMARY
+# =====================================================
+
+def update_memory_summary(
+    state_obj,
+    user_text="",
+    assistant_text=""
+):
+
+    try:
+
+        current = state_obj.get(
+            "memory_summary",
+            ""
         )
 
-    # Open loops / long-term memory indicate available context, not automatic
-    # continuation. Continuation is decided by the canonical dialogue contract.
-    if open_loops.get("has_open_loops"):
-        result["trajectory_active"] = True
+        entry = " | ".join(
 
-    if goal_hierarchy.get("strategic_goal"):
-        result["trajectory_active"] = True
+            x for x in [
 
-    # =====================================================
-    # 🧠 TOPIC CONTINUITY SUPPORT
-    # =====================================================
-    dialogue_contract = result.get("dialogue_contract") or {}
-    if dialogue_contract.get("continuation"):
-        result["continuation"] = True
-        result["trajectory_strength"] = safe_probability(
-            result["trajectory_strength"], 0.10
+                safe_trim_text(
+                    user_text,
+                    240
+                ),
+
+                safe_trim_text(
+                    assistant_text,
+                    240
+                )
+
+            ]
+
+            if x
         )
 
-    if memory_anchor_storage:
-        result["trajectory_active"] = True
+        combined = (
+            current + " | " + entry
+        ).strip()
 
-    if active_topic_slot:
+        if len(combined) > SESSION_MEMORY_LIMIT:
 
-        result[
-            "active_topic_slot"
-        ] = active_topic_slot
+            combined = combined[
+                -SESSION_MEMORY_LIMIT:
+            ]
 
+        state_obj[
+            "memory_summary"
+        ] = combined
 
+    except Exception as e:
+
+        safe_state_log(
+            f"MEMORY ERROR: {e}"
+        )
+
+# =====================================================
+# 🔥 VISUAL SUMMARY
+# =====================================================
+
+def build_visual_scene_summary(
+    state_obj
+):
+
+    scene = state_obj.get(
+        "active_visual_scene"
+    )
+
+    if not scene:
+
+        return {}
+
+    return {
+
+        "type":
+
+            scene.get(
+                "scene_type"
+            ),
+
+        "objects":
+
+            safe_list(
+
+                scene.get(
+                    "objects",
+                    []
+                )
+            )[:5],
+
+        "colors":
+
+            safe_list(
+
+                scene.get(
+                    "colors",
+                    []
+                )
+            )[:5]
+    }
+
+# =====================================================
+# 🔥 DIALOG COMPRESSION
+# =====================================================
+
+def compress_dialog_to_summary(
+    state_obj
+):
+
+    dialog = state_obj.get(
+        "dialog",
+        []
+    )
+
+    if not dialog:
+
+        return
+
+    recent = dialog[-8:]
+
+    compact_dialog = []
+
+    for msg in recent:
+
+        compact_dialog.append({
+
+            "role":
+                msg.get("role"),
+
+            "content":
+
+                safe_trim_text(
+                    msg.get(
+                        "content",
+                        ""
+                    ),
+                    180
+                )
+        })
+
+    scene = state_obj.get(
+        "scene_state",
+        {}
+    )
+
+    visual = build_visual_scene_summary(
+        state_obj
+    )
+
+    # =================================================
+    # 🔥 MACHINE SUMMARY
     # =====================================================
-    # 🧠 FACTORY AWARENESS
-    # =====================================================
 
-    factory_targets = []
+    machine_summary = {
 
-    if semantic_state.get("active_scene"):
-        factory_targets.append("scene_continuity")
+        "scene": {
 
-    if semantic_state.get("trajectory_active"):
-        factory_targets.append("trajectory")
+            "type":
+                scene.get("type"),
 
-    if memory_signals:
-        factory_targets.append("memory")
+            "goal":
+                scene.get("goal"),
 
-    if dynamic_focus:
-        factory_targets.append("focus")
+            "flow":
+                scene.get(
+                    "active_flow"
+                ),
 
-    # Preserve representation requests collected earlier.
-    existing_targets = list(result.get("factory_targets", []))
-    for target in existing_targets:
-        if target not in factory_targets:
-            factory_targets.append(target)
-    result["factory_targets"] = factory_targets
+            "continuity":
+                scene.get(
+                    "continuity_mode"
+                ),
 
-    # =====================================================
-    # 🔥 FINAL MACHINE NORMALIZATION
-    # =====================================================
+            "render":
+                scene.get(
+                    "render_type"
+                )
+        },
 
-    float_keys = [
+        "visual":
+            visual,
 
-        "confidence",
-        "trajectory_strength",
-        "renderer_probability",
-        "image_generation_probability",
-        "visual_probability",
-        "execution_probability",
-        "renderer_priority",
-        "execution_pressure",
-        "execution_readiness"
+        "dialog":
+            compact_dialog
+    }
+
+    state_obj[
+        "memory_summary"
+    ] = str(
+        machine_summary
+    )[
+        -SESSION_MEMORY_LIMIT:
     ]
 
-    for key in float_keys:
+    # =================================================
+    # 🔥 SAFE DIALOG RESET
+    # =====================================================
 
-        result[key] = clamp(
-            result.get(key, 0.0)
+    state_obj["dialog"] = [{
+
+        "role": "system",
+
+        "content": "[COMPRESSED_MEMORY]"
+    }]
+
+    safe_state_log(
+        "DIALOG COMPRESSED"
+    )
+
+# =====================================================
+# 🔥 IMAGE MEMORY
+# =====================================================
+
+def trim_image_memory(
+    state_obj
+):
+
+    memory = safe_list(
+
+        state_obj.get(
+            "image_memory",
+            []
+        )
+    )
+
+    if len(memory) > IMAGE_MEMORY_LIMIT:
+
+        state_obj[
+            "image_memory"
+        ] = memory[
+            -IMAGE_MEMORY_LIMIT:
+        ]
+
+# =====================================================
+# 🔥 VISUAL HISTORY
+# =====================================================
+
+def trim_visual_history(
+    state_obj
+):
+
+    history = safe_list(
+
+        state_obj.get(
+            "visual_scene_history",
+            []
+        )
+    )
+
+    if len(history) > VISUAL_HISTORY_LIMIT:
+
+        state_obj[
+            "visual_scene_history"
+        ] = history[
+            -VISUAL_HISTORY_LIMIT:
+        ]
+
+# =====================================================
+# 🔥 DIALOG
+# =====================================================
+
+def add_dialog(
+    user_id,
+    role,
+    content
+):
+
+    state_obj = get_state(user_id)
+
+    dialog = state_obj.get(
+        "dialog",
+        []
+    )
+
+    message = compact_dialog_message(
+        role,
+        content
+    )
+    dialog.append(message)
+
+    # Keep canonical dialog continuity mirrors available to the executor.
+    state_obj["dialog"] = dialog
+    state_obj["last_user_turn"] = (
+        safe_trim_text(content, 320) if role == "user" else state_obj.get("last_user_turn", "")
+    )
+    state_obj["last_april_turn"] = (
+        safe_trim_text(content, 320) if role != "user" else state_obj.get("last_april_turn", "")
+    )
+    state_obj["dialog_state"] = {
+        "timeline": dialog,
+        "last_user_turn": state_obj.get("last_user_turn", ""),
+        "last_april_turn": state_obj.get("last_april_turn", ""),
+        "active_topic": state_obj.get("active_topic", ""),
+        "focus": state_obj.get("focus_state", state_obj.get("dynamic_focus", {})),
+    }
+
+    # =================================================
+    # 🔥 META
+    # =====================================================
+
+    meta = state_obj.get(
+        "meta",
+        {}
+    )
+
+    if role == "user":
+
+        meta[
+            "last_user_message"
+        ] = safe_trim_text(
+            content,
+            320
         )
 
+    else:
+
+        meta[
+            "last_bot_message"
+        ] = safe_trim_text(
+            content,
+            320
+        )
+
+    state_obj["meta"] = meta
+
+    # =================================================
+    # 🔥 LIMIT
+    # =====================================================
+
+    plan = get_user_plan(
+        user_id
+    )
+
+    limit = get_dialog_limit(
+        user_id,
+        plan
+    )
+
+    if len(dialog) > limit:
+
+        compress_dialog_to_summary(
+            state_obj
+        )
+
+        # Compression is a memory operation, not a loss of canonical
+        # continuity. Keep the compacted timeline mirrored in dialog_state so
+        # the next Executor pass can still recover the conversation.
+        state_obj["dialog_state"] = {
+            "timeline": state_obj.get("dialog", []),
+            "last_user_turn": state_obj.get("last_user_turn", ""),
+            "last_april_turn": state_obj.get("last_april_turn", ""),
+            "active_topic": state_obj.get("active_topic", ""),
+            "focus": state_obj.get(
+                "focus_state",
+                state_obj.get("dynamic_focus", {}),
+            ),
+        }
+
+    trim_image_memory(
+        state_obj
+    )
+
+    trim_visual_history(
+        state_obj
+    )
     
+    trim_topic_memory(
+        state_obj
+    )
+
+    state_obj["active_scene"] = refresh_unified_scene(user_id)
+
+    persist_state(user_id) 
+
+# =====================================================
+# 🔥 DIALOG STATE
+# =====================================================
+
+def get_dialog_state(user_id):
+
+    return get_state(user_id).get(
+        "dialog_state",
+        {}
+    )
+
+
+def set_dialog_state(
+    user_id,
+    data
+):
+
+    get_state(user_id)[
+        "dialog_state"
+    ] = data
+
+# =====================================================
+# 🔥 ACTIVE FLOW
+# =====================================================
+
+def set_active_flow(
+    user_id,
+    flow
+):
+
+    state_obj = get_state(user_id)
+
+    state_obj[
+        "active_flow"
+    ] = flow
+
+    scene = state_obj.get(
+        "scene_state",
+        {}
+    )
+
+    if isinstance(flow, dict):
+
+        flow_type = flow.get(
+            "type"
+        )
+
+        scene[
+            "active_flow"
+        ] = flow_type
+
+        scene[
+            "trajectory_locked"
+        ] = True
+
+        scene[
+            "goal"
+        ] = safe_trim_text(
+
+            flow.get(
+                "original"
+            ),
+
+            240
+        )
+
+        # =================================================
+        # 🔥 RENDER MODE
+        # =====================================================
+
+        if flow_type in [
+
+            "renderer_space",
+            "graph",
+            "formula",
+            "diagram",
+            "table"
+        ]:
+
+            scene[
+                "renderer_active"
+            ] = True
+
+            scene[
+                "render_type"
+            ] = flow_type
+
+            scene[
+                "continuity_mode"
+            ] = "renderer"
+
+        # =================================================
+        # 🔥 VISUAL MODE
+        # =====================================================
+
+        if flow_type in [
+
+            "image",
+            "image_generate",
+            "image_edit"
+        ]:
+
+            scene[
+                "visual_active"
+            ] = True
+
+            scene[
+                "continuity_mode"
+            ] = "visual"
+
+    scene["updated_at"] = time.time()
+
+    state_obj[
+        "scene_state"
+    ] = scene
+
+    safe_state_log(
+        f"FLOW SET: {user_id}"
+    )
+
+    persist_state(user_id)
+
+
+def get_active_flow(user_id):
+
+    return get_state(user_id).get(
+        "active_flow"
+    )
+
+
+def clear_active_flow(user_id):
+
+    state_obj = get_state(user_id)
+
+    visual = state_obj.get(
+        "active_visual_scene"
+    )
+
+    state_obj[
+        "active_flow"
+    ] = None
+
+    scene = state_obj.get(
+        "scene_state",
+        {}
+    )
+
+    scene[
+        "active_flow"
+    ] = None
+
+    scene[
+        "trajectory_locked"
+    ] = False
+
+    # =================================================
+    # 🔥 SAFE VISUAL
     # =====================================================
-    # 🔥 ARTIFACT BUNDLE
-    # =====================================================
 
-    artifact_bundle = build_artifact_bundle()
+    if visual:
 
-    artifact_bundle = enrich_artifact_bundle(
-        artifact_bundle,
-        result
+        scene[
+            "visual_active"
+        ] = True
+
+        scene[
+            "continuity_mode"
+        ] = "visual"
+
+    scene["updated_at"] = time.time()
+
+    state_obj[
+        "scene_state"
+    ] = scene
+
+    safe_state_log(
+        f"FLOW CLEARED: {user_id}"
     )
 
-    artifact_bundle["required_domains"] = result.get(
-        "required_domains",
-        []
+    persist_state(user_id)
+
+# =====================================================
+# 🔥 ENTITY
+# =====================================================
+
+def set_last_entity(
+    user_id,
+    entity
+):
+
+    state_obj = get_state(user_id)
+
+    meta = state_obj.get(
+        "meta",
+        {}
     )
 
-    artifact_bundle["candidate_domains"] = result.get(
-        "candidate_domains",
-        []
-    )
+    meta[
+        "last_entity"
+    ] = entity
 
-    artifact_bundle["required_representations"] = result.get(
-        "required_representations",
-        []
-    )
-    artifact_bundle["candidate_representations"] = result.get(
-        "candidate_representations",
-        []
-    )
-    artifact_bundle["requested_representation"] = result.get(
-        "requested_representation"
-    )
-    artifact_bundle["factory_order"] = {}
-
-    result["artifact_bundle"] = artifact_bundle
+    state_obj[
+        "meta"
+    ] = meta
 
 
-    safe_semantic_log(
-        f"INTENT: {result['intent']}"
-    )
+def get_last_entity(user_id):
 
-    safe_semantic_log(
-        f"ROOM: {result['possible_room']}"
-    )
-
-    safe_semantic_log(
-        f"DOMAINS: {result.get('required_domains', [])}"
-    )
-
-    safe_semantic_log(
-        f"REPRESENTATIONS: {result.get('required_representations', [])}"
+    return get_state(user_id).get(
+        "meta",
+        {}
+    ).get(
+        "last_entity"
     )
 
 
-    return result
+# =====================================================
+# 🔥 GET STATE — CANONICAL SINGLE DEFINITION
+# =====================================================
+
+def get_state(user_id):
+    """Return one canonical per-user runtime state."""
+    key = str(user_id)
+
+    if key not in state:
+        db_state = None
+        try:
+            if callable(load_memory):
+                db_state = load_memory(key)
+        except Exception as exc:
+            safe_state_log(f"STATE LOAD SKIPPED: {exc}")
+
+        if isinstance(db_state, dict):
+            state[key] = db_state
+            safe_state_log(f"STATE RESTORED: {key}")
+        else:
+            state[key] = build_default_state()
+            safe_state_log(f"NEW STATE: {key}")
+
+    state_obj = state[key]
+    defaults = build_default_state()
+    for name, value in defaults.items():
+        if name not in state_obj:
+            if isinstance(value, dict):
+                state_obj[name] = value.copy()
+            elif isinstance(value, list):
+                state_obj[name] = list(value)
+            else:
+                state_obj[name] = value
+
+    if not isinstance(state_obj.get("scene_state"), dict):
+        state_obj["scene_state"] = build_default_scene()
+
+    return state_obj
+
+# =====================================================
+# 🔥 PERSISTENT MEMORY BRIDGE
+# =====================================================
+
+def persist_state(user_id):
+    try:
+        state_obj = get_state(user_id)
+        if callable(save_memory):
+            save_memory(user_id, state_obj)
+    except Exception as e:
+        safe_state_log(f"PERSIST ERROR: {e}")
+
+
+# Call persist_state(user_id) after:
+# add_dialog()
+# set_image_context()
+# update_scene_state()
+# clear_scene_state()
+# set_active_flow()
+# clear_active_flow()
+
+
+
+
+# =====================================================
+# 🧠 ACTIVE SCENE ENGINE (LEGACY - DeepHub Pass)
+# =====================================================
+
+def build_active_scene(user_id):
+
+    state_obj = get_state(user_id)
+
+    return {
+
+        "dialog_summary":
+            state_obj.get("memory_summary", ""),
+
+        "visual_context":
+            state_obj.get("visual_continuity_summary", {}),
+
+        "active_visual_scene":
+            state_obj.get("active_visual_scene"),
+
+        "active_flow":
+            state_obj.get("active_flow"),
+
+        "scene_state":
+            state_obj.get("scene_state", {}),
+
+        "focus_snapshot":
+            state_obj.get("focus_snapshot", {}),
+
+        "goal_hierarchy":
+            state_obj.get("goal_hierarchy", {}),
+
+        "dynamic_focus":
+            state_obj.get("dynamic_focus", {})
+    }
+
+def refresh_active_scene(user_id):
+
+    state_obj = get_state(user_id)
+
+    state_obj["active_scene"] = (
+        build_active_scene(user_id)
+    )
+
+    return state_obj["active_scene"]
+
+
+# =====================================================
+# 🧠 MEMORY ENGINE HELPERS (LEGACY - DeepHub Pass)
+# =====================================================
+
+MEMORY_ENGINE_VERSION = "2.0"
+
+def get_active_focus(user_id):
+    state_obj = get_state(user_id)
+    focus = state_obj.get("dynamic_focus", {})
+
+    if not isinstance(focus, dict):
+        return {}
+
+    return focus
+
+def build_memory_snapshot(user_id):
+    state_obj = get_state(user_id)
+
+    return {
+        "memory_version": MEMORY_ENGINE_VERSION,
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "active_flow": state_obj.get("active_flow"),
+        "scene_state": state_obj.get("scene_state", {})
+    }
+
+def cleanup_closed_loops(user_id):
+    state_obj = get_state(user_id)
+
+    loops = state_obj.get("open_loops", [])
+
+    if not isinstance(loops, list):
+        loops = []
+
+    state_obj["open_loops"] = [
+        loop for loop in loops
+        if not (
+            isinstance(loop, dict)
+            and loop.get("status") == "closed"
+        )
+    ]
+    
+
+# =====================================================
+# 🧠 GOLDEN MEMORY LAYER
+# =====================================================
+
+def build_golden_memory_state():
+    return {
+        "dynamic_focus": {},
+        "goal_hierarchy": {},
+        "open_loops": [],
+        "memory_signals": {}
+    }
+
+def update_dynamic_focus(user_id, focus_payload):
+    state_obj = get_state(user_id)
+    state_obj["dynamic_focus"] = focus_payload or {}
+
+def update_goal_hierarchy(user_id, goal_payload):
+    state_obj = get_state(user_id)
+    state_obj["goal_hierarchy"] = goal_payload or {}
+
+def update_open_loops(user_id, loops_payload):
+    state_obj = get_state(user_id)
+    state_obj["open_loops"] = loops_payload or []
+
+def update_memory_signals(user_id, signals_payload):
+    state_obj = get_state(user_id)
+    state_obj["memory_signals"] = signals_payload or {}
+
+def build_memory_bridge(user_id):
+    state_obj = get_state(user_id)
+    return {
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {})
+    }
+
+
+# =====================================================
+# 🧠 DYNAMIC MEMORY FOCUS UPGRADE (COMPATIBILITY LAYER)
+# =====================================================
+
+def update_focus_snapshot(
+    user_id,
+    abcde_payload
+):
+
+    state_obj = get_state(user_id)
+
+    state_obj["focus_snapshot"] = {
+
+        "topic":
+            abcde_payload.get("topic"),
+
+        "scene":
+            abcde_payload.get("scene"),
+
+        "object":
+            abcde_payload.get("object"),
+
+        "focus":
+            abcde_payload.get("focus"),
+
+        "intent":
+            abcde_payload.get("intent")
+    }
+
+    return state_obj["focus_snapshot"]
+
+
+def get_focus_snapshot(user_id):
+
+    state_obj = get_state(user_id)
+
+    focus_state = state_obj.get("focus_state")
+
+    if isinstance(focus_state, dict) and focus_state:
+        return {
+            "topic": focus_state.get("active_topic"),
+            "scene": focus_state.get("active_scene"),
+            "object": focus_state.get("active_object"),
+            "focus": focus_state.get("priority_score"),
+            "intent": focus_state.get("intent_freshness")
+        }
+
+    return state_obj.get("focus_snapshot", {})
+
+
+def build_context_memory_bridge(user_id):
+
+    state_obj = get_state(user_id)
+
+    return {
+
+        "dynamic_focus":
+            state_obj.get("dynamic_focus", {}),
+
+        "focus_snapshot":
+            state_obj.get("focus_snapshot", {}),
+
+        "goal_hierarchy":
+            state_obj.get("goal_hierarchy", {}),
+
+        "memory_signals":
+            state_obj.get("memory_signals", {}),
+
+        "active_flow":
+            state_obj.get("active_flow")
+    }
+    
+# =====================================================
+# 🧠 TOPIC MEMORY TRIMMER
+# =====================================================
+
+def trim_topic_memory(state_obj):
+
+    for key in [
+
+        "visual_topic_registry",
+
+        "task_context_storage",
+
+        "continuity_context_storage",
+
+        "memory_anchor_storage"
+
+    ]:
+
+        value = state_obj.get(
+            key,
+            []
+        )
+
+        if isinstance(
+            value,
+            list
+        ):
+
+            state_obj[key] = value[
+                -TOPIC_MEMORY_LIMIT:
+            ]
+
+
+# =====================================================
+# 🧠 SCENE MEMORY API
+# =====================================================
+
+def update_scene_relation(user_id, relation):
+    get_state(user_id)["scene_relation"] = relation or {}
+
+def push_scene_history(user_id, scene):
+    state_obj = get_state(user_id)
+    history = state_obj.get("scene_history", [])
+    history.append(scene)
+    state_obj["scene_history"] = history[-20:]
+
+
+# =====================================================
+# 🧠 UNIFIED SCENE STORAGE
+# =====================================================
+
+def refresh_unified_scene(user_id):
+    state_obj = get_state(user_id)
+
+    state_obj["active_scene"] = {
+        "scene_state": state_obj.get("scene_state", {}),
+        "focus_state": state_obj.get("focus_state", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "active_flow": state_obj.get("active_flow"),
+        "active_visual_scene": state_obj.get("active_visual_scene", {}),
+        "visual_summary": state_obj.get("visual_summary", {}),
+        "today_visual_memory": state_obj.get(
+            "memory_timeline", {}
+        ).get("day_0", {}).get("visual_scenes", [])
+    }
+
+    return state_obj["active_scene"]
+
+
+
+# =====================================================
+# 🧠 APRIL MEMORY ENGINE V4
+# =====================================================
+
+from datetime import datetime, timezone
+
+MEMORY_DAYS = 7
+TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
+
+def utc_day_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+def build_memory_day():
+    return {
+        "A": [],
+        "B": [],
+        "C": [],
+        "D": [],
+        "E": [],
+        "visual_scenes": [],
+        "topics": [],
+        "objects": [],
+        "intent_signals": [],
+        "created_at": time.time()
+    }
+
+def build_memory_timeline():
+    return {f"day_{i}": build_memory_day() for i in range(MEMORY_DAYS)}
+
+def ensure_memory_engine(state_obj):
+
+    if "memory_timeline" not in state_obj:
+        state_obj["memory_timeline"] = build_memory_timeline()
+
+    if "memory_cycle" not in state_obj:
+        state_obj["memory_cycle"] = {
+            "last_day_key": utc_day_key(),
+            "last_rollover": time.time()
+        }
+
+    if "focus_state" not in state_obj:
+        state_obj["focus_state"] = {
+            "active_topic": None,
+            "active_scene": None,
+            "active_object": None,
+            "active_goal": None,
+            "priority_score": 0.0,
+            "intent_freshness": 0.0
+        }
+
+def memory_rollover_if_needed(user_id):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    today = utc_day_key()
+
+    if state_obj["memory_cycle"]["last_day_key"] == today:
+        return False
+
+    timeline = state_obj["memory_timeline"]
+
+    for i in range(MEMORY_DAYS - 1, 0, -1):
+        timeline[f"day_{i}"] = timeline.get(
+            f"day_{i-1}",
+            build_memory_day()
+        )
+
+    timeline["day_0"] = build_memory_day()
+
+    state_obj["memory_cycle"] = {
+        "last_day_key": today,
+        "last_rollover": time.time()
+    }
+
+    safe_state_log(f"MEMORY_DAY_SHIFT: {user_id}")
+    return True
+
+def update_focus_state(user_id, payload):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    state_obj["focus_state"] = {
+        "active_topic": payload.get("topic"),
+        "active_scene": payload.get("scene"),
+        "active_object": payload.get("object"),
+        "active_goal": payload.get("goal"),
+        "priority_score": payload.get("priority_score", 0.0),
+        "intent_freshness": payload.get("intent_freshness", 0.0)
+    }
+
+def register_topic(user_id, topic, slot="A", score=1.0):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    slot = slot if slot in TOPIC_CLASSES else "C"
+
+    timeline = state_obj["memory_timeline"]
+    today = timeline["day_0"]
+
+    today[slot].append({
+        "topic": topic,
+        "score": score,
+        "timestamp": time.time()
+    })
+
+def bind_visual_scene_to_memory(user_id, scene_payload):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    state_obj["memory_timeline"]["day_0"]["visual_scenes"].append(
+        scene_payload
+    )
+
+def build_memory_context(user_id):
+
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+
+    return {
+        "focus_state": state_obj.get("focus_state", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "active_flow": state_obj.get("active_flow"),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),  # legacy fallback
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),  # legacy fallback
+        "memory_signals": state_obj.get("memory_signals", {})  # legacy fallback
+    }
+
+def build_executor_memory_bridge(user_id):
+
+    memory = build_memory_context(user_id)
+
+    return {
+        "active_topic": memory.get("focus_state", {}).get("active_topic"),
+        "active_goal": memory.get("focus_state", {}).get("active_goal"),
+        "priority_score": memory.get("focus_state", {}).get("priority_score"),
+        "intent_freshness": memory.get("focus_state", {}).get("intent_freshness"),
+        "today": memory.get("memory_timeline", {}).get("day_0", {}),
+        "yesterday": memory.get("memory_timeline", {}).get("day_1", {}),
+        "open_loops": memory.get("open_loops", [])
+    }
+
+
+# =====================================================
+# 🧠 APRIL MEMORY ENGINE V5 INTEGRATION
+# =====================================================
+
+def ensure_memory_runtime(user_id):
+    state_obj = get_state(user_id)
+    ensure_memory_engine(state_obj)
+    memory_rollover_if_needed(user_id)
+    return state_obj
+
+def build_unified_memory_bridge(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    return {
+        "focus_state": state_obj.get("focus_state", {}),
+        "focus_snapshot": state_obj.get("focus_snapshot", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {})
+    }
+
+def sync_focus_layers(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    focus_state = state_obj.get("focus_state", {})
+
+    state_obj["focus_snapshot"] = {
+        "topic": focus_state.get("active_topic"),
+        "scene": focus_state.get("active_scene"),
+        "object": focus_state.get("active_object"),
+        "focus": focus_state.get("priority_score"),
+        "intent": focus_state.get("intent_freshness")
+    }
+
+    if not state_obj.get("dynamic_focus"):
+        state_obj["dynamic_focus"] = state_obj["focus_snapshot"]
+
+def bind_current_visual_scene(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    visual = state_obj.get("active_visual_scene")
+
+    if visual:
+        bind_visual_scene_to_memory(user_id, visual)
+
+def build_memory_snapshot_v3(user_id):
+
+    state_obj = ensure_memory_runtime(user_id)
+
+    return {
+        "memory_version": "3.0",
+        "focus_state": state_obj.get("focus_state", {}),
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "open_loops": state_obj.get("open_loops", []),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "memory_timeline": state_obj.get("memory_timeline", {}),
+        "memory_cycle": state_obj.get("memory_cycle", {}),
+        "active_flow": state_obj.get("active_flow")
+    }
+
+
+
+# =====================================================
+# 🧠 VISUAL LEDGER MEMORY BRIDGE
+# =====================================================
+
+def update_visual_summary(
+    user_id,
+    visual_summary
+):
+
+    state_obj = ensure_memory_runtime(
+        user_id
+    )
+
+    state_obj["visual_summary"] = (
+        visual_summary or {}
+    )
+
+    scene = state_obj.get(
+        "active_visual_scene"
+    ) or {}
+
+    scene["events_count"] = (
+        visual_summary.get(
+            "scene_events_count",
+            0
+        )
+    )
+
+    scene["last_event"] = (
+        visual_summary.get(
+            "last_event"
+        )
+    )
+
+    scene["package"] = (
+        visual_summary.get(
+            "package",
+            "free"
+        )
+    )
+
+    scene["session_started_utc"] = (
+        visual_summary.get(
+            "session_started_utc"
+        )
+    )
+
+    state_obj["active_visual_scene"] = scene
+
+    bind_visual_scene_to_memory(
+        user_id,
+        scene
+    )
+
+    state_obj["active_scene"] = refresh_unified_scene(
+        user_id
+    )
+
+    persist_state(user_id)
+
+    return scene
+
+
+def build_visual_memory_bridge(
+    user_id
+):
+
+    state_obj = ensure_memory_runtime(
+        user_id
+    )
+
+    return {
+
+        "user_visual_scene":
+            state_obj.get(
+                "active_visual_scene",
+                {}
+            ),
+
+        "visual_summary":
+            state_obj.get(
+                "visual_summary",
+                {}
+            ),
+
+        "today_visual_memory":
+            state_obj.get(
+                "memory_timeline",
+                {}
+            ).get(
+                "day_0",
+                {}
+            ).get(
+                "visual_scenes",
+                []
+            )
+    }
+
+
+
+# =====================================================
+# 🧠 DIALOG CONTEXT MEMORY
+# =====================================================
+
+def update_dialog_context(user_id, semantic_result):
+    if not isinstance(semantic_result, dict):
+        return
+    state_obj = get_state(user_id)
+    obj = semantic_result.get("current_object")
+    topic = semantic_result.get("current_topic")
+    if obj:
+        state_obj["current_object"] = obj
+        state_obj["active_entity"] = obj
+    if topic:
+        state_obj["current_topic"] = topic
+    persist_state(user_id)
