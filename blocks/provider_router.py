@@ -9,8 +9,6 @@ import time
 from typing import Any, Dict, Optional
 
 from openai import OpenAI
-from google import genai
-
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
 # ============================================================
@@ -18,7 +16,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 # ============================================================
 
 APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_0"
-APRIL_QUANTUM_PROVIDER_MODEL = "gpt-5.6-luna"
+APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
 APRIL_QUANTUM_PROVIDER_NO_TEXT_FALLBACK_MODELS = True
@@ -38,14 +36,33 @@ PROVIDER_COST_LOG_VERSION = "cost_guard_v4"
 _PROVIDER_CALL_CACHE: dict[str, dict[str, Any]] = {}
 _PROVIDER_INFLIGHT: set[str] = []
 
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+_openai_client = None
+_gemini_client = None
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
+
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not configured")
+        from google import genai
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
 You are April's single text-generation provider, GPT-5.6 Luna.
 
 You receive one canonical MachineRequest already interpreted by April's processor.
-Return exactly one MachineResponse JSON object.
+Return exactly one MachineResponse JSON object. Do not wrap it in markdown fences.
 
 Required fields:
 answer, content, summary, scene, artifacts, render_blocks,
@@ -531,6 +548,10 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             f"OUTPUT_CAP: {output_tokens}",
             "Return one complete logical answer as JSON.",
         ])
+        user_message = {
+            "role": "user",
+            "content": [{"type": "input_text", "text": user_text}],
+        }
 
     estimated = system_tokens + _estimate_input_tokens(user_text)
     provider_log({
@@ -817,7 +838,7 @@ async def generate_text(messages: Any, temperature: Any = None,
             "no_model_escalation": True,
         })
 
-        response = openai_client.responses.create(**request)
+        response = _get_openai_client().responses.create(**request)
         usage = _extract_usage(response)
         raw_text = _extract_openai_text(response)
         if not raw_text:
@@ -861,7 +882,7 @@ async def generate_text(messages: Any, temperature: Any = None,
 async def transcribe_voice(file_path: str) -> str:
     try:
         with open(file_path, "rb") as handle:
-            result = openai_client.audio.transcriptions.create(
+            result = _get_openai_client().audio.transcriptions.create(
                 model="gpt-4o-mini-transcribe",
                 file=handle,
             )
@@ -876,8 +897,8 @@ async def analyze_image(path: str, prompt: str):
     Existing visual lane is preserved. Text generation still remains Luna-only.
     """
     try:
-        uploaded = gemini_client.files.upload(file=path)
-        response = gemini_client.models.generate_content(
+        uploaded = _get_gemini_client().files.upload(file=path)
+        response = _get_gemini_client().models.generate_content(
             model="gemini-2.5-flash",
             contents=[uploaded, prompt],
         )
