@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import json
 import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -362,13 +363,17 @@ def _executor_block_signature(block: Any) -> tuple:
     if not isinstance(block, dict):
         return ("raw", type(block).__name__, _clip_text(str(block), 500))
     payload = block.get("payload")
-    if isinstance(payload, (dict, list, tuple, set)):
-        payload_sig = type(payload).__name__
-    else:
-        payload_sig = _clip_text(payload, 200)
+    try:
+        if isinstance(payload, (dict, list, tuple, set)):
+            payload_sig = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:2000]
+        else:
+            payload_sig = _clip_text(payload, 200)
+    except Exception:
+        payload_sig = _clip_text(str(payload), 500)
     return (
         block.get("type"),
-        block.get("signal"),
+        block.get("artifact_id"),
+        block.get("signal_version"),
         block.get("renderer"),
         block.get("viewer"),
         block.get("label"),
@@ -611,9 +616,205 @@ def _executor_has_url(text: str) -> bool:
     return bool(re.search(r"https?://\S+", text.strip()))
 
 
+UNIFIED_RENDER_SIGNAL_VERSION = "1.0"
+
+
+def _executor_build_unified_render_signal(
+    block_type: str,
+    *,
+    renderer: Optional[str] = None,
+    viewer: Optional[str] = None,
+    source_room: str = "",
+    payload: Any = None,
+    content: str = "",
+    priority: int = 0,
+    artifact_id: str = "",
+) -> dict:
+    """Single-route render-signal identity; payload stays top-level and intact."""
+    normalized_type = normalize_text(block_type).lower() or "text"
+    renderer_name = renderer or _executor_renderer_for_type(normalized_type)
+    viewer_name = viewer or renderer_name
+    return {
+        "type": normalized_type,
+        "payload_type": normalized_type,
+        "renderer": renderer_name,
+        "viewer": viewer_name,
+        "source_room": normalize_text(source_room),
+        "version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "artifact_id": normalize_text(artifact_id),
+        "payload_present": payload is not None,
+        "scene_contract": True,
+        "priority": priority,
+    }
+
+
+def _executor_finalize_render_block_signal(block: dict, *, block_type: Optional[str] = None) -> dict:
+    """Normalize one render block without replacing its payload with prose."""
+    if not isinstance(block, dict):
+        return block
+    t = normalize_text(block_type or block.get("type") or block.get("artifact_type")).lower() or "text"
+    renderer = normalize_text(block.get("renderer")) or _executor_renderer_for_type(t)
+    viewer = normalize_text(block.get("viewer")) or renderer
+    payload = block.get("payload")
+    block["type"] = t
+    block["artifact_type"] = block.get("artifact_type") or t
+    block["renderer"] = renderer
+    block["viewer"] = viewer
+    block["signal_version"] = block.get("signal_version") or UNIFIED_RENDER_SIGNAL_VERSION
+    block["scene_contract"] = True
+    signal = block.get("signal")
+    if not isinstance(signal, dict):
+        signal = {}
+    signal.setdefault("type", t)
+    signal.setdefault("payload_type", t)
+    signal.setdefault("renderer", renderer)
+    signal.setdefault("viewer", viewer)
+    signal.setdefault("source_room", normalize_text(block.get("source_room")))
+    signal.setdefault("version", UNIFIED_RENDER_SIGNAL_VERSION)
+    signal.setdefault("artifact_id", normalize_text(block.get("artifact_id")))
+    signal["payload_present"] = payload is not None
+    signal["scene_contract"] = True
+    block["signal"] = signal
+    return block
+
+
+def _executor_artifact_to_render_block(artifact: Any, index: int = 0) -> Optional[dict]:
+    """Project a room artifact into the canonical single-route render signal."""
+    if artifact is None:
+        return None
+    data = _executor_payload_to_mapping(artifact)
+    metadata = getattr(artifact, "metadata", None)
+    render = getattr(artifact, "render", None)
+    artifact_type = normalize_text(
+        getattr(metadata, "artifact_type", None)
+        or data.get("artifact_type")
+        or data.get("type")
+    ).lower()
+    if not artifact_type:
+        return None
+    room_source = normalize_text(
+        getattr(metadata, "room_source", None)
+        or data.get("room_source")
+        or data.get("source_room")
+    )
+    renderer = normalize_text(
+        getattr(render, "web_block", None)
+        or getattr(render, "renderer", None)
+        or data.get("renderer")
+        or data.get("viewer")
+    ) or _executor_renderer_for_type(artifact_type)
+    viewer = normalize_text(getattr(render, "viewer", None) or data.get("viewer")) or renderer
+
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        for key, value in data.items():
+            if key in {
+                "answer", "content", "summary", "text", "response", "explanation",
+                "display_text", "title", "message", "artifact_type", "room_source",
+                "render_signal", "presentation", "machine_only", "human_visible",
+            }:
+                continue
+            payload[key] = value
+
+    content = _executor_best_text(
+        data.get("answer"),
+        data.get("content"),
+        data.get("display_text"),
+        data.get("summary"),
+        data.get("title"),
+    )
+    artifact_id = normalize_text(
+        getattr(metadata, "artifact_id", None) or data.get("artifact_id")
+    )
+
+    priority = getattr(render, "priority", None) if render is not None else None
+    complexity = getattr(render, "complexity", None) if render is not None else None
+    layout = getattr(render, "layout", None) if render is not None else None
+
+    block = {
+        "type": artifact_type,
+        "artifact_type": artifact_type,
+        "content": content,
+        "text": content,
+        "payload": payload,
+        "renderer": renderer,
+        "viewer": viewer,
+        "priority": priority if priority is not None else data.get("priority", 100),
+        "complexity": complexity or data.get("complexity", "balanced"),
+        "layout": layout or data.get("layout", "single"),
+        "source_room": room_source,
+        "sequence_index": index,
+        "artifact_id": artifact_id,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "scene_contract": True,
+        "provider_payload": True,
+        "canonical_provider_payload": True,
+        "executor_generated": False,
+    }
+    block["signal"] = _executor_build_unified_render_signal(
+        artifact_type,
+        renderer=renderer,
+        viewer=viewer,
+        source_room=room_source,
+        payload=payload,
+        content=content,
+        priority=block["priority"],
+        artifact_id=artifact_id,
+    )
+    return block
+
+
+def _executor_ensure_render_signal_blocks(machine_response: Any) -> Any:
+    """Keep every room artifact and provider block on the same render stream."""
+    if machine_response is None:
+        return machine_response
+
+    blocks = list(getattr(machine_response, "render_blocks", []) or [])
+    artifacts = list(getattr(machine_response, "artifacts", []) or [])
+
+    normalized = []
+    seen = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block = _executor_finalize_render_block_signal(dict(block), block_type=_executor_infer_render_block_type(block))
+        sig = _executor_block_signature(block)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        normalized.append(block)
+
+    for idx, artifact in enumerate(artifacts):
+        block = _executor_artifact_to_render_block(artifact, index=len(normalized) + idx)
+        if block is None:
+            continue
+        artifact_id = normalize_text(block.get("artifact_id"))
+        block_type = normalize_text(block.get("type")).lower()
+        payload = block.get("payload")
+        represented = False
+        for existing in normalized:
+            if not isinstance(existing, dict):
+                continue
+            if artifact_id and normalize_text(existing.get("artifact_id")) == artifact_id:
+                represented = True
+                break
+            if (
+                normalize_text(existing.get("type")).lower() == block_type
+                and existing.get("payload") == payload
+            ):
+                represented = True
+                break
+        if not represented:
+            normalized.append(block)
+
+    machine_response.render_blocks = normalized
+    return machine_response
+
 def _executor_make_text_block(text: str, index: int = 0, source_room: str = "text", title: str = "") -> dict:
     block = {
         "type": "text",
+        "artifact_type": "text",
         "content": text,
         "text": text,
         "renderer": "TextBlock",
@@ -621,19 +822,23 @@ def _executor_make_text_block(text: str, index: int = 0, source_room: str = "tex
         "priority": 0,
         "source_room": source_room,
         "sequence_index": index,
+        "payload": {"text": text},
+        "scene_contract": True,
     }
     if title:
         block["title"] = title
-    return block
+    return _executor_finalize_render_block_signal(block, block_type="text")
 
 
 def _executor_make_table_block(table_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
     table_object = table_payload if isinstance(table_payload, dict) else {"raw": table_payload}
     table_object.setdefault("raw", source_text)
     table_object.setdefault("source", source_text)
-    return {
+    block = {
         "type": "table",
+        "artifact_type": "table",
         "table": table_object,
+        "payload": table_object,
         "content": source_text,
         "text": source_text,
         "renderer": "TableBlock",
@@ -642,15 +847,19 @@ def _executor_make_table_block(table_payload: Any, source_text: str, index: int 
         "source_room": source_room,
         "sequence_index": index,
         "artifactType": "table",
+        "scene_contract": True,
     }
+    return _executor_finalize_render_block_signal(block, block_type="table")
 
 
 def _executor_make_graph_block(graph_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
     graph_object = graph_payload if isinstance(graph_payload, dict) else {"raw": graph_payload}
     graph_object.setdefault("source", source_text)
-    return {
+    block = {
         "type": "graph",
+        "artifact_type": "graph",
         "graph": graph_object,
+        "payload": graph_object,
         "content": source_text,
         "text": source_text,
         "renderer": "GraphBlock",
@@ -658,66 +867,89 @@ def _executor_make_graph_block(graph_payload: Any, source_text: str, index: int 
         "priority": 80,
         "source_room": source_room,
         "sequence_index": index,
+        "scene_contract": True,
     }
+    return _executor_finalize_render_block_signal(block, block_type="graph")
 
 
 def _executor_make_formula_block(formula_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
     formula = normalize_text(formula_payload) or source_text
-    return {
+    block = {
         "type": "formula",
+        "artifact_type": "formula",
         "content": formula,
         "text": formula,
+        "payload": {"formula": formula, "latex": formula},
         "renderer": "FormulaBlock",
         "viewer": "FormulaBlock",
         "priority": 85,
         "source_room": source_room,
         "sequence_index": index,
+        "scene_contract": True,
     }
+    return _executor_finalize_render_block_signal(block, block_type="formula")
 
 
 def _executor_make_link_block(link_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
     url = normalize_text(link_payload) or source_text
-    return {
+    block = {
         "type": "link",
+        "artifact_type": "link",
         "url": url,
         "content": source_text,
         "text": source_text,
+        "payload": {"url": url, "href": url},
         "renderer": "LinkCard",
         "viewer": "LinkCard",
         "priority": 70,
         "source_room": source_room,
         "sequence_index": index,
+        "scene_contract": True,
     }
+    return _executor_finalize_render_block_signal(block, block_type="link")
 
 
 def _executor_make_code_block(code_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
     code = normalize_text(code_payload) or source_text
-    return {
+    block = {
         "type": "code",
+        "artifact_type": "code",
+        "code": code,
         "content": code,
         "text": code,
+        "language": _quantum_guess_code_language(code) if "_quantum_guess_code_language" in globals() else "text",
+        "payload": {
+            "code": code,
+            "language": _quantum_guess_code_language(code) if "_quantum_guess_code_language" in globals() else "text",
+        },
         "renderer": "CodeBlock",
         "viewer": "CodeBlock",
         "priority": 88,
         "source_room": source_room,
         "sequence_index": index,
+        "scene_contract": True,
     }
+    return _executor_finalize_render_block_signal(block, block_type="code")
 
 
 def _executor_make_gallery_block(images_payload: Any, source_text: str, index: int = 0, source_room: str = "text") -> dict:
     images_object = images_payload if isinstance(images_payload, dict) else {"raw": images_payload}
     images_object.setdefault("source", source_text)
-    return {
+    block = {
         "type": "gallery",
+        "artifact_type": "gallery",
         "images": images_object,
         "content": source_text,
         "text": source_text,
+        "payload": images_object,
         "renderer": "GalleryBlock",
         "viewer": "GalleryBlock",
         "priority": 75,
         "source_room": source_room,
         "sequence_index": index,
+        "scene_contract": True,
     }
+    return _executor_finalize_render_block_signal(block, block_type="gallery")
 
 
 def _executor_contribution_to_block(key: str, value: Any, index: int = 0, source_room: str = "registry") -> Optional[dict]:
@@ -1579,27 +1811,8 @@ def executor_cpu_transport_verification(machine_response):
 
 
 def executor_cpu_attach_artifact_payloads(machine_response):
-    artifacts = list(getattr(machine_response, "artifacts", []) or [])
-    render_blocks = list(getattr(machine_response, "render_blocks", []) or [])
-    artifact_index = {}
-    for artifact in artifacts:
-        artifact_type = getattr(artifact, "artifact_type", None) or getattr(artifact, "type", None)
-        payload = getattr(artifact, "data", None)
-        if artifact_type and payload is not None:
-            artifact_index[artifact_type] = payload
-    for block in render_blocks:
-        if not isinstance(block, dict):
-            continue
-        provider_payload = artifact_index.get(block.get("type"))
-        if provider_payload is None:
-            continue
-        block["payload"] = provider_payload
-        block["provider_payload"] = True
-        block["canonical_provider_payload"] = True
-        block["executor_generated"] = False
-    machine_response.render_blocks = render_blocks
-    return machine_response
-
+    """Canonical artifact -> render signal synchronization."""
+    return _executor_ensure_render_signal_blocks(machine_response)
 
 
 def executor_cpu_build_cognitive_context(*, semantic, cognition, response_decision, state, machine_response):
@@ -3226,72 +3439,92 @@ def _quantum_parse_scene_units(text: str) -> list[dict]:
 
 
 def _quantum_logical_scene_blocks(machine_response: Any, semantic: Optional[dict] = None, response_decision: Optional[dict] = None) -> list[dict]:
+    """Project the canonical render stream without rebuilding artifacts from prose."""
     semantic = semantic or {}
     response_decision = response_decision or {}
-
-    source_text = _quantum_scene_source_text(machine_response)
-    source_kind = _quantum_scene_source_kind(source_text)
-    canonical_answer = _executor_best_text(getattr(machine_response, "answer", ""), getattr(machine_response, "summary", ""))
-    canonical_content = _executor_best_text(getattr(machine_response, "content", ""), getattr(machine_response, "provider_original_content", ""), source_text)
     blocks: list[dict] = []
 
-    intro_text = canonical_answer
-    if intro_text and source_text and _quantum_norm(intro_text) != _quantum_norm(source_text):
-        if source_kind in {"code", "table", "graph", "formula", "gallery", "link"}:
-            blocks.append(_executor_make_text_block(intro_text, 0, "text"))
+    # Provider/room-produced render blocks are authoritative.
+    for block in list(getattr(machine_response, "render_blocks", []) or []):
+        if isinstance(block, dict):
+            normalized = _executor_finalize_render_block_signal(
+                dict(block),
+                block_type=_quantum_final_block_type(block),
+            )
+            blocks.append(normalized)
 
-    if source_kind == "code":
-        blocks.append(_quantum_make_code_block(source_text, len(blocks), "text"))
-    elif source_kind == "table":
-        blocks.append(_executor_make_table_block(_executor_parse_markdown_table(source_text), source_text, len(blocks), "text"))
-    elif source_kind == "formula":
-        blocks.append(_executor_make_formula_block(source_text, source_text, len(blocks), "text"))
-    elif source_kind == "link":
-        blocks.append(_executor_make_link_block(source_text, source_text, len(blocks), "text"))
-    elif source_kind == "gallery":
-        blocks.append(_executor_make_gallery_block({"source": source_text}, source_text, len(blocks), "text"))
-    elif source_kind == "graph":
-        blocks.append(_executor_make_graph_block({"source": source_text}, source_text, len(blocks), "text"))
-    else:
-        blocks.extend(_quantum_parse_scene_units(source_text or canonical_content or canonical_answer))
+    # Room artifacts travel on the same stream and are projected losslessly.
+    seen_artifacts = {
+        (
+            normalize_text(b.get("artifact_id")),
+            normalize_text(b.get("type")).lower(),
+            json.dumps(b.get("payload"), ensure_ascii=False, sort_keys=True, default=str)[:2000],
+        )
+        for b in blocks
+        if isinstance(b, dict)
+    }
+    for idx, artifact in enumerate(list(getattr(machine_response, "artifacts", []) or [])):
+        block = _executor_artifact_to_render_block(artifact, index=len(blocks) + idx)
+        if not block:
+            continue
+        key = (
+            normalize_text(block.get("artifact_id")),
+            normalize_text(block.get("type")).lower(),
+            json.dumps(block.get("payload"), ensure_ascii=False, sort_keys=True, default=str)[:2000],
+        )
+        if key not in seen_artifacts:
+            blocks.append(block)
+            seen_artifacts.add(key)
 
+    # Registry/room contributions can add distinct structured artifacts to
+    # the same canonical stream; preserve them without creating a new route.
     contributions = getattr(machine_response, "contributions", None) or {}
-    if isinstance(contributions, dict) and contributions:
+    if isinstance(contributions, dict):
         for idx, (key, value) in enumerate(contributions.items()):
-            block = _quantum_contribution_to_block(key, value, index=idx, source_room="registry")
-            if block:
+            block = _quantum_contribution_to_block(
+                str(key),
+                value,
+                index=len(blocks) + idx,
+                source_room="registry",
+            )
+            if not block:
+                continue
+            block = _executor_finalize_render_block_signal(
+                dict(block),
+                block_type=_quantum_final_block_type(block),
+            )
+            signature = _executor_block_signature(block)
+            if not any(_executor_block_signature(existing) == signature for existing in blocks):
                 blocks.append(block)
 
-    artifacts = list(getattr(machine_response, "artifacts", []) or [])
-    for idx, artifact in enumerate(artifacts):
-        mapping = _executor_payload_to_mapping(artifact)
-        if not mapping:
-            continue
-        block = _quantum_contribution_to_block(
-            normalize_text(mapping.get("artifact_type") or mapping.get("type") or ""),
-            mapping,
-            index=idx,
-            source_room="artifact",
-        )
-        if block:
-            blocks.append(block)
+    # Prose is synthesized only when no structured signal exists.
+    canonical_answer = _executor_best_text(
+        getattr(machine_response, "answer", ""),
+        getattr(machine_response, "content", ""),
+    )
+    if not blocks and canonical_answer:
+        blocks = [_executor_make_text_block(canonical_answer, 0, "text")]
 
-    requested_representation = _quantum_requested_representation(semantic, response_decision)
+    requested_representation = _quantum_requested_representation(
+        semantic,
+        response_decision,
+    )
     if requested_representation and requested_representation != "text":
-        preferred = requested_representation.lower()
-        prioritized, others = [], []
+        preferred, others = [], []
+        accepted = {requested_representation}
+        if requested_representation == "diagram":
+            accepted.add("graph")
+        elif requested_representation == "image":
+            accepted.add("gallery")
         for block in blocks:
-            block_type = normalize_text(block.get("type")).lower()
-            if block_type == preferred or (preferred == "diagram" and block_type == "graph") or (preferred == "image" and block_type == "gallery"):
-                prioritized.append(block)
+            if normalize_text(block.get("type")).lower() in accepted:
+                preferred.append(block)
             else:
                 others.append(block)
-        if prioritized:
-            blocks = prioritized + others
+        if preferred:
+            blocks = preferred + others
 
-    blocks = _quantum_normalize_scene_blocks(blocks, canonical_text=canonical_answer or source_text)
-    return blocks
-
+    return _quantum_final_dedup_blocks(blocks)
 
 def _quantum_build_renderer_state(blocks: list[dict], semantic: Optional[dict] = None, response_decision: Optional[dict] = None, logical_report: Optional[dict] = None, source_text: str = "") -> dict:
     semantic = semantic or {}
@@ -3960,6 +4193,7 @@ def executor_cpu_finalize_transport(machine_response):
     concatenation.
     """
     machine_response = executor_cpu_normalize_answer(machine_response)
+    machine_response = executor_cpu_attach_artifact_payloads(machine_response)
     machine_response = executor_cpu_materialize_blocks(machine_response)
 
     blocks = _quantum_final_dedup_blocks(
