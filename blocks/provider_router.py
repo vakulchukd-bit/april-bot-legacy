@@ -665,7 +665,17 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             "scene_contract": True,
         }]
 
-    metadata = dict(parsed.get("metadata") or {})
+    raw_metadata = parsed.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    raw_scene = parsed.get("scene")
+    scene = dict(raw_scene) if isinstance(raw_scene, dict) else {}
+    raw_artifacts = parsed.get("artifacts")
+    artifacts = list(raw_artifacts) if isinstance(raw_artifacts, list) else []
+    raw_scene_plan = parsed.get("scene_plan")
+    scene_plan = list(raw_scene_plan) if isinstance(raw_scene_plan, list) else ([str(raw_scene_plan)] if raw_scene_plan else ["text"])
+    raw_render_priority = parsed.get("render_priority")
+    render_priority = list(raw_render_priority) if isinstance(raw_render_priority, list) else []
+
     metadata.update({
         "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
@@ -683,11 +693,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             "response": normalize_response_text(parsed.get("response") or answer),
             "summary": normalize_response_text(parsed.get("summary") or _compact_summary(answer, blocks)),
             "explanation": normalize_response_text(parsed.get("explanation") or ""),
-            "scene": dict(parsed.get("scene") or {}),
-            "artifacts": list(parsed.get("artifacts") or []),
+            "scene": scene,
+            "artifacts": artifacts,
             "render_blocks": blocks,
-            "scene_plan": list(parsed.get("scene_plan") or ["text"]),
-            "render_priority": list(parsed.get("render_priority") or []),
+            "scene_plan": scene_plan,
+            "render_priority": render_priority,
             "confidence": parsed.get("confidence", 1.0),
             "provider": "openai",
             "provider_contract": "fiber_v6_quantum",
