@@ -44,6 +44,7 @@ import os
 import json
 import asyncio
 import time
+import tempfile
 
 from flask import (
     Flask,
@@ -1107,51 +1108,66 @@ def voice_chat():
             audio_file.filename
         )
 
-        temp_path = "voice.webm"
+        # Give every voice upload its own temporary file.  Never use a shared
+        # filename: concurrent users must never be able to overwrite one
+        # another's audio input.
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".webm",
+                prefix="april_voice_",
+                delete=False,
+            ) as temp_file:
+                temp_path = temp_file.name
+                audio_file.save(temp_path)
 
-        audio_file.save(
-            temp_path
-        )
-
-        print(
-            "VOICE SAVED:",
-            temp_path
-        )
-
-        transcript = asyncio.run(
-
-            transcribe_voice(
+            print(
+                "VOICE SAVED:",
                 temp_path
             )
-        )
 
-        transcript = normalize_voice_transcript(transcript)
+            transcript = asyncio.run(
+
+                transcribe_voice(
+                    temp_path
+                )
+            )
+
+            transcript = normalize_voice_transcript(transcript)
+        finally:
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
         print(
             "TRANSCRIPT:",
             transcript
         )
 
-        result = asyncio.run(
+        # Voice is input-only at this boundary.
+        # The transcript is returned to AprilWeb, which attaches it to the
+        # real authenticated user and sends it through the single canonical
+        # /api/v1/chat route.  Never create a shared synthetic identity such
+        # as "web_voice" and never call the Provider from /voice.
+        user_id = (request.form.get("user_id") or "").strip()
+        flow_id = (request.form.get("flow_id") or "").strip()
 
-            process_web_message(
-
-                user_id="web_voice",
-
-                text=transcript
-            )
-        )
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "user_id required"
+            }), 400
 
         return jsonify({
-
             "success": True,
-
-            "transcript":
-                transcript,
-
-            "response":
-                result
-
+            "transcript": transcript,
+            "user_id": user_id,
+            "flow_id": flow_id,
+            "voice_input": True,
+            "processed": False,
+            "canonical_route": "/api/v1/chat",
         })
 
     except Exception as e:
