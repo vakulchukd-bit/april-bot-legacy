@@ -317,6 +317,12 @@ class ArtifactRenderContract:
     complexity: str = "balanced"
     layout: str = "single"
 
+    # Canonical render-signal identity.
+    # The payload itself remains in BaseArtifact.data["payload"]; this field
+    # only describes how that payload must travel to April Web.
+    signal_version: str = "1.0"
+    signal_type: str = ""
+
 # =====================================================
 # BASE ARTIFACT
 # =====================================================
@@ -422,6 +428,81 @@ FACTORY_STATUS = {
     "professional_rooms": True
 }
 
+
+# =====================================================
+# CANONICAL RENDER SIGNAL
+# =====================================================
+UNIFIED_RENDER_SIGNAL_VERSION = "1.0"
+
+
+def _render_signal_metadata(
+    artifact_type: str,
+    room_source: str,
+    renderer: str,
+    *,
+    content: str = "",
+    priority: int = 100,
+    complexity: str = "balanced",
+    layout: str = "single",
+) -> Dict[str, Any]:
+    """Return only transport metadata; payload stays structured and untouched."""
+    return {
+        "type": artifact_type,
+        "payload_type": artifact_type,
+        "renderer": renderer,
+        "viewer": renderer,
+        "source_room": room_source,
+        "version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "content_present": bool(content),
+        "priority": priority,
+        "complexity": complexity,
+        "layout": layout,
+        "scene_contract": True,
+    }
+
+
+def _build_artifact_render_signal(
+    *,
+    artifact_type: str,
+    room_source: str,
+    renderer: str,
+    payload: Dict[str, Any],
+    content: str = "",
+    priority: int = 100,
+    complexity: str = "balanced",
+    layout: str = "single",
+) -> Dict[str, Any]:
+    """Canonical room -> Fiber render signal.
+
+    The structured payload is carried once at top-level ``payload``.
+    ``signal`` contains identity/routing metadata only, so no payload is
+    duplicated or rewritten while crossing the single route.
+    """
+    return {
+        "type": artifact_type,
+        "payload_type": artifact_type,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "signal": _render_signal_metadata(
+            artifact_type,
+            room_source,
+            renderer,
+            content=content,
+            priority=priority,
+            complexity=complexity,
+            layout=layout,
+        ),
+        "renderer": renderer,
+        "viewer": renderer,
+        "source_room": room_source,
+        "content": content,
+        "text": content,
+        "payload": payload,
+        "priority": priority,
+        "complexity": complexity,
+        "layout": layout,
+        "scene_contract": True,
+    }
+
 # =====================================================
 # CREATE ARTIFACT
 # =====================================================
@@ -432,136 +513,90 @@ def create_artifact(
     room_source: str,
     data: Dict[str, Any]
 ):
-
+    """Create a BaseArtifact with one canonical, lossless render signal."""
     normalized_data = _canonicalize_artifact_data(
         data,
         artifact_type=artifact_type,
         room_source=room_source,
     )
 
-    room_identity = normalized_data.get(
-        "room_identity",
-        {}
-    )
+    room_identity = normalized_data.get("room_identity", {})
+    if not isinstance(room_identity, dict):
+        room_identity = {}
 
     render_block = ARTIFACT_BLOCK_MAP.get(
         artifact_type,
         "FunctionBlock"
     )
 
-    return BaseArtifact(
+    priority = normalized_data.get("priority", 100)
+    complexity = normalized_data.get("complexity", "balanced")
+    layout = normalized_data.get("layout", "single")
+    canonical_text = _extract_text_candidate(normalized_data)
 
+    structured_payload = normalized_data.get("payload")
+    if not isinstance(structured_payload, dict):
+        structured_payload = {}
+
+    render_signal = _build_artifact_render_signal(
+        artifact_type=artifact_type,
+        room_source=room_source,
+        renderer=render_block,
+        payload=structured_payload,
+        content=canonical_text,
+        priority=priority,
+        complexity=complexity,
+        layout=layout,
+    )
+    normalized_data["render_signal"] = render_signal
+
+    artifact = BaseArtifact(
         metadata=ArtifactMetadata(
-
-            artifact_type=
-                artifact_type,
-
-            room_source=
-                room_source
+            artifact_type=artifact_type,
+            room_source=room_source
         ),
-
         context=ArtifactContext(
-
-            domain=normalized_data.get(
-                "domain"
-            ),
-
-            specialization=room_identity.get(
-                "specialization"
-            ),
-
-            knowledge_class=room_identity.get(
-                "knowledge_class"
-            ),
-
-            knowledge_scope=normalized_data.get(
-                "knowledge_scope",
-                []
-            ),
-
-            capabilities=normalized_data.get(
-                "capabilities",
-                []
-            ),
-
-            research_capabilities=normalized_data.get(
-                "research_capabilities",
-                []
-            ),
-
-            experiment_capabilities=normalized_data.get(
-                "experiment_capabilities",
-                []
-            ),
-
-            artifact_outputs=normalized_data.get(
-                "artifact_outputs",
-                []
-            ),
-
-            scene_contributions=normalized_data.get(
-                "scene_contributions",
-                []
-            ),
-
-            focus_contributions=normalized_data.get(
-                "focus_contributions",
-                []
-            ),
-
-            memory_contributions=normalized_data.get(
-                "memory_contributions",
-                []
-            ),
-
-            trajectory_hints=normalized_data.get(
-                "trajectory_hints",
-                []
-            ),
-
-            scene_hints=normalized_data.get(
-                "scene_hints",
-                []
-            )
+            domain=normalized_data.get("domain"),
+            specialization=room_identity.get("specialization"),
+            knowledge_class=room_identity.get("knowledge_class"),
+            knowledge_scope=normalized_data.get("knowledge_scope", []),
+            capabilities=normalized_data.get("capabilities", []),
+            research_capabilities=normalized_data.get("research_capabilities", []),
+            experiment_capabilities=normalized_data.get("experiment_capabilities", []),
+            artifact_outputs=normalized_data.get("artifact_outputs", []),
+            scene_contributions=normalized_data.get("scene_contributions", []),
+            focus_contributions=normalized_data.get("focus_contributions", []),
+            memory_contributions=normalized_data.get("memory_contributions", []),
+            trajectory_hints=normalized_data.get("trajectory_hints", []),
+            scene_hints=normalized_data.get("scene_hints", [])
         ),
-
         quality=ArtifactQuality(),
-
         render=ArtifactRenderContract(
-
-            web_block=
-                render_block,
-
-            viewer=
-                render_block,
-
-            renderer=
-                render_block,
-
-            scene_block=
-                artifact_type,
-
-            payload_type=
-                artifact_type,
-
-            priority=
-                normalized_data.get("priority", 100),
-
-            complexity=
-                normalized_data.get("complexity", "balanced"),
-
-            layout=
-                normalized_data.get("layout", "single"),
-
-            machine_only=
-                bool(normalized_data.get("machine_only", False)),
-
-            human_visible=
-                bool(normalized_data.get("human_visible", True))
+            web_block=render_block,
+            viewer=render_block,
+            renderer=render_block,
+            scene_block=artifact_type,
+            payload_type=artifact_type,
+            priority=priority,
+            complexity=complexity,
+            layout=layout,
+            machine_only=bool(normalized_data.get("machine_only", False)),
+            human_visible=bool(normalized_data.get("human_visible", True)),
+            signal_version=UNIFIED_RENDER_SIGNAL_VERSION,
+            signal_type=artifact_type,
         ),
-
         data=normalized_data
     )
+
+    # Make artifact identity observable without changing the payload.
+    try:
+        artifact.data["render_signal"]["artifact_id"] = artifact.metadata.artifact_id
+        artifact.data["render_signal"]["signal"]["artifact_id"] = artifact.metadata.artifact_id
+    except Exception:
+        pass
+
+    return artifact
+
 
 # =====================================================
 # FIBER INSPECTION API
@@ -620,6 +655,97 @@ def build_diagnostic_snapshot(diag: DiagnosticContract) -> Dict[str, Any]:
 # =====================================================
 
 
+
+def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, Any]]:
+    """Project one artifact into the single canonical render-block shape."""
+    if artifact is None:
+        return []
+
+    data = dict(getattr(artifact, "data", {}) or {})
+    artifact_type = getattr(getattr(artifact, "metadata", None), "artifact_type", "") or data.get("artifact_type", "")
+    room_source = getattr(getattr(artifact, "metadata", None), "room_source", "") or data.get("room_source", "")
+    render = getattr(artifact, "render", None)
+    renderer = getattr(render, "web_block", "") or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
+    priority = getattr(render, "priority", data.get("priority", 100))
+    complexity = getattr(render, "complexity", data.get("complexity", "balanced"))
+    layout = getattr(render, "layout", data.get("layout", "single"))
+    content = _extract_text_candidate(data)
+
+    structured_payload = data.get("payload")
+    if not isinstance(structured_payload, dict):
+        structured_payload = {
+            key: value
+            for key, value in data.items()
+            if key not in _CANONICAL_TEXT_KEYS
+            and key not in {"render_signal", "presentation", "machine_only", "human_visible"}
+        }
+
+    signal = data.get("render_signal")
+    if not isinstance(signal, dict):
+        signal = _build_artifact_render_signal(
+            artifact_type=artifact_type,
+            room_source=room_source,
+            renderer=renderer,
+            payload=structured_payload,
+            content=content,
+            priority=priority,
+            complexity=complexity,
+            layout=layout,
+        )
+
+    signal = dict(signal)
+    signal.setdefault("artifact_id", getattr(getattr(artifact, "metadata", None), "artifact_id", ""))
+    signal.setdefault("signal_version", UNIFIED_RENDER_SIGNAL_VERSION)
+    signal.setdefault("type", artifact_type)
+    signal.setdefault("payload_type", artifact_type)
+    signal.setdefault("renderer", renderer)
+    signal.setdefault("viewer", renderer)
+    signal.setdefault("source_room", room_source)
+    signal.setdefault("payload", structured_payload)
+
+    block = {
+        "type": artifact_type,
+        "artifact_type": artifact_type,
+        "renderer": renderer,
+        "viewer": renderer,
+        "content": content,
+        "text": content,
+        "payload": structured_payload,
+        "signal": dict(signal.get("signal") or {
+            "type": artifact_type,
+            "payload_type": artifact_type,
+            "renderer": renderer,
+            "viewer": renderer,
+            "source_room": room_source,
+            "version": UNIFIED_RENDER_SIGNAL_VERSION,
+            "scene_contract": True,
+        }),
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "source_room": room_source,
+        "artifact_id": getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
+        "priority": priority,
+        "complexity": complexity,
+        "layout": layout,
+        "scene_contract": True,
+        "provider_payload": True,
+        "canonical_provider_payload": True,
+        "executor_generated": False,
+    }
+    return [block]
+
+
+def _ensure_artifact_render_signal(artifact: BaseArtifact) -> BaseArtifact:
+    """Ensure a room artifact has exactly one lossless render signal."""
+    blocks = _artifact_canonical_render_blocks(artifact)
+    if blocks:
+        artifact.data["render_signal"] = dict(blocks[0].get("signal") or {})
+        artifact.data["render_signal"]["payload"] = blocks[0].get("payload")
+        artifact.data.setdefault("render_blocks", [])
+        artifact.data["render_blocks"] = blocks
+        artifact.render.signal_version = UNIFIED_RENDER_SIGNAL_VERSION
+        artifact.render.signal_type = blocks[0].get("type", "")
+    return artifact
+
 def build_universal_contract(
     artifact: Optional[BaseArtifact] = None,
     user_id: str = "",
@@ -631,6 +757,7 @@ def build_universal_contract(
     contract.fiber.identity.subscription = subscription
 
     if artifact is not None:
+        artifact = _ensure_artifact_render_signal(artifact)
         artifact_payload = _canonicalize_artifact_data(
             dict(artifact.data or {}),
             artifact_type=getattr(artifact.metadata, "artifact_type", ""),
@@ -652,7 +779,9 @@ def build_universal_contract(
         artifact_payload["answer"] = canonical_text
         artifact_payload["content"] = canonical_text
         artifact_payload["summary"] = canonical_text
-        artifact_payload.setdefault("render_blocks", list(artifact_payload.get("render_blocks", []) or []))
+        canonical_artifact_blocks = _artifact_canonical_render_blocks(artifact)
+        existing_room_blocks = list(artifact_payload.get("render_blocks", []) or [])
+        artifact_payload["render_blocks"] = canonical_artifact_blocks or existing_room_blocks
         artifact_payload.setdefault("scene", artifact_payload.get("scene", {}))
         artifact_payload["presentation"] = presentation
 
