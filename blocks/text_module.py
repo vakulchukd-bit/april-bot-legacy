@@ -33,7 +33,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
 )
 
 APRIL_FILE_ID = "APRIL_TEXT_ORCHESTRATION_MODULE"
-APRIL_VERSION = "QUANTUM_1_4"
+APRIL_VERSION = "QUANTUM_1_5_UNIFIED_ADAPTIVE"
 
 TEXT_QUANTUM_SINGLE_ROUTE = True
 TEXT_QUANTUM_NO_FALLBACK = True
@@ -432,7 +432,7 @@ def _build_text_artifact_data(reply: str, packet: Dict[str, Any], runtime: dict)
         "provider_machine_response": mr,
         "runtime": {
             "plan": runtime.get("plan"),
-            "token_mode": runtime.get("token_mode"),
+            "token_mode": "processor_owned",
         },
         "machine_channels": {
             "input": TEXT_INPUT_CHANNEL,
@@ -462,10 +462,25 @@ async def process(user_id, text, state, energy="MEDIUM"):
         {"type": type(machine_request).__name__, "model": TEXT_QUANTUM_MODEL},
     )
 
+    canonical_budget = getattr(
+        machine_request,
+        "response_output_tokens",
+        None,
+    )
+    if not isinstance(canonical_budget, int) or canonical_budget < 1:
+        constraints = getattr(machine_request, "constraints", {})
+        metadata = constraints.get("metadata", {}) if isinstance(constraints, dict) else {}
+        canonical_budget = metadata.get("response_budget") if isinstance(metadata, dict) else None
+
+    if not isinstance(canonical_budget, int) or not (1 <= canonical_budget <= 8000):
+        raise RuntimeError(
+            "Canonical adaptive response budget missing: Quantum Processor must supply it."
+        )
+
     output = await generate_text(
         messages=machine_request,
         temperature=None,
-        max_output_tokens=None,
+        max_output_tokens=canonical_budget,
         model=TEXT_QUANTUM_MODEL,
     )
 
@@ -520,6 +535,8 @@ async def process(user_id, text, state, energy="MEDIUM"):
             "artifacts": len(artifacts),
             "provider_calls": 1,
             "model": TEXT_QUANTUM_MODEL,
+            "response_budget": canonical_budget,
+            "response_budget_mode": "continuous_processor_budget",
         },
     )
 
