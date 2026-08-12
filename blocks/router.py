@@ -1,865 +1,377 @@
-# blocks/router.py
-
-# =====================================================
-# 🧠 APRIL WEB ROUTER
-# =====================================================
-
 """
-APRIL ROUTER — WEB SPACE ORCHESTRATION
+APRIL WEB ROUTER — QUANTUM EVIDENCE V1
 
-Router теперь:
-- calm orchestration layer;
-- continuity-safe semantic router;
-- renderer-first stabilizer;
-- lightweight capability guide;
-- provider-safe helper.
+Role:
+    Lightweight orchestration evidence layer.
 
-Router НЕ:
-- authority system;
-- execution owner;
-- recursive retry source;
-- hidden generation trigger;
-- telegram dispatcher.
+The router observes already-produced signals and packages them for the
+Quantum Processor. It does not own the final route.
 
-CORE PRINCIPLES:
+Single route:
+    USER -> SEMANTIC/COGNITION -> QUANTUM PROCESSOR ->
+    EXECUTION/ARTIFACT -> SCENE CONTRACT -> APRIL WEB
 
-1. continuation before reroute
-2. renderer before generation
-3. lightweight before heavy
-4. preserve active scene
-5. avoid hidden escalation
-6. no provider chaos
-7. no room wars
+The router deliberately does NOT:
+    - call OpenAI/Provider;
+    - select a final room;
+    - lock a renderer;
+    - trigger generation;
+    - execute tools;
+    - create fallback/parallel routes;
+    - contain Telegram dispatch logic.
+
+Compatibility:
+    route_request(text, ctx) remains async and updates ctx["semantic"].
+    Legacy helper names are preserved where practical.
 """
 
-# =====================================================
-# 🔥 OPTIONAL AI HINT
-# =====================================================
+from __future__ import annotations
 
-try:
+from typing import Any, Dict, Iterable, Optional
 
-    from blocks.intent_ai import (
-        detect_intent_ai
-    )
 
-    AI_INTENT_AVAILABLE = True
-
-except Exception:
-
-    AI_INTENT_AVAILABLE = False
-
-    async def detect_intent_ai(text):
-
-        return None
-
-# =====================================================
-# 🔥 MACHINE IDENTITY
-# =====================================================
-
-APRIL_FILE_ID = "APRIL_WEB_ROUTER"
+APRIL_FILE_ID = "APRIL_WEB_ROUTER_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
 ROUTER_MACHINE_CHANNEL = {
-
     "type": "semantic_router",
-
-    "mode": "supportive",
-
-    "authority": "soft",
-
+    "mode": "evidence",
+    "authority": "none",
     "web_safe": True,
-
     "renderer_first": True,
-
-    "continuity_safe": True
+    "continuity_safe": True,
+    "decision_owner": DECISION_OWNER,
 }
 
-# =====================================================
-# 🔥 ROUTER CONTRACT
-# =====================================================
-
-def build_router_contract():
-
-    return {
-
-        "router_type":
-            "lightweight_semantic_stabilizer",
-
-        "execution_authority":
-            False,
-
-        "renderer_authority":
-            False,
-
-        "generation_authority":
-            False,
-
-        "provider_authority":
-            False,
-
-        "semantic_mutation_minimized":
-            True,
-
-        "continuity_first":
-            True,
-
-        "web_oriented":
-            True
-    }
-
-# =====================================================
-# 🔥 LOGGING
-# =====================================================
-
 ROUTER_PATCH_LOG = []
+MAX_ROUTER_LOGS = 120
 
-def safe_router_log(msg):
 
+def safe_router_log(msg: Any) -> None:
     try:
-
-        print(
-            "APRIL ROUTER:",
-            msg
-        )
-
-        ROUTER_PATCH_LOG.append(
-            str(msg)
-        )
-
-    except:
+        ROUTER_PATCH_LOG.append(str(msg))
+        if len(ROUTER_PATCH_LOG) > MAX_ROUTER_LOGS:
+            del ROUTER_PATCH_LOG[:-MAX_ROUTER_LOGS]
+    except Exception:
         pass
 
-safe_router_log(
-    "APRIL WEB ROUTER INITIALIZED"
-)
+
+def normalize(text: Any) -> str:
+    return str(text or "").lower().strip()
+
+
+def contains_any(text: Any, words: Iterable[str]) -> bool:
+    value = normalize(text)
+    return any(word in value for word in words)
+
+
+def build_router_contract() -> Dict[str, Any]:
+    return {
+        "router_type": "quantum_evidence_stabilizer",
+        "execution_authority": False,
+        "renderer_authority": False,
+        "generation_authority": False,
+        "provider_authority": False,
+        "semantic_mutation_minimized": True,
+        "continuity_first": True,
+        "web_oriented": True,
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "parallel_route": False,
+    }
+
 
 ROUTER_CONTRACT = build_router_contract()
 
-# =====================================================
-# 🧠 HELPERS
-# =====================================================
 
-def normalize(text: str):
+def set_router_hint(semantic: Dict[str, Any], hint: str) -> str:
+    """
+    Compatibility field only.
 
-    return (
-        text or ""
-    ).lower().strip()
-
-
-def contains_any(
-    text: str,
-    words: list
-):
-
-    return any(
-        w in text
-        for w in words
-    )
-
-# =====================================================
-# 🧠 SAFE ROUTER HINT
-# =====================================================
-
-def set_router_hint(
-    semantic,
-    hint
-):
-
-    semantic[
-        "router_suggestion"
-    ] = hint
-
-    semantic[
-        "router_last_hint"
-    ] = hint
-
+    A hint is descriptive evidence; it is NOT a command to another room.
+    """
+    semantic["router_suggestion"] = hint
+    semantic["router_last_hint"] = hint
     return hint
 
-# =====================================================
-# 🧠 SAFE FLAGS
-# =====================================================
 
-def apply_router_stabilization(
-    semantic: dict
-):
-
-    semantic[
-        "router_is_soft"
-    ] = True
-
-    semantic[
-        "router_authority"
-    ] = "supportive"
-
-    semantic[
-        "router_renderer_aware"
-    ] = True
-
-    semantic[
-        "router_continuity_first"
-    ] = True
-
-    semantic[
-        "router_renderer_first"
-    ] = True
-
-    semantic[
-        "router_anti_escalation"
-    ] = True
-
-    semantic[
-        "router_anti_recursion"
-    ] = True
-
-    semantic[
-        "router_preserve_scene"
-    ] = True
-
-    semantic[
-        "router_preserve_flow"
-    ] = True
-
-    semantic[
-        "router_generation_requires_intent"
-    ] = True
-
-    semantic[
-        "router_lightweight_priority"
-    ] = True
-
-    semantic[
-        "router_hidden_generation_blocked"
-    ] = True
-
+def apply_router_stabilization(semantic: Dict[str, Any]) -> Dict[str, Any]:
+    semantic.update({
+        "router_is_soft": True,
+        "router_authority": "supportive",
+        "router_renderer_aware": True,
+        "router_continuity_first": True,
+        "router_renderer_first": True,
+        "router_anti_escalation": True,
+        "router_anti_recursion": True,
+        "router_preserve_scene": True,
+        "router_preserve_flow": True,
+        "router_generation_requires_intent": True,
+        "router_lightweight_priority": True,
+        "router_hidden_generation_blocked": True,
+        "router_decision_owner": DECISION_OWNER,
+        "router_provider_calls": 0,
+        "router_parallel_route": False,
+    })
     return semantic
 
-# =====================================================
-# 🧠 CONTINUATION
-# =====================================================
 
-def is_soft_continuation(
-    text: str
-):
+CONTINUATION_WORDS = (
+    "да", "ага", "ок", "окей", "давай", "продолжай", "ещё", "еще",
+    "вот", "примерно", "ближе", "уже лучше", "дальше", "снова",
+    "поехали", "оставь", "так", "в таком стиле",
+)
 
+VISUAL_REFERENCE_WORDS = (
+    "это", "этот", "эта", "там", "на картинке", "на фото",
+    "цвет", "слева", "справа", "фон", "стиль", "атмосфера",
+    "форма", "размер",
+)
+
+SCIENCE_WORDS = (
+    "реши", "уравнение", "график", "функция", "sin(", "cos(",
+    "tan(", "y=", "формула",
+)
+
+RENDER_WORDS = (
+    "таблица", "формула", "diagram", "диаграмма", "схема",
+    "layout", "grid", "renderer", "пространство", "scene",
+    "композиция", "canvas", "блок", "график",
+)
+
+GENERATION_WORDS = (
+    "создай изображение", "сгенерируй изображение",
+    "нарисуй картинку", "создай картинку", "draw image",
+    "generate image", "создай арт", "сделай арт",
+)
+
+EDIT_WORDS = (
+    "измени", "добавь", "убери", "замени", "сделай ярче",
+    "сделай темнее", "поменяй", "исправь",
+)
+
+WEB_WORDS = (
+    "погода", "новости", "курс валют", "маршрут", "карта",
+    "где находится", "что происходит",
+)
+
+
+def is_soft_continuation(text: str) -> bool:
     t = normalize(text)
-
-    continuation_words = [
-
-        "да",
-        "ага",
-        "ок",
-        "окей",
-        "давай",
-        "продолжай",
-        "ещё",
-        "еще",
-        "вот",
-        "примерно",
-        "ближе",
-        "уже лучше",
-        "дальше",
-        "снова",
-        "поехали",
-        "оставь",
-        "так",
-        "в таком стиле"
-    ]
-
-    if t in continuation_words:
+    if t in CONTINUATION_WORDS:
         return True
+    return len(t) <= 28 and contains_any(t, CONTINUATION_WORDS)
 
-    if len(t) <= 28:
 
-        if contains_any(
-            t,
-            continuation_words
-        ):
-
-            return True
-
-    return False
-
-# =====================================================
-# 🧠 VISUAL CONTINUITY
-# =====================================================
-
-def detect_visual_continuation(
-    text: str,
-    state: dict
-):
-
-    t = normalize(text)
-
-    active_visual_scene = state.get(
-        "active_visual_scene"
-    )
-
-    if not active_visual_scene:
+def detect_visual_continuation(text: str, state: Dict[str, Any]) -> bool:
+    if not state.get("active_visual_scene"):
         return False
-
-    visual_words = [
-
-        "это",
-        "этот",
-        "эта",
-        "там",
-        "на картинке",
-        "на фото",
-        "цвет",
-        "слева",
-        "справа",
-        "фон",
-        "стиль",
-        "атмосфера",
-        "форма",
-        "размер"
-    ]
-
-    if contains_any(
-        t,
-        visual_words
-    ):
-
-        return True
-
-    if len(t) <= 48:
-
-        return True
-
-    return False
-
-# =====================================================
-# 🧠 LOCAL DETECTION
-# =====================================================
-
-def detect_intent_local(
-    text: str
-):
-
     t = normalize(text)
+    if contains_any(t, VISUAL_REFERENCE_WORDS):
+        return True
+    return len(t) <= 48
 
-    math_words = [
 
-        "=",
-        "+",
-        "-",
-        "*",
-        "/",
-        "^",
-        "реши",
-        "уравнение",
-        "график",
-        "функция",
-        "sin(",
-        "cos(",
-        "tan(",
-        "y="
-    ]
-
-    if contains_any(
-        t,
-        math_words
-    ):
-
+def detect_intent_local(text: str) -> Optional[str]:
+    """
+    Descriptive local signal only. It never owns routing.
+    """
+    t = normalize(text)
+    if contains_any(t, SCIENCE_WORDS):
         return "science"
-
-    renderer_words = [
-
-        "таблица",
-        "формула",
-        "diagram",
-        "диаграмма",
-        "схема",
-        "layout",
-        "grid",
-        "renderer",
-        "пространство",
-        "scene",
-        "композиция",
-        "canvas",
-        "блок"
-    ]
-
-    if contains_any(
-        t,
-        renderer_words
-    ):
-
+    if contains_any(t, RENDER_WORDS):
         return "renderer_space"
-
-    generate_words = [
-
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "создай картинку",
-        "draw image",
-        "generate image",
-        "создай арт",
-        "сделай арт"
-    ]
-
-    if contains_any(
-        t,
-        generate_words
-    ):
-
+    if contains_any(t, GENERATION_WORDS):
         return "image_generate"
-
-    edit_words = [
-
-        "измени",
-        "добавь",
-        "убери",
-        "замени",
-        "сделай ярче",
-        "сделай темнее",
-        "поменяй",
-        "исправь"
-    ]
-
-    if contains_any(
-        t,
-        edit_words
-    ):
-
+    if contains_any(t, EDIT_WORDS):
         return "image_edit"
-
+    if contains_any(t, WEB_WORDS):
+        return "web"
     return None
 
-# =====================================================
-# 🧠 EXECUTION DETECTION
-# =====================================================
 
-def user_waiting_execution(
-    semantic,
-    cognition
-):
+def user_waiting_execution(semantic: Dict[str, Any], cognition: Dict[str, Any]) -> bool:
+    return bool(
+        semantic.get("should_execute")
+        or cognition.get("prefer_execution")
+        or cognition.get("wants_result", 0.0) >= 0.72
+    )
 
-    if semantic.get(
-        "should_execute"
-    ):
-
-        return True
-
-    if cognition.get(
-        "prefer_execution"
-    ):
-
-        return True
-
-    if cognition.get(
-        "wants_result",
-        0.0
-    ) >= 0.72:
-
-        return True
-
-    return False
-
-# =====================================================
-# 🧠 RENDERER PRIORITY
-# =====================================================
 
 def renderer_priority_active(
-    semantic,
-    cognition
-):
+    semantic: Dict[str, Any],
+    cognition: Dict[str, Any],
+) -> bool:
+    return bool(
+        semantic.get("prefer_renderer")
+        or semantic.get("render_intent")
+        or cognition.get("prefer_renderer")
+    )
 
-    if semantic.get(
-        "prefer_renderer"
-    ):
 
-        return True
+def _add_signal(
+    evidence: list,
+    name: str,
+    confidence: float,
+    source: str,
+    **data: Any,
+) -> None:
+    evidence.append({
+        "signal": name,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "source": source,
+        **data,
+    })
 
-    if semantic.get(
-        "render_intent"
-    ):
 
-        return True
+def _build_quantum_evidence(
+    text: str,
+    ctx: Dict[str, Any],
+    semantic: Dict[str, Any],
+    cognition: Dict[str, Any],
+    reasoning: Dict[str, Any],
+    response_decision: Dict[str, Any],
+    visual_reference: Dict[str, Any],
+) -> Dict[str, Any]:
+    state = ctx.get("state") or {}
+    active_flow = state.get("active_flow") or {}
+    evidence = []
 
-    if cognition.get(
-        "prefer_renderer"
-    ):
+    if renderer_priority_active(semantic, cognition):
+        _add_signal(evidence, "renderer_candidate", 0.88, "semantic_cognition")
 
-        return True
+    if semantic.get("should_execute") or cognition.get("prefer_execution"):
+        _add_signal(evidence, "execution_candidate", 0.88, "semantic_cognition")
 
-    return False
-
-# =====================================================
-# 🧠 MAIN ROUTER
-# =====================================================
-
-async def route_request(
-    text,
-    ctx
-):
-
-    try:
-
-        t = normalize(text)
-
-        ctx = ctx or {}
-
-        state = ctx.get(
-            "state",
-            {}
-        )
-
-        semantic = ctx.get(
-            "semantic",
-            {}
-        )
-
-        cognition = ctx.get(
-            "cognition",
-            {}
-        )
-
-        reasoning = ctx.get(
+    continuation_target = reasoning.get("continuation_target")
+    if continuation_target:
+        _add_signal(
+            evidence,
+            "continuation",
+            0.86,
             "reasoning",
-            {}
+            target=continuation_target,
         )
 
-        response_decision = ctx.get(
-            "response_decision",
-            {}
+    if is_soft_continuation(text):
+        _add_signal(evidence, "soft_continuation", 0.78, "router_local")
+
+    if detect_visual_continuation(text, state):
+        _add_signal(
+            evidence,
+            "visual_continuation",
+            0.82,
+            "visual_scene",
+            active_scene=True,
         )
 
-        visual_reference = ctx.get(
-            "visual_reference",
-            {}
+    local = detect_intent_local(text)
+    if local:
+        _add_signal(evidence, "local_intent_candidate", 0.80, "router_local", intent=local)
+
+    if cognition.get("exploration_mode"):
+        _add_signal(evidence, "exploration", 0.78, "cognition")
+
+    if visual_reference.get("lightweight_mode"):
+        _add_signal(evidence, "lightweight_visual", 0.80, "visual_reference")
+
+    if response_decision.get("should_offer_reference"):
+        _add_signal(evidence, "reference_offer", 0.72, "response_decision")
+
+    if cognition.get("internet_context_needed"):
+        _add_signal(evidence, "web_context", 0.86, "cognition")
+
+    if active_flow:
+        _add_signal(
+            evidence,
+            "active_flow",
+            0.78,
+            "session_state",
+            flow_type=active_flow.get("type"),
         )
 
-        apply_router_stabilization(
-            semantic
+    # Do not choose a final route here. The strongest signal is only a
+    # compatibility hint for older consumers.
+    strongest = max(evidence, key=lambda item: item["confidence"], default=None)
+
+    return {
+        "current_request": str(text or ""),
+        "signals": evidence,
+        "strongest_hint": strongest["signal"] if strongest else "text",
+        "strongest_confidence": strongest["confidence"] if strongest else 0.40,
+        "active_flow": active_flow,
+        "visual_scene_active": bool(state.get("active_visual_scene")),
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "parallel_route": False,
+        "route_selection": "delegated",
+        "room_selection": "delegated",
+        "renderer_selection": "delegated",
+        "execution_selection": "delegated",
+    }
+
+
+async def route_request(text: str, ctx: Optional[Dict[str, Any]]) -> str:
+    """
+    Aggregate router evidence without becoming a hard router.
+
+    Compatibility:
+        Returns a string because existing callers may expect it.
+        The returned string is only the strongest descriptive hint.
+        The canonical decision remains in ctx["semantic"]["quantum_router_evidence"].
+    """
+    try:
+        ctx = ctx if isinstance(ctx, dict) else {}
+        semantic = ctx.setdefault("semantic", {})
+        cognition = ctx.get("cognition") or {}
+        reasoning = ctx.get("reasoning") or {}
+        response_decision = ctx.get("response_decision") or {}
+        visual_reference = ctx.get("visual_reference") or {}
+        state = ctx.get("state") or {}
+
+        apply_router_stabilization(semantic)
+
+        evidence = _build_quantum_evidence(
+            text=text,
+            ctx=ctx,
+            semantic=semantic,
+            cognition=cognition,
+            reasoning=reasoning,
+            response_decision=response_decision,
+            visual_reference=visual_reference,
         )
 
-        active_flow = state.get(
-            "active_flow"
+        semantic["quantum_router_evidence"] = evidence
+        semantic["router_candidate_signals"] = evidence["signals"]
+        semantic["router_final_decision_delegated"] = True
+        semantic["router_provider_calls"] = 0
+        semantic["router_parallel_route"] = False
+
+        hint = evidence["strongest_hint"]
+        # Compatibility hint mapping; no execution lock is created.
+        hint_map = {
+            "renderer_candidate": "renderer_space",
+            "execution_candidate": "execution_candidate",
+            "continuation": "continuation",
+            "soft_continuation": "continuation",
+            "visual_continuation": "visual_continuation",
+            "local_intent_candidate": "semantic_candidate",
+            "exploration": "exploration",
+            "lightweight_visual": "lightweight_visual",
+            "reference_offer": "reference",
+            "web_context": "web_candidate",
+            "active_flow": "active_flow",
+        }
+        compatibility_hint = hint_map.get(hint, "text")
+
+        set_router_hint(semantic, compatibility_hint)
+        safe_router_log(
+            f"EVIDENCE: {hint} / {evidence['strongest_confidence']:.2f}"
         )
 
-        continuation_target = reasoning.get(
-            "continuation_target"
-        )
-
-        # =================================================
-        # 🔥 RENDERER PRIORITY
-        # =====================================================
-
-        if renderer_priority_active(
-            semantic,
-            cognition
-        ):
-
-            semantic[
-                "renderer_route_locked"
-            ] = True
-
-            return set_router_hint(
-                semantic,
-                "renderer_space"
-            )
-
-        # =================================================
-        # 🔥 SCIENCE CONTINUATION
-        # =====================================================
-
-        if continuation_target == "math":
-
-            semantic[
-                "math_continuation"
-            ] = True
-
-            return set_router_hint(
-                semantic,
-                "science"
-            )
-
-        # =================================================
-        # 🔥 VISUAL CONTINUITY
-        # =====================================================
-
-        if detect_visual_continuation(
-            text,
-            state
-        ):
-
-            semantic[
-                "router_visual_continuity"
-            ] = True
-
-            return set_router_hint(
-                semantic,
-                "image_edit"
-            )
-
-        # =================================================
-        # 🔥 EXPLORATION MODE
-        # =====================================================
-
-        if cognition.get(
-            "exploration_mode"
-        ):
-
-            semantic[
-                "exploration_active"
-            ] = True
-
-            semantic[
-                "generation_should_wait"
-            ] = True
-
-            if visual_reference.get(
-                "lightweight_mode"
-            ):
-
-                semantic[
-                    "lightweight_visual_mode"
-                ] = True
-
-                return set_router_hint(
-                    semantic,
-                    "text"
-                )
-
-        # =================================================
-        # 🔥 REFERENCE MODE
-        # =====================================================
-
-        if response_decision.get(
-            "should_offer_reference"
-        ):
-
-            semantic[
-                "reference_mode"
-            ] = True
-
-            return set_router_hint(
-                semantic,
-                "text"
-            )
-
-        # =================================================
-        # 🔥 HARD EXECUTION
-        # =====================================================
-
-        if semantic.get(
-            "should_execute"
-        ):
-
-            room = semantic.get(
-                "room"
-            )
-
-            if room:
-
-                semantic[
-                    "execution_locked"
-                ] = True
-
-                return set_router_hint(
-                    semantic,
-                    room
-                )
-
-        # =================================================
-        # 🔥 LOCAL DETECTION
-        # =====================================================
-
-        local = detect_intent_local(
-            text
-        )
-
-        if local:
-
-            semantic[
-                "local_detection_used"
-            ] = True
-
-            return set_router_hint(
-                semantic,
-                local
-            )
-
-        # =================================================
-        # 🔥 ACTIVE FLOW
-        # =====================================================
-
-        if active_flow:
-
-            flow_type = active_flow.get(
-                "type"
-            )
-
-            semantic[
-                "active_flow_detected"
-            ] = True
-
-            if flow_type == "math":
-
-                return set_router_hint(
-                    semantic,
-                    "science"
-                )
-
-            if flow_type in [
-
-                "renderer_space",
-                "visual_scene"
-            ]:
-
-                return set_router_hint(
-                    semantic,
-                    "renderer_space"
-                )
-
-            if flow_type in [
-
-                "image",
-                "image_generate",
-                "image_edit"
-            ]:
-
-                if is_soft_continuation(
-                    text
-                ):
-
-                    return set_router_hint(
-                        semantic,
-                        "image_edit"
-                    )
-
-        # =================================================
-        # 🔥 SHORT INPUT
-        # =====================================================
-
-        if len(t) <= 12:
-
-            semantic[
-                "short_input_detected"
-            ] = True
-
-            return semantic.get(
-                "router_suggestion",
-                "text"
-            )
-
-        # =================================================
-        # 🔥 OPTIONAL AI HINT
-        # =====================================================
-
-        intent = None
-
-        if (
-
-            AI_INTENT_AVAILABLE
-
-            and not semantic.get(
-                "renderer_route_locked"
-            )
-
-        ):
-
-            try:
-
-                intent = await detect_intent_ai(
-                    text
-                )
-
-                safe_router_log(
-                    f"AI HINT: {intent}"
-                )
-
-            except Exception as e:
-
-                safe_router_log(
-                    f"AI HINT ERROR: {e}"
-                )
-
-                intent = None
-
-        # =================================================
-        # 🔥 AI IMAGE GENERATION
-        # =====================================================
-
-        if intent == "generate_image":
-
-            semantic[
-                "ai_image_generation"
-            ] = True
-
-            if cognition.get(
-                "exploration_mode"
-            ):
-
-                semantic[
-                    "generation_should_wait"
-                ] = True
-
-                return set_router_hint(
-                    semantic,
-                    "text"
-                )
-
-            return set_router_hint(
-                semantic,
-                "image_generate"
-            )
-
-        # =================================================
-        # 🔥 AI IMAGE EDIT
-        # =====================================================
-
-        if intent == "edit_image":
-
-            if state.get(
-                "image_context"
-            ):
-
-                semantic[
-                    "ai_image_edit"
-                ] = True
-
-                return set_router_hint(
-                    semantic,
-                    "image_edit"
-                )
-
-        # =================================================
-        # 🔥 WEB CONTEXT
-        # =====================================================
-
-        if cognition.get(
-            "internet_context_needed"
-        ):
-
-            semantic[
-                "web_context_route"
-            ] = True
-
-            return set_router_hint(
-                semantic,
-                "text"
-            )
-
-        # =================================================
-        # 🔥 DEFAULT SAFE ROUTE
-        # =====================================================
-
-        semantic[
-            "default_safe_route"
-        ] = True
-
-        return semantic.get(
-            "router_suggestion",
-            "text"
-        )
-
-    except Exception as e:
-
-        print(
-            "🔥 ROUTER ERROR:",
-            e
-        )
-
+        return compatibility_hint
+
+    except Exception as exc:
+        safe_router_log(f"ROUTER EVIDENCE ERROR: {exc}")
+        # Safe compatibility value only; no alternate route is created.
         return "text"
