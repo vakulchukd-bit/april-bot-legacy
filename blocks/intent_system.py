@@ -1,1261 +1,443 @@
-# =====================================================
-# 🧠 APRIL INTENT SYSTEM
-# =====================================================
-
 """
-APRIL_FILE_ID:
-APRIL_INTENT_SYSTEM
+APRIL — INTENT SYSTEM / QUANTUM EVIDENCE V1
 
-ROLE:
-SEMANTIC_INTENT_SIGNAL_LAYER
+Role:
+    Lightweight semantic evidence layer.
 
-INPUT:
-USER_TEXT
-SESSION_STATE
-ACTIVE_FLOW
-VISUAL_CONTEXT
+This layer observes the request and emits signals.
+It does NOT own the final route, room, provider, renderer, or execution decision.
 
-OUTPUT:
-INTENT_SIGNAL_PAYLOAD
-TRAJECTORY_HINTS
-RENDERER_PREFERENCES
-ORCHESTRATION_SAFE_STATE
+Decision owner:
+    QUANTUM_PROCESSOR
 
-=====================================================
-
-APRIL ORCHESTRATION INTENT SYSTEM
-
-Intent system теперь:
-- lightweight semantic helper;
-- continuation-safe signal layer;
-- orchestration-aware classifier;
-- renderer-first assistant;
-- provider-safe interpreter.
-
-Intent system НЕ:
-- command router;
-- hard execution authority;
-- fallback trigger;
-- Telegram-era dispatcher;
-- aggressive escalation layer.
-
-=====================================================
-
-APRIL PRINCIPLES:
-
-1. continuation before coercion
-2. renderer before generation
-3. orchestration before commands
-4. lightweight before heavy
-5. semantic neutrality
-6. no hidden escalation
-7. no Telegram assumptions
+Single route:
+    USER -> INTENT EVIDENCE -> SEMANTIC/COGNITION ->
+    QUANTUM PROCESSOR -> EXECUTION/ARTIFACT -> SCENE CONTRACT -> APRIL WEB
 """
+
+from __future__ import annotations
 
 import time
+from typing import Any, Dict, Iterable, Optional
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
+
+APRIL_FILE_ID = "APRIL_INTENT_SYSTEM_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
 INPUT_MACHINE_CHANNEL = {
-
-    "source":
-        "executor_input_pipeline",
-
-    "type":
-        "intent_signal_input",
-
-    "isolated":
-        True
+    "source": "executor_input_pipeline",
+    "type": "intent_signal_input",
+    "isolated": True,
 }
 
 OUTPUT_MACHINE_CHANNEL = {
-
-    "target":
-        "semantic_orchestration_pipeline",
-
-    "type":
-        "intent_signal_output",
-
-    "isolated":
-        True
+    "target": "semantic_orchestration_pipeline",
+    "type": "intent_signal_output",
+    "isolated": True,
 }
 
-# =====================================================
-# 🔥 SAFE PATCH MODE
-# =====================================================
-
 PATCH_LOG = []
-
 MAX_PATCH_LOGS = 120
 
 
-def safe_patch_log(msg):
-
+def safe_patch_log(msg: Any) -> None:
+    """Machine telemetry only; never influences intent."""
     try:
-
-        print(
-            "INTENT PATCH:",
-            msg
-        )
-
         PATCH_LOG.append({
-
-            "timestamp":
-                time.time(),
-
-            "message":
-                msg,
-
-            "file_id":
-                "APRIL_INTENT_SYSTEM",
-
-            "machine_only":
-                True
+            "timestamp": time.time(),
+            "message": str(msg),
+            "file_id": APRIL_FILE_ID,
+            "machine_only": True,
         })
-
         if len(PATCH_LOG) > MAX_PATCH_LOGS:
-
-            PATCH_LOG.pop(0)
-
+            del PATCH_LOG[:-MAX_PATCH_LOGS]
     except Exception:
         pass
 
-# =====================================================
-# 🧠 PATCH HELPERS
-# =====================================================
 
-def patch_intent_detect(text):
-
-    safe_patch_log(
-        f"INTENT DETECT: {text[:60]}"
-    )
-
+def patch_intent_detect(text: str) -> str:
+    safe_patch_log(f"INTENT EVIDENCE: {text[:60]}")
     return text
 
 
-def patch_intent_future(
-    *args,
-    **kwargs
-):
-
+def patch_intent_future(*args: Any, **kwargs: Any) -> None:
     return None
 
-# =====================================================
-# 🧠 HELPERS
-# =====================================================
 
-def normalize(
-    text: str
-):
-
-    return (
-        text or ""
-    ).lower().strip()
+def normalize(text: str) -> str:
+    return str(text or "").lower().strip()
 
 
-def contains_any(
-    text: str,
-    words: list
-):
+def contains_any(text: str, words: Iterable[str]) -> bool:
+    value = normalize(text)
+    return any(word in value for word in words)
 
-    return any(
-        w in text
-        for w in words
-    )
 
-# =====================================================
-# 🧠 CONTINUATION DETECTION
-# =====================================================
+CONTINUATION_WORDS = (
+    "да", "ага", "ок", "окей", "давай", "вот", "примерно",
+    "ближе", "уже лучше", "не то", "чуть темнее", "чуть ярче",
+    "продолжай", "с этого", "поехали", "дальше", "теперь",
+    "еще", "ещё", "в таком стиле", "оставь", "вот это",
+    "ближе к этому", "продолжим", "вернемся", "вернёмся",
+)
 
-def is_continuation(
-    text: str
-):
+QUESTION_WORDS = (
+    "как", "что", "почему", "зачем", "умеешь", "можешь",
+    "где", "когда", "сколько", "какой", "какая", "какие",
+)
 
+EDIT_WORDS = (
+    "добавь", "измени", "убери", "замени", "поменяй",
+    "улучши", "подправь", "ярче", "темнее", "переделай",
+    "исправь", "сделай темнее", "сделай ярче",
+)
+
+GENERATION_WORDS = (
+    "создай изображение", "сгенерируй изображение",
+    "нарисуй картинку", "создай картинку",
+    "draw image", "generate image", "ultra realistic",
+    "4k render", "cinematic render", "photorealistic",
+    "realistic render",
+)
+
+LIGHT_VISUAL_WORDS = (
+    "пример", "референс", "концепт", "идея", "вариант",
+    "атмосфера", "примерно", "визуально", "как выглядит",
+    "схема", "layout", "структура", "расположение",
+)
+
+RENDER_WORDS = (
+    "график", "таблица", "формула", "diagram", "диаграмма",
+    "схема", "layout", "структура", "grid", "line", "point",
+    "arrow", "renderer", "пространство", "scene", "композиция",
+    "canvas",
+)
+
+SPATIAL_WORDS = (
+    "слева", "справа", "сверху", "снизу", "по центру",
+    "размести", "поставь", "расположи", "между", "рядом",
+)
+
+WEB_WORDS = (
+    "погода", "новости", "курс валют", "что происходит",
+    "где находится", "карта", "маршрут", "рейс", "сейчас в",
+    "такси", "отель", "навигация", "локация",
+)
+
+TEXT_WORDS = (
+    "сообщение", "письмо", "текст", "шаблон", "ответ клиенту",
+    "напиши письмо", "напиши сообщение",
+)
+
+LINK_WORDS = (
+    "ссылка", "url", "линк", "короткая ссылка",
+    "сократи ссылку", "short link",
+)
+
+EXPLORATION_WORDS = (
+    "идея", "вариант", "примерно", "атмосфера", "может",
+    "посмотрим", "подумаем", "как думаешь",
+)
+
+DISCUSSION_WORDS = ("обсудим", "поговорим", "как думаешь", "что думаешь")
+REFLECTION_WORDS = ("почему", "объясни", "рассуждай", "размышляй")
+SPACE_WORDS = ("пространство", "scene", "renderer", "график", "таблица", "формула")
+
+
+def is_continuation(text: str) -> bool:
     t = normalize(text)
-
-    continuation_words = [
-
-        "да",
-        "ага",
-        "ок",
-        "окей",
-        "давай",
-        "вот",
-        "примерно",
-        "ближе",
-        "уже лучше",
-        "не то",
-        "чуть темнее",
-        "чуть ярче",
-        "продолжай",
-        "с этого",
-        "поехали",
-        "дальше",
-        "теперь",
-        "еще",
-        "ещё",
-        "в таком стиле",
-        "оставь",
-        "вот это",
-        "ближе к этому",
-        "продолжим",
-        "вернемся",
-        "вернёмся"
-    ]
-
-    if t in continuation_words:
-
-        safe_patch_log(
-            "CONTINUATION DETECTED"
-        )
-
+    if t in CONTINUATION_WORDS:
         return True
+    return len(t) <= 36 and contains_any(t, CONTINUATION_WORDS)
 
-    if len(t) <= 36:
 
-        if contains_any(
-            t,
-            continuation_words
-        ):
-
-            safe_patch_log(
-                "SOFT CONTINUATION DETECTED"
-            )
-
-            return True
-
-    return False
-
-# =====================================================
-# 🧠 QUESTION DETECTION
-# =====================================================
-
-def is_real_question(
-    text: str
-):
-
+def is_real_question(text: str) -> bool:
     t = normalize(text)
-
-    if is_continuation(t):
-
+    if is_continuation(t) or len(t) <= 10:
         return False
+    return "?" in t or contains_any(t, QUESTION_WORDS)
 
-    if len(t) <= 10:
 
-        return False
+def is_edit_request(text: str) -> bool:
+    return contains_any(text, EDIT_WORDS)
 
-    question_triggers = [
 
-        "как",
-        "что",
-        "почему",
-        "зачем",
-        "умеешь",
-        "можешь",
-        "где",
-        "когда",
-        "сколько",
-        "какой",
-        "какая",
-        "какие"
-    ]
+def is_generate_request(text: str) -> bool:
+    return contains_any(text, GENERATION_WORDS)
 
-    if "?" in t:
 
-        return True
+def is_lightweight_visual_request(text: str) -> bool:
+    return contains_any(text, LIGHT_VISUAL_WORDS)
 
-    return contains_any(
-        t,
-        question_triggers
-    )
 
-# =====================================================
-# 🧠 EDIT DETECTION
-# =====================================================
-
-def is_edit_request(
-    text: str
-):
-
+def detect_renderer_subtype(text: str) -> str:
     t = normalize(text)
-
-    edit_triggers = [
-
-        "добавь",
-        "измени",
-        "убери",
-        "замени",
-        "поменяй",
-        "улучши",
-        "подправь",
-        "ярче",
-        "темнее",
-        "переделай",
-        "исправь",
-        "сделай темнее",
-        "сделай ярче"
-    ]
-
-    return contains_any(
-        t,
-        edit_triggers
-    )
-
-# =====================================================
-# 🧠 HEAVY GENERATION DETECTION
-# =====================================================
-
-def is_generate_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    generate_triggers = [
-
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "создай картинку",
-        "draw image",
-        "generate image",
-
-        # 🔥 explicit heavy visual
-
-        "ultra realistic",
-        "4k render",
-        "cinematic render",
-        "photorealistic",
-        "realistic render"
-    ]
-
-    return contains_any(
-        t,
-        generate_triggers
-    )
-
-# =====================================================
-# 🧠 LIGHTWEIGHT VISUAL
-# =====================================================
-
-def is_lightweight_visual_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    lightweight_words = [
-
-        "пример",
-        "референс",
-        "концепт",
-        "идея",
-        "вариант",
-        "атмосфера",
-        "примерно",
-        "визуально",
-        "как выглядит",
-        "схема",
-        "layout",
-        "структура",
-        "расположение"
-    ]
-
-    return contains_any(
-        t,
-        lightweight_words
-    )
-
-# =====================================================
-# 🧠 RENDERER DETECTION
-# =====================================================
-
-def detect_renderer_subtype(
-    text: str
-):
-
-    t = normalize(text)
-
     if "график" in t:
-
         return "graph"
-
     if "формула" in t:
-
         return "formula"
-
-    if (
-        "таблица" in t
-        or "grid" in t
-    ):
-
+    if "таблица" in t or "grid" in t:
         return "table"
-
-    if (
-        "diagram" in t
-        or "диаграмма" in t
-        or "схема" in t
-    ):
-
+    if "diagram" in t or "диаграмма" in t or "схема" in t:
         return "diagram"
-
-    if (
-        "layout" in t
-        or "пространство" in t
-        or "scene" in t
-        or "композиция" in t
-    ):
-
+    if any(x in t for x in ("layout", "пространство", "scene", "композиция")):
         return "scene"
-
     return "renderer"
 
 
-def is_renderer_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    renderer_words = [
-
-        "график",
-        "таблица",
-        "формула",
-        "diagram",
-        "диаграмма",
-        "схема",
-        "layout",
-        "структура",
-        "grid",
-        "line",
-        "point",
-        "arrow",
-        "renderer",
-        "пространство",
-        "scene",
-        "композиция",
-        "canvas"
-    ]
-
-    return contains_any(
-        t,
-        renderer_words
-    )
-
-# =====================================================
-# 🧠 SPATIAL SCENE DETECTION
-# =====================================================
-
-def is_spatial_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    spatial_words = [
-
-        "слева",
-        "справа",
-        "сверху",
-        "снизу",
-        "по центру",
-        "размести",
-        "поставь",
-        "расположи",
-        "между",
-        "рядом"
-    ]
-
-    return contains_any(
-        t,
-        spatial_words
-    )
-
-# =====================================================
-# 🧠 WEB DETECTION
-# =====================================================
-
-def is_web_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    web_words = [
-
-        "погода",
-        "новости",
-        "курс валют",
-        "что происходит",
-        "где находится",
-        "карта",
-        "маршрут",
-        "рейс",
-        "сейчас в",
-        "такси",
-        "отель",
-        "навигация",
-        "локация"
-    ]
-
-    return contains_any(
-        t,
-        web_words
-    )
-
-# =====================================================
-# 🧠 TEXT DETECTION
-# =====================================================
-
-def is_text_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    text_triggers = [
-
-        "сообщение",
-        "письмо",
-        "текст",
-        "шаблон",
-        "ответ клиенту",
-        "напиши письмо",
-        "напиши сообщение"
-    ]
-
-    return contains_any(
-        t,
-        text_triggers
-    )
-
-# =====================================================
-# 🧠 LINK DETECTION
-# =====================================================
-
-def is_link_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    link_triggers = [
-
-        "ссылка",
-        "url",
-        "линк",
-        "короткая ссылка",
-        "сократи ссылку",
-        "short link"
-    ]
-
-    return contains_any(
-        t,
-        link_triggers
-    )
-
-# =====================================================
-# 🧠 EXPLORATION DETECTION
-# =====================================================
-
-def is_exploration_request(
-    text: str
-):
-
-    t = normalize(text)
-
-    exploration_words = [
-
-        "идея",
-        "вариант",
-        "примерно",
-        "атмосфера",
-        "может",
-        "посмотрим",
-        "подумаем",
-        "как думаешь"
-    ]
-
-    return contains_any(
-        t,
-        exploration_words
-    )
+def is_renderer_request(text: str) -> bool:
+    return contains_any(text, RENDER_WORDS)
 
 
-# =====================================================
-# 🧠 DIALOGUE INTENT SIGNALS
-# =====================================================
-
-def is_discussion_request(text: str):
-
-    t = normalize(text)
-
-    words = [
-        "обсудим",
-        "поговорим",
-        "как думаешь",
-        "что думаешь"
-    ]
-
-    return contains_any(t, words)
+def is_spatial_request(text: str) -> bool:
+    return contains_any(text, SPATIAL_WORDS)
 
 
-def is_reflection_request(text: str):
-
-    t = normalize(text)
-
-    words = [
-        "почему",
-        "объясни",
-        "рассуждай",
-        "размышляй"
-    ]
-
-    return contains_any(t, words)
+def is_web_request(text: str) -> bool:
+    return contains_any(text, WEB_WORDS)
 
 
-def is_space_discussion_request(text: str):
+def is_text_request(text: str) -> bool:
+    return contains_any(text, TEXT_WORDS)
 
-    t = normalize(text)
 
-    discussion_words = [
-        "обсудим",
-        "как думаешь",
-        "почему"
-    ]
+def is_link_request(text: str) -> bool:
+    return contains_any(text, LINK_WORDS)
 
-    space_words = [
-        "пространство",
-        "scene",
-        "renderer",
-        "график",
-        "таблица",
-        "формула"
-    ]
 
+def is_exploration_request(text: str) -> bool:
+    return contains_any(text, EXPLORATION_WORDS)
+
+
+def is_discussion_request(text: str) -> bool:
+    return contains_any(text, DISCUSSION_WORDS)
+
+
+def is_reflection_request(text: str) -> bool:
+    return contains_any(text, REFLECTION_WORDS)
+
+
+def is_space_discussion_request(text: str) -> bool:
     return (
-        contains_any(t, discussion_words)
-        and contains_any(t, space_words)
+        contains_any(text, DISCUSSION_WORDS)
+        and contains_any(text, SPACE_WORDS)
     )
 
 
-# =====================================================
-# 🧠 MACHINE RESULT PACKAGE
-# =====================================================
+def build_intent_result() -> Dict[str, Any]:
+    """
+    Canonical signal packet.
 
-def build_intent_result():
-
+    All modality fields are soft evidence. The Quantum Processor is the only
+    component allowed to arbitrate them into a final action.
+    """
     return {
+        "intent": "chat",
+        "confidence": 0.5,
+        "source": "default",
 
-        # =================================================
-        # 🔥 CORE
-        # =====================================================
+        "prefer_renderer": False,
+        "prefer_lightweight": False,
+        "prefer_guidance": False,
+        "prefer_execution": False,
+        "prefer_continuation": False,
+        "prefer_web": False,
 
-        "intent":
-            "chat",
+        "renderer_subtype": None,
+        "lightweight_visual": False,
+        "spatial_scene": False,
+        "explicit_image_generation": False,
 
-        "confidence":
-            0.5,
+        "continuation": False,
+        "trajectory_safe": True,
+        "trajectory_priority": 0.5,
 
-        "source":
-            "default",
+        "exploration": False,
+        "discussion_intent": False,
+        "reflection_intent": False,
+        "space_discussion_intent": False,
 
-        # =================================================
-        # 🔥 ORCHESTRATION
-        # =====================================================
+        "avoid_heavy_generation": True,
+        "avoid_hidden_escalation": True,
+        "avoid_telegram_behavior": True,
+        "provider_safe": True,
 
-        "prefer_renderer":
-            False,
+        "machine_only": True,
+        "orchestration_ready": True,
+        "renderer_first_safe": True,
+        "continuity_preserved": True,
 
-        "prefer_lightweight":
-            False,
-
-        "prefer_guidance":
-            False,
-
-        "prefer_execution":
-            False,
-
-        "prefer_continuation":
-            False,
-
-        "prefer_web":
-            False,
-
-        # =================================================
-        # 🔥 VISUAL
-        # =====================================================
-
-        "renderer_subtype":
-            None,
-
-        "lightweight_visual":
-            False,
-
-        "spatial_scene":
-            False,
-
-        "explicit_image_generation":
-            False,
-
-        # =================================================
-        # 🔥 CONTINUITY
-        # =====================================================
-
-        "continuation":
-            False,
-
-        "trajectory_safe":
-            True,
-
-        "trajectory_priority":
-            0.5,
-
-        # =================================================
-        # 🔥 EXPLORATION
-        # =====================================================
-
-        "exploration":
-            False,
-
-        "discussion_intent":
-            False,
-
-        "reflection_intent":
-            False,
-
-        "space_discussion_intent":
-            False,
-
-
-        # =================================================
-        # 🔥 SAFETY
-        # =====================================================
-
-        "avoid_heavy_generation":
-            True,
-
-        "avoid_hidden_escalation":
-            True,
-
-        "avoid_telegram_behavior":
-            True,
-
-        "provider_safe":
-            True,
-
-        # =================================================
-        # 🔥 MACHINE FLAGS
-        # =====================================================
-
-        "machine_only":
-            True,
-
-        "orchestration_ready":
-            True,
-
-        "renderer_first_safe":
-            True,
-
-        "continuity_preserved":
-            True
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "parallel_route": False,
+        "route_selection": "delegated",
+        "renderer_selection": "delegated",
+        "execution_selection": "delegated",
     }
 
-# =====================================================
-# 🧠 MAIN DETECTOR
-# =====================================================
 
-def detect_intent(
-    text: str,
-    state: dict = None
-):
+def _apply_continuation(result: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    if not is_continuation(result["_text"]):
+        return False
 
+    result["continuation"] = True
+    result["prefer_continuation"] = True
+    result["trajectory_priority"] = 0.9
+
+    if state.get("active_flow"):
+        result.update({
+            "intent": "continuation",
+            "confidence": 0.88,
+            "source": "continuation",
+        })
+        return True
+
+    if state.get("active_visual_scene"):
+        result.update({
+            "intent": "visual_continuation",
+            "confidence": 0.84,
+            "source": "visual_scene",
+            "prefer_renderer": True,
+        })
+        return True
+
+    return False
+
+
+def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
+    """
+    Produce intent evidence without becoming a hard router.
+
+    Important:
+        The order below is evidence collection, not architectural routing.
+        The returned packet must be fused with cognition, semantic state,
+        dialogue history and scene state by the Quantum Processor.
+    """
     t = normalize(text)
-
-    state = state or {}
-
-    active_flow = state.get(
-        "active_flow",
-        {}
-    )
-
-    active_visual_scene = state.get(
-        "active_visual_scene",
-        {}
-    )
-
-    patch_intent_detect(t)
+    state = state if isinstance(state, dict) else {}
 
     result = build_intent_result()
+    result["_text"] = t
+    patch_intent_detect(t)
 
-    # =================================================
-    # 🔥 CONTINUATION PRIORITY
-    # =====================================================
+    # -------------------------------------------------
+    # Continuity evidence
+    # -------------------------------------------------
+    if _apply_continuation(result, state):
+        result.pop("_text", None)
+        return result
 
-    if is_continuation(t):
+    result["exploration"] = is_exploration_request(t)
+    result["discussion_intent"] = is_discussion_request(t)
+    result["reflection_intent"] = is_reflection_request(t)
+    result["space_discussion_intent"] = is_space_discussion_request(t)
 
-        result[
-            "continuation"
-        ] = True
+    if result["exploration"]:
+        result["prefer_lightweight"] = True
+        result["lightweight_visual"] = True
+        result["trajectory_priority"] = max(result["trajectory_priority"], 0.72)
 
-        result[
-            "prefer_continuation"
-        ] = True
-
-        result[
-            "trajectory_priority"
-        ] = 0.9
-
-        if active_flow:
-
-            result[
-                "intent"
-            ] = "continuation"
-
-            result[
-                "confidence"
-            ] = 0.88
-
-            result[
-                "source"
-            ] = "continuation"
-
-            safe_patch_log(
-                "ACTIVE FLOW CONTINUATION"
-            )
-
-            return result
-
-        if active_visual_scene:
-
-            result[
-                "intent"
-            ] = "visual_continuation"
-
-            result[
-                "confidence"
-            ] = 0.84
-
-            result[
-                "source"
-            ] = "visual_scene"
-
-            result[
-                "prefer_renderer"
-            ] = True
-
-            safe_patch_log(
-                "VISUAL CONTINUATION"
-            )
-
-            return result
-
-    # =================================================
-    # 🔥 EXPLORATION
-    # =====================================================
-
-    if is_exploration_request(t):
-
-        result[
-            "exploration"
-        ] = True
-
-        result[
-            "prefer_lightweight"
-        ] = True
-
-        result[
-            "lightweight_visual"
-        ] = True
-
-        result[
-            "trajectory_priority"
-        ] = max(
-            result[
-                "trajectory_priority"
-            ],
-            0.72
-        )
-
-    
-    # =================================================
-    # 🔥 DISCUSSION AWARENESS
-    # =====================================================
-
-    if is_discussion_request(t):
-
-        result["discussion_intent"] = True
+    if result["discussion_intent"] or result["reflection_intent"] or result["space_discussion_intent"]:
         result["prefer_guidance"] = True
 
-    if is_reflection_request(t):
-
-        result["reflection_intent"] = True
-        result["prefer_guidance"] = True
-
-    if is_space_discussion_request(t):
-
-        result["space_discussion_intent"] = True
-        result["prefer_guidance"] = True
-
-# =================================================
-    # 🔥 WEB
-    # =====================================================
+    # -------------------------------------------------
+    # Independent evidence signals
+    # -------------------------------------------------
+    # We deliberately do not return early here. A user request may contain
+    # multiple simultaneous signals: e.g. a graph + explanation + web lookup.
+    candidates = []
 
     if is_web_request(t):
-
-        result[
-            "intent"
-        ] = "web"
-
-        result[
-            "confidence"
-        ] = 0.88
-
-        result[
-            "source"
-        ] = "web"
-
-        result[
-            "prefer_guidance"
-        ] = True
-
-        result[
-            "prefer_web"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        safe_patch_log(
-            "WEB INTENT DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 LINK
-    # =====================================================
+        candidates.append(("web", 0.88, "web"))
+        result["prefer_web"] = True
 
     if is_link_request(t):
-
-        result[
-            "intent"
-        ] = "link"
-
-        result[
-            "confidence"
-        ] = 0.92
-
-        result[
-            "source"
-        ] = "link"
-
-        safe_patch_log(
-            "LINK INTENT DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 EDIT
-    # =====================================================
+        candidates.append(("link", 0.92, "link"))
 
     if is_edit_request(t):
-
-        result[
-            "intent"
-        ] = "edit"
-
-        result[
-            "confidence"
-        ] = 0.88
-
-        result[
-            "source"
-        ] = "edit"
-
-        result[
-            "prefer_execution"
-        ] = True
-
-        safe_patch_log(
-            "EDIT INTENT DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 SPATIAL
-    # =====================================================
+        candidates.append(("edit", 0.88, "edit"))
+        result["prefer_execution"] = True
 
     if is_spatial_request(t):
-
-        result[
-            "intent"
-        ] = "spatial"
-
-        result[
-            "confidence"
-        ] = 0.84
-
-        result[
-            "source"
-        ] = "spatial"
-
-        result[
-            "prefer_renderer"
-        ] = True
-
-        result[
-            "spatial_scene"
-        ] = True
-
-        result[
-            "renderer_subtype"
-        ] = "scene"
-
-        safe_patch_log(
-            "SPATIAL INTENT DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 RENDERER SPACE
-    # =====================================================
+        candidates.append(("spatial", 0.84, "spatial"))
+        result["spatial_scene"] = True
+        result["prefer_renderer"] = True
 
     if is_renderer_request(t):
-
-        result[
-            "intent"
-        ] = "render"
-
-        result[
-            "confidence"
-        ] = 0.88
-
-        result[
-            "source"
-        ] = "renderer"
-
-        result[
-            "prefer_renderer"
-        ] = True
-
-        result[
-            "renderer_subtype"
-        ] = detect_renderer_subtype(
-            t
-        )
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        safe_patch_log(
-            "RENDERER INTENT DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 LIGHTWEIGHT VISUAL
-    # =====================================================
+        candidates.append(("render", 0.88, "renderer"))
+        result["prefer_renderer"] = True
+        result["renderer_subtype"] = detect_renderer_subtype(t)
 
     if is_lightweight_visual_request(t):
-
-        result[
-            "intent"
-        ] = "lightweight_visual"
-
-        result[
-            "confidence"
-        ] = 0.8
-
-        result[
-            "source"
-        ] = "lightweight_visual"
-
-        result[
-            "prefer_lightweight"
-        ] = True
-
-        result[
-            "lightweight_visual"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-        safe_patch_log(
-            "LIGHTWEIGHT VISUAL DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 HEAVY GENERATION
-    # =====================================================
+        candidates.append(("lightweight_visual", 0.80, "lightweight_visual"))
+        result["prefer_lightweight"] = True
+        result["lightweight_visual"] = True
 
     if is_generate_request(t):
-
-        result[
-            "intent"
-        ] = "generate"
-
-        result[
-            "confidence"
-        ] = 0.9
-
-        result[
-            "source"
-        ] = "generate"
-
-        result[
-            "explicit_image_generation"
-        ] = True
-
-        result[
-            "avoid_heavy_generation"
-        ] = False
-
-        safe_patch_log(
-            "HEAVY GENERATION DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 TEXT REQUEST
-    # =====================================================
+        candidates.append(("generate", 0.90, "generate"))
+        result["explicit_image_generation"] = True
+        result["avoid_heavy_generation"] = False
 
     if is_text_request(t):
-
-        result[
-            "intent"
-        ] = "text"
-
-        result[
-            "confidence"
-        ] = 0.84
-
-        result[
-            "source"
-        ] = "text"
-
-        result[
-            "prefer_guidance"
-        ] = True
-
-        safe_patch_log(
-            "TEXT INTENT DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 QUESTION
-    # =====================================================
+        candidates.append(("text", 0.84, "text"))
+        result["prefer_guidance"] = True
 
     if is_real_question(t):
+        candidates.append(("question", 0.72, "question"))
+        result["prefer_guidance"] = True
 
-        result[
-            "intent"
-        ] = "question"
+    # Choose a descriptive primary signal only. This is NOT the final action.
+    if candidates:
+        primary = max(candidates, key=lambda item: item[1])
+        result["intent"], result["confidence"], result["source"] = primary
+        result["candidate_signals"] = [
+            {"intent": intent, "confidence": confidence, "source": source}
+            for intent, confidence, source in candidates
+        ]
 
-        result[
-            "confidence"
-        ] = 0.72
-
-        result[
-            "source"
-        ] = "question"
-
-        result[
-            "prefer_guidance"
-        ] = True
-
-        safe_patch_log(
-            "QUESTION DETECTED"
-        )
-
-        return result
-
-    # =================================================
-    # 🔥 ACTIVE FLOW PROTECTION
-    # =====================================================
-
+    # -------------------------------------------------
+    # Active-flow evidence
+    # -------------------------------------------------
+    active_flow = state.get("active_flow")
     if active_flow:
+        result["continuation"] = True
+        result["prefer_continuation"] = True
+        result["trajectory_priority"] = max(result["trajectory_priority"], 0.74)
 
-        result[
-            "continuation"
-        ] = True
+        flow_type = active_flow.get("type") if isinstance(active_flow, dict) else None
+        result["active_flow_type"] = flow_type
 
-        result[
-            "prefer_continuation"
-        ] = True
+        if flow_type in {
+            "renderer_space", "visual_scene", "image_generate",
+            "image_edit", "image", "math",
+        }:
+            result["trajectory_evidence"] = {
+                "flow_type": flow_type,
+                "preserve": True,
+            }
 
-        result[
-            "trajectory_priority"
-        ] = max(
-            result[
-                "trajectory_priority"
-            ],
-            0.74
-        )
+    # -------------------------------------------------
+    # Canonical metadata
+    # -------------------------------------------------
+    result["quantum_evidence"] = {
+        "current_request": t,
+        "candidate_signals": result.get("candidate_signals", []),
+        "continuation": result["continuation"],
+        "active_flow": active_flow or {},
+        "active_visual_scene": state.get("active_visual_scene", {}),
+        "trajectory_priority": result["trajectory_priority"],
+    }
 
-        flow_type = active_flow.get(
-            "type"
-        )
-
-        if flow_type in [
-
-            "renderer_space",
-            "visual_scene",
-            "image_generate",
-            "image_edit",
-            "image",
-            "math"
-        ]:
-
-            result[
-                "intent"
-            ] = "continuation"
-
-            result[
-                "confidence"
-            ] = 0.74
-
-            result[
-                "source"
-            ] = "trajectory"
-
-            if flow_type in [
-
-                "renderer_space",
-                "visual_scene",
-                "math"
-            ]:
-
-                result[
-                    "prefer_renderer"
-                ] = True
-
-            safe_patch_log(
-                f"TRAJECTORY PROTECTION: {flow_type}"
-            )
-
-    # =================================================
-    # 🔥 FINAL DEFAULT
-    # =====================================================
+    result["decision_owner"] = DECISION_OWNER
+    result["provider_calls"] = 0
+    result["parallel_route"] = False
+    result["route_selection"] = "delegated"
+    result["renderer_selection"] = "delegated"
+    result["execution_selection"] = "delegated"
+    result.pop("_text", None)
 
     safe_patch_log(
-        "DEFAULT CHAT INTENT"
+        f"INTENT EVIDENCE READY: {result.get('intent')} / "
+        f"{len(result.get('candidate_signals', []))} candidates"
     )
-
     return result
