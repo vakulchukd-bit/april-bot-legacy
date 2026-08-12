@@ -28,7 +28,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v7_all10_integrated"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v8_all10_contract_safe"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
@@ -480,20 +480,22 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "measured_state": mode,
         },
         constraints={
-            "one_provider_call": True,
-            "one_visible_answer": True,
-            "canonical_scene": True,
-            "dialogue_coherence": round(coherence, 4),
-            "quantum_state": {
-                "dialogue": dialogue_state,
-                "representation": representation_state,
-                "measured_output": measured_output,
+            **{
+                "one_provider_call": True,
+                "one_visible_answer": True,
+                "canonical_scene": True,
+                "dialogue_coherence": round(coherence, 4),
+                "quantum_state": {
+                    "dialogue": dialogue_state,
+                    "representation": representation_state,
+                    "measured_output": measured_output,
+                },
+                "provider_input_token_budget": 900,
+                "provider_context_strategy": "provider_router_semantic_field_selection",
+                "current_request_must_remain_intact": True,
             },
-            "provider_input_token_budget": 900,
-            "provider_context_strategy": "provider_router_semantic_field_selection",
-            "current_request_must_remain_intact": True,
+            "metadata": request_metadata,
         },
-        metadata=request_metadata,
     )
 
     request.response_complexity = complexity
@@ -510,7 +512,28 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     request.single_route = True
     request.provider_calls_allowed = 1
 
+    # Canonical contract bridge: MachineRequest currently exposes metadata
+    # through constraints["metadata"], not as an __init__ field.
+    request.constraints.setdefault("metadata", {})
+    request.constraints["metadata"].update({
+        "processor_version": PROCESSOR_VERSION,
+        "single_route": True,
+        "provider_calls_per_request": 1,
+        "context_mode": mode,
+        "dialogue_coherence": round(coherence, 4),
+    })
+
     return request
+
+
+def _request_metadata(request: MachineRequest) -> dict:
+    constraints = getattr(request, "constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+    metadata = constraints.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return metadata
 
 def _response(value: Any) -> MachineResponse:
     if isinstance(value, MachineResponse):
@@ -547,6 +570,7 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
             pass
     contract = build_scene_contract(scene)
     update_dialog_context(user_id, semantic)
+    request_meta = _request_metadata(request)
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3_quantum",
@@ -561,8 +585,30 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
         "single_route": True,
         "provider_calls_per_request": 1,
         "quantum_state": request.quantum_state,
-        "energy_acceleration": request.metadata.get("energy_acceleration", {}),
+        "energy_acceleration": request_meta.get("energy_acceleration", {}),
     }
+
+
+def _validate_quantum_release(request: MachineRequest) -> None:
+    constraints = getattr(request, "constraints", {})
+    if not isinstance(constraints, dict):
+        raise RuntimeError("Quantum release blocked: constraints missing")
+
+    if constraints.get("one_provider_call") is not True:
+        raise RuntimeError("Quantum release blocked: one_provider_call invariant failed")
+
+    if constraints.get("provider_input_token_budget") != 900:
+        raise RuntimeError("Quantum release blocked: provider input budget invariant failed")
+
+    if getattr(request, "provider_calls_allowed", 1) != 1:
+        raise RuntimeError("Quantum release blocked: provider call count invariant failed")
+
+    if getattr(request, "single_route", True) is not True:
+        raise RuntimeError("Quantum release blocked: single_route invariant failed")
+
+    metadata = constraints.get("metadata")
+    if not isinstance(metadata, dict):
+        raise RuntimeError("Quantum release blocked: metadata bridge missing")
 
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     """
@@ -713,11 +759,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     request = _make_request(text, semantic, cognition, decision, state, visual)
     request.quantum_state["evidence_channels"] = 10
     request.quantum_state["evidence_field"] = quantum_field
-    request.metadata["quantum_evidence_channels"] = 10
-    request.metadata["quantum_evidence_field_version"] = PROCESSOR_VERSION
-    request.metadata["provider_calls_per_request"] = 1
-    request.metadata["single_route"] = True
-    request.metadata["processor_context"] = processor_context
+    request_meta = _request_metadata(request)
+    request_meta.update({
+        "quantum_evidence_channels": 10,
+        "quantum_evidence_field_version": PROCESSOR_VERSION,
+        "provider_calls_per_request": 1,
+        "single_route": True,
+        "processor_context": processor_context,
+    })
+    request.constraints["metadata"] = request_meta
 
     energy_profile = build_quantum_acceleration_profile(
         user_id,
@@ -733,6 +783,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     acceleration_check = validate_quantum_acceleration(request, energy_profile)
     if not acceleration_check.get("ok"):
         raise RuntimeError("Quantum energy acceleration invariant failed")
+
+    _validate_quantum_release(request)
 
     provider_result = await generate_text(
         request,
