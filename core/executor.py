@@ -11,43 +11,44 @@ import math
 import re
 from typing import Any
 
+from blocks.context_system import build_deephub_context, build_executor_context_packet
+from blocks.interpretation_layer import interpret_request, build_processor_execution_context
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.reasoning_state import build_reasoning_state
 from blocks.cognitive_core import analyze_cognition
 from blocks.response_decision import build_response_decision
 from blocks.visual_reference_system import build_visual_reference
+from blocks.intent_system import detect_intent
+from blocks.intent_ai import detect_intent_ai
+from blocks.intent_resolver import resolve_input, build_focus_intent_state
+from blocks.router import route_request
+from blocks.router_system import decide_action
 from blocks.state_manager import get_state, update_dialog_context
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v6_energy_accelerated"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v7_all10_integrated"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
 
-
 def _s(v: Any) -> str:
     return str(v or "").strip()
-
 
 def _clip(v: Any, n: int = 900) -> str:
     s = _s(v)
     return s if len(s) <= n else s[-n:]
 
-
 def _tokens(v: Any) -> set[str]:
     return set(re.findall(r"[\wА-Яа-яЁё]+", _s(v).lower()))
-
 
 def _overlap(a: Any, b: Any) -> float:
     x, y = _tokens(a), _tokens(b)
     return len(x & y) / max(1, len(x | y))
 
-
 def _clamp(x: float) -> float:
     return max(0.001, min(0.999, float(x)))
-
 
 def _norm(scores: dict[str, float]) -> dict[str, float]:
     m = max(scores.values()) if scores else 1.0
@@ -55,10 +56,153 @@ def _norm(scores: dict[str, float]) -> dict[str, float]:
     z = sum(ex.values()) or 1.0
     return {k: ex[k] / z for k in scores}
 
-
 def _bool_signal(*values: Any) -> float:
     return 1.0 if any(bool(v) for v in values) else 0.0
 
+def _as_dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+def _as_list(value: Any) -> list:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return []
+
+def _unique_strings(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in _as_list(values):
+        value = _s(value).lower()
+        if value and value not in result:
+            result.append(value)
+    return result
+
+def _merge_evidence_fields(target: dict, sources: tuple[dict, ...]) -> dict:
+    """
+    Merge only machine evidence into the canonical semantic packet.
+
+    Current request and authoritative semantic fields are never replaced.
+    Multi-valued representation/capability evidence is unioned. Scalar
+    signals are retained under quantum_evidence_sources so no room can
+    overwrite another room's signal.
+    """
+    target = _as_dict(target)
+    representations: list[str] = []
+    domains: list[str] = []
+    capabilities: list[str] = []
+    candidates: list[dict] = []
+
+    for source in sources:
+        source = _as_dict(source)
+        for key in (
+            "required_representations", "candidate_representations",
+            "requested_outputs", "required_outputs", "render_types",
+            "artifact_types", "representations",
+        ):
+            for value in _as_list(source.get(key)):
+                name = _s(value).lower()
+                if name and name not in representations:
+                    representations.append(name)
+        for key in ("required_domains", "candidate_domains", "required_competencies"):
+            for value in _as_list(source.get(key)):
+                name = _s(value).lower()
+                if name and name not in domains:
+                    domains.append(name)
+        for key in ("required_capabilities", "available_tools"):
+            for value in _as_list(source.get(key)):
+                name = _s(value).lower()
+                if name and name not in capabilities:
+                    capabilities.append(name)
+        for item in _as_list(source.get("candidate_signals")):
+            if isinstance(item, dict):
+                candidates.append(dict(item))
+
+    if representations:
+        target["required_representations"] = _unique_strings(
+            _as_list(target.get("required_representations")) + representations
+        )
+        target["candidate_representations"] = _unique_strings(
+            _as_list(target.get("candidate_representations")) + representations
+        )
+    if domains:
+        target["required_domains"] = _unique_strings(
+            _as_list(target.get("required_domains")) + domains
+        )
+        target["candidate_domains"] = _unique_strings(
+            _as_list(target.get("candidate_domains")) + domains
+        )
+    if capabilities:
+        target["required_capabilities"] = _unique_strings(
+            _as_list(target.get("required_capabilities")) + capabilities
+        )
+
+    target["quantum_candidate_signals"] = candidates
+    return target
+
+def _build_quantum_field(
+    *,
+    user_id: Any,
+    text: str,
+    state: dict,
+    context: dict,
+    interpretation: dict,
+    semantic: dict,
+    cognition: dict,
+    intent: dict,
+    intent_ai: dict,
+    resolver: dict,
+    router: dict,
+    router_system: dict,
+    decision: dict,
+) -> dict:
+    """Build the one canonical evidence field for Quantum collapse."""
+    return {
+        "version": PROCESSOR_VERSION,
+        "user_id": _s(user_id),
+        "current_request": _s(text),
+        "current_request_authoritative": True,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "single_route": True,
+        "provider_calls": 0,
+        "parallel_route": False,
+        "sources": {
+            "context_system": _as_dict(context),
+            "interpretation_layer": _as_dict(interpretation),
+            "semantic_core": _as_dict(semantic),
+            "cognitive_core": _as_dict(cognition),
+            "intent_system": _as_dict(intent),
+            "intent_ai": _as_dict(intent_ai),
+            "intent_resolver": _as_dict(resolver),
+            "router": _as_dict(router),
+            "router_system": _as_dict(router_system),
+            "response_decision": _as_dict(decision),
+        },
+        "evidence_channels": 10,
+        "representations": _unique_strings(
+            _as_list(semantic.get("required_representations"))
+            + _as_list(interpretation.get("required_representations"))
+            + _as_list(intent.get("renderer_subtype"))
+            + _as_list(decision.get("required_representations"))
+        ),
+        "candidate_signals": (
+            _as_list(intent.get("candidate_signals"))
+            + _as_list(intent_ai.get("quantum_evidence", {}).get("candidates"))
+            + _as_list(router.get("quantum_evidence", {}).get("signals"))
+            + _as_list(router_system.get("candidate_signals"))
+        ),
+        "trajectory": {
+            "resolver": _as_dict(resolver),
+            "active_flow": _as_dict(state.get("active_flow")),
+            "context": _as_dict(context.get("quantum_evidence")),
+        },
+        "arbitration": {
+            "dialogue": "processor",
+            "representation": "processor",
+            "room": "delegated",
+            "renderer": "delegated",
+            "execution": "delegated",
+        },
+    }
 
 def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
     for src in sources:
@@ -68,7 +212,6 @@ def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
             if src.get(name) not in (None, "", [], {}):
                 return src[name]
     return ""
-
 
 def _dialogue_evidence(text: str, semantic: dict, cognition: dict, decision: dict, state: dict) -> dict[str, float]:
     """Build independent evidence dimensions; no single trigger decides the state."""
@@ -159,8 +302,6 @@ def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dic
                 if name and name not in names:
                     names.append(name)
 
-    # The Processor may also receive an already structured artifact/room intent.
-    # Read only structured fields, never the raw user's words.
     for src in (semantic, cognition, decision):
         if not isinstance(src, dict):
             continue
@@ -188,7 +329,6 @@ def _representation_consensus(outputs: list[str], semantic: dict, decision: dict
         raw["text"] += .5
     p = _norm(raw)
     return max(p, key=p.get), p
-
 
 def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> str:
     """Select 2k/5k/8k by structured task evidence, not keyword triggers."""
@@ -244,7 +384,6 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
         if visual: data["visual_context"] = _clip(visual, 700)
     return data
 
-
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
@@ -256,8 +395,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
 
     complexity = _complexity(semantic, cognition, decision, text)
 
-    # Keep the current request intact; only add compact context when the
-    # processor concluded that the turn depends on prior state.
     context = _compact_context(text, state, mode, topic, goal)
 
     capabilities = []
@@ -271,7 +408,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                 if value and value not in capabilities:
                     capabilities.append(value)
 
-    # Canonical dialogue contract consumed by provider_router._select_context_fields.
     dialogue_contract = {
         "dialog_act": _s(
             _field((semantic, decision, cognition), ("dialog_act", "dialogue_act"))
@@ -284,8 +420,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "active_topic": topic if mode != "INDEPENDENT" else "",
     }
 
-    # Preserve the provider's cost-balanced packing model:
-    # provider_router is responsible for final <=900-token packing.
     request_metadata = {
         "processor_version": PROCESSOR_VERSION,
         "single_route": True,
@@ -294,8 +428,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "dialogue_coherence": round(coherence, 4),
     }
 
-    # Keep user/flow identity in metadata for Provider duplicate/in-flight guard
-    # without creating another route.
     if isinstance(state, dict):
         active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
         flow_id = state.get("flow_id") or active_flow.get("flow_id")
@@ -391,7 +523,6 @@ def _response(value: Any) -> MachineResponse:
         return MachineResponse(**allowed)
     raise RuntimeError("Provider returned no canonical MachineResponse")
 
-
 def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic: dict, cognition: dict, decision: dict, request: MachineRequest) -> dict:
     answer = _s(response.answer) or _s(response.content) or _s(response.response)
     response.answer = answer
@@ -405,7 +536,6 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
     response.executor_semantic = semantic
     response.executor_cognition = cognition
     response.executor_response_decision = decision
-    # Preserve provider-owned render signals before the canonical Factory projection.
     scene = build_machine_scene(response)
     provider_blocks = list(getattr(response, "render_blocks", []) or [])
     if provider_blocks:
@@ -416,7 +546,6 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
         except Exception:
             pass
     contract = build_scene_contract(scene)
-    # Factory/SceneContract is authoritative; no second renderer path exists.
     update_dialog_context(user_id, semantic)
     return {
         "transport_contract": "scene_first",
@@ -435,31 +564,161 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
         "energy_acceleration": request.metadata.get("energy_acceleration", {}),
     }
 
-
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
-    """One route: analyze → ensemble-collapse → MachineRequest → Provider → SceneContract."""
+    """
+    ONE ROUTE / TEN EVIDENCE ENGINES / ONE COLLAPSE / ONE PROVIDER CALL.
+
+    The ten quantumized modules are not ten routes. They are ten independent
+    evidence lenses feeding one processor field. The processor arbitrates the
+    combined field, creates one MachineRequest, then uses the existing Provider
+    path once and the existing C-Artifact/SceneContract path once.
+    """
     state = get_state(user_id)
     state = state if isinstance(state, dict) else {}
-    active_flow = state.get("active_flow")
-    active_flow = active_flow if isinstance(active_flow, dict) else {}
-    dialog_state = state.get("scene_state")
-    dialog_state = dialog_state if isinstance(dialog_state, dict) else {}
+    history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
+    active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
+    dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
+
+    build_deephub_context(user_id, text, state)
+    context_packet = state.get("_executor_context_packet")
+    if not isinstance(context_packet, dict):
+        context_packet = build_executor_context_packet(state)
+    context_evidence = state.get("_machine_context", {}).get("quantum_evidence", {})
+    if not isinstance(context_evidence, dict):
+        context_evidence = {}
+
+    active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
+    dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
+    history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
+
     semantic = semantic_analyze(
         text=text,
         state=state,
-        history=state.get("dialog", []),
+        history=history,
         active_flow=active_flow,
         dialog_state=dialog_state,
-    )
-    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
-    cognition = analyze_cognition(text=text, semantic=semantic, reasoning=reasoning, state=state)
-    visual = build_visual_reference(semantic=semantic, cognition=cognition, text=text, state=state)
-    decision = build_response_decision(semantic=semantic, cognition=cognition, state=state, visual_reference=visual)
-    request = _make_request(text, semantic, cognition, decision, state, visual)
+    ) or {}
 
-    # Local quantum-inspired acceleration: structured evidence is fused before
-    # the existing single Provider call. It cannot create a second route or
-    # increase Provider entitlement beyond the user's plan.
+    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
+    cognition = analyze_cognition(
+        text=text, semantic=semantic, reasoning=reasoning, state=state
+    ) or {}
+
+    interpretation = interpret_request(
+        text,
+        cognition=cognition,
+        semantic=semantic,
+        history=history,
+        state=state,
+    ) or {}
+
+    _merge_evidence_fields(semantic, (interpretation,))
+    semantic["quantum_interpretation_evidence"] = interpretation
+
+    intent = detect_intent(text, state) or {}
+    intent_ai = await detect_intent_ai(text, state)
+    intent_ai = intent_ai if isinstance(intent_ai, dict) else {}
+    resolver = resolve_input(history, state) or {}
+    focus_intent = build_focus_intent_state(text, state) or {}
+
+    intent_ai["provider_calls"] = 0
+    intent_ai["decision_owner"] = "QUANTUM_PROCESSOR"
+
+    _merge_evidence_fields(semantic, (intent, intent_ai, resolver))
+    semantic["quantum_intent_evidence"] = {
+        "intent_system": intent,
+        "intent_ai": intent_ai,
+        "intent_resolver": resolver,
+        "focus": focus_intent,
+    }
+
+    router_context = {
+        "semantic": semantic,
+        "cognition": cognition,
+        "reasoning": reasoning,
+        "response_decision": {},
+        "visual_reference": {},
+        "state": state,
+        "quantum_evidence": {
+            "context": context_evidence,
+            "interpretation": interpretation,
+            "intent": intent,
+            "intent_ai": intent_ai,
+            "resolver": resolver,
+        },
+    }
+    router_hint = await route_request(text, router_context)
+    router_evidence = semantic.get("quantum_router_evidence", {})
+    if not isinstance(router_evidence, dict):
+        router_evidence = {}
+
+    router_system = decide_action(text, history) or {}
+
+    _merge_evidence_fields(semantic, (router_evidence, router_system))
+    semantic["quantum_router_evidence"] = {
+        "router": router_evidence,
+        "router_system": router_system,
+        "compatibility_hint": router_hint,
+    }
+
+    visual = build_visual_reference(
+        semantic=semantic, cognition=cognition, text=text, state=state
+    ) or {}
+
+    decision = build_response_decision(
+        semantic=semantic,
+        cognition=cognition,
+        state=state,
+        visual_reference=visual,
+    ) or {}
+
+    processor_context = build_processor_execution_context({
+        "state": state,
+        "context": context_evidence,
+        "semantic": semantic,
+        "cognition": cognition,
+        "interpretation": interpretation,
+        "intent": intent,
+        "intent_ai": intent_ai,
+        "resolver": resolver,
+        "router": router_evidence,
+        "router_system": router_system,
+        "decision": decision,
+    })
+
+    quantum_field = _build_quantum_field(
+        user_id=user_id,
+        text=text,
+        state=state,
+        context=context_evidence,
+        interpretation=interpretation,
+        semantic=semantic,
+        cognition=cognition,
+        intent=intent,
+        intent_ai=intent_ai,
+        resolver={**resolver, "focus": focus_intent},
+        router=router_evidence,
+        router_system=router_system,
+        decision=decision,
+    )
+
+    state["_quantum_evidence_field"] = quantum_field
+    state["_quantum_processor_context"] = processor_context
+    semantic["quantum_evidence_field"] = quantum_field
+    semantic["processor_context"] = processor_context
+    semantic["decision_owner"] = "QUANTUM_PROCESSOR"
+    semantic["provider_calls"] = 0
+    semantic["parallel_route"] = False
+
+    request = _make_request(text, semantic, cognition, decision, state, visual)
+    request.quantum_state["evidence_channels"] = 10
+    request.quantum_state["evidence_field"] = quantum_field
+    request.metadata["quantum_evidence_channels"] = 10
+    request.metadata["quantum_evidence_field_version"] = PROCESSOR_VERSION
+    request.metadata["provider_calls_per_request"] = 1
+    request.metadata["single_route"] = True
+    request.metadata["processor_context"] = processor_context
+
     energy_profile = build_quantum_acceleration_profile(
         user_id,
         flow_id=(state.get("flow_id") if isinstance(state, dict) else "") or "",
