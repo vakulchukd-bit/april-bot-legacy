@@ -31,7 +31,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v15_visible_answer_artifact_safe"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v16_visible_answer_artifact_safe"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -535,25 +535,35 @@ def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> s
     return "LOW"
 
 
-def _adaptive_output_budget(
+
+# ---------------------------------------------------------------------------
+# 8-core × 8-lane quantum-inspired budget field (64 signals)
+# ---------------------------------------------------------------------------
+
+QUANTUM_CORES = (
+    "meaning", "intent", "context", "structure",
+    "evidence", "representation", "economy", "completion",
+)
+QUANTUM_LANES = (
+    "relevance", "density", "complexity", "dependency",
+    "structure", "continuity", "sufficiency", "confidence",
+)
+
+def _bounded01(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.0
+
+def _quantum_64_field(
     text: str,
     semantic: dict,
     cognition: dict,
     decision: dict,
-) -> int:
-    """Estimate the minimally sufficient response budget on a continuous scale.
-
-    The value is evidence-driven rather than tier-driven. It may be anywhere
-    from 1 to 8000 tokens. 8000 is the only hard ceiling; smaller values are
-    merely the estimated sufficient capacity for this request.
-    """
-    request_tokens = max(1, len(_tokens(text)))
-    task_parts = max(1, len(
-        semantic.get("task_parts")
-        or semantic.get("subtasks")
-        or semantic.get("requested_tasks")
-        or []
-    ))
+) -> dict:
+    """Evaluate 8 semantic cores × 8 lanes; no lane selects a fixed tier."""
+    words = _tokens(text)
+    request_density = _bounded01(len(words) / 120.0)
     outputs = _as_list(
         semantic.get("requested_outputs")
         or semantic.get("required_outputs")
@@ -568,36 +578,120 @@ def _adaptive_output_budget(
         or semantic.get("required_competencies")
         or cognition.get("required_domains")
     )
-    continuation = bool(
+    parts = max(1, len(
+        semantic.get("task_parts")
+        or semantic.get("subtasks")
+        or semantic.get("requested_tasks")
+        or []
+    ))
+    continuation = _bounded01(bool(
         semantic.get("continuation")
         or cognition.get("continuation")
         or decision.get("continuation")
+    ))
+    structured = _bounded01(
+        (len(outputs) + len(artifacts)) / 6.0
+    )
+    dependency = _bounded01(
+        len(domains) / 8.0
+    )
+    context_strength = _bounded01(
+        bool(semantic.get("same_topic") or semantic.get("artifact_reference")
+             or cognition.get("same_topic") or decision.get("same_topic"))
+    )
+    planning = _bounded01(bool(
+        cognition.get("multi_step") or cognition.get("requires_planning")
+        or decision.get("multi_step") or decision.get("requires_planning")
+    ))
+    renderer_density = _bounded01(
+        sum(1 for item in outputs if _s(item).lower() in {
+            "table","graph","diagram","gallery","image","code","formula","link"
+        }) / 4.0
     )
 
-    # Continuous estimate: start from the information content of the request,
-    # then add capacity for required structural outputs and continuation.
-    estimate = request_tokens * 9.0
-    estimate += max(0, task_parts - 1) * 260.0
-    estimate += len(outputs) * 260.0
-    estimate += len(artifacts) * 420.0
-    estimate += min(len(domains), 8) * 140.0
-    if continuation:
-        estimate += 260.0
+    base = {
+        "meaning":      (request_density, 0.60, 0.35, 0.30, 0.45, context_strength, 0.60, 0.70),
+        "intent":       (0.65, 0.45, 0.45, 0.40, 0.50, continuation, 0.65, 0.70),
+        "context":      (0.45, 0.35, 0.30, context_strength, 0.35, continuation, 0.55, 0.65),
+        "structure":    (structured, 0.60, 0.55, 0.35, renderer_density, continuation, 0.70, 0.72),
+        "evidence":     (request_density, 0.55, 0.50, dependency, 0.40, context_strength, 0.62, 0.68),
+        "representation": (structured, renderer_density, 0.58, 0.40, renderer_density, continuation, 0.72, 0.74),
+        "economy":      (1.0-request_density, 0.40, 0.30, 0.25, 0.30, 0.20, 0.78, 0.76),
+        "completion":   (request_density, 0.55, 0.50, 0.35, 0.55, continuation, 0.82, 0.80),
+    }
 
-    # Tables/galleries/graphs are structurally denser than plain prose.
-    dense_types = {"table", "graph", "diagram", "gallery", "image", "code", "formula", "link"}
-    dense_count = sum(1 for x in outputs if _s(x).lower() in dense_types)
-    estimate += dense_count * max(180.0, request_tokens * 2.0)
+    # Small contextual refinements from already computed processor evidence.
+    base["structure"] = tuple(min(1.0, x + (0.08 if parts > 1 else 0.0))
+                               if i == 4 else x
+                               for i, x in enumerate(base["structure"]))
+    base["completion"] = tuple(min(1.0, x + (0.08 if parts > 1 else 0.0))
+                                if i in (2,4,6) else x
+                                for i, x in enumerate(base["completion"]))
+    base["economy"] = tuple(max(0.0, x - (0.08 if structured > 0.66 else 0.0))
+                             if i == 0 else x
+                             for i, x in enumerate(base["economy"]))
 
-    # Avoid an unnecessarily tiny answer for multi-output requests, while still
-    # remaining continuous and evidence-derived.
-    lower_bound = max(
-        1.0,
-        request_tokens * 4.0,
-        120.0 if (len(outputs) + len(artifacts)) >= 2 else 1.0,
+    field = {}
+    for core, values in base.items():
+        field[core] = {lane: _bounded01(values[i]) for i, lane in enumerate(QUANTUM_LANES)}
+
+    # Fused confidence = agreement among all 64 lanes, not a fixed tier.
+    values=[v for core in field.values() for v in core.values()]
+    mean=sum(values)/len(values)
+    variance=sum((v-mean)**2 for v in values)/len(values)
+    agreement=max(0.0, 1.0-math.sqrt(variance))
+    return {
+        "cores": field,
+        "core_count": len(QUANTUM_CORES),
+        "lane_count": len(QUANTUM_LANES),
+        "signal_count": len(QUANTUM_CORES)*len(QUANTUM_LANES),
+        "mean_need": mean,
+        "agreement": agreement,
+        "structured_density": structured,
+        "request_density": request_density,
+        "continuation": continuation,
+        "planning": planning,
+    }
+
+def _quantum_budget_from_64(
+    field: dict,
+    *,
+    minimum: int = OUTPUT_MIN_TOKENS,
+    maximum: int = OUTPUT_MAX_TOKENS,
+) -> int:
+    """Collapse the 64 evidence lanes to one continuous sufficient budget."""
+    mean_need = _bounded01(field.get("mean_need", 0.0))
+    agreement = _bounded01(field.get("agreement", 0.0))
+    structured = _bounded01(field.get("structured_density", 0.0))
+    request_density = _bounded01(field.get("request_density", 0.0))
+    continuation = _bounded01(field.get("continuation", 0.0))
+    planning = _bounded01(field.get("planning", 0.0))
+
+    # Continuous information need. No LOW/MEDIUM/HIGH tiers and no preset
+    # output steps. The final value may be any integer in [minimum, maximum].
+    need = (
+        0.34 * mean_need
+        + 0.20 * (1.0 - agreement)
+        + 0.20 * structured
+        + 0.10 * request_density
+        + 0.08 * continuation
+        + 0.08 * planning
     )
-    estimate = max(lower_bound, estimate)
-    return int(max(OUTPUT_MIN_TOKENS, min(OUTPUT_MAX_TOKENS, round(estimate))))
+    # Map continuously to a useful range while keeping very simple answers
+    # economical. The floor is evidence-driven, not a tier.
+    budget = minimum + (maximum - minimum) * _bounded01(need)
+    return int(round(max(minimum, min(maximum, budget))))
+
+def _adaptive_output_budget(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+) -> int:
+    """Continuous 1..8000 budget produced by the 64-signal processor field."""
+    field = _quantum_64_field(text, semantic, cognition, decision)
+    return _quantum_budget_from_64(field)
+
 
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
@@ -626,7 +720,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     goal = _s(_field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))) or text
 
     complexity = _complexity(semantic, cognition, decision, text)
-    response_budget = _adaptive_output_budget(text, semantic, cognition, decision)
+    quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
+    response_budget = _quantum_budget_from_64(quantum_budget_field)
 
     representation_constraints = _representation_constraints(
         semantic, cognition, decision
@@ -759,7 +854,11 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "response_budget": response_budget,
         "response_budget_min": OUTPUT_MIN_TOKENS,
         "response_budget_max": OUTPUT_MAX_TOKENS,
-        "response_budget_mode": "continuous_evidence_scale",
+        "response_budget_mode": "continuous_64_signal_scale",
+        "quantum_cores": 8,
+        "quantum_lanes_per_core": 8,
+        "quantum_signal_count": 64,
+        "quantum_budget_field": quantum_budget_field,
     }
     request.dialogue_contract = dialogue_contract
     request.response_decision = decision
@@ -778,7 +877,11 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "response_budget": response_budget,
         "response_budget_min": OUTPUT_MIN_TOKENS,
         "response_budget_max": OUTPUT_MAX_TOKENS,
-        "response_budget_mode": "continuous_evidence_scale",
+        "response_budget_mode": "continuous_64_signal_scale",
+        "quantum_cores": 8,
+        "quantum_lanes_per_core": 8,
+        "quantum_signal_count": 64,
+        "quantum_budget_field": quantum_budget_field,
         "requested_outputs": list(outputs),
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
@@ -1238,7 +1341,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "provider_calls": 1,
         "response_budget": getattr(request, "response_output_tokens", 0),
         "response_budget_range": [OUTPUT_MIN_TOKENS, OUTPUT_MAX_TOKENS],
-        "response_budget_mode": "continuous_evidence_scale",
+        "quantum_cores": 8,
+        "quantum_lanes_per_core": 8,
+        "quantum_signal_count": 64,
+        "response_budget_mode": "continuous_64_signal_scale",
+        "quantum_cores": 8,
+        "quantum_lanes_per_core": 8,
+        "quantum_signal_count": 64,
+        "quantum_budget_field": quantum_budget_field,
         "experience": True,
         "experience_manager": True,
         "goal_engine": True,
