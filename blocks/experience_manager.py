@@ -1,776 +1,149 @@
-# =====================================================
-# 🧠 APRIL EXECUTION STABILIZER CORE
-# =====================================================
-
 """
-APRIL EXECUTION STABILIZER CORE
+APRIL — EXPERIENCE MANAGER / QUANTUM USER-STATE BRIDGE V1
 
-APRIL_FILE_ID:
-APRIL_EXECUTION_STABILIZER_CORE_V2
+Role:
+    Per-user short-term experience state.
 
-ROLE:
-TEMPORARY_EXECUTION_CONTINUITY_AND_ANTI_LOOP_SUPPORT
-
-INPUT:
-EXECUTION_STATE
-LAST_ACTION
-EXECUTION_RESULT
-MODALITY_CONTEXT
-RETRY_CONTEXT
-
-OUTPUT:
-TEMPORARY_EXECUTION_BUFFER
-ANTI_LOOP_STABILIZATION
-RETRY_SUPPRESSION_STATE
-EXECUTION_CONTINUITY_SUPPORT
-
-THIS FILE IS:
-- temporary execution continuity layer
-- anti-loop stabilizer
-- retry suppression helper
-- renderer stabilization support
-- modality cooldown helper
-- lightweight execution continuity layer
-
-THIS FILE IS NOT:
-- execution memory
-- routing memory
-- cognition engine
-- orchestration authority
-- trajectory memory
-- retry chaos system
-
-GOLDEN APRIL PRINCIPLES:
-- lightweight before heavy
-- stabilization before retry
-- continuity before recursion
-- executor-safe architecture
-- no orchestration duplication
-- no execution noise accumulation
+It does not become a second memory system.
+It stores only compact JSON-safe experience signals and short stabilization
+history. Final reasoning remains in QUANTUM_PROCESSOR.
 """
 
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List
 import json
-import os
 import time
-from datetime import datetime
 
-# =====================================================
-# 🔥 FILE ID
-# =====================================================
 
-APRIL_FILE_ID = (
-    "APRIL_EXECUTION_STABILIZER_CORE_V2"
-)
+APRIL_FILE_ID = "APRIL_EXPERIENCE_MANAGER_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
+DATA_FILE = Path("experience.json")
+MAX_EVENTS = 8
+EVENT_TTL = 60 * 60 * 6
 
-EXECUTION_STABILIZER_TASK_CHANNEL = {
 
-    "channel":
-        "execution_stabilizer_task_channel",
+def _text(value: Any) -> str:
+    return str(value or "").strip()
 
-    "isolated":
-        True
-}
 
-EXECUTION_STABILIZER_RESPONSE_CHANNEL = {
+def _safe_dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
 
-    "channel":
-        "execution_stabilizer_response_channel",
 
-    "isolated":
-        True
-}
-
-# =====================================================
-# 🔥 CONFIG
-# =====================================================
-
-DATA_FILE = "experience.json"
-
-# =====================================================
-# 🔥 STABILIZATION LIMITS
-# =====================================================
-
-MAX_ACTIONS = 5
-
-EXECUTION_TTL = 120
-
-# =====================================================
-# 🔥 MODALITIES
-# =====================================================
-
-VISUAL_MODALITIES = {
-
-    "graph",
-    "diagram",
-    "formula",
-    "scene",
-    "renderer",
-    "image",
-    "visual"
-}
-
-# =====================================================
-# 🔥 MACHINE LOGGING
-# =====================================================
-
-def build_input_log():
-
-    """
-    INPUT MACHINE TRACE
-
-    Used internally by:
-    - Executor
-    - Governance
-    - diagnostics
-    - retry stabilization
-    """
-
-    return {
-
-        "file_id":
-            APRIL_FILE_ID,
-
-        "event":
-            "execution_stabilizer_input",
-
-        "channel":
-            EXECUTION_STABILIZER_TASK_CHANNEL,
-
-        "timestamp":
-            datetime.utcnow().isoformat(),
-
-        "machine_only":
-            True
-    }
-
-
-def build_output_log(
-    user_id,
-    execution_state
-):
-
-    """
-    OUTPUT MACHINE TRACE
-
-    Used internally by:
-    - Executor
-    - analytics
-    - anti-loop diagnostics
-    """
-
-    return {
-
-        "file_id":
-            APRIL_FILE_ID,
-
-        "event":
-            "execution_stabilizer_output",
-
-        "channel":
-            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
-
-        "user_id":
-            str(user_id),
-
-        "execution_state":
-            execution_state,
-
-        "timestamp":
-            datetime.utcnow().isoformat(),
-
-        "machine_only":
-            True
-    }
-
-# =====================================================
-# 🔥 HELPERS
-# =====================================================
-
-def normalize_text(
-    value
-):
-
-    return str(
-        value or ""
-    ).strip()
-
-
-def normalize_lower(
-    value
-):
-
-    return normalize_text(
-        value
-    ).lower()
-
-# =====================================================
-# 🔥 LOAD
-# =====================================================
-
-def load_experience():
-
-    """
-    Safe stabilization loading.
-    """
-
-    if not os.path.exists(
-        DATA_FILE
-    ):
-
-        return {}
-
-    try:
-
-        with open(
-
-            DATA_FILE,
-
-            "r",
-
-            encoding="utf-8"
-
-        ) as f:
-
-            return json.load(f)
-
-    except Exception as e:
-
-        print(
-            "🔥 LOAD ERROR:",
-            e
-        )
-
-        return {}
-
-# =====================================================
-# 🔥 SAVE
-# =====================================================
-
-def save_experience(
-    data
-):
-
-    """
-    Safe stabilization saving.
-    """
-
-    try:
-
-        with open(
-
-            DATA_FILE,
-
-            "w",
-
-            encoding="utf-8"
-
-        ) as f:
-
-            json.dump(
-
-                data,
-
-                f,
-
-                ensure_ascii=False,
-
-                indent=2
-            )
-
-    except Exception as e:
-
-        print(
-            "🔥 SAVE ERROR:",
-            e
-        )
-
-# =====================================================
-# 🔥 CLEANUP
-# =====================================================
-
-def cleanup_old_actions(
-    actions
-):
-
-    """
-    DeepHub cleanup philosophy:
-
-    DO NOT:
-    - store long execution history
-    - preserve retry loops
-    - accumulate orchestration noise
-
-    ONLY:
-    - maintain short stabilization window
-    """
-
-    if not isinstance(
-        actions,
-        list
-    ):
-
-        return []
-
-    now = time.time()
-
-    cleaned = []
-
-    for action in actions:
-
-        timestamp = action.get(
-            "timestamp",
-            0
-        )
-
-        if (
-
-            now - timestamp
-
-            <= EXECUTION_TTL
-        ):
-
-            cleaned.append(
-                action
-            )
-
-    return cleaned[
-        -MAX_ACTIONS:
-    ]
-
-# =====================================================
-# 🔥 MODALITY
-# =====================================================
-
-def detect_modality(
-    last
-):
-
-    """
-    Detects execution modality.
-    """
-
-    action_type = normalize_lower(
-
-        last.get(
-            "type",
-            "unknown"
-        )
-    )
-
-    if action_type in VISUAL_MODALITIES:
-
-        return "renderer"
-
-    return "execution"
-
-# =====================================================
-# 🔥 EXECUTION STATE
-# =====================================================
-
-def build_execution_state(
-    last
-):
-
-    """
-    Machine-readable stabilization state.
-
-    IMPORTANT:
-    This is NOT cognition memory.
-    """
-
-    action_type = normalize_lower(
-
-        last.get(
-            "type",
-            "unknown"
-        )
-    )
-
-    status = normalize_lower(
-
-        last.get(
-            "status",
-            "unknown"
-        )
-    )
-
-    modality = detect_modality(
-        last
-    )
-
-    return {
-
-        # =================================================
-        # 🔥 CORE
-        # =====================================================
-
-        "modality":
-            modality,
-
-        "action_class":
-            action_type,
-
-        "status":
-            status,
-
-        # =================================================
-        # 🔥 STABILIZATION
-        # =====================================================
-
-        "renderer_related":
-
-            modality == "renderer",
-
-        "execution_related":
-
-            modality == "execution",
-
-        "success":
-
-            status == "success",
-
-        "failed":
-
-            status == "failed",
-
-        "retry":
-
-            status in [
-
-                "retry",
-                "failed"
-            ],
-
-        # =================================================
-        # 🔥 CONTINUITY
-        # =====================================================
-
-        "continuation_safe":
-            True,
-
-        "temporary":
-            True,
-
-        "stabilizer":
-            True,
-
-        # =================================================
-        # 🔥 META
-        # =====================================================
-
-        "timestamp":
-            time.time()
-    }
-
-# =====================================================
-# 🔥 EXECUTION ANALYSIS
-# =====================================================
-
-def analyze_execution_pressure(
-    actions
-):
-
-    """
-    Lightweight anti-loop analysis.
-    """
-
-    if not actions:
-
+def _sanitize(value: Any, depth: int = 0) -> Any:
+    """JSON-safe, cycle-resistant snapshot."""
+    if depth > 5:
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
         return {
-
-            "retry_pressure":
-                0.0,
-
-            "loop_risk":
-                False
+            str(k): _sanitize(v, depth + 1)
+            for k, v in list(value.items())[:80]
+            if not str(k).startswith("_")
         }
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize(v, depth + 1) for v in list(value)[:80]]
+    return _text(value)
 
-    failures = 0
 
-    retries = 0
+def load_experience_store() -> Dict[str, Any]:
+    if not DATA_FILE.exists():
+        return {}
+    try:
+        with DATA_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    action_classes = []
 
-    for action in actions[-3:]:
-
-        if action.get(
-            "failed"
-        ):
-
-            failures += 1
-
-        if action.get(
-            "retry"
-        ):
-
-            retries += 1
-
-        action_class = action.get(
-            "action_class"
+def save_experience_store(data: Dict[str, Any]) -> bool:
+    try:
+        safe = _sanitize(data)
+        temp = DATA_FILE.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(safe, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
+        temp.replace(DATA_FILE)
+        return True
+    except Exception:
+        return False
 
-        if action_class:
 
-            action_classes.append(
-                action_class
-            )
+def _cleanup(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    now = time.time()
+    live = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        timestamp = event.get("timestamp", now)
+        try:
+            keep = now - float(timestamp) <= EVENT_TTL
+        except Exception:
+            keep = False
+        if keep:
+            live.append(event)
+    return live[-MAX_EVENTS:]
 
-    repeated_flow = (
 
-        len(set(action_classes)) == 1
-        and len(action_classes) >= 3
-    )
-
-    pressure = min(
-
-        (
-            failures * 0.35
-            + retries * 0.2
-        ),
-
-        1.0
-    )
-
+def build_experience_state(
+    user_id: Any,
+    evidence: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    evidence = _safe_dict(evidence)
     return {
-
-        "retry_pressure":
-            round(
-                pressure,
-                3
-            ),
-
-        "loop_risk":
-            repeated_flow and failures >= 2
+        "user_id": str(user_id),
+        "signals": _sanitize(evidence.get("signals", {})),
+        "active_flow": _sanitize(evidence.get("active_flow", {})),
+        "history_overlap": evidence.get("signals", {}).get("history_overlap", 0.0),
+        "temporary": True,
+        "machine_only": True,
+        "decision_owner": DECISION_OWNER,
     }
 
-# =====================================================
-# 🔥 EXECUTION UPDATE
-# =====================================================
 
 def update_experience(
-    user_id,
-    state
-):
+    user_id: Any,
+    evidence: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    store = load_experience_store()
+    uid = str(user_id)
+    bucket = store.setdefault(uid, {"events": []})
 
-    """
-    Lightweight execution stabilization.
+    state = build_experience_state(uid, evidence)
+    state["timestamp"] = time.time()
+    bucket["events"] = _cleanup(_safe_dict(bucket).get("events", []) + [state])
 
-    Flow:
-
-    executor action
-        ↓
-    stabilization snapshot
-        ↓
-    anti-loop continuity
-        ↓
-    temporary execution buffer
-    """
-
-    build_input_log()
-
-    data = load_experience()
-
-    user_id = str(
-        user_id
-    )
-
-    if user_id not in data:
-
-        data[user_id] = {
-
-            "actions": []
-        }
-
-    last = state.get(
-        "last_action"
-    )
-
-    if not last:
-
-        print(
-            "⚠️ last_action отсутствует"
-        )
-
-        return {
-
-            "success": False,
-
-            "reason":
-                "missing_last_action",
-
-            "channel":
-                EXECUTION_STABILIZER_RESPONSE_CHANNEL
-        }
-
-    # =================================================
-    # 🔥 EXECUTION STATE
-    # =====================================================
-
-    execution_state = (
-        build_execution_state(
-            last
-        )
-    )
-
-    print(
-        "🧠 EXECUTION STABILIZER:",
-        execution_state
-    )
-
-    # =================================================
-    # 🔥 BUFFER
-    # =====================================================
-
-    data[user_id][
-        "actions"
-    ].append(
-        execution_state
-    )
-
-    # =================================================
-    # 🔥 CLEANUP
-    # =====================================================
-
-    data[user_id][
-        "actions"
-    ] = cleanup_old_actions(
-
-        data[user_id][
-            "actions"
-        ]
-    )
-
-    # =================================================
-    # 🔥 SAVE
-    # =====================================================
-
-    save_experience(
-        data
-    )
-
-    # =================================================
-    # 🔥 ANALYTICS
-    # =====================================================
-
-    analytics = analyze_execution_pressure(
-
-        data[user_id][
-            "actions"
-        ]
-    )
-
-    build_output_log(
-
-        user_id,
-
-        execution_state
-    )
-
-    # =================================================
-    # 🔥 RESPONSE
-    # =====================================================
-
+    saved = save_experience_store(store)
     return {
-
-        "success":
-            True,
-
-        "channel":
-            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
-
-        "stabilization_active":
-            True,
-
-        "temporary_memory":
-            True,
-
-        "retry_pressure":
-            analytics.get(
-                "retry_pressure",
-                0.0
-            ),
-
-        "loop_risk":
-            analytics.get(
-                "loop_risk",
-                False
-            ),
-
-        "stored_actions":
-            len(
-                data[user_id][
-                    "actions"
-                ]
-            ),
-
-        "machine_only":
-            True
+        "success": saved,
+        "user_id": uid,
+        "events": len(bucket["events"]),
+        "state": _sanitize(state),
+        "temporary": True,
+        "machine_only": True,
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
     }
 
-# =====================================================
-# 🔥 EXECUTOR SNAPSHOT
-# =====================================================
 
-def build_executor_stabilization_snapshot(
-    user_id
-):
-
-    """
-    Executor stabilization snapshot.
-
-    Used internally by:
-    - Executor
-    - Governance
-    - retry suppression
-    - diagnostics
-    """
-
-    data = load_experience()
-
-    user_id = str(user_id)
-
-    actions = data.get(
-        user_id,
-        {}
-    ).get(
-        "actions",
-        []
-    )
-
-    analytics = analyze_execution_pressure(
-        actions
-    )
-
+def get_experience(
+    user_id: Any,
+) -> Dict[str, Any]:
+    store = load_experience_store()
+    uid = str(user_id)
+    bucket = _safe_dict(store.get(uid))
+    events = _cleanup(bucket.get("events", []))
     return {
-
-        "channel":
-            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
-
-        "file_id":
-            APRIL_FILE_ID,
-
-        "actions":
-            actions,
-
-        "retry_pressure":
-            analytics.get(
-                "retry_pressure",
-                0.0
-            ),
-
-        "loop_risk":
-            analytics.get(
-                "loop_risk",
-                False
-            ),
-
-        "temporary_memory":
-            True,
-
-        "machine_only":
-            True
+        "user_id": uid,
+        "latest": events[-1] if events else {},
+        "events": events,
+        "temporary": True,
+        "machine_only": True,
+        "decision_owner": DECISION_OWNER,
     }
