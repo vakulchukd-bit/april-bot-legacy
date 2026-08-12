@@ -212,6 +212,52 @@ def safe_truncate(
 
 
 
+
+def _json_safe_snapshot(value, _active=None):
+    """Detach transport/state objects without flattening rich renderer payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if _active is None:
+        _active = set()
+
+    oid = id(value)
+    if oid in _active:
+        return {"__cycle__": True}
+
+    if is_dataclass(value):
+        try:
+            value = {
+                field_name: getattr(value, field_name)
+                for field_name in value.__dataclass_fields__
+            }
+        except Exception:
+            return str(value)
+
+    if isinstance(value, dict):
+        _active.add(oid)
+        try:
+            return {
+                str(key): _json_safe_snapshot(item, _active)
+                for key, item in value.items()
+                if not str(key).startswith("_")
+            }
+        finally:
+            _active.remove(oid)
+
+    if isinstance(value, (list, tuple, set)):
+        _active.add(oid)
+        try:
+            return [_json_safe_snapshot(item, _active) for item in value]
+        finally:
+            _active.remove(oid)
+
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
 def scene_contract_to_dict(scene_contract):
     if scene_contract is None:
         return None
@@ -234,7 +280,10 @@ def scene_contract_to_dict(scene_contract):
 
     if is_dataclass(scene_contract):
         try:
-            return asdict(scene_contract)
+            return {
+                field_name: getattr(scene_contract, field_name)
+                for field_name in scene_contract.__dataclass_fields__
+            }
         except Exception:
             pass
 
@@ -880,38 +929,18 @@ def synchronize_scene_continuity(
     if not has_visual:
         return
 
-    state["active_visual_scene"] = {
-
-        "updated":
-            datetime.now().isoformat(),
-
-        "scene":
-            result.get("scene") or (scene_contract.get("scene") if isinstance(scene_contract, dict) else None),
-
-        "layout":
-            result.get("layout") or (scene_contract.get("layout") if isinstance(scene_contract, dict) else None),
-
-        "visual":
-            result.get("visual") or (scene_contract.get("visual") if isinstance(scene_contract, dict) else None),
-
-        "graph":
-            result.get("graph") or (scene_contract.get("graph") if isinstance(scene_contract, dict) else None),
-
-        "formula":
-            result.get("formula") or (scene_contract.get("formula") if isinstance(scene_contract, dict) else None),
-
-        "gallery":
-            result.get("gallery") or (scene_contract.get("gallery") if isinstance(scene_contract, dict) else None),
-
-        "render_blocks":
-            result.get("render_blocks") or (scene_contract.get("render_blocks") if isinstance(scene_contract, dict) else []),
-
-        "scene_contract":
-            scene_contract,
-
-        "continuity_active":
-            True
-    }
+    state["active_visual_scene"] = _json_safe_snapshot({
+        "updated": datetime.now().isoformat(),
+        "scene": result.get("scene") or (scene_contract.get("scene") if isinstance(scene_contract, dict) else None),
+        "layout": result.get("layout") or (scene_contract.get("layout") if isinstance(scene_contract, dict) else None),
+        "visual": result.get("visual") or (scene_contract.get("visual") if isinstance(scene_contract, dict) else None),
+        "graph": result.get("graph") or (scene_contract.get("graph") if isinstance(scene_contract, dict) else None),
+        "formula": result.get("formula") or (scene_contract.get("formula") if isinstance(scene_contract, dict) else None),
+        "gallery": result.get("gallery") or (scene_contract.get("gallery") if isinstance(scene_contract, dict) else None),
+        "render_blocks": result.get("render_blocks") or (scene_contract.get("render_blocks") if isinstance(scene_contract, dict) else []),
+        "scene_contract": scene_contract,
+        "continuity_active": True,
+    })
 
 # =========================================================
 # 🔥 BLOCK NORMALIZER
@@ -1156,7 +1185,13 @@ def april_web_chat():
     try:
 
         data = request.json or {}
-        user_id = str(data.get("user_id", "web_user"))
+        user_id = str(data.get("user_id", "")).strip()
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "user_id required"
+            }), 400
+
         text = normalize_voice_text(data.get("text", ""))
 
         result = asyncio.run(process_april_request(user_id, text))
