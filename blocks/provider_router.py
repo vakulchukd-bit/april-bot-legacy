@@ -9,7 +9,7 @@ import time
 from typing import Any, Dict, Optional
 
 from openai import OpenAI
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest
+from blocks.C_ARTIFACT_CONTRACT import BaseArtifact, MachineRequest
 
 # ============================================================
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
@@ -74,14 +74,16 @@ Rules:
 - When the request is independent, do not invent old context.
 - When it is a continuation/reference, use only the supplied relevant context.
 - Preserve the complete logical answer; never cut a sentence or scene for style.
-- Treat requested_outputs as a canonical multi-output plan, not as mutually exclusive modes.
-- If a structured representation is requested (for example table, graph, diagram, formula),
-  place its structured data in render_blocks/artifacts and DO NOT duplicate the same structure
-  as a second answer or as repeated prose tables.
-- The answer may briefly explain the structured result, but must not reproduce the full artifact payload
-  inside answer/content when a dedicated render block exists.
-- Emit at most one canonical text render block. Emit at most one block per requested structured representation
-  unless the request genuinely asks for multiple independent artifacts of the same type.
+- Treat requested_outputs as the canonical multi-output plan already computed by April.
+- Do not invent an output type that is absent from requested_outputs.
+- If one or more structured representations are requested (table, graph, diagram, formula, link, etc.),
+  emit structured data for those representations in render_blocks and/or artifacts using the canonical
+  artifact payload shape. Do not encode the same structured payload twice.
+- The answer may briefly explain a structured result, but never reproduce the complete artifact payload
+  as narrative prose when a dedicated render block exists.
+- Emit one canonical text block plus at most one canonical block per requested structured representation,
+  unless the plan explicitly contains multiple independent items of the same type.
+- Every structured block should carry: type, renderer, viewer, payload, scene_contract=true.
 - Keep Markdown and inline LaTeX inside text unless a separate renderer is explicitly required.
 - Never produce a second answer.
 - Never call another model.
@@ -332,38 +334,26 @@ def _derive_complexity(payload: dict[str, Any]) -> str:
     return "LOW"
 
 def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int:
+    """Resolve the single canonical output budget produced by Quantum Processor.
+
+    ``requested`` is retained only for signature compatibility with older callers
+    and is deliberately ignored. Provider must never let a compatibility argument
+    replace the processor's continuous budget with an old fixed ceiling.
     """
-    Use only the processor-calculated continuous response budget.
+    del requested
 
-    No LOW/MEDIUM/HIGH ceiling is applied here. Provider is the execution
-    boundary; Quantum Processor is the authority that decided the budget.
-    """
-    candidates: list[int] = []
+    sources = (
+        payload.get("response_output_tokens"),
+        ((payload.get("constraints") or {}).get("metadata") or {}).get("response_budget")
+            if isinstance(payload.get("constraints"), dict) else None,
+        (payload.get("quantum_state") or {}).get("response_budget")
+            if isinstance(payload.get("quantum_state"), dict) else None,
+    )
+    for value in sources:
+        if isinstance(value, int) and value > 0:
+            return min(max(int(value), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
 
-    if isinstance(requested, int) and requested > 0:
-        candidates.append(int(requested))
-
-    embedded = payload.get("response_output_tokens")
-    if isinstance(embedded, int) and embedded > 0:
-        candidates.append(int(embedded))
-
-    constraints = payload.get("constraints") or {}
-    metadata = constraints.get("metadata") if isinstance(constraints, dict) else {}
-    if isinstance(metadata, dict):
-        budget = metadata.get("response_budget")
-        if isinstance(budget, int) and budget > 0:
-            candidates.append(int(budget))
-
-    quantum = payload.get("quantum_state")
-    if isinstance(quantum, dict):
-        budget = quantum.get("response_budget")
-        if isinstance(budget, int) and budget > 0:
-            candidates.append(int(budget))
-
-    chosen = candidates[0] if candidates else 1
-    # Provider never invents a tier. If the processor supplied a canonical budget,
-    # that exact value wins. Otherwise the minimal safe value is used.
-    return min(max(int(chosen), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+    return MIN_OUTPUT_TOKENS
 
 
 def _render_block_renderer(block_type: str) -> str:
@@ -436,6 +426,166 @@ def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) 
         i += 1
     cleaned = "\n".join(out).strip()
     return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
+
+def _artifact_type_and_payload(raw: Any) -> tuple[str, dict[str, Any], str, str, str]:
+    """Read provider artifact dictionaries without inventing a new route."""
+    if isinstance(raw, BaseArtifact):
+        artifact_type = _safe_text(getattr(getattr(raw, "metadata", None), "artifact_type", ""))
+        data = dict(getattr(raw, "data", {}) or {})
+        signal = data.get("render_signal") if isinstance(data.get("render_signal"), dict) else {}
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        if not payload:
+            payload = {
+                k: v for k, v in data.items()
+                if k not in {"answer", "content", "summary", "render_signal", "presentation", "machine_only", "human_visible"}
+            }
+        content = normalize_response_text(
+            data.get("content") or data.get("answer") or data.get("summary") or ""
+        )
+        artifact_id = _safe_text(getattr(getattr(raw, "metadata", None), "artifact_id", ""))
+        renderer = _safe_text(
+            getattr(getattr(raw, "render", None), "web_block", "")
+            or signal.get("renderer")
+            or ""
+        )
+        return artifact_type, payload, content, renderer, artifact_id
+
+    if not isinstance(raw, dict):
+        return "", {}, _safe_text(raw), "", ""
+
+    data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+    artifact_type = _safe_text(
+        raw.get("artifact_type")
+        or raw.get("type")
+        or data.get("artifact_type")
+        or data.get("type")
+    ).lower()
+    signal = data.get("render_signal") if isinstance(data.get("render_signal"), dict) else {}
+    payload = (
+        raw.get("payload")
+        if isinstance(raw.get("payload"), dict)
+        else data.get("payload")
+        if isinstance(data.get("payload"), dict)
+        else {}
+    )
+    if not payload:
+        payload = {
+            k: v for k, v in data.items()
+            if k not in {
+                "answer", "content", "summary", "render_signal",
+                "presentation", "metadata", "artifact_id",
+                "artifact_type", "type", "renderer", "viewer",
+                "machine_only", "human_visible",
+            }
+        }
+    content = normalize_response_text(
+        raw.get("content")
+        or raw.get("answer")
+        or raw.get("summary")
+        or data.get("content")
+        or data.get("answer")
+        or data.get("summary")
+        or signal.get("content")
+        or ""
+    )
+    renderer = _safe_text(
+        raw.get("renderer")
+        or data.get("renderer")
+        or signal.get("renderer")
+    )
+    artifact_id = _safe_text(
+        raw.get("artifact_id")
+        or data.get("artifact_id")
+        or signal.get("artifact_id")
+    )
+    return artifact_type, payload, content, renderer, artifact_id
+
+
+def _materialize_artifacts_as_render_blocks(
+    artifacts: Any,
+    existing_blocks: list[dict],
+) -> list[dict]:
+    """
+    Project provider artifacts into the same canonical render-block shape used by
+    C_ARTIFACT_CONTRACT. This is materialization, not a second route.
+    """
+    if not isinstance(artifacts, list) or not artifacts:
+        return list(existing_blocks or [])
+
+    result = list(existing_blocks or [])
+    existing_keys = {
+        (
+            _safe_text(block.get("type") or block.get("artifact_type")).lower(),
+            _safe_text(block.get("artifact_id") or block.get("render_id")),
+        )
+        for block in result
+        if isinstance(block, dict)
+    }
+    existing_payload_keys = {
+        (
+            _safe_text(block.get("type") or block.get("artifact_type")).lower(),
+            json.dumps(
+                block.get("payload")
+                if isinstance(block.get("payload"), dict)
+                else block.get("table")
+                or block.get("graph")
+                or block.get("url")
+                or block.get("content"),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )[:8000],
+        )
+        for block in result
+        if isinstance(block, dict)
+    }
+
+    renderer_map = {
+        "text": "TextBlock",
+        "markdown": "MarkdownBlock",
+        "table": "TableBlock",
+        "graph": "GraphBlock",
+        "diagram": "GraphBlock",
+        "formula": "FormulaBlock",
+        "gallery": "GalleryBlock",
+        "image": "GalleryBlock",
+        "link": "LinkCard",
+        "code": "CodeBlock",
+        "function": "FunctionBlock",
+    }
+
+    for raw in artifacts:
+        artifact_type, payload, content, renderer, artifact_id = _artifact_type_and_payload(raw)
+        if not artifact_type:
+            continue
+        renderer = renderer or renderer_map.get(artifact_type, "TextBlock")
+        key = (artifact_type, artifact_id)
+        payload_key = (
+            artifact_type,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:8000],
+        )
+        if (artifact_id and key in existing_keys) or payload_key in existing_payload_keys:
+            continue
+        result.append({
+            "type": artifact_type,
+            "artifact_type": artifact_type,
+            "renderer": renderer,
+            "viewer": renderer,
+            "content": content,
+            "text": content,
+            "payload": payload,
+            "artifact": raw,
+            "artifact_id": artifact_id,
+            "scene_contract": True,
+            "provider_payload": True,
+            "canonical_provider_payload": True,
+        })
+        existing_keys.add(key)
+        existing_payload_keys.add(payload_key)
+
+    return result
 
 
 def _dedupe_render_blocks(blocks: list[dict], answer: str, requested_outputs: list[str]) -> list[dict]:
@@ -864,9 +1014,19 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     mr["response"] = normalize_response_text(mr.get("response") or answer)
 
     original_blocks = mr.get("render_blocks") or []
-    mr["render_blocks"] = _dedupe_render_blocks(original_blocks, answer, requested_outputs)
-
     mr["artifacts"] = list(mr.get("artifacts") or [])
+
+    # Structured artifacts are first-class output. If the model returned them
+    # without render_blocks, project them into the canonical scene stream once.
+    original_blocks = _materialize_artifacts_as_render_blocks(
+        mr["artifacts"],
+        original_blocks,
+    )
+    mr["render_blocks"] = _dedupe_render_blocks(
+        original_blocks,
+        answer,
+        requested_outputs,
+    )
     mr.setdefault("scene", {})
     mr.setdefault("scene_plan", list(requested_outputs))
     mr.setdefault("render_priority", list(requested_outputs))
@@ -902,8 +1062,11 @@ def provider_transport_audit(contract: dict) -> dict:
         "summary_length": len(mr.get("summary") or ""),
         "artifact_count": len(mr.get("artifacts") or []),
         "render_block_count": len(mr.get("render_blocks") or []),
-        "text_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() == "text"),
+        "text_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() in {"text", "markdown"}),
         "table_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() == "table"),
+        "graph_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() in {"graph", "diagram", "visual", "renderer_scene"}),
+        "formula_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() == "formula"),
+        "artifact_materialization": True,
         "model": APRIL_QUANTUM_PROVIDER_MODEL,
         "provider_calls": 1,
         "single_route": True,
@@ -975,7 +1138,10 @@ async def generate_text(messages: Any, temperature: Any = None,
 
     try:
         complexity = _derive_complexity(source_request)
-        output_tokens = _derive_output_tokens(source_request, max_output_tokens)
+        # Canonical budget belongs to the MachineRequest/Quantum Processor.
+        # The optional argument is accepted for compatibility but never outranks
+        # the request's own response budget.
+        output_tokens = _derive_output_tokens(source_request, None)
         if not (MIN_OUTPUT_TOKENS <= output_tokens <= MAX_OUTPUT_TOKENS):
             raise RuntimeError("Provider budget outside canonical 1..8000 range")
         normalized_input = normalize_provider_input(source_request)
