@@ -87,6 +87,9 @@ def _b(value: Any) -> bool:
     return bool(value)
 
 
+def _s(value: Any) -> str:
+    return str(value or "").strip()
+
 def _f(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -125,29 +128,64 @@ def _representation_set(semantic: Dict[str, Any], representation: Dict[str, Any]
 
 def _representation_signals(semantic: Dict[str, Any], cognition: Dict[str, Any]) -> Dict[str, Any]:
     representation = _d(cognition.get("representation_understanding"))
-    requested = (
-        semantic.get("requested_representation")
-        or semantic.get("current_representation")
-        or representation.get("requested_representation")
+    constraints = _d(
+        semantic.get("representation_constraints")
+        or _d(semantic.get("semantic_evidence")).get("representation_constraints")
     )
-    candidates = _representation_set(semantic, representation)
+    blocked = {_s(x).lower() for x in (constraints.get("negative", []) or []) if _s(x)}
 
-    # These are evidence weights, not renderer triggers.
-    weights = {name: 0.0 for name in ("table", "graph", "diagram", "formula", "gallery", "link", "code", "text")}
+    current_positive = []
+    for source in (
+        constraints.get("positive", []),
+        semantic.get("requested_representations", []),
+        semantic.get("required_representations", []),
+    ):
+        values = [source] if isinstance(source, str) else list(source or []) if isinstance(source, (list, tuple, set)) else []
+        for value in values:
+            name = _s(value).lower()
+            if name and name not in blocked and name not in current_positive:
+                current_positive.append(name)
+
+    candidates = _representation_set(semantic, representation)
+    candidates = [x for x in candidates if x not in blocked]
+    for item in current_positive:
+        if item not in candidates:
+            candidates.append(item)
+
+    weights = {
+        name: 0.0
+        for name in ("table", "graph", "diagram", "formula", "gallery", "link", "code", "image", "text")
+    }
     for item in candidates:
         if item in weights:
-            weights[item] += 0.75
-    if requested in weights:
-        weights[requested] += 0.25
+            weights[item] += 0.70
+    for item in current_positive:
+        if item in weights:
+            weights[item] += 0.35
+    if current_positive or candidates:
+        weights["text"] += 0.35
+    for item in blocked:
+        if item in weights:
+            weights[item] = 0.0
+
+    requested_outputs = [
+        name for name, score in sorted(
+            weights.items(), key=lambda kv: kv[1], reverse=True
+        )
+        if score >= 0.50 and name not in blocked
+    ]
 
     return {
-        "requested": requested,
+        "requested": requested_outputs[0] if requested_outputs else None,
+        "requested_outputs": requested_outputs,
         "candidates": candidates,
+        "blocked": sorted(blocked),
         "weights": {k: _clamp(v) for k, v in weights.items()},
         "text_explanation": _b(representation.get("prefer_text_explanation")),
         "interaction_mode": representation.get("interaction_mode"),
+        "current_request_authoritative": True,
+        "source": "quantum_representation_evidence",
     }
-
 
 def _continuity_signals(cognition: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
     continuity = _d(cognition.get("continuity_state"))
@@ -216,6 +254,8 @@ def _render_score(
         score += 0.20
     if representation.get("requested"):
         score += 0.25
+    if representation.get("requested_outputs"):
+        score += min(0.25, 0.10 * len(representation["requested_outputs"]))
     if representation.get("candidates"):
         score += 0.15
     if dialogue.get("explanation") and representation.get("text_explanation"):
@@ -359,12 +399,18 @@ def build_response_decision(
 
     required = semantic.get("required_representations", [])
     required = list(required) if isinstance(required, (list, tuple, set)) else []
-    if representation["requested"]:
-        required.append(representation["requested"])
+    required.extend(representation.get("requested_outputs", []))
+
+    blocked = set(representation.get("blocked", []))
+    required = [x for x in required if x not in blocked]
 
     candidate = semantic.get("candidate_representations", [])
     candidate = list(candidate) if isinstance(candidate, (list, tuple, set)) else []
     candidate.extend(representation["candidates"])
+    candidate = [x for x in candidate if x not in blocked]
+
+    if required and "text" not in required:
+        required.insert(0, "text")
 
     contract = _d(semantic.get("dialogue_contract"))
     active_goal = (
@@ -434,6 +480,9 @@ def build_response_decision(
 
         "preferred_representation": representation["requested"],
         "requested_representation": representation["requested"],
+        "requested_outputs": _unique(required),
+        "required_outputs": _unique(required),
+        "blocked_representations": sorted(blocked),
         "required_representations": _unique(required),
         "candidate_representations": _unique(candidate),
 
@@ -536,6 +585,8 @@ def build_response_decision(
         "quantum_evidence": {
             "current_request": semantic.get("normalized_text"),
             "representation": representation,
+            "required_outputs": _unique(required),
+            "blocked_representations": sorted(blocked),
             "dialogue": dialogue,
             "continuity": continuity,
             "scores": {
