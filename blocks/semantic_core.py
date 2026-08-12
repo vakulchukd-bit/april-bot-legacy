@@ -80,8 +80,8 @@ DISCUSSION_WORDS = (
 )
 REFLECTION_WORDS = ("почему","объясни","рассуждай","размышляй","как ты пришла")
 SPACE_WORDS = ("пространство","scene","renderer","блок","галерея","график")
-GRAPH_WORDS = ("график","построй график","функция","plot","chart")
-TABLE_WORDS = ("таблица","таблицу","таблич","периодическая","менделеева","значения")
+GRAPH_WORDS = ("график","построй график","графике","функция","plot","chart")
+TABLE_WORDS = ("таблица","таблицу","таблицы","таблич","периодическая","менделеева","значения","сводка","сравнение в виде таблицы")
 
 def detect_representation_constraints(text):
     value = (text or "").lower()
@@ -219,11 +219,8 @@ def _state_signals(state, active_flow, dialog_state, history):
 def _signal_fusion(text, signals, interpreted):
     """Fuse independent evidence; never collapse it into a route decision."""
     representation_constraints = detect_representation_constraints(text)
-    requested = (
-        representation_constraints["positive"][0]
-        if representation_constraints["positive"]
-        else None
-    )
+    requested_representations = list(representation_constraints.get("positive") or [])
+    requested = requested_representations[0] if requested_representations else None
     renderer = detect_renderer_probability(text)
     image = detect_image_generation_probability(text)
     visual = detect_visual_probability(text)
@@ -266,7 +263,8 @@ def _signal_fusion(text, signals, interpreted):
         "reflection": reflection,
         "continuity": continuity_score,
         "requested_representation": requested,
-        "requested_representations": list(representation_constraints["positive"]),
+        "requested_representations": requested_representations,
+        "required_representations": requested_representations,
         "representation_constraints": representation_constraints,
         "candidate_domains": detect_domain_candidates(text),
         "evidence_count": sum(bool(x) for x in (
@@ -339,6 +337,8 @@ def _base_result(text, signals):
         "candidate_domains": [],
         "required_representations": [],
         "candidate_representations": [],
+        "requested_outputs": ["text"],
+        "required_outputs": ["text"],
         "conversation_vector": signals,
         "semantic_state": {"conversation_vector": signals},
         "factory_targets": [],
@@ -425,6 +425,9 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["required_representations"]=reps
     result["candidate_representations"]=list(reps)
     result["requested_representations"]=current_positive
+    result["required_representations"]=reps
+    result["requested_outputs"]=list(current_positive) if current_positive else ["text"]
+    result["required_outputs"]=list(reps)
     result["representation_constraints"]=current_representation
 
     result.update({
@@ -462,14 +465,16 @@ def analyze(text: str, state: dict=None, history: list=None,
         result["possible_capability"]="image_generation"
 
     result["should_execute"]=False  # execution authority remains downstream
-    result["response_mode"]="structured" if requested else "talk"
-    result["renderer_first"]=bool(requested)
+    result["response_mode"]="structured" if current_positive else "talk"
+    result["renderer_first"]=bool(current_positive)
     result["semantic_evidence"]={
         "fusion":fusion,
         "source_signals":signals,
         "interpretation":interpreted,
         "representation_constraints":current_representation,
         "current_request_authoritative":True,
+        "requested_outputs": list(current_positive),
+        "multi_output": len(current_positive) > 1,
         "decision_owner":"QUANTUM_PROCESSOR",
     }
 
