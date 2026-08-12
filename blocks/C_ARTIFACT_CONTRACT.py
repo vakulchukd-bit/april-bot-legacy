@@ -1387,6 +1387,16 @@ __all__ = [
     "validate_universal_contract",
     "build_machine_scene",
     "build_scene_contract",
+    "FactoryRoomContribution",
+    "QuantumFactoryState",
+    "bind_request_to_fiber",
+    "create_quantum_factory_state",
+    "quantum_factory_room_begin",
+    "quantum_factory_accept_artifact",
+    "quantum_factory_accept_response",
+    "quantum_factory_finalize",
+    "coordinate_factory_response",
+    "validate_quantum_factory_result",
 ]
 
 
@@ -1604,6 +1614,365 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     return contract
 
 
+
+# =====================================================
+# QUANTUM FACTORY CONTROL
+# =====================================================
+# The Factory does not become a second processor and does not create a
+# second route.  It is a coordinated production layer controlled by the
+# Quantum Executor through the same Fiber Core.
+#
+# Design invariant:
+#   Quantum Executor
+#       -> one MachineRequest
+#       -> one Fiber Core / one route
+#       -> one factory control session
+#       -> zero or more domain-room contributions
+#       -> one MachineResponse
+#       -> one MachineScene
+#       -> one SceneContract
+#       -> April Web
+#
+# Room selection/meaning comes from the processor's contextual analysis.
+# This layer never uses keyword triggers to select a room.
+# =====================================================
+
+QUANTUM_FACTORY_VERSION = "april_quantum_factory_control_v1"
+QUANTUM_FACTORY_SINGLE_ROUTE = True
+
+
+@dataclass
+class FactoryRoomContribution:
+    """One room's contribution inside the current Fiber transaction."""
+    room: str = ""
+    artifact: Optional[BaseArtifact] = None
+    payload: Dict[str, Any] = field(default_factory=dict)
+    accepted: bool = False
+    sequence: int = 0
+
+
+@dataclass
+class QuantumFactoryState:
+    """Per-request factory state. Never shared between users."""
+    request_id: str = ""
+    flow_id: str = ""
+    user_id: str = ""
+    route_id: str = FIBER_ROUTE_NAME
+    lane: str = "A"
+    status: str = "READY"
+    expected_rooms: List[str] = field(default_factory=list)
+    active_rooms: List[str] = field(default_factory=list)
+    completed_rooms: List[str] = field(default_factory=list)
+    contributions: List[FactoryRoomContribution] = field(default_factory=list)
+    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+
+
+def _safe_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _request_flow_id(request: Optional[MachineRequest]) -> str:
+    if request is None:
+        return ""
+    metadata = _safe_dict(getattr(request, "metadata", {}))
+    if metadata.get("flow_id"):
+        return str(metadata["flow_id"])
+    routing = _safe_dict(getattr(request, "routing", {}))
+    return str(routing.get("flow_id", "") or "")
+
+
+def bind_request_to_fiber(
+    request: MachineRequest,
+    *,
+    user_id: str = "",
+    flow_id: str = "",
+    lane: str = "A",
+) -> MachineRequest:
+    """Bind processor identity/trace to the existing Fiber Core.
+
+    This only enriches the canonical request. It does not create a route,
+    Provider, memory, Executor, or renderer.
+    """
+    if request is None:
+        raise ValueError("request is required")
+
+    fiber = request.fiber or FiberCoreContract()
+    request.fiber = fiber
+
+    fiber.identity.user_id = str(user_id or fiber.identity.user_id or "")
+    fiber.route.active_lane = str(lane or fiber.route.active_lane or "A")
+    fiber.lane.lane_id = fiber.route.active_lane
+    fiber.lane.lane_name = f"Lane {fiber.route.active_lane}"
+    fiber.metrics.lane = fiber.route.active_lane
+    fiber.trace.lane = fiber.route.active_lane
+
+    resolved_flow = str(flow_id or _request_flow_id(request) or "")
+    if resolved_flow:
+        request.metadata = dict(getattr(request, "metadata", {}) or {})
+        request.metadata["flow_id"] = resolved_flow
+        request.routing = dict(request.routing or {})
+        request.routing["flow_id"] = resolved_flow
+
+    request.metadata = dict(getattr(request, "metadata", {}) or {})
+    request.metadata.update({
+        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+        "single_route": True,
+        "fiber_route": FIBER_ROUTE_NAME,
+        "user_bound": bool(fiber.identity.user_id),
+    })
+    request.routing = dict(request.routing or {})
+    request.routing["single_route"] = True
+    request.routing["fiber_route"] = FIBER_ROUTE_NAME
+    return request
+
+
+def create_quantum_factory_state(
+    request: MachineRequest,
+    *,
+    user_id: str = "",
+    flow_id: str = "",
+) -> QuantumFactoryState:
+    """Create isolated factory state for exactly one request/user."""
+    request = bind_request_to_fiber(
+        request,
+        user_id=user_id,
+        flow_id=flow_id,
+        lane=request.fiber.route.active_lane if request.fiber else "A",
+    )
+
+    expected = []
+    for value in (
+        list(getattr(request, "required_competencies", []) or [])
+        + list(getattr(request, "required_artifacts", []) or [])
+    ):
+        value = str(value or "").strip()
+        if value and value not in expected:
+            expected.append(value)
+
+    return QuantumFactoryState(
+        request_id=str(getattr(request, "request_id", "") or ""),
+        flow_id=str(_request_flow_id(request) or ""),
+        user_id=str(user_id or request.fiber.identity.user_id or ""),
+        lane=str(request.fiber.route.active_lane or "A"),
+        expected_rooms=expected,
+    )
+
+
+def quantum_factory_room_begin(
+    factory: QuantumFactoryState,
+    room_name: str,
+) -> None:
+    """Mark a processor-selected room as active on the same Fiber route."""
+    if not factory:
+        return
+    room = str(room_name or "").strip()
+    if not room:
+        return
+
+    factory.status = "RUNNING"
+    if room not in factory.active_rooms:
+        factory.active_rooms.append(room)
+    factory_stage_begin("ROOM_BEGIN", {
+        "room": room,
+        "request_id": factory.request_id,
+        "flow_id": factory.flow_id,
+        "user_id": factory.user_id,
+        "lane": factory.lane,
+        "single_route": True,
+        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+    })
+
+
+def quantum_factory_accept_artifact(
+    factory: QuantumFactoryState,
+    room_name: str,
+    artifact: Optional[BaseArtifact],
+) -> Optional[FactoryRoomContribution]:
+    """Accept one room artifact without rewriting its payload."""
+    if not factory or artifact is None:
+        return None
+
+    room = str(room_name or getattr(artifact.metadata, "room_source", "") or "").strip()
+    if not room:
+        room = str(getattr(artifact.metadata, "room_source", "") or "UNKNOWN_ROOM")
+
+    # Re-materialize the canonical signal only when the artifact has not
+    # already got one. Existing room payload is never replaced.
+    artifact = _ensure_artifact_render_signal(artifact)
+
+    contribution = FactoryRoomContribution(
+        room=room,
+        artifact=artifact,
+        payload=dict(getattr(artifact, "data", {}) or {}),
+        accepted=True,
+        sequence=len(factory.contributions) + 1,
+    )
+    factory.contributions.append(contribution)
+
+    if room not in factory.completed_rooms:
+        factory.completed_rooms.append(room)
+
+    blocks = _artifact_canonical_render_blocks(artifact)
+    for block in blocks:
+        if block not in factory.render_blocks:
+            factory.render_blocks.append(block)
+
+    factory_stage_success("ROOM_SUCCESS", {
+        "room": room,
+        "request_id": factory.request_id,
+        "flow_id": factory.flow_id,
+        "user_id": factory.user_id,
+        "lane": factory.lane,
+        "artifact": getattr(artifact.metadata, "artifact_type", ""),
+        "render_blocks": len(blocks),
+        "single_route": True,
+    })
+    return contribution
+
+
+def quantum_factory_accept_response(
+    factory: QuantumFactoryState,
+    response: MachineResponse,
+) -> MachineResponse:
+    """Merge room contributions into the canonical MachineResponse."""
+    if not factory or response is None:
+        return response
+
+    response.fiber = response.fiber or FiberCoreContract()
+    response.fiber.identity.user_id = factory.user_id
+    response.fiber.route.active_lane = factory.lane
+    response.fiber.lane.lane_id = factory.lane
+    response.fiber.lane.lane_name = f"Lane {factory.lane}"
+    response.fiber.trace.lane = factory.lane
+    response.fiber.metrics.lane = factory.lane
+
+    existing = list(getattr(response, "render_blocks", []) or [])
+    merged = existing[:]
+
+    for block in factory.render_blocks:
+        if block not in merged:
+            merged.append(block)
+
+    response.render_blocks = merged
+
+    response.artifacts = list(getattr(response, "artifacts", []) or [])
+    for contribution in factory.contributions:
+        if contribution.artifact is not None and contribution.artifact not in response.artifacts:
+            response.artifacts.append(contribution.artifact)
+
+    response.contributions = dict(getattr(response, "contributions", {}) or {})
+    for contribution in factory.contributions:
+        response.contributions[contribution.room] = dict(contribution.payload)
+
+    response.metadata = dict(getattr(response, "metadata", {}) or {})
+    response.metadata.update({
+        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+        "factory_request_id": factory.request_id,
+        "flow_id": factory.flow_id,
+        "user_id": factory.user_id,
+        "factory_lane": factory.lane,
+        "factory_rooms": list(factory.completed_rooms),
+        "factory_contribution_count": len(factory.contributions),
+        "single_route": True,
+        "canonical_factory_merge": True,
+    })
+
+    return response
+
+
+def quantum_factory_finalize(
+    factory: QuantumFactoryState,
+    response: MachineResponse,
+) -> MachineResponse:
+    """Close the current factory transaction and preserve one route."""
+    response = quantum_factory_accept_response(factory, response)
+
+    if factory:
+        factory.status = "COMPLETE"
+        factory_stage_success("FACTORY_COMPLETE", {
+            "request_id": factory.request_id,
+            "flow_id": factory.flow_id,
+            "user_id": factory.user_id,
+            "lane": factory.lane,
+            "rooms": list(factory.completed_rooms),
+            "contributions": len(factory.contributions),
+            "render_blocks": len(factory.render_blocks),
+            "single_route": True,
+            "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+        })
+
+    return response
+
+
+def coordinate_factory_response(
+    request: MachineRequest,
+    response: MachineResponse,
+    *,
+    user_id: str = "",
+    flow_id: str = "",
+) -> tuple[MachineResponse, QuantumFactoryState]:
+    """Canonical Quantum Executor -> Factory coordination point.
+
+    The processor remains the authority for interpretation. The Factory
+    receives the already-decided request, accepts domain-room artifacts,
+    merges them into the same MachineResponse, and returns that response
+    to the existing SceneContract path.
+    """
+    request = bind_request_to_fiber(
+        request,
+        user_id=user_id,
+        flow_id=flow_id,
+    )
+    factory = create_quantum_factory_state(
+        request,
+        user_id=user_id,
+        flow_id=flow_id,
+    )
+
+    # Existing response artifacts are already authoritative room output.
+    # Accept them without inventing room selection.
+    for artifact in list(getattr(response, "artifacts", []) or []):
+        room = str(getattr(getattr(artifact, "metadata", None), "room_source", "") or "")
+        quantum_factory_accept_artifact(factory, room, artifact)
+
+    response = quantum_factory_finalize(factory, response)
+    return response, factory
+
+
+# =====================================================
+# FACTORY OUTPUT VALIDATION
+# =====================================================
+
+def validate_quantum_factory_result(
+    request: MachineRequest,
+    response: MachineResponse,
+    factory: QuantumFactoryState,
+) -> Dict[str, Any]:
+    """Check the single-route invariants before SceneContract creation."""
+    request_user = str(getattr(request.fiber.identity, "user_id", "") or "")
+    response_user = str(getattr(response.fiber.identity, "user_id", "") or "")
+
+    return {
+        "ok": bool(
+            factory
+            and factory.status == "COMPLETE"
+            and factory.route_id == FIBER_ROUTE_NAME
+            and request_user == response_user
+        ),
+        "single_route": True,
+        "route_id": FIBER_ROUTE_NAME,
+        "request_id": factory.request_id if factory else "",
+        "flow_id": factory.flow_id if factory else "",
+        "user_id": response_user,
+        "lane": factory.lane if factory else "",
+        "room_count": len(factory.completed_rooms) if factory else 0,
+        "artifact_count": len(getattr(response, "artifacts", []) or []),
+        "render_block_count": len(getattr(response, "render_blocks", []) or []),
+    }
+
+
 # =====================================================
 # CPU COORDINATION API (Stage 1)
 # Factory remains autonomous internally.
@@ -1654,7 +2023,10 @@ def factory_room_success(room_name:str, artifact=None):
     })
 
 def factory_room_error(room_name:str, error):
-    factory_stage_error(f"{room_name}: {error}")
+    factory_stage_error(
+        f"{room_name}: {error}",
+        error,
+    )
 
 def factory_response_complete(response=None):
     factory_stage_success("FACTORY_COMPLETE",{
