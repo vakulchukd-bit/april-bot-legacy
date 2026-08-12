@@ -852,6 +852,8 @@ async def generate_text(messages: Any, temperature: Any = None,
     try:
         complexity = _derive_complexity(source_request)
         output_tokens = _derive_output_tokens(source_request, max_output_tokens)
+        if not (MIN_OUTPUT_TOKENS <= output_tokens <= MAX_OUTPUT_TOKENS):
+            raise RuntimeError("Provider budget outside canonical 1..8000 range")
         normalized_input = normalize_provider_input(source_request)
 
         request = {
@@ -895,9 +897,12 @@ async def generate_text(messages: Any, temperature: Any = None,
             "provider_usage": usage,
             "estimated_cost_usd": estimated_cost,
             "output_cap": output_tokens,
-            "output_budget_mode": "continuous_processor_budget",
+            "output_budget_mode": "continuous_64_signal_budget",
             "output_budget_source": "QUANTUM_PROCESSOR",
             "output_budget_range": [MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS],
+            "quantum_cores": 8,
+            "quantum_lanes_per_core": 8,
+            "quantum_signal_count": 64,
             "answer_len": len(mr.get("answer") or ""),
             "render_blocks": len(mr.get("render_blocks") or []),
             "artifacts": len(mr.get("artifacts") or []),
