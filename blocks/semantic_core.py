@@ -82,8 +82,46 @@ REFLECTION_WORDS = ("почему","объясни","рассуждай","раз
 SPACE_WORDS = ("пространство","scene","renderer","блок","галерея","график")
 GRAPH_WORDS = ("график","построй график","функция","plot","chart")
 TABLE_WORDS = ("таблица","таблицу","таблич","периодическая","менделеева","значения")
+
+def detect_representation_constraints(text):
+    value = (text or "").lower()
+    positive, negative, scores = [], [], {}
+    for name, words in REPRESENTATION_POSITIVES.items():
+        hits = sum(1 for word in words if word in value)
+        if hits:
+            positive.append(name)
+            scores[name] = clamp(0.45 + 0.15 * hits)
+    for name, words in REPRESENTATION_NEGATIONS.items():
+        if any(word in value for word in words):
+            negative.append(name)
+            scores[name] = 0.0
+    negative = list(dict.fromkeys(negative))
+    positive = [x for x in dict.fromkeys(positive) if x not in negative]
+    return {
+        "positive": positive,
+        "negative": negative,
+        "scores": scores,
+        "current_request_authoritative": True,
+        "source": "current_request_semantic_constraints",
+    }
+
 LINK_WORDS = ("источник","ссылка","документация")
 MATH_WORDS = ("математика","формула","уравнение","интеграл","производная")
+
+REPRESENTATION_NEGATIONS = {
+    "graph": ("без графика", "без графиков", "без график", "не создавай график", "не создавай графики", "не нужен график"),
+    "table": ("без таблицы", "без таблиц", "не создавай таблицу", "не создавай таблицы", "не нужна таблица"),
+    "code": ("без кода", "без код", "не создавай код", "не нужен код"),
+    "image": ("без изображения", "без картинк", "не создавай изображение", "не создавай картинку", "не нужна картинка"),
+}
+REPRESENTATION_POSITIVES = {
+    "graph": GRAPH_WORDS,
+    "table": TABLE_WORDS,
+    "link": LINK_WORDS,
+    "diagram": ("диаграмма","diagram","схема"),
+    "formula": ("формула","уравнение","formula"),
+}
+
 CONTINUATION_WORDS = (
     "продолжай","дальше","продолжение","о чём мы говорили","о чем мы говорили",
     "помнишь","вспомни","продолжи","это","этот","эта","этом","него","неё","ее","его"
@@ -128,13 +166,9 @@ def detect_space_discussion_probability(text):
     return _weighted_probability(text, SPACE_WORDS, 0.12)
 
 def detect_representation_request(text):
-    t=(text or "").lower()
-    if any(w in t for w in GRAPH_WORDS): return "graph"
-    if any(w in t for w in TABLE_WORDS): return "table"
-    if any(w in t for w in LINK_WORDS): return "link"
-    if any(w in t for w in ("диаграмма","diagram","схема")): return "diagram"
-    if any(w in t for w in ("формула","уравнение","formula")): return "formula"
-    return None
+    constraints = detect_representation_constraints(text)
+    positive = constraints.get("positive", [])
+    return positive[0] if positive else None
 
 def detect_graph_action(text):
     t=(text or "").lower()
@@ -184,7 +218,12 @@ def _state_signals(state, active_flow, dialog_state, history):
 
 def _signal_fusion(text, signals, interpreted):
     """Fuse independent evidence; never collapse it into a route decision."""
-    requested = detect_representation_request(text)
+    representation_constraints = detect_representation_constraints(text)
+    requested = (
+        representation_constraints["positive"][0]
+        if representation_constraints["positive"]
+        else None
+    )
     renderer = detect_renderer_probability(text)
     image = detect_image_generation_probability(text)
     visual = detect_visual_probability(text)
@@ -227,6 +266,8 @@ def _signal_fusion(text, signals, interpreted):
         "reflection": reflection,
         "continuity": continuity_score,
         "requested_representation": requested,
+        "requested_representations": list(representation_constraints["positive"]),
+        "representation_constraints": representation_constraints,
         "candidate_domains": detect_domain_candidates(text),
         "evidence_count": sum(bool(x) for x in (
             requested, continuity, active_scene, goal, memory, discussion, reflection
@@ -332,6 +373,7 @@ def analyze(text: str, state: dict=None, history: list=None,
     ) or {}
 
     fusion=_signal_fusion(text, signals, interpreted)
+    current_representation = detect_representation_constraints(text)
     result=_base_result(text, signals)
 
     result["intent"]=interpreted.get("type","text")
@@ -352,6 +394,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         "history_available","continuation","continuation_target",
         "content_role","contains_object","contains_explanation",
         "contains_analysis","contains_legend","scene_composition_ready",
+        "requested_representations","representation_constraints",
         "required_domains","candidate_domains","required_representations",
         "candidate_representations","scene_type"
     ):
@@ -366,16 +409,23 @@ def analyze(text: str, state: dict=None, history: list=None,
         result.get("required_domains",[])+fusion["candidate_domains"]
     ))
 
+    blocked = set(current_representation.get("negative", []))
+    current_positive = list(current_representation.get("positive", []))
     reps=[]
     for rep in (
         result.get("required_representations",[]) +
         result.get("candidate_representations",[])
     ):
-        if rep not in reps: reps.append(rep)
-    if fusion["requested_representation"] and fusion["requested_representation"] not in reps:
-        reps.append(fusion["requested_representation"])
+        rep = str(rep).lower()
+        if rep not in blocked and rep not in reps:
+            reps.append(rep)
+    for rep in current_positive:
+        if rep not in reps:
+            reps.append(rep)
     result["required_representations"]=reps
     result["candidate_representations"]=list(reps)
+    result["requested_representations"]=current_positive
+    result["representation_constraints"]=current_representation
 
     result.update({
         "renderer_probability":fusion["renderer"],
@@ -418,6 +468,8 @@ def analyze(text: str, state: dict=None, history: list=None,
         "fusion":fusion,
         "source_signals":signals,
         "interpretation":interpreted,
+        "representation_constraints":current_representation,
+        "current_request_authoritative":True,
         "decision_owner":"QUANTUM_PROCESSOR",
     }
 
