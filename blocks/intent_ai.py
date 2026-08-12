@@ -1,974 +1,383 @@
-from openai import OpenAI
-import asyncio
+"""
+APRIL — INTENT AI / QUANTUM MULTI-SIGNAL V1
+
+Role:
+    Multimodal intent evidence analyzer.
+
+Architecture:
+    Intent AI observes.
+    Cognition/Semantic layers correlate.
+    Quantum Processor arbitrates.
+    Executor executes.
+    C-Artifact transports.
+    April Web renders.
+
+This module does NOT:
+    - choose the final room;
+    - choose the final renderer;
+    - choose the provider;
+    - execute tools;
+    - create a second route;
+    - make an OpenAI call as a normal intent path.
+
+Important:
+    OpenAI is deliberately removed from the Intent layer. The current
+    request should reach the existing Provider path once, under the
+    Quantum Processor's control. Intent AI is therefore a local evidence
+    layer, not another paid reasoning request.
+"""
+
+from __future__ import annotations
+
 import time
+from typing import Any, Dict, Iterable, Optional
 
-# =====================================================
-# 🧠 APRIL INTENT AI SYSTEM
-# =====================================================
 
-"""
-APRIL MULTI-SIGNAL INTENT SYSTEM
-
-APRIL_FILE_ID:
-APRIL_INTENT_AI_SYSTEM
-
-ROLE:
-MULTIMODAL_INTENT_SIGNAL_ANALYZER
-
-INPUT:
-USER_TEXT
-SESSION_STATE
-VISUAL_CONTINUITY_STATE
-ACTIVE_FLOW
-
-OUTPUT:
-INTENT_SIGNAL_PAYLOAD
-SEMANTIC_HINTS
-ORCHESTRATION_SUPPORT_SIGNALS
-
-=====================================================
-
-Intent AI теперь:
-- НЕ single-intent dispatcher;
-- НЕ room selector;
-- НЕ authority system.
-
-Intent AI теперь:
-- multimodal signal analyzer;
-- orchestration helper;
-- continuation-aware interpreter;
-- renderer-aware signal composer;
-- capability hint provider.
-
-=====================================================
-
-Главная идея:
-
-Intent НЕ принимает решение.
-Intent помогает orchestration layer
-понять направление пользователя.
-
-=====================================================
-
-GOLDEN APRIL RULE:
-
-Executor decides.
-Intent AI assists.
-"""
-
-# =====================================================
-# 🔥 OPENAI
-# =====================================================
-
-client = OpenAI()
-
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
+APRIL_FILE_ID = "APRIL_INTENT_AI_SYSTEM_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
 INPUT_MACHINE_CHANNEL = {
-
-    "source":
-        "executor_input_pipeline",
-
-    "type":
-        "intent_signal_request",
-
-    "isolated":
-        True
+    "source": "executor_input_pipeline",
+    "type": "intent_signal_request",
+    "isolated": True,
 }
 
 OUTPUT_MACHINE_CHANNEL = {
-
-    "target":
-        "executor_semantic_pipeline",
-
-    "type":
-        "intent_signal_payload",
-
-    "isolated":
-        True
+    "target": "executor_semantic_pipeline",
+    "type": "intent_signal_payload",
+    "isolated": True,
 }
 
-# =====================================================
-# 🔥 MACHINE LOGS
-# =====================================================
-
 INTENT_AI_LOGS = []
-
 MAX_INTENT_AI_LOGS = 100
 
 
-def log_intent_event(
-    event,
-    payload=None
-):
-
+def log_intent_event(event: str, payload: Optional[Dict[str, Any]] = None) -> None:
     try:
-
         INTENT_AI_LOGS.append({
-
-            "timestamp":
-                time.time(),
-
-            "event":
-                event,
-
-            "payload":
-                payload or {},
-
-            "file_id":
-                "APRIL_INTENT_AI_SYSTEM",
-
-            "machine_only":
-                True
+            "timestamp": time.time(),
+            "event": event,
+            "payload": payload or {},
+            "file_id": APRIL_FILE_ID,
+            "machine_only": True,
         })
-
         if len(INTENT_AI_LOGS) > MAX_INTENT_AI_LOGS:
-
-            INTENT_AI_LOGS.pop(0)
-
-    except:
+            del INTENT_AI_LOGS[:-MAX_INTENT_AI_LOGS]
+    except Exception:
         pass
 
-# =====================================================
-# 🧠 HELPERS
-# =====================================================
 
-def normalize(
-    text: str
-):
-
-    return (
-        text or ""
-    ).lower().strip()
+def normalize(text: Any) -> str:
+    return str(text or "").lower().strip()
 
 
-def contains_any(
-    text: str,
-    words: list
-):
+def contains_any(text: Any, words: Iterable[str]) -> bool:
+    value = normalize(text)
+    return any(word in value for word in words)
 
-    return any(
-        w in text
-        for w in words
-    )
 
-# =====================================================
-# 🧠 SAFE SIGNAL BUILDER
-# =====================================================
+CONTINUATION_WORDS = (
+    "да", "ага", "вот", "примерно", "ближе", "уже лучше",
+    "чуть темнее", "чуть светлее", "сделай темнее", "сделай ярче",
+    "не то", "переделай", "продолжай", "дальше", "еще", "ещё",
+    "оставь", "в таком стиле", "продолжим", "вернемся", "вернёмся",
+)
+
+SCIENCE_WORDS = (
+    "график", "уравнение", "реши", "sin(", "cos(", "tan(",
+    "y=", "формула", "функция", "парабола",
+)
+
+GENERATE_WORDS = (
+    "сгенерируй изображение", "создай изображение",
+    "нарисуй картинку", "создай картинку", "generate image",
+)
+
+EDIT_WORDS = (
+    "измени", "добавь", "убери", "замени", "сделай ярче", "сделай темнее",
+)
+
+IMAGE_ANALYSIS_WORDS = (
+    "что на картинке", "что изображено", "что это",
+    "опиши изображение", "что видишь",
+)
+
+WEB_WORDS = (
+    "погода", "новости", "курс валют", "маршрут", "карта",
+    "где находится", "что происходит",
+)
+
+EXPLORATION_WORDS = (
+    "атмосфера", "идея", "референс", "пример", "концепт",
+    "вариант", "примерно", "в таком стиле",
+)
+
 
 def build_signal_response(
+    primary_intent: str = "text",
+    confidence: float = 0.5,
+    source: str = "local",
+    signals: Optional[Dict[str, Any]] = None,
+    capability_hints: Optional[list] = None,
+    continuation: bool = False,
+    renderer: bool = False,
+    visual: bool = False,
+    execution: bool = False,
+    explanation: bool = False,
+    exploration: bool = False,
+    web: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build one machine evidence packet.
 
-    primary_intent="text",
-    confidence=0.5,
-    source="local",
-
-    signals=None,
-    capability_hints=None,
-
-    continuation=False,
-    renderer=False,
-    visual=False,
-    execution=False,
-    explanation=False,
-    exploration=False,
-    web=False
-):
-
-    signals = signals or {}
-
-    capability_hints = capability_hints or []
-
+    `primary_intent` is only the strongest descriptive signal. It is not a
+    final route decision.
+    """
     payload = {
-
-        # =================================================
-        # 🔥 LEGACY COMPATIBILITY
-        # =====================================================
-
-        "intent":
-            primary_intent,
-
-        # =================================================
-        # 🔥 NEW ARCHITECTURE
-        # =====================================================
-
-        "primary_intent":
-            primary_intent,
-
-        "confidence":
-            confidence,
-
-        "source":
-            source,
-
-        # =================================================
-        # 🔥 SIGNALS
-        # =====================================================
-
+        "intent": primary_intent,
+        "primary_intent": primary_intent,
+        "confidence": max(0.0, min(1.0, float(confidence))),
+        "source": source,
         "signals": {
-
-            "continuation":
-                continuation,
-
-            "renderer":
-                renderer,
-
-            "visual":
-                visual,
-
-            "execution":
-                execution,
-
-            "explanation":
-                explanation,
-
-            "exploration":
-                exploration,
-
-            "web":
-                web,
-
-            **signals
+            "continuation": continuation,
+            "renderer": renderer,
+            "visual": visual,
+            "execution": execution,
+            "explanation": explanation,
+            "exploration": exploration,
+            "web": web,
+            **(signals or {}),
         },
-
-        # =================================================
-        # 🔥 CAPABILITIES
-        # =====================================================
-
-        "capability_hints":
-            capability_hints,
-
-        # =================================================
-        # 🔥 STABILIZATION
-        # =====================================================
-
-        "orchestration_ready":
-            True,
-
-        "renderer_first_safe":
-            True,
-
-        "provider_aware":
-            True,
-
-        "single_route_forbidden":
-            True,
-
-        # =================================================
-        # 🔥 MACHINE FLAGS
-        # =====================================================
-
-        "machine_only":
-            True,
-
-        "semantic_signal":
-            True
+        "capability_hints": list(capability_hints or []),
+        "orchestration_ready": True,
+        "renderer_first_safe": True,
+        "provider_aware": True,
+        "single_route_forbidden": False,
+        "machine_only": True,
+        "semantic_signal": True,
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "route_selection": "delegated",
+        "renderer_selection": "delegated",
+        "room_selection": "delegated",
+        "execution_selection": "delegated",
     }
-
-    log_intent_event(
-
-        "signal_response_created",
-
-        {
-
-            "primary_intent":
-                primary_intent,
-
-            "source":
-                source,
-
-            "confidence":
-                confidence
-        }
-    )
-
+    log_intent_event("signal_response_created", {
+        "primary_intent": primary_intent,
+        "source": source,
+        "confidence": payload["confidence"],
+    })
     return payload
 
-# =====================================================
-# 🧠 LOCAL SAFE DETECTION
-# =====================================================
 
-def detect_intent_local(
-    text: str,
-    state: dict = None
-):
+def _continuation_signal(text: str, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if normalize(text) not in CONTINUATION_WORDS:
+        return None
 
+    flow = state.get("active_flow") or {}
+    flow_type = flow.get("type") if isinstance(flow, dict) else None
+    visual = bool(state.get("active_visual_scene"))
+
+    hints = ["continuation", "trajectory"]
+    if flow_type:
+        hints.append(str(flow_type))
+
+    return build_signal_response(
+        primary_intent="continuation",
+        confidence=0.86 if flow_type else 0.66,
+        source="local_continuation",
+        continuation=True,
+        renderer=flow_type in {"renderer_space", "math", "scene"},
+        visual=visual or flow_type in {
+            "image_generate", "image_edit", "image", "scene"
+        },
+        capability_hints=hints,
+    )
+
+
+def _local_candidates(text: str, state: Dict[str, Any]) -> list[Dict[str, Any]]:
+    t = normalize(text)
+    candidates = []
+
+    if contains_any(t, SCIENCE_WORDS):
+        candidates.append({
+            "intent": "science",
+            "confidence": 0.90,
+            "signals": {
+                "renderer": True,
+                "execution": True,
+                "explanation": True,
+            },
+            "capabilities": ["science", "renderer_space", "math", "formula_rendering"],
+        })
+
+    if contains_any(t, GENERATE_WORDS):
+        candidates.append({
+            "intent": "generate_image",
+            "confidence": 0.92,
+            "signals": {"visual": True, "execution": True},
+            "capabilities": ["image_generation"],
+        })
+
+    if contains_any(t, EDIT_WORDS) and (
+        state.get("image_context") or state.get("active_flow")
+    ):
+        candidates.append({
+            "intent": "edit_image",
+            "confidence": 0.88,
+            "signals": {"continuation": True, "visual": True},
+            "capabilities": ["image_edit", "continuation"],
+        })
+
+    if contains_any(t, IMAGE_ANALYSIS_WORDS) and (
+        state.get("image_context") or state.get("active_visual_scene")
+    ):
+        candidates.append({
+            "intent": "analyze_image",
+            "confidence": 0.90,
+            "signals": {"visual": True, "explanation": True},
+            "capabilities": ["image_analysis", "visual_guidance"],
+        })
+
+    if contains_any(t, WEB_WORDS):
+        candidates.append({
+            "intent": "web",
+            "confidence": 0.88,
+            "signals": {"web": True, "explanation": True},
+            "capabilities": ["web", "guidance"],
+        })
+
+    if contains_any(t, EXPLORATION_WORDS):
+        candidates.append({
+            "intent": "exploration",
+            "confidence": 0.76,
+            "signals": {"visual": True, "exploration": True, "explanation": True},
+            "capabilities": ["visual_guidance", "renderer_space", "conversation"],
+        })
+
+    return candidates
+
+
+def detect_intent_local(text: str, state: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """
+    Local multi-signal detection.
+
+    It returns the strongest descriptive signal plus ALL local candidates.
+    No early return is used for competing modalities.
+    """
+    state = state if isinstance(state, dict) else {}
     t = normalize(text)
 
-    state = state or {}
+    log_intent_event("local_detection_started", {"text": t[:120]})
 
-    active_flow = state.get(
-        "active_flow",
-        {}
+    continuation = _continuation_signal(t, state)
+    candidates = _local_candidates(t, state)
+
+    if continuation:
+        candidates.append({
+            "intent": "continuation",
+            "confidence": continuation["confidence"],
+            "signals": continuation["signals"],
+            "capabilities": continuation["capability_hints"],
+        })
+
+    if not candidates:
+        return None
+
+    strongest = max(candidates, key=lambda item: item["confidence"])
+    merged_signals: Dict[str, Any] = {}
+    merged_caps = []
+
+    for candidate in candidates:
+        merged_signals.update(candidate.get("signals", {}))
+        for capability in candidate.get("capabilities", []):
+            if capability not in merged_caps:
+                merged_caps.append(capability)
+
+    result = build_signal_response(
+        primary_intent=strongest["intent"],
+        confidence=strongest["confidence"],
+        source="local_multi_signal",
+        signals={
+            **merged_signals,
+            "candidate_count": len(candidates),
+            "candidate_signals": candidates,
+        },
+        capability_hints=merged_caps,
+        continuation=bool(merged_signals.get("continuation")),
+        renderer=bool(merged_signals.get("renderer")),
+        visual=bool(merged_signals.get("visual")),
+        execution=bool(merged_signals.get("execution")),
+        explanation=bool(merged_signals.get("explanation")),
+        exploration=bool(merged_signals.get("exploration")),
+        web=bool(merged_signals.get("web")),
     )
 
-    active_visual_scene = state.get(
-        "active_visual_scene",
-        {}
-    )
+    result["quantum_evidence"] = {
+        "current_request": t,
+        "candidates": candidates,
+        "active_flow": state.get("active_flow") or {},
+        "active_visual_scene": state.get("active_visual_scene") or {},
+        "decision_owner": DECISION_OWNER,
+    }
+
+    return result
 
-    log_intent_event(
-
-        "local_detection_started",
-
-        {
-            "text":
-                t[:120]
-        }
-    )
-
-    # =================================================
-    # 🔥 CONTINUATION
-    # =====================================================
-
-    continuation_words = [
-
-        "да",
-        "ага",
-        "вот",
-        "примерно",
-        "ближе",
-        "уже лучше",
-        "чуть темнее",
-        "чуть светлее",
-        "сделай темнее",
-        "сделай ярче",
-        "не то",
-        "переделай",
-        "продолжай",
-        "дальше",
-        "еще",
-        "оставь",
-        "в таком стиле"
-    ]
-
-    if t in continuation_words:
-
-        if active_flow:
-
-            flow_type = active_flow.get(
-                "type"
-            )
-
-            log_intent_event(
-
-                "continuation_detected",
-
-                {
-                    "flow_type":
-                        flow_type
-                }
-            )
-
-            if flow_type in [
-
-                "image_generate",
-                "image_edit",
-                "image",
-                "renderer_space",
-                "math",
-                "scene"
-            ]:
-
-                return build_signal_response(
-
-                    primary_intent="continuation",
-
-                    confidence=0.86,
-
-                    source="local_continuation",
-
-                    continuation=True,
-
-                    visual=True,
-
-                    renderer=(
-                        flow_type in [
-                            "renderer_space",
-                            "math",
-                            "scene"
-                        ]
-                    ),
-
-                    capability_hints=[
-
-                        "continuation",
-                        "trajectory",
-                        "renderer_space"
-                    ]
-                )
-
-        return build_signal_response(
-
-            primary_intent="text",
-
-            confidence=0.55,
-
-            source="soft_continuation",
-
-            continuation=True,
-
-            capability_hints=[
-
-                "conversation"
-            ]
-        )
-
-    # =================================================
-    # 🔥 SCIENCE / RENDERER
-    # =====================================================
-
-    math_words = [
-
-        "график",
-        "уравнение",
-        "реши",
-        "sin(",
-        "cos(",
-        "tan(",
-        "y=",
-        "формула",
-        "функция",
-        "парабола"
-    ]
-
-    if contains_any(
-        t,
-        math_words
-    ):
-
-        log_intent_event(
-            "science_detected"
-        )
-
-        return build_signal_response(
-
-            primary_intent="science",
-
-            confidence=0.9,
-
-            source="local_science",
-
-            renderer=True,
-
-            execution=True,
-
-            explanation=True,
-
-            capability_hints=[
-
-                "science",
-                "renderer_space",
-                "math",
-                "formula_rendering"
-            ]
-        )
-
-    # =================================================
-    # 🔥 EXPLICIT IMAGE GENERATION
-    # =====================================================
-
-    strong_generate_words = [
-
-        "сгенерируй изображение",
-        "создай изображение",
-        "нарисуй картинку",
-        "создай картинку",
-        "generate image"
-    ]
-
-    if contains_any(
-        t,
-        strong_generate_words
-    ):
-
-        log_intent_event(
-            "image_generation_detected"
-        )
-
-        return build_signal_response(
-
-            primary_intent="generate_image",
-
-            confidence=0.92,
-
-            source="local_generate",
-
-            visual=True,
-
-            execution=True,
-
-            capability_hints=[
-
-                "image_generation"
-            ]
-        )
-
-    # =================================================
-    # 🔥 IMAGE EDIT
-    # =====================================================
-
-    edit_words = [
-
-        "измени",
-        "добавь",
-        "убери",
-        "замени",
-        "сделай ярче",
-        "сделай темнее"
-    ]
-
-    if contains_any(
-        t,
-        edit_words
-    ):
-
-        if state.get(
-            "image_context"
-        ) or active_flow:
-
-            log_intent_event(
-                "image_edit_detected"
-            )
-
-            return build_signal_response(
-
-                primary_intent="edit_image",
-
-                confidence=0.88,
-
-                source="local_edit",
-
-                continuation=True,
-
-                visual=True,
-
-                capability_hints=[
-
-                    "image_edit",
-                    "continuation"
-                ]
-            )
-
-    # =================================================
-    # 🔥 IMAGE ANALYSIS
-    # =====================================================
-
-    analyze_words = [
-
-        "что на картинке",
-        "что изображено",
-        "что это",
-        "опиши изображение",
-        "что видишь"
-    ]
-
-    if contains_any(
-        t,
-        analyze_words
-    ):
-
-        if (
-
-            state.get(
-                "image_context"
-            )
-
-            or active_visual_scene
-        ):
-
-            log_intent_event(
-                "image_analysis_detected"
-            )
-
-            return build_signal_response(
-
-                primary_intent="analyze_image",
-
-                confidence=0.9,
-
-                source="local_analyze",
-
-                visual=True,
-
-                explanation=True,
-
-                capability_hints=[
-
-                    "image_analysis",
-                    "visual_guidance"
-                ]
-            )
-
-    # =================================================
-    # 🔥 WEB
-    # =====================================================
-
-    web_words = [
-
-        "погода",
-        "новости",
-        "курс валют",
-        "маршрут",
-        "карта",
-        "где находится",
-        "что происходит"
-    ]
-
-    if contains_any(
-        t,
-        web_words
-    ):
-
-        log_intent_event(
-            "web_detected"
-        )
-
-        return build_signal_response(
-
-            primary_intent="web",
-
-            confidence=0.88,
-
-            source="local_web",
-
-            web=True,
-
-            explanation=True,
-
-            capability_hints=[
-
-                "web",
-                "guidance"
-            ]
-        )
-
-    # =================================================
-    # 🔥 VISUAL EXPLORATION
-    # =====================================================
-
-    exploration_words = [
-
-        "атмосфера",
-        "идея",
-        "референс",
-        "пример",
-        "концепт",
-        "вариант",
-        "примерно",
-        "в таком стиле"
-    ]
-
-    if contains_any(
-        t,
-        exploration_words
-    ):
-
-        log_intent_event(
-            "exploration_detected"
-        )
-
-        return build_signal_response(
-
-            primary_intent="exploration",
-
-            confidence=0.76,
-
-            source="local_exploration",
-
-            visual=True,
-
-            exploration=True,
-
-            explanation=True,
-
-            capability_hints=[
-
-                "visual_guidance",
-                "renderer_space",
-                "conversation"
-            ]
-        )
-
-    return None
-
-# =====================================================
-# 🧠 SAFE AI INTENT
-# =====================================================
 
 async def detect_intent_ai(
     text: str,
-    state: dict = None
-):
+    state: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """
+    Compatibility entrypoint.
 
-    state = state or {}
+    Deliberately local:
+        the old implementation made a second OpenAI request through gpt-4o-mini
+        when local detection failed. That created a second reasoning call before
+        the real Provider path. Quantum architecture removes that duplication.
 
-    t = (
-        text or ""
-    ).strip()
+    The Quantum Processor owns provider reasoning.
+    """
+    state = state if isinstance(state, dict) else {}
+    t = normalize(text)
 
-    log_intent_event(
+    log_intent_event("intent_ai_started", {"text": t[:120]})
 
-        "intent_ai_started",
-
-        {
-            "text":
-                t[:120]
-        }
-    )
-
-    # =================================================
-    # 🔥 LOCAL FIRST
-    # =====================================================
-
-    local = detect_intent_local(
-        t,
-        state
-    )
-
+    local = detect_intent_local(t, state)
     if local:
-
-        log_intent_event(
-            "local_result_returned"
-        )
-
+        local["source"] = "local_multi_signal"
+        local["provider_calls"] = 0
+        local["decision_owner"] = DECISION_OWNER
+        log_intent_event("local_multi_signal_returned")
         return local
 
-    # =================================================
-    # 🔥 SHORT INPUT PROTECTION
-    # =====================================================
-
     if len(t) <= 15:
-
-        active_flow = state.get(
-            "active_flow"
-        )
-
-        if active_flow:
-
-            return build_signal_response(
-
-                primary_intent="continuation",
-
-                confidence=0.66,
-
-                source="short_continuation",
-
-                continuation=True,
-
-                capability_hints=[
-
-                    "continuation"
-                ]
-            )
-
-        return build_signal_response(
-
-            primary_intent="text",
-
-            confidence=0.5,
-
+        active_flow = state.get("active_flow")
+        result = build_signal_response(
+            primary_intent="continuation" if active_flow else "text",
+            confidence=0.66 if active_flow else 0.50,
             source="short_safe",
-
-            capability_hints=[
-
-                "conversation"
-            ]
+            continuation=bool(active_flow),
+            capability_hints=["continuation"] if active_flow else ["conversation"],
         )
+        result["quantum_evidence"] = {
+            "current_request": t,
+            "short_input": True,
+            "active_flow": active_flow or {},
+        }
+        return result
 
-    # =================================================
-    # 🔥 AI FALLBACK
-    # =====================================================
-
-    def run():
-
-        try:
-
-            log_intent_event(
-                "openai_fallback_started"
-            )
-
-            prompt = f"""
-Ты — multimodal signal analyzer для April.
-
-ВАЖНО:
-НЕ выбирай одну capability.
-НЕ принимай execution decisions.
-
-Твоя задача:
-определить:
-- primary intent
-- renderer needs
-- visual signals
-- continuation
-- explanation
-- execution pressure
-- exploration mode
-
-Главные правила:
-
-1. continuation важнее trigger words
-2. renderer важнее heavy generation
-3. exploration != generate_image
-4. visual != image_generation
-5. explanation может существовать
-   вместе с render/science
-
-Верни JSON.
-
-Формат:
-
-{{
-  "primary_intent": "...",
-  "renderer": true/false,
-  "visual": true/false,
-  "continuation": true/false,
-  "explanation": true/false,
-  "execution": true/false,
-  "exploration": true/false
-}}
-
-Текст:
-{text}
-"""
-
-            res = client.chat.completions.create(
-
-                model="gpt-4o-mini",
-
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-
-                temperature=0,
-
-                max_tokens=120
-            )
-
-            raw = (
-                res.choices[0]
-                .message.content
-                .strip()
-            )
-
-            lowered = raw.lower()
-
-            primary = "text"
-
-            if "science" in lowered:
-                primary = "science"
-
-            elif "generate_image" in lowered:
-                primary = "generate_image"
-
-            elif "edit_image" in lowered:
-                primary = "edit_image"
-
-            elif "web" in lowered:
-                primary = "web"
-
-            elif "exploration" in lowered:
-                primary = "exploration"
-
-            log_intent_event(
-
-                "openai_result_received",
-
-                {
-                    "primary":
-                        primary
-                }
-            )
-
-            return build_signal_response(
-
-                primary_intent=primary,
-
-                confidence=0.72,
-
-                source="openai",
-
-                renderer=(
-                    '"renderer": true'
-                    in lowered
-                ),
-
-                visual=(
-                    '"visual": true'
-                    in lowered
-                ),
-
-                continuation=(
-                    '"continuation": true'
-                    in lowered
-                ),
-
-                explanation=(
-                    '"explanation": true'
-                    in lowered
-                ),
-
-                execution=(
-                    '"execution": true'
-                    in lowered
-                ),
-
-                exploration=(
-                    '"exploration": true'
-                    in lowered
-                ),
-
-                capability_hints=[
-
-                    primary,
-
-                    "renderer_space",
-
-                    "conversation"
-                ]
-            )
-
-        except Exception as e:
-
-            print(
-                "🔥 INTENT AI ERROR:",
-                e
-            )
-
-            log_intent_event(
-
-                "intent_ai_error",
-
-                {
-                    "error":
-                        str(e)
-                }
-            )
-
-            return build_signal_response(
-
-                primary_intent="text",
-
-                confidence=0.4,
-
-                source="fallback_error",
-
-                capability_hints=[
-
-                    "conversation"
-                ]
-            )
-
-    result = await asyncio.to_thread(
-        run
+    result = build_signal_response(
+        primary_intent="text",
+        confidence=0.40,
+        source="local_neutral",
+        capability_hints=["conversation", "semantic_analysis"],
     )
-
-    log_intent_event(
-        "intent_ai_complete"
-    )
-
+    result["quantum_evidence"] = {
+        "current_request": t,
+        "local_candidates": [],
+        "needs_quantum_arbitration": True,
+        "decision_owner": DECISION_OWNER,
+    }
+    log_intent_event("neutral_evidence_returned")
     return result
