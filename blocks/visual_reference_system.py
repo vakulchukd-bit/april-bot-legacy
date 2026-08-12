@@ -118,26 +118,52 @@ def build_visual_reference(
         ("картин", "изображ", "референс", "схем", "график", "диаграм", "визуал"),
     )
 
-    # Old visual scenes remain available as evidence, but are not forced
-    # into a new independent textual request.
-    reuse_pressure = 0.0
-    if scene.get("exists") and not unrelated_textual_request:
-        reuse_pressure += scene.get("continuity_weight", 0.0)
-    if signals["continuity_signal"]:
-        reuse_pressure += 0.25
+    # Visual memory is retained, but it participates in the current turn only
+    # when the dialogue evidence makes it relevant. An old active scene is not
+    # itself evidence that the new request should be rendered visually.
+    sem_reps = {
+        str(x).lower()
+        for x in (
+            semantic.get("required_representations")
+            or semantic.get("requested_representations")
+            or []
+        )
+    }
+    visual_representation = bool(
+        sem_reps.intersection({"graph", "diagram", "gallery", "image"})
+        or semantic.get("visual_routing")
+        or semantic.get("explicit_image_generation_only")
+    )
+    relevant_continuation = bool(
+        signals["continuity_signal"]
+        and (
+            semantic.get("context_visual_followup")
+            or semantic.get("requested_representation") in {"graph", "diagram", "gallery", "image"}
+            or semantic.get("artifact_reference")
+        )
+    )
+    scene_relevant = bool(scene.get("exists") and (visual_representation or relevant_continuation))
 
+    reuse_pressure = 0.0
+    if scene_relevant:
+        reuse_pressure += scene.get("continuity_weight", 0.0)
+    if relevant_continuation:
+        reuse_pressure += 0.25
     reuse_pressure = _clamp(reuse_pressure)
 
     if explicit_generation and unrelated_textual_request:
         reuse_pressure = 0.0
+        scene_relevant = False
 
     return {
-        "enabled": bool(scene.get("exists") or signals["renderer_signal"] or signals["exploration_signal"]),
+        "enabled": bool(scene_relevant or signals["renderer_signal"] or signals["exploration_signal"]),
+        "memory_available": bool(scene.get("exists")),
+        "memory_relevant": scene_relevant,
         "mode": (
-            "context_support"
-            if scene.get("exists") and unrelated_textual_request
-            else "visual_evidence"
-            if (scene.get("exists") or signals["renderer_signal"])
+            "visual_evidence"
+            if scene_relevant or signals["renderer_signal"]
+            else "context_support"
+            if scene.get("exists")
             else None
         ),
         "references": refs,
@@ -145,7 +171,7 @@ def build_visual_reference(
         "signals": signals,
         "reuse_pressure": reuse_pressure,
         "visual_continuity": bool(signals["continuity_signal"]),
-        "reference_priority": reuse_pressure >= 0.55,
+        "reference_priority": scene_relevant and reuse_pressure >= 0.55,
         "lightweight_mode": not explicit_generation,
         "should_generate": False,
         "generation_allowed": False,
