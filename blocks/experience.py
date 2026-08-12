@@ -1,574 +1,155 @@
-# =====================================================
-# 🧠 APRIL EXECUTION STABILIZER CORE
-# =====================================================
-
 """
-APRIL EXECUTION STABILIZER CORE
+APRIL — EXPERIENCE EVIDENCE CORE / QUANTUM V1
 
-APRIL_FILE_ID:
-APRIL_EXECUTION_STABILIZER_CORE
+Role:
+    Short-lived experience signal extraction.
 
-ROLE:
-TEMPORARY_EXECUTION_CONTINUITY_AND_ANTI_LOOP_SUPPORT
+Not:
+    - long-term memory authority
+    - router
+    - executor
+    - provider
+    - renderer
 
-INPUT:
-EXECUTION_STATE
-LAST_ACTION
-EXECUTION_RESULT
-TEMPORARY_RETRY_CONTEXT
-
-OUTPUT:
-SHORT_TERM_EXECUTION_BUFFER
-ANTI_LOOP_STABILIZATION
-TEMPORARY_EXECUTION_CONTINUITY
-EXECUTOR_SUPPORT_CONTEXT
-
-THIS FILE IS:
-- temporary execution stabilizer
-- short execution buffer
-- anti-loop helper
-- retry stabilization support
-- lightweight execution continuity layer
-
-THIS FILE IS NOT:
-- long-term memory
-- execution historian
-- routing memory
-- orchestration authority
-- cognition engine
-- analytics system
-- permanent experience storage
-
-GOLDEN APRIL RULES:
-- lightweight before heavy
-- continuity before recursion
-- stabilization before retry
-- no execution noise accumulation
-- no old-pattern pollution
-- executor-safe architecture
+The canonical owner of final interpretation remains QUANTUM_PROCESSOR.
+This module only extracts compact, JSON-safe experience evidence.
 """
 
-import json
-import os
-from datetime import datetime
+from __future__ import annotations
 
-# =====================================================
-# 🔥 FILE ID
-# =====================================================
+from typing import Any, Dict, Iterable, List
 
-APRIL_FILE_ID = (
-    "APRIL_EXECUTION_STABILIZER_CORE"
+
+APRIL_FILE_ID = "APRIL_EXPERIENCE_EVIDENCE_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
+
+EXPERIENCE_INPUT_CHANNEL = {
+    "channel": "experience_evidence_input",
+    "isolated": True,
+}
+EXPERIENCE_OUTPUT_CHANNEL = {
+    "channel": "experience_evidence_output",
+    "isolated": True,
+}
+
+ACTION_WORDS = (
+    "сделай", "создай", "исправь", "покажи", "нарисуй",
+    "построй", "реши", "вычисли", "добавь", "убери",
+)
+REFERENCE_WORDS = (
+    "это", "этот", "эта", "тот", "там", "здесь", "выше",
+    "ниже", "раньше", "предыдущ", "продолжи", "дальше",
+)
+CONFUSION_WORDS = (
+    "не понимаю", "не получается", "ошибка", "не работает",
+    "запутался", "не уверен",
 )
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
 
-EXECUTION_STABILIZER_TASK_CHANNEL = {
-
-    "channel":
-        "execution_stabilizer_task_channel",
-
-    "isolated":
-        True
-}
-
-EXECUTION_STABILIZER_RESPONSE_CHANNEL = {
-
-    "channel":
-        "execution_stabilizer_response_channel",
-
-    "isolated":
-        True
-}
-
-# =====================================================
-# 🔥 CONFIG
-# =====================================================
-
-DATA_FILE = "experience.json"
-
-# =====================================================
-# 🔥 TEMPORARY MEMORY LIMIT
-# =====================================================
-
-"""
-DeepHub philosophy:
-
-Store ONLY:
-- short stabilization history
-- temporary continuity state
-- anti-loop execution traces
-
-Avoid:
-- long-term execution memory
-- orchestration pollution
-- recursive retry patterns
-"""
-
-MAX_ACTIONS = 5
-
-# =====================================================
-# 🔥 MACHINE LOGS
-# =====================================================
-
-def build_execution_input_log():
-
-    """
-    INPUT MACHINE TRACE
-
-    Used internally by:
-    - Executor
-    - Governance
-    - diagnostics
-    - stabilization analytics
-    """
-
-    return {
-
-        "file_id":
-            APRIL_FILE_ID,
-
-        "event":
-            "execution_stabilizer_input",
-
-        "channel":
-            EXECUTION_STABILIZER_TASK_CHANNEL,
-
-        "timestamp":
-            datetime.utcnow().isoformat(),
-
-        "machine_only":
-            True
-    }
+def _text(value: Any) -> str:
+    return str(value or "").strip()
 
 
-def build_execution_output_log(
-    user_id,
-    entry
-):
+def _low(value: Any) -> str:
+    return _text(value).lower()
 
-    """
-    OUTPUT MACHINE TRACE
 
-    Used internally by:
-    - Executor
-    - continuity systems
-    - retry diagnostics
-    """
+def _contains(text: Any, values: Iterable[str]) -> bool:
+    value = _low(text)
+    return any(item in value for item in values)
 
-    return {
 
-        "file_id":
-            APRIL_FILE_ID,
-
-        "event":
-            "execution_stabilizer_output",
-
-        "channel":
-            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
-
-        "user_id":
-            str(user_id),
-
-        "entry":
-            entry,
-
-        "timestamp":
-            datetime.utcnow().isoformat(),
-
-        "machine_only":
-            True
-    }
-
-# =====================================================
-# 🔥 LOAD
-# =====================================================
-
-def load_experience():
-
-    """
-    Safe stabilization loading.
-
-    Temporary execution memory only.
-    """
-
-    if not os.path.exists(DATA_FILE):
-
-        return {}
-
+def _clamp(value: Any, lo: float = 0.0, hi: float = 1.0) -> float:
     try:
+        number = float(value)
+    except Exception:
+        number = lo
+    return max(lo, min(hi, number))
 
-        with open(
 
-            DATA_FILE,
+def _safe_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return []
 
-            "r",
 
-            encoding="utf-8"
+def build_experience_evidence(
+    text: str,
+    state: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    state = state if isinstance(state, dict) else {}
+    dialog = state.get("dialog") if isinstance(state.get("dialog"), list) else []
+    active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
 
-        ) as f:
+    normalized = _low(text)
+    recent = dialog[-6:]
+    previous_user = ""
+    for item in reversed(recent):
+        if not isinstance(item, dict):
+            continue
+        if _low(item.get("role")) in {"user", "human"}:
+            candidate = _text(item.get("content"))
+            if candidate and candidate != text:
+                previous_user = candidate
+                break
 
-            return json.load(f)
-
-    except Exception as e:
-
-        print(
-            "🔥 LOAD ERROR:",
-            e
-        )
-
-        return {}
-
-# =====================================================
-# 🔥 SAVE
-# =====================================================
-
-def save_experience(data):
-
-    """
-    Safe stabilization saving.
-    """
-
-    try:
-
-        with open(
-
-            DATA_FILE,
-
-            "w",
-
-            encoding="utf-8"
-
-        ) as f:
-
-            json.dump(
-
-                data,
-
-                f,
-
-                ensure_ascii=False,
-
-                indent=2
-            )
-
-    except Exception as e:
-
-        print(
-            "🔥 SAVE ERROR:",
-            e
-        )
-
-# =====================================================
-# 🔥 CLEANUP
-# =====================================================
-
-def cleanup_old_actions(actions):
-
-    """
-    DeepHub stabilization philosophy:
-
-    DO NOT:
-    - accumulate execution history
-    - preserve recursive retry chains
-    - keep orchestration pollution
-
-    ONLY:
-    - short temporary stabilization buffer
-    """
-
-    if not isinstance(
-        actions,
-        list
-    ):
-
-        return []
-
-    return actions[-MAX_ACTIONS:]
-
-# =====================================================
-# 🔥 EXECUTION ANALYSIS
-# =====================================================
-
-def analyze_execution_pattern(
-    actions
-):
-
-    """
-    Lightweight anti-loop diagnostics.
-
-    Helps Executor detect:
-    - repeated failures
-    - recursive retries
-    - unstable execution flow
-    """
-
-    if not actions:
-
-        return {
-
-            "loop_risk":
-                False,
-
-            "failure_pressure":
-                0.0
-        }
-
-    failures = 0
-
-    last_types = []
-
-    for action in actions[-3:]:
-
-        status = action.get(
-            "status"
-        )
-
-        action_type = action.get(
-            "type"
-        )
-
-        if status == "failed":
-
-            failures += 1
-
-        if action_type:
-
-            last_types.append(
-                action_type
-            )
-
-    repeated = (
-
-        len(set(last_types)) == 1
-        and len(last_types) >= 3
-    )
+    current_words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
+    previous_words = set(re.findall(r"\w+", _low(previous_user), flags=re.UNICODE))
+    overlap = len(current_words & previous_words) / max(1, len(current_words | previous_words))
 
     return {
-
-        "loop_risk":
-            repeated and failures >= 2,
-
-        "failure_pressure":
-            min(
-                failures * 0.35,
-                1.0
-            )
+        "version": "quantum_experience_v1",
+        "current_request": _text(text),
+        "signals": {
+            "action_pressure": 1.0 if _contains(text, ACTION_WORDS) else 0.0,
+            "reference_pressure": 1.0 if _contains(text, REFERENCE_WORDS) else 0.0,
+            "confusion_pressure": 1.0 if _contains(text, CONFUSION_WORDS) else 0.0,
+            "history_available": bool(dialog),
+            "history_overlap": _clamp(overlap),
+            "active_flow": bool(active_flow),
+            "flow_type": active_flow.get("type"),
+            "short_turn": bool(normalized and len(normalized.split()) <= 8),
+        },
+        "recent_user_turns": [
+            _text(x.get("content"))
+            for x in recent
+            if isinstance(x, dict) and _low(x.get("role")) in {"user", "human"}
+        ][-4:],
+        "temporary_only": True,
+        "machine_only": True,
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "route_selection": "delegated",
+        "renderer_selection": "delegated",
+        "execution_selection": "delegated",
     }
 
-# =====================================================
-# 🔥 UPDATE EXPERIENCE
-# =====================================================
 
-def update_experience(
-    user_id,
-    state
-):
+def get_experience_signal(
+    text: str,
+    state: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Compatibility entrypoint used by the executor."""
+    return build_experience_evidence(text, state)
 
-    """
-    Main stabilization entry.
 
-    Stores ONLY:
-    - temporary execution state
-    - short continuity traces
-    - anti-loop stabilization info
-    """
-
-    build_execution_input_log()
-
-    data = load_experience()
-
-    user_id = str(user_id)
-
-    if user_id not in data:
-
-        data[user_id] = {
-
-            "actions": []
-        }
-
-    last = state.get(
-        "last_action"
-    )
-
-    if not last:
-
-        print(
-            "⚠️ last_action отсутствует"
-        )
-
-        return {
-
-            "success": False,
-
-            "reason":
-                "missing_last_action",
-
-            "channel":
-                EXECUTION_STABILIZER_RESPONSE_CHANNEL
-        }
-
-    entry = {
-
-        "type":
-            last.get(
-                "type",
-                "unknown"
-            ),
-
-        "intent":
-            last.get(
-                "intent",
-                "unknown"
-            ),
-
-        "status":
-            last.get(
-                "status",
-                "unknown"
-            )
-    }
-
-    print(
-        "🧠 TEMP EXECUTION:",
-        entry
-    )
-
-    data[user_id][
-        "actions"
-    ].append(entry)
-
-    # =================================================
-    # 🔥 CLEANUP
-    # =====================================================
-
-    data[user_id][
-        "actions"
-    ] = cleanup_old_actions(
-
-        data[user_id][
-            "actions"
-        ]
-    )
-
-    save_experience(data)
-
-    # =================================================
-    # 🔥 ANALYTICS
-    # =====================================================
-
-    diagnostics = analyze_execution_pattern(
-
-        data[user_id][
-            "actions"
-        ]
-    )
-
-    build_execution_output_log(
-
-        user_id,
-
-        entry
-    )
-
-    # =================================================
-    # 🔥 RESPONSE
-    # =====================================================
-
+def build_experience_snapshot(
+    user_id: Any,
+    state: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """JSON-safe per-user snapshot; never stores runtime objects."""
+    state = state if isinstance(state, dict) else {}
     return {
-
-        "success":
-            True,
-
-        "channel":
-            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
-
-        "stabilization_active":
-            True,
-
-        "temporary_memory":
-            True,
-
-        "loop_risk":
-            diagnostics.get(
-                "loop_risk",
-                False
-            ),
-
-        "failure_pressure":
-            diagnostics.get(
-                "failure_pressure",
-                0.0
-            ),
-
-        "stored_actions":
-            len(
-                data[user_id][
-                    "actions"
-                ]
-            )
-    }
-
-# =====================================================
-# 🔥 STABILIZATION SNAPSHOT
-# =====================================================
-
-def build_execution_snapshot(
-    user_id
-):
-
-    """
-    Executor stabilization snapshot.
-
-    Used internally by:
-    - Executor
-    - Governance
-    - retry protection
-    """
-
-    data = load_experience()
-
-    user_id = str(user_id)
-
-    actions = data.get(
-        user_id,
-        {}
-    ).get(
-        "actions",
-        []
-    )
-
-    diagnostics = analyze_execution_pattern(
-        actions
-    )
-
-    return {
-
-        "channel":
-            EXECUTION_STABILIZER_RESPONSE_CHANNEL,
-
-        "file_id":
-            APRIL_FILE_ID,
-
-        "actions":
-            actions,
-
-        "loop_risk":
-            diagnostics.get(
-                "loop_risk",
-                False
-            ),
-
-        "failure_pressure":
-            diagnostics.get(
-                "failure_pressure",
-                0.0
-            ),
-
-        "temporary_memory":
-            True,
-
-        "machine_only":
-            True
+        "user_id": str(user_id),
+        "active_flow_type": (
+            state.get("active_flow", {}).get("type")
+            if isinstance(state.get("active_flow"), dict)
+            else None
+        ),
+        "dialog_length": len(state.get("dialog", [])) if isinstance(state.get("dialog"), list) else 0,
+        "temporary_only": True,
+        "machine_only": True,
+        "decision_owner": DECISION_OWNER,
     }
