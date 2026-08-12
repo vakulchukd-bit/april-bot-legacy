@@ -8,7 +8,6 @@ APRIL WEB SPACE GATEWAY
 
 Это больше НЕ:
 - text-only flask layer;
-- telegram-era bridge;
 - plain request → plain text system.
 
 Теперь это:
@@ -57,9 +56,7 @@ from flask import (
 from flask_cors import CORS
 
 import requests
-from dataclasses import asdict, is_dataclass
-
-from openai import OpenAI
+from dataclasses import is_dataclass
 
 from blocks.paypal_module import (
     get_access_token,
@@ -110,14 +107,6 @@ PAYPAL_CLIENT_ID = os.getenv(
 
 BASE_URL = (
     "https://api-m.paypal.com"
-)
-
-OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY"
-)
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY
 )
 
 # =========================================================
@@ -738,6 +727,9 @@ def build_space_continuity(normalized):
 # =========================================================
 
 GATEWAY_ROLE = "TRANSPORT_ONLY"
+GATEWAY_CANONICAL_ONLY = True
+GATEWAY_PARALLEL_ROUTE = False
+GATEWAY_PROVIDER_CALLS = 0
 CPU_OWNS_ROUTING = True
 CPU_OWNS_SCENE_CONTRACT = True
 
@@ -807,30 +799,33 @@ async def process_web_message(
 
     result = executor_contract_passthrough(result)
 
-    if isinstance(result, dict) and result.get("scene_contract"):
-        scene_view = scene_contract_view(result["scene_contract"])
-        normalized = {
-            "scene_contract": scene_view,
-            "content": (scene_view.get("content")
-                        or scene_view.get("answer")
-                        or scene_view.get("summary")
-                        or ""),
-            "answer": scene_view.get("answer"),
-            "summary": scene_view.get("summary"),
-            "render_blocks": scene_view.get("render_blocks", []),
-            "scene": (scene_view.get("machine_scene")
-                      or scene_view.get("scene", {})),
-            "graph": scene_view.get("graph"),
-            "formula": scene_view.get("formula"),
-            "table": scene_view.get("table"),
-            "gallery": scene_view.get("gallery"),
-            "layout": scene_view.get("layout"),
-            "visual": scene_view.get("visual"),
-        }
-        normalized["space_continuity"] = build_space_continuity(normalized)
-    else:
-        # Compatibility path until CPU returns canonical transport only
-        normalized = normalize_executor_response(result)
+    if not isinstance(result, dict) or not result.get("scene_contract"):
+        raise RuntimeError("Canonical CPU SceneContract is required.")
+
+    scene_view = scene_contract_view(result["scene_contract"])
+    normalized = {
+        "scene_contract": scene_view,
+        "content": (
+            scene_view.get("content")
+            or scene_view.get("answer")
+            or scene_view.get("summary")
+            or ""
+        ),
+        "answer": scene_view.get("answer"),
+        "summary": scene_view.get("summary"),
+        "render_blocks": scene_view.get("render_blocks", []),
+        "scene": (
+            scene_view.get("machine_scene")
+            or scene_view.get("scene", {})
+        ),
+        "graph": scene_view.get("graph"),
+        "formula": scene_view.get("formula"),
+        "table": scene_view.get("table"),
+        "gallery": scene_view.get("gallery"),
+        "layout": scene_view.get("layout"),
+        "visual": scene_view.get("visual"),
+    }
+    normalized["space_continuity"] = build_space_continuity(normalized)
 
     try:
         sc = normalized.get("scene_contract") if isinstance(normalized, dict) else None
@@ -902,6 +897,11 @@ def build_gateway_transport_payload(normalized):
     contract.setdefault("gateway_owner", "checkout_server")
     payload = {
         "scene_contract": _json_safe_snapshot(contract),
+        "transport_authority": "SCENE_CONTRACT",
+        "gateway_role": GATEWAY_ROLE,
+        "gateway_canonical_only": GATEWAY_CANONICAL_ONLY,
+        "parallel_route": GATEWAY_PARALLEL_ROUTE,
+        "provider_calls": GATEWAY_PROVIDER_CALLS,
         "contract_version": contract.get("version", 1),
         "transport_mode": "passthrough",
         "gateway_rebuild":False,
