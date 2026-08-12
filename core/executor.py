@@ -31,7 +31,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v14_unified_adaptive"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v15_visible_answer_artifact_safe"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -808,31 +808,138 @@ def _response(value: Any) -> MachineResponse:
         return MachineResponse(**allowed)
     raise RuntimeError("Provider returned no canonical MachineResponse")
 
-def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic: dict, cognition: dict, decision: dict, request: MachineRequest) -> dict:
+def _ensure_visible_answer_block(response: MachineResponse) -> list[dict]:
+    """
+    Canonical visible-answer invariant.
+
+    Provider may return structured artifacts/render blocks without a dedicated
+    visible text block. April Web still needs a canonical human-visible block.
+    This helper preserves every provider block and artifact, adding exactly one
+    TextBlock only when the answer is not already represented as visible text.
+    """
+    answer = _s(
+        getattr(response, "answer", "")
+        or getattr(response, "content", "")
+        or getattr(response, "response", "")
+    )
+    original = list(getattr(response, "render_blocks", []) or [])
+
+    if not answer:
+        return original
+
+    def block_text(block: Any) -> str:
+        if not isinstance(block, dict):
+            return ""
+        for key in ("content", "text", "answer", "message", "value"):
+            value = block.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    # A dedicated text block containing the canonical answer already exists.
+    for block in original:
+        if not isinstance(block, dict):
+            continue
+        block_type = _s(
+            block.get("type") or block.get("artifact_type") or ""
+        ).lower()
+        if block_type in {"text", "markdown"} and block_text(block):
+            return original
+
+    visible_text_block = {
+        "type": "text",
+        "artifact_type": "text",
+        "content": answer,
+        "text": answer,
+        "renderer": "TextBlock",
+        "viewer": "TextBlock",
+        "scene_contract": True,
+        "source": "quantum_processor_canonical_answer",
+    }
+
+    # Preserve provider structured blocks exactly as received.
+    return [visible_text_block, *original]
+
+
+def _canonicalize(
+    user_id: str,
+    response: MachineResponse,
+    state: dict,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    request: MachineRequest,
+) -> dict:
     answer = _s(response.answer) or _s(response.content) or _s(response.response)
+    if not answer:
+        raise RuntimeError("Quantum canonicalization blocked: empty MachineResponse answer")
+
     response.answer = answer
     response.content = answer
     if not response.summary:
         response.summary = answer[:500]
+
+    # Critical invariant:
+    # answer must survive independently of structured artifacts/renderers.
+    response.render_blocks = _ensure_visible_answer_block(response)
+
     response.metadata = dict(response.metadata or {})
-    response.metadata.update({"processor_version": PROCESSOR_VERSION, "single_route": True, "provider_calls_per_request": 1})
+    response.metadata.update({
+        "processor_version": PROCESSOR_VERSION,
+        "single_route": True,
+        "provider_calls_per_request": 1,
+        "visible_answer_guaranteed": True,
+        "visible_answer_block_type": "text",
+        "artifact_preservation": True,
+    })
     response.quantum_state = request.quantum_state
-    response.conversation_space = {"current_turn": {"user": _s(request.conversation.get("current_request")), "april": {"answer": answer, "render_blocks": response.render_blocks}}}
+    response.conversation_space = {
+        "current_turn": {
+            "user": _s(request.conversation.get("current_request")),
+            "april": {
+                "answer": answer,
+                "render_blocks": response.render_blocks,
+                "artifacts": list(getattr(response, "artifacts", []) or []),
+            },
+        }
+    }
     response.executor_semantic = semantic
     response.executor_cognition = cognition
     response.executor_response_decision = decision
+
+    # Build the canonical scene only after the visible answer invariant exists.
     scene = build_machine_scene(response)
     provider_blocks = list(getattr(response, "render_blocks", []) or [])
-    if provider_blocks:
-        try:
-            scene.blocks = provider_blocks
-            scene.contract.blocks = provider_blocks
-            scene.contract.render_blocks = list(provider_blocks)
-        except Exception:
-            pass
+
+    # Never discard artifacts; only synchronize the canonical visible/render
+    # block list with the already-preserved MachineResponse.
+    try:
+        scene.blocks = provider_blocks
+        scene.contract.blocks = provider_blocks
+        scene.contract.render_blocks = list(provider_blocks)
+
+        if hasattr(scene.contract, "supported_payloads"):
+            supported = list(getattr(scene.contract, "supported_payloads", []) or [])
+            for artifact in list(getattr(response, "artifacts", []) or []):
+                if artifact not in supported:
+                    supported.append(artifact)
+            scene.contract.supported_payloads = supported
+    except Exception:
+        # Scene contract builders may expose immutable dataclasses in some
+        # deployments; MachineResponse remains canonical regardless.
+        pass
+
     contract = build_scene_contract(scene)
     update_dialog_context(user_id, semantic)
     request_meta = _request_metadata(request)
+
+    # Final transport audit: text must be visible, artifacts must survive.
+    render_blocks = list(getattr(contract, "render_blocks", []) or [])
+    if not render_blocks:
+        render_blocks = list(provider_blocks)
+    if not render_blocks:
+        raise RuntimeError("Quantum canonicalization blocked: no render blocks")
+
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3_quantum",
@@ -843,12 +950,16 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
         "answer": answer,
         "content": answer,
         "summary": response.summary,
-        "render_blocks": list(getattr(contract, "render_blocks", []) or []),
+        "render_blocks": render_blocks,
+        "artifacts": list(getattr(response, "artifacts", []) or []),
         "single_route": True,
         "provider_calls_per_request": 1,
         "quantum_state": request.quantum_state,
         "energy_acceleration": request_meta.get("energy_acceleration", {}),
+        "visible_answer_guaranteed": True,
+        "artifact_preservation": True,
     }
+
 
 
 def _validate_quantum_release(request: MachineRequest) -> None:
@@ -1139,4 +1250,20 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         max_output_tokens=request.response_output_tokens,
     )
     response = _response(provider_result)
+
+    # The Provider may legitimately return structured artifacts without a
+    # standalone visible text block. Canonicalize once here so Web never sees
+    # an artifact-only SceneContract for an answer that exists.
+    response.render_blocks = _ensure_visible_answer_block(response)
+    request.constraints.setdefault("metadata", {})["visible_answer_audit"] = {
+        "answer_present": bool(_s(response.answer) or _s(response.content) or _s(response.response)),
+        "render_blocks_before_canonicalize": len(getattr(response, "render_blocks", []) or []),
+        "artifacts_preserved": len(getattr(response, "artifacts", []) or []),
+        "text_block_guaranteed": any(
+            isinstance(block, dict)
+            and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
+            for block in getattr(response, "render_blocks", []) or []
+        ),
+    }
+
     return _canonicalize(user_id, response, state, semantic, cognition, decision, request)
