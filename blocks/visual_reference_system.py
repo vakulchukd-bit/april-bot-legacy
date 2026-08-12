@@ -1,912 +1,163 @@
-# =====================================================
-# 🧠 VISUAL REFERENCE SYSTEM
-# =====================================================
-
 """
-APRIL VISUAL REFERENCE SYSTEM
+APRIL — VISUAL REFERENCE SYSTEM / QUANTUM VISUAL EVIDENCE V1
 
-Renderer-aware semantic support layer.
+Role:
+    Visual continuity and reference evidence provider.
 
-ROLE:
-- visual continuity support;
-- trajectory-safe visual guidance;
-- renderer cooperation;
-- lightweight scene assistance;
-- semantic visual stabilization.
-
-NOT ROLE:
-- image authority;
-- orchestration layer;
-- forced generation;
-- trigger engine;
-- scene ownership.
-
-APRIL PRINCIPLES:
-
-1. scene before keywords
-2. continuity before escalation
-3. renderer before generation
-4. semantic inheritance before triggers
-5. support instead of domination
-6. visual cognition instead of guessing
+Important:
+    An active visual scene is context, not a command to reuse it.
+    Final renderer/generation decisions belong to QUANTUM_PROCESSOR.
 """
 
-# =====================================================
-# 🧠 HELPERS
-# =====================================================
+from __future__ import annotations
 
-def normalize(
-    text: str
-):
-
-    return (
-        text or ""
-    ).lower().strip()
+from typing import Any, Dict, Iterable
 
 
-def contains_any(
-    text: str,
-    words: list
-):
-
-    return any(
-        w in text
-        for w in words
-    )
+APRIL_FILE_ID = "APRIL_VISUAL_REFERENCE_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
 
-def clamp(
-    value,
-    minimum=0.0,
-    maximum=1.0
-):
-
-    if value < minimum:
-        return minimum
-
-    if value > maximum:
-        return maximum
-
-    return value
+def _text(value: Any) -> str:
+    return str(value or "").strip()
 
 
-# =====================================================
-# 🧠 SAFE SCENE HELPERS
-# =====================================================
+def _low(value: Any) -> str:
+    return _text(value).lower()
 
-def build_scene_snapshot(
-    active_visual_scene
-):
 
-    if not active_visual_scene:
+def _contains(text: Any, values: Iterable[str]) -> bool:
+    value = _low(text)
+    return any(item in value for item in values)
 
-        return {
 
-            "exists": False
-        }
+def _clamp(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.0
 
+
+def build_scene_snapshot(active_visual_scene: Any) -> Dict[str, Any]:
+    if not isinstance(active_visual_scene, dict) or not active_visual_scene:
+        return {"exists": False}
     return {
-
         "exists": True,
-
-        "scene_type":
-            active_visual_scene.get(
-                "scene_type"
-            ),
-
-        "objects":
-            active_visual_scene.get(
-                "objects",
-                []
-            ),
-
-        "summary":
-            active_visual_scene.get(
-                "summary",
-                ""
-            ),
-
-        "atmosphere":
-            active_visual_scene.get(
-                "atmosphere"
-            ),
-
-        "continuity_weight":
-            active_visual_scene.get(
-                "continuity_weight",
-                0.0
-            )
+        "scene_type": _text(active_visual_scene.get("scene_type")),
+        "objects": list(active_visual_scene.get("objects") or [])[:8],
+        "summary": _text(active_visual_scene.get("summary"))[:600],
+        "atmosphere": _text(active_visual_scene.get("atmosphere"))[:240],
+        "continuity_weight": _clamp(active_visual_scene.get("continuity_weight", 0.0)),
     }
 
 
-def inherit_scene_direction(
-    result,
-    scene_snapshot
-):
-
-    if not scene_snapshot.get(
-        "exists"
-    ):
-
-        return result
-
-    result[
-        "visual_continuity"
-    ] = True
-
-    result[
-        "trajectory_aligned"
-    ] = True
-
-    result[
-        "dialogue_centered"
-    ] = True
-
-    result[
-        "support_level"
-    ] += 0.28
-
-    result[
-        "scene_inherited"
-    ] = True
-
-    atmosphere = scene_snapshot.get(
-        "atmosphere"
-    )
-
-    if atmosphere:
-
-        result[
-            "atmosphere"
-        ] = atmosphere
-
-    continuity_weight = scene_snapshot.get(
-        "continuity_weight",
-        0.0
-    )
-
-    if continuity_weight >= 0.7:
-
-        result[
-            "reference_priority"
-        ] = True
-
-        result[
-            "lightweight_mode"
-        ] = True
-
-        result[
-            "suppress_generation"
-        ] = True
-
-    return result
-
-
-# =====================================================
-# 🧠 MACHINE SIGNALS
-# =====================================================
-
-def detect_machine_visual_state(
-    semantic: dict,
-    cognition: dict,
-    reasoning: dict,
-    state: dict
-):
-
-    signals = {
-
-        "scene_active": False,
-
-        "renderer_active": False,
-
-        "continuity_active": False,
-
-        "exploration_active": False,
-
-        "generation_blocked": False,
-
-        "trajectory_active": False,
-
-        "dialogue_priority": False
-    }
-
-    # =================================================
-    # 🔥 SEMANTIC
-    # =====================================================
-
-    if semantic.get(
-        "visual_continuity"
-    ):
-
-        signals[
-            "continuity_active"
-        ] = True
-
-    if semantic.get(
-        "render_intent"
-    ):
-
-        signals[
-            "renderer_active"
-        ] = True
-
-    if semantic.get(
-        "prefer_renderer"
-    ):
-
-        signals[
-            "renderer_active"
-        ] = True
-
-    if semantic.get(
-        "dialog_state"
-    ) == "exploration":
-
-        signals[
-            "exploration_active"
-        ] = True
-
-    # =================================================
-    # 🔥 COGNITION
-    # =====================================================
-
-    if cognition.get(
-        "renderer_space_active"
-    ):
-
-        signals[
-            "renderer_active"
-        ] = True
-
-    if cognition.get(
-        "needs_continuation"
-    ):
-
-        signals[
-            "continuity_active"
-        ] = True
-
-    if cognition.get(
-        "trajectory_locked"
-    ):
-
-        signals[
-            "trajectory_active"
-        ] = True
-
-    if cognition.get(
-        "response_should_continue_scene"
-    ):
-
-        signals[
-            "continuity_active"
-        ] = True
-
-    if cognition.get(
-        "prefer_renderer"
-    ):
-
-        signals[
-            "renderer_active"
-        ] = True
-
-    # =================================================
-    # 🔥 REASONING
-    # =====================================================
-
-    if reasoning.get(
-        "unresolved_intent"
-    ):
-
-        signals[
-            "dialogue_priority"
-        ] = True
-
-    # =================================================
-    # 🔥 STATE
-    # =====================================================
-
-    if state.get(
-        "active_visual_scene"
-    ):
-
-        signals[
-            "scene_active"
-        ] = True
-
-    return signals
-
-
-# =====================================================
-# 🧠 VISUAL REFERENCE INHERITANCE
-# =====================================================
-
-def build_scene_references(
-    scene_snapshot
-):
-
-    references = []
-
-    if not scene_snapshot.get(
-        "exists"
-    ):
-
-        return references
-
-    scene_type = scene_snapshot.get(
-        "scene_type"
-    )
-
-    atmosphere = scene_snapshot.get(
-        "atmosphere"
-    )
-
-    objects = scene_snapshot.get(
-        "objects",
-        []
-    )
-
+def build_scene_references(scene_snapshot: Dict[str, Any]) -> list[Dict[str, Any]]:
+    if not scene_snapshot.get("exists"):
+        return []
+    refs: list[Dict[str, Any]] = []
+    scene_type = scene_snapshot.get("scene_type")
+    atmosphere = scene_snapshot.get("atmosphere")
     if scene_type:
-
-        references.append({
-
-            "type": "scene",
-
-            "title":
-                f"Scene continuity: {scene_type}",
-
-            "weight": 0.92
-        })
-
+        refs.append({"type": "scene", "title": scene_type, "weight": 0.70})
     if atmosphere:
-
-        references.append({
-
-            "type": "atmosphere",
-
-            "title":
-                f"Atmosphere continuity: {atmosphere}",
-
-            "weight": 0.88
-        })
-
-    for obj in objects[:4]:
-
-        references.append({
-
-            "type": "object",
-
-            "title":
-                f"Scene object: {obj}",
-
-            "weight": 0.72
-        })
-
-    return references
+        refs.append({"type": "atmosphere", "title": atmosphere, "weight": 0.60})
+    for obj in scene_snapshot.get("objects", [])[:4]:
+        refs.append({"type": "object", "title": _text(obj), "weight": 0.40})
+    return refs
 
 
-# =====================================================
-# 🧠 EXPLORATION DETECTION
-# =====================================================
+def detect_visual_context(
+    semantic: Dict[str, Any],
+    cognition: Dict[str, Any],
+    reasoning: Dict[str, Any],
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "scene_active": bool(state.get("active_visual_scene")),
+        "renderer_signal": bool(
+            semantic.get("visual_continuity")
+            or semantic.get("render_intent")
+            or semantic.get("prefer_renderer")
+            or cognition.get("prefer_renderer")
+            or cognition.get("renderer_space_active")
+        ),
+        "continuity_signal": bool(
+            cognition.get("needs_continuation")
+            or cognition.get("trajectory_locked")
+            or semantic.get("continuation")
+        ),
+        "exploration_signal": bool(
+            semantic.get("dialog_state") == "exploration"
+            or cognition.get("needs_guidance")
+        ),
+        "dialogue_priority": bool(reasoning.get("unresolved_intent")),
+    }
 
-def detect_exploration_state(
-    text: str,
-    semantic: dict,
-    cognition: dict
-):
-
-    t = normalize(text)
-
-    exploration_words = [
-
-        "примерно",
-        "не уверен",
-        "не знаю",
-        "может",
-        "вариант",
-        "идея",
-        "атмосфера",
-        "направление",
-        "референс",
-        "пример"
-    ]
-
-    score = 0.0
-
-    if contains_any(
-        t,
-        exploration_words
-    ):
-
-        score += 0.45
-
-    if semantic.get(
-        "ambiguity_level",
-        0.0
-    ) >= 0.4:
-
-        score += 0.3
-
-    if cognition.get(
-        "needs_guidance"
-    ):
-
-        score += 0.2
-
-    if semantic.get(
-        "dialog_state"
-    ) == "exploration":
-
-        score += 0.25
-
-    return clamp(score)
-
-
-# =====================================================
-# 🧠 MAIN
-# =====================================================
 
 def build_visual_reference(
-    semantic: dict,
-    cognition: dict,
+    semantic: Dict[str, Any],
+    cognition: Dict[str, Any],
     text: str,
-    state: dict
-):
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    semantic = semantic if isinstance(semantic, dict) else {}
+    cognition = cognition if isinstance(cognition, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    reasoning = state.get("reasoning") if isinstance(state.get("reasoning"), dict) else {}
 
-    t = normalize(text)
+    scene = build_scene_snapshot(state.get("active_visual_scene"))
+    signals = detect_visual_context(semantic, cognition, reasoning, state)
+    refs = build_scene_references(scene)
 
-    reasoning = state.get(
-        "reasoning",
-        {}
+    explicit_generation = _contains(
+        text,
+        ("создай изображение", "сгенерируй изображение", "нарисуй картинку"),
+    )
+    unrelated_textual_request = not _contains(
+        text,
+        ("картин", "изображ", "референс", "схем", "график", "диаграм", "визуал"),
     )
 
-    active_flow = state.get(
-        "active_flow"
-    )
-
-    active_visual_scene = state.get(
-        "active_visual_scene"
-    )
-
-    scene_snapshot = build_scene_snapshot(
-        active_visual_scene
-    )
-
-    machine = detect_machine_visual_state(
-
-        semantic,
-        cognition,
-        reasoning,
-        state
-    )
-
-    # =================================================
-    # 🧠 BASE
-    # =====================================================
-
-    result = {
-
-        # =================================================
-        # CORE
-        # =====================================================
-
-        "enabled": False,
-
-        "mode": None,
-
-        "references": [],
-
-        # =================================================
-        # GENERATION
-        # =====================================================
-
-        "should_generate": False,
-
-        "suppress_generation": False,
-
-        "generation_allowed": False,
-
-        # =================================================
-        # LIGHTWEIGHT
-        # =====================================================
-
-        "lightweight_mode": False,
-
-        "renderer_mode": True,
-
-        "reference_priority": False,
-
-        # =================================================
-        # CONTINUITY
-        # =====================================================
-
-        "trajectory_aligned": True,
-
-        "dialogue_centered": True,
-
-        "visual_should_continue_dialogue": True,
-
-        "visual_should_not_interrupt": True,
-
-        "visual_continuity": False,
-
-        "scene_inherited": False,
-
-        # =================================================
-        # SUPPORT
-        # =====================================================
-
-        "support_level": 0.0,
-
-        "reference_confidence": 0.0,
-
-        "direction_detected": False,
-
-        "guidance": None,
-
-        # =================================================
-        # STYLE
-        # =====================================================
-
-        "response_style": "guidance",
-
-        "emotion": None,
-
-        "atmosphere": None,
-
-        # =================================================
-        # MACHINE STATE
-        # =====================================================
-
-        "renderer_cooperation": True,
-
-        "semantic_inheritance": True,
-
-        "trajectory_support": True,
-
-        "machine_context_mode": True,
-
-        # =================================================
-        # SAFETY
-        # =====================================================
-
-        "visual_is_supportive": True,
-
-        "visual_requires_context": True,
-
-        "visual_requires_meaning": True,
-
-        "visual_is_not_random": True,
-
-        "capability_awareness": True,
-
-        "provider_aware": True,
-
-        "avoid_heavy_generation": True
-    }
-
-    # =================================================
-    # 🧠 SCENE INHERITANCE
-    # =====================================================
-
-    result = inherit_scene_direction(
-
-        result,
-        scene_snapshot
-    )
-
-    inherited_refs = build_scene_references(
-        scene_snapshot
-    )
-
-    result["references"].extend(
-        inherited_refs
-    )
-
-    # =================================================
-    # 🧠 MACHINE COOPERATION
-    # =====================================================
-
-    if machine.get(
-        "renderer_active"
-    ):
-
-        result[
-            "renderer_mode"
-        ] = True
-
-        result[
-            "suppress_generation"
-        ] = True
-
-        result[
-            "lightweight_mode"
-        ] = True
-
-        result[
-            "support_level"
-        ] += 0.25
-
-    if machine.get(
-        "continuity_active"
-    ):
-
-        result[
-            "visual_continuity"
-        ] = True
-
-        result[
-            "trajectory_aligned"
-        ] = True
-
-        result[
-            "dialogue_centered"
-        ] = True
-
-        result[
-            "support_level"
-        ] += 0.22
-
-    if machine.get(
-        "trajectory_active"
-    ):
-
-        result[
-            "reference_priority"
-        ] = True
-
-    if machine.get(
-        "dialogue_priority"
-    ):
-
-        result[
-            "visual_should_continue_dialogue"
-        ] = True
-
-        result[
-            "lightweight_mode"
-        ] = True
-
-    # =================================================
-    # 🧠 EXPLORATION
-    # =====================================================
-
-    exploration_score = (
-        detect_exploration_state(
-            text,
-            semantic,
-            cognition
-        )
-    )
-
-    if exploration_score >= 0.45:
-
-        result["enabled"] = True
-
-        result["mode"] = (
-            "exploration"
-        )
-
-        result[
-            "lightweight_mode"
-        ] = True
-
-        result[
-            "reference_priority"
-        ] = True
-
-        result[
-            "suppress_generation"
-        ] = True
-
-        result[
-            "response_style"
-        ] = "soft_guidance"
-
-        result[
-            "support_level"
-        ] += exploration_score
-
-    # =================================================
-    # 🧠 VISUAL EXPECTATION
-    # =====================================================
-
-    visual_expectation = semantic.get(
-        "visual_expectation",
-        0.0
-    )
-
-    example_expectation = semantic.get(
-        "example_expectation",
-        0.0
-    )
-
-    if visual_expectation >= 0.45:
-
-        result["enabled"] = True
-
-        result[
-            "support_level"
-        ] += 0.2
-
-    if example_expectation >= 0.45:
-
-        result["enabled"] = True
-
-        result[
-            "reference_priority"
-        ] = True
-
-        result[
-            "support_level"
-        ] += 0.25
-
-    # =================================================
-    # 🧠 SCREENSHOT CONTINUITY
-    # =====================================================
-
-    screenshot_words = [
-
-        "скрин",
-        "скриншот",
-        "screenshot"
-    ]
-
-    if contains_any(
-        t,
-        screenshot_words
-    ):
-
-        result["enabled"] = True
-
-        result["mode"] = (
+    # Old visual scenes remain available as evidence, but are not forced
+    # into a new independent textual request.
+    reuse_pressure = 0.0
+    if scene.get("exists") and not unrelated_textual_request:
+        reuse_pressure += scene.get("continuity_weight", 0.0)
+    if signals["continuity_signal"]:
+        reuse_pressure += 0.25
+
+    reuse_pressure = _clamp(reuse_pressure)
+
+    if explicit_generation and unrelated_textual_request:
+        reuse_pressure = 0.0
+
+    return {
+        "enabled": bool(scene.get("exists") or signals["renderer_signal"] or signals["exploration_signal"]),
+        "mode": (
             "context_support"
-        )
-
-        result[
-            "lightweight_mode"
-        ] = True
-
-        result[
-            "reference_priority"
-        ] = True
-
-        result[
-            "suppress_generation"
-        ] = True
-
-        result["guidance"] = (
-
-            "Screenshot treated as "
-            "continuation context."
-        )
-
-    # =================================================
-    # 🧠 EXPLICIT GENERATION
-    # =====================================================
-
-    explicit_generation_words = [
-
-        "создай изображение",
-        "сгенерируй изображение",
-        "нарисуй картинку",
-        "сделай картинку",
-        "generate image",
-        "draw image"
-    ]
-
-    explicit_generation = contains_any(
-
-        t,
-        explicit_generation_words
-    )
-
-    if explicit_generation:
-
-        if (
-
-            not result[
-                "suppress_generation"
-            ]
-
-            and semantic.get(
-                "ambiguity_level",
-                0.0
-            ) < 0.4
-
-            and semantic.get(
-                "dialog_state"
-            ) != "exploration"
-
-            and not cognition.get(
-                "needs_guidance"
-            )
-        ):
-
-            result[
-                "should_generate"
-            ] = True
-
-            result[
-                "generation_allowed"
-            ] = True
-
-            result[
-                "avoid_heavy_generation"
-            ] = False
-
-    # =================================================
-    # 🧠 ACTIVE FLOW
-    # =====================================================
-
-    if active_flow:
-
-        result[
-            "trajectory_aligned"
-        ] = True
-
-        result[
-            "dialogue_centered"
-        ] = True
-
-        result[
-            "support_level"
-        ] += 0.12
-
-    # =================================================
-    # 🧠 REFERENCE SORT
-    # =====================================================
-
-    result["references"] = sorted(
-
-        result["references"],
-
-        key=lambda x: x.get(
-            "weight",
-            0.0
+            if scene.get("exists") and unrelated_textual_request
+            else "visual_evidence"
+            if (scene.get("exists") or signals["renderer_signal"])
+            else None
         ),
-
-        reverse=True
-    )
-
-    # =================================================
-    # 🧠 NORMALIZATION
-    # =====================================================
-
-    result[
-        "support_level"
-    ] = clamp(
-        result[
-            "support_level"
-        ]
-    )
-
-    result[
-        "reference_confidence"
-    ] = clamp(
-        result[
-            "reference_confidence"
-        ]
-    )
-
-    # =================================================
-    # 🧠 FINAL SAFETY
-    # =====================================================
-
-    if result[
-        "lightweight_mode"
-    ]:
-
-        result[
-            "should_generate"
-        ] = False
-
-    if result.get(
-        "renderer_mode"
-    ):
-
-        result[
-            "avoid_heavy_generation"
-        ] = True
-
-    return result
+        "references": refs,
+        "scene_snapshot": scene,
+        "signals": signals,
+        "reuse_pressure": reuse_pressure,
+        "visual_continuity": bool(signals["continuity_signal"]),
+        "reference_priority": reuse_pressure >= 0.55,
+        "lightweight_mode": not explicit_generation,
+        "should_generate": False,
+        "generation_allowed": False,
+        "suppress_generation": True,
+        "visual_should_not_interrupt": True,
+        "visual_is_supportive": True,
+        "trajectory_aligned": True,
+        "dialogue_centered": True,
+        "semantic_inheritance": True,
+        "provider_calls": 0,
+        "decision_owner": DECISION_OWNER,
+        "renderer_selection": "delegated",
+        "generation_selection": "delegated",
+        "machine_only": True,
+    }
