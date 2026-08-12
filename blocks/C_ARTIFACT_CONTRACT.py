@@ -1581,6 +1581,76 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
 
 
 
+
+def _materialize_scene_artifacts(scene: Any, blocks: list) -> list:
+    """Project plain response artifacts into canonical render blocks once."""
+    normalized = list(blocks or [])
+    artifacts = list(getattr(scene, "artifacts", []) or [])
+    if not artifacts:
+        return normalized
+
+    existing_ids = {
+        str(block.get("artifact_id") or "")
+        for block in normalized
+        if isinstance(block, dict) and block.get("artifact_id")
+    }
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_type = str(
+            artifact.get("artifact_type")
+            or artifact.get("type")
+            or ""
+        ).strip().lower()
+        if not artifact_type:
+            continue
+        artifact_id = str(
+            artifact.get("artifact_id")
+            or (artifact.get("metadata") or {}).get("artifact_id")
+            or ""
+        ).strip()
+        if artifact_id and artifact_id in existing_ids:
+            continue
+
+        data = artifact.get("data") if isinstance(artifact.get("data"), dict) else artifact
+        payload = (
+            artifact.get("payload")
+            if isinstance(artifact.get("payload"), dict)
+            else data.get("payload")
+            if isinstance(data, dict) and isinstance(data.get("payload"), dict)
+            else {}
+        )
+        renderer = (
+            artifact.get("renderer")
+            or (artifact.get("render_signal") or {}).get("renderer")
+            or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
+        )
+        content = str(
+            artifact.get("content")
+            or artifact.get("answer")
+            or artifact.get("summary")
+            or (artifact.get("render_signal") or {}).get("content")
+            or ""
+        ).strip()
+        normalized.append({
+            "type": artifact_type,
+            "artifact_type": artifact_type,
+            "renderer": renderer,
+            "viewer": artifact.get("viewer") or renderer,
+            "content": content,
+            "text": content,
+            "payload": payload,
+            "artifact": artifact,
+            "artifact_id": artifact_id,
+            "scene_contract": True,
+            "provider_payload": True,
+            "canonical_provider_payload": True,
+        })
+        if artifact_id:
+            existing_ids.add(artifact_id)
+    return normalized
+
+
 def build_canonical_scene_blocks(scene):
     """
     Stage 3 (test):
@@ -1590,7 +1660,7 @@ def build_canonical_scene_blocks(scene):
     if _scene_is_internal_only(scene):
         return []
 
-    blocks = list(scene.blocks or [])
+    blocks = _materialize_scene_artifacts(scene, list(scene.blocks or []))
     if blocks:
         return blocks
 
@@ -1618,33 +1688,35 @@ def build_canonical_scene_blocks(scene):
 
 
 def _ensure_visible_text_block(scene: Any, blocks: list) -> list:
-    """Guarantee one canonical text block when a visible textual answer exists.
-
-    This is a transport invariant, not a fallback route: the same SceneContract
-    remains authoritative, but a plain answer must never disappear merely because
-    no renderer block was materialized upstream.
-    """
+    """Guarantee one canonical visible answer without duplicating structured blocks."""
     normalized = list(blocks or [])
-    if normalized or _scene_is_internal_only(scene):
+    if _scene_is_internal_only(scene):
         return normalized
 
     content = _scene_text_fallback(scene)
     if not content:
         return normalized
 
+    has_visible_text = any(
+        isinstance(block, dict)
+        and str(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
+        and str(block.get("content") or block.get("text") or block.get("answer") or "").strip()
+        for block in normalized
+    )
+    if has_visible_text:
+        return normalized
+
     metadata = getattr(scene, "metadata", {}) or {}
     presentation = metadata.get("presentation", {}) or {}
-    payload_type = presentation.get("payload_type", "text") or "text"
-    renderer = presentation.get("renderer") or SCENE_BLOCK_REGISTRY.get(payload_type, "TextBlock")
-    viewer = presentation.get("viewer") or renderer
-
     return [{
-        "type": payload_type,
-        "renderer": renderer,
-        "viewer": viewer,
+        "type": "text",
+        "renderer": "TextBlock",
+        "viewer": "TextBlock",
         "content": content,
+        "text": content,
         "priority": presentation.get("priority", 100),
-    }]
+        "scene_contract": True,
+    }, *normalized]
 
 
 def build_scene_contract(scene: MachineScene) -> SceneContract:
