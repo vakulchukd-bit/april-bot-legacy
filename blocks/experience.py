@@ -17,7 +17,8 @@ This module only extracts compact, JSON-safe experience evidence.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+import re
+from typing import Any, Dict, Iterable
 
 
 APRIL_FILE_ID = "APRIL_EXPERIENCE_EVIDENCE_QUANTUM_V1"
@@ -67,13 +68,6 @@ def _clamp(value: Any, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, number))
 
 
-def _safe_list(value: Any) -> list:
-    if isinstance(value, list):
-        return value
-    if isinstance(value, (tuple, set)):
-        return list(value)
-    return []
-
 
 def build_experience_evidence(
     text: str,
@@ -99,9 +93,16 @@ def build_experience_evidence(
     previous_words = set(re.findall(r"\w+", _low(previous_user), flags=re.UNICODE))
     overlap = len(current_words & previous_words) / max(1, len(current_words | previous_words))
 
+    recent_user_turns = [
+        _text(x.get("content"))
+        for x in recent
+        if isinstance(x, dict) and _low(x.get("role")) in {"user", "human"}
+    ][-4:]
+
     return {
-        "version": "quantum_experience_v1",
+        "version": "quantum_experience_v2",
         "current_request": _text(text),
+        "active_flow": active_flow,
         "signals": {
             "action_pressure": 1.0 if _contains(text, ACTION_WORDS) else 0.0,
             "reference_pressure": 1.0 if _contains(text, REFERENCE_WORDS) else 0.0,
@@ -112,11 +113,7 @@ def build_experience_evidence(
             "flow_type": active_flow.get("type"),
             "short_turn": bool(normalized and len(normalized.split()) <= 8),
         },
-        "recent_user_turns": [
-            _text(x.get("content"))
-            for x in recent
-            if isinstance(x, dict) and _low(x.get("role")) in {"user", "human"}
-        ][-4:],
+        "recent_user_turns": recent_user_turns,
         "temporary_only": True,
         "machine_only": True,
         "decision_owner": DECISION_OWNER,
