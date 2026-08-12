@@ -152,17 +152,52 @@ CORS(app)
 # 🧠 SAFE JSON
 # =========================================================
 
-def safe_json(value):
-
-    try:
-
-        json.dumps(value)
-
+def _json_safe_snapshot(value, _active=None):
+    """Preserve rich transport structures while breaking runtime cycles."""
+    if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
-    except:
+    if _active is None:
+        _active = set()
 
+    oid = id(value)
+    if oid in _active:
+        return {"__cycle__": True}
+
+    if is_dataclass(value):
+        try:
+            value = {
+                field_name: getattr(value, field_name)
+                for field_name in value.__dataclass_fields__
+            }
+        except Exception:
+            return str(value)
+
+    if isinstance(value, dict):
+        _active.add(oid)
+        try:
+            return {
+                str(key): _json_safe_snapshot(item, _active)
+                for key, item in value.items()
+            }
+        finally:
+            _active.remove(oid)
+
+    if isinstance(value, (list, tuple, set)):
+        _active.add(oid)
+        try:
+            return [_json_safe_snapshot(item, _active) for item in value]
+        finally:
+            _active.remove(oid)
+
+    try:
         return str(value)
+    except Exception:
+        return None
+
+
+def safe_json(value):
+    return _json_safe_snapshot(value)
 
 
 def _checkout_best_text(*values):
@@ -388,6 +423,9 @@ def normalize_executor_response(
 
             "space": {}
         }
+
+    scene_contract = scene_contract_view(result.get("scene_contract"))
+    root_scene = scene_contract if isinstance(scene_contract, dict) else {}
 
     print("========== NORMALIZE EXECUTOR RESPONSE ==========")
     print("RESULT TYPE:", type(result))
@@ -811,8 +849,11 @@ async def process_web_message(
         print("SCENE CONTRACT AUDIT ERROR:", audit_error)
 
     normalized["space_continuity"] = build_space_continuity(normalized)
+    normalized["user_id"] = str(user_id)
+    normalized["canonical_route"] = "/api/v1/chat"
+    normalized["single_route"] = True
 
-    return normalized
+    return _json_safe_snapshot(normalized)
 
 
 
@@ -859,10 +900,10 @@ def build_gateway_transport_payload(normalized):
     contract = scene_contract_view(normalized.get("scene_contract"))
     contract.setdefault("gateway_transport_only", True)
     contract.setdefault("gateway_owner", "checkout_server")
-    return {
-        "scene_contract": contract,
+    payload = {
+        "scene_contract": _json_safe_snapshot(contract),
         "contract_version": contract.get("version", 1),
-        "transport_mode":"passthrough",
+        "transport_mode": "passthrough",
         "gateway_rebuild":False,
         "space_continuity": normalized.get("space_continuity", {}),
         "render_blocks": contract.get("render_blocks", []),
@@ -871,6 +912,7 @@ def build_gateway_transport_payload(normalized):
         "answer": contract.get("answer", normalized.get("answer")),
         "summary": contract.get("summary", normalized.get("summary")),
     }
+    return _json_safe_snapshot(payload)
 
 # =========================================================
 # 🎨 SUCCESS HTML
@@ -1222,10 +1264,7 @@ def image_chat():
             "image"
         )
 
-        user_id = request.form.get(
-            "user_id",
-            "web_image"
-        )
+        user_id = (request.form.get("user_id") or "").strip()
 
         if not image_file:
 
@@ -1236,6 +1275,12 @@ def image_chat():
                 "error":
                     "image file missing"
 
+            }), 400
+
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "user_id required"
             }), 400
 
         print(
@@ -1368,9 +1413,12 @@ def web_chat():
 
         data = request.json or {}
 
-        user_id = data.get(
-            "user_id"
-        )
+        user_id = str(data.get("user_id") or "").strip()
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "user_id required"
+            }), 400
 
         text = data.get(
             "text",
@@ -1425,16 +1473,6 @@ def web_chat():
                 "active_visual_scene"
             )
         )
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "error":
-                    "user_id required"
-            }), 400
 
         print(
             "🧠 VISUAL SUMMARY:",
