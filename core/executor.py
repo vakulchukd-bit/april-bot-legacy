@@ -17,7 +17,14 @@ from blocks.cognitive_core import analyze_cognition
 from blocks.response_decision import build_response_decision
 from blocks.visual_reference_system import build_visual_reference
 from blocks.state_manager import get_state, update_dialog_context
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
+from blocks.C_ARTIFACT_CONTRACT import (
+    MachineRequest,
+    MachineResponse,
+    build_machine_scene,
+    build_scene_contract,
+    coordinate_factory_response,
+    validate_quantum_factory_result,
+)
 from blocks.provider_router import generate_text
 
 PROCESSOR_VERSION = "april_quantum_processor_balanced_v2"
@@ -404,6 +411,27 @@ def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic
     response.executor_semantic = semantic
     response.executor_cognition = cognition
     response.executor_response_decision = decision
+    # Bind the provider response to the same Fiber/Factory transaction before
+    # Scene construction. The Factory does not create a second route: it
+    # accepts room artifacts, preserves provider render signals, and merges
+    # everything into the same MachineResponse.
+    response, factory_state = coordinate_factory_response(
+        request,
+        response,
+        user_id=user_id,
+        flow_id=_s(
+            _field(
+                (getattr(request, "metadata", {}) or {}, getattr(request, "routing", {}) or {}),
+                ("flow_id",),
+            )
+        ),
+    )
+    response.metadata["factory_validation"] = validate_quantum_factory_result(
+        request,
+        response,
+        factory_state,
+    )
+
     # Preserve provider-owned render signals before the canonical Factory projection.
     scene = build_machine_scene(response)
     provider_blocks = list(getattr(response, "render_blocks", []) or [])
