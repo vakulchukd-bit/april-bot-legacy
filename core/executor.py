@@ -28,10 +28,46 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v8_all10_contract_safe"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v9_all10_cycle_safe"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
+
+
+def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
+    """
+    Convert runtime evidence into a detached, JSON-safe snapshot.
+
+    Quantum evidence may contain shared references because multiple engines
+    contribute the same dicts. Shared references are fine; live back-references
+    are not. This helper detaches every branch so the persisted user state
+    cannot become a self-referential object graph.
+    """
+    active = _active if _active is not None else set()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    oid = id(value)
+    if oid in active:
+        return {"__cycle__": True}
+    if isinstance(value, dict):
+        active.add(oid)
+        try:
+            result = {
+                str(k): _quantum_snapshot(v, active)
+                for k, v in value.items()
+            }
+        finally:
+            active.remove(oid)
+        return result
+    if isinstance(value, (list, tuple, set)):
+        active.add(oid)
+        try:
+            result = [_quantum_snapshot(v, active) for v in value]
+        finally:
+            active.remove(oid)
+        return result
+    # Runtime objects are not allowed into canonical state/evidence.
+    return _s(value)
 
 def _s(v: Any) -> str:
     return str(v or "").strip()
@@ -166,16 +202,16 @@ def _build_quantum_field(
         "provider_calls": 0,
         "parallel_route": False,
         "sources": {
-            "context_system": _as_dict(context),
-            "interpretation_layer": _as_dict(interpretation),
-            "semantic_core": _as_dict(semantic),
-            "cognitive_core": _as_dict(cognition),
-            "intent_system": _as_dict(intent),
-            "intent_ai": _as_dict(intent_ai),
-            "intent_resolver": _as_dict(resolver),
-            "router": _as_dict(router),
-            "router_system": _as_dict(router_system),
-            "response_decision": _as_dict(decision),
+            "context_system": _quantum_snapshot(_as_dict(context)),
+            "interpretation_layer": _quantum_snapshot(_as_dict(interpretation)),
+            "semantic_core": _quantum_snapshot(_as_dict(semantic)),
+            "cognitive_core": _quantum_snapshot(_as_dict(cognition)),
+            "intent_system": _quantum_snapshot(_as_dict(intent)),
+            "intent_ai": _quantum_snapshot(_as_dict(intent_ai)),
+            "intent_resolver": _quantum_snapshot(_as_dict(resolver)),
+            "router": _quantum_snapshot(_as_dict(router)),
+            "router_system": _quantum_snapshot(_as_dict(router_system)),
+            "response_decision": _quantum_snapshot(_as_dict(decision)),
         },
         "evidence_channels": 10,
         "representations": _unique_strings(
@@ -184,17 +220,17 @@ def _build_quantum_field(
             + _as_list(intent.get("renderer_subtype"))
             + _as_list(decision.get("required_representations"))
         ),
-        "candidate_signals": (
+        "candidate_signals": _quantum_snapshot(
             _as_list(intent.get("candidate_signals"))
             + _as_list(intent_ai.get("quantum_evidence", {}).get("candidates"))
             + _as_list(router.get("quantum_evidence", {}).get("signals"))
             + _as_list(router_system.get("candidate_signals"))
         ),
-        "trajectory": {
+        "trajectory": _quantum_snapshot({
             "resolver": _as_dict(resolver),
             "active_flow": _as_dict(state.get("active_flow")),
             "context": _as_dict(context.get("quantum_evidence")),
-        },
+        }),
         "arbitration": {
             "dialogue": "processor",
             "representation": "processor",
@@ -748,10 +784,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         decision=decision,
     )
 
-    state["_quantum_evidence_field"] = quantum_field
-    state["_quantum_processor_context"] = processor_context
-    semantic["quantum_evidence_field"] = quantum_field
-    semantic["processor_context"] = processor_context
+    detached_quantum_field = _quantum_snapshot(quantum_field)
+    state["_quantum_evidence_field"] = detached_quantum_field
+    state["_quantum_processor_context"] = _quantum_snapshot(processor_context)
+    semantic["quantum_evidence_field"] = _quantum_snapshot(quantum_field)
+    semantic["processor_context"] = _quantum_snapshot(processor_context)
     semantic["decision_owner"] = "QUANTUM_PROCESSOR"
     semantic["provider_calls"] = 0
     semantic["parallel_route"] = False
