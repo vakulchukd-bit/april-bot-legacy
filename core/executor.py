@@ -18,6 +18,9 @@ from blocks.reasoning_state import build_reasoning_state
 from blocks.cognitive_core import analyze_cognition
 from blocks.response_decision import build_response_decision
 from blocks.visual_reference_system import build_visual_reference
+from blocks.experience import build_experience_evidence
+from blocks.experience_manager import get_experience
+from blocks.goal_engine import build_goal_evidence
 from blocks.intent_system import detect_intent
 from blocks.intent_ai import detect_intent_ai
 from blocks.intent_resolver import resolve_input, build_focus_intent_state
@@ -28,7 +31,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v9_all10_cycle_safe"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v10_all14_cycle_safe"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
@@ -190,6 +193,10 @@ def _build_quantum_field(
     router: dict,
     router_system: dict,
     decision: dict,
+    experience: dict,
+    experience_manager: dict,
+    goal: dict,
+    visual_reference: dict,
 ) -> dict:
     """Build the one canonical evidence field for Quantum collapse."""
     return {
@@ -212,8 +219,12 @@ def _build_quantum_field(
             "router": _quantum_snapshot(_as_dict(router)),
             "router_system": _quantum_snapshot(_as_dict(router_system)),
             "response_decision": _quantum_snapshot(_as_dict(decision)),
+            "experience": _quantum_snapshot(_as_dict(experience)),
+            "experience_manager": _quantum_snapshot(_as_dict(experience_manager)),
+            "goal_engine": _quantum_snapshot(_as_dict(goal)),
+            "visual_reference_system": _quantum_snapshot(_as_dict(visual_reference)),
         },
-        "evidence_channels": 10,
+        "evidence_channels": 14,
         "representations": _unique_strings(
             _as_list(semantic.get("required_representations"))
             + _as_list(interpretation.get("required_representations"))
@@ -747,12 +758,53 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         semantic=semantic, cognition=cognition, text=text, state=state
     ) or {}
 
+    # -------------------------------------------------------------
+    # FOUR NEW QUANTUM EVIDENCE LENSES
+    # These do not own routing or memory. They only contribute compact,
+    # JSON-safe evidence to the single processor field.
+    # -------------------------------------------------------------
+    experience = build_experience_evidence(
+        text=text,
+        state=state,
+    ) or {}
+
+    experience_manager_state = get_experience(
+        user_id
+    ) or {}
+
+    # The experience manager is a short-lived per-user signal source.
+    # Only the latest compact state is admitted to the quantum field.
+    experience_manager_evidence = {
+        "user_id": _s(experience_manager_state.get("user_id") or user_id),
+        "latest": _quantum_snapshot(
+            experience_manager_state.get("latest", {})
+        ),
+        "has_experience": bool(experience_manager_state.get("events")),
+        "temporary": True,
+        "machine_only": True,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "provider_calls": 0,
+    }
+
+    goal_evidence = build_goal_evidence(
+        text=text,
+        state=state,
+        semantic=semantic,
+    ) or {}
+
     decision = build_response_decision(
         semantic=semantic,
         cognition=cognition,
         state=state,
         visual_reference=visual,
     ) or {}
+
+    semantic["quantum_experience_evidence"] = _quantum_snapshot(experience)
+    semantic["quantum_goal_evidence"] = _quantum_snapshot(goal_evidence)
+    semantic["quantum_visual_reference_evidence"] = _quantum_snapshot(visual)
+    semantic["quantum_experience_manager_evidence"] = _quantum_snapshot(
+        experience_manager_evidence
+    )
 
     processor_context = build_processor_execution_context({
         "state": state,
@@ -766,6 +818,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "router": router_evidence,
         "router_system": router_system,
         "decision": decision,
+        "experience": experience,
+        "experience_manager": experience_manager_evidence,
+        "goal": goal_evidence,
+        "visual_reference": visual,
     })
 
     quantum_field = _build_quantum_field(
@@ -782,6 +838,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         router=router_evidence,
         router_system=router_system,
         decision=decision,
+        experience=experience,
+        experience_manager=experience_manager_evidence,
+        goal=goal_evidence,
+        visual_reference=visual,
     )
 
     detached_quantum_field = _quantum_snapshot(quantum_field)
@@ -794,14 +854,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["parallel_route"] = False
 
     request = _make_request(text, semantic, cognition, decision, state, visual)
-    request.quantum_state["evidence_channels"] = 10
+    request.quantum_state["evidence_channels"] = 14
     request.quantum_state["evidence_field"] = quantum_field
     request_meta = _request_metadata(request)
     request_meta.update({
-        "quantum_evidence_channels": 10,
+        "quantum_evidence_channels": 14,
         "quantum_evidence_field_version": PROCESSOR_VERSION,
         "provider_calls_per_request": 1,
         "single_route": True,
+        "quantum_evidence_channels": 14,
         "processor_context": processor_context,
     })
     request.constraints["metadata"] = request_meta
@@ -822,6 +883,18 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         raise RuntimeError("Quantum energy acceleration invariant failed")
 
     _validate_quantum_release(request)
+
+    # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
+        "evidence_channels": 14,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "single_route": True,
+        "provider_calls": 1,
+        "experience": True,
+        "experience_manager": True,
+        "goal_engine": True,
+        "visual_reference_system": True,
+    }
 
     provider_result = await generate_text(
         request,
