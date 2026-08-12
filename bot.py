@@ -28,7 +28,6 @@ This file is NOT:
 ❌ trigger dispatcher
 ❌ semantic analyzer
 ❌ frontend renderer
-❌ telegram transport
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🧠 GOLDEN FLOW
@@ -96,7 +95,7 @@ import json
 import os
 import re
 import traceback
-from dataclasses import asdict, is_dataclass
+from dataclasses import is_dataclass
 
 from datetime import datetime
 
@@ -127,25 +126,26 @@ from blocks.state_manager import (
 from checkout_server import app
 
 # =========================================================
-# 🔥 CONFIG
+# 🔥 CANONICAL ROUTE CONFIG
 # =========================================================
 
-OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY"
-)
-
-GEMINI_API_KEY = os.getenv(
-    "GEMINI_API_KEY"
-)
-
-CHECKOUT_DOMAIN = os.getenv(
-    "CHECKOUT_DOMAIN",
-    "https://aprill.site"
-)
+BOT_ROUTER_ROLE = "CANONICAL_MACHINE_BRIDGE"
+BOT_ROUTER_PROVIDER_CALLS = 0
+BOT_ROUTER_PARALLEL_ROUTE = False
+BOT_ROUTER_SCENE_AUTHORITY = "QUANTUM_PROCESSOR"
 
 # =========================================================
 # 🔥 RENDERER TYPES
 # =========================================================
+
+BOT_ROUTER_GUARD = {
+    "legacy_messenger_transport": False,
+    "provider_authority": False,
+    "cognition_authority": False,
+    "renderer_authority": False,
+    "scene_contract_authority": "QUANTUM_PROCESSOR",
+    "single_route": True,
+}
 
 RENDERER_TYPES = [
 
@@ -1143,7 +1143,8 @@ async def process_april_request(
         result = {"content": str(result), "type": "text"}
 
     result = preserve_executor_scene_contract(result)
-    result.setdefault("scene_contract", {})
+    if not isinstance(result.get("scene_contract"), dict):
+        raise RuntimeError("Canonical CPU SceneContract is required.")
     result.setdefault("gateway_transport", {})
     normalized = organize_multimodal_response(result)
 
@@ -1198,6 +1199,10 @@ def april_web_chat():
 
         return jsonify({
             "success": True,
+            "canonical_route": "/chat",
+            "single_route": True,
+            "router_role": BOT_ROUTER_ROLE,
+            "provider_calls": BOT_ROUTER_PROVIDER_CALLS,
             "type": result.get("type"),
             "content": result.get("content", ""),
             "answer": result.get("answer", ""),
