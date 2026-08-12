@@ -15,7 +15,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_0"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_1_unified_adaptive"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -27,8 +27,7 @@ OPENAI_FAST_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 OPENAI_PREMIUM_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 
 INPUT_TOKEN_BUDGET = 900
-OUTPUT_TIER_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
-MIN_OUTPUT_TOKENS = 2000
+MIN_OUTPUT_TOKENS = 1
 MAX_OUTPUT_TOKENS = 8000
 
 PROVIDER_DUPLICATE_TTL_SECONDS = 90
@@ -180,7 +179,7 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "required_competencies", "required_artifacts", "routing",
             "constraints", "metadata", "dialogue_contract",
             "response_decision", "semantic", "cognition",
-            "response_complexity", "response_output_tokens",
+            "response_complexity", "response_output_tokens", "quantum_state",
         )
         for name in names:
             value = getattr(machine_request, name, None)
@@ -226,6 +225,7 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
         "cognition": raw.get("cognition") or {},
         "response_complexity": raw.get("response_complexity"),
         "response_output_tokens": raw.get("response_output_tokens"),
+        "quantum_state": raw.get("quantum_state") or {},
     }
 
     compact = _compact_value(compact) or {}
@@ -302,8 +302,9 @@ def _count_question_marks(text: str) -> int:
 
 
 def _derive_complexity(payload: dict[str, Any]) -> str:
+    """Descriptive complexity label only; never selects the output budget."""
     explicit = _safe_text(payload.get("response_complexity")).upper()
-    if explicit in OUTPUT_TIER_TOKENS:
+    if explicit in {"LOW", "MEDIUM", "HIGH"}:
         return explicit
 
     question_count = _count_question_marks(_extract_request_text(payload))
@@ -311,28 +312,49 @@ def _derive_complexity(payload: dict[str, Any]) -> str:
     artifacts = payload.get("required_artifacts") or []
     dialogue = _dialogue_contract(payload)
 
-    complexity_signals = question_count
-    complexity_signals += max(0, len(outputs) - 1)
-    complexity_signals += max(0, len(artifacts) - 1)
-
+    score = question_count
+    score += max(0, len(outputs) - 1)
+    score += max(0, len(artifacts) - 1)
     if dialogue.get("continuation") and dialogue.get("previous_april_turn"):
-        complexity_signals += 1
+        score += 1
 
-    if complexity_signals >= 5:
+    if score >= 5:
         return "HIGH"
-    if complexity_signals >= 2:
+    if score >= 2:
         return "MEDIUM"
     return "LOW"
 
-
 def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int:
-    complexity = _derive_complexity(payload)
+    """
+    Use only the processor-calculated continuous response budget.
+
+    No LOW/MEDIUM/HIGH ceiling is applied here. Provider is the execution
+    boundary; Quantum Processor is the authority that decided the budget.
+    """
+    candidates: list[int] = []
+
     if isinstance(requested, int) and requested > 0:
-        return min(max(requested, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+        candidates.append(int(requested))
+
     embedded = payload.get("response_output_tokens")
     if isinstance(embedded, int) and embedded > 0:
-        return min(max(embedded, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
-    return OUTPUT_TIER_TOKENS[complexity]
+        candidates.append(int(embedded))
+
+    constraints = payload.get("constraints") or {}
+    metadata = constraints.get("metadata") if isinstance(constraints, dict) else {}
+    if isinstance(metadata, dict):
+        budget = metadata.get("response_budget")
+        if isinstance(budget, int) and budget > 0:
+            candidates.append(int(budget))
+
+    quantum = payload.get("quantum_state")
+    if isinstance(quantum, dict):
+        budget = quantum.get("response_budget")
+        if isinstance(budget, int) and budget > 0:
+            candidates.append(int(budget))
+
+    chosen = candidates[0] if candidates else 1
+    return min(max(chosen, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
 
 
 def _render_block_renderer(block_type: str) -> str:
@@ -873,6 +895,9 @@ async def generate_text(messages: Any, temperature: Any = None,
             "provider_usage": usage,
             "estimated_cost_usd": estimated_cost,
             "output_cap": output_tokens,
+            "output_budget_mode": "continuous_processor_budget",
+            "output_budget_source": "QUANTUM_PROCESSOR",
+            "output_budget_range": [MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS],
             "answer_len": len(mr.get("answer") or ""),
             "render_blocks": len(mr.get("render_blocks") or []),
             "artifacts": len(mr.get("artifacts") or []),
