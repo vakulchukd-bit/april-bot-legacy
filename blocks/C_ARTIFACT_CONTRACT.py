@@ -427,6 +427,61 @@ FACTORY_STATUS = {
 
     "professional_rooms": True
 }
+# =====================================================
+# CANONICAL FACTORY ROOM PROFILES
+# =====================================================
+
+FACTORY_ROOM_PROFILES = {
+    "diagram": {
+        "room": "C_DIAGRAM_ROOM",
+        "artifact_type": "diagram",
+        "renderer": "DiagramBlock",
+        "viewer": "DiagramBlock",
+        "semantic_service": "APRIL_DIAGRAM_SYSTEM_CORE",
+        "capabilities": [
+            "spatial_semantics",
+            "geometry",
+            "relations",
+            "structure",
+            "engineering_layout",
+        ],
+        "machine_input": "MachineRequest",
+        "machine_output": "BaseArtifact",
+        "scene_output": "SceneContract",
+        "single_route": True,
+    },
+}
+
+
+def get_factory_room_profile(room_or_artifact_type: str) -> Dict[str, Any]:
+    '''Return the canonical production-room profile without routing logic.'''
+    key = str(room_or_artifact_type or "").strip()
+    if key in FACTORY_ROOM_PROFILES:
+        return dict(FACTORY_ROOM_PROFILES[key])
+    for profile in FACTORY_ROOM_PROFILES.values():
+        if key in {profile.get("room"), profile.get("artifact_type")}:
+            return dict(profile)
+    return {}
+
+
+def build_diagram_room_payload(
+    semantic: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    '''Normalize diagram-room semantics into one artifact payload.'''
+    semantic = dict(semantic or {})
+    payload = dict(payload or {})
+    profile = get_factory_room_profile("diagram")
+    payload.update({
+        "artifact_type": profile["artifact_type"],
+        "room_source": profile["room"],
+        "renderer": profile["renderer"],
+        "viewer": profile["viewer"],
+        "semantic": semantic,
+        "diagram_semantics": semantic,
+        "machine_only": bool(payload.get("machine_only", False)),
+    })
+    return payload
 
 
 # =====================================================
@@ -844,6 +899,19 @@ def build_universal_contract(
         contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
 
     return contract
+
+
+def create_diagram_artifact(
+    semantic: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> BaseArtifact:
+    '''Create the canonical C_DIAGRAM_ROOM artifact for the same Fiber route.'''
+    data = build_diagram_room_payload(semantic, payload)
+    return create_artifact(
+        artifact_type="diagram",
+        room_source="C_DIAGRAM_ROOM",
+        data=data,
+    )
 
 
 def create_transport_contract(
@@ -1387,6 +1455,10 @@ __all__ = [
     "validate_universal_contract",
     "build_machine_scene",
     "build_scene_contract",
+    "FACTORY_ROOM_PROFILES",
+    "get_factory_room_profile",
+    "build_diagram_room_payload",
+    "create_diagram_artifact",
     "FactoryRoomContribution",
     "QuantumFactoryState",
     "bind_request_to_fiber",
@@ -1397,6 +1469,7 @@ __all__ = [
     "quantum_factory_finalize",
     "coordinate_factory_response",
     "validate_quantum_factory_result",
+    "validate_diagram_factory_artifact",
 ]
 
 
@@ -1944,6 +2017,28 @@ def coordinate_factory_response(
 # =====================================================
 # FACTORY OUTPUT VALIDATION
 # =====================================================
+
+def validate_diagram_factory_artifact(artifact: Optional[BaseArtifact]) -> Dict[str, Any]:
+    '''Validate canonical diagram -> DiagramBlock transport.'''
+    if artifact is None:
+        return {"ok": False, "reason": "missing_artifact"}
+    metadata = getattr(artifact, "metadata", None)
+    render = getattr(artifact, "render", None)
+    artifact_type = getattr(metadata, "artifact_type", "")
+    room = getattr(metadata, "room_source", "")
+    renderer = getattr(render, "web_block", "")
+    return {
+        "ok": (
+            artifact_type == "diagram"
+            and room == "C_DIAGRAM_ROOM"
+            and renderer == "DiagramBlock"
+        ),
+        "artifact_type": artifact_type,
+        "room_source": room,
+        "renderer": renderer,
+        "single_route": True,
+    }
+
 
 def validate_quantum_factory_result(
     request: MachineRequest,
