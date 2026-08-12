@@ -1334,6 +1334,21 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         raise RuntimeError("Quantum release blocked: contradictory representation plan")
 
     # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    #
+    # IMPORTANT:
+    # The 64-signal budget field is owned by the MachineRequest created by
+    # _make_request(). It must never be read from execute()'s local scope,
+    # because that would make the processor depend on a variable that only
+    # exists inside _make_request(). Reading the canonical field from the
+    # request keeps the budget calculation single-source and preserves the
+    # single-route processor invariant.
+    quantum_budget_field = (
+        getattr(request, "quantum_state", {}) or {}
+    ).get("quantum_budget_field", {})
+    if not isinstance(quantum_budget_field, dict):
+        raise RuntimeError("Quantum release blocked: canonical 64-signal budget field missing")
+
+    # Final quantum release audit: 14 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
         "evidence_channels": 14,
         "decision_owner": "QUANTUM_PROCESSOR",
@@ -1341,13 +1356,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "provider_calls": 1,
         "response_budget": getattr(request, "response_output_tokens", 0),
         "response_budget_range": [OUTPUT_MIN_TOKENS, OUTPUT_MAX_TOKENS],
+        "response_budget_canonical": True,
         "quantum_cores": 8,
         "quantum_lanes_per_core": 8,
         "quantum_signal_count": 64,
         "response_budget_mode": "continuous_64_signal_scale",
-        "quantum_cores": 8,
-        "quantum_lanes_per_core": 8,
-        "quantum_signal_count": 64,
         "quantum_budget_field": quantum_budget_field,
         "experience": True,
         "experience_manager": True,
