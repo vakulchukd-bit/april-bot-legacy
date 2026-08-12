@@ -15,7 +15,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_1_unified_adaptive"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_2_64lane_canonical_render"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -68,13 +68,20 @@ answer, content, summary, scene, artifacts, render_blocks,
 scene_plan, render_priority, confidence.
 
 Rules:
-- answer/content are the complete human-visible answer.
+- answer/content are the complete human-visible narrative answer.
 - Answer the current request, not the transport protocol.
 - Use dialogue_contract only to preserve necessary continuity.
 - When the request is independent, do not invent old context.
 - When it is a continuation/reference, use only the supplied relevant context.
 - Preserve the complete logical answer; never cut a sentence or scene for style.
-- Use structured render_blocks only for representations actually required.
+- Treat requested_outputs as a canonical multi-output plan, not as mutually exclusive modes.
+- If a structured representation is requested (for example table, graph, diagram, formula),
+  place its structured data in render_blocks/artifacts and DO NOT duplicate the same structure
+  as a second answer or as repeated prose tables.
+- The answer may briefly explain the structured result, but must not reproduce the full artifact payload
+  inside answer/content when a dedicated render block exists.
+- Emit at most one canonical text render block. Emit at most one block per requested structured representation
+  unless the request genuinely asks for multiple independent artifacts of the same type.
 - Keep Markdown and inline LaTeX inside text unless a separate renderer is explicitly required.
 - Never produce a second answer.
 - Never call another model.
@@ -354,7 +361,9 @@ def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int
             candidates.append(int(budget))
 
     chosen = candidates[0] if candidates else 1
-    return min(max(chosen, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+    # Provider never invents a tier. If the processor supplied a canonical budget,
+    # that exact value wins. Otherwise the minimal safe value is used.
+    return min(max(int(chosen), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
 
 
 def _render_block_renderer(block_type: str) -> str:
@@ -374,6 +383,104 @@ def _render_block_renderer(block_type: str) -> str:
         "video": "VideoBlock",
         "action": "ActionBlock",
     }.get(block_type, "TextBlock")
+
+
+def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
+    """Return the processor-owned multi-output plan without trigger routing."""
+    requested = payload.get("requested_outputs") or []
+    if isinstance(requested, str):
+        requested = [requested]
+    result = []
+    aliases = {
+        "markdown": "text",
+        "renderer_scene": "diagram",
+        "visual": "graph",
+        "image_generate": "image",
+    }
+    for item in requested:
+        name = _safe_text(item).strip().lower()
+        name = aliases.get(name, name)
+        if name and name not in result:
+            result.append(name)
+    if any(x != "text" for x in result) and "text" not in result:
+        result.insert(0, "text")
+    return result or ["text"]
+
+
+def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
+    """
+    Prevent a narrative answer from containing a second full copy of a structured artifact.
+    This is intentionally conservative: it does not parse arbitrary prose or remove facts.
+    It only removes a fenced/markdown table block when a dedicated table output is requested.
+    """
+    if not answer or "table" not in requested_outputs:
+        return answer
+    # Remove markdown table runs of 2+ rows; the dedicated TableBlock carries the structure.
+    lines = answer.splitlines()
+    out = []
+    table_run = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        is_pipe = line.count("|") >= 2
+        if is_pipe:
+            run = 0
+            j = i
+            while j < len(lines) and lines[j].count("|") >= 2:
+                run += 1
+                j += 1
+            if run >= 3:
+                i = j
+                continue
+        out.append(line)
+        i += 1
+    cleaned = "\n".join(out).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
+def _dedupe_render_blocks(blocks: list[dict], answer: str, requested_outputs: list[str]) -> list[dict]:
+    """Canonicalize one answer + structured artifacts without losing unique payloads."""
+    clean = _clean_render_blocks(blocks)
+    result: list[dict] = []
+    seen = set()
+    text_added = False
+
+    for block in clean:
+        btype = _safe_text(block.get("type") or block.get("artifact_type") or "text").lower()
+        payload = block.get("payload", block.get("table", block.get("graph", block.get("images", block.get("url")))))
+        if btype in {"text", "markdown"}:
+            content = normalize_response_text(block.get("content") or block.get("text") or block.get("answer") or "")
+            if not content:
+                continue
+            # Remove an exact duplicate of the canonical answer.
+            if text_added and re.sub(r"\s+", " ", content).strip().lower() == re.sub(r"\s+", " ", answer).strip().lower():
+                continue
+            if text_added and content.strip().lower() == answer.strip().lower():
+                continue
+            block["type"] = "text"
+            block["renderer"] = "TextBlock"
+            block["viewer"] = "TextBlock"
+            text_added = True
+            result.append(block)
+            continue
+
+        sig = (btype, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:8000])
+        if sig in seen:
+            continue
+        seen.add(sig)
+        result.append(block)
+
+    # Guarantee one text block, but do not duplicate a provider text block.
+    if not text_added and answer:
+        result.insert(0, {
+            "type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "scene_contract": True,
+        })
+    return result
 
 
 def _clean_render_blocks(blocks: Any) -> list[dict]:
@@ -739,36 +846,51 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 def provider_finalize_for_executor(contract: dict) -> dict:
     if not isinstance(contract, dict):
         raise RuntimeError("Provider contract must be a dict.")
+
     mr = contract.setdefault("machine_response", {})
     answer = normalize_response_text(mr.get("answer") or mr.get("content") or mr.get("response") or "")
     if not answer:
         raise RuntimeError("Canonical MachineResponse contains no visible answer.")
 
+    source = contract.get("processor_input")
+    payload = source if isinstance(source, dict) else {}
+    requested_outputs = _canonical_requested_outputs(payload)
+
+    # Remove duplicated full structured representations from the narrative channel.
+    answer = _strip_duplicate_structured_text(answer, requested_outputs)
+
     mr["answer"] = answer
-    mr["content"] = normalize_response_text(mr.get("content") or answer)
+    mr["content"] = answer
     mr["response"] = normalize_response_text(mr.get("response") or answer)
-    mr["summary"] = normalize_response_text(mr.get("summary") or _compact_summary(answer, mr.get("render_blocks") or []))
-    mr["render_blocks"] = _clean_render_blocks(mr.get("render_blocks") or [])
-    if not mr["render_blocks"] and not mr.get("artifacts"):
-        mr["render_blocks"] = [{
-            "type": "text",
-            "content": answer,
-            "text": answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-        }]
-    mr.setdefault("artifacts", [])
+
+    original_blocks = mr.get("render_blocks") or []
+    mr["render_blocks"] = _dedupe_render_blocks(original_blocks, answer, requested_outputs)
+
+    mr["artifacts"] = list(mr.get("artifacts") or [])
     mr.setdefault("scene", {})
-    mr.setdefault("scene_plan", ["text"])
-    mr.setdefault("render_priority", [])
+    mr.setdefault("scene_plan", list(requested_outputs))
+    mr.setdefault("render_priority", list(requested_outputs))
     mr.setdefault("metadata", {})
+
+    # Canonical output plan survives Provider untouched.
     mr["metadata"].update({
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
         "provider_calls": 1,
         "single_route": True,
         "summary_visible": False,
         "canonical_answer_verified": True,
+        "canonical_output_plan": requested_outputs,
+        "duplicate_guard": True,
+        "answer_artifact_separation": True,
+        "structured_output_deduplication": True,
     })
+
+    # Never create duplicate text blocks for artifact-only plans.
+    if requested_outputs != ["text"]:
+        mr["metadata"]["structured_outputs"] = [
+            x for x in requested_outputs if x != "text"
+        ]
+
     return contract
 
 
@@ -780,6 +902,8 @@ def provider_transport_audit(contract: dict) -> dict:
         "summary_length": len(mr.get("summary") or ""),
         "artifact_count": len(mr.get("artifacts") or []),
         "render_block_count": len(mr.get("render_blocks") or []),
+        "text_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() == "text"),
+        "table_block_count": sum(1 for b in (mr.get("render_blocks") or []) if isinstance(b, dict) and _safe_text(b.get("type")).lower() == "table"),
         "model": APRIL_QUANTUM_PROVIDER_MODEL,
         "provider_calls": 1,
         "single_route": True,
