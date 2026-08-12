@@ -1,160 +1,108 @@
-# ==================== 🧠 APRIL LEGACY ROUTER ====================
-
 """
-APRIL LEGACY COMPATIBILITY ROUTER
+APRIL LEGACY ROUTER SYSTEM — QUANTUM EVIDENCE V1
 
-⚠️ IMPORTANT:
-Этот router больше НЕ является главным мозгом April.
+Role:
+    Compatibility evidence layer only.
 
-Главные authority системы теперь:
-- semantic_core
-- cognitive_core
-- response_decision
-- executor orchestration
+The original router contained many sequential action overrides:
+    exploration -> guide -> visual -> image -> diagram -> question -> continue.
 
-Router теперь:
-- compatibility helper;
-- weak hypothesis layer;
-- continuity-safe stabilizer;
-- lightweight orchestration assistant.
+That structure could silently replace one signal with another.
 
-Router НЕ:
-- execution authority;
-- hard trigger layer;
-- recursive router;
-- generation authority;
-- telegram dispatcher.
+Quantum version:
+    - collects all applicable signals;
+    - preserves their confidence and provenance;
+    - never owns final routing;
+    - never invokes Provider/OpenAI;
+    - never triggers generation;
+    - never selects a room or renderer;
+    - keeps decide_action() for compatibility.
+
+Final authority:
+    QUANTUM_PROCESSOR
+
+Single route:
+    USER -> EVIDENCE -> QUANTUM PROCESSOR -> EXECUTION/ARTIFACT ->
+    SCENE CONTRACT -> APRIL WEB
 """
 
-# =====================================================
-# 🔥 MACHINE IDENTITY
-# =====================================================
+from __future__ import annotations
 
-APRIL_FILE_ID = "APRIL_LEGACY_ROUTER"
+from typing import Any, Dict, Iterable, List, Optional
+
+
+APRIL_FILE_ID = "APRIL_LEGACY_ROUTER_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
 ROUTER_MACHINE_CHANNEL = {
-
-    "type": "legacy_router",
-
+    "type": "legacy_compatibility_evidence",
     "mode": "supportive",
-
-    "authority": "soft",
-
+    "authority": "none",
     "continuity_safe": True,
-
     "web_safe": True,
-
-    "renderer_first": True
+    "renderer_first": True,
+    "decision_owner": DECISION_OWNER,
+    "provider_calls": 0,
+    "parallel_route": False,
 }
 
-# =====================================================
-# 🔥 ROUTER CONTRACT
-# =====================================================
 
-def build_router_contract():
-
+def build_router_contract() -> Dict[str, Any]:
     return {
-
-        "legacy_compatible":
-            True,
-
-        "execution_authority":
-            False,
-
-        "generation_authority":
-            False,
-
-        "renderer_authority":
-            False,
-
-        "hard_trigger_behavior":
-            False,
-
-        "continuity_first":
-            True,
-
-        "trajectory_safe":
-            True,
-
-        "web_oriented":
-            True
+        "legacy_compatible": True,
+        "execution_authority": False,
+        "generation_authority": False,
+        "renderer_authority": False,
+        "hard_trigger_behavior": False,
+        "continuity_first": True,
+        "trajectory_safe": True,
+        "web_oriented": True,
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "parallel_route": False,
     }
+
 
 ROUTER_CONTRACT = build_router_contract()
 
-# =====================================================
-# 🔥 LOGGING
-# =====================================================
+ROUTER_PATCH_LOG: List[str] = []
+MAX_ROUTER_LOGS = 100
 
-ROUTER_PATCH_LOG = []
 
-def safe_router_log(msg):
-
+def safe_router_log(msg: Any) -> None:
     try:
-
-        print(
-            "APRIL LEGACY ROUTER:",
-            msg
-        )
-
-        ROUTER_PATCH_LOG.append(
-            str(msg)
-        )
-
-    except:
+        ROUTER_PATCH_LOG.append(str(msg))
+        if len(ROUTER_PATCH_LOG) > MAX_ROUTER_LOGS:
+            del ROUTER_PATCH_LOG[:-MAX_ROUTER_LOGS]
+    except Exception:
         pass
 
-safe_router_log(
-    "LEGACY ROUTER INITIALIZED"
-)
 
-# =====================================================
-# 🧠 SAFE HELPERS
-# =====================================================
-
-def normalize(text):
-
-    return (
-        text or ""
-    ).lower().strip()
+safe_router_log("LEGACY COMPATIBILITY EVIDENCE INITIALIZED")
 
 
-def contains_any(text, words):
+def normalize(text: Any) -> str:
+    return str(text or "").lower().strip()
 
-    return any(
-        w in text
-        for w in words
-    )
 
-# =====================================================
-# 🧠 NEGATION DETECTION
-# =====================================================
+def contains_any(text: Any, words: Iterable[str]) -> bool:
+    value = normalize(text)
+    return any(word in value for word in words)
 
-def has_negation(text):
 
-    negations = [
-
+def has_negation(text: str) -> bool:
+    return contains_any(text, (
         "не надо",
         "не делай",
         "не нужно",
         "не хочу",
         "не генерируй",
-        "не создавай"
-    ]
+        "не создавай",
+    ))
 
-    return contains_any(
-        text,
-        negations
-    )
 
-# =====================================================
-# 🧠 EXPLORATION DETECTION
-# =====================================================
-
-def is_exploration(text):
-
-    exploration_words = [
-
+def is_exploration(text: str) -> bool:
+    return contains_any(text, (
         "примерно",
         "может",
         "наверное",
@@ -167,86 +115,49 @@ def is_exploration(text):
         "как будто",
         "не уверен",
         "вариант",
-        "настроение"
-    ]
+        "настроение",
+    ))
 
-    return contains_any(
-        text,
-        exploration_words
-    )
 
-# =====================================================
-# 🧠 USER LEADS DETECTION
-# =====================================================
-
-def user_leads_direction(text):
-
-    direction_words = [
-
+def user_leads_direction(text: str) -> bool:
+    return contains_any(text, (
         "вот",
         "в таком стиле",
         "ближе",
         "примерно так",
         "вот это",
         "атмосфера",
-        "идея"
-    ]
+        "идея",
+    ))
 
-    return contains_any(
-        text,
-        direction_words
-    )
 
-# =====================================================
-# 🧠 LIGHT VISUAL DETECTION
-# =====================================================
-
-def wants_visual_reference(text):
-
-    visual_words = [
-
+def wants_visual_reference(text: str) -> bool:
+    return contains_any(text, (
         "референс",
         "пример",
         "атмосфера",
         "визуально",
         "идея",
         "примерно",
-        "стиль"
-    ]
+        "стиль",
+    ))
 
-    return contains_any(
-        text,
-        visual_words
-    )
 
-# =====================================================
-# 🧠 IMAGE GENERATION DETECTION
-# =====================================================
-
-def wants_real_generation(text):
-
-    generation_words = [
-
+def wants_real_generation(text: str) -> bool:
+    return contains_any(text, (
         "сгенерируй",
         "создай изображение",
         "нарисуй",
         "сделай картинку",
-        "покажи изображение"
-    ]
+        "покажи изображение",
+    ))
 
-    return contains_any(
-        text,
-        generation_words
-    )
 
-# =====================================================
-# 🧠 SHORT CONTINUATION
-# =====================================================
-
-def is_short_continuation(text):
-
-    continuation_words = [
-
+def is_short_continuation(text: str) -> bool:
+    t = normalize(text)
+    if len(t.split()) > 3:
+        return False
+    return contains_any(t, (
         "да",
         "ага",
         "вот",
@@ -255,253 +166,261 @@ def is_short_continuation(text):
         "примерно",
         "уже лучше",
         "не знаю",
-        "ну вот"
-    ]
+        "ну вот",
+    ))
 
-    if len(text.split()) <= 3:
 
-        if contains_any(
-            text,
-            continuation_words
-        ):
+def build_result() -> Dict[str, Any]:
+    """
+    Compatibility packet.
 
-            return True
-
-    return False
-
-# =====================================================
-# 🧠 SAFE RESULT TEMPLATE
-# =====================================================
-
-def build_result():
-
+    `action` is retained for callers that still expect it, but it is only
+    the strongest descriptive hint. `quantum_evidence` contains the complete
+    signal set and the Quantum Processor owns final arbitration.
+    """
     return {
-
         "action": "chat",
-
         "confidence": 0.5,
 
         "is_soft_decision": True,
-
         "trajectory_safe": True,
-
         "continuity_safe": True,
 
         "exploration_mode": False,
-
         "visual_guidance": False,
-
         "generation_allowed": False,
-
         "continuation_detected": False,
 
         "legacy_router": True,
-
         "hard_authority": False,
-
         "executor_override_allowed": True,
-
         "renderer_first": True,
+        "web_safe": True,
 
-        "web_safe": True
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "parallel_route": False,
+
+        "candidate_signals": [],
+        "quantum_evidence": {},
     }
 
-# =====================================================
-# 🧠 MAIN ROUTER
-# =====================================================
+
+def _add_signal(
+    result: Dict[str, Any],
+    name: str,
+    confidence: float,
+    source: str,
+    **metadata: Any,
+) -> None:
+    result["candidate_signals"].append({
+        "signal": name,
+        "confidence": max(0.0, min(1.0, float(confidence))),
+        "source": source,
+        **metadata,
+    })
+
+
+def _strongest_signal(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    signals = result.get("candidate_signals") or []
+    if not signals:
+        return None
+    return max(signals, key=lambda item: item.get("confidence", 0.0))
+
 
 def decide_action(
     text: str,
-    history: list
-):
+    history: Optional[list],
+) -> Dict[str, Any]:
+    """
+    Collect legacy compatibility evidence.
 
+    Important:
+        No early return is used while collecting signals.
+        A request can simultaneously be exploratory, visual, generative,
+        diagram-related and conversational. All evidence survives.
+
+        The returned `action` is only a compatibility hint.
+    """
     t = normalize(text)
-
-    safe_router_log(
-        f"INPUT: {t[:80]}"
-    )
-
-    # =================================================
-    # 🔥 BASE RESULT
-    # =====================================================
-
     result = build_result()
 
-    # =================================================
-    # 🔥 NEGATION
-    # =====================================================
+    safe_router_log(f"INPUT: {t[:80]}")
 
+    # -------------------------------------------------
+    # NEGATION — strongest safety evidence
+    # -------------------------------------------------
     if has_negation(t):
+        _add_signal(
+            result,
+            "negation",
+            0.94,
+            "legacy_local",
+            suppress_generation=True,
+        )
 
-        result["action"] = "chat"
-
-        result["confidence"] = 0.9
-
-        return result
-
-    # =================================================
-    # 🔥 SHORT CONTINUATION
-    # =====================================================
-
+    # -------------------------------------------------
+    # CONTINUATION
+    # -------------------------------------------------
     if is_short_continuation(t):
+        result["continuation_detected"] = True
+        _add_signal(
+            result,
+            "continuation",
+            0.85,
+            "legacy_local",
+        )
 
-        result["action"] = "continue"
-
-        result[
-            "continuation_detected"
-        ] = True
-
-        result["confidence"] = 0.85
-
-        return result
-
-    # =================================================
-    # 🔥 EXPLORATION
-    # =====================================================
-
+    # -------------------------------------------------
+    # EXPLORATION
+    # -------------------------------------------------
     if is_exploration(t):
+        result["exploration_mode"] = True
+        _add_signal(
+            result,
+            "exploration",
+            0.76,
+            "legacy_local",
+        )
 
-        result[
-            "exploration_mode"
-        ] = True
-
-        result["action"] = "guide"
-
-        result["confidence"] = 0.75
-
-    # =================================================
-    # 🔥 USER LEADS
-    # =====================================================
-
+    # -------------------------------------------------
+    # USER DIRECTION
+    # -------------------------------------------------
     if user_leads_direction(t):
+        result["exploration_mode"] = True
+        _add_signal(
+            result,
+            "user_direction",
+            0.80,
+            "legacy_local",
+        )
 
-        result[
-            "trajectory_safe"
-        ] = True
-
-        result[
-            "exploration_mode"
-        ] = True
-
-        result["action"] = "guide"
-
-        result["confidence"] = 0.8
-
-    # =================================================
-    # 🔥 VISUAL GUIDANCE
-    # =====================================================
-
+    # -------------------------------------------------
+    # VISUAL GUIDANCE
+    # -------------------------------------------------
     if wants_visual_reference(t):
+        result["visual_guidance"] = True
+        _add_signal(
+            result,
+            "visual_reference",
+            0.76,
+            "legacy_local",
+        )
 
-        result[
-            "visual_guidance"
-        ] = True
-
-        result["action"] = "reference"
-
-        result["confidence"] = 0.75
-
-    # =================================================
-    # 🔥 REAL GENERATION
-    # =====================================================
-
+    # -------------------------------------------------
+    # IMAGE GENERATION
+    # -------------------------------------------------
     if wants_real_generation(t):
+        result["generation_allowed"] = not has_negation(t)
+        _add_signal(
+            result,
+            "image_generation_candidate",
+            0.90,
+            "legacy_local",
+            blocked_by_negation=has_negation(t),
+        )
 
-        # exploration suppresses generation
-
-        if not result[
-            "exploration_mode"
-        ]:
-
-            result[
-                "generation_allowed"
-            ] = True
-
-            result["action"] = "image"
-
-            result["confidence"] = 0.9
-
-    # =================================================
-    # 🔥 DIAGRAM
-    # =====================================================
-
-    diagram_words = [
-
+    # -------------------------------------------------
+    # DIAGRAM
+    # -------------------------------------------------
+    if contains_any(t, (
         "чертеж",
         "чертёж",
         "схема",
-        "диаграмма"
-    ]
-
-    if contains_any(
-        t,
-        diagram_words
-    ):
-
-        result["action"] = "diagram"
-
-        result["confidence"] = 0.8
-
-    # =================================================
-    # 🔥 QUESTION
-    # =====================================================
-
-    question_words = [
-
-        "что",
-        "почему",
-        "как",
-        "зачем"
-    ]
-
-    if (
-
-        "?" in t
-
-        or contains_any(
-            t,
-            question_words
+        "диаграмма",
+    )):
+        _add_signal(
+            result,
+            "diagram_candidate",
+            0.80,
+            "legacy_local",
         )
-    ):
 
-        if result["action"] == "chat":
+    # -------------------------------------------------
+    # QUESTION
+    # -------------------------------------------------
+    if "?" in t or contains_any(t, ("что", "почему", "как", "зачем")):
+        _add_signal(
+            result,
+            "question",
+            0.70,
+            "legacy_local",
+        )
 
-            result["confidence"] = 0.7
+    # -------------------------------------------------
+    # SHORT INPUT
+    # -------------------------------------------------
+    if len(t.split()) <= 2 and t:
+        _add_signal(
+            result,
+            "short_input",
+            0.55,
+            "legacy_local",
+        )
 
-    # =================================================
-    # 🔥 WEAK SHORT INPUT
-    # =====================================================
+    # -------------------------------------------------
+    # HISTORY / TRAJECTORY AS WEAK CONTEXT
+    # -------------------------------------------------
+    if history:
+        _add_signal(
+            result,
+            "history_available",
+            0.40,
+            "session_context",
+            history_size=len(history),
+        )
 
-    if len(t.split()) <= 2:
+    # -------------------------------------------------
+    # FINAL COMPATIBILITY HINT
+    # -------------------------------------------------
+    strongest = _strongest_signal(result)
 
-        if result["action"] == "chat":
+    if strongest:
+        signal = strongest["signal"]
 
-            result["action"] = "continue"
+        compatibility_map = {
+            "negation": "chat",
+            "continuation": "continue",
+            "exploration": "guide",
+            "user_direction": "guide",
+            "visual_reference": "reference",
+            "image_generation_candidate": "image",
+            "diagram_candidate": "diagram",
+            "question": "chat",
+            "short_input": "continue",
+            "history_available": "chat",
+        }
 
-            result["confidence"] = 0.55
+        result["action"] = compatibility_map.get(signal, "chat")
+        result["confidence"] = strongest["confidence"]
 
-            result[
-                "continuation_detected"
-            ] = True
+    # Safety normalization:
+    # negation can suppress generation without deleting the generation
+    # evidence itself.
+    if has_negation(t):
+        result["generation_allowed"] = False
 
-    # =================================================
-    # 🔥 FINAL SAFETY
-    # =====================================================
+    result["hard_authority"] = False
+    result["executor_override_allowed"] = True
+    result["trajectory_safe"] = True
+    result["continuity_safe"] = True
 
-    result[
-        "executor_override_allowed"
-    ] = True
+    result["quantum_evidence"] = {
+        "current_request": text,
+        "signals": list(result["candidate_signals"]),
+        "history_available": bool(history),
+        "decision_owner": DECISION_OWNER,
+        "final_route": "delegated",
+        "final_room": "delegated",
+        "final_renderer": "delegated",
+        "final_execution": "delegated",
+        "provider_calls": 0,
+        "parallel_route": False,
+    }
 
-    result[
-        "hard_authority"
-    ] = False
-
-    result[
-        "trajectory_safe"
-    ] = True
-
-    result[
-        "continuity_safe"
-    ] = True
+    safe_router_log(
+        f"EVIDENCE: {len(result['candidate_signals'])} signals / "
+        f"hint={result['action']}"
+    )
 
     return result
