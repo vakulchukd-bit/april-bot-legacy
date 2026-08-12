@@ -659,7 +659,7 @@ def _quantum_budget_from_64(
     minimum: int = OUTPUT_MIN_TOKENS,
     maximum: int = OUTPUT_MAX_TOKENS,
 ) -> int:
-    """Collapse the 64 evidence lanes to one continuous sufficient budget."""
+    """Collapse 64 continuous evidence signals into the minimum sufficient budget."""
     mean_need = _bounded01(field.get("mean_need", 0.0))
     agreement = _bounded01(field.get("agreement", 0.0))
     structured = _bounded01(field.get("structured_density", 0.0))
@@ -667,19 +667,29 @@ def _quantum_budget_from_64(
     continuation = _bounded01(field.get("continuation", 0.0))
     planning = _bounded01(field.get("planning", 0.0))
 
-    # Continuous information need. No LOW/MEDIUM/HIGH tiers and no preset
-    # output steps. The final value may be any integer in [minimum, maximum].
-    need = (
-        0.34 * mean_need
-        + 0.20 * (1.0 - agreement)
-        + 0.20 * structured
-        + 0.10 * request_density
-        + 0.08 * continuation
-        + 0.08 * planning
+    # Economy is deliberately part of the decision: low information demand
+    # stays cheap, while structure/continuation/planning expand the frontier
+    # continuously. There are no response-size tiers.
+    informational_need = (
+        0.28 * mean_need
+        + 0.26 * structured
+        + 0.16 * request_density
+        + 0.12 * continuation
+        + 0.10 * planning
+        + 0.08 * (1.0 - agreement)
     )
-    # Map continuously to a useful range while keeping very simple answers
-    # economical. The floor is evidence-driven, not a tier.
-    budget = minimum + (maximum - minimum) * _bounded01(need)
+    need = _bounded01(informational_need)
+
+    # Non-linear expansion keeps ordinary answers near their actual minimum
+    # while preserving a continuous path all the way to the hard 8000 ceiling.
+    shaped = need ** 2.15
+    budget = minimum + (maximum - minimum) * shaped
+
+    # Ensure representation-bearing requests have enough room for their
+    # canonical structure without imposing renderer-specific fixed tiers.
+    if structured > 0.18:
+        budget = max(budget, 1 + (maximum - minimum) * (0.12 * structured ** 1.25))
+
     return int(round(max(minimum, min(maximum, budget))))
 
 def _adaptive_output_budget(
