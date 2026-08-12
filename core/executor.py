@@ -31,10 +31,11 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v12_all14_canonical_fusion"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v14_unified_adaptive"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
-OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
+OUTPUT_MIN_TOKENS = 1
+OUTPUT_MAX_TOKENS = 8000
 
 
 def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
@@ -498,13 +499,13 @@ def _representation_consensus(
 
 
 def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> str:
-    """Select 2k/5k/8k by structured task evidence, not keyword triggers."""
+    """Descriptive complexity label only; never selects an output budget."""
     explicit = _s(
         semantic.get("response_complexity")
         or cognition.get("response_complexity")
         or decision.get("response_complexity")
     ).upper()
-    if explicit in OUTPUT_TOKENS:
+    if explicit in {"LOW", "MEDIUM", "HIGH"}:
         return explicit
 
     parts = max(
@@ -519,20 +520,84 @@ def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> s
     outputs = semantic.get("requested_outputs") or semantic.get("required_outputs") or []
     artifacts = semantic.get("required_artifacts") or []
     domains = semantic.get("required_domains") or semantic.get("required_competencies") or []
-
-    complexity_score = 0
-    complexity_score += max(0, parts - 1)
-    complexity_score += max(0, len(outputs) - 1)
-    complexity_score += max(0, len(artifacts) - 1)
-    complexity_score += min(2, len(domains))
-    complexity_score += int(bool(cognition.get("multi_step") or cognition.get("requires_planning")))
-    complexity_score += int(bool(decision.get("multi_step") or decision.get("requires_planning")))
-
-    if complexity_score >= 5:
+    score = (
+        max(0, parts - 1)
+        + max(0, len(outputs) - 1)
+        + max(0, len(artifacts) - 1)
+        + min(2, len(domains))
+        + int(bool(cognition.get("multi_step") or cognition.get("requires_planning")))
+        + int(bool(decision.get("multi_step") or decision.get("requires_planning")))
+    )
+    if score >= 5:
         return "HIGH"
-    if complexity_score >= 2:
+    if score >= 2:
         return "MEDIUM"
     return "LOW"
+
+
+def _adaptive_output_budget(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+) -> int:
+    """Estimate the minimally sufficient response budget on a continuous scale.
+
+    The value is evidence-driven rather than tier-driven. It may be anywhere
+    from 1 to 8000 tokens. 8000 is the only hard ceiling; smaller values are
+    merely the estimated sufficient capacity for this request.
+    """
+    request_tokens = max(1, len(_tokens(text)))
+    task_parts = max(1, len(
+        semantic.get("task_parts")
+        or semantic.get("subtasks")
+        or semantic.get("requested_tasks")
+        or []
+    ))
+    outputs = _as_list(
+        semantic.get("requested_outputs")
+        or semantic.get("required_outputs")
+        or decision.get("requested_outputs")
+    )
+    artifacts = _as_list(
+        semantic.get("required_artifacts")
+        or decision.get("required_artifacts")
+    )
+    domains = _as_list(
+        semantic.get("required_domains")
+        or semantic.get("required_competencies")
+        or cognition.get("required_domains")
+    )
+    continuation = bool(
+        semantic.get("continuation")
+        or cognition.get("continuation")
+        or decision.get("continuation")
+    )
+
+    # Continuous estimate: start from the information content of the request,
+    # then add capacity for required structural outputs and continuation.
+    estimate = request_tokens * 9.0
+    estimate += max(0, task_parts - 1) * 260.0
+    estimate += len(outputs) * 260.0
+    estimate += len(artifacts) * 420.0
+    estimate += min(len(domains), 8) * 140.0
+    if continuation:
+        estimate += 260.0
+
+    # Tables/galleries/graphs are structurally denser than plain prose.
+    dense_types = {"table", "graph", "diagram", "gallery", "image", "code", "formula", "link"}
+    dense_count = sum(1 for x in outputs if _s(x).lower() in dense_types)
+    estimate += dense_count * max(180.0, request_tokens * 2.0)
+
+    # Avoid an unnecessarily tiny answer for multi-output requests, while still
+    # remaining continuous and evidence-derived.
+    lower_bound = max(
+        1.0,
+        request_tokens * 4.0,
+        120.0 if (len(outputs) + len(artifacts)) >= 2 else 1.0,
+    )
+    estimate = max(lower_bound, estimate)
+    return int(max(OUTPUT_MIN_TOKENS, min(OUTPUT_MAX_TOKENS, round(estimate))))
 
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
@@ -561,6 +626,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     goal = _s(_field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))) or text
 
     complexity = _complexity(semantic, cognition, decision, text)
+    response_budget = _adaptive_output_budget(text, semantic, cognition, decision)
 
     representation_constraints = _representation_constraints(
         semantic, cognition, decision
@@ -682,14 +748,18 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     )
 
     request.response_complexity = complexity
-    request.response_output_tokens = OUTPUT_TOKENS[complexity]
-    request.max_output_tokens = OUTPUT_TOKENS[complexity]
+    request.response_output_tokens = response_budget
+    request.max_output_tokens = response_budget
     request.quantum_state = {
         "dialogue": dialogue_state,
         "representation": representation_state,
         "measured_output": measured_output,
         "evidence_channels": len(evidence),
         "coherence": round(coherence, 4),
+        "response_budget": response_budget,
+        "response_budget_min": OUTPUT_MIN_TOKENS,
+        "response_budget_max": OUTPUT_MAX_TOKENS,
+        "response_budget_mode": "continuous_evidence_scale",
     }
     request.dialogue_contract = dialogue_contract
     request.response_decision = decision
@@ -705,6 +775,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "provider_calls_per_request": 1,
         "context_mode": mode,
         "dialogue_coherence": round(coherence, 4),
+        "response_budget": response_budget,
+        "response_budget_min": OUTPUT_MIN_TOKENS,
+        "response_budget_max": OUTPUT_MAX_TOKENS,
+        "response_budget_mode": "continuous_evidence_scale",
         "requested_outputs": list(outputs),
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
@@ -787,6 +861,10 @@ def _validate_quantum_release(request: MachineRequest) -> None:
 
     if constraints.get("provider_input_token_budget") != 900:
         raise RuntimeError("Quantum release blocked: provider input budget invariant failed")
+
+    response_budget = getattr(request, "response_output_tokens", 0)
+    if not isinstance(response_budget, int) or not (OUTPUT_MIN_TOKENS <= response_budget <= OUTPUT_MAX_TOKENS):
+        raise RuntimeError("Quantum release blocked: adaptive response budget invariant failed")
 
     if getattr(request, "provider_calls_allowed", 1) != 1:
         raise RuntimeError("Quantum release blocked: provider call count invariant failed")
@@ -1047,6 +1125,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "decision_owner": "QUANTUM_PROCESSOR",
         "single_route": True,
         "provider_calls": 1,
+        "response_budget": getattr(request, "response_output_tokens", 0),
+        "response_budget_range": [OUTPUT_MIN_TOKENS, OUTPUT_MAX_TOKENS],
+        "response_budget_mode": "continuous_evidence_scale",
         "experience": True,
         "experience_manager": True,
         "goal_engine": True,
