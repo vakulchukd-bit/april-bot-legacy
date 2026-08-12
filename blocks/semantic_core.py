@@ -17,6 +17,7 @@ No parallel route. No provider call. No renderer trigger.
 """
 
 from blocks.interpretation_layer import interpret_request
+import math
 
 APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
 SEMANTIC_MACHINE_CHANNEL = {
@@ -81,7 +82,7 @@ DISCUSSION_WORDS = (
 REFLECTION_WORDS = ("почему","объясни","рассуждай","размышляй","как ты пришла")
 SPACE_WORDS = ("пространство","scene","renderer","блок","галерея","график")
 GRAPH_WORDS = ("график","построй график","графике","функция","plot","chart")
-TABLE_WORDS = ("таблица","таблицу","таблицы","таблич","периодическая","менделеева","значения","сводка","сравнение в виде таблицы")
+TABLE_WORDS = ("таблица","таблицу","таблицы","таблиц","таблич","периодическая","менделеева","значения","сводка","сравнение в виде таблицы")
 
 def detect_representation_constraints(text):
     value = (text or "").lower()
@@ -105,7 +106,7 @@ def detect_representation_constraints(text):
         "source": "current_request_semantic_constraints",
     }
 
-LINK_WORDS = ("источник","ссылка","документация")
+LINK_WORDS = ("источник","ссылка","ссылоч","документация")
 MATH_WORDS = ("математика","формула","уравнение","интеграл","производная")
 
 REPRESENTATION_NEGATIONS = {
@@ -118,13 +119,18 @@ REPRESENTATION_POSITIVES = {
     "graph": GRAPH_WORDS,
     "table": TABLE_WORDS,
     "link": LINK_WORDS,
-    "diagram": ("диаграмма","diagram","схема"),
-    "formula": ("формула","уравнение","formula"),
+    "diagram": ("диаграмма","диаграмм","diagram","схема","схем"),
+    "formula": ("формула","формул","уравнение","уравнен","formula"),
 }
 
 CONTINUATION_WORDS = (
     "продолжай","дальше","продолжение","о чём мы говорили","о чем мы говорили",
     "помнишь","вспомни","продолжи","это","этот","эта","этом","него","неё","ее","его"
+)
+REFERENCE_WORDS = (
+    "ту, которую", "то, что", "тот, который", "та, которую", "этой формулой",
+    "этой", "этот", "это", "ту", "тот", "того", "которую", "который",
+    "предыдущ", "к этой", "с этой"
 )
 DOMAIN_WORDS = {
     "biology": ("биология","генетика","эволюция","клетка","организм","экология","бактерии","днк","животные","растения"),
@@ -214,13 +220,142 @@ def _state_signals(state, active_flow, dialog_state, history):
         "active_flow": active_flow,
         "dialog_state": dialog_state,
         "history_depth": len(history),
+        "last_april_turn": state.get("last_april_turn", ""),
+        "last_user_turn": state.get("last_user_turn", ""),
     }
 
+
+REPRESENTATION_UNIVERSE = (
+    "text", "table", "graph", "diagram", "formula",
+    "gallery", "link", "code", "image",
+)
+
+
+def _representation_posteriors(
+    text: str,
+    signals: dict,
+    interpreted: dict,
+    constraints: dict,
+) -> tuple[dict[str, float], list[str], list[str]]:
+    """
+    Build a smooth posterior over representations.
+
+    Lexical matches are only one evidence source. Current interpretation,
+    continuation context, and prior rendered types contribute as independent
+    signals. No renderer is selected by a single keyword.
+    """
+    scores = {name: 0.10 for name in REPRESENTATION_UNIVERSE}
+    low = (text or "").lower()
+
+    # Current request evidence.
+    positive = [str(x).lower() for x in (constraints.get("positive") or [])]
+    negative = {str(x).lower() for x in (constraints.get("negative") or [])}
+    for name in positive:
+        if name in scores:
+            scores[name] += 2.20
+
+    # Interpretation is a separate evidence source, not a renderer command.
+    for name in (
+        *(interpreted.get("required_representations") or []),
+        *(interpreted.get("candidate_representations") or []),
+    ):
+        key = str(name).lower()
+        if key in scores:
+            scores[key] += 0.90
+
+    # "show/present/build" language increases the probability mass already
+    # associated with a representation, rather than selecting a renderer.
+    presentation_language = _weighted_probability(
+        text,
+        ("покажи", "построй", "отобрази", "в блоке", "представь", "нарисуй"),
+        0.08,
+    )
+    if presentation_language:
+        for name in positive:
+            if name in scores:
+                scores[name] += presentation_language
+
+    # Recover previous structured output only for genuine continuation/reference.
+    reference_signal = any(word in low for word in REFERENCE_WORDS)
+    recent_context_available = bool(
+        signals.get("last_april_turn")
+        or signals.get("last_user_turn")
+        or signals.get("continuity_context_storage")
+    )
+    continuation = bool(
+        interpreted.get("continuation")
+        or signals.get("continuity_context_storage")
+        or interpreted.get("dialog_act") == "reference"
+        or (reference_signal and recent_context_available)
+    )
+    if continuation:
+        previous_text = " ".join(
+            [
+                str(signals.get("last_april_turn") or ""),
+                str(signals.get("last_user_turn") or ""),
+            ]
+        ).lower()
+        for name, words in REPRESENTATION_POSITIVES.items():
+            if any(word in previous_text for word in words):
+                scores[name] += 0.70
+
+    # Existing active scene can contribute only as weak context evidence.
+    # It never revives a renderer on its own.
+    if continuation and signals.get("active_visual_scene"):
+        scores["graph"] += 0.10
+        scores["diagram"] += 0.10
+        scores["gallery"] += 0.08
+
+    # Negative constraints suppress stale candidates smoothly.
+    for name in negative:
+        if name in scores:
+            scores[name] = 0.0
+
+    # Text is the human-visible channel when another representation exists.
+    if any(v > 0.30 for k, v in scores.items() if k != "text"):
+        scores["text"] += 0.55
+
+    # Softmax gives a continuous posterior over the same evidence field.
+    temperature = 0.85
+    exp_values = {}
+    for key, value in scores.items():
+        exp_values[key] = math.exp(max(-20.0, min(20.0, value / temperature)))
+    total = sum(exp_values.values()) or 1.0
+    posterior = {key: exp_values[key] / total for key in scores}
+
+    top = sorted(posterior, key=posterior.get, reverse=True)
+    # Keep the posterior complete, but promote only materially supported
+    # candidates. The selection is relative to the current posterior, not a
+    # renderer-specific trigger.
+    top_mass = posterior[top[0]] if top else 0.0
+    selected = [
+        key for key in top[:4]
+        if posterior[key] >= max(0.12, top_mass * 0.34)
+        and key not in negative
+    ]
+
+    if not selected:
+        selected = ["text"]
+
+    # Independent requests default to the current evidence only; continuation
+    # may inherit a prior representation when the posterior supports it.
+    if not continuation and not positive:
+        selected = ["text"]
+
+    return posterior, selected, sorted(negative)
+
+
 def _signal_fusion(text, signals, interpreted):
-    """Fuse independent evidence; never collapse it into a route decision."""
+    """Fuse independent evidence without collapsing it into a renderer trigger."""
     representation_constraints = detect_representation_constraints(text)
-    requested_representations = list(representation_constraints.get("positive") or [])
-    requested = requested_representations[0] if requested_representations else None
+    posterior, selected, blocked = _representation_posteriors(
+        text,
+        signals,
+        interpreted,
+        representation_constraints,
+    )
+
+    requested = next((x for x in selected if x != "text"), selected[0] if selected else "text")
     renderer = detect_renderer_probability(text)
     image = detect_image_generation_probability(text)
     visual = detect_visual_probability(text)
@@ -229,29 +364,38 @@ def _signal_fusion(text, signals, interpreted):
     reflection = detect_reflection_probability(text)
 
     history = signals["history_depth"]
-    continuity = bool(signals["continuity_context_storage"] or interpreted.get("continuation"))
+    continuity = bool(
+        signals["continuity_context_storage"]
+        or interpreted.get("continuation")
+        or interpreted.get("dialog_act") == "reference"
+    )
     active_scene = bool(signals["active_visual_scene"])
     goal = bool(signals["goal"])
     memory = bool(signals["memory_signals"])
 
-    # Evidence aggregation is deliberately capped. One keyword cannot dominate
-    # a context containing stronger contradictory signals.
-    render_score = clamp(renderer * 0.45 + (0.35 if requested else 0.0)
-                         + (0.10 if active_scene else 0.0)
-                         + (0.10 if interpreted.get("prefer_renderer") else 0.0))
+    structured_mass = sum(
+        posterior.get(k, 0.0)
+        for k in ("table", "graph", "diagram", "formula", "gallery", "link", "code", "image")
+    )
+
+    render_score = clamp(
+        structured_mass * 0.70
+        + renderer * 0.20
+        + (0.10 if continuity and active_scene else 0.0)
+    )
     continuity_score = clamp(
-        (0.35 if continuity else 0.0) +
-        (0.20 if history else 0.0) +
-        (0.20 if goal else 0.0) +
-        (0.15 if memory else 0.0) +
-        (0.10 if active_scene else 0.0)
+        (0.30 if continuity else 0.0)
+        + (0.20 if history else 0.0)
+        + (0.20 if goal else 0.0)
+        + (0.15 if memory else 0.0)
+        + (0.15 if interpreted.get("dialogue_contract", {}).get("continuation") else 0.0)
     )
     execution_score = clamp(
-        execution * 0.45 +
-        render_score * 0.20 +
-        (0.20 if requested else 0.0) +
-        (0.10 if interpreted.get("dialogue_act") == "request" else 0.0) +
-        (0.05 if goal else 0.0)
+        execution * 0.45
+        + render_score * 0.20
+        + structured_mass * 0.20
+        + (0.10 if interpreted.get("dialogue_act") == "request" else 0.0)
+        + (0.05 if goal else 0.0)
     )
 
     return {
@@ -263,12 +407,24 @@ def _signal_fusion(text, signals, interpreted):
         "reflection": reflection,
         "continuity": continuity_score,
         "requested_representation": requested,
-        "requested_representations": requested_representations,
-        "required_representations": requested_representations,
-        "representation_constraints": representation_constraints,
+        "requested_representations": list(selected),
+        "required_representations": list(selected),
+        "representation_constraints": {
+            **representation_constraints,
+            "negative": blocked,
+        },
+        "representation_posteriors": posterior,
+        "representation_consensus": {
+            "selected": list(selected),
+            "confidence": posterior.get(requested, 0.0),
+            "entropy": -sum(
+                p * math.log(max(p, 1e-12))
+                for p in posterior.values()
+            ),
+        },
         "candidate_domains": detect_domain_candidates(text),
         "evidence_count": sum(bool(x) for x in (
-            requested, continuity, active_scene, goal, memory, discussion, reflection
+            selected, continuity, active_scene, goal, memory, discussion, reflection
         )),
     }
 
@@ -402,6 +558,8 @@ def analyze(text: str, state: dict=None, history: list=None,
             result[key]=interpreted[key]
 
     result["requested_representation"]=fusion["requested_representation"]
+    result["representation_posteriors"]=fusion["representation_posteriors"]
+    result["representation_consensus"]=fusion["representation_consensus"]
     result["candidate_domains"]=list(dict.fromkeys(
         result.get("candidate_domains",[])+fusion["candidate_domains"]
     ))
@@ -409,26 +567,15 @@ def analyze(text: str, state: dict=None, history: list=None,
         result.get("required_domains",[])+fusion["candidate_domains"]
     ))
 
-    blocked = set(current_representation.get("negative", []))
-    current_positive = list(current_representation.get("positive", []))
-    reps=[]
-    for rep in (
-        result.get("required_representations",[]) +
-        result.get("candidate_representations",[])
-    ):
-        rep = str(rep).lower()
-        if rep not in blocked and rep not in reps:
-            reps.append(rep)
-    for rep in current_positive:
-        if rep not in reps:
-            reps.append(rep)
-    result["required_representations"]=reps
+    blocked = set(fusion["representation_constraints"].get("negative", []))
+    current_positive = list(fusion["requested_representations"])
+    reps = [x for x in fusion["required_representations"] if x not in blocked]
+    result["required_representations"]=list(reps)
     result["candidate_representations"]=list(reps)
-    result["requested_representations"]=current_positive
-    result["required_representations"]=reps
-    result["requested_outputs"]=list(current_positive) if current_positive else ["text"]
+    result["requested_representations"]=list(current_positive)
+    result["requested_outputs"]=list(current_positive)
     result["required_outputs"]=list(reps)
-    result["representation_constraints"]=current_representation
+    result["representation_constraints"]=fusion["representation_constraints"]
 
     result.update({
         "renderer_probability":fusion["renderer"],
@@ -448,17 +595,23 @@ def analyze(text: str, state: dict=None, history: list=None,
 
     requested=fusion["requested_representation"]
     # These are evidence flags only. The processor owns the final choice.
-    result["render_intent"]=bool(requested or fusion["renderer"] >= 0.45)
+    result["render_intent"]=bool(any(
+        name != "text" for name in result["required_representations"]
+    ))
     result["prefer_renderer"]=result["render_intent"]
-    result["renderer_scene_object"]=bool(requested)
-    result["visual_routing"]=bool(fusion["visual"] >= 0.30 or requested)
+    result["renderer_scene_object"]=bool(
+        any(name != "text" for name in result["required_representations"])
+    )
+    result["visual_routing"]=bool(
+        any(name in {"graph", "diagram", "gallery", "image"} for name in result["required_representations"])
+    )
     result["possible_capability"]="renderer" if requested else None
     result["possible_output"]=requested
     result["possible_scene_type"]=requested
     result["current_representation"]=requested or "text"
     result["unresolved_intent"]=not bool(requested or interpreted.get("dialog_act"))
 
-    if fusion["image"] >= 0.45:
+    if "image" in result["required_representations"] and fusion["image"] > 0.0:
         result["visual_generation_needed"]=True
         result["explicit_image_generation_only"]=True
         result["possible_output"]="image"
@@ -474,6 +627,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         "representation_constraints":current_representation,
         "current_request_authoritative":True,
         "requested_outputs": list(current_positive),
+        "representation_posteriors": dict(fusion["representation_posteriors"]),
         "multi_output": len(current_positive) > 1,
         "decision_owner":"QUANTUM_PROCESSOR",
     }
