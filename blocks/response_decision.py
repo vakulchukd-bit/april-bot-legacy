@@ -134,6 +134,16 @@ def _representation_signals(semantic: Dict[str, Any], cognition: Dict[str, Any])
     )
     blocked = {_s(x).lower() for x in (constraints.get("negative", []) or []) if _s(x)}
 
+    posterior = semantic.get("representation_posteriors")
+    if not isinstance(posterior, dict):
+        posterior = {}
+
+    weights = {
+        _s(key).lower(): _clamp(value)
+        for key, value in posterior.items()
+        if _s(key)
+    }
+
     current_positive = []
     for source in (
         constraints.get("positive", []),
@@ -146,41 +156,41 @@ def _representation_signals(semantic: Dict[str, Any], cognition: Dict[str, Any])
             if name and name not in blocked and name not in current_positive:
                 current_positive.append(name)
 
-    candidates = _representation_set(semantic, representation)
-    candidates = [x for x in candidates if x not in blocked]
+    for item in current_positive:
+        if item not in weights:
+            weights[item] = 0.0
+        weights[item] += 0.35
+
+    if not weights:
+        weights = {"text": 1.0}
+
+    # Relative posterior selection: no per-renderer threshold.
+    ranked = sorted(weights, key=weights.get, reverse=True)
+    top = weights.get(ranked[0], 0.0) if ranked else 0.0
+    requested_outputs = [
+        name for name in ranked[:4]
+        if name not in blocked and (
+            name == ranked[0]
+            or weights.get(name, 0.0) >= top * 0.50
+        )
+    ]
+    if not requested_outputs:
+        requested_outputs = ["text"]
+    if any(name != "text" for name in requested_outputs) and "text" not in requested_outputs:
+        requested_outputs.insert(0, "text")
+
+    candidates = [x for x in _representation_set(semantic, representation) if x not in blocked]
     for item in current_positive:
         if item not in candidates:
             candidates.append(item)
 
-    weights = {
-        name: 0.0
-        for name in ("table", "graph", "diagram", "formula", "gallery", "link", "code", "image", "text")
-    }
-    for item in candidates:
-        if item in weights:
-            weights[item] += 0.70
-    for item in current_positive:
-        if item in weights:
-            weights[item] += 0.35
-    if current_positive or candidates:
-        weights["text"] += 0.35
-    for item in blocked:
-        if item in weights:
-            weights[item] = 0.0
-
-    requested_outputs = [
-        name for name, score in sorted(
-            weights.items(), key=lambda kv: kv[1], reverse=True
-        )
-        if score >= 0.50 and name not in blocked
-    ]
-
     return {
-        "requested": requested_outputs[0] if requested_outputs else None,
+        "requested": next((x for x in requested_outputs if x != "text"), requested_outputs[0]),
         "requested_outputs": requested_outputs,
         "candidates": candidates,
         "blocked": sorted(blocked),
-        "weights": {k: _clamp(v) for k, v in weights.items()},
+        "weights": weights,
+        "posterior": posterior,
         "text_explanation": _b(representation.get("prefer_text_explanation")),
         "interaction_mode": representation.get("interaction_mode"),
         "current_request_authoritative": True,
@@ -309,20 +319,46 @@ def _canonical_action(
     clarification: bool,
     cognition: Dict[str, Any],
 ) -> str:
-    # Hard representation requests are evidence-backed, not keyword branches.
+    """Collapse continuous evidence into one action without thresholded renderer triggers."""
     if clarification:
         return "clarify"
-    if representation.get("text_explanation") and dialogue.get("explanation"):
-        return "talk"
-    if render_score >= 0.72:
-        return "render"
-    if generation_score >= 0.65:
-        return "generate"
-    if execution_score >= 0.70:
-        return "execute"
-    if _b(cognition.get("needs_guidance")) or _b(cognition.get("exploration_mode")):
-        return "guide"
-    return "talk"
+
+    requested = [
+        _s(x).lower()
+        for x in (representation.get("requested_outputs") or [])
+        if _s(x)
+    ]
+    structured_mass = sum(
+        _f(representation.get("weights", {}).get(name, 0.0))
+        for name in requested
+        if name != "text"
+    )
+    dialogue_explanation = bool(
+        dialogue.get("explanation") and representation.get("text_explanation")
+    )
+    guidance = bool(
+        _b(cognition.get("needs_guidance"))
+        or _b(cognition.get("exploration_mode"))
+    )
+
+    # Four competing utilities. A renderer wins because of the fused
+    # representation state, not because one word activated a renderer branch.
+    utilities = {
+        "talk": 0.32 + (0.18 if dialogue_explanation else 0.0) + (0.10 if guidance else 0.0),
+        "render": 0.24 + render_score * 0.62 + structured_mass * 0.28,
+        "execute": 0.20 + execution_score * 0.72,
+        "generate": 0.12 + generation_score * 0.88,
+        "guide": 0.18 + (0.35 if guidance else 0.0),
+    }
+
+    if requested and any(name != "text" for name in requested):
+        utilities["render"] += 0.20
+
+    # Never let non-explicit visual generation outrank the normal response.
+    if not _b(cognition.get("explicit_visual_generation")):
+        utilities["generate"] *= 0.35
+
+    return max(utilities, key=utilities.get)
 
 
 def build_response_decision(
