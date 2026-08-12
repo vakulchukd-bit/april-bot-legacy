@@ -1203,11 +1203,54 @@ def get_state(user_id):
 # 🔥 PERSISTENT MEMORY BRIDGE
 # =====================================================
 
+
+_PERSISTENCE_EXCLUDED_KEYS = {
+    "_machine_context",
+    "_executor_context_packet",
+    "_quantum_evidence_field",
+    "_quantum_processor_context",
+}
+
+
+def _persistable_snapshot(value, _active=None):
+    """Detach runtime graphs and remove ephemeral Quantum Processor objects."""
+    active = _active if _active is not None else set()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    oid = id(value)
+    if oid in active:
+        return None
+
+    if isinstance(value, dict):
+        active.add(oid)
+        try:
+            result = {}
+            for key, child in value.items():
+                key = str(key)
+                if key in _PERSISTENCE_EXCLUDED_KEYS:
+                    continue
+                result[key] = _persistable_snapshot(child, active)
+            return result
+        finally:
+            active.remove(oid)
+
+    if isinstance(value, (list, tuple, set)):
+        active.add(oid)
+        try:
+            return [_persistable_snapshot(child, active) for child in value]
+        finally:
+            active.remove(oid)
+
+    # Runtime objects do not belong in durable user memory.
+    return str(value)
+
+
 def persist_state(user_id):
     try:
         state_obj = get_state(user_id)
+        persistable = _persistable_snapshot(state_obj)
         if callable(save_memory):
-            save_memory(user_id, state_obj)
+            save_memory(user_id, persistable)
     except Exception as e:
         safe_state_log(f"PERSIST ERROR: {e}")
 
