@@ -31,7 +31,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_balanced_v10_all14_cycle_safe"
+PROCESSOR_VERSION = "april_quantum_processor_balanced_v12_all14_canonical_fusion"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
@@ -322,6 +322,69 @@ def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], floa
     measured = max(p, key=p.get)
     return measured, p, p[measured]
 
+
+def _representation_constraints(*sources: dict) -> dict:
+    """
+    Canonical representation constraints.
+
+    Positive evidence can add a requested representation.
+    Negative evidence blocks a representation from stale candidates.
+    The processor never invents a renderer just because a keyword appears;
+    it reconciles structured constraints already produced by the evidence
+    layers and preserves the complete multi-output plan.
+    """
+    positive: list[str] = []
+    negative: list[str] = []
+
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        constraints = src.get("representation_constraints")
+        if isinstance(constraints, dict):
+            for key, target in (("positive", positive), ("negative", negative)):
+                values = constraints.get(key) or []
+                if isinstance(values, str):
+                    values = [values]
+                for value in values:
+                    name = _s(value).lower()
+                    if name and name not in target:
+                        target.append(name)
+
+        preferred = _s(src.get("preferred_representation")).lower()
+        if preferred and preferred not in positive:
+            # Preferred is evidence, not authority; consensus still decides.
+            positive.append(preferred)
+
+    blocked = set(negative)
+    positive = [item for item in positive if item not in blocked]
+
+    return {
+        "positive": positive,
+        "negative": negative,
+        "blocked": sorted(blocked),
+        "current_request_authoritative": True,
+    }
+
+
+def _representation_audit(
+    requested_outputs: list[str],
+    measured_output: str,
+    constraints: dict,
+) -> dict:
+    requested = list(dict.fromkeys(requested_outputs or []))
+    blocked = set(constraints.get("negative", []) or [])
+    return {
+        "requested_outputs": requested,
+        "preferred_representation": measured_output,
+        "blocked_outputs": sorted(blocked),
+        "multi_output": len(requested) > 1,
+        "table_requested": "table" in requested,
+        "graph_requested": "graph" in requested,
+        "code_requested": "code" in requested,
+        "representation_gap": bool(requested and not set(requested).issubset(blocked | set(requested))),
+        "canonical": True,
+    }
+
 def _requested_outputs(
     text: str,
     semantic: dict,
@@ -329,72 +392,63 @@ def _requested_outputs(
     decision: dict,
 ) -> list[str]:
     """
-    Canonical multi-output plan.
+    Produce the canonical multi-output request.
 
-    Current-request representation constraints are authoritative. Memory and
-    cognition may contribute candidates, but cannot reintroduce a representation
-    explicitly excluded by the current request.
+    Priority:
+      1. explicit structured positive/negative representation constraints;
+      2. requested outputs from Decision/Semantic;
+      3. compatible representation candidates.
+
+    No renderer is selected by a single keyword or by an old visual scene.
     """
-    sources = (semantic, cognition, decision)
+    constraints = _representation_constraints(semantic, cognition, decision)
+    blocked = set(constraints["negative"])
     names: list[str] = []
-    blocked: set[str] = set()
 
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        constraints = src.get("representation_constraints")
-        if isinstance(constraints, dict):
-            for value in constraints.get("negative", []) or []:
-                name = _s(value).lower()
-                if name:
-                    blocked.add(name)
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            values = []
+        for value in values:
+            name = _s(value).lower()
+            aliases = {
+                "markdown": "text",
+                "renderer_scene": "diagram",
+                "visual": "graph",
+                "image_generate": "image",
+            }
+            name = aliases.get(name, name)
+            if name and name not in blocked and name not in names:
+                names.append(name)
 
     for src in (decision, semantic):
         if not isinstance(src, dict):
             continue
-        for key in ("requested_outputs", "required_outputs"):
-            value = src.get(key)
-            values = (
-                [value] if isinstance(value, str)
-                else list(value or [])
-                if isinstance(value, (list, tuple, set))
-                else []
-            )
-            for value in values:
-                name = _s(value).lower()
-                if name and name not in blocked and name not in names:
-                    names.append(name)
+        add(src.get("requested_outputs"))
+        add(src.get("required_outputs"))
 
-    aliases = {
-        "markdown": "text",
-        "renderer_scene": "diagram",
-        "visual": "graph",
-        "image_generate": "image",
-    }
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        for key in (
-            "requested_representations",
-            "required_representations",
-            "candidate_representations",
-            "requested_outputs",
-            "required_outputs",
-            "artifact_types",
-            "render_types",
-            "representations",
-        ):
-            value = src.get(key)
-            values = (
-                [value] if isinstance(value, str)
-                else list(value or [])
-                if isinstance(value, (list, tuple, set))
-                else []
-            )
-            for value in values:
-                name = aliases.get(_s(value).lower(), _s(value).lower())
-                if name and name not in blocked and name not in names:
-                    names.append(name)
+    # Positive structured constraints are strong evidence, but do not replace
+    # outputs already present in the canonical plan.
+    add(constraints["positive"])
+
+    # Candidate representations are added only when they are not explicitly
+    # blocked and the evidence layer has not supplied a concrete plan yet.
+    if not names:
+        for src in (semantic, cognition, decision):
+            if not isinstance(src, dict):
+                continue
+            for key in (
+                "required_representations",
+                "requested_representations",
+                "candidate_representations",
+                "artifact_types",
+                "render_types",
+                "representations",
+            ):
+                add(src.get(key))
 
     if any(name != "text" for name in names) and "text" not in names:
         names.insert(0, "text")
@@ -508,6 +562,9 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
 
     complexity = _complexity(semantic, cognition, decision, text)
 
+    representation_constraints = _representation_constraints(
+        semantic, cognition, decision
+    )
     context = _compact_context(text, state, mode, topic, goal)
 
     capabilities = []
@@ -546,6 +603,12 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         flow_id = state.get("flow_id") or active_flow.get("flow_id")
         if flow_id:
             request_metadata["flow_id"] = flow_id
+
+    representation_audit = _representation_audit(
+        requested_outputs=outputs,
+        measured_output=measured_output,
+        constraints=representation_constraints,
+    )
 
     request = MachineRequest(
         goal=goal,
@@ -609,6 +672,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                 "representation_plan": {
                     "requested_outputs": list(outputs),
                     "preferred_representation": measured_output,
+                    "constraints": representation_constraints,
+                    "audit": representation_audit,
                     "current_request_authoritative": True,
                 },
             },
@@ -942,6 +1007,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
         ),
+        "representation_audit": _quantum_snapshot(
+            request.constraints.get("representation_plan", {}).get("audit", {})
+        ),
         "processor_context": processor_context,
     })
     request.constraints["metadata"] = request_meta
@@ -962,6 +1030,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         raise RuntimeError("Quantum energy acceleration invariant failed")
 
     _validate_quantum_release(request)
+
+    representation_plan = request.constraints.get("representation_plan", {})
+    requested_outputs = list(getattr(request, "requested_outputs", []) or [])
+    if representation_plan.get("current_request_authoritative") is not True:
+        raise RuntimeError("Quantum release blocked: representation authority invariant failed")
+    blocked_outputs = set(
+        (representation_plan.get("constraints") or {}).get("negative", []) or []
+    )
+    if any(output in blocked_outputs for output in requested_outputs):
+        raise RuntimeError("Quantum release blocked: contradictory representation plan")
 
     # Final quantum release audit: 14 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
