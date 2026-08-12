@@ -322,60 +322,126 @@ def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], floa
     measured = max(p, key=p.get)
     return measured, p, p[measured]
 
-def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dict) -> list[str]:
-    """Use semantic state only; never inspect user wording for renderer triggers."""
+def _requested_outputs(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+) -> list[str]:
+    """
+    Canonical multi-output plan.
+
+    Current-request representation constraints are authoritative. Memory and
+    cognition may contribute candidates, but cannot reintroduce a representation
+    explicitly excluded by the current request.
+    """
+    sources = (semantic, cognition, decision)
     names: list[str] = []
+    blocked: set[str] = set()
+
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        constraints = src.get("representation_constraints")
+        if isinstance(constraints, dict):
+            for value in constraints.get("negative", []) or []:
+                name = _s(value).lower()
+                if name:
+                    blocked.add(name)
+
+    for src in (decision, semantic):
+        if not isinstance(src, dict):
+            continue
+        for key in ("requested_outputs", "required_outputs"):
+            value = src.get(key)
+            values = (
+                [value] if isinstance(value, str)
+                else list(value or [])
+                if isinstance(value, (list, tuple, set))
+                else []
+            )
+            for value in values:
+                name = _s(value).lower()
+                if name and name not in blocked and name not in names:
+                    names.append(name)
+
     aliases = {
         "markdown": "text",
         "renderer_scene": "diagram",
         "visual": "graph",
         "image_generate": "image",
     }
-    for src in (semantic, cognition, decision):
+    for src in sources:
         if not isinstance(src, dict):
             continue
         for key in (
-            "requested_outputs",
-            "required_outputs",
+            "requested_representations",
             "required_representations",
             "candidate_representations",
-            "requested_representation",
-            "preferred_representation",
+            "requested_outputs",
+            "required_outputs",
+            "artifact_types",
+            "render_types",
+            "representations",
         ):
             value = src.get(key)
-            vals = [value] if isinstance(value, str) else list(value or []) if isinstance(value, (list, tuple, set)) else []
-            for value in vals:
+            values = (
+                [value] if isinstance(value, str)
+                else list(value or [])
+                if isinstance(value, (list, tuple, set))
+                else []
+            )
+            for value in values:
                 name = aliases.get(_s(value).lower(), _s(value).lower())
-                if name and name not in names:
+                if name and name not in blocked and name not in names:
                     names.append(name)
 
-    for src in (semantic, cognition, decision):
-        if not isinstance(src, dict):
-            continue
-        artifact = src.get("artifact_types") or src.get("render_types") or src.get("representations")
-        vals = [artifact] if isinstance(artifact, str) else list(artifact or []) if isinstance(artifact, (list, tuple, set)) else []
-        for value in vals:
-            name = aliases.get(_s(value).lower(), _s(value).lower())
-            if name and name not in names:
-                names.append(name)
+    if any(name != "text" for name in names) and "text" not in names:
+        names.insert(0, "text")
 
     return names or ["text"]
 
-def _representation_consensus(outputs: list[str], semantic: dict, decision: dict) -> tuple[str, dict[str, float]]:
+
+def _representation_consensus(
+    outputs: list[str],
+    semantic: dict,
+    decision: dict,
+) -> tuple[str, dict[str, float]]:
+    """
+    Quantum-inspired representation measurement.
+
+    Multiple candidates coexist. Current-request negative evidence suppresses
+    stale alternatives. One preferred representation is measured, while the
+    complete output plan remains in request.requested_outputs.
+    """
     candidates = ["text", "table", "graph", "diagram", "formula", "code", "gallery", "image", "link"]
     raw = {x: -1.0 for x in candidates}
+
     for x in outputs:
         if x in raw:
             raw[x] += 4.0
-    preferred = _s(decision.get("preferred_representation") or semantic.get("preferred_representation")).lower()
+
+    preferred = _s(
+        decision.get("preferred_representation")
+        or semantic.get("preferred_representation")
+    ).lower()
     if preferred in raw:
-        raw[preferred] += 2.0
-    if semantic.get("math_intent"):
-        raw["formula"] += 2.5
-    if semantic.get("render_intent"):
-        raw["text"] += .5
+        raw[preferred] += 1.5
+
+    constraints = semantic.get("representation_constraints", {})
+    if isinstance(constraints, dict):
+        for blocked in constraints.get("negative", []) or []:
+            blocked = _s(blocked).lower()
+            if blocked in raw:
+                raw[blocked] = -8.0
+        for positive in constraints.get("positive", []) or []:
+            positive = _s(positive).lower()
+            if positive in raw:
+                raw[positive] += 2.5
+
     p = _norm(raw)
     return max(p, key=p.get), p
+
 
 def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> str:
     """Select 2k/5k/8k by structured task evidence, not keyword triggers."""
@@ -540,6 +606,11 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                 "provider_input_token_budget": 900,
                 "provider_context_strategy": "provider_router_semantic_field_selection",
                 "current_request_must_remain_intact": True,
+                "representation_plan": {
+                    "requested_outputs": list(outputs),
+                    "preferred_representation": measured_output,
+                    "current_request_authoritative": True,
+                },
             },
             "metadata": request_metadata,
         },
@@ -556,6 +627,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "coherence": round(coherence, 4),
     }
     request.dialogue_contract = dialogue_contract
+    request.response_decision = decision
     request.single_route = True
     request.provider_calls_allowed = 1
 
@@ -568,6 +640,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "provider_calls_per_request": 1,
         "context_mode": mode,
         "dialogue_coherence": round(coherence, 4),
+        "requested_outputs": list(outputs),
+        "representation_plan": _quantum_snapshot(
+            request.constraints.get("representation_plan", {})
+        ),
     })
 
     return request
@@ -862,7 +938,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "quantum_evidence_field_version": PROCESSOR_VERSION,
         "provider_calls_per_request": 1,
         "single_route": True,
-        "quantum_evidence_channels": 14,
+        "requested_outputs": list(request.requested_outputs),
+        "representation_plan": _quantum_snapshot(
+            request.constraints.get("representation_plan", {})
+        ),
         "processor_context": processor_context,
     })
     request.constraints["metadata"] = request_meta
