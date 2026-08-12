@@ -413,17 +413,47 @@ def is_diagram_request(
     для старых systems.
     """
 
+    # Legacy bridge: use only explicitly supplied machine context.
+    # No hidden/global state is consulted.
+    hidden_context = locals().get("hidden_context")
     if isinstance(hidden_context, dict) and hidden_context.get("semantic"):
         analysis = analyze_diagram_request(hidden_context)
     else:
-        analysis = analyze_diagram_semantics(
-            text
-        )
+        analysis = analyze_diagram_semantics(text)
 
     return analysis.get(
         "renderer_candidate",
         False
     )
+
+# =====================================================
+# 🔥 FACTORY SEMANTIC ADAPTER
+# =====================================================
+
+DIAGRAM_ROOM_ID = "C_DIAGRAM_ROOM"
+DIAGRAM_ARTIFACT_TYPE = "diagram"
+DIAGRAM_RENDERER = "DiagramBlock"
+
+
+def build_diagram_factory_signal(machine_request: dict) -> dict:
+    '''Convert processor-provided semantic state into the factory's canonical
+    diagram signal. This function does not select routes or call renderers.'''
+    request = machine_request or {}
+    analysis = analyze_diagram_request(request)
+    return {
+        "artifact_type": DIAGRAM_ARTIFACT_TYPE,
+        "room_source": DIAGRAM_ROOM_ID,
+        "renderer": DIAGRAM_RENDERER,
+        "viewer": DIAGRAM_RENDERER,
+        "semantic": analysis,
+        "spatial": {
+            "geometry": bool(analysis.get("geometry_detected")),
+            "relations": bool(analysis.get("spatial_intent")),
+            "engineering": bool(analysis.get("engineering_intent")),
+            "structure": bool(analysis.get("structure_intent")),
+        },
+        "machine_only": True,
+    }
 
 # =====================================================
 # 🔥 DIAGRAM PROMPT
