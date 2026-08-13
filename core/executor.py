@@ -608,6 +608,18 @@ def _quantum_64_field(
             "table","graph","diagram","gallery","image","code","formula","link"
         }) / 4.0
     )
+    # Scope is a representation-size signal, not a renderer trigger. It
+    # measures how much material the request is asking the provider to carry.
+    scope_words = {
+        "all", "every", "complete", "full", "entire", "все", "вся",
+        "всю", "полный", "полная", "полностью", "всех", "каждый", "каждую",
+    }
+    normalized_words = {_s(word).lower() for word in words}
+    scope_density = _bounded01(
+        0.55 * len(normalized_words & scope_words)
+        + 0.25 * min(1.0, sum(c.isdigit() for c in text) / 12.0)
+        + 0.20 * min(1.0, len(words) / 24.0)
+    )
 
     base = {
         "meaning":      (request_density, 0.60, 0.35, 0.30, 0.45, context_strength, 0.60, 0.70),
@@ -651,6 +663,11 @@ def _quantum_64_field(
         "request_density": request_density,
         "continuation": continuation,
         "planning": planning,
+        "renderer_density": renderer_density,
+        "output_count": len(outputs),
+        "artifact_count": len(artifacts),
+        "parts": parts,
+        "scope_density": scope_density,
     }
 
 def _quantum_budget_from_64(
@@ -666,30 +683,52 @@ def _quantum_budget_from_64(
     request_density = _bounded01(field.get("request_density", 0.0))
     continuation = _bounded01(field.get("continuation", 0.0))
     planning = _bounded01(field.get("planning", 0.0))
+    renderer_density = _bounded01(field.get("renderer_density", 0.0))
+    output_count = max(0, int(field.get("output_count", 0) or 0))
+    artifact_count = max(0, int(field.get("artifact_count", 0) or 0))
+    parts = max(1, int(field.get("parts", 1) or 1))
+    scope_density = _bounded01(field.get("scope_density", 0.0))
 
-    # Economy is deliberately part of the decision: low information demand
-    # stays cheap, while structure/continuation/planning expand the frontier
-    # continuously. There are no response-size tiers.
+    # Economy is deliberately part of the decision, but structured output has
+    # a real serialization cost. The processor therefore estimates the minimum
+    # sufficient payload continuously instead of using entitlement tiers.
     informational_need = (
-        0.28 * mean_need
-        + 0.26 * structured
-        + 0.16 * request_density
-        + 0.12 * continuation
-        + 0.10 * planning
-        + 0.08 * (1.0 - agreement)
+        0.22 * mean_need
+        + 0.20 * structured
+        + 0.18 * renderer_density
+        + 0.14 * request_density
+        + 0.08 * continuation
+        + 0.06 * planning
+        + 0.06 * (1.0 - agreement)
+        + 0.03 * _bounded01(output_count / 4.0)
+        + 0.03 * _bounded01(artifact_count / 4.0)
     )
     need = _bounded01(informational_need)
 
-    # Non-linear expansion keeps ordinary answers near their actual minimum
-    # while preserving a continuous path all the way to the hard 8000 ceiling.
-    shaped = need ** 2.15
+    # Continuous base frontier: short/simple answers stay small, while dense
+    # requests move smoothly toward the 8000-token ceiling.
+    shaped = need ** 1.90
     budget = minimum + (maximum - minimum) * shaped
 
-    # Ensure representation-bearing requests have enough room for their
-    # canonical structure without imposing renderer-specific fixed tiers.
-    if structured > 0.18:
-        budget = max(budget, 1 + (maximum - minimum) * (0.12 * structured ** 1.25))
+    # Structured payload reserve. This is not renderer routing and not a fixed
+    # tier: it is a continuous serialization-capacity estimate derived from the
+    # already measured representation plan. Larger tables/scenes can therefore
+    # receive more room without forcing every request to 8k.
+    if structured > 0.0:
+        representation_need = (
+            0.52 * structured
+            + 0.28 * renderer_density
+            + 0.10 * _bounded01(output_count / 4.0)
+            + 0.10 * _bounded01(parts / 6.0)
+            + 0.18 * scope_density
+        )
+        reserve = (maximum - minimum) * (0.50 * _bounded01(representation_need) ** 1.15)
+        scope_reserve = (maximum - minimum) * (0.55 * scope_density ** 1.12)
+        budget = max(budget, minimum + reserve + scope_reserve)
 
+    # Never exceed the canonical processor envelope. If the logical payload
+    # would require more than 8000, the provider receives 8000 and the machine
+    # prompt instructs it to compact the representation rather than truncate it.
     return int(round(max(minimum, min(maximum, budget))))
 
 def _adaptive_output_budget(
@@ -869,6 +908,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "quantum_lanes_per_core": 8,
         "quantum_signal_count": 64,
         "quantum_budget_field": quantum_budget_field,
+        "response_budget_logical": True,
+        "response_budget_compression_ceiling": OUTPUT_MAX_TOKENS,
     }
     request.dialogue_contract = dialogue_contract
     request.response_decision = decision
