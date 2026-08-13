@@ -3,7 +3,7 @@
 Hybrid classical control layer for the existing Quantum Processor.
 It performs local state evaluation only: no Provider call, no new route,
 no renderer routing, no user-state sharing. It preserves the 900-token
-Provider input ceiling and the existing 2k/5k/8k output policy.
+Provider input ceiling and the processor-owned continuous 1..8000 output budget.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from blocks.tariffs_config import ADMIN_ID
 
 ENERGY_CORE_VERSION = "april_quantum_energy_accelerator_v3"
 ENERGY_LEVELS = {"free": "LOW", "lite": "MEDIUM", "premium": "HIGH"}
-OUTPUT_TOKENS = {"LOW": 2000, "MEDIUM": 5000, "HIGH": 8000}
+OUTPUT_TOKENS = {"LOW": 8000, "MEDIUM": 8000, "HIGH": 8000}
 PROVIDER_INPUT_TOKEN_BUDGET = 900
 ENERGY_TASK_CHANNEL = {"channel": "energy_policy_task_channel", "isolated": True}
 ENERGY_RESPONSE_CHANNEL = {"channel": "energy_policy_response_channel", "isolated": True}
@@ -255,7 +255,9 @@ def build_quantum_acceleration_profile(
         "local_passes": local_passes,
         "local_parallel_evaluators": len(ch),
         "provider_input_token_budget": PROVIDER_INPUT_TOKEN_BUDGET,
-        "provider_output_token_budget": OUTPUT_TOKENS[entitlement],
+        # This field is an accelerator profile hint only. The canonical
+        # per-request budget is attached later to MachineRequest.
+        "provider_output_token_budget": None,
         "provider_calls_allowed": 1,
         "render_preservation": True,
         "scene_contract_required": True,
@@ -275,9 +277,15 @@ def apply_quantum_acceleration(request: Any, profile: dict) -> Any:
     requested = _s(getattr(request, "response_complexity", "")).upper() or "LOW"
     effective = _cap_level(requested, entitlement)
 
-    request.response_complexity = effective
-    request.response_output_tokens = OUTPUT_TOKENS[effective]
-    request.max_output_tokens = OUTPUT_TOKENS[effective]
+    # The Quantum Processor owns the response budget.
+    # Energy acceleration may classify/accelerate the request, but it must
+    # never replace the processor's continuous 1..8000 token decision with
+    # the old entitlement tiers (2k/5k/8k).
+    adaptive_budget = getattr(request, "response_output_tokens", None)
+    if not isinstance(adaptive_budget, int) or not (1 <= adaptive_budget <= 8000):
+        raise RuntimeError("Quantum acceleration received an invalid adaptive response budget")
+    request.response_output_tokens = adaptive_budget
+    request.max_output_tokens = adaptive_budget
 
     request.constraints = dict(getattr(request, "constraints", {}) or {})
     request.constraints.update({
@@ -337,7 +345,9 @@ def validate_quantum_acceleration(request: Any, profile: dict) -> dict:
         "single_route": True,
         "provider_calls_allowed": 1,
         "provider_input_token_budget": PROVIDER_INPUT_TOKEN_BUDGET,
-        "provider_output_token_budget": profile.get("provider_output_token_budget"),
+        "provider_output_token_budget": getattr(request, "response_output_tokens", None),
+        "response_budget_range": [1, 8000],
+        "response_budget_canonical": True,
         "entitlement_energy": profile.get("entitlement_energy", "LOW"),
         "effective_complexity": effective,
         "local_passes": profile.get("local_passes", 1),
