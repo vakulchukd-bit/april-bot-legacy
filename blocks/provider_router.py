@@ -74,6 +74,9 @@ Rules:
 - When the request is independent, do not invent old context.
 - When it is a continuation/reference, use only the supplied relevant context.
 - Preserve the complete logical answer; never cut a sentence or scene for style.
+- The output budget is dynamic and canonical: use only the tokens logically required, from 1 through 8000.
+- If the complete logical answer would exceed 8000 tokens, compact the representation (especially structured payloads) while preserving all requested information; never stop mid-JSON, mid-row, or mid-scene.
+- Never assume a 2000, 5000, or 8000 fixed tier. The supplied OUTPUT_CAP is the exact per-request ceiling selected by the Quantum Processor.
 - Treat requested_outputs as the canonical multi-output plan already computed by April.
 - Do not invent an output type that is absent from requested_outputs.
 - If one or more structured representations are requested (table, graph, diagram, formula, link, etc.),
@@ -83,6 +86,7 @@ Rules:
   as narrative prose when a dedicated render block exists.
 - Emit one canonical text block plus at most one canonical block per requested structured representation,
   unless the plan explicitly contains multiple independent items of the same type.
+- Keep structured payloads compact and machine-oriented: do not duplicate row/element data in answer, summary, and render_blocks.
 - Every structured block should carry: type, renderer, viewer, payload, scene_contract=true.
 - Keep Markdown and inline LaTeX inside text unless a separate renderer is explicitly required.
 - Never produce a second answer.
@@ -813,20 +817,46 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     user_message = build_openai_request(machine_request)
     user_text = user_message["content"][0]["text"]
 
-    # If the conservative estimator still exceeds the boundary, rebuild using
-    # mandatory units only. We never character-cut the current request.
+    # If the conservative estimator still exceeds the boundary, rebuild from
+    # the already-computed semantic fields. This is logical machine-packet
+    # compression, not character truncation: intent, goal, representation plan
+    # and output constraints survive while verbose transport context is removed.
     if _estimate_input_tokens(user_text) > remaining:
         payload = machine_request_to_dict(machine_request)
+        intent = payload.get("intent") or {}
+        constraints = payload.get("constraints") or {}
+        representation_plan = constraints.get("representation_plan") or {}
         current = _extract_request_text(payload)
         complexity = _derive_complexity(payload)
         output_tokens = _derive_output_tokens(payload)
-        user_text = "\n".join([
+
+        compact_fields = [
             "APRIL CANONICAL REQUEST",
+            f"GOAL: {_safe_text(payload.get('goal')).strip()}",
+            f"INTENT_TYPE: {_safe_text(intent.get('type')).strip()}",
             f"REQUEST: {current}",
+            f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
             f"COMPLEXITY: {complexity}",
             f"OUTPUT_CAP: {output_tokens}",
+            "Preserve the logical request; omit verbose transport context.",
             "Return one complete logical answer as JSON.",
-        ])
+        ]
+        # Drop the least critical verbose fields until the whole machine packet
+        # fits the 900-token envelope. The current request itself is retained.
+        removable = {"REPRESENTATION_PLAN:", "REQUIRED_ARTIFACTS:", "INTENT_TYPE:"}
+        pieces = []
+        for piece in compact_fields:
+            trial = "\n".join(pieces + [piece])
+            if _estimate_input_tokens(trial) <= remaining:
+                pieces.append(piece)
+            elif piece.split(":", 1)[0] + ":" not in removable:
+                # Preserve the authoritative current request even when other
+                # machine metadata has to yield to the 900-token envelope.
+                if piece.startswith("REQUEST:"):
+                    pieces.append(piece)
+        user_text = "\n".join(pieces)
         user_message = {
             "role": "user",
             "content": [{"type": "input_text", "text": user_text}],
