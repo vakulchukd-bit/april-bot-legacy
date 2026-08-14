@@ -138,20 +138,34 @@ def build_visual_reference(
         )
 
     dialogue_contract = semantic.get("dialogue_contract", {}) if isinstance(semantic.get("dialogue_contract"), dict) else {}
+    measurement = semantic.get("quantum_dialogue_measurement", {}) if isinstance(semantic.get("quantum_dialogue_measurement"), dict) else {}
+    measured_dialogue = measurement.get("dialogue", {}) if isinstance(measurement, dict) else {}
+
     continuation_signal = bool(
         dialogue_contract.get("continuation")
         or dialogue_contract.get("reference_to_previous")
         or semantic.get("continuation")
+        or measured_dialogue.get("continuation_score", 0.0) >= 0.72
     )
     explicit_reference = bool(
         dialogue_contract.get("reference_to_previous")
         or dialogue_contract.get("dialog_act") in {
             "continuation", "reference", "reformulation", "correction"
         }
+        or measured_dialogue.get("label") in {
+            "continuation", "reference", "reformulation", "correction"
+        }
     )
+
+    context_dependency = _low(
+        semantic.get("context_dependency")
+        or dialogue_contract.get("context_dependency")
+    )
+    new_topic_guard = context_dependency in {"independent", "new_topic"}
 
     scene_relevant = bool(
         scene.get("exists")
+        and not new_topic_guard
         and continuation_signal
         and (explicit_reference or context_similarity >= 0.46)
     )
@@ -188,6 +202,8 @@ def build_visual_reference(
         "visual_is_supportive": True,
         "trajectory_aligned": True,
         "dialogue_centered": True,
+        "context_dependency": context_dependency or "unresolved",
+        "new_topic_guard": new_topic_guard,
         "semantic_inheritance": scene_relevant,
         "provider_calls": 0,
         "decision_owner": DECISION_OWNER,
