@@ -315,18 +315,21 @@ def _dialogue_evidence(
         or state.get("topic")
     )
 
-    # Real semantic measurement from the interpretation-layer engines.
-    measured = QUANTUM_DIALOGUE_ENGINE.classify(
-        text=text,
-        previous_assistant=previous_april,
-        previous_user=previous_user,
-        active_goal=_s(
-            semantic.get("active_goal")
-            or decision.get("active_goal")
-            or state.get("active_goal")
-        ),
-        active_topic=active_topic,
-    )
+    # Reuse the canonical interpretation measurement when available. This keeps
+    # the processor on one heavy semantic pass for the turn.
+    measured = semantic.get("quantum_dialogue_measurement")
+    if not isinstance(measured, dict):
+        measured = QUANTUM_DIALOGUE_ENGINE.classify(
+            text=text,
+            previous_assistant=previous_april,
+            previous_user=previous_user,
+            active_goal=_s(
+                semantic.get("active_goal")
+                or decision.get("active_goal")
+                or state.get("active_goal")
+            ),
+            active_topic=active_topic,
+        )
 
     dialogue = measured.get("dialogue", {}) if isinstance(measured, dict) else {}
     continuation_score = _bounded01(dialogue.get("continuation_score", 0.0))
@@ -1408,6 +1411,18 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         state=state,
     ) or {}
 
+    # Freeze canonical interpretation measurements for downstream engines.
+    field = interpretation.get("quantum_interpretation_field", {})
+    if isinstance(field, dict):
+        dialogue_field = field.get("dialogue")
+        representation_field = field.get("representation")
+        if isinstance(dialogue_field, dict) and isinstance(
+            dialogue_field.get("semantic_measurement"), dict
+        ):
+            interpretation["quantum_dialogue_measurement"] = dialogue_field["semantic_measurement"]
+        if isinstance(representation_field, dict):
+            interpretation["quantum_representation_measurement"] = representation_field
+
     semantic = semantic_analyze(
         text=text,
         state=state,
@@ -1426,6 +1441,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
 
     _merge_evidence_fields(semantic, (interpretation,))
     semantic["quantum_interpretation_evidence"] = interpretation
+    if isinstance(interpretation.get("quantum_representation_measurement"), dict):
+        semantic["quantum_representation_measurement"] = _quantum_snapshot(
+            interpretation["quantum_representation_measurement"]
+        )
+    if isinstance(interpretation.get("quantum_dialogue_measurement"), dict):
+        semantic["quantum_dialogue_measurement"] = _quantum_snapshot(
+            interpretation["quantum_dialogue_measurement"]
+        )
 
     intent = detect_intent(text, state) or {}
     intent_ai = await detect_intent_ai(text, state)
@@ -1525,33 +1548,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         experience_manager_evidence
     )
 
-    # One semantic dialogue measurement for this turn. It is reused by the
-    # processor collapse; no second lexical interpretation path is introduced.
-    previous_turn = history[-1] if history and isinstance(history[-1], dict) else {}
-    previous_april = ""
-    if isinstance(previous_turn.get("april"), dict):
-        previous_april = _s(
-            previous_turn["april"].get("answer")
-            or previous_turn["april"].get("content")
-            or previous_turn["april"].get("summary")
+    # Reuse interpretation-layer measurement; no second heavy NLP pass.
+    if not isinstance(semantic.get("quantum_dialogue_measurement"), dict):
+        semantic["quantum_dialogue_measurement"] = _quantum_snapshot(
+            interpretation.get("quantum_dialogue_measurement", {})
         )
-    semantic["quantum_dialogue_measurement"] = _quantum_snapshot(
-        QUANTUM_DIALOGUE_ENGINE.classify(
-            text=text,
-            previous_assistant=previous_april,
-            previous_user=_s(previous_turn.get("user")),
-            active_goal=_s(
-                semantic.get("active_goal")
-                or cognition.get("active_goal")
-                or decision.get("active_goal")
-            ),
-            active_topic=_s(
-                semantic.get("active_topic")
-                or decision.get("active_topic")
-                or state.get("active_topic")
-            ),
-        )
-    )
 
     processor_context = build_processor_execution_context({
         "state": state,
