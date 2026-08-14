@@ -1863,6 +1863,52 @@ def build_visual_memory_bridge(
 # 🧠 DIALOG CONTEXT MEMORY
 # =====================================================
 
+
+def update_scene_context(
+    user_id,
+    scene_contract,
+    current_request="",
+    answer="",
+):
+    """
+    Persist the canonical scene produced by the existing route so the next
+    turn can compare against the scene that actually reached the Web.
+    """
+    state_obj = ensure_memory_runtime(user_id)
+    contract = scene_contract if isinstance(scene_contract, dict) else {}
+    if not contract and hasattr(scene_contract, "__dict__"):
+        contract = dict(scene_contract.__dict__)
+
+    render_blocks = contract.get("render_blocks") or contract.get("blocks") or []
+    block_types = []
+    for block in render_blocks:
+        if isinstance(block, dict):
+            block_type = str(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+                or ""
+            ).strip().lower()
+            if block_type and block_type not in block_types:
+                block_types.append(block_type)
+
+    state_obj["active_scene_contract"] = {
+        "scene_version": str(contract.get("scene_version") or ""),
+        "active_scene": str(contract.get("active_scene") or ""),
+        "space_continuity": contract.get("space_continuity") or {},
+        "metadata": contract.get("metadata") or {},
+        "supported_payloads": contract.get("supported_payloads") or [],
+        "render_block_types": block_types,
+        "current_request": str(current_request or "").strip(),
+        "answer": str(answer or "").strip()[:4000],
+        "scene_id": str(contract.get("scene_id") or ""),
+    }
+    state_obj["current_scene_request"] = str(current_request or "").strip()
+    state_obj["last_april_turn"] = str(answer or "").strip()[:4000]
+    persist_state(user_id)
+    return state_obj["active_scene_contract"]
+
+
 def update_dialog_context(user_id, semantic_result):
     if not isinstance(semantic_result, dict):
         return
