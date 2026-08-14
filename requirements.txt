@@ -58,6 +58,7 @@ nltk
 owlready2
 networkit
 
+scikit-learn
 # Semantic Analysis
 rapidfuzz
 pydantic
