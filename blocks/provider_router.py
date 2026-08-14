@@ -130,6 +130,11 @@ def _estimate_input_tokens(text: Any) -> int:
     return max(1, int(total + 0.999))
 
 
+def _provider_packet_fingerprint(text: str) -> str:
+    payload = _safe_text(text).replace("\r\n", "\n").strip()
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def _compact_value(value: Any, *, depth: int = 0, max_depth: int = 3,
                    max_items: int = 8, max_keys: int = 16) -> Any:
     if depth > max_depth:
@@ -781,6 +786,7 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
     mandatory = [
         "APRIL CANONICAL REQUEST",
         render("REQUEST", fields[0][1]),
+        render("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
         render("COMPLEXITY", complexity),
         render("OUTPUT_CAP", output_tokens),
     ]
@@ -869,6 +875,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         "input_budget_enforced": estimated <= INPUT_TOKEN_BUDGET,
         "context_strategy": "semantic_field_selection",
         "current_request_truncation": False,
+        "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
 
     return [
@@ -985,6 +992,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     raw_render_priority = parsed.get("render_priority")
     render_priority = list(raw_render_priority) if isinstance(raw_render_priority, list) else []
 
+    source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
     metadata.update({
         "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
@@ -992,6 +1000,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "single_route": True,
         "summary_visible": False,
         "render_blocks_source": "luna",
+        "requested_outputs": list(source_payload.get("requested_outputs") or []),
+        "response_budget": source_payload.get("response_output_tokens"),
     })
 
     return {
@@ -1035,6 +1045,7 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     source = contract.get("processor_input")
     payload = source if isinstance(source, dict) else {}
     requested_outputs = _canonical_requested_outputs(payload)
+    mr.setdefault("metadata", {})["canonical_output_plan_before_finalize"] = list(requested_outputs)
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
