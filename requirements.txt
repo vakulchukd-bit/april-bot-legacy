@@ -50,6 +50,7 @@ faiss-cpu
 chromadb
 
 # NLP
+stanza
 spacy
 nltk
 
