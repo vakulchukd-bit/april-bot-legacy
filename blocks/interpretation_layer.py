@@ -20,6 +20,7 @@ Compatibility:
 
 import os
 import re
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence
 
@@ -103,12 +104,77 @@ SPACY_NLP: Language = spacy.load(SPACY_MODEL_NAME)
 
 # Stanza's multilingual pipeline provides sentence segmentation, tokenization,
 # POS, morphology, lemmas and dependency structure and detects the language.
+#
+# The resources are provisioned exactly once during Interpretation Engine
+# startup when they are absent. After that, the live Pipeline is strictly
+# offline: no resource update checks and no model downloads are performed
+# during a chat request.
+STANZA_RESOURCE_DIR = Path(
+    os.getenv(
+        "APRIL_STANZA_MODEL_DIR",
+        os.getenv("STANZA_RESOURCES_DIR", str(Path.home() / ".cache" / "april-stanza-resources")),
+    )
+).expanduser()
+
+STANZA_BOOTSTRAP_LANGS = tuple(
+    lang.strip().lower()
+    for lang in os.getenv("APRIL_STANZA_LANGS", "ru,en,uk").split(",")
+    if lang.strip()
+)
+
+def _stanza_lang_ready(lang: str) -> bool:
+    root = STANZA_RESOURCE_DIR / lang
+    # A language directory is considered provisioned only when the core
+    # processors required by QuantumLinguisticEngine are present.
+    required = (
+        root / "tokenize",
+        root / "pos",
+        root / "lemma",
+        root / "depparse",
+        root / "ner",
+    )
+    return all(path.exists() for path in required)
+
+def _stanza_resources_ready() -> bool:
+    return (
+        (STANZA_RESOURCE_DIR / "resources.json").is_file()
+        and all(_stanza_lang_ready(lang) for lang in STANZA_BOOTSTRAP_LANGS)
+    )
+
+def _provision_stanza_resources() -> None:
+    STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # The multilingual language-id model is part of the mandatory startup
+    # contract for MultilingualPipeline.
+    if not (STANZA_RESOURCE_DIR / "multilingual").exists():
+        stanza.download(
+            lang="multilingual",
+            model_dir=str(STANZA_RESOURCE_DIR),
+            verbose=False,
+        )
+
+    missing = [lang for lang in STANZA_BOOTSTRAP_LANGS if not _stanza_lang_ready(lang)]
+    for lang in missing:
+        stanza.download(
+            lang=lang,
+            model_dir=str(STANZA_RESOURCE_DIR),
+            verbose=False,
+        )
+
+    if not _stanza_resources_ready():
+        raise RuntimeError(
+            "STANZA_RESOURCE_BOOTSTRAP_INCOMPLETE: "
+            f"required resources are missing under {STANZA_RESOURCE_DIR}"
+        )
+
+if not _stanza_resources_ready():
+    _provision_stanza_resources()
+
 STANZA_NLP = MultilingualPipeline(
+    model_dir=str(STANZA_RESOURCE_DIR),
     max_cache_size=12,
-    # Models are provisioned during deployment; do not perform network/resource
-    # checks on a live chat request. The multilingual pipeline still keeps its
-    # in-process language cache.
     download_method=None,
+    verbose=False,
 )
 
 SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
