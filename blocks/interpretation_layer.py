@@ -293,15 +293,19 @@ class QuantumIntentEngine:
 
 class QuantumEvidenceFusionEngine:
     """
-    Fuses linguistic, semantic-vector, NLI and context evidence.
+    Single-turn semantic measurement engine.
 
-    Nothing in this engine selects a renderer or creates a route.
+    Each turn performs one linguistic pass, one batched embedding pass, and
+    one cached NLI measurement per semantic family. Public helper methods read
+    from the same turn cache instead of re-running heavy models.
     """
 
     def __init__(self):
         self.linguistic = QuantumLinguisticEngine()
         self.embedding = QuantumEmbeddingEngine()
         self.intent = QuantumIntentEngine()
+        self._turn_cache: dict[tuple, Dict[str, Any]] = {}
+        self._cache_limit = 96
 
     @staticmethod
     def _best_label(result: Dict[str, Any]) -> tuple[str, float]:
@@ -311,6 +315,55 @@ class QuantumEvidenceFusionEngine:
             return "statement", 0.0
         return str(labels[0]), float(scores[0])
 
+    def turn_measurement(
+        self,
+        text: str,
+        previous_assistant: str = "",
+        previous_user: str = "",
+        active_goal: str = "",
+        active_topic: str = "",
+    ) -> Dict[str, Any]:
+        key = (
+            str(text or "").strip(),
+            str(previous_assistant or "").strip(),
+            str(active_goal or "").strip(),
+            str(active_topic or "").strip(),
+        )
+        cached = self._turn_cache.get(key)
+        if cached is not None:
+            return cached
+
+        linguistic = self.linguistic.analyze(text)
+        dialogue_nli = self.intent.classify(text, DIALOGUE_LABELS)
+        representation_nli = self.intent.classify(text, tuple(REPRESENTATION_HYPOTHESES.values()))
+        domain_nli = self.intent.classify(text, tuple(DOMAIN_HYPOTHESES.values()))
+        capability_nli = self.intent.classify(text, tuple(CAPABILITY_HYPOTHESES.values()))
+
+        embedding_map = self.embedding.similarities(
+            text,
+            [v for v in (previous_assistant, active_topic, active_goal) if v],
+        )
+
+        result = {
+            "linguistic": linguistic,
+            "dialogue_nli": dialogue_nli,
+            "representation_nli": representation_nli,
+            "domain_nli": domain_nli,
+            "capability_nli": capability_nli,
+            "embeddings": {
+                "previous_assistant": embedding_map.get(previous_assistant, 0.0),
+                "active_topic": embedding_map.get(active_topic, 0.0),
+                "active_goal": embedding_map.get(active_goal, 0.0),
+            },
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "evidence_only": True,
+            "engine": "quantum_interpretation_turn_engine",
+        }
+        self._turn_cache[key] = result
+        if len(self._turn_cache) > self._cache_limit:
+            self._turn_cache.pop(next(iter(self._turn_cache)))
+        return result
+
     def dialogue(
         self,
         text: str,
@@ -319,71 +372,51 @@ class QuantumEvidenceFusionEngine:
         active_goal: str = "",
         active_topic: str = "",
     ) -> Dict[str, Any]:
-        linguistic = self.linguistic.analyze(text)
-        nli = self.intent.classify(text, DIALOGUE_LABELS)
-        label, confidence = self._best_label(nli)
-
-        previous_similarity = self.embedding.similarity(text, previous_assistant)
-        topic_similarity = self.embedding.similarity(text, active_topic)
-        goal_similarity = self.embedding.similarity(text, active_goal)
-
+        turn = self.turn_measurement(text, previous_assistant, previous_user, active_goal, active_topic)
+        label, confidence = self._best_label(turn["dialogue_nli"])
         return {
             "dialogue": {
                 "label": label,
                 "confidence": confidence,
-                "continuation_score": previous_similarity["score"],
-                "reference_score": previous_similarity["score"],
-                "topic_score": topic_similarity["score"],
-                "goal_score": goal_similarity["score"],
+                "continuation_score": turn["embeddings"]["previous_assistant"],
+                "reference_score": turn["embeddings"]["previous_assistant"],
+                "topic_score": turn["embeddings"]["active_topic"],
+                "goal_score": turn["embeddings"]["active_goal"],
             },
-            "linguistic": linguistic,
-            "nli": nli,
-            "previous_similarity": previous_similarity,
-            "topic_similarity": topic_similarity,
-            "goal_similarity": goal_similarity,
+            "linguistic": turn["linguistic"],
+            "nli": turn["dialogue_nli"],
+            "previous_similarity": {"score": turn["embeddings"]["previous_assistant"], "source": "sentence_transformers"},
+            "topic_similarity": {"score": turn["embeddings"]["active_topic"], "source": "sentence_transformers"},
+            "goal_similarity": {"score": turn["embeddings"]["active_goal"], "source": "sentence_transformers"},
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
             "engine": "quantum_dialogue_engine",
         }
 
     def representations(self, text: str, context: str = "") -> Dict[str, Any]:
-        hypotheses = list(REPRESENTATION_HYPOTHESES.values())
-        nli = self.intent.classify(text, hypotheses)
-        reverse_map = {
-            value: key for key, value in REPRESENTATION_HYPOTHESES.items()
-        }
+        turn = self.turn_measurement(text, active_topic=context)
+        nli = turn["representation_nli"]
+        reverse_map = {value: key for key, value in REPRESENTATION_HYPOTHESES.items()}
         measurements = [
-            {
-                "type": reverse_map[label],
-                "score": float(score),
-                "source": "transformers_nli",
-            }
+            {"type": reverse_map[label], "score": float(score), "source": "transformers_nli"}
             for label, score in zip(nli["labels"], nli["scores"])
             if label in reverse_map
         ]
-        context_similarity = self.embedding.similarity(text, context)
-
         return {
             "nli": nli,
             "measurements": measurements,
-            "context_similarity": context_similarity,
+            "context_similarity": {"score": turn["embeddings"]["active_topic"], "source": "sentence_transformers"},
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
             "engine": "quantum_representation_engine",
         }
 
     def domains(self, text: str) -> Dict[str, Any]:
-        hypotheses = list(DOMAIN_HYPOTHESES.values())
-        nli = self.intent.classify(text, hypotheses)
-        reverse_map = {
-            value: key for key, value in DOMAIN_HYPOTHESES.items()
-        }
+        turn = self.turn_measurement(text)
+        nli = turn["domain_nli"]
+        reverse_map = {value: key for key, value in DOMAIN_HYPOTHESES.items()}
         measurements = [
-            {
-                "domain": reverse_map[label],
-                "score": float(score),
-                "source": "transformers_nli",
-            }
+            {"domain": reverse_map[label], "score": float(score), "source": "transformers_nli"}
             for label, score in zip(nli["labels"], nli["scores"])
             if label in reverse_map
         ]
@@ -394,6 +427,7 @@ class QuantumEvidenceFusionEngine:
             "evidence_only": True,
             "engine": "quantum_domain_engine",
         }
+
 
 
 QUANTUM_LINGUISTIC_ENGINE = QuantumLinguisticEngine()
@@ -416,7 +450,7 @@ def contains_any(text: str, words: Sequence[str]) -> bool:
 
     This is token/lemma evidence only. It cannot select a route or renderer.
     """
-    analysis = QUANTUM_LINGUISTIC_ENGINE.analyze(text)
+    analysis = QUANTUM_EVIDENCE_FUSION.turn_measurement(text)["linguistic"]
     wanted = {normalize_lower(word) for word in words}
     return bool(
         set(analysis["lemmas"]) & wanted
@@ -444,6 +478,18 @@ def build_domain_confidence(text: str):
         for item in measurements
         if float(item["score"]) >= 0.20
     }
+
+
+def _capability_scores(text: str) -> Dict[str, float]:
+    turn = QUANTUM_EVIDENCE_FUSION.turn_measurement(text)
+    reverse_map = {value: key for key, value in CAPABILITY_HYPOTHESES.items()}
+    nli = turn["capability_nli"]
+    return {
+        reverse_map[label]: float(score)
+        for label, score in zip(nli["labels"], nli["scores"])
+        if label in reverse_map
+    }
+
 
 
 def measure_representation_evidence(text: str) -> List[Dict[str, Any]]:
@@ -493,11 +539,7 @@ def semantic_evidence_image(text: str) -> float:
 
 
 def semantic_evidence_exploration(text: str) -> float:
-    result = QUANTUM_INTENT_ENGINE.classify(
-        text,
-        ("the user wants an exploratory analysis", "the user wants a direct answer"),
-    )
-    return float(result["scores"][0]) if result["labels"] else 0.0
+    return _capability_scores(text).get("exploration", 0.0)
 
 
 def semantic_evidence_continuation(text: str, previous_assistant: str = "") -> float:
@@ -509,43 +551,23 @@ def semantic_evidence_continuation(text: str, previous_assistant: str = "") -> f
 
 
 def semantic_evidence_web(text: str) -> float:
-    result = QUANTUM_INTENT_ENGINE.classify(
-        text,
-        ("the user wants a web search", "the user does not want a web search"),
-    )
-    return float(result["scores"][0]) if result["labels"] else 0.0
+    return _capability_scores(text).get("web", 0.0)
 
 
 def semantic_evidence_code(text: str) -> float:
-    result = QUANTUM_INTENT_ENGINE.classify(
-        text,
-        ("the user wants source code", "the user wants an explanation without code"),
-    )
-    return float(result["scores"][0]) if result["labels"] else 0.0
+    return _capability_scores(text).get("code", 0.0)
 
 
 def semantic_evidence_information(text: str) -> float:
-    result = QUANTUM_INTENT_ENGINE.classify(
-        text,
-        ("the user is asking for information or an explanation", "the user is not asking for information"),
-    )
-    return float(result["scores"][0]) if result["labels"] else 0.0
+    return _capability_scores(text).get("information", 0.0)
 
 
 def detect_discussion_mode(text: str) -> float:
-    result = QUANTUM_INTENT_ENGINE.classify(
-        text,
-        ("the user wants a discussion or reasoning", "the user wants a direct task result"),
-    )
-    return float(result["scores"][0]) if result["labels"] else 0.0
+    return _capability_scores(text).get("discussion", 0.0)
 
 
 def detect_space_discussion(text: str) -> float:
-    result = QUANTUM_INTENT_ENGINE.classify(
-        text,
-        ("the user is discussing the interaction space or scene", "the user is discussing a normal subject"),
-    )
-    return float(result["scores"][0]) if result["labels"] else 0.0
+    return _capability_scores(text).get("space", 0.0)
 
 
 def detect_lightweight_visual(text: str) -> float:
@@ -1091,6 +1113,7 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
     }
 
     result["quantum_interpretation_field"] = semantic_packet
+    result["quantum_representation_measurement"] = semantic_packet.get("representation", {})
     result["factory_order"] = build_factory_order(result)
     result["scene_strategy"] = build_scene_strategy(result)
     result["estimated_action_count"] = estimate_action_count(result)
