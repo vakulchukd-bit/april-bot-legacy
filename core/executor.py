@@ -31,7 +31,7 @@ from blocks.intent_ai import detect_intent_ai
 from blocks.intent_resolver import resolve_input, build_focus_intent_state
 from blocks.router import route_request
 from blocks.router_system import decide_action
-from blocks.state_manager import get_state, update_dialog_context
+from blocks.state_manager import get_state, update_dialog_context, update_scene_context
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
@@ -536,6 +536,9 @@ def _requested_outputs(
     """
     constraints = _representation_constraints(semantic, cognition, decision)
     blocked = set(constraints["negative"])
+    locked = _s(semantic.get("representation_authority")).lower()
+    if locked in {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"}:
+        return [locked] if locked not in blocked else ["text"]
     names: list[str] = []
 
     def add(value: Any) -> None:
@@ -903,23 +906,34 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
         if goal: data["active_goal"] = _clip(goal, 500)
         data["recent_dialogue"] = recent
     if mode == "ARTIFACT_REFERENCE":
-        visual = state.get("active_visual_scene") or state.get("visual_summary")
-        if visual: data["visual_context"] = _clip(visual, 700)
+        visual = None
+        if isinstance(state.get("active_scene_contract"), dict):
+            visual = state.get("active_scene_contract")
+        if not visual:
+            visual = state.get("active_visual_scene") or state.get("visual_summary")
+        if visual:
+            data["visual_context"] = _clip(visual, 900)
     return data
 
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
+    # An unrelated new topic must not inherit the previous visual memory merely
+    # because a scene exists in state.
+    if visual and not bool(visual.get("memory_relevant")):
+        evidence["visual_present"] = 0.0
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
     # Real semantic representation measurement. This is NLI/vector evidence,
     # never a word-trigger map.
-    representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
-        text=text,
-        context=_s(
-            semantic.get("active_topic")
-            or decision.get("active_topic")
-            or state.get("active_topic")
-        ),
-    )
+    representation_measurement = semantic.get("quantum_representation_measurement")
+    if not isinstance(representation_measurement, dict):
+        representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
+            text=text,
+            context=_s(
+                semantic.get("active_topic")
+                or decision.get("active_topic")
+                or state.get("active_topic")
+            ),
+        )
     semantic["quantum_representation_measurement"] = _quantum_snapshot(
         representation_measurement
     )
@@ -1262,6 +1276,25 @@ def _canonicalize(
         scene.blocks = provider_blocks
         scene.contract.blocks = provider_blocks
         scene.contract.render_blocks = list(provider_blocks)
+        scene.contract.metadata = dict(scene.contract.metadata or {})
+        scene.contract.metadata["renderer_state"] = {
+            "active_scene": scene.contract.active_scene,
+            "block_types": [
+                _s(
+                    block.get("type")
+                    or block.get("artifact_type")
+                    or block.get("representation")
+                ).lower()
+                for block in provider_blocks
+                if isinstance(block, dict)
+            ],
+            "continuation": bool(
+                request.constraints.get("representation_plan", {}).get("continuation")
+                or semantic.get("continuation")
+            ),
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "single_route": True,
+        }
 
         if hasattr(scene.contract, "supported_payloads"):
             supported = list(getattr(scene.contract, "supported_payloads", []) or [])
@@ -1276,6 +1309,12 @@ def _canonicalize(
 
     contract = build_scene_contract(scene)
     update_dialog_context(user_id, semantic)
+    update_scene_context(
+        user_id,
+        contract,
+        current_request=_s(request.conversation.get("current_request")),
+        answer=answer,
+    )
     request_meta = _request_metadata(request)
 
     # Final transport audit: text must be visible, artifacts must survive.
@@ -1359,12 +1398,23 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
 
+    # One canonical heavy Interpretation pass per turn. Semantic Core reuses
+    # the same evidence packet instead of re-running Stanza/NLI.
+    interpretation = interpret_request(
+        text,
+        cognition=state.get("cognition", {}) if isinstance(state.get("cognition"), dict) else {},
+        semantic={},
+        history=history,
+        state=state,
+    ) or {}
+
     semantic = semantic_analyze(
         text=text,
         state=state,
         history=history,
         active_flow=active_flow,
         dialog_state=dialog_state,
+        interpreted=interpretation,
     ) or {}
 
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
@@ -1372,13 +1422,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         text=text, semantic=semantic, reasoning=reasoning, state=state
     ) or {}
 
-    interpretation = interpret_request(
-        text,
-        cognition=cognition,
-        semantic=semantic,
-        history=history,
-        state=state,
-    ) or {}
+    interpretation["cognition"] = _quantum_snapshot(cognition)
 
     _merge_evidence_fields(semantic, (interpretation,))
     semantic["quantum_interpretation_evidence"] = interpretation
