@@ -174,7 +174,6 @@ STANZA_NLP = MultilingualPipeline(
     model_dir=str(STANZA_RESOURCE_DIR),
     max_cache_size=12,
     download_method=None,
-    verbose=False,
 )
 
 SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
