@@ -505,7 +505,8 @@ def _base_result(text, signals):
     }
 
 def analyze(text: str, state: dict=None, history: list=None,
-            active_flow: dict=None, dialog_state: dict=None):
+            active_flow: dict=None, dialog_state: dict=None,
+            interpreted: dict=None):
     text=(text or "").strip()
     state=state if isinstance(state, dict) else {}
     history=history if isinstance(history, list) else []
@@ -520,13 +521,15 @@ def analyze(text: str, state: dict=None, history: list=None,
     safe_semantic_log(f"INPUT: {text[:80]}")
 
     cognition=state.get("cognition", {})
-    interpreted=interpret_request(
-        text,
-        cognition=cognition,
-        semantic={},
-        history=history,
-        state=state,
-    ) or {}
+    interpreted = interpreted if isinstance(interpreted, dict) else None
+    if interpreted is None:
+        interpreted=interpret_request(
+            text,
+            cognition=cognition,
+            semantic={},
+            history=history,
+            state=state,
+        ) or {}
 
     fusion=_signal_fusion(text, signals, interpreted)
     current_representation = detect_representation_constraints(text)
@@ -573,8 +576,45 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["required_representations"]=list(reps)
     result["candidate_representations"]=list(reps)
     result["requested_representations"]=list(current_positive)
-    result["requested_outputs"]=list(current_positive)
-    result["required_outputs"]=list(reps)
+    # Representation authority: a new-topic request without explicit,
+    # semantically strong representation evidence remains text. This prevents
+    # broad NLI priors from inventing graphs/diagrams for ordinary requests.
+    dialog_contract = interpreted.get("dialogue_contract", {}) if isinstance(interpreted, dict) else {}
+    continuation = bool(
+        dialog_contract.get("continuation")
+        or interpreted.get("continuation")
+    )
+    rep_scores = {
+        str(item.get("label")).lower(): float(item.get("score", 0.0))
+        for item in (interpreted.get("representation_evidence") or [])
+        if isinstance(item, dict)
+    }
+    text_score = rep_scores.get("text", 0.0)
+    strong_representation = [
+        name for name in (
+            "table", "graph", "diagram", "formula",
+            "image", "gallery", "code", "link"
+        )
+        if (
+            rep_scores.get(name, 0.0) >= 0.80
+            and (rep_scores.get(name, 0.0) - text_score) >= 0.16
+        )
+    ]
+    explicit_current = bool(current_positive)
+    if not explicit_current and not continuation and not strong_representation:
+        result["required_representations"] = ["text"]
+        result["candidate_representations"] = ["text"]
+        result["requested_representations"] = ["text"]
+        result["requested_outputs"] = ["text"]
+        result["required_outputs"] = ["text"]
+        result["requested_representation"] = "text"
+        result["representation_authority"] = "text"
+        result["representation_consensus"] = {
+            **result.get("representation_consensus", {}),
+            "selected": ["text"],
+            "decision_reason": "new_topic_without_strong_representation_evidence",
+        }
+
     result["representation_constraints"]=fusion["representation_constraints"]
 
     result.update({
@@ -593,7 +633,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         ),
     })
 
-    requested=fusion["requested_representation"]
+    requested = result.get("requested_representation") or fusion["requested_representation"]
     # These are evidence flags only. The processor owns the final choice.
     result["render_intent"]=bool(any(
         name != "text" for name in result["required_representations"]
