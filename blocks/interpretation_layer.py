@@ -100,87 +100,52 @@ NLI_MODEL_NAME = os.getenv(
 SPACY_MODEL_NAME = os.getenv("APRIL_SPACY_MODEL", "xx_ent_wiki_sm")
 
 # Real engines are required. Missing packages/models are deployment errors.
-SPACY_NLP: Language = spacy.load(SPACY_MODEL_NAME)
 
-# Stanza's multilingual pipeline provides sentence segmentation, tokenization,
-# POS, morphology, lemmas and dependency structure and detects the language.
-#
-# The resources are provisioned exactly once during Interpretation Engine
-# startup when they are absent. After that, the live Pipeline is strictly
-# offline: no resource update checks and no model downloads are performed
-# during a chat request.
-STANZA_RESOURCE_DIR = Path(
-    os.getenv(
-        "APRIL_STANZA_MODEL_DIR",
-        os.getenv("STANZA_RESOURCES_DIR", str(Path.home() / ".cache" / "april-stanza-resources")),
-    )
-).expanduser()
+# Heavy semantic models are created through one runtime gate instead of during
+# Python import. This keeps deployment import-safe while all required engines
+# remain mandatory for semantic work.
+SPACY_NLP: Language | None = None
+STANZA_NLP: MultilingualPipeline | None = None
+SEMANTIC_ENCODER: SentenceTransformer | None = None
+DIALOGUE_NLI: Any = None
+_SEMANTIC_RUNTIME_READY = False
 
-STANZA_BOOTSTRAP_LANGS = tuple(
-    lang.strip().lower()
-    for lang in os.getenv("APRIL_STANZA_LANGS", "ru,en,uk").split(",")
-    if lang.strip()
-)
 
-def _stanza_lang_ready(lang: str) -> bool:
-    root = STANZA_RESOURCE_DIR / lang
-    # A language directory is considered provisioned only when the core
-    # processors required by QuantumLinguisticEngine are present.
-    required = (
-        root / "tokenize",
-        root / "pos",
-        root / "lemma",
-        root / "depparse",
-        root / "ner",
-    )
-    return all(path.exists() for path in required)
+def _ensure_semantic_runtime() -> None:
+    global SPACY_NLP, STANZA_NLP, SEMANTIC_ENCODER, DIALOGUE_NLI, _SEMANTIC_RUNTIME_READY
+    if _SEMANTIC_RUNTIME_READY:
+        return
 
-def _stanza_resources_ready() -> bool:
-    return (
-        (STANZA_RESOURCE_DIR / "resources.json").is_file()
-        and all(_stanza_lang_ready(lang) for lang in STANZA_BOOTSTRAP_LANGS)
-    )
-
-def _provision_stanza_resources() -> None:
-    STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
-
-    # The multilingual language-id model is part of the mandatory startup
-    # contract for MultilingualPipeline.
-    if not (STANZA_RESOURCE_DIR / "multilingual").exists():
-        stanza.download(
-            lang="multilingual",
-            model_dir=str(STANZA_RESOURCE_DIR),
-            verbose=False,
-        )
-
-    missing = [lang for lang in STANZA_BOOTSTRAP_LANGS if not _stanza_lang_ready(lang)]
-    for lang in missing:
-        stanza.download(
-            lang=lang,
-            model_dir=str(STANZA_RESOURCE_DIR),
-            verbose=False,
-        )
+    SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
 
     if not _stanza_resources_ready():
-        raise RuntimeError(
-            "STANZA_RESOURCE_BOOTSTRAP_INCOMPLETE: "
-            f"required resources are missing under {STANZA_RESOURCE_DIR}"
-        )
+        _provision_stanza_resources()
 
-if not _stanza_resources_ready():
-    _provision_stanza_resources()
+    lang_subset = list(STANZA_BOOTSTRAP_LANGS)
+    lang_configs = {
+        lang: {"processors": "tokenize,mwt,pos,lemma,depparse,ner"}
+        for lang in lang_subset
+    }
+    STANZA_NLP = MultilingualPipeline(
+        model_dir=str(STANZA_RESOURCE_DIR),
+        max_cache_size=12,
+        download_method=None,
+        lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
+        lang_configs=lang_configs or None,
+    )
 
-STANZA_NLP = MultilingualPipeline(
-    model_dir=str(STANZA_RESOURCE_DIR),
-    max_cache_size=12,
-    download_method=None,
-)
+    SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
+    DIALOGUE_NLI = hf_pipeline(
+        "zero-shot-classification",
+        model=NLI_MODEL_NAME,
+    )
 
-SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
-DIALOGUE_NLI = hf_pipeline(
-    "zero-shot-classification",
-    model=NLI_MODEL_NAME,
-)
+    _SEMANTIC_RUNTIME_READY = True
+
+
+def preload_semantic_runtime() -> None:
+    """Explicit prewarm hook; keeps the existing single semantic route."""
+    _ensure_semantic_runtime()
 
 DIALOGUE_LABELS = (
     "question",
@@ -250,6 +215,10 @@ class SemanticEvidence:
         }
 
 
+def _runtime_ready_guard() -> None:
+    _ensure_semantic_runtime()
+
+
 class QuantumLinguisticEngine:
     """
     Dedicated linguistic engine.
@@ -260,6 +229,7 @@ class QuantumLinguisticEngine:
     """
 
     def analyze(self, text: str) -> Dict[str, Any]:
+        _runtime_ready_guard()
         if not text or not text.strip():
             return {
                 "language": None,
@@ -329,12 +299,34 @@ class QuantumLinguisticEngine:
 class QuantumEmbeddingEngine:
     """Semantic vector engine for request/history/topic/goal comparison."""
 
+    def __init__(self):
+        self._pair_cache: dict[tuple[str, str], float] = {}
+        self._batch_cache: dict[tuple[str, tuple[str, ...]], Dict[str, float]] = {}
+        self._cache_limit = 256
+
+    def _remember_pair(self, key: tuple[str, str], score: float) -> None:
+        self._pair_cache[key] = score
+        if len(self._pair_cache) > self._cache_limit:
+            self._pair_cache.pop(next(iter(self._pair_cache)))
+
     def similarity(self, text_a: str, text_b: str) -> Dict[str, Any]:
+        _runtime_ready_guard()
+        text_a = normalize_text(text_a)
+        text_b = normalize_text(text_b)
         if not text_a or not text_b:
             return {
                 "score": 0.0,
                 "source": "sentence_transformers",
                 "measured": False,
+            }
+
+        key = (text_a, text_b)
+        if key in self._pair_cache:
+            return {
+                "score": self._pair_cache[key],
+                "source": "sentence_transformers",
+                "measured": True,
+                "cached": True,
             }
 
         vectors = SEMANTIC_ENCODER.encode(
@@ -348,19 +340,22 @@ class QuantumEmbeddingEngine:
                 vectors[1].reshape(1, -1),
             )[0][0]
         )
+        score = max(0.0, min(1.0, score))
+        self._remember_pair(key, score)
         return {
-            "score": max(0.0, min(1.0, score)),
+            "score": score,
             "source": "sentence_transformers",
             "measured": True,
+            "cached": False,
         }
 
     def similarities(self, text: str, candidates: Sequence[str]) -> Dict[str, float]:
         """Batch semantic comparison used by one interpretation turn.
 
-        The previous implementation called a non-existent method here. This
-        keeps the same embedding engine and makes the intended single batched
-        measurement explicit, avoiding repeated model execution.
+        Results are cached by the exact semantic pair set so the same turn does
+        not repeatedly encode identical context fields.
         """
+        _runtime_ready_guard()
         text = normalize_text(text)
         unique = []
         seen = set()
@@ -373,6 +368,11 @@ class QuantumEmbeddingEngine:
         if not text or not unique:
             return {candidate: 0.0 for candidate in unique}
 
+        key = (text, tuple(unique))
+        cached = self._batch_cache.get(key)
+        if cached is not None:
+            return dict(cached)
+
         vectors = SEMANTIC_ENCODER.encode(
             [text, *unique],
             normalize_embeddings=True,
@@ -382,17 +382,23 @@ class QuantumEmbeddingEngine:
             vectors[0].reshape(1, -1),
             vectors[1:],
         )[0]
-
-        return {
+        result = {
             candidate: max(0.0, min(1.0, float(score)))
             for candidate, score in zip(unique, scores)
         }
+        self._batch_cache[key] = result
+        if len(self._batch_cache) > self._cache_limit:
+            self._batch_cache.pop(next(iter(self._batch_cache)))
+        for candidate, score in result.items():
+            self._remember_pair((text, candidate), score)
+        return result
 
 
 class QuantumIntentEngine:
     """NLI/zero-shot semantic engine. No keyword routing."""
 
     def classify(self, text: str, hypotheses: Sequence[str]) -> Dict[str, Any]:
+        _runtime_ready_guard()
         result = DIALOGUE_NLI(
             text,
             candidate_labels=list(hypotheses),
@@ -419,6 +425,8 @@ class QuantumEvidenceFusionEngine:
         self.embedding = QuantumEmbeddingEngine()
         self.intent = QuantumIntentEngine()
         self._turn_cache: dict[tuple, Dict[str, Any]] = {}
+        self._linguistic_cache: dict[str, Dict[str, Any]] = {}
+        self._nli_cache: dict[str, Dict[str, Any]] = {}
         self._cache_limit = 96
 
     @staticmethod
@@ -447,11 +455,32 @@ class QuantumEvidenceFusionEngine:
         if cached is not None:
             return cached
 
-        linguistic = self.linguistic.analyze(text)
-        dialogue_nli = self.intent.classify(text, DIALOGUE_LABELS)
-        representation_nli = self.intent.classify(text, tuple(REPRESENTATION_HYPOTHESES.values()))
-        domain_nli = self.intent.classify(text, tuple(DOMAIN_HYPOTHESES.values()))
-        capability_nli = self.intent.classify(text, tuple(CAPABILITY_HYPOTHESES.values()))
+        normalized_turn_text = str(text or "").strip()
+        linguistic = self._linguistic_cache.get(normalized_turn_text)
+        if linguistic is None:
+            linguistic = self.linguistic.analyze(normalized_turn_text)
+            self._linguistic_cache[normalized_turn_text] = linguistic
+
+        nli_bundle = self._nli_cache.get(normalized_turn_text)
+        if nli_bundle is None:
+            nli_bundle = {
+                "dialogue_nli": self.intent.classify(normalized_turn_text, DIALOGUE_LABELS),
+                "representation_nli": self.intent.classify(
+                    normalized_turn_text, tuple(REPRESENTATION_HYPOTHESES.values())
+                ),
+                "domain_nli": self.intent.classify(
+                    normalized_turn_text, tuple(DOMAIN_HYPOTHESES.values())
+                ),
+                "capability_nli": self.intent.classify(
+                    normalized_turn_text, tuple(CAPABILITY_HYPOTHESES.values())
+                ),
+            }
+            self._nli_cache[normalized_turn_text] = nli_bundle
+
+        dialogue_nli = nli_bundle["dialogue_nli"]
+        representation_nli = nli_bundle["representation_nli"]
+        domain_nli = nli_bundle["domain_nli"]
+        capability_nli = nli_bundle["capability_nli"]
 
         embedding_map = self.embedding.similarities(
             text,
