@@ -574,6 +574,7 @@ def _dialogue_signal_contract(
     history: list,
     state: dict,
     semantic: dict,
+    cognition: dict | None = None,
 ) -> Dict[str, Any]:
     last_assistant = ""
     last_user = ""
@@ -593,15 +594,21 @@ def _dialogue_signal_contract(
         if last_assistant:
             break
 
+    cognition = cognition if isinstance(cognition, dict) else {}
+
     active_goal = normalize_text(
         state.get("active_goal")
         or state.get("current_goal")
         or semantic.get("active_goal")
+        or cognition.get("active_goal")
+        or cognition.get("current_goal")
     )
     active_topic = normalize_text(
         state.get("active_topic")
         or state.get("current_topic")
         or semantic.get("current_topic")
+        or cognition.get("active_topic")
+        or cognition.get("current_topic")
     )
 
     measured = QUANTUM_EVIDENCE_FUSION.dialogue(
