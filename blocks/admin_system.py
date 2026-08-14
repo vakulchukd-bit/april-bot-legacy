@@ -1,8 +1,8 @@
-=========================================================
+# =========================================================
 
-🧠 APRIL ADMIN MONITOR CORE
+# 🧠 APRIL ADMIN MONITOR CORE
 
-=========================================================
+# =========================================================
 
 """
 APRIL ADMIN MONITOR CORE
@@ -147,11 +147,11 @@ This file must remain:
 - future-expandable
   """
 
-=========================================================
+# =========================================================
 
-🔥 STORAGE ACCESS
+# 🔥 STORAGE ACCESS
 
-=========================================================
+# =========================================================
 
 """
 Only lightweight monitoring-safe
@@ -162,29 +162,29 @@ from storage import (
 get_all_users
 )
 
-=========================================================
+# =========================================================
 
-🧠 ERROR OBSERVER
+# 🧠 ERROR OBSERVER
 
-=========================================================
+# =========================================================
 
 from blocks.error_handler import (
 get_errors
 )
 
-=========================================================
+# =========================================================
 
-🧠 CORE IMPORTS
+# 🧠 CORE IMPORTS
 
-=========================================================
+# =========================================================
 
 from datetime import datetime
 
-=========================================================
+# =========================================================
 
-🧠 SYSTEM CONFIG
+# 🧠 SYSTEM CONFIG
 
-=========================================================
+# =========================================================
 
 ADMIN_CORE_VERSION = "APRIL_WEB_ADMIN_CORE"
 
@@ -192,11 +192,11 @@ APRIL_FILE_ID = (
 "APRIL_ADMIN_MONITOR_CORE"
 )
 
-=========================================================
+# =========================================================
 
-🧠 MACHINE CHANNELS
+# 🧠 MACHINE CHANNELS
 
-=========================================================
+# =========================================================
 
 """
 This helper core communicates only through
@@ -223,513 +223,513 @@ ADMIN_RESPONSE_CHANNEL = {
 
 }
 
-=========================================================
+# =========================================================
 
-🔥 TRACE LOGGER
+# 🔥 TRACE LOGGER
 
-=========================================================
+# =========================================================
 
 def APRIL_LOG_IN(
-room,
-metadata=None
-):
+    room,
+    metadata=None
+    ):
 
-try:
+    try:
 
-    print(
-        "🟢 APRIL_LOG_IN",
-        {
-            "room":
-                room,
+        print(
+            "🟢 APRIL_LOG_IN",
+            {
+                "room":
+                    room,
 
-            "file":
-                APRIL_FILE_ID,
+                "file":
+                    APRIL_FILE_ID,
 
-            "timestamp":
-                datetime.utcnow().isoformat(),
+                "timestamp":
+                    datetime.utcnow().isoformat(),
 
-            **(
-                metadata or {}
-            )
-        }
-    )
+                **(
+                    metadata or {}
+                )
+            }
+        )
 
-except Exception:
-    pass
+    except Exception:
+        pass
 
 def APRIL_LOG_OUT(
-room,
-metadata=None
-):
+    room,
+    metadata=None
+    ):
 
-try:
+    try:
 
-    print(
-        "🔵 APRIL_LOG_OUT",
-        {
-            "room":
-                room,
+        print(
+            "🔵 APRIL_LOG_OUT",
+            {
+                "room":
+                    room,
 
-            "file":
-                APRIL_FILE_ID,
+                "file":
+                    APRIL_FILE_ID,
 
-            "timestamp":
-                datetime.utcnow().isoformat(),
+                "timestamp":
+                    datetime.utcnow().isoformat(),
 
-            **(
-                metadata or {}
-            )
-        }
-    )
+                **(
+                    metadata or {}
+                )
+            }
+        )
 
-except Exception:
-    pass
+    except Exception:
+        pass
 
-=========================================================
+    # =========================================================
 
-👥 USER REGISTRY STABILIZER
+    # 👥 USER REGISTRY STABILIZER
 
-=========================================================
+    # =========================================================
 
 def register_user(user_id):
 
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "register_user",
+    APRIL_LOG_IN(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "register_user",
 
-        "user_id":
-            user_id
+            "user_id":
+                user_id
+        }
+    )
+
+    result = {
+
+        "success": True,
+
+        "user_id": user_id
     }
-)
 
-result = {
+    APRIL_LOG_OUT(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "register_user_complete"
+        }
+    )
 
-    "success": True,
+    return result
 
-    "user_id": user_id
-}
+    # =========================================================
 
-APRIL_LOG_OUT(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "register_user_complete"
-    }
-)
+    # 📋 EVENT OBSERVER
 
-return result
-
-=========================================================
-
-📋 EVENT OBSERVER
-
-=========================================================
+    # =========================================================
 
 def log_event(
-user_id,
-event_type
-):
+    user_id,
+    event_type
+    ):
 
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "log_event",
+    APRIL_LOG_IN(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "log_event",
+
+            "event_type":
+                event_type
+        }
+    )
+
+    result = {
+
+        "success": True,
 
         "event_type":
-            event_type
+            event_type,
+
+        "channel":
+            ADMIN_RESPONSE_CHANNEL
     }
-)
 
-result = {
+    APRIL_LOG_OUT(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "event_logged"
+        }
+    )
 
-    "success": True,
+    return result
 
-    "event_type":
-        event_type,
+    # =========================================================
 
-    "channel":
-        ADMIN_RESPONSE_CHANNEL
-}
+    # 👥 ACTIVE USER ANALYSIS
 
-APRIL_LOG_OUT(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "event_logged"
-    }
-)
-
-return result
-
-=========================================================
-
-👥 ACTIVE USER ANALYSIS
-
-=========================================================
+    # =========================================================
 
 def get_active_users():
 
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "active_users_scan"
-    }
-)
-
-try:
-
-    users = get_all_users()
-
-    total = len(users)
-
-    APRIL_LOG_OUT(
+    APRIL_LOG_IN(
         "ADMIN_MONITOR_ROOM",
         {
-            "active_users":
-                total
+            "action":
+                "active_users_scan"
         }
     )
 
-    return total
+    try:
 
-except Exception as e:
+        users = get_all_users()
 
-    print(
-        "🔥 ACTIVE USERS ERROR:",
-        e
-    )
+        total = len(users)
 
-    return 0
+        APRIL_LOG_OUT(
+            "ADMIN_MONITOR_ROOM",
+            {
+                "active_users":
+                    total
+            }
+        )
 
-=========================================================
+        return total
 
-⚠️ ERROR PRESSURE ANALYSIS
+    except Exception as e:
 
-=========================================================
+        print(
+            "🔥 ACTIVE USERS ERROR:",
+            e
+        )
+
+        return 0
+
+    # =========================================================
+
+    # ⚠️ ERROR PRESSURE ANALYSIS
+
+    # =========================================================
 
 def get_errors_count():
 
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "error_pressure_scan"
+    APRIL_LOG_IN(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "error_pressure_scan"
+        }
+    )
+
+    try:
+
+        errors = get_errors()
+
+        total = len(errors)
+
+        APRIL_LOG_OUT(
+            "ADMIN_MONITOR_ROOM",
+            {
+                "error_pressure":
+                    total
+            }
+        )
+
+        return total
+
+    except Exception:
+
+        return 0
+
+    # =========================================================
+
+    # 🧠 SYSTEM HEALTH ANALYSIS
+
+    # =========================================================
+
+def get_system_health():
+
+    APRIL_LOG_IN(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "health_analysis"
+        }
+    )
+
+    users = get_active_users()
+
+    errors = get_errors_count()
+
+    # =====================================================
+    # 🧠 HEALTH STATUS
+    # =====================================================
+
+    if errors > 25:
+
+        status = "offline"
+
+    elif errors > 10:
+
+        status = "warning"
+
+    else:
+
+        status = "online"
+
+    payload = {
+
+        "system":
+            "APRIL",
+
+        "version":
+            ADMIN_CORE_VERSION,
+
+        "status":
+            status,
+
+        "active_users":
+            users,
+
+        "error_pressure":
+            errors,
+
+        "web_mode":
+            True,
+
+        "telegram_mode":
+            False,
+
+        "analyzer_ready":
+            True,
+
+        "telemetry_ready":
+            True
     }
-)
-
-try:
-
-    errors = get_errors()
-
-    total = len(errors)
 
     APRIL_LOG_OUT(
         "ADMIN_MONITOR_ROOM",
         {
-            "error_pressure":
-                total
+            "status":
+                status
         }
     )
 
-    return total
+    return payload
 
-except Exception:
+    # =========================================================
 
-    return 0
+    # 🧠 EXECUTOR SUPPORT PAYLOAD
 
-=========================================================
-
-🧠 SYSTEM HEALTH ANALYSIS
-
-=========================================================
-
-def get_system_health():
-
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "health_analysis"
-    }
-)
-
-users = get_active_users()
-
-errors = get_errors_count()
-
-# =====================================================
-# 🧠 HEALTH STATUS
-# =====================================================
-
-if errors > 25:
-
-    status = "offline"
-
-elif errors > 10:
-
-    status = "warning"
-
-else:
-
-    status = "online"
-
-payload = {
-
-    "system":
-        "APRIL",
-
-    "version":
-        ADMIN_CORE_VERSION,
-
-    "status":
-        status,
-
-    "active_users":
-        users,
-
-    "error_pressure":
-        errors,
-
-    "web_mode":
-        True,
-
-    "telegram_mode":
-        False,
-
-    "analyzer_ready":
-        True,
-
-    "telemetry_ready":
-        True
-}
-
-APRIL_LOG_OUT(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "status":
-            status
-    }
-)
-
-return payload
-
-=========================================================
-
-🧠 EXECUTOR SUPPORT PAYLOAD
-
-=========================================================
+    # =========================================================
 
 def build_executor_support_payload():
 
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "executor_payload_build"
+    APRIL_LOG_IN(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "executor_payload_build"
+        }
+    )
+
+    health = get_system_health()
+
+    payload = {
+
+        "channel":
+            ADMIN_RESPONSE_CHANNEL,
+
+        "payload_type":
+            "executor_support",
+
+        "system":
+            health.get(
+                "system"
+            ),
+
+        "status":
+            health.get(
+                "status"
+            ),
+
+        "active_users":
+            health.get(
+                "active_users"
+            ),
+
+        "error_pressure":
+            health.get(
+                "error_pressure"
+            ),
+
+        "web_mode":
+            True
     }
-)
 
-health = get_system_health()
+    APRIL_LOG_OUT(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "payload":
+                "executor_support"
+        }
+    )
 
-payload = {
+    return payload
 
-    "channel":
-        ADMIN_RESPONSE_CHANNEL,
+    # =========================================================
 
-    "payload_type":
-        "executor_support",
+    # 🧠 ADMIN TELEMETRY EXPORT
 
-    "system":
-        health.get(
-            "system"
-        ),
-
-    "status":
-        health.get(
-            "status"
-        ),
-
-    "active_users":
-        health.get(
-            "active_users"
-        ),
-
-    "error_pressure":
-        health.get(
-            "error_pressure"
-        ),
-
-    "web_mode":
-        True
-}
-
-APRIL_LOG_OUT(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "payload":
-            "executor_support"
-    }
-)
-
-return payload
-
-=========================================================
-
-🧠 ADMIN TELEMETRY EXPORT
-
-=========================================================
+    # =========================================================
 
 def build_admin_telemetry_export():
 
-"""
-Safe telemetry export for:
-- Web superadmin
-- diagnostics
-- analyzer
-- monitoring widgets
-"""
+    """
+    Safe telemetry export for:
+    - Web superadmin
+    - diagnostics
+    - analyzer
+    - monitoring widgets
+    """
 
-health = get_system_health()
+    health = get_system_health()
 
-return {
+    return {
 
-    "system_status":
-        health.get(
-            "status"
-        ),
+        "system_status":
+            health.get(
+                "status"
+            ),
 
-    "online_users":
-        health.get(
-            "active_users"
-        ),
+        "online_users":
+            health.get(
+                "active_users"
+            ),
 
-    "error_pressure":
-        health.get(
-            "error_pressure"
-        ),
+        "error_pressure":
+            health.get(
+                "error_pressure"
+            ),
 
-    "voice_status":
-        "online",
+        "voice_status":
+            "online",
 
-    "render_status":
-        "online",
+        "render_status":
+            "online",
 
-    "trace_status":
-        "online",
+        "trace_status":
+            "online",
 
-    "memory_status":
-        "online",
+        "memory_status":
+            "online",
 
-    "multimodal_status":
-        "online",
+        "multimodal_status":
+            "online",
 
-    "session_status":
-        "online"
-}
+        "session_status":
+            "online"
+    }
 
-=========================================================
+    # =========================================================
 
-🧠 ANALYZER EXPORT
+    # 🧠 ANALYZER EXPORT
 
-=========================================================
+    # =========================================================
 
 def build_analyzer_payload():
 
-"""
-Reserved analyzer bridge.
+    """
+    Reserved analyzer bridge.
 
-Future analyzer:
-- room scanning
-- continuity checks
-- render diagnostics
-- telemetry verification
-- executor tracing
-"""
+    Future analyzer:
+    - room scanning
+    - continuity checks
+    - render diagnostics
+    - telemetry verification
+    - executor tracing
+    """
 
-health = get_system_health()
+    health = get_system_health()
 
-return {
+    return {
 
-    "analyzer":
-        True,
+        "analyzer":
+            True,
 
-    "status":
-        health.get(
-            "status"
-        ),
+        "status":
+            health.get(
+                "status"
+            ),
 
-    "active_users":
-        health.get(
-            "active_users"
-        ),
+        "active_users":
+            health.get(
+                "active_users"
+            ),
 
-    "error_pressure":
-        health.get(
-            "error_pressure"
-        ),
+        "error_pressure":
+            health.get(
+                "error_pressure"
+            ),
 
-    "continuity":
-        "stable",
+        "continuity":
+            "stable",
 
-    "render":
-        "stable",
+        "render":
+            "stable",
 
-    "trace":
-        "stable"
-}
+        "trace":
+            "stable"
+    }
 
-=========================================================
+    # =========================================================
 
-🧠 FUTURE ADMIN PANEL PAYLOAD
+    # 🧠 FUTURE ADMIN PANEL PAYLOAD
 
-=========================================================
+    # =========================================================
 
 def build_admin_dashboard_payload():
 
-APRIL_LOG_IN(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "action":
-            "dashboard_payload_build"
+    APRIL_LOG_IN(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "action":
+                "dashboard_payload_build"
+        }
+    )
+
+    health = get_system_health()
+
+    payload = {
+
+        "channel":
+            ADMIN_RESPONSE_CHANNEL,
+
+        "dashboard_type":
+            "private_creator_admin",
+
+        "system_health":
+            health,
+
+        "telemetry":
+            build_admin_telemetry_export(),
+
+        "analyzer":
+            build_analyzer_payload(),
+
+        "executor_connected":
+            True,
+
+        "future_expansion":
+            True
     }
-)
 
-health = get_system_health()
+    APRIL_LOG_OUT(
+        "ADMIN_MONITOR_ROOM",
+        {
+            "payload":
+                "dashboard_payload"
+        }
+    )
 
-payload = {
-
-    "channel":
-        ADMIN_RESPONSE_CHANNEL,
-
-    "dashboard_type":
-        "private_creator_admin",
-
-    "system_health":
-        health,
-
-    "telemetry":
-        build_admin_telemetry_export(),
-
-    "analyzer":
-        build_analyzer_payload(),
-
-    "executor_connected":
-        True,
-
-    "future_expansion":
-        True
-}
-
-APRIL_LOG_OUT(
-    "ADMIN_MONITOR_ROOM",
-    {
-        "payload":
-            "dashboard_payload"
-    }
-)
-
-return payload
+    return payload
