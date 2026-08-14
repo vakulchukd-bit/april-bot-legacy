@@ -12,7 +12,12 @@ import re
 from typing import Any
 
 from blocks.context_system import build_deephub_context, build_executor_context_packet
-from blocks.interpretation_layer import interpret_request, build_processor_execution_context
+from blocks.interpretation_layer import (
+    interpret_request,
+    build_processor_execution_context,
+    QUANTUM_EVIDENCE_FUSION,
+    QUANTUM_DIALOGUE_ENGINE,
+)
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.reasoning_state import build_reasoning_state
 from blocks.cognitive_core import analyze_cognition
@@ -31,7 +36,7 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v16_visible_answer_artifact_safe"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v17_semantic_fusion_no_triggers"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -238,6 +243,20 @@ def _build_quantum_field(
             + _as_list(router.get("quantum_evidence", {}).get("signals"))
             + _as_list(router_system.get("candidate_signals"))
         ),
+        "semantic_engines": {
+            "dialogue": _quantum_snapshot(
+                semantic.get("quantum_dialogue_measurement", {})
+            ),
+            "representation": _quantum_snapshot(
+                semantic.get("quantum_representation_measurement", {})
+            ),
+            "representation_candidates": _quantum_snapshot(
+                semantic.get("quantum_representation_candidates", [])
+            ),
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "word_trigger_routing": False,
+            "fallback_semantics": False,
+        },
         "trajectory": _quantum_snapshot({
             "resolver": _as_dict(resolver),
             "active_flow": _as_dict(state.get("active_flow")),
@@ -261,48 +280,161 @@ def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
                 return src[name]
     return ""
 
-def _dialogue_evidence(text: str, semantic: dict, cognition: dict, decision: dict, state: dict) -> dict[str, float]:
-    """Build independent evidence dimensions; no single trigger decides the state."""
+def _dialogue_evidence(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    state: dict,
+) -> dict[str, float]:
+    """
+    Semantic dialogue measurement.
+
+    IMPORTANT:
+      - no word list decides continuation;
+      - no renderer keyword decides the dialogue state;
+      - previous-turn relation comes from semantic vectors + NLI;
+      - the processor only fuses the measured evidence.
+    """
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     last = dialog[-1] if dialog and isinstance(dialog[-1], dict) else {}
+
     previous_user = _s(last.get("user"))
-    previous_april = _s((last.get("april") or {}).get("answer")) if isinstance(last.get("april"), dict) else ""
-    low = text.lower()
+    previous_april = ""
+    if isinstance(last.get("april"), dict):
+        previous_april = _s(
+            last["april"].get("answer")
+            or last["april"].get("content")
+            or last["april"].get("summary")
+        )
+
+    active_topic = _s(
+        semantic.get("active_topic")
+        or decision.get("active_topic")
+        or state.get("active_topic")
+        or state.get("topic")
+    )
+
+    # Real semantic measurement from the interpretation-layer engines.
+    measured = QUANTUM_DIALOGUE_ENGINE.classify(
+        text=text,
+        previous_assistant=previous_april,
+        previous_user=previous_user,
+        active_goal=_s(
+            semantic.get("active_goal")
+            or decision.get("active_goal")
+            or state.get("active_goal")
+        ),
+        active_topic=active_topic,
+    )
+
+    dialogue = measured.get("dialogue", {}) if isinstance(measured, dict) else {}
+    continuation_score = _bounded01(dialogue.get("continuation_score", 0.0))
+    reference_score = _bounded01(dialogue.get("reference_score", 0.0))
+    nli_confidence = _bounded01(dialogue.get("confidence", 0.0))
+
+    # Semantic evidence supplied by semantic_core/cognition/decision is allowed
+    # to strengthen the measured state, but never to override it by a word.
+    same_topic = max(
+        _bounded01(measured.get("topic_similarity", {}).get("score", 0.0)),
+        _bounded01(semantic.get("same_topic_score", 0.0)),
+        _bounded01(cognition.get("same_topic_score", 0.0)),
+        _bounded01(decision.get("same_topic_score", 0.0)),
+    )
+    artifact_reference = max(
+        _bounded01(measured.get("previous_similarity", {}).get("score", 0.0)),
+        _bounded01(semantic.get("artifact_reference_score", 0.0)),
+        _bounded01(cognition.get("artifact_reference_score", 0.0)),
+        _bounded01(decision.get("artifact_reference_score", 0.0)),
+    )
+
+    # Structural complexity is measured from payload shape, not from trigger
+    # words. It is only used as evidence for the quantum budget.
     words = _tokens(text)
-    prev_words = _tokens(previous_user)
-    chars = set(low.replace(" ", ""))
-    prev_chars = set(previous_user.lower().replace(" ", ""))
-    explicit = bool(re.search(r"\b(таблиц|граф|диаграм|формул|код|ссылк|изображ|картин|галере|файл)\w*", low))
-    continuation_words = bool(re.search(r"\b(да|нет|это|так|тогда|а|и|ещё|еще|почему|как|теперь|продолжи|исправь|дальше)\b", low))
-    deictic = bool(re.search(r"\b(этот|эта|это|тот|та|выше|ниже|здесь|там|он|она|оно|они)\b", low))
-    code_marks = sum(low.count(x) for x in ("```", "=>", "{", "}", "def ", "class "))
-    formula_marks = sum(low.count(x) for x in ("=", "^", "√", "∑", "∫", "π"))
-    semantic_flags = sum(bool(semantic.get(k)) for k in ("continuation", "same_topic", "render_intent", "math_intent", "artifact_reference", "visual_generation_needed", "multi_step"))
-    cognition_flags = sum(bool(cognition.get(k)) for k in ("continuation", "same_topic", "artifact_reference", "complexity", "reasoning_needed", "tool_needed"))
-    decision_flags = sum(bool(decision.get(k)) for k in ("continuation", "same_topic", "reflection_mode", "analysis_mode", "explanation_mode", "render_intent"))
-    relation = _overlap(text, previous_user)
-    answer_relation = _overlap(text, previous_april)
-    same_topic = max(relation, float(bool(semantic.get("same_topic") or decision.get("same_topic"))))
-    continuation = max(float(continuation_words), float(bool(semantic.get("continuation") or cognition.get("continuation") or decision.get("continuation"))))
-    artifact = max(float(explicit and bool(dialog)), float(bool(semantic.get("artifact_reference") or decision.get("artifact_reference"))))
-    history = float(bool(dialog))
-    return {
-        "history": history, "topic_overlap": relation, "answer_overlap": answer_relation,
-        "word_overlap": len(words & prev_words) / max(1, len(words)),
-        "char_overlap": len(chars & prev_chars) / max(1, len(chars | prev_chars)),
-        "question": float("?" in text), "exclamation": float("!" in text),
-        "short_turn": float(0 < len(words) <= 8), "long_turn": float(len(words) > 80),
-        "continuation": continuation, "same_topic": same_topic, "artifact": artifact,
-        "deictic": float(deictic), "explicit_output": float(explicit),
-        "code_density": min(1.0, code_marks / 5), "formula_density": min(1.0, formula_marks / 5),
-        "numeric_density": min(1.0, sum(c.isdigit() for c in text) / max(1, len(text))),
-        "list_density": min(1.0, (text.count("\n-") + text.count("\n1.") + text.count(";")) / 4),
-        "semantic_strength": min(1.0, semantic_flags / 7), "cognition_strength": min(1.0, cognition_flags / 6),
-        "decision_strength": min(1.0, decision_flags / 6),
-        "goal_present": float(bool(_field((decision, cognition, semantic, state), ("active_goal", "goal", "resolved_request")))),
-        "topic_present": float(bool(_field((semantic, decision, state), ("active_topic", "topic", "current_topic")))),
-        "visual_present": float(bool(state.get("active_visual_scene") or state.get("visual_summary"))),
+    list_density = min(
+        1.0,
+        (
+            text.count("\n-")
+            + text.count("\n*")
+            + text.count("\n1.")
+            + text.count(";")
+        ) / 4.0,
+    )
+    code_density = min(
+        1.0,
+        sum(text.count(marker) for marker in ("```", "=>", "{", "}")) / 5.0,
+    )
+    formula_density = min(
+        1.0,
+        sum(text.count(marker) for marker in ("=", "^", "√", "∑", "∫", "π")) / 5.0,
+    )
+    numeric_density = min(
+        1.0,
+        sum(char.isdigit() for char in text) / max(1, len(text)),
+    )
+
+    # Explicit semantic representation evidence comes from NLI, not keywords.
+    representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
+        text=text,
+        context=active_topic or previous_april,
+    )
+    nli_labels = representation_measurement.get("nli", {}).get("labels", [])
+    nli_scores = representation_measurement.get("nli", {}).get("scores", [])
+    rep_scores = {
+        _s(label).lower(): _bounded01(score)
+        for label, score in zip(nli_labels, nli_scores)
     }
+    representation_strength = max(rep_scores.values(), default=0.0)
+
+    return {
+        "history": float(bool(dialog)),
+        "topic_overlap": same_topic,
+        "answer_overlap": reference_score,
+        "word_overlap": same_topic,
+        "char_overlap": same_topic,
+        "question": float(text.rstrip().endswith("?")),
+        "exclamation": float(text.rstrip().endswith("!")),
+        "short_turn": float(0 < len(words) <= 8),
+        "long_turn": float(len(words) > 80),
+        "continuation": continuation_score,
+        "same_topic": same_topic,
+        "artifact": artifact_reference,
+        "deictic": reference_score,
+        "explicit_output": representation_strength,
+        "code_density": code_density,
+        "formula_density": formula_density,
+        "numeric_density": numeric_density,
+        "list_density": list_density,
+        "semantic_strength": nli_confidence,
+        "cognition_strength": _bounded01(
+            float(bool(cognition.get("reasoning_needed")))
+            + float(bool(cognition.get("multi_step")))
+            + float(bool(cognition.get("requires_planning")))
+        ),
+        "decision_strength": _bounded01(
+            float(bool(decision.get("render_intent")))
+            + float(bool(decision.get("analysis_mode")))
+            + float(bool(decision.get("explanation_mode")))
+        ),
+        "goal_present": float(bool(
+            semantic.get("active_goal")
+            or cognition.get("active_goal")
+            or decision.get("active_goal")
+            or state.get("active_goal")
+        )),
+        "topic_present": float(bool(active_topic)),
+        "visual_present": float(bool(
+            state.get("active_visual_scene")
+            or state.get("visual_summary")
+            or semantic.get("visual_context")
+        )),
+        "nli_confidence": nli_confidence,
+        "representation_strength": representation_strength,
+        "dialogue_label": _s(
+            measured.get("dialog_act") or dialogue.get("label")
+        ),
+    }
+
 
 def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], float]:
     """Fuse 24 evidence dimensions across 5 competing states, then collapse once."""
@@ -420,6 +552,9 @@ def _requested_outputs(
                 "renderer_scene": "diagram",
                 "visual": "graph",
                 "image_generate": "image",
+                # Formula transport is rendered by TextBlock/KaTeX in the
+                # current Web architecture; no FormulaBlock is required.
+                "formula": "text",
             }
             name = aliases.get(name, name)
             if name and name not in blocked and name not in names:
@@ -450,6 +585,14 @@ def _requested_outputs(
                 "representations",
             ):
                 add(src.get(key))
+
+    # NLI/vector candidates are semantic evidence, not lexical triggers.
+    if not names:
+        for candidate in _as_list(semantic.get("quantum_representation_candidates")):
+            if not isinstance(candidate, dict):
+                continue
+            if _bounded01(candidate.get("score", 0.0)) >= 0.45:
+                add(candidate.get("type"))
 
     if any(name != "text" for name in names) and "text" not in names:
         names.insert(0, "text")
@@ -610,16 +753,21 @@ def _quantum_64_field(
     )
     # Scope is a representation-size signal, not a renderer trigger. It
     # measures how much material the request is asking the provider to carry.
-    scope_words = {
-        "all", "every", "complete", "full", "entire", "все", "вся",
-        "всю", "полный", "полная", "полностью", "всех", "каждый", "каждую",
-    }
-    normalized_words = {_s(word).lower() for word in words}
-    scope_density = _bounded01(
-        0.55 * len(normalized_words & scope_words)
-        + 0.25 * min(1.0, sum(c.isdigit() for c in text) / 12.0)
-        + 0.20 * min(1.0, len(words) / 24.0)
+    # Scope is measured from semantic structure and payload density only.
+    # No lexical scope list is allowed to change the budget.
+    semantic_scope = _bounded01(
+        0.45 * _bounded01(len(outputs) / 6.0)
+        + 0.25 * _bounded01(len(artifacts) / 6.0)
+        + 0.15 * _bounded01(len(domains) / 8.0)
+        + 0.15 * _bounded01(parts / 8.0)
     )
+    lexical_free_scope = _bounded01(
+        0.45 * semantic_scope
+        + 0.25 * request_density
+        + 0.15 * _bounded01(sum(c.isdigit() for c in text) / 12.0)
+        + 0.15 * _bounded01(len(words) / 24.0)
+    )
+    scope_density = lexical_free_scope
 
     base = {
         "meaning":      (request_density, 0.60, 0.35, 0.30, 0.45, context_strength, 0.60, 0.70),
@@ -762,8 +910,51 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
+    # Real semantic representation measurement. This is NLI/vector evidence,
+    # never a word-trigger map.
+    representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
+        text=text,
+        context=_s(
+            semantic.get("active_topic")
+            or decision.get("active_topic")
+            or state.get("active_topic")
+        ),
+    )
+    semantic["quantum_representation_measurement"] = _quantum_snapshot(
+        representation_measurement
+    )
+
+    # Preserve high-confidence semantic candidates for the processor collapse.
+    measured_labels = representation_measurement.get("nli", {}).get("labels", [])
+    measured_scores = representation_measurement.get("nli", {}).get("scores", [])
+    semantic_candidates = [
+        {
+            "type": _s(label).lower(),
+            "score": float(score),
+            "source": "quantum_nli",
+        }
+        for label, score in zip(measured_labels, measured_scores)
+    ]
+    semantic["quantum_representation_candidates"] = semantic_candidates
+
+    # Only semantically measured candidates above the evidence threshold enter
+    # the representation plan when no structured output was already supplied.
+    if not (
+        semantic.get("requested_outputs")
+        or semantic.get("required_outputs")
+        or decision.get("requested_outputs")
+        or decision.get("required_outputs")
+    ):
+        semantic["candidate_representations"] = [
+            item["type"]
+            for item in semantic_candidates
+            if item["score"] >= 0.45
+        ]
+
     outputs = _requested_outputs(text, semantic, cognition, decision)
-    measured_output, representation_state = _representation_consensus(outputs, semantic, decision)
+    measured_output, representation_state = _representation_consensus(
+        outputs, semantic, decision
+    )
 
     topic = _s(_field((semantic, decision, state), ("active_topic", "topic", "current_topic")))
     goal = _s(_field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))) or text
@@ -1290,6 +1481,34 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         experience_manager_evidence
     )
 
+    # One semantic dialogue measurement for this turn. It is reused by the
+    # processor collapse; no second lexical interpretation path is introduced.
+    previous_turn = history[-1] if history and isinstance(history[-1], dict) else {}
+    previous_april = ""
+    if isinstance(previous_turn.get("april"), dict):
+        previous_april = _s(
+            previous_turn["april"].get("answer")
+            or previous_turn["april"].get("content")
+            or previous_turn["april"].get("summary")
+        )
+    semantic["quantum_dialogue_measurement"] = _quantum_snapshot(
+        QUANTUM_DIALOGUE_ENGINE.classify(
+            text=text,
+            previous_assistant=previous_april,
+            previous_user=_s(previous_turn.get("user")),
+            active_goal=_s(
+                semantic.get("active_goal")
+                or cognition.get("active_goal")
+                or decision.get("active_goal")
+            ),
+            active_topic=_s(
+                semantic.get("active_topic")
+                or decision.get("active_topic")
+                or state.get("active_topic")
+            ),
+        )
+    )
+
     processor_context = build_processor_execution_context({
         "state": state,
         "context": context_evidence,
@@ -1336,6 +1555,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["decision_owner"] = "QUANTUM_PROCESSOR"
     semantic["provider_calls"] = 0
     semantic["parallel_route"] = False
+    semantic["quantum_processor_version"] = PROCESSOR_VERSION
+    semantic["semantic_decision_owner"] = "QUANTUM_PROCESSOR"
 
     request = _make_request(text, semantic, cognition, decision, state, visual)
     request.quantum_state["evidence_channels"] = 14
@@ -1412,6 +1633,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "quantum_lanes_per_core": 8,
         "quantum_signal_count": 64,
         "response_budget_mode": "continuous_64_signal_scale",
+        "input_budget": 900,
+        "input_budget_mode": "logical_compaction",
+        "quantum_semantic_engines": [
+            "spacy_linguistic",
+            "sentence_transformers_embedding",
+            "transformers_nli",
+            "context_vector_fusion",
+        ],
+        "word_trigger_routing": False,
+        "fallback_semantics": False,
         "quantum_budget_field": quantum_budget_field,
         "experience": True,
         "experience_manager": True,
