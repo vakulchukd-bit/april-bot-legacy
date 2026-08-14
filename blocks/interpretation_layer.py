@@ -105,6 +105,10 @@ SPACY_NLP: Language = spacy.load(SPACY_MODEL_NAME)
 # POS, morphology, lemmas and dependency structure and detects the language.
 STANZA_NLP = MultilingualPipeline(
     max_cache_size=12,
+    # Models are provisioned during deployment; do not perform network/resource
+    # checks on a live chat request. The multilingual pipeline still keeps its
+    # in-process language cache.
+    download_method=None,
 )
 
 SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
@@ -149,6 +153,17 @@ DOMAIN_HYPOTHESES = {
     "news": "the request is primarily about current events or news",
     "social": "the request is primarily about society or social topics",
     "web": "the request is primarily about finding or using web resources",
+}
+
+# Capability hypotheses are evidence labels, not routing decisions.
+# They are consumed by the Quantum Processor as one semantic evidence family.
+CAPABILITY_HYPOTHESES = {
+    "exploration": "the user wants analysis, comparison, investigation, or deeper examination",
+    "web": "the user wants web search, an online resource, or information from the internet",
+    "code": "the user wants programming code or a software implementation",
+    "information": "the user wants an explanation, factual answer, or clarification",
+    "discussion": "the user wants a discussion, opinion, or reasoning about a topic",
+    "space": "the user is discussing spatial arrangement, scene layout, or visual composition",
 }
 
 
@@ -272,6 +287,40 @@ class QuantumEmbeddingEngine:
             "score": max(0.0, min(1.0, score)),
             "source": "sentence_transformers",
             "measured": True,
+        }
+
+    def similarities(self, text: str, candidates: Sequence[str]) -> Dict[str, float]:
+        """Batch semantic comparison used by one interpretation turn.
+
+        The previous implementation called a non-existent method here. This
+        keeps the same embedding engine and makes the intended single batched
+        measurement explicit, avoiding repeated model execution.
+        """
+        text = normalize_text(text)
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            candidate = normalize_text(candidate)
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                unique.append(candidate)
+
+        if not text or not unique:
+            return {candidate: 0.0 for candidate in unique}
+
+        vectors = SEMANTIC_ENCODER.encode(
+            [text, *unique],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+        scores = cosine_similarity(
+            vectors[0].reshape(1, -1),
+            vectors[1:],
+        )[0]
+
+        return {
+            candidate: max(0.0, min(1.0, float(score)))
+            for candidate, score in zip(unique, scores)
         }
 
 
@@ -709,7 +758,12 @@ def _semantic_context_packet(
         context=previous_answer or active_topic,
     )
 
-    linguistic = QUANTUM_LINGUISTIC_ENGINE.analyze(text)
+    linguistic = QUANTUM_EVIDENCE_FUSION.turn_measurement(
+        text=text,
+        previous_assistant=previous_answer,
+        active_topic=active_topic,
+        active_goal=active_goal,
+    )["linguistic"]
 
     return {
         "linguistic": linguistic,
