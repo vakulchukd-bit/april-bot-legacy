@@ -1747,8 +1747,13 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
         contract.metadata["summary"] = ""
     contract.active_scene = getattr(scene, "active_scene", "")
     contract.space_continuity = {
+        **dict(contract.space_continuity or {}),
         "active_scene": contract.active_scene,
         "render_blocks": contract.render_blocks,
+        "renderer_state": dict(
+            contract.metadata.get("renderer_state", {})
+            if isinstance(contract.metadata, dict) else {}
+        ),
     }
     # Final transport invariant: visible text and render_blocks must agree.
     if canonical_text and not contract.metadata.get("machine_only") and not contract.render_blocks:
