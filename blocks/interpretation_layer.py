@@ -18,17 +18,18 @@ Compatibility:
     imports do not need a parallel route.
 """
 
-import time
-import math
-import re
 import os
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List, Sequence
+
 import spacy
+import stanza
 from spacy.language import Language
 from sentence_transformers import SentenceTransformer
+from stanza.pipeline.multilingual import MultilingualPipeline
 from transformers import pipeline as hf_pipeline
 from sklearn.metrics.pairwise import cosine_similarity
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Canonical semantic vocabulary
@@ -78,47 +79,14 @@ RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
-PATCH_LOG = []
-MAX_PATCH_LOGS = 120
-
-
 # ---------------------------------------------------------------------------
-# Basic utilities
-# ---------------------------------------------------------------------------
-
-def ensure_semantic_constants():
-    """Compatibility no-op: constants are now canonical module data."""
-    return True
-
-
-def safe_patch_log(message):
-    try:
-        PATCH_LOG.append({
-            "timestamp": time.time(),
-            "message": str(message),
-            "file_id": "APRIL_INTERPRETATION_LAYER",
-            "machine_only": True,
-        })
-        if len(PATCH_LOG) > MAX_PATCH_LOGS:
-            del PATCH_LOG[:-MAX_PATCH_LOGS]
-    except Exception:
-        pass
-
-
-def normalize_text(text):
-    return str(text or "").strip()
-
-
-def normalize_lower(text):
-    return normalize_text(text).lower()
-
-
-# ---------------------------------------------------------------------------
-# Quantum semantic engines — REQUIRED REAL LIBRARIES
+# Quantum Interpretation Engine
 #
-# Interpretation is a semantic measurement station.
-# It does not route or render. It produces rich evidence for Quantum Processor.
-# Missing libraries/models are deployment errors: no silent fallback.
+# One specialized room. One engine stack. One output evidence field.
+#
+# No renderer routing, no provider calls, no fallback semantics, no substring
+# trigger ownership. The Quantum Processor remains the final decision owner.
+# ---------------------------------------------------------------------------
 
 SEMANTIC_MODEL_NAME = os.getenv(
     "APRIL_SENTENCE_MODEL",
@@ -130,9 +98,58 @@ NLI_MODEL_NAME = os.getenv(
 )
 SPACY_MODEL_NAME = os.getenv("APRIL_SPACY_MODEL", "xx_ent_wiki_sm")
 
+# Real engines are required. Missing packages/models are deployment errors.
 SPACY_NLP: Language = spacy.load(SPACY_MODEL_NAME)
+
+# Stanza's multilingual pipeline provides sentence segmentation, tokenization,
+# POS, morphology, lemmas and dependency structure and detects the language.
+STANZA_NLP = MultilingualPipeline(
+    max_cache_size=12,
+)
+
 SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
-DIALOGUE_NLI = hf_pipeline("zero-shot-classification", model=NLI_MODEL_NAME)
+DIALOGUE_NLI = hf_pipeline(
+    "zero-shot-classification",
+    model=NLI_MODEL_NAME,
+)
+
+DIALOGUE_LABELS = (
+    "question",
+    "request",
+    "reformulation",
+    "continuation",
+    "correction",
+    "reference",
+    "affirmation",
+    "rejection",
+    "new_topic",
+    "statement",
+)
+
+REPRESENTATION_HYPOTHESES = {
+    "text": "the user wants a normal textual answer",
+    "table": "the user wants the information represented as a table",
+    "graph": "the user wants the information represented as a graph or chart",
+    "diagram": "the user wants a schematic or diagram with connected elements",
+    "formula": "the user wants a mathematical formula or mathematical notation",
+    "image": "the user wants an image or generated picture",
+    "gallery": "the user wants multiple images or a gallery",
+    "code": "the user wants executable source code",
+    "link": "the user wants a link or web resource",
+}
+
+DOMAIN_HYPOTHESES = {
+    "biology": "the request is primarily about biology or living organisms",
+    "chemistry": "the request is primarily about chemistry or chemical substances",
+    "physics": "the request is primarily about physics",
+    "engineering": "the request is primarily about engineering or design",
+    "it": "the request is primarily about computing, programming, or software",
+    "literature": "the request is primarily about literature or writing",
+    "politics": "the request is primarily about politics or government",
+    "news": "the request is primarily about current events or news",
+    "social": "the request is primarily about society or social topics",
+    "web": "the request is primarily about finding or using web resources",
+}
 
 
 @dataclass
@@ -141,7 +158,7 @@ class SemanticEvidence:
     score: float
     source: str
     positive: bool = True
-    details: Dict[str, Any] = None
+    details: Dict[str, Any] | None = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -154,68 +171,131 @@ class SemanticEvidence:
 
 
 class QuantumLinguisticEngine:
-    """spaCy: linguistic structure, morphology and named entities."""
+    """
+    Dedicated linguistic engine.
+
+    Stanza performs multilingual neural sentence/token processing, POS,
+    morphology, lemma and dependency structure. spaCy supplies entity analysis
+    using the already installed multilingual NER model.
+    """
 
     def analyze(self, text: str) -> Dict[str, Any]:
-        doc = SPACY_NLP(text)
+        if not text or not text.strip():
+            return {
+                "language": None,
+                "tokens": [],
+                "lemmas": [],
+                "pos": [],
+                "dependencies": [],
+                "entities": [],
+                "sentences": [],
+                "source": "stanza+spacy",
+            }
+
+        docs = STANZA_NLP([text])
+        doc = docs[0] if isinstance(docs, list) else docs
+
+        sentences: list[str] = []
+        tokens: list[str] = []
+        lemmas: list[str] = []
+        pos: list[str] = []
+        dependencies: list[dict[str, Any]] = []
+
+        for sentence in doc.sentences:
+            sentences.append(sentence.text)
+            for word in sentence.words:
+                tokens.append(word.text)
+                lemmas.append((word.lemma or word.text).lower())
+                pos.append(word.upos or "")
+                head_text = ""
+                if word.head:
+                    index = int(word.head) - 1
+                    if 0 <= index < len(sentence.words):
+                        head_text = sentence.words[index].text
+                dependencies.append({
+                    "text": word.text,
+                    "lemma": word.lemma or word.text,
+                    "upos": word.upos,
+                    "xpos": word.xpos,
+                    "feats": word.feats,
+                    "head": head_text,
+                    "deprel": word.deprel,
+                })
+
+        ner_doc = SPACY_NLP(text)
+        entities = [
+            {
+                "text": entity.text,
+                "label": entity.label_,
+                "start": entity.start_char,
+                "end": entity.end_char,
+            }
+            for entity in ner_doc.ents
+        ]
+
         return {
-            "tokens": [t.text for t in doc if not t.is_space],
-            "lemmas": [t.lemma_.lower() for t in doc if not t.is_space],
-            "pos": [t.pos_ for t in doc if not t.is_space],
-            "dependencies": [
-                {"text": t.text, "dep": t.dep_, "head": t.head.text}
-                for t in doc if not t.is_space
-            ],
-            "entities": [{"text": e.text, "label": e.label_} for e in doc.ents],
-            "sentences": [sent.text for sent in doc.sents],
-            "source": "spacy",
+            "language": getattr(doc, "lang", None),
+            "tokens": tokens,
+            "lemmas": lemmas,
+            "pos": pos,
+            "dependencies": dependencies,
+            "entities": entities,
+            "sentences": sentences,
+            "source": "stanza+spacy",
+            "engine": "quantum_linguistic_engine",
         }
 
 
 class QuantumEmbeddingEngine:
-    """Sentence-Transformers semantic vector engine."""
+    """Semantic vector engine for request/history/topic/goal comparison."""
 
     def similarity(self, text_a: str, text_b: str) -> Dict[str, Any]:
         if not text_a or not text_b:
-            return {"score": 0.0, "source": "sentence_transformers"}
+            return {
+                "score": 0.0,
+                "source": "sentence_transformers",
+                "measured": False,
+            }
+
         vectors = SEMANTIC_ENCODER.encode(
             [text_a, text_b],
             normalize_embeddings=True,
             convert_to_numpy=True,
         )
-        score = float(cosine_similarity(
-            vectors[0].reshape(1, -1),
-            vectors[1].reshape(1, -1),
-        )[0][0])
+        score = float(
+            cosine_similarity(
+                vectors[0].reshape(1, -1),
+                vectors[1].reshape(1, -1),
+            )[0][0]
+        )
         return {
             "score": max(0.0, min(1.0, score)),
-            "source": "sentence_transformers+sklearn",
+            "source": "sentence_transformers",
+            "measured": True,
         }
 
 
 class QuantumIntentEngine:
-    """Transformers multilingual NLI/zero-shot semantic classifier."""
+    """NLI/zero-shot semantic engine. No keyword routing."""
 
-    def classify(self, text: str, labels: Sequence[str]) -> Dict[str, Any]:
+    def classify(self, text: str, hypotheses: Sequence[str]) -> Dict[str, Any]:
         result = DIALOGUE_NLI(
             text,
-            candidate_labels=list(labels),
+            candidate_labels=list(hypotheses),
             multi_label=True,
         )
         return {
             "labels": list(result["labels"]),
             "scores": [float(score) for score in result["scores"]],
-            "source": "transformers_nli_zero_shot",
+            "source": "transformers_nli",
         }
 
 
 class QuantumEvidenceFusionEngine:
     """
-    Fuses linguistic structure + semantic vectors + NLI + scene context.
+    Fuses linguistic, semantic-vector, NLI and context evidence.
 
-    A lexical occurrence is never allowed to select a renderer.
-    Candidate representation is evidence only. Final collapse belongs to
-    Quantum Processor.
+    Nothing in this engine selects a renderer or creates a route.
     """
 
     def __init__(self):
@@ -223,59 +303,96 @@ class QuantumEvidenceFusionEngine:
         self.embedding = QuantumEmbeddingEngine()
         self.intent = QuantumIntentEngine()
 
+    @staticmethod
+    def _best_label(result: Dict[str, Any]) -> tuple[str, float]:
+        labels = result.get("labels") or []
+        scores = result.get("scores") or []
+        if not labels:
+            return "statement", 0.0
+        return str(labels[0]), float(scores[0])
+
     def dialogue(
         self,
         text: str,
         previous_assistant: str = "",
+        previous_user: str = "",
         active_goal: str = "",
         active_topic: str = "",
     ) -> Dict[str, Any]:
         linguistic = self.linguistic.analyze(text)
-        nli = self.intent.classify(text, (
-            "question", "request", "reformulation", "continuation",
-            "correction", "reference", "affirmation", "rejection",
-            "new_topic", "statement",
-        ))
-        previous_similarity = (
-            self.embedding.similarity(text, previous_assistant)
-            if previous_assistant else
-            {"score": 0.0, "source": "sentence_transformers"}
-        )
-        topic_similarity = (
-            self.embedding.similarity(text, active_topic)
-            if active_topic else
-            {"score": 0.0, "source": "sentence_transformers"}
-        )
+        nli = self.intent.classify(text, DIALOGUE_LABELS)
+        label, confidence = self._best_label(nli)
+
+        previous_similarity = self.embedding.similarity(text, previous_assistant)
+        topic_similarity = self.embedding.similarity(text, active_topic)
+        goal_similarity = self.embedding.similarity(text, active_goal)
+
         return {
             "dialogue": {
-                "label": nli["labels"][0],
-                "confidence": float(nli["scores"][0]),
-                "continuation_score": float(previous_similarity["score"]),
-                "reference_score": float(previous_similarity["score"]),
+                "label": label,
+                "confidence": confidence,
+                "continuation_score": previous_similarity["score"],
+                "reference_score": previous_similarity["score"],
+                "topic_score": topic_similarity["score"],
+                "goal_score": goal_similarity["score"],
             },
             "linguistic": linguistic,
             "nli": nli,
             "previous_similarity": previous_similarity,
             "topic_similarity": topic_similarity,
+            "goal_similarity": goal_similarity,
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
+            "engine": "quantum_dialogue_engine",
         }
 
     def representations(self, text: str, context: str = "") -> Dict[str, Any]:
-        nli = self.intent.classify(text, (
-            "text", "table", "graph", "diagram", "formula",
-            "image", "gallery", "code", "link",
-        ))
-        context_similarity = (
-            self.embedding.similarity(text, context)
-            if context else
-            {"score": 0.0, "source": "sentence_transformers"}
-        )
+        hypotheses = list(REPRESENTATION_HYPOTHESES.values())
+        nli = self.intent.classify(text, hypotheses)
+        reverse_map = {
+            value: key for key, value in REPRESENTATION_HYPOTHESES.items()
+        }
+        measurements = [
+            {
+                "type": reverse_map[label],
+                "score": float(score),
+                "source": "transformers_nli",
+            }
+            for label, score in zip(nli["labels"], nli["scores"])
+            if label in reverse_map
+        ]
+        context_similarity = self.embedding.similarity(text, context)
+
         return {
             "nli": nli,
+            "measurements": measurements,
             "context_similarity": context_similarity,
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
+            "engine": "quantum_representation_engine",
+        }
+
+    def domains(self, text: str) -> Dict[str, Any]:
+        hypotheses = list(DOMAIN_HYPOTHESES.values())
+        nli = self.intent.classify(text, hypotheses)
+        reverse_map = {
+            value: key for key, value in DOMAIN_HYPOTHESES.items()
+        }
+        measurements = [
+            {
+                "domain": reverse_map[label],
+                "score": float(score),
+                "source": "transformers_nli",
+            }
+            for label, score in zip(nli["labels"], nli["scores"])
+            if label in reverse_map
+        ]
+        return {
+            "nli": nli,
+            "measurements": measurements,
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "evidence_only": True,
+            "engine": "quantum_domain_engine",
         }
 
 
@@ -285,148 +402,300 @@ QUANTUM_INTENT_ENGINE = QuantumIntentEngine()
 QUANTUM_EVIDENCE_FUSION = QuantumEvidenceFusionEngine()
 
 
-def contains_any(text, words):
-    """
-    Compatibility API.
+def normalize_text(text: Any) -> str:
+    return str(text or "").strip()
 
-    This is linguistic token/lemma evidence only. It is deliberately not
-    substring matching and cannot select a renderer.
+
+def normalize_lower(text: Any) -> str:
+    return normalize_text(text).lower()
+
+
+def contains_any(text: str, words: Sequence[str]) -> bool:
+    """
+    Compatibility evidence helper.
+
+    This is token/lemma evidence only. It cannot select a route or renderer.
     """
     analysis = QUANTUM_LINGUISTIC_ENGINE.analyze(text)
     wanted = {normalize_lower(word) for word in words}
     return bool(
-        set(analysis["lemmas"]) & wanted or
-        {normalize_lower(word) for word in analysis["tokens"]} & wanted
+        set(analysis["lemmas"]) & wanted
+        or {normalize_lower(word) for word in analysis["tokens"]} & wanted
     )
 
 
-def _semantic_evidence_stub(kind, text):
-    table = {
-        "legacy": WEB_WORDS, "renderer": RENDERER_WORDS, "code": CODE_WORDS,
-        "information": INFORMATIONAL_WORDS, "continuation": CONTINUATION_WORDS,
-        "exploration": EXPLORATION_WORDS, "image": EXPLICIT_IMAGE_WORDS,
-        "math": MATH_WORDS, "web": WEB_WORDS,
+def _semantic_evidence_stub(kind: str, text: str) -> bool:
+    return contains_any(text, (kind,))
+
+
+def detect_domain_candidates(text: str):
+    measurements = QUANTUM_EVIDENCE_FUSION.domains(text).get("measurements", [])
+    return [
+        item["domain"]
+        for item in measurements
+        if float(item["score"]) >= 0.45
+    ]
+
+
+def build_domain_confidence(text: str):
+    measurements = QUANTUM_EVIDENCE_FUSION.domains(text).get("measurements", [])
+    return {
+        item["domain"]: round(float(item["score"]), 4)
+        for item in measurements
+        if float(item["score"]) >= 0.20
     }
-    return contains_any(text, table.get(kind, ()))
-
-
-# ---------------------------------------------------------------------------
-# Semantic evidence — no final routing decisions
-# ---------------------------------------------------------------------------
-
-def detect_domain_candidates(text):
-    value = normalize_lower(text)
-    return [domain for domain, words in DOMAIN_WORDS.items()
-            if any(word in value for word in words)]
-
-
-REPRESENTATION_LEXICAL_EVIDENCE = {}
 
 
 def measure_representation_evidence(text: str) -> List[Dict[str, Any]]:
-    """
-    Real semantic representation measurement.
-
-    NLI scores are evidence. They do not become renderer requests here.
-    """
     result = QUANTUM_EVIDENCE_FUSION.representations(text)
     return [
         SemanticEvidence(
-            label=label,
-            score=score,
-            source=result["nli"]["source"],
+            label=item["type"],
+            score=item["score"],
+            source=item["source"],
             details={
                 "decision_owner": "QUANTUM_PROCESSOR",
                 "evidence_only": True,
                 "context_similarity": result["context_similarity"]["score"],
             },
         ).as_dict()
-        for label, score in zip(result["nli"]["labels"], result["nli"]["scores"])
+        for item in result["measurements"]
     ]
 
 
-def detect_representation_candidates(text):
-    """Compatibility API: semantic candidates only."""
-    return [item["label"] for item in measure_representation_evidence(text)]
-
-
-def detect_domain_candidates(text):
-    analysis = QUANTUM_LINGUISTIC_ENGINE.analyze(text)
-    lemmas = set(analysis["lemmas"])
+def detect_representation_candidates(text: str):
     return [
-        domain for domain, words in DOMAIN_WORDS.items()
-        if lemmas.intersection({normalize_lower(word) for word in words})
+        item["label"]
+        for item in measure_representation_evidence(text)
+        if float(item["score"]) >= 0.45
     ]
 
 
-def detect_discussion_mode(text):
-    return contains_any(text, DISCUSSION_WORDS)
+def semantic_evidence_math(text: str) -> float:
+    scores = {
+        item["label"]: float(item["score"])
+        for item in measure_representation_evidence(text)
+    }
+    return scores.get("formula", 0.0)
 
 
-def detect_space_discussion(text):
-    value = normalize_lower(text)
-    return (
-        contains_any(value, ("пространство", "scene", "renderer", "render", "блок"))
-        and detect_discussion_mode(value)
+def semantic_evidence_renderer(text: str) -> float:
+    measurements = measure_representation_evidence(text)
+    return max((float(item["score"]) for item in measurements), default=0.0)
+
+
+def semantic_evidence_image(text: str) -> float:
+    scores = {
+        item["label"]: float(item["score"])
+        for item in measure_representation_evidence(text)
+    }
+    return scores.get("image", 0.0)
+
+
+def semantic_evidence_exploration(text: str) -> float:
+    result = QUANTUM_INTENT_ENGINE.classify(
+        text,
+        ("the user wants an exploratory analysis", "the user wants a direct answer"),
+    )
+    return float(result["scores"][0]) if result["labels"] else 0.0
+
+
+def semantic_evidence_continuation(text: str, previous_assistant: str = "") -> float:
+    result = QUANTUM_DIALOGUE_ENGINE.classify(
+        text=text,
+        previous_assistant=previous_assistant,
+    )
+    return float(result.get("dialogue", {}).get("continuation_score", 0.0))
+
+
+def semantic_evidence_web(text: str) -> float:
+    result = QUANTUM_INTENT_ENGINE.classify(
+        text,
+        ("the user wants a web search", "the user does not want a web search"),
+    )
+    return float(result["scores"][0]) if result["labels"] else 0.0
+
+
+def semantic_evidence_code(text: str) -> float:
+    result = QUANTUM_INTENT_ENGINE.classify(
+        text,
+        ("the user wants source code", "the user wants an explanation without code"),
+    )
+    return float(result["scores"][0]) if result["labels"] else 0.0
+
+
+def semantic_evidence_information(text: str) -> float:
+    result = QUANTUM_INTENT_ENGINE.classify(
+        text,
+        ("the user is asking for information or an explanation", "the user is not asking for information"),
+    )
+    return float(result["scores"][0]) if result["labels"] else 0.0
+
+
+def detect_discussion_mode(text: str) -> float:
+    result = QUANTUM_INTENT_ENGINE.classify(
+        text,
+        ("the user wants a discussion or reasoning", "the user wants a direct task result"),
+    )
+    return float(result["scores"][0]) if result["labels"] else 0.0
+
+
+def detect_space_discussion(text: str) -> float:
+    result = QUANTUM_INTENT_ENGINE.classify(
+        text,
+        ("the user is discussing the interaction space or scene", "the user is discussing a normal subject"),
+    )
+    return float(result["scores"][0]) if result["labels"] else 0.0
+
+
+def detect_lightweight_visual(text: str) -> float:
+    scores = {
+        item["label"]: float(item["score"])
+        for item in measure_representation_evidence(text)
+    }
+    return max(
+        scores.get("image", 0.0),
+        scores.get("diagram", 0.0),
+        scores.get("graph", 0.0),
     )
 
 
-def semantic_evidence_math(text):
-    scores = {
-        item["label"]: item["score"]
-        for item in measure_representation_evidence(text)
-    }
-    return float(scores.get("formula", 0.0))
-
-
-def semantic_evidence_renderer(text):
-    # Evidence only. The Quantum Processor decides whether the evidence is
-    # sufficient to request a renderer.
-    reps = measure_representation_evidence(text)
-    action_evidence = _any_phrase_present(text, ACTION_WORDS + ("построй", "отобрази", "покажи"))
-    return bool(reps) and bool(action_evidence)
-
-
-def detect_lightweight_visual(text):
-    return contains_any(text, LIGHTWEIGHT_VISUAL_WORDS)
-
-
-def semantic_evidence_image(text):
-    return contains_any(text, EXPLICIT_IMAGE_WORDS)
-
-
-def semantic_evidence_exploration(text):
-    return contains_any(text, EXPLORATION_WORDS)
-
-
-def semantic_evidence_continuation(text):
-    return contains_any(text, CONTINUATION_WORDS)
-
-
-def semantic_evidence_web(text):
-    return contains_any(text, WEB_WORDS)
-
-
-def semantic_evidence_code(text):
-    return contains_any(text, CODE_WORDS)
-
-
-def semantic_evidence_information(text):
-    return contains_any(text, INFORMATIONAL_WORDS)
-
-
-def detect_scene_type(text, cognition=None):
-    """Return a representation *candidate*, never a routing command."""
+def detect_scene_type(text: str, cognition=None):
     cognition = cognition if isinstance(cognition, dict) else {}
-    reps = detect_representation_candidates(text)
-    for preferred in cognition.get("required_representations", ()) or ():
-        if preferred in reps:
-            return preferred
-    return reps[0] if reps else None
+    required = [str(x).lower() for x in cognition.get("required_representations", ()) or ()]
+    if required:
+        return required[0]
+    candidates = detect_representation_candidates(text)
+    return candidates[0] if candidates else None
 
 
-def build_domain_confidence(text):
-    return {domain: 0.85 for domain in detect_domain_candidates(text)}
+def _dialogue_signal_contract(
+    text: str,
+    history: list,
+    state: dict,
+    semantic: dict,
+) -> Dict[str, Any]:
+    last_assistant = ""
+    last_user = ""
+    last_turn_id = None
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        if not last_assistant and isinstance(item.get("april"), dict):
+            last_assistant = normalize_text(
+                item["april"].get("answer")
+                or item["april"].get("content")
+                or item["april"].get("summary")
+            )
+            last_turn_id = item.get("turn_id")
+        if not last_user and item.get("user"):
+            last_user = normalize_text(item.get("user"))
+        if last_assistant:
+            break
+
+    active_goal = normalize_text(
+        state.get("active_goal")
+        or state.get("current_goal")
+        or semantic.get("active_goal")
+    )
+    active_topic = normalize_text(
+        state.get("active_topic")
+        or state.get("current_topic")
+        or semantic.get("current_topic")
+    )
+
+    measured = QUANTUM_EVIDENCE_FUSION.dialogue(
+        text=text,
+        previous_assistant=last_assistant,
+        previous_user=last_user,
+        active_goal=active_goal,
+        active_topic=active_topic,
+    )
+    dialogue = measured["dialogue"]
+    label = str(dialogue["label"])
+    previous_score = float(dialogue["continuation_score"])
+    reference_score = float(dialogue["reference_score"])
+    topic_score = float(dialogue["topic_score"])
+    goal_score = float(dialogue["goal_score"])
+
+    continuation = bool(
+        last_assistant
+        and (
+            label in {
+                "continuation",
+                "reformulation",
+                "correction",
+                "reference",
+                "affirmation",
+                "rejection",
+            }
+            or previous_score >= 0.72
+        )
+    )
+
+    topic_shift = bool(
+        active_topic and not continuation and topic_score < 0.35
+    )
+
+    return {
+        "dialog_act": label,
+        "current_request": text,
+        "continuation": continuation,
+        "reference_to_previous": bool(last_assistant and reference_score >= 0.60),
+        "previous_april_turn": last_assistant,
+        "previous_user_turn": last_user,
+        "reply_to": last_turn_id,
+        "active_goal": active_goal,
+        "active_topic": active_topic,
+        "topic_score": topic_score,
+        "goal_score": goal_score,
+        "continuation_score": previous_score,
+        "reference_score": reference_score,
+        "topic_shift": topic_shift,
+        "history_available": bool(history),
+        "turn_count": len(history),
+        "semantic_measurement": measured,
+        "confidence": float(dialogue["confidence"]),
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "evidence_only": True,
+        "canonical": True,
+    }
+
+
+def _semantic_context_packet(
+    text: str,
+    history: list,
+    state: dict,
+    semantic: dict,
+    cognition: dict,
+) -> Dict[str, Any]:
+    dialogue = _dialogue_signal_contract(text, history, state, semantic)
+
+    previous_answer = dialogue["previous_april_turn"]
+    active_topic = dialogue["active_topic"]
+    active_goal = dialogue["active_goal"]
+
+    representation = QUANTUM_EVIDENCE_FUSION.representations(
+        text,
+        context=previous_answer or active_topic,
+    )
+
+    linguistic = QUANTUM_LINGUISTIC_ENGINE.analyze(text)
+
+    return {
+        "linguistic": linguistic,
+        "dialogue": dialogue,
+        "representation": representation,
+        "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
+        "context_vectors": {
+            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer),
+            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic),
+            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal),
+        },
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "engine": "quantum_interpretation_engine",
+        "evidence_only": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -716,68 +985,90 @@ def _canonical_dialogue_contract(text, history=None, state=None, semantic=None):
 def _base_interpret_request(text, cognition=None, semantic=None, history=None, state=None):
     text = normalize_text(text)
     if not text:
-        safe_patch_log("EMPTY REQUEST")
         return None
 
     cognition = cognition if isinstance(cognition, dict) else {}
     semantic = semantic if isinstance(semantic, dict) else {}
-    result = build_result(text)
-    low = text.lower()
+    history = history if isinstance(history, list) else []
+    state = state if isinstance(state, dict) else {}
 
-    # Context is evidence. Current request remains authoritative.
-    result["semantic_profile"] = build_semantic_dialog_profile(text, cognition, semantic)
+    result = build_result(text)
+
+    semantic_packet = _semantic_context_packet(
+        text=text,
+        history=history,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+    )
+
+    domains = [
+        item["domain"]
+        for item in semantic_packet["domain"].get("measurements", [])
+        if float(item["score"]) >= 0.45
+    ]
+    representation_evidence = [
+        item for item in measure_representation_evidence(text)
+    ]
+    semantic_candidates = [
+        item["label"]
+        for item in representation_evidence
+        if float(item["score"]) >= 0.45
+    ]
+
+    explicit_required = [
+        str(x).lower()
+        for x in (
+            (semantic.get("required_representations", []) or [])
+            + (cognition.get("required_representations", []) or [])
+        )
+        if str(x).strip()
+    ]
+
+    result["semantic_profile"] = build_semantic_dialog_profile(
+        text,
+        cognition,
+        semantic,
+        dialogue_history=history,
+    )
     result["scene_profile"] = build_scene_construction_profile(result["semantic_profile"])
     result["artifact_contract"] = build_scene_artifact_contract(
-        result["semantic_profile"], result["scene_profile"]
+        result["semantic_profile"],
+        result["scene_profile"],
     )
-
-    domains = detect_domain_candidates(text)
-    lexical_reps = detect_representation_candidates(text)
-
-    # IMPORTANT:
-    # Local interpretation may measure candidates, but it may NOT promote them
-    # to required/requested renderers. Only explicit upstream processor evidence
-    # is allowed to populate required_representations.
-    explicit_reps = []
-    for rep in (semantic.get("required_representations", []) or []) + (
-        cognition.get("required_representations", []) or []
-    ):
-        if rep not in explicit_reps:
-            explicit_reps.append(rep)
 
     result["candidate_domains"] = domains
-    result["required_domains"] = list(semantic.get("required_domains", []) or domains)
-    result["domain_confidence"] = build_domain_confidence(text)
-    result["candidate_representations"] = lexical_reps
-    result["representation_evidence"] = measure_representation_evidence(text)
-    result["required_representations"] = explicit_reps
-    result["scene_type"] = (
-        explicit_reps[0] if explicit_reps else None
+    result["required_domains"] = list(
+        semantic.get("required_domains", []) or domains
     )
+    result["domain_confidence"] = build_domain_confidence(text)
+    result["candidate_representations"] = semantic_candidates
+    result["representation_evidence"] = representation_evidence
+    result["required_representations"] = explicit_required
+    result["scene_type"] = explicit_required[0] if explicit_required else None
 
     result["discussion_mode"] = detect_discussion_mode(text)
     result["space_discussion"] = detect_space_discussion(text)
-    result["exploration"] = semantic_evidence_exploration(text) or bool(cognition.get("exploration_mode"))
-    result["continuation"] = semantic_evidence_continuation(text) or bool(cognition.get("needs_continuation"))
-    result["web_context"] = semantic_evidence_web(text) or bool(cognition.get("internet_context_needed"))
+    result["exploration"] = semantic_evidence_exploration(text)
+    result["continuation"] = float(
+        semantic_packet["dialogue"].get("continuation_score", 0.0)
+    )
+    result["web_context"] = semantic_evidence_web(text)
     result["explicit_image_generation"] = semantic_evidence_image(text)
-    result["lightweight_visual"] = detect_lightweight_visual(text) or bool(cognition.get("visual_reference_mode"))
+    result["lightweight_visual"] = detect_lightweight_visual(text)
 
-    result["contains_object"] = detect_object_content(text)
-    result["contains_explanation"] = detect_explanation_content(text)
-    result["contains_analysis"] = detect_analysis_content(text)
-    result["contains_legend"] = detect_legend_content(text)
+    result["contains_object"] = bool(text)
+    result["contains_explanation"] = semantic_evidence_information(text) >= 0.60
+    result["contains_analysis"] = result["exploration"] >= 0.60
+    result["contains_legend"] = False
     if result["contains_explanation"]:
         result["content_role"] = "explanation"
     elif result["contains_analysis"]:
         result["content_role"] = "analysis"
-    elif result["contains_legend"]:
-        result["content_role"] = "legend"
 
-    # These are observations, not route commands.
     result["evidence"] = {
-        "domain": domains,
-        "representation": result.get("representation_evidence", []),
+        "domain": semantic_packet["domain"],
+        "representation": representation_evidence,
         "math": semantic_evidence_math(text),
         "code": semantic_evidence_code(text),
         "web": result["web_context"],
@@ -785,21 +1076,26 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
         "continuation": result["continuation"],
         "exploration": result["exploration"],
         "information": semantic_evidence_information(text),
+        "linguistic": semantic_packet["linguistic"],
+        "dialogue": semantic_packet["dialogue"],
+        "context_vectors": semantic_packet["context_vectors"],
         "cognition": dict(cognition),
         "semantic": dict(semantic),
     }
 
+    result["quantum_interpretation_field"] = semantic_packet
     result["factory_order"] = build_factory_order(result)
     result["scene_strategy"] = build_scene_strategy(result)
     result["estimated_action_count"] = estimate_action_count(result)
     result["response_complexity"] = determine_response_complexity(result)
 
-    # No representation is promoted to an execution type here.
+    # Interpretation only emits evidence. Quantum Processor decides.
     result["semantic_authority"] = True
     result["decision_source"] = "QUANTUM_PROCESSOR"
-    result["semantic_decision_source"] = "evidence_fusion"
+    result["semantic_decision_source"] = "quantum_evidence_fusion"
     result["representation_resolution"] = "processor_selection"
-    result["legacy_keyword_matching"] = None
+    result["legacy_keyword_matching"] = False
+    result["avoid_trigger_execution"] = True
     result["factory_order"]["status"] = "evidence_only"
 
     return result
@@ -807,48 +1103,77 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
 
 def interpret_request(text, cognition=None, semantic=None, history=None, state=None):
     result = _base_interpret_request(
-        text, cognition=cognition, semantic=semantic, history=history, state=state
+        text,
+        cognition=cognition,
+        semantic=semantic,
+        history=history,
+        state=state,
     )
     if result is None:
         return None
 
-    contract = _canonical_dialogue_contract(
-        text, history=history or [], state=state or {}, semantic=result
+    contract = _dialogue_signal_contract(
+        text,
+        history or [],
+        state or {},
+        result,
+        cognition or {},
     )
+
     result["dialogue_contract"] = contract
     result["dialog_act"] = contract["dialog_act"]
     result["continuation"] = bool(contract["continuation"])
-    result["continuation_target"] = contract["previous_april_turn"] or contract["active_topic"]
+    result["continuation_target"] = (
+        contract["previous_april_turn"]
+        or contract["active_topic"]
+    )
     result["active_goal"] = contract["active_goal"]
     result["active_topic"] = contract["active_topic"]
-    result["resolved_request"] = contract["resolved_request"]
+    result["resolved_request"] = (
+        text
+        if not contract["continuation"]
+        else (
+            "Continue the previous task naturally.\n"
+            f"Previous assistant response: {contract['previous_april_turn']}\n"
+            f"Current user instruction: {text}"
+        )
+    )
     result["reply_to"] = contract["reply_to"]
-    result["required_capabilities"] = contract["required_capabilities"]
+    result["required_capabilities"] = [
+        "semantic_interpretation",
+        "dialogue_context",
+    ]
+    if result.get("candidate_representations"):
+        result["required_capabilities"].append("representation_evidence")
+
     result["dialogue_understanding"] = contract
     result["context_dependency"] = (
         "continuation" if contract.get("continuation")
-        else "reference" if contract.get("dialog_act") == "reference"
+        else "reference" if contract.get("reference_to_previous")
         else "new_topic" if contract.get("topic_shift")
         else "independent"
     )
     result["context_policy"] = {
         "current_request": True,
-        "dialogue_vector": bool(contract.get("continuation") or contract.get("dialog_act") == "reference"),
-        "previous_turn": bool(contract.get("reply_to") or contract.get("previous_april_turn")),
-        "active_goal": bool(contract.get("active_goal") and contract.get("continuation")),
-        "full_history": False,
+        "dialogue_vector": bool(
+            contract.get("continuation")
+            or contract.get("reference_to_previous")
+        ),
+        "previous_turn": bool(contract.get("reply_to")),
+        "active_goal": bool(contract.get("active_goal")),
+        "full_history": True,
+        "semantic_similarity": True,
+        "nli_intent": True,
+        "linguistic_structure": True,
     }
 
-    # Canonical transport contract: one packet, one owner, no fallback route.
     result["canonical_transport"] = "transport_state"
     result["decision_owner"] = "QUANTUM_PROCESSOR"
     result["routing_owner"] = "QUANTUM_PROCESSOR"
     result["renderer_owner"] = "QUANTUM_PROCESSOR"
     result["provider_calls"] = 0
     result["avoid_trigger_execution"] = True
-    result["unresolved_intent"] = False if contract["dialog_act"] in {
-        "affirmation", "rejection", "continuation"
-    } else False
+    result["unresolved_intent"] = False
 
     result = validate_response_complexity(result)
     state_out = build_interpretation_state()
@@ -857,22 +1182,25 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
     result["transport_state"] = state_out
     result["primary_contract"] = "transport_state"
     result["semantic_engine_diagnostics"] = {
-        "libraries": SEMANTIC_LIBRARY_ENGINE.capabilities(),
-        "representation_policy": "evidence_only_until_quantum_measurement",
-        "dialogue_policy": "multi_evidence_fusion",
+        "engines": [
+            "stanza_multilingual_linguistic",
+            "spacy_ner",
+            "sentence_transformers_embedding",
+            "transformers_nli",
+            "quantum_evidence_fusion",
+        ],
+        "engine_mode": "required",
+        "fallback_mode": False,
         "substring_routing": False,
         "candidate_to_required_promotion": False,
         "renderer_selection_owner": "QUANTUM_PROCESSOR",
+        "single_route": True,
     }
     result["interpretation_state"] = state_out
     result["transport_diagnostics"] = build_transport_diagnostics(result)
     result = propagate_canonical_response(result, state_out)
     result = bridge_machine_response(result, state_out)
-    safe_patch_log(
-        f"INTERPRETATION EVIDENCE | domains={result['required_domains']} "
-        f"representations={result['required_representations']} "
-        f"complexity={result['response_complexity']}"
-    )
+
     return result
 
 
@@ -1015,7 +1343,7 @@ def build_semantic_dialog_profile(text, cognition=None, semantic=None,
         "active_topic": cognition.get("active_topic_slot") or semantic.get("current_topic"),
         "semantic_state": semantic,
         "requires_scene_builder": False,
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1026,7 +1354,7 @@ def build_scene_construction_profile(semantic_profile):
         "dialogue_mode": "semantic_unified",
         "context_source": "evidence_packet",
         "decision_owner": "QUANTUM_PROCESSOR",
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1041,7 +1369,7 @@ def build_scene_artifact_contract(semantic_profile, scene_profile):
         "active_goal": (semantic_profile or {}).get("active_goal"),
         "scene_type": (scene_profile or {}).get("scene_type", "dialogue"),
         "representation": "processor_decides",
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1064,7 +1392,7 @@ def build_unified_scene_context(semantic_profile, scene_profile, artifact_contra
         "active_scene": (scene_profile or {}).get("scene_type", "dialogue"),
         "memory_state": memory_state or {},
         "continuity_state": {"single_route": True, "transport": "transport_state", "scene_contract": "canonical"},
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1080,7 +1408,7 @@ def build_scene_execution_plan(semantic_profile, scene_profile, artifact_contrac
         "representation": "processor_decides",
         "execution_mode": "single_semantic_pipeline",
         "decision_owner": "QUANTUM_PROCESSOR",
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1099,7 +1427,7 @@ def build_unified_interpretation_state(scene_context, processor_state=None):
         "active_goal": scene_context.get("active_goal"),
         "active_scene": scene_context.get("active_scene"),
         "executor_mode": "single_scene_contract",
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1125,7 +1453,7 @@ def build_semantic_processor_state(interpretation_state, execution_plan=None):
             "continuity": True,
             "single_route": True,
         },
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1149,7 +1477,7 @@ def build_dialogue_understanding_core(processor_state, executor_state=None):
             "response_context": True,
             "executor_shared_context": executor_state or {},
         },
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1168,7 +1496,7 @@ def optimize_dialogue_understanding(dialogue_core):
             "single_scene": True, "single_contract": True, "single_transport": True,
             "preserve_dialogue_vector": True,
         },
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1192,7 +1520,7 @@ def build_semantic_interpretation_contract(dialogue_optimization):
             "trigger_independent": True,
             "scene_continuity": True,
         },
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1219,7 +1547,7 @@ def build_canonical_semantic_runtime(semantic_contract, processor_state, dialogu
                 "files": dialogue.get("files"),
             }.items() if value not in (None, {}, [], "")
         },
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1241,7 +1569,7 @@ def fuse_semantic_inputs(runtime_state):
             "context_complete": True,
         },
         "available_modalities": [k for k, v in inputs.items() if v not in (None, {}, [], "")],
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
@@ -1253,7 +1581,7 @@ def build_processor_execution_context(runtime_state):
         "executor_context": fused,
         "processor_context": fused,
         "decision_owner": "QUANTUM_PROCESSOR",
-        "profile_version": "quantum_evidence_v2_semantic_engines",
+        "profile_version": "quantum_interpretation_engine_v3",
     }
 
 
