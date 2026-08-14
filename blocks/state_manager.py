@@ -31,6 +31,10 @@ SYSTEM DOES NOT:
 # =====================================================
 
 import time
+import math
+from datetime import datetime, timezone
+
+from sentence_transformers import SentenceTransformer, util
 
 try:
     from storage import get_user_plan, load_memory, save_memory
@@ -67,24 +71,12 @@ STATE_MACHINE_CHANNEL = {
 STATE_PATCH_LOG = []
 
 def safe_state_log(msg):
-
     try:
-
-        print(
-            "STATE:",
-            msg
-        )
-
-        STATE_PATCH_LOG.append(
-            str(msg)
-        )
-
-    except:
+        print("STATE:", msg)
+    except Exception:
         pass
 
-safe_state_log(
-    "STATE MANAGER INITIALIZED"
-)
+safe_state_log("STATE MANAGER INITIALIZED")
 
 # =====================================================
 # 🔥 RUNTIME STATE
@@ -187,6 +179,207 @@ def compact_dialog_message(
                 320
             )
     }
+
+
+# =====================================================
+# 🧠 QUANTUM MEMORY ENGINE V1
+# =====================================================
+
+# The memory room owns memory measurement only.
+# It does not orchestrate, route, render or call providers.
+# Seven days are a fixed rolling window: day_0 ... day_6.
+# Older state is discarded on rollover instead of creating day_7/day_8.
+
+MEMORY_DAYS = 7
+MEMORY_DAY_KEYS = tuple(f"day_{i}" for i in range(MEMORY_DAYS))
+MEMORY_VECTOR_MODEL_NAME = os.getenv(
+    "APRIL_MEMORY_EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+)
+
+class QuantumMemoryEngine:
+    """
+    Dynamic semantic memory engine.
+
+    Measurements:
+      recency + semantic similarity + topic/goal/scene continuity +
+      visual relationship + memory-type relevance.
+
+    The result is an evidence packet for Quantum Processor.
+    """
+
+    def __init__(self, model_name=MEMORY_VECTOR_MODEL_NAME):
+        self.model_name = model_name
+        self._encoder = None
+        self._cache = {}
+
+    def _model(self):
+        if self._encoder is None:
+            self._encoder = SentenceTransformer(self.model_name)
+        return self._encoder
+
+    def _embed(self, text):
+        value = safe_trim_text(text, 4000)
+        if not value:
+            return None
+        key = value
+        if key not in self._cache:
+            self._cache[key] = self._model().encode(
+                value,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+            )
+        return self._cache[key]
+
+    @staticmethod
+    def _cosine(a, b):
+        if a is None or b is None:
+            return 0.0
+        score = float(util.cos_sim(a, b).item())
+        return max(0.0, min(1.0, (score + 1.0) / 2.0))
+
+    @staticmethod
+    def _recency(timestamp, now=None):
+        if not timestamp:
+            return 0.0
+        now = now or time.time()
+        age_days = max(0.0, (now - float(timestamp)) / 86400.0)
+        return math.exp(-0.55 * age_days)
+
+    def score_record(self, query, record, current_topic="", current_goal="", current_scene=""):
+        record_text = record.get("text") or record.get("summary") or record.get("topic") or ""
+        semantic = self._cosine(self._embed(query), self._embed(record_text))
+
+        topic = self._cosine(
+            self._embed(current_topic),
+            self._embed(record.get("topic", "")),
+        ) if current_topic and record.get("topic") else 0.0
+
+        goal = self._cosine(
+            self._embed(current_goal),
+            self._embed(record.get("goal", "")),
+        ) if current_goal and record.get("goal") else 0.0
+
+        scene = self._cosine(
+            self._embed(current_scene),
+            self._embed(
+                record.get("scene_type", "")
+                or record.get("scene", "")
+                or record.get("summary", "")
+            ),
+        ) if current_scene and (
+            record.get("scene_type") or record.get("scene") or record.get("summary")
+        ) else 0.0
+
+        visual = 1.0 if (
+            record.get("visual")
+            or record.get("visual_scene")
+            or record.get("visual_summary")
+        ) else 0.0
+
+        recency = self._recency(record.get("timestamp"))
+
+        total = (
+            0.45 * semantic +
+            0.18 * topic +
+            0.12 * goal +
+            0.12 * scene +
+            0.05 * visual +
+            0.08 * recency
+        )
+
+        return {
+            "score": round(max(0.0, min(1.0, total)), 6),
+            "semantic": round(semantic, 6),
+            "topic": round(topic, 6),
+            "goal": round(goal, 6),
+            "scene": round(scene, 6),
+            "visual": round(visual, 6),
+            "recency": round(recency, 6),
+        }
+
+    def retrieve(self, query, timeline, current_topic="", current_goal="", current_scene="", top_k=6):
+        records = []
+        for day_index in range(MEMORY_DAYS):
+            day = timeline.get(f"day_{day_index}", {})
+            if not isinstance(day, dict):
+                continue
+
+            for slot in ("A", "B", "C", "D", "E"):
+                for item in day.get(slot, []) if isinstance(day.get(slot, []), list) else []:
+                    if isinstance(item, dict):
+                        record = dict(item)
+                        record["memory_day"] = day_index
+                        record["memory_slot"] = slot
+                        records.append(record)
+
+            for item in day.get("visual_scenes", []) if isinstance(day.get("visual_scenes", []), list) else []:
+                if isinstance(item, dict):
+                    record = dict(item)
+                    record["memory_day"] = day_index
+                    record["memory_slot"] = "visual"
+                    record["visual"] = True
+                    records.append(record)
+
+        ranked = []
+        for record in records:
+            metrics = self.score_record(
+                query,
+                record,
+                current_topic=current_topic,
+                current_goal=current_goal,
+                current_scene=current_scene,
+            )
+            ranked.append({**record, "quantum_memory_score": metrics})
+
+        ranked.sort(
+            key=lambda item: item["quantum_memory_score"]["score"],
+            reverse=True,
+        )
+
+        return ranked[:max(1, int(top_k))]
+
+    def build_signal(self, query, timeline, current_topic="", current_goal="", current_scene="", top_k=6):
+        matches = self.retrieve(
+            query,
+            timeline,
+            current_topic=current_topic,
+            current_goal=current_goal,
+            current_scene=current_scene,
+            top_k=top_k,
+        )
+
+        strongest = matches[0] if matches else {}
+        strongest_score = (
+            strongest.get("quantum_memory_score", {}).get("score", 0.0)
+            if strongest else 0.0
+        )
+
+        return {
+            "engine": "quantum_memory_engine_v1",
+            "window_days": MEMORY_DAYS,
+            "day_keys": list(MEMORY_DAY_KEYS),
+            "query": safe_trim_text(query, 1000),
+            "matches": matches,
+            "strongest_match": strongest,
+            "strongest_score": strongest_score,
+            "continuation_candidate": bool(strongest and strongest_score >= 0.60),
+            "historical_reference_candidate": bool(strongest and strongest_score >= 0.72),
+            "visual_continuation_candidate": bool(
+                strongest and
+                strongest_score >= 0.65 and
+                strongest.get("visual")
+            ),
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "evidence_only": True,
+        }
+
+    def clear_runtime_cache(self):
+        self._cache.clear()
+
+
+QUANTUM_MEMORY_ENGINE = QuantumMemoryEngine()
+
 
 # =====================================================
 # 🔥 DEFAULT SCENE
@@ -1372,18 +1565,22 @@ def build_golden_memory_state():
 def update_dynamic_focus(user_id, focus_payload):
     state_obj = get_state(user_id)
     state_obj["dynamic_focus"] = focus_payload or {}
+    persist_state(user_id)
 
 def update_goal_hierarchy(user_id, goal_payload):
     state_obj = get_state(user_id)
     state_obj["goal_hierarchy"] = goal_payload or {}
+    persist_state(user_id)
 
 def update_open_loops(user_id, loops_payload):
     state_obj = get_state(user_id)
     state_obj["open_loops"] = loops_payload or []
+    persist_state(user_id)
 
 def update_memory_signals(user_id, signals_payload):
     state_obj = get_state(user_id)
     state_obj["memory_signals"] = signals_payload or {}
+    persist_state(user_id)
 
 def build_memory_bridge(user_id):
     state_obj = get_state(user_id)
@@ -1546,9 +1743,6 @@ def refresh_unified_scene(user_id):
 # 🧠 APRIL MEMORY ENGINE V4
 # =====================================================
 
-from datetime import datetime, timezone
-
-MEMORY_DAYS = 7
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
 
 def utc_day_key():
@@ -1569,12 +1763,22 @@ def build_memory_day():
     }
 
 def build_memory_timeline():
-    return {f"day_{i}": build_memory_day() for i in range(MEMORY_DAYS)}
+    return {key: build_memory_day() for key in MEMORY_DAY_KEYS}
 
 def ensure_memory_engine(state_obj):
 
     if "memory_timeline" not in state_obj:
         state_obj["memory_timeline"] = build_memory_timeline()
+    else:
+        timeline = state_obj["memory_timeline"]
+        for key in MEMORY_DAY_KEYS:
+            if key not in timeline or not isinstance(timeline[key], dict):
+                timeline[key] = build_memory_day()
+        # Hard-delete any accidental day_7+ keys so the seven-day contract
+        # remains canonical.
+        for key in list(timeline):
+            if key not in MEMORY_DAY_KEYS:
+                del timeline[key]
 
     if "memory_cycle" not in state_obj:
         state_obj["memory_cycle"] = {
@@ -1598,32 +1802,46 @@ def memory_rollover_if_needed(user_id):
     ensure_memory_engine(state_obj)
 
     today = utc_day_key()
+    cycle = state_obj["memory_cycle"]
+    last_day = cycle.get("last_day_key") or today
 
-    if state_obj["memory_cycle"]["last_day_key"] == today:
+    if last_day == today:
         return False
 
+    # Rotate exactly once per elapsed UTC day, capped to the seven-day window.
+    try:
+        last_date = datetime.strptime(last_day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        today_date = datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        elapsed_days = max(1, (today_date - last_date).days)
+    except Exception:
+        elapsed_days = 1
+
+    elapsed_days = min(elapsed_days, MEMORY_DAYS)
+
     timeline = state_obj["memory_timeline"]
+    for _ in range(elapsed_days):
+        for i in range(MEMORY_DAYS - 1, 0, -1):
+            timeline[f"day_{i}"] = timeline.get(f"day_{i-1}", build_memory_day())
+        timeline["day_0"] = build_memory_day()
 
-    for i in range(MEMORY_DAYS - 1, 0, -1):
-        timeline[f"day_{i}"] = timeline.get(
-            f"day_{i-1}",
-            build_memory_day()
-        )
-
-    timeline["day_0"] = build_memory_day()
+    for key in list(timeline):
+        if key not in MEMORY_DAY_KEYS:
+            del timeline[key]
 
     state_obj["memory_cycle"] = {
         "last_day_key": today,
         "last_rollover": time.time()
     }
 
-    safe_state_log(f"MEMORY_DAY_SHIFT: {user_id}")
+    safe_state_log(f"MEMORY_DAY_SHIFT: {user_id} elapsed={elapsed_days}")
+    persist_state(user_id)
     return True
 
 def update_focus_state(user_id, payload):
 
     state_obj = get_state(user_id)
     ensure_memory_engine(state_obj)
+    payload = payload if isinstance(payload, dict) else {}
 
     state_obj["focus_state"] = {
         "active_topic": payload.get("topic"),
@@ -1633,8 +1851,9 @@ def update_focus_state(user_id, payload):
         "priority_score": payload.get("priority_score", 0.0),
         "intent_freshness": payload.get("intent_freshness", 0.0)
     }
+    persist_state(user_id)
 
-def register_topic(user_id, topic, slot="A", score=1.0):
+def register_topic(user_id, topic, slot="A", score=1.0, goal=None, scene=None):
 
     state_obj = get_state(user_id)
     ensure_memory_engine(state_obj)
@@ -1644,49 +1863,185 @@ def register_topic(user_id, topic, slot="A", score=1.0):
     timeline = state_obj["memory_timeline"]
     today = timeline["day_0"]
 
+    topic_text = safe_trim_text(topic, 1000)
     today[slot].append({
-        "topic": topic,
-        "score": score,
-        "timestamp": time.time()
+        "topic": topic_text,
+        "text": topic_text,
+        "score": float(score),
+        "goal": safe_trim_text(goal, 600),
+        "scene": safe_trim_text(scene, 600),
+        "timestamp": time.time(),
     })
+    today[slot] = today[slot][-TOPIC_MEMORY_LIMIT:]
 
 def bind_visual_scene_to_memory(user_id, scene_payload):
 
     state_obj = get_state(user_id)
     ensure_memory_engine(state_obj)
 
-    state_obj["memory_timeline"]["day_0"]["visual_scenes"].append(
-        scene_payload
+    payload = scene_payload if isinstance(scene_payload, dict) else {}
+    record = dict(payload)
+    record.setdefault(
+        "text",
+        safe_trim_text(
+            record.get("summary")
+            or record.get("scene_type")
+            or record.get("topic")
+            or "",
+            2000,
+        ),
     )
+    record.setdefault("timestamp", time.time())
+    record["visual"] = True
 
-def build_memory_context(user_id):
+    today = state_obj["memory_timeline"]["day_0"]["visual_scenes"]
+    today.append(record)
+    state_obj["memory_timeline"]["day_0"]["visual_scenes"] = today[-VISUAL_HISTORY_LIMIT:]
 
-    state_obj = get_state(user_id)
-    ensure_memory_engine(state_obj)
+def build_memory_context(user_id, query=None):
 
-    return {
+    state_obj = ensure_memory_runtime(user_id)
+
+    context = {
         "focus_state": state_obj.get("focus_state", {}),
         "memory_timeline": state_obj.get("memory_timeline", {}),
         "memory_cycle": state_obj.get("memory_cycle", {}),
         "open_loops": state_obj.get("open_loops", []),
         "active_flow": state_obj.get("active_flow"),
-        "dynamic_focus": state_obj.get("dynamic_focus", {}),  # legacy fallback
-        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),  # legacy fallback
-        "memory_signals": state_obj.get("memory_signals", {})  # legacy fallback
+        "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
+        "memory_signals": state_obj.get("memory_signals", {}),
+        "window_days": MEMORY_DAYS,
+        "day_keys": list(MEMORY_DAY_KEYS),
     }
 
-def build_executor_memory_bridge(user_id):
+    if query:
+        focus = state_obj.get("focus_state", {})
+        context["quantum_memory_signal"] = QUANTUM_MEMORY_ENGINE.build_signal(
+            query=query,
+            timeline=state_obj.get("memory_timeline", {}),
+            current_topic=focus.get("active_topic") or state_obj.get("current_topic") or "",
+            current_goal=focus.get("active_goal") or "",
+            current_scene=focus.get("active_scene") or "",
+        )
 
-    memory = build_memory_context(user_id)
+    return context
+
+def build_executor_memory_bridge(user_id, query=None):
+
+    memory = build_memory_context(user_id, query=query)
+    focus = memory.get("focus_state", {})
+    signal = memory.get("quantum_memory_signal", {})
 
     return {
-        "active_topic": memory.get("focus_state", {}).get("active_topic"),
-        "active_goal": memory.get("focus_state", {}).get("active_goal"),
-        "priority_score": memory.get("focus_state", {}).get("priority_score"),
-        "intent_freshness": memory.get("focus_state", {}).get("intent_freshness"),
+        "active_topic": focus.get("active_topic"),
+        "active_goal": focus.get("active_goal"),
+        "priority_score": focus.get("priority_score"),
+        "intent_freshness": focus.get("intent_freshness"),
         "today": memory.get("memory_timeline", {}).get("day_0", {}),
         "yesterday": memory.get("memory_timeline", {}).get("day_1", {}),
-        "open_loops": memory.get("open_loops", [])
+        "open_loops": memory.get("open_loops", []),
+        "quantum_memory": signal,
+        "memory_window_days": MEMORY_DAYS,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "evidence_only": True,
+    }
+
+
+# =====================================================
+# 🧠 QUANTUM MEMORY QUERY / SCENE RESOLUTION
+# =====================================================
+
+def query_dynamic_memory(user_id, query, top_k=6):
+    state_obj = ensure_memory_runtime(user_id)
+    focus = state_obj.get("focus_state", {})
+
+    return QUANTUM_MEMORY_ENGINE.build_signal(
+        query=query,
+        timeline=state_obj.get("memory_timeline", {}),
+        current_topic=focus.get("active_topic") or state_obj.get("current_topic") or "",
+        current_goal=focus.get("active_goal") or "",
+        current_scene=focus.get("active_scene") or "",
+        top_k=top_k,
+    )
+
+
+def resolve_memory_scene(user_id, current_request, similarity_threshold=0.65):
+    """
+    Resolve whether the current request continues the live visual scene,
+    references a prior seven-day scene, or is an independent topic.
+
+    No renderer is selected here.
+    """
+    state_obj = ensure_memory_runtime(user_id)
+    focus = state_obj.get("focus_state", {})
+    active_visual = state_obj.get("active_visual_scene") or {}
+
+    active_record = dict(active_visual) if isinstance(active_visual, dict) else {}
+    if active_record:
+        active_record.setdefault(
+            "text",
+            active_record.get("summary")
+            or active_record.get("scene_type")
+            or state_obj.get("current_topic")
+            or "",
+        )
+        active_record["visual"] = True
+        active_record.setdefault("timestamp", time.time())
+
+    candidates = []
+    if active_record.get("text"):
+        metrics = QUANTUM_MEMORY_ENGINE.score_record(
+            current_request,
+            active_record,
+            current_topic=focus.get("active_topic") or state_obj.get("current_topic") or "",
+            current_goal=focus.get("active_goal") or "",
+            current_scene=focus.get("active_scene") or "",
+        )
+        candidates.append({
+            **active_record,
+            "source": "active_scene",
+            "quantum_memory_score": metrics,
+        })
+
+    signal = query_dynamic_memory(user_id, current_request, top_k=6)
+    candidates.extend(signal.get("matches", []))
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: item.get("quantum_memory_score", {}).get("score", 0.0),
+        reverse=True,
+    )
+
+    best = ranked[0] if ranked else {}
+    best_score = best.get("quantum_memory_score", {}).get("score", 0.0) if best else 0.0
+
+    if not best:
+        relation = "independent"
+    elif best.get("source") == "active_scene" and best_score >= similarity_threshold:
+        relation = "continue_active_scene"
+    elif best_score >= 0.72:
+        relation = "historical_scene_reference"
+    else:
+        relation = "independent"
+
+    return {
+        "engine": "quantum_memory_engine_v1",
+        "relation": relation,
+        "score": round(float(best_score), 6),
+        "active_scene_match": bool(
+            best.get("source") == "active_scene"
+            and best_score >= similarity_threshold
+        ),
+        "historical_match": bool(
+            best.get("source") != "active_scene"
+            and best_score >= 0.72
+        ),
+        "best_match": best,
+        "memory_signal": signal,
+        "window_days": MEMORY_DAYS,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "evidence_only": True,
     }
 
 
@@ -1754,7 +2109,13 @@ def build_memory_snapshot_v3(user_id):
         "memory_signals": state_obj.get("memory_signals", {}),
         "memory_timeline": state_obj.get("memory_timeline", {}),
         "memory_cycle": state_obj.get("memory_cycle", {}),
-        "active_flow": state_obj.get("active_flow")
+        "active_flow": state_obj.get("active_flow"),
+        "memory_engine": {
+            "version": "quantum_memory_engine_v1",
+            "window_days": MEMORY_DAYS,
+            "day_keys": list(MEMORY_DAY_KEYS),
+            "decision_owner": "QUANTUM_PROCESSOR",
+        },
     }
 
 
