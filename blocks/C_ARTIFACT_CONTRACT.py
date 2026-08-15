@@ -322,6 +322,8 @@ class ArtifactRenderContract:
     # only describes how that payload must travel to April Web.
     signal_version: str = "1.0"
     signal_type: str = ""
+    # Canonical presentation contract transported with the same Fiber signal.
+    presentation: Dict[str, Any] = field(default_factory=dict)
 
 # =====================================================
 # BASE ARTIFACT
@@ -499,6 +501,7 @@ def _render_signal_metadata(
     priority: int = 100,
     complexity: str = "balanced",
     layout: str = "single",
+    presentation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return only transport metadata; payload stays structured and untouched."""
     return {
@@ -513,6 +516,7 @@ def _render_signal_metadata(
         "complexity": complexity,
         "layout": layout,
         "scene_contract": True,
+        "presentation": dict(presentation or {}),
     }
 
 
@@ -526,6 +530,7 @@ def _build_artifact_render_signal(
     priority: int = 100,
     complexity: str = "balanced",
     layout: str = "single",
+    presentation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Canonical room -> Fiber render signal.
 
@@ -545,6 +550,7 @@ def _build_artifact_render_signal(
             priority=priority,
             complexity=complexity,
             layout=layout,
+            presentation=presentation,
         ),
         "renderer": renderer,
         "viewer": renderer,
@@ -555,6 +561,7 @@ def _build_artifact_render_signal(
         "priority": priority,
         "complexity": complexity,
         "layout": layout,
+        "presentation": dict(presentation or {}),
         "scene_contract": True,
     }
 
@@ -602,6 +609,7 @@ def create_artifact(
         priority=priority,
         complexity=complexity,
         layout=layout,
+        presentation=presentation,
     )
     normalized_data["render_signal"] = render_signal
 
@@ -639,6 +647,7 @@ def create_artifact(
             human_visible=bool(normalized_data.get("human_visible", True)),
             signal_version=UNIFIED_RENDER_SIGNAL_VERSION,
             signal_type=artifact_type,
+            presentation=presentation,
         ),
         data=normalized_data
     )
@@ -749,6 +758,10 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
         )
 
     signal = dict(signal)
+    presentation = data.get("presentation")
+    if not isinstance(presentation, dict):
+        presentation = dict(signal.get("presentation") or {})
+    signal.setdefault("presentation", presentation)
     signal.setdefault("artifact_id", getattr(getattr(artifact, "metadata", None), "artifact_id", ""))
     signal.setdefault("signal_version", UNIFIED_RENDER_SIGNAL_VERSION)
     signal.setdefault("type", artifact_type)
@@ -781,6 +794,7 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
         "priority": priority,
         "complexity": complexity,
         "layout": layout,
+        "presentation": presentation,
         "scene_contract": True,
         "provider_payload": True,
         "canonical_provider_payload": True,
@@ -818,13 +832,35 @@ def build_universal_contract(
             artifact_type=getattr(artifact.metadata, "artifact_type", ""),
             room_source=getattr(artifact.metadata, "room_source", ""),
         )
-        presentation = artifact_payload.setdefault(
-            "presentation",
-            build_presentation_hint(
+        presentation = artifact_payload.get("presentation")
+        if not isinstance(presentation, dict):
+            presentation = build_presentation_hint(
                 artifact.metadata.artifact_type,
                 artifact_payload.get("complexity", "balanced")
             )
-        )
+            presentation = {
+                "version": "1.0",
+                "engine": "APRIL-QUANTUM-PRESENTATION-V1",
+                "enabled": True,
+                "decision_owner": "QUANTUM_PROCESSOR",
+                "single_route": True,
+                "mode": "semantic_presentation",
+                "primary_role": "normal",
+                "spans": [],
+                "formulas": [],
+                "key_points": [],
+                "by_block": {},
+                "math": {
+                    "markdown": "react-markdown",
+                    "markdown_extensions": ["remark-gfm"],
+                    "math_parse": "remark-math",
+                    "math_render": "rehype-katex",
+                    "math_css": "katex/dist/katex.min.css",
+                    "structural_only": True,
+                },
+                **presentation,
+            }
+            artifact_payload["presentation"] = presentation
 
         canonical_text = _extract_text_candidate(
             artifact_payload,
@@ -863,6 +899,7 @@ def build_universal_contract(
                 "room_source": artifact.metadata.room_source,
                 "artifact_type": artifact.metadata.artifact_type,
                 "presentation": presentation,
+                "presentation_engine": "APRIL-QUANTUM-PRESENTATION-V1",
                 "machine_only": artifact_payload.get("machine_only", False),
                 "human_visible": artifact_payload.get("human_visible", True),
             },
@@ -874,6 +911,7 @@ def build_universal_contract(
         machine_scene.metadata.update({
             "artifact_contract_stage": "stage4_final",
             "presentation": presentation,
+            "presentation_engine": "APRIL-QUANTUM-PRESENTATION-V1",
             "machine_only": artifact_payload.get("machine_only", False),
             "human_visible": artifact_payload.get("human_visible", True),
         })
@@ -1454,6 +1492,8 @@ __all__ = [
     "create_transport_contract",
     "validate_universal_contract",
     "build_machine_scene",
+    "build_presentation_hint",
+    "UNIFIED_RENDER_SIGNAL_VERSION",
     "build_scene_contract",
     "FACTORY_ROOM_PROFILES",
     "get_factory_room_profile",
@@ -1645,6 +1685,12 @@ def _materialize_scene_artifacts(scene: Any, blocks: list) -> list:
             "scene_contract": True,
             "provider_payload": True,
             "canonical_provider_payload": True,
+            "presentation": dict(
+                artifact.get("presentation")
+                or (artifact.get("render_signal") or {}).get("presentation")
+                or (data.get("presentation") if isinstance(data, dict) else {})
+                or {}
+            ),
         })
         if artifact_id:
             existing_ids.add(artifact_id)
@@ -1684,6 +1730,8 @@ def build_canonical_scene_blocks(scene):
         "viewer": presentation.get("viewer", renderer),
         "content": content,
         "priority": presentation.get("priority", 100),
+        "presentation": presentation,
+        "scene_contract": True,
     }]
 
 
@@ -1715,6 +1763,7 @@ def _ensure_visible_text_block(scene: Any, blocks: list) -> list:
         "content": content,
         "text": content,
         "priority": presentation.get("priority", 100),
+        "presentation": presentation,
         "scene_contract": True,
     }, *normalized]
 
