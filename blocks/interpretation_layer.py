@@ -20,6 +20,8 @@ Compatibility:
 
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence
@@ -128,44 +130,82 @@ STANZA_BOOTSTRAP_LANGS = tuple(
     if lang.strip()
 )
 STANZA_RESOURCES_FILE = STANZA_RESOURCE_DIR / "resources.json"
+STANZA_LANGUAGE_PROCESSORS = os.getenv(
+    "APRIL_STANZA_PROCESSORS",
+    "tokenize,mwt,pos,lemma,depparse",
+)
+STANZA_LANGID_MODEL_FILE = STANZA_RESOURCE_DIR / "multilingual" / "langid" / "ud.pt"
 _STANZA_BOOTSTRAP_ATTEMPTED = False
+_SEMANTIC_RUNTIME_LOCK = threading.RLock()
+_SEMANTIC_ACCELERATOR_STARTED = False
+_SEMANTIC_ACCELERATOR_ERROR: Exception | None = None
+
+
+def _stanza_lang_ready(lang: str) -> bool:
+    root = STANZA_RESOURCE_DIR / lang
+    required = (
+        root / "tokenize",
+        root / "pos",
+        root / "lemma",
+        root / "depparse",
+    )
+    return root.is_dir() and all(path.exists() for path in required)
 
 
 def _stanza_resources_ready() -> bool:
-    """Return True only when the complete Stanza resources manifest exists."""
-    return STANZA_RESOURCES_FILE.is_file() and STANZA_RESOURCES_FILE.stat().st_size > 0
+    """Validate the actual files MultilingualPipeline will open."""
+    if not STANZA_RESOURCES_FILE.is_file() or STANZA_RESOURCES_FILE.stat().st_size <= 0:
+        return False
+
+    # A resources.json alone is insufficient. The previous deployment had the
+    # manifest but not multilingual/langid/ud.pt, which caused the empty bubble
+    # and HTTP 500 during the first semantic request.
+    if not STANZA_LANGID_MODEL_FILE.is_file() or STANZA_LANGID_MODEL_FILE.stat().st_size <= 0:
+        return False
+
+    return all(_stanza_lang_ready(lang) for lang in STANZA_BOOTSTRAP_LANGS)
 
 
 def _provision_stanza_resources() -> None:
-    """Provision the configured Stanza resources once for offline runtime use."""
+    """Prepare all mandatory Stanza files once, never during normal turns."""
     global _STANZA_BOOTSTRAP_ATTEMPTED
 
-    if _stanza_resources_ready():
-        return
+    with _SEMANTIC_RUNTIME_LOCK:
+        if _stanza_resources_ready():
+            return
+        if _STANZA_BOOTSTRAP_ATTEMPTED:
+            raise RuntimeError(
+                f"Stanza resources are unavailable at {STANZA_RESOURCE_DIR}"
+            )
 
-    if _STANZA_BOOTSTRAP_ATTEMPTED:
-        raise RuntimeError(
-            f"Stanza resources are unavailable at {STANZA_RESOURCES_FILE}"
-        )
+        _STANZA_BOOTSTRAP_ATTEMPTED = True
+        STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
 
-    _STANZA_BOOTSTRAP_ATTEMPTED = True
-    STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Stanza's supported offline workflow is: download first, then construct
-    # the pipeline with download_method=None. We deliberately provision each
-    # configured language once rather than downloading during every request.
-    for language in STANZA_BOOTSTRAP_LANGS:
+        # IMPORTANT: resources.json is not the readiness signal. Explicitly
+        # provision the multilingual langid model required by MultilingualPipeline.
         stanza.download(
-            lang=language,
+            lang="multilingual",
             model_dir=str(STANZA_RESOURCE_DIR),
+            processors="langid",
             logging_level="WARN",
         )
 
-    if not _stanza_resources_ready():
-        raise RuntimeError(
-            f"Stanza resource provisioning completed without resources.json: "
-            f"{STANZA_RESOURCES_FILE}"
-        )
+        for language in STANZA_BOOTSTRAP_LANGS:
+            if not _stanza_lang_ready(language):
+                stanza.download(
+                    lang=language,
+                    model_dir=str(STANZA_RESOURCE_DIR),
+                    processors=STANZA_LANGUAGE_PROCESSORS,
+                    logging_level="WARN",
+                )
+
+        if not _stanza_resources_ready():
+            raise RuntimeError(
+                "STANZA_RESOURCE_BOOTSTRAP_INCOMPLETE: "
+                f"langid={STANZA_LANGID_MODEL_FILE}; "
+                f"resources={STANZA_RESOURCES_FILE}; "
+                f"languages={STANZA_BOOTSTRAP_LANGS}"
+            )
 
 
 def _ensure_semantic_runtime() -> None:
@@ -173,43 +213,87 @@ def _ensure_semantic_runtime() -> None:
     if _SEMANTIC_RUNTIME_READY:
         return
 
-    SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
+    with _SEMANTIC_RUNTIME_LOCK:
+        if _SEMANTIC_RUNTIME_READY:
+            return
 
-    if not _stanza_resources_ready():
-        _provision_stanza_resources()
+        started = time.perf_counter()
+        try:
+            SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
 
-    lang_subset = list(STANZA_BOOTSTRAP_LANGS)
-    lang_configs = {
-        lang: {"processors": "tokenize,mwt,pos,lemma,depparse,ner"}
-        for lang in lang_subset
-    }
-    try:
-        STANZA_NLP = MultilingualPipeline(
-            model_dir=str(STANZA_RESOURCE_DIR),
-            max_cache_size=12,
-            download_method=None,
-            lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
-            lang_configs=lang_configs or None,
+            if not _stanza_resources_ready():
+                _provision_stanza_resources()
+
+            lang_subset = list(STANZA_BOOTSTRAP_LANGS)
+            lang_configs = {
+                lang: {"processors": STANZA_LANGUAGE_PROCESSORS}
+                for lang in lang_subset
+            }
+
+            STANZA_NLP = MultilingualPipeline(
+                model_dir=str(STANZA_RESOURCE_DIR),
+                max_cache_size=12,
+                download_method=None,
+                lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
+                lang_configs=lang_configs or None,
+            )
+
+            SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
+            DIALOGUE_NLI = hf_pipeline(
+                "zero-shot-classification",
+                model=NLI_MODEL_NAME,
+            )
+        except Exception:
+            STANZA_NLP = None
+            SEMANTIC_ENCODER = None
+            DIALOGUE_NLI = None
+            raise
+
+        _SEMANTIC_RUNTIME_READY = True
+        os.environ["APRIL_STANZA_RUNTIME_READY"] = "1"
+        elapsed = time.perf_counter() - started
+        print(
+            f"⚡ SEMANTIC ACCELERATOR READY: runtime_preloaded=1 elapsed={elapsed:.2f}s",
+            flush=True,
         )
-
-        SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
-        DIALOGUE_NLI = hf_pipeline(
-            "zero-shot-classification",
-            model=NLI_MODEL_NAME,
-        )
-    except Exception:
-        # Do not advertise a half-built semantic runtime.
-        STANZA_NLP = None
-        SEMANTIC_ENCODER = None
-        DIALOGUE_NLI = None
-        raise
-
-    _SEMANTIC_RUNTIME_READY = True
 
 
 def preload_semantic_runtime() -> None:
-    """Explicit prewarm hook; keeps the existing single semantic route."""
+    """Prewarm the complete semantic stack before the first user request."""
     _ensure_semantic_runtime()
+
+
+def start_semantic_accelerator() -> None:
+    """Start one background prewarm worker for the existing semantic route."""
+    global _SEMANTIC_ACCELERATOR_STARTED, _SEMANTIC_ACCELERATOR_ERROR
+    if _SEMANTIC_ACCELERATOR_STARTED:
+        return
+
+    _SEMANTIC_ACCELERATOR_STARTED = True
+
+    def _worker() -> None:
+        global _SEMANTIC_ACCELERATOR_ERROR
+        try:
+            print("⚡ SEMANTIC ACCELERATOR: PREWARM START", flush=True)
+            preload_semantic_runtime()
+        except Exception as exc:
+            _SEMANTIC_ACCELERATOR_ERROR = exc
+            print(
+                f"⚡ SEMANTIC ACCELERATOR ERROR: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    threading.Thread(
+        target=_worker,
+        name="april-semantic-accelerator",
+        daemon=True,
+    ).start()
+
+
+# Eagerly prewarm the semantic stack during application startup. This moves
+# Stanza / embedding / NLI initialization out of the user's chat request.
+# The runtime lock guarantees that only one semantic stack is constructed.
+preload_semantic_runtime()
 
 DIALOGUE_LABELS = (
     "question",
