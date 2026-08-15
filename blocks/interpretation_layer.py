@@ -130,9 +130,14 @@ STANZA_BOOTSTRAP_LANGS = tuple(
     if lang.strip()
 )
 STANZA_RESOURCES_FILE = STANZA_RESOURCE_DIR / "resources.json"
+# Keep the semantic accelerator focused on the annotations actually consumed
+# by QuantumLinguisticEngine. MWT is language/package dependent and was the
+# direct cause of the Railway crash ("mwt, default"). Dependency parsing is
+# not required for dialogue-signal measurement, so it is intentionally kept
+# out of the bootstrap path as well.
 STANZA_LANGUAGE_PROCESSORS = os.getenv(
     "APRIL_STANZA_PROCESSORS",
-    "tokenize,mwt,pos,lemma,depparse",
+    "tokenize,pos,lemma",
 )
 STANZA_LANGID_MODEL_FILE = STANZA_RESOURCE_DIR / "multilingual" / "langid" / "ud.pt"
 _STANZA_BOOTSTRAP_ATTEMPTED = False
@@ -147,7 +152,6 @@ def _stanza_lang_ready(lang: str) -> bool:
         root / "tokenize",
         root / "pos",
         root / "lemma",
-        root / "depparse",
     )
     return root.is_dir() and all(path.exists() for path in required)
 
@@ -173,39 +177,43 @@ def _provision_stanza_resources() -> None:
     with _SEMANTIC_RUNTIME_LOCK:
         if _stanza_resources_ready():
             return
-        if _STANZA_BOOTSTRAP_ATTEMPTED:
-            raise RuntimeError(
-                f"Stanza resources are unavailable at {STANZA_RESOURCE_DIR}"
-            )
-
         _STANZA_BOOTSTRAP_ATTEMPTED = True
         STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
 
-        # IMPORTANT: resources.json is not the readiness signal. Explicitly
-        # provision the multilingual langid model required by MultilingualPipeline.
-        stanza.download(
-            lang="multilingual",
-            model_dir=str(STANZA_RESOURCE_DIR),
-            processors="langid",
-            logging_level="WARN",
-        )
-
-        for language in STANZA_BOOTSTRAP_LANGS:
-            if not _stanza_lang_ready(language):
-                stanza.download(
-                    lang=language,
-                    model_dir=str(STANZA_RESOURCE_DIR),
-                    processors=STANZA_LANGUAGE_PROCESSORS,
-                    logging_level="WARN",
-                )
-
-        if not _stanza_resources_ready():
-            raise RuntimeError(
-                "STANZA_RESOURCE_BOOTSTRAP_INCOMPLETE: "
-                f"langid={STANZA_LANGID_MODEL_FILE}; "
-                f"resources={STANZA_RESOURCES_FILE}; "
-                f"languages={STANZA_BOOTSTRAP_LANGS}"
+        try:
+            # IMPORTANT: resources.json is not the readiness signal. Explicitly
+            # provision the multilingual langid model required by MultilingualPipeline.
+            stanza.download(
+                lang="multilingual",
+                model_dir=str(STANZA_RESOURCE_DIR),
+                processors="langid",
+                logging_level="WARN",
             )
+
+            for language in STANZA_BOOTSTRAP_LANGS:
+                if not _stanza_lang_ready(language):
+                    # Do not request MWT globally. Stanza documents MWT as
+                    # language-dependent; requesting it for every language
+                    # makes the default package lookup fail when one language
+                    # has no MWT model in the installed resources manifest.
+                    stanza.download(
+                        lang=language,
+                        model_dir=str(STANZA_RESOURCE_DIR),
+                        processors=STANZA_LANGUAGE_PROCESSORS,
+                        logging_level="WARN",
+                    )
+
+            if not _stanza_resources_ready():
+                raise RuntimeError(
+                    "STANZA_RESOURCE_BOOTSTRAP_INCOMPLETE: "
+                    f"langid={STANZA_LANGID_MODEL_FILE}; "
+                    f"resources={STANZA_RESOURCES_FILE}; "
+                    f"languages={STANZA_BOOTSTRAP_LANGS}"
+                )
+        except Exception:
+            # A transient Hub/network error must not poison the process forever.
+            _STANZA_BOOTSTRAP_ATTEMPTED = False
+            raise
 
 
 def _ensure_semantic_runtime() -> None:
@@ -290,10 +298,11 @@ def start_semantic_accelerator() -> None:
     ).start()
 
 
-# Eagerly prewarm the semantic stack during application startup. This moves
-# Stanza / embedding / NLI initialization out of the user's chat request.
-# The runtime lock guarantees that only one semantic stack is constructed.
-preload_semantic_runtime()
+# Start the accelerator without blocking module import. This prevents a
+# missing/downloadable semantic model from crashing bot.py before Flask/Railway
+# can finish booting. If a request arrives first, _ensure_semantic_runtime()
+# still owns the same single runtime gate and waits for the shared lock.
+start_semantic_accelerator()
 
 DIALOGUE_LABELS = (
     "question",
@@ -373,9 +382,10 @@ class QuantumLinguisticEngine:
     """
     Dedicated linguistic engine.
 
-    Stanza performs multilingual neural sentence/token processing, POS,
-    morphology, lemma and dependency structure. spaCy supplies entity analysis
-    using the already installed multilingual NER model.
+    Stanza performs multilingual neural sentence/token processing, POS and
+    lemma analysis. spaCy supplies entity analysis using the already installed
+    multilingual NER model. Dependency fields are retained in the canonical
+    evidence shape and remain empty when dependency parsing is not provisioned.
     """
 
     def analyze(self, text: str) -> Dict[str, Any]:
@@ -419,7 +429,7 @@ class QuantumLinguisticEngine:
                     "xpos": word.xpos,
                     "feats": word.feats,
                     "head": head_text,
-                    "deprel": word.deprel,
+                    "deprel": getattr(word, "deprel", None),
                 })
 
         ner_doc = SPACY_NLP(text)
