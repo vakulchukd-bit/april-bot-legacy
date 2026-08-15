@@ -1212,6 +1212,285 @@ def beautify_response(
     return text
 
 
+
+# =====================================================
+# 🧠 QUANTUM PRESENTATION ENGINE
+# =====================================================
+# Presentation is a machine-readable semantic contract, not a renderer.
+#
+# The engine NEVER infers presentation from words, punctuation, or
+# user-text triggers. It preserves presentation decisions/signals already
+# produced by the semantic/processor layers and normalizes them into one
+# canonical contract for every downstream renderer.
+#
+# Web presentation libraries consume this contract:
+#   - react-markdown + remark-gfm
+#   - remark-math + rehype-katex
+#
+# The backend does not render HTML; it carries the presentation signal
+# through the same Scene/Artifact route.
+
+PRESENTATION_ENGINE_VERSION = "APRIL-QUANTUM-PRESENTATION-V1"
+PRESENTATION_SIGNAL_VERSION = "1.0"
+
+PRESENTATION_LIBRARY_CONTRACT = {
+    "markdown": "react-markdown",
+    "markdown_extensions": ["remark-gfm"],
+    "math_parse": "remark-math",
+    "math_render": "rehype-katex",
+    "math_css": "katex/dist/katex.min.css",
+    "single_route": True,
+    "decision_owner": "QUANTUM_PROCESSOR",
+    "semantic_owner": "PRESENTATION_ENGINE",
+    "renderer_owner": "APRIL_WEB_RENDERER",
+}
+
+PRESENTATION_ROLES = (
+    "normal",
+    "key_point",
+    "definition",
+    "formula",
+    "code",
+    "value",
+    "caption",
+    "label",
+    "warning",
+    "example",
+)
+
+def _presentation_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _presentation_candidates(
+    response=None,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    renderer_payloads=None,
+):
+    candidates = []
+
+    sources = [
+        response,
+        renderer_payloads,
+        response_decision,
+        semantic,
+        cognition,
+    ]
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        for key in ("presentation", "presentation_signal", "presentation_contract"):
+            value = source.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+
+        metadata = source.get("metadata")
+        if isinstance(metadata, dict):
+            for key in ("presentation", "presentation_signal", "presentation_contract"):
+                value = metadata.get(key)
+                if isinstance(value, dict):
+                    candidates.append(value)
+
+        signal = source.get("signal")
+        if isinstance(signal, dict) and isinstance(signal.get("presentation"), dict):
+            candidates.append(signal["presentation"])
+
+    return candidates
+
+
+def normalize_presentation_signal(
+    response=None,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    renderer_payloads=None,
+):
+    """
+    Normalize an existing presentation decision into one lossless contract.
+
+    IMPORTANT:
+    This function does not discover formulas/key points from plain text.
+    Any span/role is accepted only when supplied structurally by the upstream
+    semantic/processor layer.
+    """
+    existing = _presentation_candidates(
+        response=response,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        renderer_payloads=renderer_payloads,
+    )
+
+    merged = {}
+    for item in existing:
+        merged.update(item)
+
+    spans = merged.get("spans")
+    if not isinstance(spans, list):
+        spans = []
+
+    formulas = merged.get("formulas")
+    if not isinstance(formulas, list):
+        formulas = []
+
+    key_points = merged.get("key_points")
+    if not isinstance(key_points, list):
+        key_points = []
+
+    by_block = merged.get("by_block")
+    if not isinstance(by_block, dict):
+        by_block = {}
+
+    normalized_spans = []
+    for raw in spans:
+        if not isinstance(raw, dict):
+            continue
+
+        role = str(raw.get("role") or "normal").strip().lower()
+        if role not in PRESENTATION_ROLES:
+            role = "normal"
+
+        start = raw.get("start")
+        end = raw.get("end")
+        start_ok = isinstance(start, int) and start >= 0
+        end_ok = isinstance(end, int) and end >= 0 and (not start_ok or end >= start)
+
+        item = {
+            "role": role,
+            "start": start if start_ok else None,
+            "end": end if end_ok else None,
+            "value": raw.get("value", ""),
+            "latex": raw.get("latex", raw.get("tex", "")),
+            "display": bool(raw.get("display", role == "formula")),
+            "emphasis": raw.get("emphasis", "normal"),
+            "style": raw.get("style", "default"),
+        }
+
+        # Do not invent a range. A semantic span can still carry a value/latex
+        # token for renderer-specific handling.
+        normalized_spans.append(item)
+
+    normalized = {
+        "version": str(merged.get("version") or PRESENTATION_SIGNAL_VERSION),
+        "engine": PRESENTATION_ENGINE_VERSION,
+        "enabled": bool(merged.get("enabled", True)),
+        "decision_owner": str(merged.get("decision_owner") or "QUANTUM_PROCESSOR"),
+        "single_route": True,
+        "mode": str(merged.get("mode") or "semantic_presentation"),
+        "primary_role": str(merged.get("primary_role") or "normal"),
+        "spans": normalized_spans,
+        "formulas": formulas,
+        "key_points": key_points,
+        "by_block": by_block,
+        "typography": dict(merged.get("typography") or {}),
+        "math": {
+            **PRESENTATION_LIBRARY_CONTRACT,
+            **dict(merged.get("math") or {}),
+            "structural_only": True,
+        },
+        "renderer_policy": {
+            "text": True,
+            "markdown": True,
+            "table": True,
+            "graph": True,
+            "diagram": True,
+            "gallery": True,
+            "code": True,
+            "link": True,
+            **dict(merged.get("renderer_policy") or {}),
+        },
+    }
+
+    # Preserve additional machine-controlled presentation fields without
+    # rewriting their contents.
+    for key in (
+        "title_role",
+        "description_role",
+        "legend_role",
+        "labels",
+        "units",
+        "primary_message",
+        "importance",
+        "density",
+        "layout",
+    ):
+        if key in merged:
+            normalized[key] = merged[key]
+
+    return normalized
+
+
+def attach_presentation_signal(
+    payload,
+    *,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    renderer_payloads=None,
+):
+    """Attach one presentation contract to a machine/scene payload in-place."""
+    if not isinstance(payload, dict):
+        return payload
+
+    presentation = normalize_presentation_signal(
+        response=payload,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        renderer_payloads=renderer_payloads,
+    )
+
+    payload["presentation"] = presentation
+
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        metadata["presentation"] = presentation
+
+    # MachineResponse-style containers frequently expose their render blocks
+    # directly. Keep the same signal available to individual blocks only when
+    # a block already carries a local presentation contract; otherwise the
+    # scene-level signal remains the single canonical source.
+    blocks = payload.get("render_blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if isinstance(block, dict) and isinstance(block.get("presentation"), dict):
+                block["presentation"] = normalize_presentation_signal(response=block)
+
+    scene = payload.get("scene")
+    if isinstance(scene, dict):
+        scene["presentation"] = presentation
+        scene_metadata = scene.get("metadata")
+        if isinstance(scene_metadata, dict):
+            scene_metadata["presentation"] = presentation
+
+    return payload
+
+
+def finalize_quantum_presentation_payload(
+    payload,
+    *,
+    semantic=None,
+    cognition=None,
+    response_decision=None,
+    renderer_payloads=None,
+):
+    if not isinstance(payload, dict):
+        return payload
+
+    # Scene/machine/renderer payloads all remain on the same canonical route.
+    return attach_presentation_signal(
+        payload,
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        renderer_payloads=renderer_payloads,
+    )
+
+
 # =====================================================
 # 🔥 FINAL PRESENTATION ENTRY
 # =====================================================
@@ -1249,19 +1528,49 @@ def format_response_presentation(
 
     if is_machine_response(final_text):
         safe_format_log("MACHINE RESPONSE -> SCENE CONTRACT")
-        return finalize_presentation_payload({
+        machine_payload = finalize_presentation_payload({
             "presentation_mode": "scene_pipeline",
             "machine_response": final_text
         })
+        if isinstance(machine_payload, dict):
+            attach_presentation_signal(
+                machine_payload,
+                semantic=semantic,
+                cognition=cognition,
+                response_decision=response_decision,
+            )
+            if isinstance(machine_payload.get("machine_response"), dict):
+                attach_presentation_signal(
+                    machine_payload["machine_response"],
+                    semantic=semantic,
+                    cognition=cognition,
+                    response_decision=response_decision,
+                )
+        return machine_payload
 
     if isinstance(final_text, dict) and final_text.get("type")=="provider_response":
         mr = final_text.get("machine_response")
         if is_machine_response(mr):
             safe_format_log("PROVIDER -> SCENE CONTRACT")
-            return finalize_presentation_payload({
+            provider_payload = finalize_presentation_payload({
                 "presentation_mode":"scene_pipeline",
                 "machine_response": mr
             })
+            if isinstance(provider_payload, dict):
+                attach_presentation_signal(
+                    provider_payload,
+                    semantic=semantic,
+                    cognition=cognition,
+                    response_decision=response_decision,
+                )
+                if isinstance(provider_payload.get("machine_response"), dict):
+                    attach_presentation_signal(
+                        provider_payload["machine_response"],
+                        semantic=semantic,
+                        cognition=cognition,
+                        response_decision=response_decision,
+                    )
+            return provider_payload
         safe_format_log("PROVIDER CONTRACT PRESERVED")
         return final_text
 
@@ -1453,3 +1762,5 @@ def finalize_presentation_payload(payload):
 # =====================================================
 
 PRESENTATION_ROUTE_VERSION = "fiber_scene_v1"
+PRESENTATION_ENGINE = PRESENTATION_ENGINE_VERSION
+
