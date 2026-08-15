@@ -134,7 +134,9 @@ def build_visual_reference(
     context_similarity = 0.0
     if scene.get("exists") and scene_reference_text:
         context_similarity = float(
-            QUANTUM_EMBEDDING_ENGINE.similarity(text, scene_reference_text)["score"]
+            QUANTUM_EMBEDDING_ENGINE.similarities(text, [scene_reference_text]).get(
+                scene_reference_text, 0.0
+            )
         )
 
     dialogue_contract = semantic.get("dialogue_contract", {}) if isinstance(semantic.get("dialogue_contract"), dict) else {}
