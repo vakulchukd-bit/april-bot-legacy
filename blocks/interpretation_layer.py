@@ -110,6 +110,63 @@ SEMANTIC_ENCODER: SentenceTransformer | None = None
 DIALOGUE_NLI: Any = None
 _SEMANTIC_RUNTIME_READY = False
 
+# Canonical Stanza runtime state. Resources are provisioned once into the
+# configured model directory; live requests never perform resource checks
+# unless the runtime has not been initialized yet.
+STANZA_RESOURCE_DIR = Path(
+    os.getenv(
+        "APRIL_STANZA_RESOURCES_DIR",
+        os.getenv(
+            "STANZA_RESOURCES_DIR",
+            str(Path.home() / "stanza_resources"),
+        ),
+    )
+).expanduser()
+STANZA_BOOTSTRAP_LANGS = tuple(
+    lang.strip().lower()
+    for lang in os.getenv("APRIL_STANZA_LANGS", "ru,en,uk").split(",")
+    if lang.strip()
+)
+STANZA_RESOURCES_FILE = STANZA_RESOURCE_DIR / "resources.json"
+_STANZA_BOOTSTRAP_ATTEMPTED = False
+
+
+def _stanza_resources_ready() -> bool:
+    """Return True only when the complete Stanza resources manifest exists."""
+    return STANZA_RESOURCES_FILE.is_file() and STANZA_RESOURCES_FILE.stat().st_size > 0
+
+
+def _provision_stanza_resources() -> None:
+    """Provision the configured Stanza resources once for offline runtime use."""
+    global _STANZA_BOOTSTRAP_ATTEMPTED
+
+    if _stanza_resources_ready():
+        return
+
+    if _STANZA_BOOTSTRAP_ATTEMPTED:
+        raise RuntimeError(
+            f"Stanza resources are unavailable at {STANZA_RESOURCES_FILE}"
+        )
+
+    _STANZA_BOOTSTRAP_ATTEMPTED = True
+    STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Stanza's supported offline workflow is: download first, then construct
+    # the pipeline with download_method=None. We deliberately provision each
+    # configured language once rather than downloading during every request.
+    for language in STANZA_BOOTSTRAP_LANGS:
+        stanza.download(
+            lang=language,
+            model_dir=str(STANZA_RESOURCE_DIR),
+            logging_level="WARN",
+        )
+
+    if not _stanza_resources_ready():
+        raise RuntimeError(
+            f"Stanza resource provisioning completed without resources.json: "
+            f"{STANZA_RESOURCES_FILE}"
+        )
+
 
 def _ensure_semantic_runtime() -> None:
     global SPACY_NLP, STANZA_NLP, SEMANTIC_ENCODER, DIALOGUE_NLI, _SEMANTIC_RUNTIME_READY
@@ -126,19 +183,26 @@ def _ensure_semantic_runtime() -> None:
         lang: {"processors": "tokenize,mwt,pos,lemma,depparse,ner"}
         for lang in lang_subset
     }
-    STANZA_NLP = MultilingualPipeline(
-        model_dir=str(STANZA_RESOURCE_DIR),
-        max_cache_size=12,
-        download_method=None,
-        lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
-        lang_configs=lang_configs or None,
-    )
+    try:
+        STANZA_NLP = MultilingualPipeline(
+            model_dir=str(STANZA_RESOURCE_DIR),
+            max_cache_size=12,
+            download_method=None,
+            lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
+            lang_configs=lang_configs or None,
+        )
 
-    SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
-    DIALOGUE_NLI = hf_pipeline(
-        "zero-shot-classification",
-        model=NLI_MODEL_NAME,
-    )
+        SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        DIALOGUE_NLI = hf_pipeline(
+            "zero-shot-classification",
+            model=NLI_MODEL_NAME,
+        )
+    except Exception:
+        # Do not advertise a half-built semantic runtime.
+        STANZA_NLP = None
+        SEMANTIC_ENCODER = None
+        DIALOGUE_NLI = None
+        raise
 
     _SEMANTIC_RUNTIME_READY = True
 
@@ -217,6 +281,8 @@ class SemanticEvidence:
 
 def _runtime_ready_guard() -> None:
     _ensure_semantic_runtime()
+    if not _SEMANTIC_RUNTIME_READY or STANZA_NLP is None or SEMANTIC_ENCODER is None or DIALOGUE_NLI is None:
+        raise RuntimeError("Quantum Interpretation semantic runtime is not ready")
 
 
 class QuantumLinguisticEngine:
