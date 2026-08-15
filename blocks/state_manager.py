@@ -53,11 +53,13 @@ TOPIC_MEMORY_LIMIT = 5
 
 # Runtime semantic model is deliberately lazy: importing State Manager must
 # remain cheap. The engine is loaded only when semantic memory is requested.
-SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # compatibility metadata; runtime is shared
 
 STATE_ENGINE_LOG = []
 # Compatibility name retained for callers that may inspect the old log.
 STATE_PATCH_LOG = STATE_ENGINE_LOG
+
+SEMANTIC_ENGINE_OWNER = "blocks.interpretation_layer.QUANTUM_EMBEDDING_ENGINE"
 
 _state_lock = threading.RLock()
 semantic_lock = threading.RLock()
@@ -320,11 +322,12 @@ class QuantumMemoryEngine:
             if self._encoder_ready:
                 return self._encoder
 
-            # No fallback model: this is the configured semantic engine.
-            from sentence_transformers import SentenceTransformer
-            self._encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
+            # One shared semantic engine for Interpretation, Visual Reference,
+            # and Memory. No second SentenceTransformer instance is created here.
+            from blocks.interpretation_layer import get_shared_semantic_encoder
+            self._encoder = get_shared_semantic_encoder()
             self._encoder_ready = True
-            safe_state_log("SEMANTIC MEMORY ENGINE READY")
+            safe_state_log("SEMANTIC MEMORY ENGINE LINKED: SHARED_INTERPRETATION_ENCODER")
             return self._encoder
 
     @staticmethod
@@ -348,6 +351,24 @@ class QuantumMemoryEngine:
         encoder = self._get_encoder()
         vectors = encoder.encode([q, c], normalize_embeddings=True)
         return max(0.0, min(1.0, (self._cosine(vectors[0], vectors[1]) + 1.0) / 2.0))
+
+    def semantic_scores(self, query, candidates):
+        """Batch semantic comparison through the shared interpretation encoder."""
+        q = safe_trim_text(query, 1600)
+        unique = []
+        seen = set()
+
+        for candidate in candidates:
+            c = safe_trim_text(candidate, 1600)
+            if c and c not in seen:
+                seen.add(c)
+                unique.append(c)
+
+        if not q or not unique:
+            return {}
+
+        from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
+        return QUANTUM_EMBEDDING_ENGINE.similarities(q, unique)
 
     # ---------- memory field ----------
 
@@ -432,14 +453,18 @@ class QuantumMemoryEngine:
         candidates = list(self.iter_memory_records(state_obj))
         ranked = []
 
-        # The semantic model is activated only when there is actually memory
-        # evidence to compare. This keeps normal state access lightweight.
+        candidate_texts = []
+        candidate_records = []
         for record in candidates:
             candidate_text = self._record_text(record)
-            if not candidate_text:
-                continue
+            if candidate_text:
+                candidate_texts.append(candidate_text)
+                candidate_records.append(record)
 
-            semantic = self.semantic_score(query, candidate_text)
+        semantic_map = self.semantic_scores(query, candidate_texts)
+
+        for record, candidate_text in zip(candidate_records, candidate_texts):
+            semantic = float(semantic_map.get(candidate_text, 0.0))
             recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_DAYS))
 
             relation = 0.0
