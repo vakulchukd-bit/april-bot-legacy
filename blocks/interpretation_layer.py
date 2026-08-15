@@ -216,6 +216,38 @@ def _provision_stanza_resources() -> None:
             raise
 
 
+def _prewarm_stanza_language_cache(pipeline: MultilingualPipeline, languages: Sequence[str]) -> None:
+    """Materialize the configured language pipelines once during accelerator prewarm.
+
+    MultilingualPipeline lazily creates the language-specific pipeline on first
+    use. We deliberately materialize those pipelines during startup so the first
+    user request does not pay the language-model loading cost.
+    """
+    if pipeline is None:
+        raise RuntimeError("Stanza multilingual pipeline is not initialized")
+
+    samples = {
+        "ru": "Это служебный прогрев русского семантического контура.",
+        "uk": "Це службовий прогрів українського семантичного контуру.",
+        "en": "This is a semantic runtime warmup sentence.",
+    }
+
+    warmed = []
+    for language in languages:
+        code = str(language or "").strip().lower()
+        if not code:
+            continue
+        sample = samples.get(code, "Semantic runtime warmup.")
+        pipeline([sample])
+        warmed.append(code)
+
+    if warmed:
+        print(
+            f"⚡ STANZA LANGUAGE CACHE READY: {','.join(warmed)}",
+            flush=True,
+        )
+
+
 def _ensure_semantic_runtime() -> None:
     global SPACY_NLP, STANZA_NLP, SEMANTIC_ENCODER, DIALOGUE_NLI, _SEMANTIC_RUNTIME_READY
     if _SEMANTIC_RUNTIME_READY:
@@ -245,6 +277,8 @@ def _ensure_semantic_runtime() -> None:
                 lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
                 lang_configs=lang_configs or None,
             )
+
+            _prewarm_stanza_language_cache(STANZA_NLP, lang_subset)
 
             SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
             DIALOGUE_NLI = hf_pipeline(
@@ -378,6 +412,30 @@ def _runtime_ready_guard() -> None:
         raise RuntimeError("Quantum Interpretation semantic runtime is not ready")
 
 
+def _embedding_runtime_guard() -> None:
+    """Load only the shared embedding engine when vector evidence is needed."""
+    global SEMANTIC_ENCODER
+    if SEMANTIC_ENCODER is not None:
+        return
+    with _SEMANTIC_RUNTIME_LOCK:
+        if SEMANTIC_ENCODER is not None:
+            return
+        started = time.perf_counter()
+        SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        elapsed = time.perf_counter() - started
+        print(
+            f"⚡ SEMANTIC EMBEDDING ENGINE READY: shared=1 elapsed={elapsed:.2f}s",
+            flush=True,
+        )
+
+
+def get_shared_semantic_encoder() -> SentenceTransformer:
+    """Return the one shared sentence-transformer engine for all rooms."""
+    _embedding_runtime_guard()
+    assert SEMANTIC_ENCODER is not None
+    return SEMANTIC_ENCODER
+
+
 class QuantumLinguisticEngine:
     """
     Dedicated linguistic engine.
@@ -470,7 +528,7 @@ class QuantumEmbeddingEngine:
             self._pair_cache.pop(next(iter(self._pair_cache)))
 
     def similarity(self, text_a: str, text_b: str) -> Dict[str, Any]:
-        _runtime_ready_guard()
+        _embedding_runtime_guard()
         text_a = normalize_text(text_a)
         text_b = normalize_text(text_b)
         if not text_a or not text_b:
@@ -515,7 +573,7 @@ class QuantumEmbeddingEngine:
         Results are cached by the exact semantic pair set so the same turn does
         not repeatedly encode identical context fields.
         """
-        _runtime_ready_guard()
+        _embedding_runtime_guard()
         text = normalize_text(text)
         unique = []
         seen = set()
@@ -994,6 +1052,11 @@ def _dialogue_signal_contract(
     }
 
 
+def semantic_packet_score(dialogue_result: Dict[str, Any], key: str) -> float:
+    embeddings = dialogue_result.get("semantic_measurement", {}).get("embeddings", {})
+    return float(embeddings.get(key, 0.0) or 0.0)
+
+
 def _semantic_context_packet(
     text: str,
     history: list,
@@ -1025,9 +1088,21 @@ def _semantic_context_packet(
         "representation": representation,
         "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
         "context_vectors": {
-            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer),
-            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic),
-            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal),
+            "previous_answer": {
+                "score": float(semantic_packet_score(dialogue, "previous_answer")),
+                "source": "sentence_transformers",
+                "measured": bool(previous_answer),
+            },
+            "active_topic": {
+                "score": float(semantic_packet_score(dialogue, "active_topic")),
+                "source": "sentence_transformers",
+                "measured": bool(active_topic),
+            },
+            "active_goal": {
+                "score": float(semantic_packet_score(dialogue, "active_goal")),
+                "source": "sentence_transformers",
+                "measured": bool(active_goal),
+            },
         },
         "decision_owner": "QUANTUM_PROCESSOR",
         "engine": "quantum_interpretation_engine",
