@@ -153,6 +153,57 @@ _SEMANTIC_RUNTIME_LOCK = threading.RLock()
 _SEMANTIC_ACCELERATOR_STARTED = False
 _SEMANTIC_ACCELERATOR_ERROR: Exception | None = None
 
+# Canonical quantum snapshot helper.
+# Downstream diagnostics must receive plain transport-safe data only.
+# It never invokes a model and therefore cannot add latency to the route.
+def _quantum_snapshot(value: Any, *, _depth: int = 0, _max_depth: int = 8) -> Any:
+    """Return a transport-safe immutable-ish snapshot of quantum evidence.
+
+    The interpretation layer may contain nested dictionaries/lists and numeric
+    model outputs. Diagnostics and MachineResponse must never receive live
+    model objects, custom classes, sets, or other runtime references.
+    """
+    if _depth >= _max_depth:
+        return "<max-depth>"
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+
+    if isinstance(value, dict):
+        return {
+            str(key): _quantum_snapshot(
+                item,
+                _depth=_depth + 1,
+                _max_depth=_max_depth,
+            )
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            _quantum_snapshot(
+                item,
+                _depth=_depth + 1,
+                _max_depth=_max_depth,
+            )
+            for item in value
+        ]
+
+    if isinstance(value, set):
+        return [
+            _quantum_snapshot(
+                item,
+                _depth=_depth + 1,
+                _max_depth=_max_depth,
+            )
+            for item in sorted(value, key=lambda item: str(item))
+        ]
+
+    # Last-resort compatibility representation. This branch is diagnostic-only
+    # and is deliberately non-executing: it cannot affect routing or providers.
+    return str(value)
+
+
 # Canonical Quantum Measurement runtime.
 # One turn -> one semantic field. Repeated callers consume the cached field.
 _QUANTUM_MEASUREMENT_CACHE: dict[tuple, Dict[str, Any]] = {}
@@ -1319,7 +1370,7 @@ def _semantic_context_packet(
         "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
         "context_vectors": {
             "previous_answer": {
-                "score": float(semantic_packet_score(dialogue, "previous_answer")),
+                "score": float(semantic_packet_score(dialogue, "previous_assistant")),
                 "source": "sentence_transformers",
                 "measured": bool(previous_answer),
             },
