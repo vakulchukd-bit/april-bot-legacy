@@ -20,7 +20,6 @@ Compatibility:
 
 import os
 import re
-import hashlib
 import threading
 import time
 from pathlib import Path
@@ -127,7 +126,7 @@ STANZA_RESOURCE_DIR = Path(
 ).expanduser()
 STANZA_BOOTSTRAP_LANGS = tuple(
     lang.strip().lower()
-    for lang in os.getenv("APRIL_STANZA_LANGS", "ru").split(",")
+    for lang in os.getenv("APRIL_STANZA_LANGS", "ru,en,uk").split(",")
     if lang.strip()
 )
 STANZA_RESOURCES_FILE = STANZA_RESOURCE_DIR / "resources.json"
@@ -141,84 +140,10 @@ STANZA_LANGUAGE_PROCESSORS = os.getenv(
     "tokenize,pos,lemma",
 )
 STANZA_LANGID_MODEL_FILE = STANZA_RESOURCE_DIR / "multilingual" / "langid" / "ud.pt"
-# Language weights are warmed only for the configured fast path. Additional
-# languages remain explicit configuration, not automatic deployment work.
-STANZA_PREWARM_LANGS = tuple(
-    lang.strip().lower()
-    for lang in os.getenv("APRIL_STANZA_PREWARM_LANGS", "ru").split(",")
-    if lang.strip() and lang.strip().lower() in STANZA_BOOTSTRAP_LANGS
-)
 _STANZA_BOOTSTRAP_ATTEMPTED = False
 _SEMANTIC_RUNTIME_LOCK = threading.RLock()
 _SEMANTIC_ACCELERATOR_STARTED = False
 _SEMANTIC_ACCELERATOR_ERROR: Exception | None = None
-
-# Canonical quantum snapshot helper.
-# Downstream diagnostics must receive plain transport-safe data only.
-# It never invokes a model and therefore cannot add latency to the route.
-def _quantum_snapshot(value: Any, *, _depth: int = 0, _max_depth: int = 8) -> Any:
-    """Return a transport-safe immutable-ish snapshot of quantum evidence.
-
-    The interpretation layer may contain nested dictionaries/lists and numeric
-    model outputs. Diagnostics and MachineResponse must never receive live
-    model objects, custom classes, sets, or other runtime references.
-    """
-    if _depth >= _max_depth:
-        return "<max-depth>"
-
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value
-
-    if isinstance(value, dict):
-        return {
-            str(key): _quantum_snapshot(
-                item,
-                _depth=_depth + 1,
-                _max_depth=_max_depth,
-            )
-            for key, item in value.items()
-        }
-
-    if isinstance(value, (list, tuple)):
-        return [
-            _quantum_snapshot(
-                item,
-                _depth=_depth + 1,
-                _max_depth=_max_depth,
-            )
-            for item in value
-        ]
-
-    if isinstance(value, set):
-        return [
-            _quantum_snapshot(
-                item,
-                _depth=_depth + 1,
-                _max_depth=_max_depth,
-            )
-            for item in sorted(value, key=lambda item: str(item))
-        ]
-
-    # Last-resort compatibility representation. This branch is diagnostic-only
-    # and is deliberately non-executing: it cannot affect routing or providers.
-    return str(value)
-
-
-# Canonical Quantum Measurement runtime.
-# One turn -> one semantic field. Repeated callers consume the cached field.
-_QUANTUM_MEASUREMENT_CACHE: dict[tuple, Dict[str, Any]] = {}
-_QUANTUM_MEASUREMENT_CACHE_LIMIT = 96
-_QUANTUM_HYPOTHESIS_EMBEDDINGS: dict[str, Any] = {}
-_QUANTUM_HYPOTHESIS_INDEX_READY = False
-_QUANTUM_HYPOTHESIS_INDEX_LOCK = threading.RLock()
-_QUANTUM_RUNTIME_METRICS = {
-    "measurements": 0,
-    "cache_hits": 0,
-    "nli_refinements": 0,
-    "nli_full_passes": 0,
-    "last_elapsed_ms": 0.0,
-    "last_stage_ms": {},
-}
 
 
 def _stanza_lang_ready(lang: str) -> bool:
@@ -291,37 +216,6 @@ def _provision_stanza_resources() -> None:
             raise
 
 
-def _prewarm_stanza_language_cache(pipeline: MultilingualPipeline, languages: Sequence[str]) -> None:
-    """Warm only the explicitly configured hot-language cache.
-
-    MultilingualPipeline already owns the runtime cache. Warming every
-    provisioned language makes deployment unnecessarily expensive, so the
-    quantum accelerator warms only STANZA_PREWARM_LANGS.
-    """
-    if pipeline is None:
-        raise RuntimeError("Stanza multilingual pipeline is not initialized")
-
-    samples = {
-        "ru": "Это служебный прогрев русского семантического контура.",
-        "uk": "Це службовий прогрів українського семантичного контуру.",
-        "en": "This is a semantic runtime warmup sentence.",
-    }
-
-    warmed = []
-    for language in languages:
-        code = str(language or "").strip().lower()
-        if not code:
-            continue
-        sample = samples.get(code, "Semantic runtime warmup.")
-        pipeline([sample])
-        warmed.append(code)
-
-    print(
-        f"⚡ STANZA LANGUAGE CACHE READY: {','.join(warmed) if warmed else 'lazy-mode'}",
-        flush=True,
-    )
-
-
 def _ensure_semantic_runtime() -> None:
     global SPACY_NLP, STANZA_NLP, SEMANTIC_ENCODER, DIALOGUE_NLI, _SEMANTIC_RUNTIME_READY
     if _SEMANTIC_RUNTIME_READY:
@@ -334,15 +228,6 @@ def _ensure_semantic_runtime() -> None:
         started = time.perf_counter()
         try:
             SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
-            # Keep only the entity component for this room. Linguistic
-            # token/lemma/POS work is already provided by Stanza.
-            if getattr(SPACY_NLP, "pipe_names", None):
-                for pipe_name in list(SPACY_NLP.pipe_names):
-                    if pipe_name != "ner":
-                        try:
-                            SPACY_NLP.disable_pipe(pipe_name)
-                        except Exception:
-                            pass
 
             if not _stanza_resources_ready():
                 _provision_stanza_resources()
@@ -360,8 +245,6 @@ def _ensure_semantic_runtime() -> None:
                 lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
                 lang_configs=lang_configs or None,
             )
-
-            _prewarm_stanza_language_cache(STANZA_NLP, STANZA_PREWARM_LANGS)
 
             SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
             DIALOGUE_NLI = hf_pipeline(
@@ -470,142 +353,6 @@ CAPABILITY_HYPOTHESES = {
     "space": "the user is discussing spatial arrangement, scene layout, or visual composition",
 }
 
-NLI_HYPOTHESIS_FAMILIES = {
-    "dialogue": DIALOGUE_LABELS,
-    "representation": tuple(REPRESENTATION_HYPOTHESES.values()),
-    "domain": tuple(DOMAIN_HYPOTHESES.values()),
-    "capability": tuple(CAPABILITY_HYPOTHESES.values()),
-}
-
-QUANTUM_PREFILTER_TOP_K = {
-    "dialogue": 3,
-    "representation": 2,
-    "domain": 2,
-    "capability": 2,
-}
-QUANTUM_REFINEMENT_MARGIN = 0.08
-QUANTUM_REFINEMENT_SCORE = 0.54
-
-
-def _prototype_key(family: str, hypothesis: str) -> str:
-    return f"{family}::{hypothesis}"
-
-
-def _ensure_hypothesis_index() -> None:
-    """Build one reusable multilingual semantic index for NLI candidates."""
-    global _QUANTUM_HYPOTHESIS_INDEX_READY
-    if _QUANTUM_HYPOTHESIS_INDEX_READY:
-        return
-
-    with _QUANTUM_HYPOTHESIS_INDEX_LOCK:
-        if _QUANTUM_HYPOTHESIS_INDEX_READY:
-            return
-        _embedding_runtime_guard()
-        labels = [
-            (family, hypothesis)
-            for family, hypotheses in NLI_HYPOTHESIS_FAMILIES.items()
-            for hypothesis in hypotheses
-        ]
-        vectors = SEMANTIC_ENCODER.encode(
-            [hypothesis for _, hypothesis in labels],
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        _QUANTUM_HYPOTHESIS_EMBEDDINGS.clear()
-        for (family, hypothesis), vector in zip(labels, vectors):
-            _QUANTUM_HYPOTHESIS_EMBEDDINGS[_prototype_key(family, hypothesis)] = vector
-        _QUANTUM_HYPOTHESIS_INDEX_READY = True
-
-
-def _semantic_prefilter(
-    text: str,
-    families: Dict[str, Sequence[str]],
-) -> tuple[list[str], Dict[str, Any]]:
-    """Select a compact semantic candidate field before expensive NLI.
-
-    This is vector retrieval, not lexical triggering. The full hypothesis
-    library stays available; only the highest semantic candidates are sent to
-    the NLI refinement stage.
-    """
-    _ensure_hypothesis_index()
-    query = normalize_text(text)
-    if not query:
-        return [], {"families": {}, "mode": "empty"}
-
-    query_vec = SEMANTIC_ENCODER.encode(
-        [query],
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )[0]
-
-    selected: list[str] = []
-    family_meta: Dict[str, Any] = {}
-
-    for family, hypotheses in families.items():
-        scored = []
-        for hypothesis in hypotheses:
-            vector = _QUANTUM_HYPOTHESIS_EMBEDDINGS[_prototype_key(family, hypothesis)]
-            score = float(vector @ query_vec)
-            scored.append((hypothesis, max(0.0, min(1.0, score))))
-
-        scored.sort(key=lambda item: item[1], reverse=True)
-        top_k = max(1, int(QUANTUM_PREFILTER_TOP_K.get(family, 2)))
-        top = scored[:top_k]
-
-        margin = 0.0
-        if len(scored) > 1:
-            margin = scored[0][1] - scored[1][1]
-
-        # Low-confidence families get a slightly wider NLI refinement field,
-        # but never the whole library unless the semantic margin is extremely
-        # weak. This preserves accuracy without forcing every request through
-        # the full 35-ish hypothesis set.
-        if margin < QUANTUM_REFINEMENT_MARGIN or (top and top[0][1] < QUANTUM_REFINEMENT_SCORE):
-            widened = scored[: min(len(scored), top_k + 2)]
-        else:
-            widened = top
-
-        family_meta[family] = {
-            "vector_candidates": [
-                {"label": label, "score": round(score, 6)}
-                for label, score in widened
-            ],
-            "top_score": round(scored[0][1], 6) if scored else 0.0,
-            "margin": round(margin, 6),
-            "candidate_count": len(widened),
-        }
-        selected.extend(label for label, _ in widened)
-
-    return list(dict.fromkeys(selected)), {
-        "families": family_meta,
-        "mode": "semantic_prefilter",
-        "candidate_count": len(selected),
-    }
-
-
-def _split_nli_families(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Split one NLI measurement into the canonical evidence families."""
-    labels = list(result.get("labels") or [])
-    scores = [float(x) for x in (result.get("scores") or [])]
-    score_map = {label: score for label, score in zip(labels, scores)}
-    families = {}
-    for family, hypotheses in NLI_HYPOTHESIS_FAMILIES.items():
-        family_scores = [
-            (hypothesis, score_map[hypothesis])
-            for hypothesis in hypotheses
-            if hypothesis in score_map
-        ]
-        family_scores.sort(key=lambda item: item[1], reverse=True)
-        families[family] = {
-            "labels": [label for label, _ in family_scores],
-            "scores": [score for _, score in family_scores],
-            "source": "transformers_nli",
-            "batched": True,
-        }
-    return families
-
 
 @dataclass
 class SemanticEvidence:
@@ -629,30 +376,6 @@ def _runtime_ready_guard() -> None:
     _ensure_semantic_runtime()
     if not _SEMANTIC_RUNTIME_READY or STANZA_NLP is None or SEMANTIC_ENCODER is None or DIALOGUE_NLI is None:
         raise RuntimeError("Quantum Interpretation semantic runtime is not ready")
-
-
-def _embedding_runtime_guard() -> None:
-    """Load only the shared embedding engine when vector evidence is needed."""
-    global SEMANTIC_ENCODER
-    if SEMANTIC_ENCODER is not None:
-        return
-    with _SEMANTIC_RUNTIME_LOCK:
-        if SEMANTIC_ENCODER is not None:
-            return
-        started = time.perf_counter()
-        SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
-        elapsed = time.perf_counter() - started
-        print(
-            f"⚡ SEMANTIC EMBEDDING ENGINE READY: shared=1 elapsed={elapsed:.2f}s",
-            flush=True,
-        )
-
-
-def get_shared_semantic_encoder() -> SentenceTransformer:
-    """Return the one shared sentence-transformer engine for all rooms."""
-    _embedding_runtime_guard()
-    assert SEMANTIC_ENCODER is not None
-    return SEMANTIC_ENCODER
 
 
 class QuantumLinguisticEngine:
@@ -747,7 +470,7 @@ class QuantumEmbeddingEngine:
             self._pair_cache.pop(next(iter(self._pair_cache)))
 
     def similarity(self, text_a: str, text_b: str) -> Dict[str, Any]:
-        _embedding_runtime_guard()
+        _runtime_ready_guard()
         text_a = normalize_text(text_a)
         text_b = normalize_text(text_b)
         if not text_a or not text_b:
@@ -792,7 +515,7 @@ class QuantumEmbeddingEngine:
         Results are cached by the exact semantic pair set so the same turn does
         not repeatedly encode identical context fields.
         """
-        _embedding_runtime_guard()
+        _runtime_ready_guard()
         text = normalize_text(text)
         unique = []
         seen = set()
@@ -832,42 +555,19 @@ class QuantumEmbeddingEngine:
 
 
 class QuantumIntentEngine:
-    """NLI refinement engine fed by semantic candidate retrieval."""
+    """NLI/zero-shot semantic engine. No keyword routing."""
 
-    def classify(
-        self,
-        text: str,
-        hypotheses: Sequence[str],
-        *,
-        family_map: Dict[str, Sequence[str]] | None = None,
-    ) -> Dict[str, Any]:
+    def classify(self, text: str, hypotheses: Sequence[str]) -> Dict[str, Any]:
         _runtime_ready_guard()
-        requested = list(hypotheses)
-        prefilter = {"mode": "explicit", "candidate_count": len(requested)}
-        if family_map:
-            requested, prefilter = _semantic_prefilter(text, family_map)
-
-        # Keep the NLI call strictly semantic. No word list controls routing.
         result = DIALOGUE_NLI(
             text,
-            candidate_labels=list(requested),
+            candidate_labels=list(hypotheses),
             multi_label=True,
         )
-
-        used_full_library = len(requested) >= len(
-            tuple(dict.fromkeys(x for values in NLI_HYPOTHESIS_FAMILIES.values() for x in values))
-        )
-        _QUANTUM_RUNTIME_METRICS["nli_refinements"] += 1
-        if used_full_library:
-            _QUANTUM_RUNTIME_METRICS["nli_full_passes"] += 1
-
         return {
             "labels": list(result["labels"]),
             "scores": [float(score) for score in result["scores"]],
             "source": "transformers_nli",
-            "semantic_prefilter": prefilter,
-            "candidate_count": len(requested),
-            "full_hypothesis_library": used_full_library,
         }
 
 
@@ -905,7 +605,6 @@ class QuantumEvidenceFusionEngine:
         active_goal: str = "",
         active_topic: str = "",
     ) -> Dict[str, Any]:
-        started = time.perf_counter()
         key = (
             str(text or "").strip(),
             str(previous_assistant or "").strip(),
@@ -914,72 +613,39 @@ class QuantumEvidenceFusionEngine:
         )
         cached = self._turn_cache.get(key)
         if cached is not None:
-            _QUANTUM_RUNTIME_METRICS["cache_hits"] += 1
             return cached
 
         normalized_turn_text = str(text or "").strip()
-        stage_times: Dict[str, float] = {}
-
-        stage = time.perf_counter()
         linguistic = self._linguistic_cache.get(normalized_turn_text)
         if linguistic is None:
             linguistic = self.linguistic.analyze(normalized_turn_text)
             self._linguistic_cache[normalized_turn_text] = linguistic
-        stage_times["linguistic_ms"] = round((time.perf_counter() - stage) * 1000.0, 3)
 
-        stage = time.perf_counter()
         nli_bundle = self._nli_cache.get(normalized_turn_text)
-        nli_metadata: Dict[str, Any] = {}
         if nli_bundle is None:
-            combined_hypotheses = tuple(
-                dict.fromkeys(
-                    hypothesis
-                    for family in NLI_HYPOTHESIS_FAMILIES.values()
-                    for hypothesis in family
-                )
-            )
-            family_map = {
-                family: tuple(hypotheses)
-                for family, hypotheses in NLI_HYPOTHESIS_FAMILIES.items()
-                if any(hypothesis in combined_hypotheses for hypothesis in hypotheses)
-            }
-            combined_nli = self.intent.classify(
-                normalized_turn_text,
-                combined_hypotheses,
-                family_map=family_map,
-            )
-            split = _split_nli_families(combined_nli)
-            nli_metadata = {
-                "semantic_prefilter": combined_nli.get("semantic_prefilter", {}),
-                "candidate_count": combined_nli.get("candidate_count", len(combined_hypotheses)),
-                "full_hypothesis_library": bool(combined_nli.get("full_hypothesis_library")),
-            }
             nli_bundle = {
-                "dialogue_nli": split["dialogue"],
-                "representation_nli": split["representation"],
-                "domain_nli": split["domain"],
-                "capability_nli": split["capability"],
-                "combined_nli": combined_nli,
+                "dialogue_nli": self.intent.classify(normalized_turn_text, DIALOGUE_LABELS),
+                "representation_nli": self.intent.classify(
+                    normalized_turn_text, tuple(REPRESENTATION_HYPOTHESES.values())
+                ),
+                "domain_nli": self.intent.classify(
+                    normalized_turn_text, tuple(DOMAIN_HYPOTHESES.values())
+                ),
+                "capability_nli": self.intent.classify(
+                    normalized_turn_text, tuple(CAPABILITY_HYPOTHESES.values())
+                ),
             }
             self._nli_cache[normalized_turn_text] = nli_bundle
-        stage_times["nli_ms"] = round((time.perf_counter() - stage) * 1000.0, 3)
 
         dialogue_nli = nli_bundle["dialogue_nli"]
         representation_nli = nli_bundle["representation_nli"]
         domain_nli = nli_bundle["domain_nli"]
         capability_nli = nli_bundle["capability_nli"]
 
-        stage = time.perf_counter()
         embedding_map = self.embedding.similarities(
             text,
             [v for v in (previous_assistant, active_topic, active_goal) if v],
         )
-        stage_times["embedding_ms"] = round((time.perf_counter() - stage) * 1000.0, 3)
-
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        _QUANTUM_RUNTIME_METRICS["measurements"] += 1
-        _QUANTUM_RUNTIME_METRICS["last_elapsed_ms"] = round(elapsed_ms, 3)
-        _QUANTUM_RUNTIME_METRICS["last_stage_ms"] = dict(stage_times)
 
         result = {
             "linguistic": linguistic,
@@ -992,14 +658,9 @@ class QuantumEvidenceFusionEngine:
                 "active_topic": embedding_map.get(active_topic, 0.0),
                 "active_goal": embedding_map.get(active_goal, 0.0),
             },
-            "nli_metadata": nli_metadata,
-            "timing": {
-                "elapsed_ms": round(elapsed_ms, 3),
-                "stages": stage_times,
-            },
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
-            "engine": "quantum_interpretation_turn_engine_v2",
+            "engine": "quantum_interpretation_turn_engine",
         }
         self._turn_cache[key] = result
         if len(self._turn_cache) > self._cache_limit:
@@ -1333,11 +994,6 @@ def _dialogue_signal_contract(
     }
 
 
-def semantic_packet_score(dialogue_result: Dict[str, Any], key: str) -> float:
-    embeddings = dialogue_result.get("semantic_measurement", {}).get("embeddings", {})
-    return float(embeddings.get(key, 0.0) or 0.0)
-
-
 def _semantic_context_packet(
     text: str,
     history: list,
@@ -1369,21 +1025,9 @@ def _semantic_context_packet(
         "representation": representation,
         "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
         "context_vectors": {
-            "previous_answer": {
-                "score": float(semantic_packet_score(dialogue, "previous_assistant")),
-                "source": "sentence_transformers",
-                "measured": bool(previous_answer),
-            },
-            "active_topic": {
-                "score": float(semantic_packet_score(dialogue, "active_topic")),
-                "source": "sentence_transformers",
-                "measured": bool(active_topic),
-            },
-            "active_goal": {
-                "score": float(semantic_packet_score(dialogue, "active_goal")),
-                "source": "sentence_transformers",
-                "measured": bool(active_goal),
-            },
+            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer),
+            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic),
+            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal),
         },
         "decision_owner": "QUANTUM_PROCESSOR",
         "engine": "quantum_interpretation_engine",
@@ -1450,23 +1094,18 @@ def build_result(text):
 
 
 def detect_explanation_content(text):
-    return semantic_evidence_information(text) >= 0.60
+    return contains_any(text, (
+        "объясни", "объяснение", "пояснение", "расшифровка",
+        "что означает", "что значит",
+    ))
 
 
 def detect_analysis_content(text):
-    return semantic_evidence_exploration(text) >= 0.60
+    return contains_any(text, ("анализ", "вывод", "заключение", "интерпретация"))
 
 
 def detect_legend_content(text):
-    representation = {
-        item["label"]: float(item["score"])
-        for item in measure_representation_evidence(text)
-    }
-    return max(
-        representation.get("graph", 0.0),
-        representation.get("table", 0.0),
-        representation.get("diagram", 0.0),
-    ) >= 0.60
+    return contains_any(text, ("обозначение", "обозначения", "легенда", "расшифровка"))
 
 
 def detect_object_content(text):
@@ -1648,23 +1287,10 @@ def _canonical_dialogue_contract(text, history=None, state=None, semantic=None):
         resolved_request = text
 
     capabilities = []
-    capability_measurement = (
-        measured.get("semantic_measurement", {}).get("capability_nli", {})
-        if isinstance(measured.get("semantic_measurement"), dict)
-        else {}
-    )
-    capability_labels = capability_measurement.get("labels") or []
-    capability_scores = capability_measurement.get("scores") or []
-    capability_map = {
-        label: float(score)
-        for label, score in zip(capability_labels, capability_scores)
-    }
-    representation_signal = semantic.get("candidate_representations") or []
-    if representation_signal:
+    if semantic.get("candidate_representations"):
         capabilities.append("structured_rendering")
-    if capability_map and max(capability_map.get(label, 0.0) for label in capability_map) >= 0.60:
-        if capability_map.get(CAPABILITY_HYPOTHESES["exploration"], 0.0) >= 0.60:
-            capabilities.append("analysis")
+    if any(x in normalize_lower(text) for x in ("проанализ", "сравни", "почему", "разбери", "объясни")):
+        capabilities.append("analysis")
     if measured.get("reference_to_previous"):
         capabilities.append("dialogue_continuity")
 
@@ -1813,76 +1439,7 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
     return result
 
 
-def _interpretation_cache_signature(
-    text: str,
-    cognition: Any,
-    semantic: Any,
-    history: Any,
-    state: Any,
-) -> tuple:
-    history = history if isinstance(history, list) else []
-    state = state if isinstance(state, dict) else {}
-    semantic = semantic if isinstance(semantic, dict) else {}
-    cognition = cognition if isinstance(cognition, dict) else {}
-
-    last_assistant = ""
-    last_user = ""
-    for item in reversed(history[-8:]):
-        if not isinstance(item, dict):
-            continue
-        if not last_assistant and isinstance(item.get("april"), dict):
-            last_assistant = normalize_text(
-                item["april"].get("answer")
-                or item["april"].get("content")
-                or item["april"].get("summary")
-            )
-        if not last_user and item.get("user"):
-            last_user = normalize_text(item.get("user"))
-        if last_assistant and last_user:
-            break
-
-    context_fields = (
-        state.get("active_goal"),
-        state.get("current_goal"),
-        state.get("active_topic"),
-        state.get("current_topic"),
-        semantic.get("active_goal"),
-        semantic.get("current_topic"),
-        cognition.get("active_goal"),
-        cognition.get("active_topic"),
-    )
-    return (
-        normalize_text(text),
-        last_assistant,
-        last_user,
-        *tuple(normalize_text(value) for value in context_fields),
-    )
-
-
-def _remember_interpretation(signature: tuple, result: Dict[str, Any]) -> None:
-    _QUANTUM_MEASUREMENT_CACHE[signature] = result
-    if len(_QUANTUM_MEASUREMENT_CACHE) > _QUANTUM_MEASUREMENT_CACHE_LIMIT:
-        _QUANTUM_MEASUREMENT_CACHE.pop(next(iter(_QUANTUM_MEASUREMENT_CACHE)))
-
-
 def interpret_request(text, cognition=None, semantic=None, history=None, state=None):
-    started = time.perf_counter()
-    signature = _interpretation_cache_signature(
-        text, cognition, semantic, history, state
-    )
-    cached = _QUANTUM_MEASUREMENT_CACHE.get(signature)
-    if cached is not None:
-        _QUANTUM_RUNTIME_METRICS["cache_hits"] += 1
-        cached_copy = dict(cached)
-        diagnostics = dict(cached_copy.get("semantic_engine_diagnostics", {}))
-        diagnostics["cache_hit"] = True
-        diagnostics["cache_signature"] = hashlib.sha1(
-            repr(signature).encode("utf-8")
-        ).hexdigest()[:16]
-        diagnostics["last_call_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
-        cached_copy["semantic_engine_diagnostics"] = diagnostics
-        return cached_copy
-
     result = _base_interpret_request(
         text,
         cognition=cognition,
@@ -1901,18 +1458,7 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
         cognition or {},
     )
 
-    # Canonical public measurements for every downstream consumer.
     result["dialogue_contract"] = contract
-    result["quantum_dialogue_measurement"] = _quantum_snapshot(
-        contract.get("semantic_measurement", {})
-    )
-    result["quantum_representation_measurement"] = _quantum_snapshot(
-        result.get("quantum_representation_measurement", {})
-    )
-    result["quantum_representation_candidates"] = _quantum_snapshot(
-        result.get("candidate_representations", [])
-    )
-
     result["dialog_act"] = contract["dialog_act"]
     result["continuation"] = bool(contract["continuation"])
     result["continuation_target"] = (
@@ -1973,53 +1519,26 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
     state_out = export_transport_state(state_out, result)
     result["transport_state"] = state_out
     result["primary_contract"] = "transport_state"
-
-    runtime_metrics = dict(_QUANTUM_RUNTIME_METRICS)
-    runtime_metrics["interpret_request_elapsed_ms"] = round(
-        (time.perf_counter() - started) * 1000.0, 3
-    )
     result["semantic_engine_diagnostics"] = {
         "engines": [
             "stanza_multilingual_linguistic",
             "spacy_ner",
             "sentence_transformers_embedding",
-            "transformers_nli_refinement",
+            "transformers_nli",
             "quantum_evidence_fusion",
         ],
         "engine_mode": "required",
-        "stanza_bootstrap_languages": list(STANZA_BOOTSTRAP_LANGS),
-        "stanza_prewarm_languages": list(STANZA_PREWARM_LANGS),
         "fallback_mode": False,
         "substring_routing": False,
         "candidate_to_required_promotion": False,
         "renderer_selection_owner": "QUANTUM_PROCESSOR",
         "single_route": True,
-        "cache_hit": False,
-        "measurement_version": "quantum_measurement_v2",
-        "runtime_metrics": runtime_metrics,
     }
     result["interpretation_state"] = state_out
     result["transport_diagnostics"] = build_transport_diagnostics(result)
     result = propagate_canonical_response(result, state_out)
     result = bridge_machine_response(result, state_out)
 
-    result["quantum_measurement"] = {
-        "version": "quantum_measurement_v2",
-        "current_request": text,
-        "evidence": _quantum_snapshot(result.get("quantum_interpretation_field", {})),
-        "dialogue": _quantum_snapshot(result.get("quantum_dialogue_measurement", {})),
-        "representation": _quantum_snapshot(result.get("quantum_representation_measurement", {})),
-        "context_dependency": result.get("context_dependency"),
-        "timing": _quantum_snapshot(
-            result.get("quantum_dialogue_measurement", {}).get("timing", {})
-            if isinstance(result.get("quantum_dialogue_measurement"), dict)
-            else {}
-        ),
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "evidence_only": True,
-    }
-
-    _remember_interpretation(signature, result)
     return result
 
 
@@ -2433,38 +1952,3 @@ SEMANTIC_PIPELINE = (
     "semantic_dialogue_graph", "scene_profile", "artifact_contract",
     "executor_preparation_contract",
 )
-
-
-# ---------------------------------------------------------------------------
-# Runtime diagnostics / canonical engine access
-# ---------------------------------------------------------------------------
-
-def get_quantum_interpretation_runtime_metrics() -> Dict[str, Any]:
-    return {
-        "runtime_ready": bool(_SEMANTIC_RUNTIME_READY),
-        "accelerator_started": bool(_SEMANTIC_ACCELERATOR_STARTED),
-        "accelerator_error": (
-            f"{type(_SEMANTIC_ACCELERATOR_ERROR).__name__}: {_SEMANTIC_ACCELERATOR_ERROR}"
-            if _SEMANTIC_ACCELERATOR_ERROR else None
-        ),
-        "measurements": int(_QUANTUM_RUNTIME_METRICS.get("measurements", 0)),
-        "cache_hits": int(_QUANTUM_RUNTIME_METRICS.get("cache_hits", 0)),
-        "nli_refinements": int(_QUANTUM_RUNTIME_METRICS.get("nli_refinements", 0)),
-        "nli_full_passes": int(_QUANTUM_RUNTIME_METRICS.get("nli_full_passes", 0)),
-        "last_elapsed_ms": float(_QUANTUM_RUNTIME_METRICS.get("last_elapsed_ms", 0.0)),
-        "last_stage_ms": dict(_QUANTUM_RUNTIME_METRICS.get("last_stage_ms", {})),
-        "measurement_cache_size": len(_QUANTUM_MEASUREMENT_CACHE),
-        "turn_cache_size": len(QUANTUM_EVIDENCE_FUSION._turn_cache),
-        "nli_cache_size": len(QUANTUM_EVIDENCE_FUSION._nli_cache),
-        "hypothesis_index_ready": bool(_QUANTUM_HYPOTHESIS_INDEX_READY),
-    }
-
-
-def clear_quantum_interpretation_caches() -> None:
-    _QUANTUM_MEASUREMENT_CACHE.clear()
-    QUANTUM_EVIDENCE_FUSION._turn_cache.clear()
-    QUANTUM_EVIDENCE_FUSION._linguistic_cache.clear()
-    QUANTUM_EVIDENCE_FUSION._nli_cache.clear()
-    QUANTUM_EVIDENCE_FUSION.embedding._pair_cache.clear()
-    QUANTUM_EVIDENCE_FUSION.embedding._batch_cache.clear()
-    QUANTUM_EVIDENCE_FUSION._cache_limit = 96
