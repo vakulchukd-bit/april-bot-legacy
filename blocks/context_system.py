@@ -842,6 +842,11 @@ def build_deephub_context(user_id: Any, text: Any, state: Dict[str, Any]) -> str
     state["current_request"] = text
     synchronize_scene_state(state)
 
+    # Resolve stale-scene / continuation state BEFORE any evidence or executor
+    # packet is built. This preserves the single route while preventing an
+    # unrelated previous visual scene from entering the quantum field first.
+    canonical_context_text = build_context_text(user_id, text, state)
+
     evidence = build_quantum_context_evidence(
         user_id, text, state
     )
@@ -865,7 +870,7 @@ def build_deephub_context(user_id: Any, text: Any, state: Dict[str, Any]) -> str
     packet["provider_calls"] = 0
     state["_executor_context_packet"] = packet
 
-    return build_context_text(user_id, text, state)
+    return canonical_context_text
 
 
 def build_context_telemetry_v2(state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
