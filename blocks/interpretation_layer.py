@@ -259,6 +259,17 @@ def _ensure_semantic_runtime() -> None:
                 "zero-shot-classification",
                 model=NLI_MODEL_NAME,
             )
+
+            # Precompute the semantic prototype index once during the
+            # accelerator warm-up.  No prototype encoding occurs on a live turn.
+            global SEMANTIC_HYPOTHESIS_EMBEDDINGS
+            SEMANTIC_HYPOTHESIS_EMBEDDINGS = SEMANTIC_ENCODER.encode(
+                [NLI_HYPOTHESIS_DESCRIPTIONS[label] for label in SEMANTIC_HYPOTHESIS_LABELS],
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+                batch_size=16,
+            )
         except Exception:
             STANZA_NLP = None
             SEMANTIC_ENCODER = None
@@ -382,6 +393,38 @@ NLI_HYPOTHESIS_OWNER = {
     for family, labels in NLI_FAMILY_HYPOTHESES.items()
     for label in labels
 }
+
+# Fast semantic prototype index.  The SentenceTransformer is used as the
+# first-pass measurement; the heavier NLI model is only a refinement stage.
+# This avoids the 35-label CPU NLI wall observed in production.
+DIALOGUE_HYPOTHESIS_DESCRIPTIONS = {
+    "question": "the user is asking a question and expects an answer",
+    "request": "the user is making a request for an action or result",
+    "reformulation": "the user is restating or reformulating the previous request",
+    "continuation": "the user wants to continue the previous task or conversation",
+    "correction": "the user is correcting a previous statement or answer",
+    "reference": "the user is explicitly referring back to earlier conversation context",
+    "affirmation": "the user is affirming or confirming the previous exchange",
+    "rejection": "the user is rejecting or disagreeing with the previous exchange",
+    "new_topic": "the user is starting a new unrelated topic",
+    "statement": "the user is making a normal statement without a specific action request",
+}
+NLI_HYPOTHESIS_DESCRIPTIONS = {}
+for _label, _desc in DIALOGUE_HYPOTHESIS_DESCRIPTIONS.items():
+    NLI_HYPOTHESIS_DESCRIPTIONS[_label] = _desc
+for _label, _desc in REPRESENTATION_HYPOTHESES.items():
+    NLI_HYPOTHESIS_DESCRIPTIONS[_desc] = _desc
+for _label, _desc in DOMAIN_HYPOTHESES.items():
+    NLI_HYPOTHESIS_DESCRIPTIONS[_desc] = _desc
+for _label, _desc in CAPABILITY_HYPOTHESES.items():
+    NLI_HYPOTHESIS_DESCRIPTIONS[_desc] = _desc
+
+SEMANTIC_HYPOTHESIS_LABELS = tuple(NLI_HYPOTHESIS_DESCRIPTIONS.keys())
+SEMANTIC_HYPOTHESIS_EMBEDDINGS = None
+SEMANTIC_FAST_PATH = os.getenv("APRIL_SEMANTIC_FAST_PATH", "1") != "0"
+NLI_REFINEMENT_TOP_K = max(1, int(os.getenv("APRIL_NLI_REFINEMENT_TOP_K", "2")))
+NLI_REFINEMENT_MARGIN = float(os.getenv("APRIL_NLI_REFINEMENT_MARGIN", "0.06"))
+NLI_REFINEMENT_THRESHOLD = float(os.getenv("APRIL_NLI_REFINEMENT_THRESHOLD", "0.58"))
 
 
 @dataclass
@@ -585,20 +628,156 @@ class QuantumEmbeddingEngine:
 
 
 class QuantumIntentEngine:
-    """NLI/zero-shot semantic engine. No keyword routing."""
+    """Two-stage semantic intent engine.
 
-    def classify(self, text: str, hypotheses: Sequence[str]) -> Dict[str, Any]:
+    Stage 1 is a fast SentenceTransformer prototype measurement.
+    Stage 2 is optional NLI refinement on only the most relevant hypotheses.
+
+    This preserves the existing evidence contract while preventing a full
+    35-hypothesis CPU NLI pass on every request.
+    """
+
+    def __init__(self):
+        self._prototype_cache: dict[str, Dict[str, float]] = {}
+        self._cache_limit = 128
+
+    def _prototype_scores(self, text: str) -> Dict[str, float]:
         _runtime_ready_guard()
-        result = DIALOGUE_NLI(
-            text,
-            candidate_labels=list(hypotheses),
-            multi_label=True,
-            batch_size=NLI_BATCH_SIZE,
+        cached = self._prototype_cache.get(text)
+        if cached is not None:
+            return dict(cached)
+        if SEMANTIC_HYPOTHESIS_EMBEDDINGS is None:
+            raise RuntimeError("Semantic hypothesis prototype index is not ready")
+        vector = SEMANTIC_ENCODER.encode(
+            [text],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )[0]
+        scores = cosine_similarity(
+            vector.reshape(1, -1),
+            SEMANTIC_HYPOTHESIS_EMBEDDINGS,
+        )[0]
+        # Cosine is [-1, 1]; map it into the positive evidence interval.
+        normalized = (scores + 1.0) / 2.0
+        result = {
+            label: float(max(0.0, min(1.0, score)))
+            for label, score in zip(SEMANTIC_HYPOTHESIS_LABELS, normalized)
+        }
+        self._prototype_cache[text] = result
+        if len(self._prototype_cache) > self._cache_limit:
+            self._prototype_cache.pop(next(iter(self._prototype_cache)))
+        return dict(result)
+
+    @staticmethod
+    def _family_candidates(scores: Dict[str, float], family: str) -> list[str]:
+        labels = list(NLI_FAMILY_HYPOTHESES[family])
+        ranked = sorted(labels, key=lambda label: scores.get(label, 0.0), reverse=True)
+        return ranked[:NLI_REFINEMENT_TOP_K]
+
+    @staticmethod
+    def _family_result_from_scores(scores: Dict[str, float], family: str) -> Dict[str, Any]:
+        ranked = sorted(
+            ((label, scores.get(label, 0.0)) for label in NLI_FAMILY_HYPOTHESES[family]),
+            key=lambda item: item[1],
+            reverse=True,
         )
         return {
-            "labels": list(result["labels"]),
-            "scores": [float(score) for score in result["scores"]],
-            "source": "transformers_nli",
+            "labels": [label for label, _ in ranked],
+            "scores": [float(score) for _, score in ranked],
+            "source": "sentence_transformer_semantic_prototype",
+            "refined": False,
+        }
+
+    def classify(self, text: str, hypotheses: Sequence[str], *,
+                 families: Sequence[str] | None = None,
+                 force_refinement: bool = False) -> Dict[str, Any]:
+        _runtime_ready_guard()
+        normalized = normalize_text(text)
+        prototype = self._prototype_scores(normalized)
+
+        selected = list(hypotheses)
+        if families:
+            selected_families = [family for family in families if family in NLI_FAMILY_HYPOTHESES]
+        else:
+            selected_families = sorted({
+                NLI_HYPOTHESIS_OWNER.get(label)
+                for label in selected
+                if NLI_HYPOTHESIS_OWNER.get(label)
+            })
+
+        refinement_candidates = []
+        for family in selected_families:
+            refinement_candidates.extend(self._family_candidates(prototype, family))
+        refinement_candidates = list(dict.fromkeys(refinement_candidates))
+
+        # A context-free, high-confidence turn remains on the fast semantic
+        # path. NLI is reserved for uncertainty or dialogue-context cases.
+        top_scores = []
+        for family in selected_families:
+            labels = list(NLI_FAMILY_HYPOTHESES[family])
+            ranked = sorted((prototype.get(label, 0.0) for label in labels), reverse=True)
+            top = ranked[0] if ranked else 0.0
+            margin = (ranked[0] - ranked[1]) if len(ranked) > 1 else 1.0
+            top_scores.append((top, margin))
+
+        needs_refinement = force_refinement or any(
+            top < NLI_REFINEMENT_THRESHOLD or margin < NLI_REFINEMENT_MARGIN
+            for top, margin in top_scores
+        )
+
+        # Explicit dialogue context is a genuine uncertainty signal. When the
+        # caller has history/goal/topic, allow one small NLI refinement pass.
+        if families and "dialogue" in families and (
+            force_refinement or len(selected_families) == 1
+        ):
+            needs_refinement = True
+
+        if not SEMANTIC_FAST_PATH:
+            needs_refinement = True
+
+        refinement_ms = 0.0
+        nli_scores = dict(prototype)
+        if needs_refinement and refinement_candidates:
+            started = time.perf_counter()
+            refined = self._classify_small_set(
+                normalized,
+                refinement_candidates,
+            )
+            refinement_ms = (time.perf_counter() - started) * 1000.0
+            nli_scores.update(refined)
+
+        labels = sorted(
+            selected,
+            key=lambda label: nli_scores.get(label, 0.0),
+            reverse=True,
+        )
+        return {
+            "labels": labels,
+            "scores": [float(nli_scores.get(label, 0.0)) for label in labels],
+            "source": (
+                "transformers_nli_refinement"
+                if needs_refinement
+                else "sentence_transformer_semantic_prototype"
+            ),
+            "refined": bool(needs_refinement),
+            "refinement_candidates": refinement_candidates,
+            "refinement_ms": round(refinement_ms, 2),
+            "prototype_top_scores": top_scores,
+        }
+
+    def _classify_small_set(self, text: str, candidates: Sequence[str]) -> Dict[str, float]:
+        # The NLI pipeline remains the same model and evidence mechanism;
+        # the important optimization is the drastically smaller candidate set.
+        result = DIALOGUE_NLI(
+            text,
+            candidate_labels=list(candidates),
+            multi_label=True,
+            batch_size=max(1, min(NLI_BATCH_SIZE, len(candidates))),
+        )
+        return {
+            str(label): float(score)
+            for label, score in zip(result.get("labels", []), result.get("scores", []))
         }
 
 
@@ -655,39 +834,54 @@ class QuantumEvidenceFusionEngine:
         nli_bundle = self._nli_cache.get(normalized_turn_text)
         if nli_bundle is None:
             nli_started = time.perf_counter()
-            combined = self.intent.classify(
-                normalized_turn_text,
-                NLI_COMBINED_HYPOTHESES,
-            )
-            combined_map = {
-                str(label): float(score)
-                for label, score in zip(
-                    combined.get("labels", []), combined.get("scores", [])
-                )
-            }
 
-            def _family_result(family: str) -> Dict[str, Any]:
-                labels = list(NLI_FAMILY_HYPOTHESES[family])
-                ordered = sorted(
-                    ((label, combined_map.get(label, 0.0)) for label in labels),
-                    key=lambda item: item[1],
-                    reverse=True,
-                )
-                return {
-                    "labels": [label for label, _ in ordered],
-                    "scores": [score for _, score in ordered],
-                    "source": "transformers_nli_combined",
-                }
+            # Fast semantic measurement for all families.
+            dialogue_result = self.intent.classify(
+                normalized_turn_text,
+                NLI_FAMILY_HYPOTHESES["dialogue"],
+                families=("dialogue",),
+                force_refinement=bool(previous_assistant),
+            )
+            representation_result = self.intent.classify(
+                normalized_turn_text,
+                NLI_FAMILY_HYPOTHESES["representation"],
+                families=("representation",),
+                force_refinement=False,
+            )
+            domain_result = self.intent.classify(
+                normalized_turn_text,
+                NLI_FAMILY_HYPOTHESES["domain"],
+                families=("domain",),
+                force_refinement=False,
+            )
+            capability_result = self.intent.classify(
+                normalized_turn_text,
+                NLI_FAMILY_HYPOTHESES["capability"],
+                families=("capability",),
+                force_refinement=False,
+            )
 
             nli_bundle = {
-                "dialogue_nli": _family_result("dialogue"),
-                "representation_nli": _family_result("representation"),
-                "domain_nli": _family_result("domain"),
-                "capability_nli": _family_result("capability"),
+                "dialogue_nli": dialogue_result,
+                "representation_nli": representation_result,
+                "domain_nli": domain_result,
+                "capability_nli": capability_result,
             }
             self._nli_cache[normalized_turn_text] = nli_bundle
+            total_ms = (time.perf_counter() - nli_started) * 1000.0
+            refined_count = sum(
+                1 for item in nli_bundle.values()
+                if isinstance(item, dict) and item.get("refined")
+            )
+            refinement_candidates = sum(
+                len(item.get("refinement_candidates") or [])
+                for item in nli_bundle.values()
+                if isinstance(item, dict)
+            )
             print(
-                f"SEMANTIC TURN: combined_nli_ms={(time.perf_counter() - nli_started)*1000:.1f}",
+                f"SEMANTIC TURN: fast_measurement_ms={total_ms:.1f} "
+                f"nli_refined_families={refined_count} "
+                f"nli_candidates={refinement_candidates}",
                 flush=True,
             )
 
@@ -1079,9 +1273,18 @@ def _semantic_context_packet(
         "representation": representation,
         "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
         "context_vectors": {
-            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer),
-            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic),
-            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal),
+            "previous_answer": (
+                QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer)
+                if previous_answer else {"score": 0.0, "measured": False}
+            ),
+            "active_topic": (
+                QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic)
+                if active_topic else {"score": 0.0, "measured": False}
+            ),
+            "active_goal": (
+                QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal)
+                if active_goal else {"score": 0.0, "measured": False}
+            ),
         },
         "decision_owner": "QUANTUM_PROCESSOR",
         "engine": "quantum_interpretation_engine",
