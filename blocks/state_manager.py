@@ -47,7 +47,6 @@ MEMORY_DAYS = 7
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
 
 SESSION_MEMORY_LIMIT = 1600
-HOT_DIALOG_LIMIT = 30  # 15 USER + 15 APRIL; canonical Free window
 VISUAL_HISTORY_LIMIT = 8
 IMAGE_MEMORY_LIMIT = 5
 TOPIC_MEMORY_LIMIT = 5
@@ -110,17 +109,10 @@ def compact_dialog_message(role, content):
     }
 
 
-def get_dialog_limit(user_id, plan=None):
-    """
-    Canonical hot-dialog window.
-
-    Free is the only active package at this stage:
-    30 completed dialogue messages = 15 USER + 15 APRIL.
-
-    Lite/Premium are intentionally reserved for future policy expansion and
-    do not create alternate memory engines or alternate limits.
-    """
-    return HOT_DIALOG_LIMIT
+def get_dialog_limit(user_id, plan):
+    if user_id == ADMIN_ID:
+        return 50
+    return {"free": 10, "lite": 20, "premium": 30}.get(plan, 10)
 
 
 def utc_day_key():
@@ -179,7 +171,6 @@ def build_default_state():
         "image_context": None,
         "image_memory": [],
         "active_visual_scene": None,
-        "pending_visual_scene": None,
         "visual_scene_history": [],
         "visual_topic_registry": [],
         "task_context_storage": [],
@@ -223,7 +214,7 @@ def build_default_state():
             "last_day_key": utc_day_key(),
             "last_rollover": time.time(),
         },
-        "memory_version": "QUANTUM-MEMORY-7D-V2-HOTPATH-SAFE",
+        "memory_version": "QUANTUM-7D-V1",
         "active_scene_contract": {},
         "current_scene_request": "",
         "visual_summary": {},
@@ -242,7 +233,7 @@ class QuantumMemoryEngine:
     existing Executor/Quantum Processor can consume.
     """
 
-    VERSION = "QUANTUM-MEMORY-7D-V2-HOTPATH-SAFE"
+    VERSION = "QUANTUM-MEMORY-7D-V1"
 
     def __init__(self):
         self._encoder = None
@@ -439,7 +430,7 @@ class QuantumMemoryEngine:
                         "day_index": age,
                     }
 
-    def query(self, state_obj, query, *, limit=8, allow_semantic=True):
+    def query(self, state_obj, query, *, limit=8):
         """
         Produce memory evidence. Stored visual scenes remain in the 7-day
         memory, but the current active visual context is exposed only when its
@@ -465,21 +456,6 @@ class QuantumMemoryEngine:
         active_scene = focus.get("active_scene") or state_obj.get("active_visual_scene")
         current_visual = state_obj.get("active_visual_scene")
 
-        # HOT-PATH SAFETY:
-        # The normal request route must not trigger a second semantic model pass.
-        # Interpretation/Visual Reference remain the owners of turn-level
-        # measurement. State Manager can expose stored memory without invoking
-        # embeddings until an explicit memory query is requested.
-        dialog_state = state_obj.get("dialog_state") if isinstance(state_obj.get("dialog_state"), dict) else {}
-        context_dependency = str(dialog_state.get("context_dependency") or "").strip().lower()
-        measured_continuation = bool(
-            dialog_state.get("continuation") or dialog_state.get("reference_to_previous")
-        )
-        explicit_memory_query = bool(
-            dialog_state.get("memory_query_requested")
-            or state_obj.get("memory_signals", {}).get("memory_query_requested")
-        )
-
         candidates = list(self.iter_memory_records(state_obj))
         candidate_texts = []
         candidate_records = []
@@ -498,19 +474,15 @@ class QuantumMemoryEngine:
         if active_scene_text:
             comparison_texts.append(active_scene_text)
 
-        semantic_map = {}
-        if allow_semantic and (explicit_memory_query or measured_continuation):
-            semantic_map = self.semantic_scores(query, comparison_texts)
-
-        ranked = []
+        semantic_map = self.semantic_scores(query, comparison_texts)
 
         active_topic_score = (
             float(semantic_map.get(safe_trim_text(active_topic, 1600), 0.0))
-            if semantic_map else 0.0
+            if active_topic else 0.0
         )
         active_scene_similarity = (
             float(semantic_map.get(active_scene_text, 0.0))
-            if semantic_map and active_scene_text else 0.0
+            if active_scene_text else 0.0
         )
 
         for record, candidate_text in zip(candidate_records, candidate_texts):
@@ -522,12 +494,9 @@ class QuantumMemoryEngine:
             if record.get("memory_kind") == "visual_scene":
                 relation += 0.15 * active_scene_similarity
 
-            # Without a measured/explicit memory query, stored records remain
-            # dormant evidence and cannot enter the hot response context.
-            if semantic_map:
-                score = min(1.0, (semantic * 0.65) + (recency * 0.20) + relation)
-                if score >= 0.30:
-                    ranked.append((score, record))
+            score = min(1.0, (semantic * 0.65) + (recency * 0.20) + relation)
+            if score >= 0.30:
+                ranked.append((score, record))
 
         ranked.sort(key=lambda x: x[0], reverse=True)
         matches = []
@@ -547,16 +516,19 @@ class QuantumMemoryEngine:
                 "timestamp": record.get("timestamp"),
             })
 
-        # Stored visual memory is never deleted. Only an explicit measured
-        # continuation/reference may re-activate the pending scene.
+        # Stored visual memory is never deleted. A measured new/independent
+        # dialogue context releases it from the current response immediately.
+        dialog_state = state_obj.get("dialog_state") if isinstance(state_obj.get("dialog_state"), dict) else {}
+        context_dependency = str(dialog_state.get("context_dependency") or "").strip().lower()
+        measured_continuation = bool(
+            dialog_state.get("continuation") or dialog_state.get("reference_to_previous")
+        )
         if context_dependency in {"new_topic", "independent"} and not measured_continuation:
             active_visual_context_relevant = False
-        elif measured_continuation and current_visual:
-            active_visual_context_relevant = (
-                active_scene_similarity >= 0.55 if semantic_map else True
-            )
         else:
-            active_visual_context_relevant = False
+            active_visual_context_relevant = bool(
+                current_visual and active_scene_similarity >= 0.55
+            )
 
         return {
             "engine": self.VERSION,
@@ -638,7 +610,6 @@ class QuantumMemoryEngine:
         record = deepcopy(scene_payload)
         record.setdefault("timestamp", time.time())
         record.setdefault("memory_kind", "visual_scene")
-        record.setdefault("user_id", None)
 
         scene_id = str(record.get("scene_id") or "").strip()
         existing = state_obj["memory_timeline"]["day_0"]["visual_scenes"]
@@ -707,11 +678,7 @@ class QuantumMemoryEngine:
 
     def build_executor_bridge(self, state_obj, query=""):
         self.ensure_runtime(state_obj)
-        memory = self.query(
-            state_obj,
-            query,
-            allow_semantic=False,
-        ) if query else {
+        memory = self.query(state_obj, query) if query else {
             "engine": self.VERSION,
             "window_days": MEMORY_DAYS,
             "matches": [],
@@ -882,8 +849,6 @@ def set_image_context(user_id, ctx):
     state_obj["scene_state"] = scene
 
     if isinstance(ctx, dict):
-        ctx = deepcopy(ctx)
-        ctx.setdefault("user_id", str(user_id))
         QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, ctx)
 
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
@@ -942,199 +907,35 @@ def build_visual_scene_summary(state_obj):
     }
 
 
-def _build_memory_record_from_pair(state_obj, user_text, assistant_text, *,
-                                   turn_id=None, visual_context=None):
-    """
-    Build one canonical memory record from a completed USER↔APRIL pair.
-
-    This is intentionally deterministic and lightweight. It does not create
-    another model/route. The existing shared semantic engine remains the
-    measurement owner; this function only builds the persistable memory
-    representation.
-    """
-    user_text = str(user_text or "").strip()
-    assistant_text = str(assistant_text or "").strip()
-    if not user_text and not assistant_text:
-        return None
-
-    visual = visual_context if isinstance(visual_context, dict) else {}
-    scene = state_obj.get("active_visual_scene")
-    scene = deepcopy(scene) if isinstance(scene, dict) else {}
-
-    dialogue_state = state_obj.get("dialog_state")
-    dialogue_state = dialogue_state if isinstance(dialogue_state, dict) else {}
-
-    topic = (
-        dialogue_state.get("active_topic")
-        or state_obj.get("current_topic")
-        or state_obj.get("active_topic_slot")
-    )
-
-    visual_type = (
-        visual.get("scene_type")
-        or visual.get("type")
-        or scene.get("scene_type")
-        or scene.get("type")
-    )
-
-    visual_summary = (
-        visual.get("summary")
-        or scene.get("summary")
-        or state_obj.get("visual_summary", {}).get("summary")
-    )
-
-    block_types = (
-        visual.get("render_block_types")
-        or scene.get("render_block_types")
-        or []
-    )
-
-    return {
-        "record_type": "quantum_memory_record",
-        "user_id": None,  # populated by add_dialog/persist layer; never cross-user.
-        "turn_id": turn_id,
-        "topic": safe_trim_text(topic, 400),
-        "topic_group": state_obj.get("active_topic_slot") or "A",
-        "intent": dialogue_state.get("dialog_act") or state_obj.get("task_type"),
-        "user_meaning": safe_trim_text(user_text, 800),
-        "april_meaning": safe_trim_text(assistant_text, 1200),
-        "answer_summary": safe_trim_text(assistant_text, 1200),
-        "facts": [],
-        "decisions": [],
-        "already_explained": [safe_trim_text(assistant_text, 800)] if assistant_text else [],
-        "open_loops": deepcopy(state_obj.get("open_loops", [])),
-        "continuation_hint": (
-            "continue_existing_context"
-            if dialogue_state.get("continuation") or dialogue_state.get("reference_to_previous")
-            else "independent_topic"
-        ),
-        "visual": {
-            "scene_id": visual.get("scene_id") or scene.get("scene_id"),
-            "scene_type": visual_type,
-            "scene_summary": safe_trim_text(visual_summary, 800),
-            "render_types": list(block_types) if isinstance(block_types, list) else [],
-            "entities": safe_list(visual.get("visual_entities") or scene.get("visual_entities"))[:20],
-            "values": safe_list(visual.get("visual_values") or scene.get("visual_values"))[:20],
-            "relationships": safe_list(
-                visual.get("visual_relationships") or scene.get("visual_relationships")
-            )[:20],
-            "active": bool(scene),
-        },
-        "created_at": time.time(),
-        "memory_day": 0,
-        "expires_in_days": MEMORY_DAYS,
-    }
-
-
-def _store_completed_pair_in_day0(state_obj, user_text, assistant_text, *,
-                                  turn_id=None, user_id=None):
-    """
-    Store a completed USER↔APRIL pair as one memory record.
-
-    The hot dialog remains the short operational window. The semantic record
-    is the durable seven-day representation.
-    """
-    record = _build_memory_record_from_pair(
-        state_obj,
-        user_text,
-        assistant_text,
-        turn_id=turn_id,
-        visual_context=state_obj.get("active_visual_scene"),
-    )
-    if not record:
-        return None
-
-    record["user_id"] = str(user_id) if user_id is not None else None
-
-    day0 = state_obj["memory_timeline"]["day_0"]
-    slot = record.get("topic_group") if record.get("topic_group") in TOPIC_CLASSES else "C"
-    day0[slot].append(record)
-    day0["topics"].append({
-        "topic": record.get("topic"),
-        "turn_id": record.get("turn_id"),
-        "user_id": record.get("user_id"),
-        "timestamp": record.get("created_at"),
-    })
-
-    # Keep the seven-day field bounded without creating a second policy.
-    for key in TOPIC_CLASSES:
-        day0[key] = day0[key][-HOT_DIALOG_LIMIT:]
-    day0["topics"] = day0["topics"][-HOT_DIALOG_LIMIT:]
-
-    return record
-
-
-def compress_dialog_to_summary(state_obj, user_id=None):
-    """
-    Collapse completed dialogue pairs into the canonical seven-day memory.
-
-    No parallel memory is created. The live dialog remains capped at 30
-    messages; completed pairs are represented semantically in day_0.
-    """
+def compress_dialog_to_summary(state_obj):
     dialog = safe_list(state_obj.get("dialog"))
     if not dialog:
         return
 
-    # Find complete USER -> APRIL pairs in chronological order.
-    pending_user = None
-    pairs = []
-    for msg in dialog:
-        if not isinstance(msg, dict):
-            continue
-        role = str(msg.get("role") or "").strip().lower()
-        content = str(msg.get("content") or "").strip()
+    recent = [
+        {
+            "role": msg.get("role"),
+            "content": safe_trim_text(msg.get("content", ""), 180),
+        }
+        for msg in dialog[-8:]
+        if isinstance(msg, dict)
+    ]
 
-        if role == "user":
-            pending_user = content
-        elif role in {"assistant", "april"} and pending_user:
-            pairs.append((pending_user, content))
-            pending_user = None
-
-    if not pairs:
-        return
-
-    # Only the pair(s) that are leaving the hot window should be persisted.
-    # The caller may invoke this more than once; turn_id is stable enough for
-    # deduplication through the USER text + answer timestamp guard below.
-    existing = state_obj["memory_timeline"]["day_0"]
-    existing_ids = {
-        str(item.get("turn_id"))
-        for slot in TOPIC_CLASSES
-        for item in existing.get(slot, [])
-        if isinstance(item, dict) and item.get("turn_id") is not None
+    machine_summary = {
+        "scene": {
+            "type": state_obj.get("scene_state", {}).get("type"),
+            "goal": state_obj.get("scene_state", {}).get("goal"),
+            "flow": state_obj.get("scene_state", {}).get("active_flow"),
+            "continuity": state_obj.get("scene_state", {}).get("continuity_mode"),
+            "render": state_obj.get("scene_state", {}).get("render_type"),
+        },
+        "visual": build_visual_scene_summary(state_obj),
+        "dialog": recent,
+        "focus_state": deepcopy(state_obj.get("focus_state", {})),
     }
 
-    for index, (user_text, assistant_text) in enumerate(pairs):
-        turn_id = f"{safe_trim_text(user_text, 80)}::{safe_trim_text(assistant_text, 80)}"
-        if turn_id in existing_ids:
-            continue
-        _store_completed_pair_in_day0(
-            state_obj,
-            user_text,
-            assistant_text,
-            turn_id=turn_id,
-            user_id=user_id,
-        )
-        existing_ids.add(turn_id)
-
-    # Keep a compact machine-readable summary for compatibility callers.
-    recent_records = []
-    for slot in TOPIC_CLASSES:
-        for item in existing.get(slot, []):
-            if isinstance(item, dict) and item.get("record_type") == "quantum_memory_record":
-                recent_records.append(item)
-
-    recent_records = recent_records[-8:]
-    state_obj["memory_summary"] = str([
-        {
-            "topic": item.get("topic"),
-            "user_meaning": item.get("user_meaning"),
-            "answer_summary": item.get("answer_summary"),
-            "continuation_hint": item.get("continuation_hint"),
-            "visual": item.get("visual"),
-        }
-        for item in recent_records
-    ])[-SESSION_MEMORY_LIMIT:]
+    state_obj["memory_summary"] = str(machine_summary)[-SESSION_MEMORY_LIMIT:]
+    state_obj["dialog"] = [{"role": "system", "content": "[COMPRESSED_MEMORY]"}]
 
 
 def trim_image_memory(state_obj):
@@ -1152,63 +953,28 @@ def add_dialog(user_id, role, content):
     dialog = safe_list(state_obj.get("dialog"))
 
     dialog.append(compact_dialog_message(role, content))
+    state_obj["dialog"] = dialog
 
     if role == "user":
         state_obj["last_user_turn"] = safe_trim_text(content, 320)
         state_obj["meta"]["last_user_message"] = safe_trim_text(content, 320)
-
-        # A new user turn starts a fresh active-context cycle. The previous
-        # visual scene is not deleted; it is parked as a candidate so the
-        # existing semantic/visual engines can explicitly re-activate it only
-        # when the turn is measured as a continuation/reference.
-        if state_obj.get("active_visual_scene"):
-            state_obj["pending_visual_scene"] = deepcopy(state_obj["active_visual_scene"])
-            state_obj["active_visual_scene"] = None
-            state_obj["scene_state"] = build_default_scene()
     else:
         state_obj["last_april_turn"] = safe_trim_text(content, 320)
         state_obj["meta"]["last_bot_message"] = safe_trim_text(content, 320)
 
-    # The hot window is one canonical Free window: 30 messages.
-    # We only move COMPLETE USER↔APRIL pairs to semantic memory.
-    while len(dialog) > HOT_DIALOG_LIMIT:
-        if len(dialog) < 2:
-            break
-
-        first = dialog[0]
-        second = dialog[1]
-        first_role = str(first.get("role") or "").lower() if isinstance(first, dict) else ""
-        second_role = str(second.get("role") or "").lower() if isinstance(second, dict) else ""
-
-        if first_role == "user" and second_role in {"assistant", "april"}:
-            old_user = str(first.get("content") or "")
-            old_april = str(second.get("content") or "")
-
-            _store_completed_pair_in_day0(
-                state_obj,
-                old_user,
-                old_april,
-                turn_id=f"{safe_trim_text(old_user, 80)}::{safe_trim_text(old_april, 80)}",
-                user_id=user_id,
-            )
-            dialog = dialog[2:]
-        else:
-            # Never discard an unmatched current-turn message. If the oldest
-            # item is not a completed pair, preserve it until its counterpart
-            # arrives.
-            break
-
-    state_obj["dialog"] = dialog
     state_obj["dialog_state"] = {
         "timeline": deepcopy(dialog),
-        "hot_limit": HOT_DIALOG_LIMIT,
-        "hot_user_target": HOT_DIALOG_LIMIT // 2,
-        "hot_april_target": HOT_DIALOG_LIMIT // 2,
         "last_user_turn": state_obj.get("last_user_turn", ""),
         "last_april_turn": state_obj.get("last_april_turn", ""),
         "active_topic": state_obj.get("current_topic"),
         "focus": deepcopy(state_obj.get("focus_state", {})),
     }
+
+    plan = get_user_plan(user_id) if callable(get_user_plan) else "free"
+    limit = get_dialog_limit(user_id, plan)
+    if len(dialog) > limit:
+        compress_dialog_to_summary(state_obj)
+        state_obj["dialog_state"]["timeline"] = deepcopy(state_obj["dialog"])
 
     trim_image_memory(state_obj)
     trim_visual_history(state_obj)
@@ -1589,33 +1355,12 @@ def update_visual_summary(user_id, visual_summary):
     state_obj["visual_summary"] = visual_summary
 
     scene = state_obj.get("active_visual_scene")
-    # Text/dialogue events are not visual events. A visual scene may only be
-    # refreshed by an explicit visual artifact/scene signal.
-    last_event = visual_summary.get("last_event")
-    last_event_type = ""
-    if isinstance(last_event, dict):
-        payload = last_event.get("payload")
-        last_event_type = str(
-            last_event.get("event_type")
-            or last_event.get("type")
-            or (payload.get("type") if isinstance(payload, dict) else "")
-            or ""
-        ).strip().lower()
-    explicit_visual = bool(
-        visual_summary.get("visual_event")
-        or visual_summary.get("visual_scene")
-        or visual_summary.get("scene_id")
-        or visual_summary.get("render_block_types")
-    )
     has_event = bool(
-        explicit_visual
-        and last_event_type not in {
-            "user_message",
-            "assistant_message",
-            "text",
-            "message",
-        }
+        visual_summary.get("scene_events_count")
+        or visual_summary.get("last_event")
+        or visual_summary.get("current_request")
     )
+
     # An empty frontend visual summary is not a new scene. Keep the seven-day
     # memory untouched and do not rewrite the active scene with stale text.
     if not isinstance(scene, dict) or not scene:
@@ -1642,7 +1387,6 @@ def update_visual_summary(user_id, visual_summary):
 def build_visual_memory_bridge(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     return {
-        "user_id": str(user_id),
         "user_visual_scene": deepcopy(state_obj.get("active_visual_scene", {})),
         "visual_summary": deepcopy(state_obj.get("visual_summary", {})),
         "today_visual_memory": deepcopy(
@@ -1699,7 +1443,6 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
             if continuity["continuation"] else ""
         )
         scene_record = {
-            "user_id": str(user_id),
             "scene_id": state_obj["active_scene_contract"]["scene_id"],
             "scene_type": state_obj["active_scene_contract"]["active_scene"],
             "summary": answer_text,
@@ -1758,22 +1501,6 @@ def update_dialog_context(user_id, semantic_result):
     })
     state_obj["dialog_state"] = dialogue_state
 
-    # Re-activate the parked scene only after the existing semantic engine has
-    # explicitly measured continuation/reference. A new/independent topic
-    # leaves the scene in 7-day memory but out of the active context.
-    pending_scene = state_obj.get("pending_visual_scene")
-    continuation_measured = bool(
-        dialogue_state.get("continuation")
-        or dialogue_state.get("reference_to_previous")
-    )
-    dependency = str(dialogue_state.get("context_dependency") or "").strip().lower()
-
-    if continuation_measured and isinstance(pending_scene, dict):
-        state_obj["active_visual_scene"] = deepcopy(pending_scene)
-        state_obj["pending_visual_scene"] = None
-    elif dependency in {"new_topic", "independent"} or not continuation_measured:
-        state_obj["active_visual_scene"] = None
-
     # Semantic result is evidence entering the same memory field; it is not a
     # second memory system.
     QUANTUM_MEMORY_ENGINE.record_intent(state_obj, {
@@ -1786,47 +1513,6 @@ def update_dialog_context(user_id, semantic_result):
     })
     persist_state(user_id)
 
-# =====================================================
-# CANONICAL MEMORY LIFECYCLE
-# =====================================================
-
-def finalize_memory_turn(user_id):
-    """
-    Finalize the current completed USER↔APRIL turn.
-
-    The active 30-message window is untouched except for its canonical
-    overflow rule. The completed pair is represented in day_0 as one semantic
-    record and naturally ages through the existing seven-day rollover.
-    """
-    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    dialog = safe_list(state_obj.get("dialog"))
-
-    if len(dialog) > HOT_DIALOG_LIMIT:
-        # add_dialog normally performs this operation incrementally. This
-        # guard keeps callers that mutate dialog directly on the same contract.
-        while len(dialog) > HOT_DIALOG_LIMIT and len(dialog) >= 2:
-            first, second = dialog[0], dialog[1]
-            first_role = str(first.get("role") or "").lower() if isinstance(first, dict) else ""
-            second_role = str(second.get("role") or "").lower() if isinstance(second, dict) else ""
-            if first_role != "user" or second_role not in {"assistant", "april"}:
-                break
-
-            _store_completed_pair_in_day0(
-                state_obj,
-                first.get("content", ""),
-                second.get("content", ""),
-                turn_id=f"{safe_trim_text(first.get('content', ''), 80)}::{safe_trim_text(second.get('content', ''), 80)}",
-                user_id=user_id,
-            )
-            dialog = dialog[2:]
-
-        state_obj["dialog"] = dialog
-
-    state_obj["dialog_state"]["timeline"] = deepcopy(dialog)
-    state_obj["dialog_state"]["hot_limit"] = HOT_DIALOG_LIMIT
-    persist_state(user_id)
-    return build_memory_snapshot_v3(user_id)
-
 
 # =====================================================
 # DIRECT QUANTUM MEMORY QUERY API
@@ -1838,12 +1524,7 @@ def query_dynamic_memory(user_id, query, limit=8):
     No route/renderer decision is made here.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    result = QUANTUM_MEMORY_ENGINE.query(
-        state_obj,
-        query,
-        limit=limit,
-        allow_semantic=True,
-    )
+    result = QUANTUM_MEMORY_ENGINE.query(state_obj, query, limit=limit)
     return result
 
 
