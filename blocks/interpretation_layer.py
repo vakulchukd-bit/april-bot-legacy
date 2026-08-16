@@ -126,7 +126,7 @@ STANZA_RESOURCE_DIR = Path(
 ).expanduser()
 STANZA_BOOTSTRAP_LANGS = tuple(
     lang.strip().lower()
-    for lang in os.getenv("APRIL_STANZA_LANGS", "ru,en,uk").split(",")
+    for lang in os.getenv("APRIL_STANZA_LANGS", "ru").split(",")
     if lang.strip()
 )
 STANZA_RESOURCES_FILE = STANZA_RESOURCE_DIR / "resources.json"
@@ -140,6 +140,13 @@ STANZA_LANGUAGE_PROCESSORS = os.getenv(
     "tokenize,pos,lemma",
 )
 STANZA_LANGID_MODEL_FILE = STANZA_RESOURCE_DIR / "multilingual" / "langid" / "ud.pt"
+# Language weights are warmed only for the configured fast path. Additional
+# languages remain explicit configuration, not automatic deployment work.
+STANZA_PREWARM_LANGS = tuple(
+    lang.strip().lower()
+    for lang in os.getenv("APRIL_STANZA_PREWARM_LANGS", "ru").split(",")
+    if lang.strip() and lang.strip().lower() in STANZA_BOOTSTRAP_LANGS
+)
 _STANZA_BOOTSTRAP_ATTEMPTED = False
 _SEMANTIC_RUNTIME_LOCK = threading.RLock()
 _SEMANTIC_ACCELERATOR_STARTED = False
@@ -217,11 +224,11 @@ def _provision_stanza_resources() -> None:
 
 
 def _prewarm_stanza_language_cache(pipeline: MultilingualPipeline, languages: Sequence[str]) -> None:
-    """Materialize the configured language pipelines once during accelerator prewarm.
+    """Warm only the explicitly configured hot-language cache.
 
-    MultilingualPipeline lazily creates the language-specific pipeline on first
-    use. We deliberately materialize those pipelines during startup so the first
-    user request does not pay the language-model loading cost.
+    MultilingualPipeline already owns the runtime cache. Warming every
+    provisioned language makes deployment unnecessarily expensive, so the
+    quantum accelerator warms only STANZA_PREWARM_LANGS.
     """
     if pipeline is None:
         raise RuntimeError("Stanza multilingual pipeline is not initialized")
@@ -241,11 +248,10 @@ def _prewarm_stanza_language_cache(pipeline: MultilingualPipeline, languages: Se
         pipeline([sample])
         warmed.append(code)
 
-    if warmed:
-        print(
-            f"⚡ STANZA LANGUAGE CACHE READY: {','.join(warmed)}",
-            flush=True,
-        )
+    print(
+        f"⚡ STANZA LANGUAGE CACHE READY: {','.join(warmed) if warmed else 'lazy-mode'}",
+        flush=True,
+    )
 
 
 def _ensure_semantic_runtime() -> None:
@@ -278,7 +284,7 @@ def _ensure_semantic_runtime() -> None:
                 lang_configs=lang_configs or None,
             )
 
-            _prewarm_stanza_language_cache(STANZA_NLP, lang_subset)
+            _prewarm_stanza_language_cache(STANZA_NLP, STANZA_PREWARM_LANGS)
 
             SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
             DIALOGUE_NLI = hf_pipeline(
@@ -386,6 +392,34 @@ CAPABILITY_HYPOTHESES = {
     "discussion": "the user wants a discussion, opinion, or reasoning about a topic",
     "space": "the user is discussing spatial arrangement, scene layout, or visual composition",
 }
+
+NLI_HYPOTHESIS_FAMILIES = {
+    "dialogue": DIALOGUE_LABELS,
+    "representation": tuple(REPRESENTATION_HYPOTHESES.values()),
+    "domain": tuple(DOMAIN_HYPOTHESES.values()),
+    "capability": tuple(CAPABILITY_HYPOTHESES.values()),
+}
+
+def _split_nli_families(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Split one NLI measurement into the canonical evidence families."""
+    labels = list(result.get("labels") or [])
+    scores = [float(x) for x in (result.get("scores") or [])]
+    score_map = {label: score for label, score in zip(labels, scores)}
+    families = {}
+    for family, hypotheses in NLI_HYPOTHESIS_FAMILIES.items():
+        family_scores = [
+            (hypothesis, score_map[hypothesis])
+            for hypothesis in hypotheses
+            if hypothesis in score_map
+        ]
+        family_scores.sort(key=lambda item: item[1], reverse=True)
+        families[family] = {
+            "labels": [label for label, _ in family_scores],
+            "scores": [score for _, score in family_scores],
+            "source": "transformers_nli",
+            "batched": True,
+        }
+    return families
 
 
 @dataclass
@@ -681,17 +715,24 @@ class QuantumEvidenceFusionEngine:
 
         nli_bundle = self._nli_cache.get(normalized_turn_text)
         if nli_bundle is None:
+            combined_hypotheses = tuple(
+                dict.fromkeys(
+                    hypothesis
+                    for family in NLI_HYPOTHESIS_FAMILIES.values()
+                    for hypothesis in family
+                )
+            )
+            combined_nli = self.intent.classify(
+                normalized_turn_text,
+                combined_hypotheses,
+            )
+            split = _split_nli_families(combined_nli)
             nli_bundle = {
-                "dialogue_nli": self.intent.classify(normalized_turn_text, DIALOGUE_LABELS),
-                "representation_nli": self.intent.classify(
-                    normalized_turn_text, tuple(REPRESENTATION_HYPOTHESES.values())
-                ),
-                "domain_nli": self.intent.classify(
-                    normalized_turn_text, tuple(DOMAIN_HYPOTHESES.values())
-                ),
-                "capability_nli": self.intent.classify(
-                    normalized_turn_text, tuple(CAPABILITY_HYPOTHESES.values())
-                ),
+                "dialogue_nli": split["dialogue"],
+                "representation_nli": split["representation"],
+                "domain_nli": split["domain"],
+                "capability_nli": split["capability"],
+                "combined_nli": combined_nli,
             }
             self._nli_cache[normalized_turn_text] = nli_bundle
 
@@ -1169,18 +1210,23 @@ def build_result(text):
 
 
 def detect_explanation_content(text):
-    return contains_any(text, (
-        "объясни", "объяснение", "пояснение", "расшифровка",
-        "что означает", "что значит",
-    ))
+    return semantic_evidence_information(text) >= 0.60
 
 
 def detect_analysis_content(text):
-    return contains_any(text, ("анализ", "вывод", "заключение", "интерпретация"))
+    return semantic_evidence_exploration(text) >= 0.60
 
 
 def detect_legend_content(text):
-    return contains_any(text, ("обозначение", "обозначения", "легенда", "расшифровка"))
+    representation = {
+        item["label"]: float(item["score"])
+        for item in measure_representation_evidence(text)
+    }
+    return max(
+        representation.get("graph", 0.0),
+        representation.get("table", 0.0),
+        representation.get("diagram", 0.0),
+    ) >= 0.60
 
 
 def detect_object_content(text):
@@ -1362,10 +1408,23 @@ def _canonical_dialogue_contract(text, history=None, state=None, semantic=None):
         resolved_request = text
 
     capabilities = []
-    if semantic.get("candidate_representations"):
+    capability_measurement = (
+        measured.get("semantic_measurement", {}).get("capability_nli", {})
+        if isinstance(measured.get("semantic_measurement"), dict)
+        else {}
+    )
+    capability_labels = capability_measurement.get("labels") or []
+    capability_scores = capability_measurement.get("scores") or []
+    capability_map = {
+        label: float(score)
+        for label, score in zip(capability_labels, capability_scores)
+    }
+    representation_signal = semantic.get("candidate_representations") or []
+    if representation_signal:
         capabilities.append("structured_rendering")
-    if any(x in normalize_lower(text) for x in ("проанализ", "сравни", "почему", "разбери", "объясни")):
-        capabilities.append("analysis")
+    if capability_map and max(capability_map.get(label, 0.0) for label in capability_map) >= 0.60:
+        if capability_map.get(CAPABILITY_HYPOTHESES["exploration"], 0.0) >= 0.60:
+            capabilities.append("analysis")
     if measured.get("reference_to_previous"):
         capabilities.append("dialogue_continuity")
 
@@ -1603,6 +1662,8 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
             "quantum_evidence_fusion",
         ],
         "engine_mode": "required",
+        "stanza_bootstrap_languages": list(STANZA_BOOTSTRAP_LANGS),
+        "stanza_prewarm_languages": list(STANZA_PREWARM_LANGS),
         "fallback_mode": False,
         "substring_routing": False,
         "candidate_to_required_promotion": False,
