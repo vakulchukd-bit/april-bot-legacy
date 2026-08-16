@@ -55,6 +55,8 @@ def build_scene_snapshot(active_visual_scene: Any, active_scene_contract: Any = 
             or source.get("current_request")
             or source.get("answer")
         )[:900],
+        "current_request": _text(source.get("current_request"))[:1200],
+        "previous_scene_id": _text(source.get("previous_scene_id")),
         "atmosphere": _text(source.get("atmosphere")),
         "continuity_weight": _clamp(source.get("continuity_weight", 0.65)),
         "render_block_types": list(source.get("render_block_types") or [])[:8],
@@ -123,25 +125,21 @@ def build_visual_reference(
     signals = detect_visual_context(semantic, cognition, reasoning, state)
     refs = build_scene_references(scene)
 
-    scene_reference_text = " ".join(
-        part for part in (
-            scene.get("scene_type", ""),
-            scene.get("summary", ""),
-            " ".join(scene.get("objects", [])[:4]),
-            str(scene.get("current_request", "")),
-        ) if part
-    ).strip()
-    context_similarity = 0.0
-    if scene.get("exists") and scene_reference_text:
-        context_similarity = float(
-            QUANTUM_EMBEDDING_ENGINE.similarities(text, [scene_reference_text]).get(
-                scene_reference_text, 0.0
-            )
-        )
-
-    dialogue_contract = semantic.get("dialogue_contract", {}) if isinstance(semantic.get("dialogue_contract"), dict) else {}
-    measurement = semantic.get("quantum_dialogue_measurement", {}) if isinstance(semantic.get("quantum_dialogue_measurement"), dict) else {}
-    measured_dialogue = measurement.get("dialogue", {}) if isinstance(measurement, dict) else {}
+    dialogue_contract = (
+        semantic.get("dialogue_contract")
+        if isinstance(semantic.get("dialogue_contract"), dict)
+        else {}
+    )
+    measurement = (
+        semantic.get("quantum_dialogue_measurement")
+        if isinstance(semantic.get("quantum_dialogue_measurement"), dict)
+        else {}
+    )
+    measured_dialogue = (
+        measurement.get("dialogue", {})
+        if isinstance(measurement, dict)
+        else {}
+    )
 
     continuation_signal = bool(
         dialogue_contract.get("continuation")
@@ -165,14 +163,81 @@ def build_visual_reference(
     )
     new_topic_guard = context_dependency in {"independent", "new_topic"}
 
+    # A measured new/independent topic immediately releases the stored visual
+    # scene from the current response context. The scene remains in 7D memory.
+    if new_topic_guard and not continuation_signal and not explicit_reference:
+        return {
+            "enabled": bool(signals["renderer_signal"] or signals["exploration_signal"]),
+            "memory_available": bool(scene.get("exists")),
+            "memory_relevant": False,
+            "mode": "new_topic",
+            "references": [],
+            "scene_snapshot": {"exists": False},
+            "signals": signals,
+            "context_similarity": 0.0,
+            "continuation_signal": False,
+            "explicit_reference": False,
+            "reuse_pressure": 0.0,
+            "visual_continuity": False,
+            "reference_priority": False,
+            "lightweight_mode": True,
+            "should_generate": False,
+            "generation_allowed": False,
+            "suppress_generation": True,
+            "visual_should_not_interrupt": True,
+            "visual_is_supportive": False,
+            "trajectory_aligned": True,
+            "dialogue_centered": True,
+            "context_dependency": context_dependency,
+            "new_topic_guard": True,
+            "semantic_inheritance": False,
+            "provider_calls": 0,
+            "decision_owner": DECISION_OWNER,
+            "renderer_selection": "delegated",
+            "generation_selection": "delegated",
+            "machine_only": True,
+        }
+
+    # For a genuine continuation/reference, consume the semantic measurement
+    # already produced by Interpretation when it is present. Otherwise make
+    # one shared batch embedding measurement here.
+    context_similarity = 0.0
+    if scene.get("exists") and scene.get("summary"):
+        existing_measurement = (
+            measurement.get("context_vectors", {})
+            if isinstance(measurement, dict)
+            else {}
+        )
+        measured_scene_score = (
+            existing_measurement.get("active_visual_scene", {}).get("score")
+            if isinstance(existing_measurement.get("active_visual_scene"), dict)
+            else None
+        )
+        if measured_scene_score is not None:
+            context_similarity = _clamp(measured_scene_score)
+        else:
+            scene_reference_text = " ".join(
+                part for part in (
+                    scene.get("scene_type", ""),
+                    scene.get("summary", ""),
+                    " ".join(scene.get("objects", [])[:4]),
+                    scene.get("current_request", ""),
+                ) if part
+            ).strip()
+            if scene_reference_text:
+                context_similarity = float(
+                    QUANTUM_EMBEDDING_ENGINE.similarities(
+                        text,
+                        [scene_reference_text],
+                    ).get(scene_reference_text, 0.0)
+                )
+
     scene_relevant = bool(
         scene.get("exists")
         and not new_topic_guard
         and continuation_signal
         and (explicit_reference or context_similarity >= 0.46)
     )
-    if not continuation_signal:
-        scene_relevant = False
 
     reuse_pressure = _clamp(
         0.55 * context_similarity
@@ -201,7 +266,7 @@ def build_visual_reference(
         "generation_allowed": False,
         "suppress_generation": True,
         "visual_should_not_interrupt": True,
-        "visual_is_supportive": True,
+        "visual_is_supportive": scene_relevant,
         "trajectory_aligned": True,
         "dialogue_centered": True,
         "context_dependency": context_dependency or "unresolved",
@@ -213,3 +278,4 @@ def build_visual_reference(
         "generation_selection": "delegated",
         "machine_only": True,
     }
+
