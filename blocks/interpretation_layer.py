@@ -246,6 +246,14 @@ def _ensure_semantic_runtime() -> None:
                 lang_configs=lang_configs or None,
             )
 
+            # Materialize the Russian language pipeline during the existing
+            # background accelerator. Without this, the first Russian user
+            # turn blocks the hot route while Stanza lazily loads tokenize/POS/
+            # lemma, even though the global semantic runtime says READY.
+            if STANZA_NLP is not None and "ru" in lang_subset:
+                STANZA_NLP.process("Прогрев русского семантического контура.")
+                print("⚡ STANZA RU PREWARM: ready", flush=True)
+
             SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
             DIALOGUE_NLI = hf_pipeline(
                 "zero-shot-classification",
@@ -351,6 +359,28 @@ CAPABILITY_HYPOTHESES = {
     "information": "the user wants an explanation, factual answer, or clarification",
     "discussion": "the user wants a discussion, opinion, or reasoning about a topic",
     "space": "the user is discussing spatial arrangement, scene layout, or visual composition",
+}
+
+# One canonical NLI hypothesis field. Families are partitioned after the single
+# model measurement, so the existing public evidence shapes remain unchanged.
+NLI_FAMILY_HYPOTHESES = {
+    "dialogue": tuple(DIALOGUE_LABELS),
+    "representation": tuple(REPRESENTATION_HYPOTHESES.values()),
+    "domain": tuple(DOMAIN_HYPOTHESES.values()),
+    "capability": tuple(CAPABILITY_HYPOTHESES.values()),
+}
+NLI_COMBINED_HYPOTHESES = tuple(
+    dict.fromkeys(
+        label
+        for family in NLI_FAMILY_HYPOTHESES.values()
+        for label in family
+    )
+)
+NLI_BATCH_SIZE = int(os.getenv("APRIL_NLI_BATCH_SIZE", "8"))
+NLI_HYPOTHESIS_OWNER = {
+    label: family
+    for family, labels in NLI_FAMILY_HYPOTHESES.items()
+    for label in labels
 }
 
 
@@ -563,6 +593,7 @@ class QuantumIntentEngine:
             text,
             candidate_labels=list(hypotheses),
             multi_label=True,
+            batch_size=NLI_BATCH_SIZE,
         )
         return {
             "labels": list(result["labels"]),
@@ -623,19 +654,42 @@ class QuantumEvidenceFusionEngine:
 
         nli_bundle = self._nli_cache.get(normalized_turn_text)
         if nli_bundle is None:
+            nli_started = time.perf_counter()
+            combined = self.intent.classify(
+                normalized_turn_text,
+                NLI_COMBINED_HYPOTHESES,
+            )
+            combined_map = {
+                str(label): float(score)
+                for label, score in zip(
+                    combined.get("labels", []), combined.get("scores", [])
+                )
+            }
+
+            def _family_result(family: str) -> Dict[str, Any]:
+                labels = list(NLI_FAMILY_HYPOTHESES[family])
+                ordered = sorted(
+                    ((label, combined_map.get(label, 0.0)) for label in labels),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                return {
+                    "labels": [label for label, _ in ordered],
+                    "scores": [score for _, score in ordered],
+                    "source": "transformers_nli_combined",
+                }
+
             nli_bundle = {
-                "dialogue_nli": self.intent.classify(normalized_turn_text, DIALOGUE_LABELS),
-                "representation_nli": self.intent.classify(
-                    normalized_turn_text, tuple(REPRESENTATION_HYPOTHESES.values())
-                ),
-                "domain_nli": self.intent.classify(
-                    normalized_turn_text, tuple(DOMAIN_HYPOTHESES.values())
-                ),
-                "capability_nli": self.intent.classify(
-                    normalized_turn_text, tuple(CAPABILITY_HYPOTHESES.values())
-                ),
+                "dialogue_nli": _family_result("dialogue"),
+                "representation_nli": _family_result("representation"),
+                "domain_nli": _family_result("domain"),
+                "capability_nli": _family_result("capability"),
             }
             self._nli_cache[normalized_turn_text] = nli_bundle
+            print(
+                f"SEMANTIC TURN: combined_nli_ms={(time.perf_counter() - nli_started)*1000:.1f}",
+                flush=True,
+            )
 
         dialogue_nli = nli_bundle["dialogue_nli"]
         representation_nli = nli_bundle["representation_nli"]
