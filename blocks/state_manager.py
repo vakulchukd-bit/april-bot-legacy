@@ -179,6 +179,7 @@ def build_default_state():
         "image_context": None,
         "image_memory": [],
         "active_visual_scene": None,
+        "pending_visual_scene": None,
         "visual_scene_history": [],
         "visual_topic_registry": [],
         "task_context_storage": [],
@@ -222,7 +223,7 @@ def build_default_state():
             "last_day_key": utc_day_key(),
             "last_rollover": time.time(),
         },
-        "memory_version": "QUANTUM-7D-V1",
+        "memory_version": "QUANTUM-MEMORY-7D-V2-HOTPATH-SAFE",
         "active_scene_contract": {},
         "current_scene_request": "",
         "visual_summary": {},
@@ -241,7 +242,7 @@ class QuantumMemoryEngine:
     existing Executor/Quantum Processor can consume.
     """
 
-    VERSION = "QUANTUM-MEMORY-7D-V1"
+    VERSION = "QUANTUM-MEMORY-7D-V2-HOTPATH-SAFE"
 
     def __init__(self):
         self._encoder = None
@@ -438,7 +439,7 @@ class QuantumMemoryEngine:
                         "day_index": age,
                     }
 
-    def query(self, state_obj, query, *, limit=8):
+    def query(self, state_obj, query, *, limit=8, allow_semantic=True):
         """
         Produce memory evidence. Stored visual scenes remain in the 7-day
         memory, but the current active visual context is exposed only when its
@@ -464,6 +465,21 @@ class QuantumMemoryEngine:
         active_scene = focus.get("active_scene") or state_obj.get("active_visual_scene")
         current_visual = state_obj.get("active_visual_scene")
 
+        # HOT-PATH SAFETY:
+        # The normal request route must not trigger a second semantic model pass.
+        # Interpretation/Visual Reference remain the owners of turn-level
+        # measurement. State Manager can expose stored memory without invoking
+        # embeddings until an explicit memory query is requested.
+        dialog_state = state_obj.get("dialog_state") if isinstance(state_obj.get("dialog_state"), dict) else {}
+        context_dependency = str(dialog_state.get("context_dependency") or "").strip().lower()
+        measured_continuation = bool(
+            dialog_state.get("continuation") or dialog_state.get("reference_to_previous")
+        )
+        explicit_memory_query = bool(
+            dialog_state.get("memory_query_requested")
+            or state_obj.get("memory_signals", {}).get("memory_query_requested")
+        )
+
         candidates = list(self.iter_memory_records(state_obj))
         candidate_texts = []
         candidate_records = []
@@ -482,16 +498,19 @@ class QuantumMemoryEngine:
         if active_scene_text:
             comparison_texts.append(active_scene_text)
 
-        semantic_map = self.semantic_scores(query, comparison_texts)
+        semantic_map = {}
+        if allow_semantic and (explicit_memory_query or measured_continuation):
+            semantic_map = self.semantic_scores(query, comparison_texts)
+
         ranked = []
 
         active_topic_score = (
             float(semantic_map.get(safe_trim_text(active_topic, 1600), 0.0))
-            if active_topic else 0.0
+            if semantic_map else 0.0
         )
         active_scene_similarity = (
             float(semantic_map.get(active_scene_text, 0.0))
-            if active_scene_text else 0.0
+            if semantic_map and active_scene_text else 0.0
         )
 
         for record, candidate_text in zip(candidate_records, candidate_texts):
@@ -503,9 +522,12 @@ class QuantumMemoryEngine:
             if record.get("memory_kind") == "visual_scene":
                 relation += 0.15 * active_scene_similarity
 
-            score = min(1.0, (semantic * 0.65) + (recency * 0.20) + relation)
-            if score >= 0.30:
-                ranked.append((score, record))
+            # Without a measured/explicit memory query, stored records remain
+            # dormant evidence and cannot enter the hot response context.
+            if semantic_map:
+                score = min(1.0, (semantic * 0.65) + (recency * 0.20) + relation)
+                if score >= 0.30:
+                    ranked.append((score, record))
 
         ranked.sort(key=lambda x: x[0], reverse=True)
         matches = []
@@ -525,19 +547,16 @@ class QuantumMemoryEngine:
                 "timestamp": record.get("timestamp"),
             })
 
-        # Stored visual memory is never deleted. A measured new/independent
-        # dialogue context releases it from the current response immediately.
-        dialog_state = state_obj.get("dialog_state") if isinstance(state_obj.get("dialog_state"), dict) else {}
-        context_dependency = str(dialog_state.get("context_dependency") or "").strip().lower()
-        measured_continuation = bool(
-            dialog_state.get("continuation") or dialog_state.get("reference_to_previous")
-        )
+        # Stored visual memory is never deleted. Only an explicit measured
+        # continuation/reference may re-activate the pending scene.
         if context_dependency in {"new_topic", "independent"} and not measured_continuation:
             active_visual_context_relevant = False
-        else:
-            active_visual_context_relevant = bool(
-                current_visual and active_scene_similarity >= 0.55
+        elif measured_continuation and current_visual:
+            active_visual_context_relevant = (
+                active_scene_similarity >= 0.55 if semantic_map else True
             )
+        else:
+            active_visual_context_relevant = False
 
         return {
             "engine": self.VERSION,
@@ -688,7 +707,11 @@ class QuantumMemoryEngine:
 
     def build_executor_bridge(self, state_obj, query=""):
         self.ensure_runtime(state_obj)
-        memory = self.query(state_obj, query) if query else {
+        memory = self.query(
+            state_obj,
+            query,
+            allow_semantic=False,
+        ) if query else {
             "engine": self.VERSION,
             "window_days": MEMORY_DAYS,
             "matches": [],
@@ -1133,6 +1156,15 @@ def add_dialog(user_id, role, content):
     if role == "user":
         state_obj["last_user_turn"] = safe_trim_text(content, 320)
         state_obj["meta"]["last_user_message"] = safe_trim_text(content, 320)
+
+        # A new user turn starts a fresh active-context cycle. The previous
+        # visual scene is not deleted; it is parked as a candidate so the
+        # existing semantic/visual engines can explicitly re-activate it only
+        # when the turn is measured as a continuation/reference.
+        if state_obj.get("active_visual_scene"):
+            state_obj["pending_visual_scene"] = deepcopy(state_obj["active_visual_scene"])
+            state_obj["active_visual_scene"] = None
+            state_obj["scene_state"] = build_default_scene()
     else:
         state_obj["last_april_turn"] = safe_trim_text(content, 320)
         state_obj["meta"]["last_bot_message"] = safe_trim_text(content, 320)
@@ -1726,6 +1758,22 @@ def update_dialog_context(user_id, semantic_result):
     })
     state_obj["dialog_state"] = dialogue_state
 
+    # Re-activate the parked scene only after the existing semantic engine has
+    # explicitly measured continuation/reference. A new/independent topic
+    # leaves the scene in 7-day memory but out of the active context.
+    pending_scene = state_obj.get("pending_visual_scene")
+    continuation_measured = bool(
+        dialogue_state.get("continuation")
+        or dialogue_state.get("reference_to_previous")
+    )
+    dependency = str(dialogue_state.get("context_dependency") or "").strip().lower()
+
+    if continuation_measured and isinstance(pending_scene, dict):
+        state_obj["active_visual_scene"] = deepcopy(pending_scene)
+        state_obj["pending_visual_scene"] = None
+    elif dependency in {"new_topic", "independent"} or not continuation_measured:
+        state_obj["active_visual_scene"] = None
+
     # Semantic result is evidence entering the same memory field; it is not a
     # second memory system.
     QUANTUM_MEMORY_ENGINE.record_intent(state_obj, {
@@ -1790,7 +1838,12 @@ def query_dynamic_memory(user_id, query, limit=8):
     No route/renderer decision is made here.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    result = QUANTUM_MEMORY_ENGINE.query(state_obj, query, limit=limit)
+    result = QUANTUM_MEMORY_ENGINE.query(
+        state_obj,
+        query,
+        limit=limit,
+        allow_semantic=True,
+    )
     return result
 
 
