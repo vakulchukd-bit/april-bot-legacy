@@ -51,6 +51,13 @@ VISUAL_HISTORY_LIMIT = 8
 IMAGE_MEMORY_LIMIT = 5
 TOPIC_MEMORY_LIMIT = 5
 
+# Actual rendered visual artifacts may remain the active visual scene.
+# Plain text responses do not become visual scenes merely because a SceneContract exists.
+VISUAL_SCENE_BLOCK_TYPES = {
+    "graph", "plot", "chart", "diagram", "schematic",
+    "gallery", "image", "media", "visual", "scene", "table",
+}
+
 # Runtime semantic model is deliberately lazy: importing State Manager must
 # remain cheap. The engine is loaded only when semantic memory is requested.
 SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # compatibility metadata; runtime is shared
@@ -343,17 +350,11 @@ class QuantumMemoryEngine:
             return 0.0
 
     def semantic_score(self, query, candidate):
-        q = safe_trim_text(query, 1600)
-        c = safe_trim_text(candidate, 1600)
-        if not q or not c:
-            return 0.0
-
-        encoder = self._get_encoder()
-        vectors = encoder.encode([q, c], normalize_embeddings=True)
-        return max(0.0, min(1.0, (self._cosine(vectors[0], vectors[1]) + 1.0) / 2.0))
+        scores = self.semantic_scores(query, [candidate])
+        return float(scores.get(safe_trim_text(candidate, 1600), 0.0))
 
     def semantic_scores(self, query, candidates):
-        """Batch semantic comparison through the shared interpretation encoder."""
+        """Batch comparison through the one shared interpretation embedding engine."""
         q = safe_trim_text(query, 1600)
         unique = []
         seen = set()
@@ -368,6 +369,8 @@ class QuantumMemoryEngine:
             return {}
 
         from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
+        # The interpretation engine owns the encoder/cache. State Manager only
+        # consumes its measurement, so no second model/runtime can appear here.
         return QUANTUM_EMBEDDING_ENGINE.similarities(q, unique)
 
     # ---------- memory field ----------
@@ -429,7 +432,9 @@ class QuantumMemoryEngine:
 
     def query(self, state_obj, query, *, limit=8):
         """
-        Produce memory evidence. It never selects a route or renderer.
+        Produce memory evidence. Stored visual scenes remain in the 7-day
+        memory, but the current active visual context is exposed only when its
+        semantic relevance survives the current-turn measurement.
         """
         self.ensure_runtime(state_obj)
         query = str(query or "").strip()
@@ -441,6 +446,7 @@ class QuantumMemoryEngine:
                 "matches": [],
                 "active_scene": state_obj.get("active_scene", {}),
                 "active_visual_scene": state_obj.get("active_visual_scene"),
+                "active_visual_context_relevant": bool(state_obj.get("active_visual_scene")),
                 "decision_owner": "QUANTUM_PROCESSOR",
                 "evidence_only": True,
             }
@@ -451,8 +457,6 @@ class QuantumMemoryEngine:
         current_visual = state_obj.get("active_visual_scene")
 
         candidates = list(self.iter_memory_records(state_obj))
-        ranked = []
-
         candidate_texts = []
         candidate_records = []
         for record in candidates:
@@ -461,22 +465,34 @@ class QuantumMemoryEngine:
                 candidate_texts.append(candidate_text)
                 candidate_records.append(record)
 
-        semantic_map = self.semantic_scores(query, candidate_texts)
+        active_scene_text = self._record_text(
+            active_scene if isinstance(active_scene, dict) else {"text": active_scene}
+        )
+        comparison_texts = list(candidate_texts)
+        if active_topic:
+            comparison_texts.append(safe_trim_text(active_topic, 1600))
+        if active_scene_text:
+            comparison_texts.append(active_scene_text)
+
+        semantic_map = self.semantic_scores(query, comparison_texts)
+
+        active_topic_score = (
+            float(semantic_map.get(safe_trim_text(active_topic, 1600), 0.0))
+            if active_topic else 0.0
+        )
+        active_scene_similarity = (
+            float(semantic_map.get(active_scene_text, 0.0))
+            if active_scene_text else 0.0
+        )
 
         for record, candidate_text in zip(candidate_records, candidate_texts):
             semantic = float(semantic_map.get(candidate_text, 0.0))
             recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_DAYS))
 
-            relation = 0.0
-            if active_topic and str(active_topic).lower() in candidate_text.lower():
-                relation += 0.15
-
-            if active_scene:
-                scene_text = self._record_text(
-                    active_scene if isinstance(active_scene, dict) else {"text": active_scene}
-                )
-                if scene_text:
-                    relation += 0.20 * self.semantic_score(query, scene_text)
+            # Memory relation is semantic, never substring/keyword routing.
+            relation = 0.10 * active_topic_score
+            if record.get("memory_kind") == "visual_scene":
+                relation += 0.15 * active_scene_similarity
 
             score = min(1.0, (semantic * 0.65) + (recency * 0.20) + relation)
             if score >= 0.30:
@@ -500,26 +516,74 @@ class QuantumMemoryEngine:
                 "timestamp": record.get("timestamp"),
             })
 
-        # Explicit active scene evidence is kept separate from historical
-        # matches so the processor can distinguish "continue" from "recall".
-        active_scene_text = self._record_text(
-            active_scene if isinstance(active_scene, dict) else {"text": active_scene}
+        # Stored visual memory is never deleted. A measured new/independent
+        # dialogue context releases it from the current response immediately.
+        dialog_state = state_obj.get("dialog_state") if isinstance(state_obj.get("dialog_state"), dict) else {}
+        context_dependency = str(dialog_state.get("context_dependency") or "").strip().lower()
+        measured_continuation = bool(
+            dialog_state.get("continuation") or dialog_state.get("reference_to_previous")
         )
-        active_similarity = (
-            self.semantic_score(query, active_scene_text)
-            if active_scene_text
-            else 0.0
-        )
+        if context_dependency in {"new_topic", "independent"} and not measured_continuation:
+            active_visual_context_relevant = False
+        else:
+            active_visual_context_relevant = bool(
+                current_visual and active_scene_similarity >= 0.55
+            )
 
         return {
             "engine": self.VERSION,
             "window_days": MEMORY_DAYS,
             "matches": matches,
-            "active_scene_similarity": round(active_similarity, 6),
-            "active_visual_scene": current_visual,
+            "active_scene_similarity": round(active_scene_similarity, 6),
+            "active_visual_scene": current_visual if active_visual_context_relevant else None,
+            "stored_visual_scene": current_visual,
+            "active_visual_context_relevant": active_visual_context_relevant,
+            "active_topic_similarity": round(active_topic_score, 6),
             "focus_state": deepcopy(focus),
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
+        }
+
+    @staticmethod
+    def _is_visual_scene_contract(block_types):
+        return any(
+            str(block_type or "").strip().lower() in VISUAL_SCENE_BLOCK_TYPES
+            for block_type in (block_types or [])
+        )
+
+    @staticmethod
+    def _continuity_context(state_obj, contract):
+        """Read already-measured dialogue continuity; never infer from keywords."""
+        dialogue_state = state_obj.get("dialog_state", {})
+        metadata = contract.get("metadata") if isinstance(contract.get("metadata"), dict) else {}
+        space = contract.get("space_continuity") if isinstance(contract.get("space_continuity"), dict) else {}
+
+        explicit_continuation = (
+            metadata.get("continuation")
+            if "continuation" in metadata
+            else space.get("continuation")
+        )
+        explicit_dependency = (
+            metadata.get("context_dependency")
+            if "context_dependency" in metadata
+            else space.get("context_dependency")
+        )
+
+        if explicit_continuation is not None:
+            continuation = bool(explicit_continuation)
+        else:
+            continuation = bool(dialogue_state.get("continuation") or dialogue_state.get("reference_to_previous"))
+
+        dependency = str(
+            explicit_dependency
+            or dialogue_state.get("context_dependency")
+            or ""
+        ).strip().lower()
+
+        return {
+            "continuation": continuation,
+            "context_dependency": dependency,
+            "new_topic": dependency in {"new_topic", "independent"} and not continuation,
         }
 
     # ---------- unified writes ----------
@@ -547,7 +611,16 @@ class QuantumMemoryEngine:
         record.setdefault("timestamp", time.time())
         record.setdefault("memory_kind", "visual_scene")
 
-        state_obj["memory_timeline"]["day_0"]["visual_scenes"].append(record)
+        scene_id = str(record.get("scene_id") or "").strip()
+        existing = state_obj["memory_timeline"]["day_0"]["visual_scenes"]
+
+        if scene_id:
+            existing[:] = [
+                item for item in existing
+                if not (isinstance(item, dict) and str(item.get("scene_id") or "").strip() == scene_id)
+            ]
+
+        existing.append(record)
         state_obj["active_visual_scene"] = record
         state_obj["visual_scene_history"].append(record)
         state_obj["visual_scene_history"] = state_obj["visual_scene_history"][-VISUAL_HISTORY_LIMIT:]
@@ -1253,7 +1326,7 @@ def bind_current_visual_scene(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     visual = state_obj.get("active_visual_scene")
     if visual:
-        QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, visual)
+        state_obj["active_visual_scene"] = deepcopy(visual)
         persist_state(user_id)
 
 
@@ -1281,17 +1354,35 @@ def update_visual_summary(user_id, visual_summary):
     visual_summary = visual_summary or {}
     state_obj["visual_summary"] = visual_summary
 
-    scene = state_obj.get("active_visual_scene") or {}
-    scene["events_count"] = visual_summary.get("scene_events_count", 0)
-    scene["last_event"] = visual_summary.get("last_event")
-    scene["package"] = visual_summary.get("package", "free")
-    scene["session_started_utc"] = visual_summary.get("session_started_utc")
-    QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, scene)
+    scene = state_obj.get("active_visual_scene")
+    has_event = bool(
+        visual_summary.get("scene_events_count")
+        or visual_summary.get("last_event")
+        or visual_summary.get("current_request")
+    )
+
+    # An empty frontend visual summary is not a new scene. Keep the seven-day
+    # memory untouched and do not rewrite the active scene with stale text.
+    if not isinstance(scene, dict) or not scene:
+        if not has_event:
+            return {}
+        scene = {}
+
+    if has_event:
+        scene["events_count"] = visual_summary.get("scene_events_count", scene.get("events_count", 0))
+        scene["last_event"] = visual_summary.get("last_event", scene.get("last_event"))
+        scene["package"] = visual_summary.get("package", scene.get("package", "free"))
+        scene["session_started_utc"] = visual_summary.get("session_started_utc", scene.get("session_started_utc"))
+        scene["timestamp"] = time.time()
+        if visual_summary.get("current_request"):
+            scene["current_request"] = str(visual_summary["current_request"]).strip()[:1200]
+
+        if scene.get("scene_type") or scene.get("scene_id") or scene.get("summary"):
+            QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, scene)
 
     state_obj["active_scene"] = QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
     persist_state(user_id)
     return scene
-
 
 def build_visual_memory_bridge(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
@@ -1326,6 +1417,9 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
             if block_type and block_type not in block_types:
                 block_types.append(block_type)
 
+    current_request_text = str(current_request or "").strip()
+    answer_text = str(answer or "").strip()[:4000]
+
     state_obj["active_scene_contract"] = {
         "scene_version": str(contract.get("scene_version") or ""),
         "active_scene": str(contract.get("active_scene") or ""),
@@ -1333,28 +1427,39 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "metadata": deepcopy(contract.get("metadata") or {}),
         "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
         "render_block_types": block_types,
-        "current_request": str(current_request or "").strip(),
-        "answer": str(answer or "").strip()[:4000],
+        "current_request": current_request_text,
+        "answer": answer_text,
         "scene_id": str(contract.get("scene_id") or ""),
     }
-    state_obj["current_scene_request"] = str(current_request or "").strip()
-    state_obj["last_april_turn"] = str(answer or "").strip()[:4000]
+    state_obj["current_scene_request"] = current_request_text
+    state_obj["last_april_turn"] = answer_text
 
-    # A scene contract is itself a memory record. This keeps the actual
-    # rendered scene and the remembered scene in the same memory field.
-    scene_record = {
-        "scene_id": state_obj["active_scene_contract"]["scene_id"],
-        "scene_type": state_obj["active_scene_contract"]["active_scene"],
-        "summary": state_obj["active_scene_contract"]["answer"],
-        "current_request": state_obj["active_scene_contract"]["current_request"],
-        "render_block_types": block_types,
-        "timestamp": time.time(),
-    }
-    QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, scene_record)
+    is_visual_scene = QUANTUM_MEMORY_ENGINE._is_visual_scene_contract(block_types)
+    continuity = QUANTUM_MEMORY_ENGINE._continuity_context(state_obj, state_obj["active_scene_contract"])
+
+    if is_visual_scene:
+        previous_scene_id = (
+            str((state_obj.get("active_visual_scene") or {}).get("scene_id") or "")
+            if continuity["continuation"] else ""
+        )
+        scene_record = {
+            "scene_id": state_obj["active_scene_contract"]["scene_id"],
+            "scene_type": state_obj["active_scene_contract"]["active_scene"],
+            "summary": answer_text,
+            "current_request": current_request_text,
+            "render_block_types": block_types,
+            "timestamp": time.time(),
+            "continuation": continuity["continuation"],
+            "context_dependency": continuity["context_dependency"],
+            "previous_scene_id": previous_scene_id,
+        }
+        QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, scene_record)
+
+    # Text-only responses update dialogue/scene contract state but never replace
+    # the stored visual scene. That scene remains available for true continuation.
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
     persist_state(user_id)
     return state_obj["active_scene_contract"]
-
 
 def update_dialog_context(user_id, semantic_result):
     if not isinstance(semantic_result, dict):
@@ -1363,6 +1468,9 @@ def update_dialog_context(user_id, semantic_result):
     state_obj = get_state(user_id)
     obj = semantic_result.get("current_object")
     topic = semantic_result.get("current_topic")
+    contract = semantic_result.get("dialogue_contract") if isinstance(
+        semantic_result.get("dialogue_contract"), dict
+    ) else {}
 
     if obj:
         state_obj["current_object"] = obj
@@ -1370,12 +1478,37 @@ def update_dialog_context(user_id, semantic_result):
     if topic:
         state_obj["current_topic"] = topic
 
+    # Store measured dialogue evidence in the existing dialog state so the
+    # scene updater can consume the same decision without another semantic pass.
+    dialogue_state = state_obj.get("dialog_state")
+    if not isinstance(dialogue_state, dict):
+        dialogue_state = {}
+
+    dialogue_state.update({
+        "current_request": semantic_result.get("normalized")
+        or semantic_result.get("current_request")
+        or "",
+        "continuation": bool(
+            contract.get("continuation", semantic_result.get("continuation", False))
+        ),
+        "reference_to_previous": bool(
+            contract.get("reference_to_previous", False)
+        ),
+        "context_dependency": semantic_result.get("context_dependency"),
+        "active_topic": topic or semantic_result.get("active_topic"),
+        "active_goal": semantic_result.get("active_goal"),
+        "dialog_act": contract.get("dialog_act") or semantic_result.get("dialog_act"),
+    })
+    state_obj["dialog_state"] = dialogue_state
+
     # Semantic result is evidence entering the same memory field; it is not a
     # second memory system.
     QUANTUM_MEMORY_ENGINE.record_intent(state_obj, {
         "topic": topic,
         "object": obj,
         "intent": semantic_result.get("intent"),
+        "context_dependency": semantic_result.get("context_dependency"),
+        "continuation": bool(contract.get("continuation", semantic_result.get("continuation", False))),
         "timestamp": time.time(),
     })
     persist_state(user_id)
