@@ -1355,10 +1355,35 @@ def update_visual_summary(user_id, visual_summary):
     state_obj["visual_summary"] = visual_summary
 
     scene = state_obj.get("active_visual_scene")
+
+    last_event = visual_summary.get("last_event")
+    event_type = ""
+    event_payload_type = ""
+    if isinstance(last_event, dict):
+        event_type = str(
+            last_event.get("event_type") or last_event.get("type") or ""
+        ).strip().lower()
+        payload = last_event.get("payload")
+        if isinstance(payload, dict):
+            event_payload_type = str(
+                payload.get("type") or payload.get("artifact_type") or ""
+            ).strip().lower()
+
+    dialogue_only_event = event_type in {
+        "user_message", "assistant_message", "message", "text"
+    } or event_payload_type in {"user_message", "assistant_message", "message", "text"}
+
+    # Plain conversation events do not mutate the active visual scene. The
+    # visual scene has its own lifecycle and is updated by real visual/scene
+    # contracts elsewhere in the single route.
+    if dialogue_only_event:
+        return scene or {}
+
     has_event = bool(
-        visual_summary.get("scene_events_count")
-        or visual_summary.get("last_event")
-        or visual_summary.get("current_request")
+        visual_summary.get("visual_event")
+        or visual_summary.get("visual_scene")
+        or visual_summary.get("scene_id")
+        or visual_summary.get("render_block_types")
     )
 
     # An empty frontend visual summary is not a new scene. Keep the seven-day
