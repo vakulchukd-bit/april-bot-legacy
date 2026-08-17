@@ -447,3 +447,24 @@ def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
         f"{len(result.get('candidate_signals', []))} candidates"
     )
     return result
+
+
+# =====================================================
+# 🖼️ CANONICAL IMAGE ANALYSIS FACADE
+# =====================================================
+# Public compatibility surface for the existing image route.
+# The actual passive analyzer remains in blocks/blocks/image_system.py.
+# This function does not create a second image engine or route.
+async def analyze_image(path: str, state=None):
+    """
+    Canonical image-analysis entry point.
+
+    `state` is accepted for compatibility with existing callers and is not
+    used to create a parallel state/analysis engine. The existing passive
+    analyzer remains the implementation owner.
+    """
+    from blocks.blocks.image_system import analyze_image as _passive_analyze_image
+    result = await _passive_analyze_image(path)
+    if isinstance(result, dict) and isinstance(state, dict):
+        result.setdefault("user_id", state.get("meta", {}).get("user_id"))
+    return result
