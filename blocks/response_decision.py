@@ -144,77 +144,54 @@ def _representation_signals(semantic: Dict[str, Any], cognition: Dict[str, Any])
         if _s(key)
     }
 
-    explicit_positive: list[str] = []
+    current_positive = []
     for source in (
         constraints.get("positive", []),
         semantic.get("requested_representations", []),
         semantic.get("required_representations", []),
-        representation.get("requested_representations", []),
-        representation.get("required_representations", []),
     ):
         values = [source] if isinstance(source, str) else list(source or []) if isinstance(source, (list, tuple, set)) else []
         for value in values:
             name = _s(value).lower()
-            if name and name not in blocked and name not in explicit_positive:
-                explicit_positive.append(name)
+            if name and name not in blocked and name not in current_positive:
+                current_positive.append(name)
 
-    for item in explicit_positive:
-        weights[item] = max(weights.get(item, 0.0), 0.90)
+    for item in current_positive:
+        if item not in weights:
+            weights[item] = 0.0
+        weights[item] += 0.35
 
-    if "text" not in weights:
-        weights["text"] = 0.0
+    if not weights:
+        weights = {"text": 1.0}
 
-    ranked = sorted(weights, key=weights.get, reverse=True)
-    top = weights.get(ranked[0], 0.0) if ranked else 0.0
-
-    # A renderer must have current-request evidence, not merely a high
-    # relative posterior against unrelated representations. This prevents
-    # "Как тебя зовут?" from becoming a LinkCard because link happened to be
-    # among the top posterior labels.
-    renderer_requested = _b(
-        semantic.get("render_intent")
-        or semantic.get("renderer_request")
-        or semantic.get("prefer_renderer")
-        or representation.get("prefer_renderer")
-    )
-
-    requested_outputs: list[str] = ["text"]
-    for name in explicit_positive:
-        if name != "text" and name not in requested_outputs:
-            requested_outputs.append(name)
-
-    # Only allow a non-explicit representation when the processor already
-    # established renderer intent and the semantic posterior is exceptionally
-    # strong. Relative ranking alone is never sufficient.
-    if renderer_requested:
-        for name in ranked:
-            if name == "text" or name in requested_outputs or name in blocked:
-                continue
-            if weights.get(name, 0.0) >= 0.82:
-                requested_outputs.append(name)
-
-    if requested_outputs == ["text"] and not renderer_requested:
+    # Canonical presentation rule: a structured renderer must have positive
+    # evidence from the CURRENT request. Relative posterior mass is not enough
+    # to manufacture a table/link/graph for an unrelated question.
+    explicit_outputs = [
+        name for name in current_positive
+        if name not in blocked and name != "text"
+    ]
+    requested_outputs = ["text", *dict.fromkeys(explicit_outputs)]
+    if not explicit_outputs:
         requested_outputs = ["text"]
 
     candidates = [x for x in _representation_set(semantic, representation) if x not in blocked]
-    candidates.extend(x for x in explicit_positive if x not in blocked)
-    candidates = _unique(candidates)
+    for item in current_positive:
+        if item not in candidates:
+            candidates.append(item)
 
     return {
-        "requested": next((x for x in requested_outputs if x != "text"), "text"),
+        "requested": next((x for x in requested_outputs if x != "text"), requested_outputs[0]),
         "requested_outputs": requested_outputs,
         "candidates": candidates,
         "blocked": sorted(blocked),
         "weights": weights,
         "posterior": posterior,
-        "explicit_positive": explicit_positive,
-        "renderer_requested": renderer_requested,
         "text_explanation": _b(representation.get("prefer_text_explanation")),
         "interaction_mode": representation.get("interaction_mode"),
         "current_request_authoritative": True,
         "source": "quantum_representation_evidence",
     }
-
 
 def _continuity_signals(cognition: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
     continuity = _d(cognition.get("continuity_state"))
