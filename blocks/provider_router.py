@@ -412,32 +412,41 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
 
 
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
+    """Keep the visible answer aligned with the canonical output plan.
+
+    For text-only turns, structured markdown emitted by the model is not a
+    second presentation channel; it is removed so the Web renderer can own
+    representation. For explicit table output, the dedicated TableBlock owns
+    the table and the prose copy is removed as before.
     """
-    Prevent a narrative answer from containing a second full copy of a structured artifact.
-    This is intentionally conservative: it does not parse arbitrary prose or remove facts.
-    It only removes a fenced/markdown table block when a dedicated table output is requested.
-    """
-    if not answer or "table" not in requested_outputs:
+    if not answer:
         return answer
-    # Remove markdown table runs of 2+ rows; the dedicated TableBlock carries the structure.
+    text_only = list(requested_outputs or []) == ["text"]
+    if not text_only and "table" not in requested_outputs:
+        return answer
+
     lines = answer.splitlines()
-    out = []
-    table_run = 0
+    out: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
         is_pipe = line.count("|") >= 2
         if is_pipe:
-            run = 0
             j = i
+            run = 0
+            separator = False
             while j < len(lines) and lines[j].count("|") >= 2:
+                current = lines[j].strip()
+                if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", current):
+                    separator = True
                 run += 1
                 j += 1
-            if run >= 3:
+            if run >= 3 and separator:
                 i = j
                 continue
         out.append(line)
         i += 1
+
     cleaned = "\n".join(out).strip()
     return re.sub(r"\n{3,}", "\n\n", cleaned)
 
@@ -1109,41 +1118,38 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     source = contract.get("processor_input")
     payload = source if isinstance(source, dict) else {}
     requested_outputs = _canonical_requested_outputs(payload)
+    identity_request = bool((payload.get("constraints") or {}).get("metadata", {}).get("identity_request")) if isinstance(payload.get("constraints"), dict) else False
+    if identity_request:
+        requested_outputs = ["text"]
     mr.setdefault("metadata", {})["canonical_output_plan_before_finalize"] = list(requested_outputs)
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
 
-    request_text = _extract_request_text(payload)
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
-    identity_request = bool(metadata.get("identity_request"))
-    micro_social_request = bool(metadata.get("micro_social_request"))
-    if micro_social_request and not identity_request:
-        greeting_leak = re.search(
-            r"\b(Python|JavaScript|TypeScript|таблиц|график|сравнен|GPT[- ]?5\.6\s*Luna|ChatGPT)\b",
-            answer,
-            re.I,
+    intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else {}
+    identity_request = bool(
+        metadata.get("identity_request")
+        or intent.get("type") == "self_identification"
+        or (constraints.get("dialogue_act") == "self_identification")
+    )
+
+    # Identity is a processor-owned semantic decision. Provider never infers it
+    # from phrases and never exposes its internal model identity to the user.
+    if identity_request:
+        identity = APRIL_IDENTITY if isinstance(APRIL_IDENTITY, dict) else {}
+        identity_name = _safe_text(identity.get("name") or "April")
+        capabilities = identity.get("capabilities") if isinstance(identity.get("capabilities"), list) else []
+        capability_text = ", ".join(str(x) for x in capabilities[:6] if x)
+        answer = (
+            f"Я — {identity_name}. Я веду с тобой единый диалог, понимаю смысл запроса, "
+            f"учитываю релевантный контекст и могу работать с текстом, голосом, изображениями "
+            f"и структурированными представлениями ответа"
+            + (f", включая {capability_text}." if capability_text else ".")
+            + " Внутри April использует модельные и вычислительные инструменты, "
+              "но пользователь общается именно с April."
         )
-        if greeting_leak:
-            answer = "Привет! Я April. Чем помочь?"
-    if identity_request or re.search(
-        r"\b(кто\s+ты|как\s+тебя\s+зовут|расскажи[ ,]+кто\s+ты|who\s+are\s+you)\b",
-        request_text,
-        re.I,
-    ):
-        if re.search(
-            r"\b(GPT[- ]?5\.6\s*Luna|ChatGPT|OpenAI model|language model|text-generation provider)\b",
-            answer,
-            re.I,
-        ):
-            answer = (
-                "Я — April, твой персональный ИИ-помощник. "
-                "Я понимаю запрос, учитываю контекст диалога и помогаю с текстом, "
-                "анализом, кодом, таблицами, графиками и другими представлениями ответа. "
-                "Внутри April использует разные вычислительные и модельные инструменты, "
-                "но с тобой работает именно April."
-            )
 
     mr["answer"] = answer
     mr["content"] = answer
