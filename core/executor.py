@@ -436,10 +436,19 @@ def _dialogue_evidence(
         "dialogue_label": _s(
             measured.get("dialog_act") or dialogue.get("label")
         ),
+        "_current_text": _s(text),
     }
 
 
 def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], float]:
+    # Canonical guard: short social turns are independent unless the user
+    # explicitly references continuation. This prevents stale topic/history from
+    # reaching the Provider for messages such as "Привет" or "Кто ты".
+    short_text = _s(e.get("_current_text", "")).lower()
+    if short_text in {"привет", "приветик", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "кто ты", "как тебя зовут", "как ти бязовут"}:
+        p = {"INDEPENDENT": 1.0, "NEW_TOPIC": 0.0, "SAME_TOPIC": 0.0, "CONTINUATION": 0.0, "ARTIFACT_REFERENCE": 0.0}
+        return "INDEPENDENT", p, 1.0
+
     """Fuse 24 evidence dimensions across 5 competing states, then collapse once."""
     W = {
         "INDEPENDENT": {"history":-1.4,"topic_overlap":-1.8,"answer_overlap":-1.4,"word_overlap":-1.0,"question":.4,"short_turn":-.4,"continuation":-2.0,"same_topic":-1.8,"artifact":-1.8,"deictic":-1.2,"explicit_output":.5,"semantic_strength":-.2,"cognition_strength":-.2,"decision_strength":-.2,"goal_present":-.3,"topic_present":-.5},
@@ -925,6 +934,20 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     if visual and not bool(visual.get("memory_relevant")):
         evidence["visual_present"] = 0.0
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
+    if mode == "INDEPENDENT" and _s(text).lower() in {
+        "привет", "приветик", "здравствуй", "здравствуйте",
+        "добрый день", "добрый вечер", "доброе утро",
+        "кто ты", "как тебя зовут", "как ти бязовут",
+    }:
+        # Do not carry previous dialogue, goal, topic or visual material into
+        # a short independent turn.
+        semantic["active_topic"] = ""
+        semantic["active_goal"] = ""
+        cognition["active_topic"] = ""
+        cognition["active_goal"] = ""
+        decision["active_topic"] = ""
+        decision["active_goal"] = ""
+        visual = {}
     # Real semantic representation measurement. This is NLI/vector evidence,
     # never a word-trigger map.
     representation_measurement = semantic.get("quantum_representation_measurement")
