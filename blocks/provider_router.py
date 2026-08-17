@@ -1009,11 +1009,16 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     if not answer:
         raise RuntimeError("GPT-5.6 Luna returned an empty canonical answer.")
 
-    content = normalize_response_text(parsed.get("content") or answer)
+    # Never preserve a machine JSON envelope as visible content. The canonical
+    # human content follows the already-unwrapped answer.
+    content = _unwrap_model_answer(parsed.get("content") or answer)
+    if not content:
+        content = answer
     blocks = _sanitize_render_block_texts(
         _clean_render_blocks(parsed.get("render_blocks", []) or []),
         answer,
     )
+
     if not blocks:
         blocks = [{
             "type": "text",
@@ -1036,6 +1041,16 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     render_priority = list(raw_render_priority) if isinstance(raw_render_priority, list) else []
 
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
+
+    # Current-request authority: when the Processor requested text only, a
+    # model-side table/graph/link is not allowed to manufacture a second
+    # presentation. Preserve only text/markdown blocks in that case.
+    source_outputs = list(source_payload.get("requested_outputs") or [])
+    if source_outputs and all(str(x).lower() in {"text", "markdown"} for x in source_outputs):
+        blocks = [
+            block for block in blocks
+            if str(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
+        ]
     metadata.update({
         "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
@@ -1052,8 +1067,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "machine_response": {
             "answer": answer,
             "content": content,
-            "response": normalize_response_text(parsed.get("response") or answer),
-            "summary": normalize_response_text(parsed.get("summary") or _compact_summary(answer, blocks)),
+            "response": _unwrap_model_answer(parsed.get("response") or answer),
+            "summary": _unwrap_model_answer(parsed.get("summary") or _compact_summary(answer, blocks)),
             "explanation": normalize_response_text(parsed.get("explanation") or ""),
             "scene": scene,
             "artifacts": artifacts,
