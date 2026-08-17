@@ -36,12 +36,6 @@ FILE_ID = "APRIL_SCENE_CONTEXT_COORDINATION_SYSTEM"
 ROOM = "CONTEXT_ROOM"
 VERSION = "QUANTUM_CONTEXT_V8"
 
-LOW_VALUE_MESSAGES = {
-    "ок", "ага", "понял", "да", "ясно", "угу",
-    "привет", "здравствуй", "как дела", "ты как",
-    "как ты", "понятно", "спасибо", "нет", "хорошо",
-}
-
 CONTEXT_STOPWORDS = {
     "и", "а", "но", "или", "да", "же", "ли", "не", "ни",
     "что", "это", "этот", "эта", "эти", "тот", "та", "те",
@@ -51,16 +45,7 @@ CONTEXT_STOPWORDS = {
     "они", "его", "ее", "её", "их", "мой", "моя", "мое", "моё",
     "можешь", "можно", "нужно", "надо", "есть", "был", "была",
     "быть", "будет", "расскажи", "покажи", "скажи", "дай",
-    "пожалуйста", "привет", "здравствуйте",
-}
-
-REFERENCE_MARKERS = {
-    "помнишь", "вернемся", "вернёмся", "продолжим",
-    "предыдущ", "прошлый", "прошлая", "прошлое", "прошлые",
-    "тот", "та", "те", "его", "ее", "её", "это", "такой",
-    "такая", "как раньше", "как тогда", "дальше", "снова",
-    "повтори", "перепиши", "продолжи", "таблицу", "график",
-    "формулу",
+    "пожалуйста",
 }
 
 MAX_RELEVANT_MESSAGES = 20
@@ -113,25 +98,53 @@ def _tokens(value: Any) -> set[str]:
 
 
 def _is_low_information(text: Any) -> bool:
-    value = normalize_lower(text)
-    return not value or value in LOW_VALUE_MESSAGES or not _tokens(value)
+    value = normalize_text(text)
+    if not value:
+        return True
+    tokens = _tokens(value)
+    return len(tokens) <= 1
 
 
-def _is_reference(text: Any) -> bool:
-    value = normalize_lower(text)
-    return any(marker in value for marker in REFERENCE_MARKERS)
+def _semantic_profile(text: Any, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
+        st = _state_dict(state)
+        topic = _scene_topic(st.get("scene_state")) if st else ""
+        focus = _dict(st.get("focus_state") or st.get("dynamic_focus")) if st else {}
+        return QUANTUM_EVIDENCE_FUSION._fast_measurement(
+            normalize_text(text),
+            "",
+            topic,
+            normalize_text(focus.get("active_goal") or focus.get("primary_focus") or ""),
+        )
+    except Exception:
+        return {}
 
 
-def _is_independent_short_turn(text: Any) -> bool:
-    """Short social/greeting turns must not inherit an active topic or scene.
-    They remain ordinary dialogue and never delete stored memory; they only
-    release active context for the current turn.
-    """
-    value = normalize_lower(text)
-    return (
-        value in LOW_VALUE_MESSAGES
-        or value in {"привет", "приветик", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "кто ты", "как тебя зовут", "как ти бязовут"}
-    )
+def _is_reference(text: Any, state: Optional[Dict[str, Any]] = None) -> bool:
+    profile = _semantic_profile(text, state)
+    reference = float(profile.get("reference_score", 0.0) or 0.0)
+    continuation = float(profile.get("continuation_score", 0.0) or 0.0)
+    independent = float(profile.get("independent_score", 0.0) or 0.0)
+    return max(reference, continuation) >= 0.58 and max(reference, continuation) >= independent + 0.03
+
+
+def _is_independent_short_turn(text: Any, state: Dict[str, Any] | None = None) -> bool:
+    """Semantic context gate; no phrase/keyword routing."""
+    value = normalize_text(text)
+    if not value or len(value.split()) > 24:
+        return False
+    if _is_low_information(value):
+        return True
+    try:
+        from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
+        profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(value, "", "", "")
+        independent = float(profile.get("independent_score", 0.0))
+        continuation = float(profile.get("continuation_score", 0.0))
+        reference = float(profile.get("reference_score", 0.0))
+        return independent >= 0.58 and independent >= max(continuation, reference) + 0.03
+    except Exception:
+        return len(value.split()) <= 4
 
 
 def _overlap(a: Any, b: Any) -> float:
@@ -425,15 +438,13 @@ def _v7_clear_stale_scene(state: Dict[str, Any], current_text: str) -> bool:
 
 
 def detect_dialog_intent(current_text: Any, state: Dict[str, Any]) -> str:
-    text = normalize_lower(current_text)
-    topic = normalize_lower(_scene_topic(state.get("scene_state")))
-    if topic and topic in text:
+    profile = _semantic_profile(current_text, state)
+    continuation = float(profile.get("continuation_score", 0.0) or 0.0)
+    reference = float(profile.get("reference_score", 0.0) or 0.0)
+    independent = float(profile.get("independent_score", 0.0) or 0.0)
+    if continuation >= 0.60 and continuation >= max(reference, independent) + 0.03:
         return "CONTINUE_TOPIC"
-    if any(x in text for x in ("помнишь", "вернем", "вернём", "как раньше", "как тогда")):
-        return "RETURN_TO_TOPIC"
-    if any(x in text for x in ("аналог", "сравни", "как в прошл")):
-        return "COMPARE_WITH_PAST"
-    if any(x in text for x in ("тот", "эта", "предыдущ", "прошл")):
+    if reference >= 0.60 and reference >= max(continuation, independent) + 0.03:
         return "REFERENCE_OBJECT"
     return "NEW_TOPIC"
 
@@ -799,7 +810,7 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
         scene,
     )
 
-    independent_short = _is_independent_short_turn(text)
+    independent_short = _is_independent_short_turn(text, state)
     blocks = [
         build_base_context(),
         build_current_request(text, scene),
