@@ -122,6 +122,18 @@ def _is_reference(text: Any) -> bool:
     return any(marker in value for marker in REFERENCE_MARKERS)
 
 
+def _is_independent_short_turn(text: Any) -> bool:
+    """Short social/greeting turns must not inherit an active topic or scene.
+    They remain ordinary dialogue and never delete stored memory; they only
+    release active context for the current turn.
+    """
+    value = normalize_lower(text)
+    return (
+        value in LOW_VALUE_MESSAGES
+        or value in {"привет", "приветик", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "кто ты", "как тебя зовут", "как ти бязовут"}
+    )
+
+
 def _overlap(a: Any, b: Any) -> float:
     aa, bb = _tokens(a), _tokens(b)
     if not aa or not bb:
@@ -367,7 +379,31 @@ def _v7_clear_stale_scene(state: Dict[str, Any], current_text: str) -> bool:
         or dynamic.get("primary_focus")
         or ""
     )
-    if not old_topic or _is_low_information(current_text) or _is_reference(current_text):
+    # A short independent turn must release active topic/visual state even
+    # though the stored memory remains intact. Otherwise an old scene can leak
+    # into greetings and short questions merely because state exists.
+    if _is_reference(current_text):
+        return False
+    if _is_independent_short_turn(current_text):
+        scene["previous_topic"] = old_topic
+        scene["previous_scene"] = dict(scene)
+        for key in (
+            "trajectory", "goal", "active_topic",
+            "active_room", "active_scene_id", "topic_signature"
+        ):
+            scene[key] = ""
+        state["scene_state"] = scene
+        state["focus_state"] = {}
+        state["dynamic_focus"] = {}
+        state["active_visual_scene"] = None
+        state["visual_focus"] = {}
+        state["visual_summary"] = {}
+        state["active_flow"] = None
+        state["current_topic"] = ""
+        state["active_topic"] = ""
+        state["active_goal"] = ""
+        return True
+    if not old_topic or _is_low_information(current_text):
         return False
     if _overlap(current_text, old_topic) > 0:
         return False
@@ -763,20 +799,26 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
         scene,
     )
 
+    independent_short = _is_independent_short_turn(text)
     blocks = [
         build_base_context(),
         build_current_request(text, scene),
         build_scene_block(scene),
-        build_dynamic_focus_block(state),
-        build_dialog_focus_block(state, text),
-        build_visual_scene_block(state.get("active_visual_scene")),
-        build_visual_focus_block(state),
-        build_visual_summary_block(state),
-        build_visual_memory_block(state),
-        build_memory_timeline_block(state),
-        "ACTIVE DIALOG:\n" + build_active_dialog(state, text),
-        "RELEVANT DIALOG:\n" + relevant,
     ]
+    if not independent_short:
+        blocks.extend([
+            build_dynamic_focus_block(state),
+            build_dialog_focus_block(state, text),
+            build_visual_scene_block(state.get("active_visual_scene")),
+            build_visual_focus_block(state),
+            build_visual_summary_block(state),
+            build_visual_memory_block(state),
+            build_memory_timeline_block(state),
+            "ACTIVE DIALOG:\n" + build_active_dialog(state, text),
+            "RELEVANT DIALOG:\n" + relevant,
+        ])
+    else:
+        blocks.append("DIALOGUE MODE: INDEPENDENT SHORT TURN")
 
     image = _dict(state.get("image_context"))
     hint = image.get("hint") or image.get("prompt")
