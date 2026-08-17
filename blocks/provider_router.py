@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from openai import OpenAI
 from blocks.C_ARTIFACT_CONTRACT import BaseArtifact, MachineRequest
+from blocks.april_personality import APRIL_IDENTITY
 
 # ============================================================
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
@@ -58,7 +59,11 @@ def _get_gemini_client():
     return _gemini_client
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are April's single text-generation provider, GPT-5.6 Luna.
+You are the internal text-generation engine used by April.
+The user-facing assistant is ALWAYS April. The provider/model name is an internal implementation detail.
+When the current request asks who you are, answer as April and describe April's own capabilities.
+Never identify yourself to the user as GPT-5.6 Luna, ChatGPT, a model, the provider, or an internal module.
+Never expose internal provider/model names unless the user explicitly asks for technical implementation details.
 
 You receive one canonical MachineRequest already interpreted by April's processor.
 Return exactly one MachineResponse JSON object. Do not wrap it in markdown fences.
@@ -841,6 +846,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             f"GOAL: {_safe_text(payload.get('goal')).strip()}",
             f"INTENT_TYPE: {_safe_text(intent.get('type')).strip()}",
             f"REQUEST: {current}",
+            f"ASSISTANT_IDENTITY: {json.dumps({"name": APRIL_IDENTITY.get("name", "April"), "mode": APRIL_IDENTITY.get("identity_mode", "integrated")}, ensure_ascii=False, separators=(",", ":"))}",
             f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
             f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
             f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
@@ -1107,6 +1113,37 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
+
+    request_text = _extract_request_text(payload)
+    constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
+    metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
+    identity_request = bool(metadata.get("identity_request"))
+    micro_social_request = bool(metadata.get("micro_social_request"))
+    if micro_social_request and not identity_request:
+        greeting_leak = re.search(
+            r"\b(Python|JavaScript|TypeScript|таблиц|график|сравнен|GPT[- ]?5\.6\s*Luna|ChatGPT)\b",
+            answer,
+            re.I,
+        )
+        if greeting_leak:
+            answer = "Привет! Я April. Чем помочь?"
+    if identity_request or re.search(
+        r"\b(кто\s+ты|как\s+тебя\s+зовут|расскажи[ ,]+кто\s+ты|who\s+are\s+you)\b",
+        request_text,
+        re.I,
+    ):
+        if re.search(
+            r"\b(GPT[- ]?5\.6\s*Luna|ChatGPT|OpenAI model|language model|text-generation provider)\b",
+            answer,
+            re.I,
+        ):
+            answer = (
+                "Я — April, твой персональный ИИ-помощник. "
+                "Я понимаю запрос, учитываю контекст диалога и помогаю с текстом, "
+                "анализом, кодом, таблицами, графиками и другими представлениями ответа. "
+                "Внутри April использует разные вычислительные и модельные инструменты, "
+                "но с тобой работает именно April."
+            )
 
     mr["answer"] = answer
     mr["content"] = answer
