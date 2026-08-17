@@ -400,11 +400,7 @@ def _dialogue_evidence(
 
     # Explicit semantic representation evidence comes from NLI, not keywords.
     representation_measurement = semantic.get("quantum_representation_measurement")
-    micro_social = _s(text).lower() in {
-        "привет", "приветик", "здравствуй", "здравствуйте",
-        "добрый день", "добрый вечер", "доброе утро",
-        "кто ты", "как тебя зовут", "как ти бязовут",
-    } or _is_april_identity_request(text)
+    micro_social = bool(semantic.get("fast_social") or semantic.get("identity_request"))
     if micro_social:
         representation_measurement = {
             "nli": {
@@ -478,14 +474,6 @@ def _dialogue_evidence(
 
 
 def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], float]:
-    # Canonical guard: short social turns are independent unless the user
-    # explicitly references continuation. This prevents stale topic/history from
-    # reaching the Provider for messages such as "Привет" or "Кто ты".
-    short_text = _s(e.get("_current_text", "")).lower()
-    if short_text in {"привет", "приветик", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "кто ты", "как тебя зовут", "как ти бязовут"}:
-        p = {"INDEPENDENT": 1.0, "NEW_TOPIC": 0.0, "SAME_TOPIC": 0.0, "CONTINUATION": 0.0, "ARTIFACT_REFERENCE": 0.0}
-        return "INDEPENDENT", p, 1.0
-
     """Fuse 24 evidence dimensions across 5 competing states, then collapse once."""
     W = {
         "INDEPENDENT": {"history":-1.4,"topic_overlap":-1.8,"answer_overlap":-1.4,"word_overlap":-1.0,"question":.4,"short_turn":-.4,"continuation":-2.0,"same_topic":-1.8,"artifact":-1.8,"deictic":-1.2,"explicit_output":.5,"semantic_strength":-.2,"cognition_strength":-.2,"decision_strength":-.2,"goal_present":-.3,"topic_present":-.5},
@@ -1013,24 +1001,15 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
             data["visual_context"] = _clip(visual, 900)
     return data
 
-def _is_april_identity_request(text: str) -> bool:
-    """Recognize explicit April self-identity questions without heavy semantic routing."""
-    normalized = re.sub(r"\s+", " ", _s(text).strip().lower())
-    if not normalized:
+def _is_april_identity_request(text: str, semantic: dict | None = None) -> bool:
+    """Semantic identity evidence only; no phrase triggers."""
+    if isinstance(semantic, dict) and "identity_request" in semantic:
+        return bool(semantic.get("identity_request"))
+    try:
+        from blocks.interpretation_layer import _semantic_identity_request
+        return bool(_semantic_identity_request(text))
+    except Exception:
         return False
-    phrases = (
-        "кто ты",
-        "как тебя зовут",
-        "расскажи кто ты",
-        "расскажи, кто ты",
-        "кто такая april",
-        "кто такая април",
-        "что ты умеешь",
-        "расскажи о себе",
-        "кто ты такая",
-        "кто ты такой",
-    )
-    return any(normalized.startswith(phrase) for phrase in phrases)
 
 
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
@@ -1040,13 +1019,26 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     if visual and not bool(visual.get("memory_relevant")):
         evidence["visual_present"] = 0.0
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
-    if mode == "INDEPENDENT" and (
-        _s(text).lower() in {
-        "привет", "приветик", "здравствуй", "здравствуйте",
-        "добрый день", "добрый вечер", "доброе утро",
-        "кто ты", "как тебя зовут", "как ти бязовут",
-        } or _is_april_identity_request(text)
-    ):
+    fast_social = bool(semantic.get("fast_social"))
+    identity_semantic = bool(semantic.get("identity_request"))
+    identity_score = float(semantic.get("identity_score", 0.0) or 0.0)
+    continuation_score = float(semantic.get("continuation_score", 0.0) or 0.0)
+    reference_score = float(semantic.get("reference_score", 0.0) or 0.0)
+    identity_semantic = bool(
+        identity_semantic
+        or (identity_score >= 0.56 and identity_score >= continuation_score - 0.03 and identity_score >= reference_score - 0.03)
+    )
+    if fast_social and (identity_semantic or float(semantic.get("greeting_score", 0.0) or 0.0) >= continuation_score):
+        mode = "INDEPENDENT"
+        dialogue_state = {
+            "INDEPENDENT": 1.0,
+            "NEW_TOPIC": 0.0,
+            "SAME_TOPIC": 0.0,
+            "CONTINUATION": 0.0,
+            "ARTIFACT_REFERENCE": 0.0,
+        }
+        coherence = 1.0
+    if mode == "INDEPENDENT":
         # Do not carry previous dialogue, goal, topic or visual material into
         # a short independent turn.
         semantic["active_topic"] = ""
@@ -1072,13 +1064,20 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                     packet.pop(key, None)
                 if str(packet.get("representation_authority", "")).lower() not in {"", "text"}:
                     packet["representation_authority"] = "text"
-        semantic["representation_constraints"] = {
-            "positive": ["text"],
-            "negative": ["table", "graph", "diagram", "formula", "code", "gallery", "image", "link"],
-            "current_request_authoritative": True,
-        }
-        decision["requested_outputs"] = ["text"]
-        if _is_april_identity_request(text):
+        if fast_social or identity_semantic:
+            semantic["representation_constraints"] = {
+                "positive": ["text"],
+                "negative": ["table", "graph", "diagram", "formula", "code", "gallery", "image", "link"],
+                "current_request_authoritative": True,
+            }
+            decision["requested_outputs"] = ["text"]
+        else:
+            semantic["representation_constraints"] = {
+                "positive": [],
+                "negative": [],
+                "current_request_authoritative": True,
+            }
+        if _is_april_identity_request(text, semantic):
             identity = deepcopy(APRIL_IDENTITY)
             semantic["assistant_identity"] = identity
             cognition["assistant_identity"] = identity
@@ -1156,6 +1155,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     complexity = _complexity(semantic, cognition, decision, text)
     quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
     response_budget = _quantum_budget_from_64(quantum_budget_field)
+    if bool(semantic.get("fast_social")) or bool(semantic.get("identity_request")):
+        response_budget = min(int(response_budget), 280)
 
     representation_constraints = _representation_constraints(
         semantic, cognition, decision
@@ -1189,11 +1190,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "processor_version": PROCESSOR_VERSION,
         "assistant_identity": deepcopy(APRIL_IDENTITY),
         "assistant_identity_name": APRIL_IDENTITY.get("name", "April"),
-        "identity_request": _is_april_identity_request(text),
-        "micro_social_request": bool(_s(text).lower() in {
-            "привет", "приветик", "здравствуй", "здравствуйте",
-            "добрый день", "добрый вечер", "доброе утро",
-        } or _is_april_identity_request(text)),
+        "identity_request": bool(semantic.get("identity_request")),
+        "micro_social_request": bool(semantic.get("fast_social")),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -1215,7 +1213,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     request = MachineRequest(
         goal=goal,
         intent={
-            "type": _s(semantic.get("intent")) or ("self_identification" if _is_april_identity_request(text) else "dialogue"),
+            "type": _s(semantic.get("intent")) or ("self_identification" if semantic.get("identity_request") else "dialogue"),
             "normalized_text": _s(text),
             "dialogue_state": mode,
             "coherence": round(coherence, 4),
