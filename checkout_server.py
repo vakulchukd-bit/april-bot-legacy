@@ -397,6 +397,111 @@ def canonical_scene_metadata(contract):
     return scene_contract_view(contract).get("metadata", {})
 
 
+
+# =========================================================
+# 🧠 CANONICAL CPU RETURN / TRANSPORT HELPERS
+# =========================================================
+# These helpers are intentionally transport-only. They do not route, render,
+# call Provider, or create a parallel response path.
+
+def gateway_return_cpu_result(result):
+    """
+    Return the single canonical CPU result without collapsing SceneContract
+    into legacy text. This function is the missing gateway boundary that
+    previously caused:
+        NameError: gateway_return_cpu_result
+    after Provider had already produced a valid response.
+    """
+    if result is None:
+        raise RuntimeError("CPU returned no result.")
+
+    if not isinstance(result, dict):
+        return {
+            "success": True,
+            "scene_contract": {},
+            "content": str(result),
+            "answer": str(result),
+            "summary": "",
+            "render_blocks": [],
+            "canonical_route": "/api/v1/chat",
+            "single_route": True,
+        }
+
+    # Preserve the canonical CPU object exactly; only add transport metadata.
+    result.setdefault("single_route", True)
+    result.setdefault("canonical_route", "/api/v1/chat")
+    result.setdefault("gateway_transport_only", True)
+    return result
+
+
+def build_gateway_transport_payload(result):
+    """
+    Project the already-created CPU SceneContract into the HTTP transport
+    envelope. No new scene, response, provider, or renderer is created here.
+    """
+    if not isinstance(result, dict):
+        result = gateway_return_cpu_result(result)
+
+    scene = scene_contract_view(result.get("scene_contract"))
+    machine = result.get("machine_response")
+    machine = machine if isinstance(machine, dict) else {}
+
+    render_blocks = (
+        scene.get("render_blocks")
+        or result.get("render_blocks")
+        or machine.get("render_blocks")
+        or []
+    )
+
+    content = _checkout_best_text(
+        scene.get("content"),
+        scene.get("answer"),
+        scene.get("summary"),
+        machine.get("content"),
+        machine.get("answer"),
+        machine.get("summary"),
+        result.get("content"),
+        result.get("answer"),
+        result.get("summary"),
+    )
+
+    answer = _checkout_best_text(
+        scene.get("answer"),
+        machine.get("answer"),
+        result.get("answer"),
+        content,
+    )
+
+    summary = _checkout_best_text(
+        scene.get("summary"),
+        machine.get("summary"),
+        result.get("summary"),
+    )
+
+    return {
+        "success": True,
+        "canonical_route": "/api/v1/chat",
+        "single_route": True,
+        "scene_contract": safe_json(scene),
+        "render_blocks": safe_json(render_blocks),
+        "content": content,
+        "answer": answer,
+        "summary": summary,
+        "active_visual_scene": safe_json(
+            result.get("active_visual_scene")
+            or scene.get("active_visual_scene")
+            or {}
+        ),
+        "space_continuity": safe_json(
+            result.get("space_continuity")
+            or scene.get("space_continuity")
+            or {}
+        ),
+        "transport_role": "gateway_only",
+    }
+
+
+
 # =========================================================
 # 🧠 RESPONSE NORMALIZATION
 # =========================================================
@@ -852,8 +957,9 @@ async def process_web_message(
         # If the turn did not produce a new visual scene, restore the stored scene
         # for future genuine continuation. It never re-enters the completed turn.
         blocks = []
+        normalized_local = locals().get("normalized")
         try:
-            blocks = normalized.get("render_blocks", []) if isinstance(normalized, dict) else []
+            blocks = normalized_local.get("render_blocks", []) if isinstance(normalized_local, dict) else []
         except Exception:
             pass
         visual_types = {"graph", "plot", "chart", "diagram", "schematic", "gallery", "image", "media", "visual", "scene", "table"}
@@ -862,6 +968,110 @@ async def process_web_message(
             for block in blocks
         )
         restore_visual_context_after_turn(user_id, new_scene_active=new_scene_active)
+
+
+
+# =========================================================
+# 🎤 APRIL VOICE — CANONICAL INPUT GATEWAY
+# =========================================================
+# Voice is input transport only:
+#   audio -> transcription -> canonical transcript response.
+# The frontend then continues through the same /api/v1/chat route.
+# No second answer route is created here.
+
+@app.route(
+    "/voice",
+    methods=["POST"],
+)
+def voice_chat():
+    temp_path = None
+    try:
+        voice_file = (
+            request.files.get("voice")
+            or request.files.get("audio")
+            or request.files.get("file")
+        )
+        user_id = str(
+            (request.form.get("user_id") or request.form.get("aprilId") or "")
+        ).strip()
+
+        if not voice_file:
+            return jsonify({
+                "success": False,
+                "error": "voice file missing",
+            }), 400
+
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "user_id required",
+            }), 400
+
+        suffix = Path(voice_file.filename or "voice.webm").suffix or ".webm"
+        with tempfile.NamedTemporaryFile(
+            prefix="april_voice_",
+            suffix=suffix,
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            voice_file.save(temp_path)
+
+        print("=" * 80)
+        print("🎤 VOICE REQUEST RECEIVED")
+        print("VOICE FILE:", voice_file.filename or "voice.webm")
+        print("VOICE SAVED:", temp_path)
+
+        transcript = asyncio.run(transcribe_voice(temp_path))
+        transcript = _checkout_best_text(transcript)
+
+        if not transcript:
+            return jsonify({
+                "success": False,
+                "error": "voice transcription returned empty text",
+                "canonical_route": "/api/v1/chat",
+                "voice_input": True,
+                "processed": False,
+            }), 422
+
+        print("TRANSCRIPT:", transcript)
+
+        flow_id = None
+        try:
+            flow_id = request.form.get("flow_id")
+        except Exception:
+            pass
+
+        payload = {
+            "success": True,
+            "canonical_route": "/api/v1/chat",
+            "processed": False,
+            "transcript": transcript,
+            "user_id": user_id,
+            "voice_input": True,
+        }
+        if flow_id:
+            payload["flow_id"] = flow_id
+
+        return jsonify(payload), 200
+
+    except Exception as exc:
+        import traceback as _traceback
+        print("VOICE ERROR:", exc)
+        _traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+            "canonical_route": "/api/v1/chat",
+            "voice_input": True,
+        }), 500
+
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
 
 
 # =========================================================
