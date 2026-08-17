@@ -19,6 +19,7 @@ The public function API is preserved for existing callers.
 from datetime import datetime, timezone
 import time
 import threading
+import re
 from copy import deepcopy
 
 try:
@@ -171,6 +172,8 @@ def build_default_state():
         "image_context": None,
         "image_memory": [],
         "active_visual_scene": None,
+        "active_visual_scene_turn": None,
+        "stored_visual_scene_turn": None,
         "visual_scene_history": [],
         "visual_topic_registry": [],
         "task_context_storage": [],
@@ -1322,6 +1325,50 @@ def sync_focus_layers(user_id):
         state_obj["dynamic_focus"] = deepcopy(state_obj["focus_snapshot"])
 
 
+def prepare_visual_context_for_turn(user_id, current_request):
+    """Detach an unrelated visual scene from the ACTIVE turn without deleting memory."""
+    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
+    current = str(current_request or "").strip().lower()
+    scene = state_obj.get("active_visual_scene")
+    if not isinstance(scene, dict) or not scene:
+        state_obj["active_visual_scene_turn"] = None
+        state_obj["stored_visual_scene_turn"] = None
+        return {"active": False, "released": False}
+
+    summary = str(scene.get("summary") or scene.get("topic") or scene.get("current_request") or "").strip().lower()
+    reference_cues = ("продолж", "дальше", "это", "этот", "эта", "тот", "предыдущ", "прошл", "его", "ее", "её", "там")
+    cue = any(token in current for token in reference_cues)
+
+    # Cheap first-pass overlap. It prevents the old visual scene from entering
+    # unrelated turns without invoking the heavy semantic/NLI stack.
+    current_words = {w for w in re.findall(r"[a-zа-яё0-9]{4,}", current) if w}
+    scene_words = {w for w in re.findall(r"[a-zа-яё0-9]{4,}", summary) if w}
+    overlap = len(current_words & scene_words) / max(1, len(current_words))
+    related = cue or overlap >= 0.20
+
+    if related:
+        state_obj["active_visual_scene_turn"] = deepcopy(scene)
+        state_obj["stored_visual_scene_turn"] = None
+        return {"active": True, "released": False, "overlap": round(overlap, 4)}
+
+    state_obj["stored_visual_scene_turn"] = deepcopy(scene)
+    state_obj["active_visual_scene_turn"] = None
+    state_obj["active_visual_scene"] = None
+    state_obj["visual_focus"] = {}
+    return {"active": False, "released": True, "overlap": round(overlap, 4)}
+
+
+def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
+    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
+    stored = state_obj.get("stored_visual_scene_turn")
+    if not new_scene_active and isinstance(stored, dict) and stored:
+        state_obj["active_visual_scene"] = deepcopy(stored)
+    state_obj["active_visual_scene_turn"] = None
+    state_obj["stored_visual_scene_turn"] = None
+    QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
+    persist_state(user_id)
+
+
 def bind_current_visual_scene(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     visual = state_obj.get("active_visual_scene")
@@ -1355,35 +1402,10 @@ def update_visual_summary(user_id, visual_summary):
     state_obj["visual_summary"] = visual_summary
 
     scene = state_obj.get("active_visual_scene")
-
-    last_event = visual_summary.get("last_event")
-    event_type = ""
-    event_payload_type = ""
-    if isinstance(last_event, dict):
-        event_type = str(
-            last_event.get("event_type") or last_event.get("type") or ""
-        ).strip().lower()
-        payload = last_event.get("payload")
-        if isinstance(payload, dict):
-            event_payload_type = str(
-                payload.get("type") or payload.get("artifact_type") or ""
-            ).strip().lower()
-
-    dialogue_only_event = event_type in {
-        "user_message", "assistant_message", "message", "text"
-    } or event_payload_type in {"user_message", "assistant_message", "message", "text"}
-
-    # Plain conversation events do not mutate the active visual scene. The
-    # visual scene has its own lifecycle and is updated by real visual/scene
-    # contracts elsewhere in the single route.
-    if dialogue_only_event:
-        return scene or {}
-
     has_event = bool(
-        visual_summary.get("visual_event")
-        or visual_summary.get("visual_scene")
-        or visual_summary.get("scene_id")
-        or visual_summary.get("render_block_types")
+        visual_summary.get("scene_events_count")
+        or visual_summary.get("last_event")
+        or visual_summary.get("current_request")
     )
 
     # An empty frontend visual summary is not a new scene. Keep the seven-day
