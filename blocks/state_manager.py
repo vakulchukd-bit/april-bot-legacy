@@ -1432,11 +1432,20 @@ def prepare_visual_context_for_turn(user_id, current_request):
     independent_score = 0.0
     try:
         from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
-        profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(
-            current,
-            "",
-            topic,
-            str(scene.get("goal") or ""),
+        profile = (
+            QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(
+                current,
+                previous_assistant="",
+                active_topic=topic,
+                active_goal=str(scene.get("goal") or ""),
+            )
+            if hasattr(QUANTUM_EVIDENCE_FUSION, "fast_semantic_profile")
+            else QUANTUM_EVIDENCE_FUSION._fast_measurement(
+                current,
+                "",
+                topic,
+                str(scene.get("goal") or ""),
+            )
         )
         context_scores = profile.get("context_scores", {}) or {}
         semantic_relevance = max(
@@ -1454,7 +1463,11 @@ def prepare_visual_context_for_turn(user_id, current_request):
 
     continuation_signal = max(continuation_score, reference_score)
     social_or_independent = max(identity_score, greeting_score, independent_score)
-    semantic_continuation = continuation_signal >= 0.58 and continuation_signal >= social_or_independent + 0.03
+    semantic_continuation = (
+        continuation_signal >= 0.62
+        and continuation_signal >= social_or_independent + 0.05
+        and semantic_relevance >= 0.58
+    )
     overlap_words = {
         w for w in re.findall(r"[a-zа-яё0-9]{4,}", current.lower()) if w
     }
