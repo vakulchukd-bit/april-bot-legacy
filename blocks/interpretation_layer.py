@@ -227,26 +227,49 @@ def _ensure_semantic_runtime() -> None:
 
         started = time.perf_counter()
         try:
-            SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
-
-            if not _stanza_resources_ready():
-                _provision_stanza_resources()
-
-            lang_subset = list(STANZA_BOOTSTRAP_LANGS)
-            lang_configs = {
-                lang: {"processors": STANZA_LANGUAGE_PROCESSORS}
-                for lang in lang_subset
-            }
-
-            STANZA_NLP = MultilingualPipeline(
-                model_dir=str(STANZA_RESOURCE_DIR),
-                max_cache_size=12,
-                download_method=None,
-                lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
-                lang_configs=lang_configs or None,
+            deep_enabled = (
+                str(os.getenv("APRIL_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+                and str(os.getenv("APRIL_ALLOW_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
             )
+            if deep_enabled:
+                SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
+                if not _stanza_resources_ready():
+                    _provision_stanza_resources()
+
+                lang_subset = list(STANZA_BOOTSTRAP_LANGS)
+                lang_configs = {
+                    lang: {"processors": STANZA_LANGUAGE_PROCESSORS}
+                    for lang in lang_subset
+                }
+
+                STANZA_NLP = MultilingualPipeline(
+                    model_dir=str(STANZA_RESOURCE_DIR),
+                    max_cache_size=12,
+                    download_method=None,
+                    lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
+                    lang_configs=lang_configs or None,
+                )
+            else:
+                SPACY_NLP = None
+                STANZA_NLP = None
 
             SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
+            # Prewarm static semantic prototypes when module declarations are
+            # already available. A late first-turn guard covers import races.
+            embedding_engine = globals().get("QUANTUM_EMBEDDING_ENGINE")
+            proto_turns = globals().get("SEMANTIC_TURN_PROTOTYPES")
+            proto_reps = globals().get("REPRESENTATION_HYPOTHESES")
+            proto_domains = globals().get("DOMAIN_HYPOTHESES")
+            proto_caps = globals().get("CAPABILITY_HYPOTHESES")
+            if embedding_engine is not None and all(
+                isinstance(value, dict) for value in (proto_turns, proto_reps, proto_domains, proto_caps)
+            ):
+                embedding_engine.prewarm_static([
+                    *proto_turns.values(),
+                    *proto_reps.values(),
+                    *proto_domains.values(),
+                    *proto_caps.values(),
+                ])
             # NLI is intentionally NOT loaded during the accelerator prewarm.
             # It is a refinement engine and is loaded only when the fast
             # measurement marks a turn as genuinely ambiguous.
@@ -304,7 +327,10 @@ def start_semantic_accelerator() -> None:
 # still owns the same single runtime gate and waits for the shared lock.
 start_semantic_accelerator()
 
-APRIL_DEEP_LINGUISTICS_ENABLED = str(os.getenv("APRIL_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+APRIL_DEEP_LINGUISTICS_ENABLED = (
+    str(os.getenv("APRIL_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    and str(os.getenv("APRIL_ALLOW_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+)
 
 DIALOGUE_LABELS = (
     "question",
@@ -398,7 +424,9 @@ class SemanticEvidence:
 
 def _runtime_ready_guard() -> None:
     _ensure_semantic_runtime()
-    if not _SEMANTIC_RUNTIME_READY or STANZA_NLP is None or SEMANTIC_ENCODER is None:
+    # Only the shared embedding runtime is mandatory for the production hot path.
+    # Deep linguistic engines are optional and never block ordinary requests.
+    if not _SEMANTIC_RUNTIME_READY or SEMANTIC_ENCODER is None:
         raise RuntimeError("Quantum Interpretation semantic runtime is not ready")
 
 
@@ -534,20 +562,70 @@ class QuantumLinguisticEngine:
 
 
 class QuantumEmbeddingEngine:
-    """Semantic vector engine for request/history/topic/goal comparison."""
+    """Low-latency semantic vector engine with static prototype prewarm.
+
+    The production hot path encodes the current request once and reuses
+    precomputed vectors for all static semantic prototypes. Dynamic topic/goal
+    strings are encoded only when they are present.
+    """
 
     def __init__(self):
         self._pair_cache: dict[tuple[str, str], float] = {}
         self._batch_cache: dict[tuple[str, tuple[str, ...]], Dict[str, float]] = {}
-        self._cache_limit = 256
+        self._query_vector_cache: dict[str, Any] = {}
+        self._static_vectors: dict[str, Any] = {}
+        self._cache_limit = 512
+
+    def _remember(self, cache: dict, key, value, limit=None) -> None:
+        cache[key] = value
+        cap = int(limit or self._cache_limit)
+        if len(cache) > cap:
+            cache.pop(next(iter(cache)))
 
     def _remember_pair(self, key: tuple[str, str], score: float) -> None:
-        self._pair_cache[key] = score
-        if len(self._pair_cache) > self._cache_limit:
-            self._pair_cache.pop(next(iter(self._pair_cache)))
+        self._remember(self._pair_cache, key, float(score))
+
+    def prewarm_static(self, candidates: Sequence[str]) -> int:
+        """Encode static semantic prototypes once during accelerator prewarm."""
+        unique: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            value = normalize_text(candidate)
+            if value and value not in seen:
+                seen.add(value)
+                unique.append(value)
+        if not unique or SEMANTIC_ENCODER is None:
+            return 0
+
+        missing = [value for value in unique if value not in self._static_vectors]
+        if not missing:
+            return len(self._static_vectors)
+
+        vectors = SEMANTIC_ENCODER.encode(
+            missing,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        for candidate, vector in zip(missing, vectors):
+            self._static_vectors[candidate] = vector
+        return len(self._static_vectors)
+
+    def _query_vector(self, text: str):
+        value = normalize_text(text)
+        cached = self._query_vector_cache.get(value)
+        if cached is not None:
+            return cached
+        vector = SEMANTIC_ENCODER.encode(
+            [value],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )[0]
+        self._remember(self._query_vector_cache, value, vector, limit=256)
+        return vector
 
     def similarity(self, text_a: str, text_b: str) -> Dict[str, Any]:
-        _runtime_ready_guard()
         text_a = normalize_text(text_a)
         text_b = normalize_text(text_b)
         if not text_a or not text_b:
@@ -558,23 +636,30 @@ class QuantumEmbeddingEngine:
             }
 
         key = (text_a, text_b)
-        if key in self._pair_cache:
+        cached = self._pair_cache.get(key)
+        if cached is not None:
             return {
-                "score": self._pair_cache[key],
+                "score": float(cached),
                 "source": "sentence_transformers",
                 "measured": True,
                 "cached": True,
             }
 
-        vectors = SEMANTIC_ENCODER.encode(
-            [text_a, text_b],
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
+        _runtime_ready_guard()
+        query_vector = self._query_vector(text_a)
+        candidate_vector = self._static_vectors.get(text_b)
+        if candidate_vector is None:
+            candidate_vector = SEMANTIC_ENCODER.encode(
+                [text_b],
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )[0]
+
         score = float(
             cosine_similarity(
-                vectors[0].reshape(1, -1),
-                vectors[1].reshape(1, -1),
+                query_vector.reshape(1, -1),
+                candidate_vector.reshape(1, -1),
             )[0][0]
         )
         score = max(0.0, min(1.0, score))
@@ -587,47 +672,79 @@ class QuantumEmbeddingEngine:
         }
 
     def similarities(self, text: str, candidates: Sequence[str]) -> Dict[str, float]:
-        """Batch semantic comparison used by one interpretation turn.
-
-        Results are cached by the exact semantic pair set so the same turn does
-        not repeatedly encode identical context fields.
-        """
+        """Encode the request once; reuse prewarmed prototype vectors."""
         text = normalize_text(text)
         if not text:
             return {}
-        unique = []
-        seen = set()
+
+        unique: list[str] = []
+        seen: set[str] = set()
         for candidate in candidates:
-            candidate = normalize_text(candidate)
-            if candidate and candidate not in seen:
-                seen.add(candidate)
-                unique.append(candidate)
+            value = normalize_text(candidate)
+            if value and value not in seen:
+                seen.add(value)
+                unique.append(value)
 
-        if not text or not unique:
-            return {candidate: 0.0 for candidate in unique}
+        if not unique:
+            return {}
 
-        _runtime_ready_guard()
         key = (text, tuple(unique))
         cached = self._batch_cache.get(key)
         if cached is not None:
             return dict(cached)
 
-        vectors = SEMANTIC_ENCODER.encode(
-            [text, *unique],
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
-        scores = cosine_similarity(
-            vectors[0].reshape(1, -1),
-            vectors[1:],
-        )[0]
-        result = {
-            candidate: max(0.0, min(1.0, float(score)))
-            for candidate, score in zip(unique, scores)
-        }
-        self._batch_cache[key] = result
-        if len(self._batch_cache) > self._cache_limit:
-            self._batch_cache.pop(next(iter(self._batch_cache)))
+        _runtime_ready_guard()
+        if not self._static_vectors:
+            static_vocab = []
+            for vocab_name in (
+                "SEMANTIC_TURN_PROTOTYPES",
+                "REPRESENTATION_HYPOTHESES",
+                "DOMAIN_HYPOTHESES",
+                "CAPABILITY_HYPOTHESES",
+            ):
+                vocab = globals().get(vocab_name)
+                if isinstance(vocab, dict):
+                    static_vocab.extend(vocab.values())
+            if static_vocab:
+                self.prewarm_static(static_vocab)
+        query_vector = self._query_vector(text)
+        static_candidates = [candidate for candidate in unique if candidate in self._static_vectors]
+        dynamic_candidates = [candidate for candidate in unique if candidate not in self._static_vectors]
+
+        result: dict[str, float] = {}
+
+        if static_candidates:
+            matrix = [self._static_vectors[candidate] for candidate in static_candidates]
+            scores = cosine_similarity(
+                query_vector.reshape(1, -1),
+                matrix,
+            )[0]
+            result.update(
+                {
+                    candidate: max(0.0, min(1.0, float(score)))
+                    for candidate, score in zip(static_candidates, scores)
+                }
+            )
+
+        if dynamic_candidates:
+            vectors = SEMANTIC_ENCODER.encode(
+                dynamic_candidates,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+            scores = cosine_similarity(
+                query_vector.reshape(1, -1),
+                vectors,
+            )[0]
+            result.update(
+                {
+                    candidate: max(0.0, min(1.0, float(score)))
+                    for candidate, score in zip(dynamic_candidates, scores)
+                }
+            )
+
+        self._remember(self._batch_cache, key, dict(result))
         for candidate, score in result.items():
             self._remember_pair((text, candidate), score)
         return result
@@ -691,13 +808,18 @@ class QuantumEvidenceFusionEngine:
         }
 
     def _fast_measurement(self, text: str, previous_assistant: str, active_topic: str, active_goal: str) -> Dict[str, Any]:
-        """Fast semantic measurement using one shared embedding batch.
-
-        No lexical trigger list participates in route selection. The same
-        sentence-transformer already owned by the interpretation engine scores
-        semantic prototypes and representation prototypes in one batched pass.
-        """
+        """One cached semantic measurement for the entire turn."""
         normalized = normalize_text(text)
+        key = (
+            normalized,
+            normalize_text(previous_assistant),
+            normalize_text(active_topic),
+            normalize_text(active_goal),
+        )
+        cached = self._turn_cache.get(("fast_profile", key))
+        if cached is not None:
+            return cached
+
         prototype_items = list(SEMANTIC_TURN_PROTOTYPES.items())
         representation_items = list(REPRESENTATION_HYPOTHESES.items())
         domain_items = list(DOMAIN_HYPOTHESES.items())
@@ -708,10 +830,11 @@ class QuantumEvidenceFusionEngine:
             *(value for _, value in representation_items),
             *(value for _, value in domain_items),
             *(value for _, value in capability_items),
+            *(v for v in (active_topic, active_goal, previous_assistant) if v),
         ]
         scores = self.embedding.similarities(normalized, candidates)
-        profile = {name: float(scores.get(value, 0.0)) for name, value in prototype_items}
 
+        profile = {name: float(scores.get(value, 0.0)) for name, value in prototype_items}
         representation_scores = {
             name: float(scores.get(value, 0.0))
             for name, value in representation_items
@@ -725,35 +848,35 @@ class QuantumEvidenceFusionEngine:
             for name, value in capability_items
         }
 
-        identity_score = profile["identity"]
-        greeting_score = profile["greeting"]
-        continuation_score = profile["continuation"]
-        reference_score = profile["reference"]
-        independent_score = profile["independent"]
+        context_scores = {
+            "active_topic": float(scores.get(normalize_text(active_topic), 0.0)) if active_topic else 0.0,
+            "active_goal": float(scores.get(normalize_text(active_goal), 0.0)) if active_goal else 0.0,
+            "previous_assistant": float(scores.get(normalize_text(previous_assistant), 0.0)) if previous_assistant else 0.0,
+        }
 
-        # Relative semantic confidence is more stable than a fixed phrase match.
         dialogue_options = {
-            "identity": identity_score,
-            "greeting": greeting_score,
-            "continuation": continuation_score,
-            "reference": reference_score,
-            "independent": independent_score,
+            "identity": profile["identity"],
+            "greeting": profile["greeting"],
+            "continuation": profile["continuation"],
+            "reference": profile["reference"],
+            "independent": profile["independent"],
         }
         best_dialogue = max(dialogue_options, key=dialogue_options.get)
-        best_dialogue_score = dialogue_options[best_dialogue]
+        best_dialogue_score = float(dialogue_options[best_dialogue])
         sorted_dialogue = sorted(dialogue_options.values(), reverse=True)
-        dialogue_margin = (sorted_dialogue[0] - sorted_dialogue[1]) if len(sorted_dialogue) > 1 else sorted_dialogue[0]
+        dialogue_margin = (
+            sorted_dialogue[0] - sorted_dialogue[1]
+            if len(sorted_dialogue) > 1 else sorted_dialogue[0]
+        )
 
         explicit_representations = [
             name for name, score in representation_scores.items()
-            if name != "text" and score >= 0.63
+            if name != "text" and score >= 0.72
         ]
         best_representation = max(representation_scores, key=representation_scores.get)
-        best_rep_score = representation_scores[best_representation]
+        best_rep_score = float(representation_scores[best_representation])
 
-        # NLI refinement is intentionally not part of the synchronous hot path.
-        # If enabled, it can refine only low-confidence long turns; otherwise the
-        # embedding field is the complete evidence source for this turn.
+        # Normal requests never wait for NLI. NLI is optional refinement only.
         enable_refinement = os.getenv("APRIL_ENABLE_NLI_REFINEMENT", "0").strip().lower() in {"1", "true", "yes"}
         needs_refinement = bool(
             enable_refinement
@@ -763,56 +886,51 @@ class QuantumEvidenceFusionEngine:
         )
 
         dialogue_positive = [best_dialogue] if best_dialogue in DIALOGUE_LABELS else ["statement"]
-        dialogue_labels = list(DIALOGUE_LABELS)
-        dialogue_fast = self._fast_family(dialogue_labels, dialogue_positive, max(0.55, best_dialogue_score))
+        dialogue_fast = self._fast_family(
+            list(DIALOGUE_LABELS),
+            dialogue_positive,
+            max(0.55, best_dialogue_score),
+        )
 
-        rep_labels = list(REPRESENTATION_HYPOTHESES.values())
-        rep_positive = [REPRESENTATION_HYPOTHESES[name] for name in explicit_representations]
-        if not rep_positive:
-            rep_positive = [REPRESENTATION_HYPOTHESES["text"]]
-        representation_fast = {
-            "labels": [
-                REPRESENTATION_HYPOTHESES[name]
-                for name in sorted(representation_scores, key=representation_scores.get, reverse=True)
-            ],
-            "scores": [
-                representation_scores[name]
-                for name in sorted(representation_scores, key=representation_scores.get, reverse=True)
-            ],
-            "source": "shared_embedding_prototypes",
-        }
-        if not representation_fast["labels"]:
-            representation_fast = self._fast_family(rep_labels, rep_positive, 0.82)
-
+        rep_ranked = sorted(representation_scores, key=representation_scores.get, reverse=True)
         domain_ranked = sorted(domain_scores, key=domain_scores.get, reverse=True)
         capability_ranked = sorted(capability_scores, key=capability_scores.get, reverse=True)
 
-        return {
+        result = {
             "needs_refinement": needs_refinement,
-            "identity_score": identity_score,
-            "greeting_score": greeting_score,
-            "continuation_score": continuation_score,
-            "reference_score": reference_score,
-            "independent_score": independent_score,
+            "identity_score": float(profile["identity"]),
+            "greeting_score": float(profile["greeting"]),
+            "continuation_score": float(profile["continuation"]),
+            "reference_score": float(profile["reference"]),
+            "independent_score": float(profile["independent"]),
             "dialogue_best": best_dialogue,
             "dialogue_confidence": best_dialogue_score,
-            "dialogue_margin": dialogue_margin,
+            "dialogue_margin": float(dialogue_margin),
             "representation_scores": representation_scores,
+            "domain_scores": domain_scores,
+            "capability_scores": capability_scores,
             "best_representation": best_representation,
             "best_representation_score": best_rep_score,
             "explicit_representations": explicit_representations,
+            "context_scores": context_scores,
             "identity_request": (
-                identity_score >= 0.56
-                and identity_score >= greeting_score - 0.02
-                and identity_score >= continuation_score - 0.03
-                and identity_score >= reference_score - 0.03
+                profile["identity"] >= 0.56
+                and profile["identity"] >= profile["greeting"] - 0.02
+                and profile["identity"] >= profile["continuation"] - 0.03
+                and profile["identity"] >= profile["reference"] - 0.03
             ),
             "fast_social": (
-                max(identity_score, greeting_score, independent_score) >= 0.58
+                max(profile["identity"], profile["greeting"], profile["independent"]) >= 0.58
                 and len(normalized.split()) <= 24
+                and best_representation == "text"
+                and best_rep_score < 0.72
             ),
             "dialogue_nli": dialogue_fast,
-            "representation_nli": representation_fast,
+            "representation_nli": {
+                "labels": [REPRESENTATION_HYPOTHESES[name] for name in rep_ranked],
+                "scores": [representation_scores[name] for name in rep_ranked],
+                "source": "shared_embedding_prototypes",
+            },
             "domain_nli": {
                 "labels": [DOMAIN_HYPOTHESES[name] for name in domain_ranked],
                 "scores": [domain_scores[name] for name in domain_ranked],
@@ -823,7 +941,10 @@ class QuantumEvidenceFusionEngine:
                 "scores": [capability_scores[name] for name in capability_ranked],
                 "source": "shared_embedding_prototypes",
             },
+            "source": "single_turn_shared_embedding",
         }
+        self._remember(self._turn_cache, ("fast_profile", key), result)
+        return result
 
     def turn_measurement(
         self,
@@ -1166,6 +1287,7 @@ def _dialogue_signal_contract(
     state: dict,
     semantic: dict,
     cognition: dict | None = None,
+    precomputed_profile: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     last_assistant = ""
     last_user = ""
@@ -1215,16 +1337,28 @@ def _dialogue_signal_contract(
         or cognition.get("current_topic")
     )
 
-    if _is_micro_social_turn(text):
-        profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(text, last_assistant, active_topic, active_goal)
-        label = "self_identification" if profile.get("identity_request") else ("statement" if profile.get("greeting_score", 0.0) >= profile.get("continuation_score", 0.0) else "question")
+    profile = precomputed_profile or QUANTUM_EVIDENCE_FUSION._fast_measurement(
+        text, last_assistant, active_topic, active_goal
+    )
+    fast_social = bool(profile.get("fast_social"))
+    if fast_social:
+        label = (
+            "self_identification"
+            if profile.get("identity_request")
+            else (
+                "statement"
+                if profile.get("greeting_score", 0.0) >= profile.get("continuation_score", 0.0)
+                else "question"
+            )
+        )
+        context_scores = profile.get("context_scores", {}) or {}
         measured = {
             "dialogue": {
                 "label": label,
                 "continuation_score": float(profile.get("continuation_score", 0.0)),
                 "reference_score": float(profile.get("reference_score", 0.0)),
-                "topic_score": 0.0,
-                "goal_score": 0.0,
+                "topic_score": float(context_scores.get("active_topic", 0.0)),
+                "goal_score": float(context_scores.get("active_goal", 0.0)),
                 "confidence": float(profile.get("dialogue_confidence", 0.7)),
             },
             "source": "semantic_embedding_fast_path",
@@ -1297,38 +1431,90 @@ def _semantic_context_packet(
     semantic: dict,
     cognition: dict,
 ) -> Dict[str, Any]:
-    dialogue = _dialogue_signal_contract(text, history, state, semantic)
+    """Build one canonical semantic packet with one fast measurement."""
+    started = time.perf_counter()
 
-    previous_answer = dialogue["previous_april_turn"]
-    active_topic = dialogue["active_topic"]
-    active_goal = dialogue["active_goal"]
+    previous_answer = ""
+    active_topic = normalize_text(
+        state.get("active_topic")
+        or state.get("current_topic")
+        or semantic.get("current_topic")
+        or cognition.get("active_topic")
+        or cognition.get("current_topic")
+    )
+    active_goal = normalize_text(
+        state.get("active_goal")
+        or state.get("current_goal")
+        or semantic.get("active_goal")
+        or cognition.get("active_goal")
+        or cognition.get("current_goal")
+    )
 
-    if _is_micro_social_turn(text):
-        is_identity = _semantic_identity_request(text)
+    # Read only the most recent assistant turn; no full-history semantic scan.
+    for item in reversed(history if isinstance(history, list) else []):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").lower()
+        if isinstance(item.get("april"), dict):
+            previous_answer = normalize_text(
+                item["april"].get("answer")
+                or item["april"].get("content")
+                or item["april"].get("summary")
+            )
+        elif role in {"assistant", "april", "bot"}:
+            previous_answer = normalize_text(
+                item.get("content")
+                or item.get("answer")
+                or item.get("summary")
+            )
+        if previous_answer:
+            break
+
+    profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(
+        text, previous_answer, active_topic, active_goal
+    )
+
+    fast_social = bool(profile.get("fast_social"))
+    is_identity = bool(profile.get("identity_request"))
+    context_scores = profile.get("context_scores", {}) or {}
+
+    if fast_social:
+        dialogue = _dialogue_signal_contract(
+            text,
+            history,
+            state,
+            semantic,
+            cognition,
+            precomputed_profile=profile,
+        )
         representation = {
             "measurements": [{
                 "type": "text",
                 "score": 1.0,
-                "source": "micro_social_fast_path",
+                "source": "shared_embedding_fast_path",
                 "nli": {
                     "labels": list(REPRESENTATION_HYPOTHESES.keys()),
                     "scores": [1.0 if name == "text" else 0.0 for name in REPRESENTATION_HYPOTHESES],
-                    "source": "micro_social_fast_path",
+                    "source": "shared_embedding_fast_path",
                 },
             }],
-            "context_similarity": {"score": 0.0, "source": "micro_social_fast_path"},
+            "context_similarity": {"score": max(context_scores.values(), default=0.0), "source": "shared_embedding_fast_path"},
             "nli": {
                 "labels": list(REPRESENTATION_HYPOTHESES.keys()),
                 "scores": [1.0 if name == "text" else 0.0 for name in REPRESENTATION_HYPOTHESES],
-                "source": "micro_social_fast_path",
+                "source": "shared_embedding_fast_path",
             },
         }
         linguistic = _lightweight_linguistic(text)
         domain = {
             "measurements": [],
-            "source": "micro_social_fast_path",
+            "source": "shared_embedding_fast_path",
         }
-        context_vectors = {}
+        context_vectors = {
+            "previous_answer": {"score": float(context_scores.get("previous_assistant", 0.0))},
+            "active_topic": {"score": float(context_scores.get("active_topic", 0.0))},
+            "active_goal": {"score": float(context_scores.get("active_goal", 0.0))},
+        }
         return {
             "linguistic": linguistic,
             "dialogue": dialogue,
@@ -1336,39 +1522,81 @@ def _semantic_context_packet(
             "domain": domain,
             "context_vectors": context_vectors,
             "identity_request": is_identity,
+            "fast_path": True,
+            "profile": profile,
             "decision_owner": "QUANTUM_PROCESSOR",
             "engine": "quantum_interpretation_engine",
             "evidence_only": True,
-            "fast_path": True,
+            "measurement_ms": round((time.perf_counter() - started) * 1000, 2),
         }
 
-    representation = QUANTUM_EVIDENCE_FUSION.representations(
+    # One shared measurement drives the evidence families.
+    dialogue = _dialogue_signal_contract(
         text,
-        context=previous_answer or active_topic,
+        history,
+        state,
+        semantic,
+        cognition,
+        precomputed_profile=profile,
     )
+    representation_scores = profile.get("representation_scores", {}) or {}
+    rep_ranked = sorted(representation_scores, key=representation_scores.get, reverse=True)
+    representation = {
+        "measurements": [
+            {
+                "type": name,
+                "score": float(representation_scores.get(name, 0.0)),
+                "source": "shared_embedding_fast_path",
+                "nli": {
+                    "labels": [REPRESENTATION_HYPOTHESES[n] for n in rep_ranked],
+                    "scores": [float(representation_scores[n]) for n in rep_ranked],
+                    "source": "shared_embedding_fast_path",
+                },
+            }
+            for name in rep_ranked[:6]
+        ],
+        "context_similarity": {"score": max(context_scores.values(), default=0.0), "source": "shared_embedding_fast_path"},
+        "nli": {
+            "labels": [REPRESENTATION_HYPOTHESES[n] for n in rep_ranked],
+            "scores": [float(representation_scores[n]) for n in rep_ranked],
+            "source": "shared_embedding_fast_path",
+        },
+    }
 
-    linguistic = QUANTUM_EVIDENCE_FUSION.turn_measurement(
-        text=text,
-        previous_assistant=previous_answer,
-        active_topic=active_topic,
-        active_goal=active_goal,
-    )["linguistic"]
+    linguistic = _lightweight_linguistic(text)
+    domain_ranked = sorted(
+        (profile.get("domain_nli", {}) or {}).get("labels", []),
+        key=lambda x: (profile.get("domain_nli", {}) or {}).get("scores", [0] * len((profile.get("domain_nli", {}) or {}).get("labels", [])))[
+            (profile.get("domain_nli", {}) or {}).get("labels", []).index(x)
+        ] if x in (profile.get("domain_nli", {}) or {}).get("labels", []) else 0,
+        reverse=True,
+    )
+    domain_scores = profile.get("domain_scores", {}) or {}
 
     return {
         "linguistic": linguistic,
         "dialogue": dialogue,
         "representation": representation,
-        "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
-        "context_vectors": {
-            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer) if previous_answer else {"score": 0.0},
-            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic) if active_topic else {"score": 0.0},
-            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal) if active_goal else {"score": 0.0},
+        "domain": {
+            "measurements": [
+                {"domain": name, "score": float(score)}
+                for name, score in sorted(domain_scores.items(), key=lambda kv: kv[1], reverse=True)
+                if float(score) >= 0.45
+            ],
+            "source": "shared_embedding_fast_path",
         },
+        "context_vectors": {
+            "previous_answer": {"score": float(context_scores.get("previous_assistant", 0.0))},
+            "active_topic": {"score": float(context_scores.get("active_topic", 0.0))},
+            "active_goal": {"score": float(context_scores.get("active_goal", 0.0))},
+        },
+        "identity_request": is_identity,
+        "fast_path": False,
+        "profile": profile,
         "decision_owner": "QUANTUM_PROCESSOR",
         "engine": "quantum_interpretation_engine",
-        "identity_request": bool(semantic_packet.get("identity_request")),
-        "fast_path": bool(semantic_packet.get("fast_path")),
         "evidence_only": True,
+        "measurement_ms": round((time.perf_counter() - started) * 1000, 2),
     }
 
 
@@ -1678,33 +1906,39 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
         cognition=cognition,
     )
 
+    profile = semantic_packet.get("profile", {}) if isinstance(semantic_packet.get("profile"), dict) else {}
+    representation_scores = profile.get("representation_scores", {}) or {}
+    domain_scores = profile.get("domain_scores", {}) or {}
+    capability_scores = profile.get("capability_scores", {}) or {}
+
     if semantic_packet.get("fast_path"):
         domains = []
-        representation_evidence = [
-            {
-                "label": "text",
-                "score": 1.0,
-                "source": "micro_social_fast_path",
-                "details": {
-                    "decision_owner": "QUANTUM_PROCESSOR",
-                    "evidence_only": True,
-                    "context_similarity": 0.0,
-                },
-            }
-        ]
+        representation_evidence = [{
+            "label": "text",
+            "score": 1.0,
+            "source": "shared_embedding_fast_path",
+            "details": {"decision_owner": "QUANTUM_PROCESSOR", "evidence_only": True},
+        }]
     else:
         domains = [
-            item["domain"]
-            for item in semantic_packet["domain"].get("measurements", [])
-            if float(item["score"]) >= 0.45
+            name for name, score in domain_scores.items()
+            if float(score) >= 0.45
         ]
         representation_evidence = [
-            item for item in measure_representation_evidence(text)
+            {
+                "label": name,
+                "score": float(score),
+                "source": "shared_embedding_fast_path",
+                "details": {"decision_owner": "QUANTUM_PROCESSOR", "evidence_only": True},
+            }
+            for name, score in sorted(
+                representation_scores.items(), key=lambda item: item[1], reverse=True
+            )
+            if float(score) >= 0.45
         ]
+
     semantic_candidates = [
-        item["label"]
-        for item in representation_evidence
-        if float(item["score"]) >= 0.45
+        item["label"] for item in representation_evidence if float(item["score"]) >= 0.45
     ]
 
     explicit_required = [
@@ -1716,72 +1950,70 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
         if str(x).strip()
     ]
 
-    result["semantic_profile"] = build_semantic_dialog_profile(
-        text,
-        cognition,
-        semantic,
-        dialogue_history=history,
-    )
+    result["semantic_profile"] = {
+        "dialogue_history": history[-8:],
+        "previous_april_turn": semantic_packet["dialogue"].get("previous_april_turn", ""),
+        "active_topic": semantic_packet["dialogue"].get("active_topic", ""),
+        "active_goal": semantic_packet["dialogue"].get("active_goal", ""),
+        "identity_request": bool(semantic_packet.get("identity_request")),
+        "fast_path": bool(semantic_packet.get("fast_path")),
+        "representation_scores": representation_scores,
+        "domain_scores": domain_scores,
+        "capability_scores": capability_scores,
+        "context_scores": profile.get("context_scores", {}),
+        "engine": "quantum_interpretation_engine_v4",
+    }
     result["scene_profile"] = build_scene_construction_profile(result["semantic_profile"])
     result["artifact_contract"] = build_scene_artifact_contract(
-        result["semantic_profile"],
-        result["scene_profile"],
+        result["semantic_profile"], result["scene_profile"]
     )
 
     result["candidate_domains"] = domains
     result["required_domains"] = list(
         semantic.get("required_domains", []) or domains
     )
-    result["domain_confidence"] = (
-        {}
-        if semantic_packet.get("fast_path")
-        else build_domain_confidence(text)
-    )
+    result["domain_confidence"] = {
+        name: round(float(score), 4) for name, score in domain_scores.items()
+    }
     result["candidate_representations"] = semantic_candidates
     result["representation_evidence"] = representation_evidence
     result["required_representations"] = explicit_required
     result["scene_type"] = explicit_required[0] if explicit_required else None
 
-    result["discussion_mode"] = detect_discussion_mode(text)
-    result["space_discussion"] = detect_space_discussion(text)
-    result["exploration"] = semantic_evidence_exploration(text)
+    # Capability evidence comes from the same single embedding measurement.
+    result["discussion_mode"] = float(capability_scores.get("discussion", 0.0)) >= 0.60
+    result["space_discussion"] = float(capability_scores.get("space", 0.0)) >= 0.60
+    result["exploration"] = float(capability_scores.get("exploration", 0.0))
     result["continuation"] = float(
         semantic_packet["dialogue"].get("continuation_score", 0.0)
     )
-    result["web_context"] = semantic_evidence_web(text)
-    result["explicit_image_generation"] = (
-        0.0
-        if semantic_packet.get("fast_path")
-        else semantic_evidence_image(text)
-    )
-    result["lightweight_visual"] = detect_lightweight_visual(text)
+    result["web_context"] = float(capability_scores.get("web", 0.0))
+    result["explicit_image_generation"] = float(representation_scores.get("image", 0.0))
+    result["lightweight_visual"] = max(
+        float(representation_scores.get("graph", 0.0)),
+        float(representation_scores.get("diagram", 0.0)),
+        float(representation_scores.get("image", 0.0)),
+    ) >= 0.72
 
     result["contains_object"] = bool(text)
-    result["contains_explanation"] = semantic_evidence_information(text) >= 0.60
-    result["contains_analysis"] = result["exploration"] >= 0.60
+    result["contains_explanation"] = float(capability_scores.get("information", 0.0)) >= 0.60
+    result["contains_analysis"] = float(capability_scores.get("exploration", 0.0)) >= 0.60
     result["contains_legend"] = False
     if result["contains_explanation"]:
         result["content_role"] = "explanation"
     elif result["contains_analysis"]:
         result["content_role"] = "analysis"
 
-    if semantic_packet.get("fast_path"):
-        math_evidence = 0.0
-        code_evidence = 0.0
-    else:
-        math_evidence = semantic_evidence_math(text)
-        code_evidence = semantic_evidence_code(text)
-
     result["evidence"] = {
         "domain": semantic_packet["domain"],
         "representation": representation_evidence,
-        "math": math_evidence,
-        "code": code_evidence,
+        "math": float(representation_scores.get("formula", 0.0)),
+        "code": float(representation_scores.get("code", 0.0)),
         "web": result["web_context"],
         "image": result["explicit_image_generation"],
         "continuation": result["continuation"],
         "exploration": result["exploration"],
-        "information": semantic_evidence_information(text),
+        "information": float(capability_scores.get("information", 0.0)),
         "linguistic": semantic_packet["linguistic"],
         "dialogue": semantic_packet["dialogue"],
         "context_vectors": semantic_packet["context_vectors"],
@@ -1821,13 +2053,19 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
     if result is None:
         return None
 
-    contract = _dialogue_signal_contract(
-        text,
-        history or [],
-        state or {},
-        result,
-        cognition or {},
+    contract = (
+        result.get("quantum_interpretation_field", {}).get("dialogue")
+        if isinstance(result.get("quantum_interpretation_field"), dict)
+        else None
     )
+    if not isinstance(contract, dict):
+        contract = _dialogue_signal_contract(
+            text,
+            history or [],
+            state or {},
+            result,
+            cognition or {},
+        )
 
     result["dialogue_contract"] = contract
     result["dialog_act"] = contract["dialog_act"]
