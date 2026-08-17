@@ -1,662 +1,449 @@
-print("🔥 MAIN IMAGE SYSTEM WORKING")
-
-# =====================================================
-# 🧠 APRIL IMAGE SYSTEM
-# =====================================================
-
 """
-APRIL IMAGE SYSTEM
+APRIL — INTENT SYSTEM / QUANTUM EVIDENCE V1
 
-APRIL_FILE_ID:
-APRIL_IMAGE_SYSTEM_BRIDGE
+Role:
+    Lightweight semantic evidence layer.
 
-ROLE:
-VISUAL_PROVIDER_BRIDGE
-VISUAL_CONTINUITY_COORDINATOR
+This layer observes the request and emits signals.
+It does NOT own the final route, room, provider, renderer, or execution decision.
 
-INPUT:
-IMAGE_PATH
-VISUAL_STATE
-PROVIDER_VISUAL_ANALYSIS
+Decision owner:
+    QUANTUM_PROCESSOR
 
-OUTPUT:
-VISUAL_MEMORY
-ACTIVE_VISUAL_SCENE
-CONTINUITY_STATE
-VISUAL_ANALYSIS_RESULT
-
-=====================================================
-
-Этот модуль больше НЕ:
-- vision AI;
-- OCR interpreter;
-- trigger detector;
-- scene classifier;
-- fallback analyzer;
-- keyword parser.
-
-=====================================================
-
-Этот модуль теперь:
-- provider bridge;
-- visual continuity layer;
-- semantic scene memory;
-- lightweight visual orchestrator;
-- multimodal context synchronizer.
-
-=====================================================
-
-Главная архитектурная идея:
-
-Gemini / OpenAI / future providers
-ПОНИМАЮТ изображение.
-
-April:
-- сохраняет continuity;
-- организует сцену;
-- удерживает visual context;
-- передаёт semantic understanding
-  дальше в cognition / memory / dialogue.
-
-=====================================================
-
-APRIL PRINCIPLES:
-
-1. providers understand
-2. April orchestrates
-3. no trigger hallucinations
-4. no regex vision
-5. no forced scene classification
-6. continuity before interpretation
-7. renderer-safe architecture
+Single route:
+    USER -> INTENT EVIDENCE -> SEMANTIC/COGNITION ->
+    QUANTUM PROCESSOR -> EXECUTION/ARTIFACT -> SCENE CONTRACT -> APRIL WEB
 """
 
-from blocks.provider_router import (
-    analyze_image as provider_analyze_image
-)
+from __future__ import annotations
 
-# =====================================================
-# 🔥 FILE ID
-# =====================================================
+import time
+from typing import Any, Dict, Iterable, Optional
 
-APRIL_FILE_ID = (
-    "APRIL_IMAGE_SYSTEM_BRIDGE"
-)
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
+APRIL_FILE_ID = "APRIL_INTENT_SYSTEM_QUANTUM_V1"
+DECISION_OWNER = "QUANTUM_PROCESSOR"
 
 INPUT_MACHINE_CHANNEL = {
-
-    "source":
-        "executor_visual_input",
-
-    "type":
-        "visual_analysis_request",
-
-    "isolated":
-        True
+    "source": "executor_input_pipeline",
+    "type": "intent_signal_input",
+    "isolated": True,
 }
 
 OUTPUT_MACHINE_CHANNEL = {
-
-    "target":
-        "executor_visual_memory",
-
-    "type":
-        "visual_analysis_result",
-
-    "isolated":
-        True
+    "target": "semantic_orchestration_pipeline",
+    "type": "intent_signal_output",
+    "isolated": True,
 }
 
-# =====================================================
-# 🔥 MACHINE LOGS
-# =====================================================
-
-IMAGE_SYSTEM_LOGS = []
-
-MAX_IMAGE_SYSTEM_LOGS = 50
+PATCH_LOG = []
+MAX_PATCH_LOGS = 120
 
 
-def log_image_system_event(
-    event,
-    payload=None
-):
-
+def safe_patch_log(msg: Any) -> None:
+    """Machine telemetry only; never influences intent."""
     try:
-
-        IMAGE_SYSTEM_LOGS.append({
-
-            "file_id":
-                APRIL_FILE_ID,
-
-            "event":
-                event,
-
-            "payload":
-                payload or {},
-
-            "machine_only":
-                True
+        PATCH_LOG.append({
+            "timestamp": time.time(),
+            "message": str(msg),
+            "file_id": APRIL_FILE_ID,
+            "machine_only": True,
         })
-
-        if len(IMAGE_SYSTEM_LOGS) > MAX_IMAGE_SYSTEM_LOGS:
-
-            IMAGE_SYSTEM_LOGS.pop(0)
-
-    except:
+        if len(PATCH_LOG) > MAX_PATCH_LOGS:
+            del PATCH_LOG[:-MAX_PATCH_LOGS]
+    except Exception:
         pass
 
-# =====================================================
-# 🔥 SAFE NORMALIZATION
-# =====================================================
 
-def normalize_text(
-    text
-):
+def patch_intent_detect(text: str) -> str:
+    safe_patch_log(f"INTENT EVIDENCE: {text[:60]}")
+    return text
 
-    if text is None:
-        return ""
 
-    return str(text).strip()
-
-# =====================================================
-# 🔥 SAFE SUMMARY
-# =====================================================
-
-def build_visual_summary(
-    analysis_text
-):
-
-    """
-    Lightweight semantic summary.
-
-    НЕ:
-    - reinterpretation;
-    - hallucination;
-    - object guessing.
-
-    ONLY:
-    provider semantic preservation.
-    """
-
-    text = normalize_text(
-        analysis_text
-    )
-
-    if not text:
-        return ""
-
-    return text[:1200]
-
-# =====================================================
-# 🔥 VISUAL MEMORY PACKAGE
-# =====================================================
-
-def build_visual_memory(
-    analysis_text,
-    provider="openai"
-):
-
-    """
-    IMPORTANT:
-
-    This is NOT scene interpretation.
-
-    This is:
-    semantic continuity packaging.
-
-    Provider already understood image.
-    April only organizes continuity.
-    """
-
-    text = normalize_text(
-        analysis_text
-    )
-
-    summary = build_visual_summary(
-        text
-    )
-
-    # =================================================
-    # 🔥 CONTINUITY ESTIMATION
-    # =====================================================
-
-    continuity_weight = 0.72
-
-    if len(summary) >= 200:
-        continuity_weight += 0.08
-
-    if len(summary) >= 500:
-        continuity_weight += 0.05
-
-    continuity_weight = min(
-        continuity_weight,
-        0.9
-    )
-
-    # =================================================
-    # 🔥 RESULT
-    # =====================================================
-
-    visual_memory = {
-
-        # =================================================
-        # 🔥 CORE
-        # =====================================================
-
-        "summary":
-            summary,
-
-        "raw_analysis":
-            text,
-
-        # =================================================
-        # 🔥 PROVIDER
-        # =====================================================
-
-        "provider":
-            provider,
-
-        "provider_driven":
-            True,
-
-        "semantic_source":
-            provider,
-
-        # =================================================
-        # 🔥 CONTINUITY
-        # =====================================================
-
-        "continuity_weight":
-            continuity_weight,
-
-        "continuity_ready":
-            True,
-
-        "dialog_ready":
-            True,
-
-        "memory_ready":
-            True,
-
-        # =================================================
-        # 🔥 APRIL WEB SPACE
-        # =====================================================
-
-        "renderer_compatible":
-            True,
-
-        "web_space_ready":
-            True,
-
-        "scene_oriented":
-            True,
-
-        # =================================================
-        # 🔥 SAFETY
-        # =====================================================
-
-        "trigger_based":
-            False,
-
-        "hallucination_safe":
-            True,
-
-        "forced_scene_detection":
-            False,
-
-        "regex_vision":
-            False,
-
-        "lightweight_mode":
-            True,
-
-        # =================================================
-        # 🔥 MACHINE
-        # =====================================================
-
-        "machine_only":
-            True,
-
-        "human_visible":
-            False
-    }
-
-    log_image_system_event(
-
-        "visual_memory_created",
-
-        {
-            "provider":
-                provider,
-
-            "continuity_weight":
-                continuity_weight
-        }
-    )
-
-    return visual_memory
-
-# =====================================================
-# 🔥 VISUAL HISTORY
-# =====================================================
-
-def update_visual_history(
-    state,
-    visual_memory
-):
-
-    history = state.get(
-        "visual_scene_history",
-        []
-    )
-
-    history.append(
-        visual_memory
-    )
-
-    # =================================================
-    # 🔥 CONTINUITY WINDOW
-    # =====================================================
-
-    if len(history) > 7:
-
-        history = history[-7:]
-
-    state[
-        "visual_scene_history"
-    ] = history
-
-    log_image_system_event(
-
-        "visual_history_updated",
-
-        {
-            "history_size":
-                len(history)
-        }
-    )
-
-    return history
-
-# =====================================================
-# 🔥 CACHE RESTORE
-# =====================================================
-
-def restore_visual_cache(
-    state,
-    path
-):
-
-    if not state:
-        return None
-
-    cached = state.get(
-        "image_analysis"
-    )
-
-    cached_path = state.get(
-        "image_analysis_path"
-    )
-
-    if (
-
-        cached
-        and cached_path == path
-
-    ):
-
-        print(
-            "🧠 USING VISUAL CACHE"
-        )
-
-        log_image_system_event(
-            "visual_cache_restored"
-        )
-
-        return cached
-
+def patch_intent_future(*args: Any, **kwargs: Any) -> None:
     return None
 
-# =====================================================
-# 🔥 PROVIDER ANALYSIS
-# =====================================================
 
-async def analyze_provider_image(
-    path
-):
+def normalize(text: str) -> str:
+    return str(text or "").lower().strip()
 
+
+def contains_any(text: str, words: Iterable[str]) -> bool:
+    value = normalize(text)
+    return any(word in value for word in words)
+
+
+CONTINUATION_WORDS = (
+    "да", "ага", "ок", "окей", "давай", "вот", "примерно",
+    "ближе", "уже лучше", "не то", "чуть темнее", "чуть ярче",
+    "продолжай", "с этого", "поехали", "дальше", "теперь",
+    "еще", "ещё", "в таком стиле", "оставь", "вот это",
+    "ближе к этому", "продолжим", "вернемся", "вернёмся",
+)
+
+QUESTION_WORDS = (
+    "как", "что", "почему", "зачем", "умеешь", "можешь",
+    "где", "когда", "сколько", "какой", "какая", "какие",
+)
+
+EDIT_WORDS = (
+    "добавь", "измени", "убери", "замени", "поменяй",
+    "улучши", "подправь", "ярче", "темнее", "переделай",
+    "исправь", "сделай темнее", "сделай ярче",
+)
+
+GENERATION_WORDS = (
+    "создай изображение", "сгенерируй изображение",
+    "нарисуй картинку", "создай картинку",
+    "draw image", "generate image", "ultra realistic",
+    "4k render", "cinematic render", "photorealistic",
+    "realistic render",
+)
+
+LIGHT_VISUAL_WORDS = (
+    "пример", "референс", "концепт", "идея", "вариант",
+    "атмосфера", "примерно", "визуально", "как выглядит",
+    "схема", "layout", "структура", "расположение",
+)
+
+RENDER_WORDS = (
+    "график", "таблица", "формула", "diagram", "диаграмма",
+    "схема", "layout", "структура", "grid", "line", "point",
+    "arrow", "renderer", "пространство", "scene", "композиция",
+    "canvas",
+)
+
+SPATIAL_WORDS = (
+    "слева", "справа", "сверху", "снизу", "по центру",
+    "размести", "поставь", "расположи", "между", "рядом",
+)
+
+WEB_WORDS = (
+    "погода", "новости", "курс валют", "что происходит",
+    "где находится", "карта", "маршрут", "рейс", "сейчас в",
+    "такси", "отель", "навигация", "локация",
+)
+
+TEXT_WORDS = (
+    "сообщение", "письмо", "текст", "шаблон", "ответ клиенту",
+    "напиши письмо", "напиши сообщение",
+)
+
+LINK_WORDS = (
+    "ссылка", "url", "линк", "короткая ссылка",
+    "сократи ссылку", "short link",
+)
+
+EXPLORATION_WORDS = (
+    "идея", "вариант", "примерно", "атмосфера", "может",
+    "посмотрим", "подумаем", "как думаешь",
+)
+
+DISCUSSION_WORDS = ("обсудим", "поговорим", "как думаешь", "что думаешь")
+REFLECTION_WORDS = ("почему", "объясни", "рассуждай", "размышляй")
+SPACE_WORDS = ("пространство", "scene", "renderer", "график", "таблица", "формула")
+
+
+def is_continuation(text: str) -> bool:
+    t = normalize(text)
+    if t in CONTINUATION_WORDS:
+        return True
+    return len(t) <= 36 and contains_any(t, CONTINUATION_WORDS)
+
+
+def is_real_question(text: str) -> bool:
+    t = normalize(text)
+    if is_continuation(t) or len(t) <= 10:
+        return False
+    return "?" in t or contains_any(t, QUESTION_WORDS)
+
+
+def is_edit_request(text: str) -> bool:
+    return contains_any(text, EDIT_WORDS)
+
+
+def is_generate_request(text: str) -> bool:
+    return contains_any(text, GENERATION_WORDS)
+
+
+def is_lightweight_visual_request(text: str) -> bool:
+    return contains_any(text, LIGHT_VISUAL_WORDS)
+
+
+def detect_renderer_subtype(text: str) -> str:
+    t = normalize(text)
+    if "график" in t:
+        return "graph"
+    if "формула" in t:
+        return "formula"
+    if "таблица" in t or "grid" in t:
+        return "table"
+    if "diagram" in t or "диаграмма" in t or "схема" in t:
+        return "diagram"
+    if any(x in t for x in ("layout", "пространство", "scene", "композиция")):
+        return "scene"
+    return "renderer"
+
+
+def is_renderer_request(text: str) -> bool:
+    return contains_any(text, RENDER_WORDS)
+
+
+def is_spatial_request(text: str) -> bool:
+    return contains_any(text, SPATIAL_WORDS)
+
+
+def is_web_request(text: str) -> bool:
+    return contains_any(text, WEB_WORDS)
+
+
+def is_text_request(text: str) -> bool:
+    return contains_any(text, TEXT_WORDS)
+
+
+def is_link_request(text: str) -> bool:
+    return contains_any(text, LINK_WORDS)
+
+
+def is_exploration_request(text: str) -> bool:
+    return contains_any(text, EXPLORATION_WORDS)
+
+
+def is_discussion_request(text: str) -> bool:
+    return contains_any(text, DISCUSSION_WORDS)
+
+
+def is_reflection_request(text: str) -> bool:
+    return contains_any(text, REFLECTION_WORDS)
+
+
+def is_space_discussion_request(text: str) -> bool:
+    return (
+        contains_any(text, DISCUSSION_WORDS)
+        and contains_any(text, SPACE_WORDS)
+    )
+
+
+def build_intent_result() -> Dict[str, Any]:
     """
-    Provider-aware bridge.
+    Canonical signal packet.
 
-    Future-safe:
-    Gemini / OpenAI / hybrid routing.
+    All modality fields are soft evidence. The Quantum Processor is the only
+    component allowed to arbitrate them into a final action.
     """
+    return {
+        "intent": "chat",
+        "confidence": 0.5,
+        "source": "default",
 
-    log_image_system_event(
+        "prefer_renderer": False,
+        "prefer_lightweight": False,
+        "prefer_guidance": False,
+        "prefer_execution": False,
+        "prefer_continuation": False,
+        "prefer_web": False,
 
-        "provider_analysis_started",
+        "renderer_subtype": None,
+        "lightweight_visual": False,
+        "spatial_scene": False,
+        "explicit_image_generation": False,
 
-        {
-            "provider":
-                "openai"
-        }
-    )
+        "continuation": False,
+        "trajectory_safe": True,
+        "trajectory_priority": 0.5,
 
-    result = await provider_analyze_image(
-        path
-    )
+        "exploration": False,
+        "discussion_intent": False,
+        "reflection_intent": False,
+        "space_discussion_intent": False,
 
-    log_image_system_event(
+        "avoid_heavy_generation": True,
+        "avoid_hidden_escalation": True,
+        "avoid_telegram_behavior": True,
+        "provider_safe": True,
 
-        "provider_analysis_completed",
+        "machine_only": True,
+        "orchestration_ready": True,
+        "renderer_first_safe": True,
+        "continuity_preserved": True,
 
-        {
-            "provider":
-                "openai"
-        }
-    )
+        "decision_owner": DECISION_OWNER,
+        "provider_calls": 0,
+        "parallel_route": False,
+        "route_selection": "delegated",
+        "renderer_selection": "delegated",
+        "execution_selection": "delegated",
+    }
 
-    return result
 
-# =====================================================
-# 🔥 MAIN ANALYZE IMAGE
-# =====================================================
+def _apply_continuation(result: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    raw_text = normalize(result.get("_text", ""))
+    # Do not let stale active_flow/visual_scene turn greetings and short social
+    # questions into continuation evidence.
+    if raw_text in {"привет", "приветик", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "кто ты", "как тебя зовут", "как ти бязовут"}:
+        return False
 
-async def analyze_image(
-    path: str,
-    state=None
-) -> str:
+    if not is_continuation(result["_text"]):
+        return False
 
-    try:
+    result["continuation"] = True
+    result["prefer_continuation"] = True
+    result["trajectory_priority"] = 0.9
 
-        print(
-            "🧠 ANALYZE IMAGE START"
-        )
+    if state.get("active_flow"):
+        result.update({
+            "intent": "continuation",
+            "confidence": 0.88,
+            "source": "continuation",
+        })
+        return True
 
-        print(
-            f"🧠 IMAGE PATH: {path}"
-        )
+    if state.get("active_visual_scene"):
+        result.update({
+            "intent": "visual_continuation",
+            "confidence": 0.84,
+            "source": "visual_scene",
+            "prefer_renderer": True,
+        })
+        return True
 
-        log_image_system_event(
+    return False
 
-            "analyze_image_started",
 
-            {
-                "path":
-                    str(path)
-            }
-        )
+def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
+    """
+    Produce intent evidence without becoming a hard router.
 
-        # =================================================
-        # 🔥 CACHE
-        # =====================================================
+    Important:
+        The order below is evidence collection, not architectural routing.
+        The returned packet must be fused with cognition, semantic state,
+        dialogue history and scene state by the Quantum Processor.
+    """
+    t = normalize(text)
+    state = state if isinstance(state, dict) else {}
 
-        cached = restore_visual_cache(
-            state,
-            path
-        )
+    result = build_intent_result()
+    result["_text"] = t
+    patch_intent_detect(t)
 
-        if cached:
-
-            log_image_system_event(
-                "cache_hit"
-            )
-
-            return cached
-
-        # =================================================
-        # 🔥 PROVIDER ANALYSIS
-        # =====================================================
-
-        print(
-            "🧠 PROVIDER ANALYSIS START"
-        )
-
-        result = await analyze_provider_image(
-            path
-        )
-
-        # Normalize provider output to plain text
-        if hasattr(result, "output_text"):
-            result = result.output_text
-        elif hasattr(result, "text"):
-            result = result.text
-        elif not isinstance(result, str):
-            result = str(result)
-
-        print(
-            "🧠 PROVIDER ANALYSIS COMPLETE"
-        )
-
-        # =================================================
-        # 🔥 EMPTY SAFETY
-        # =====================================================
-
-        if not result:
-
-            log_image_system_event(
-                "empty_provider_result"
-            )
-
-            return (
-                "⚠️ Не получилось "
-                "проанализировать изображение."
-            )
-
-        # =================================================
-        # 🔥 BUILD VISUAL MEMORY
-        # =====================================================
-
-        visual_memory = build_visual_memory(
-            result,
-            provider="openai"
-        )
-
-        print(
-            "🧠 VISUAL MEMORY CREATED"
-        )
-
-        # =================================================
-        # 🔥 SAVE STATE
-        # =====================================================
-
-        if state is not None:
-
-            # =================================================
-            # 🔥 RAW PROVIDER RESULT
-            # =====================================================
-
-            state["image_analysis"] = (
-                result
-            )
-
-            state["image_analysis_path"] = (
-                path
-            )
-
-            # =================================================
-            # 🔥 ACTIVE VISUAL CONTEXT
-            # =====================================================
-
-            state["active_visual_scene"] = (
-                visual_memory
-            )
-
-            # =================================================
-            # 🔥 CONTINUITY HISTORY
-            # =====================================================
-
-            update_visual_history(
-                state,
-                visual_memory
-            )
-
-            # =================================================
-            # 🔥 LIGHTWEIGHT SNAPSHOT
-            # =====================================================
-
-            state[
-                "last_visual_analysis"
-            ] = {
-
-                "summary":
-                    visual_memory.get(
-                        "summary"
-                    ),
-
-                "provider":
-                    visual_memory.get(
-                        "provider"
-                    ),
-
-                "continuity_weight":
-                    visual_memory.get(
-                        "continuity_weight"
-                    )
-            }
-
-            print(
-                "🧠 VISUAL STATE SAVED"
-            )
-
-            log_image_system_event(
-                "visual_state_saved"
-            )
-
-        # =================================================
-        # 🔥 COMPLETE
-        # =====================================================
-
-        print(
-            "🧠 ANALYZE IMAGE COMPLETE"
-        )
-
-        log_image_system_event(
-            "analyze_image_completed"
-        )
-
+    # -------------------------------------------------
+    # Continuity evidence
+    # -------------------------------------------------
+    if _apply_continuation(result, state):
+        result.pop("_text", None)
         return result
 
-    except Exception as e:
+    result["exploration"] = is_exploration_request(t)
+    result["discussion_intent"] = is_discussion_request(t)
+    result["reflection_intent"] = is_reflection_request(t)
+    result["space_discussion_intent"] = is_space_discussion_request(t)
 
-        print(
-            f"🔥 IMAGE SYSTEM ERROR: {str(e)}"
-        )
+    if result["exploration"]:
+        result["prefer_lightweight"] = True
+        result["lightweight_visual"] = True
+        result["trajectory_priority"] = max(result["trajectory_priority"], 0.72)
 
-        log_image_system_event(
+    if result["discussion_intent"] or result["reflection_intent"] or result["space_discussion_intent"]:
+        result["prefer_guidance"] = True
 
-            "analyze_image_error",
+    # -------------------------------------------------
+    # Independent evidence signals
+    # -------------------------------------------------
+    # We deliberately do not return early here. A user request may contain
+    # multiple simultaneous signals: e.g. a graph + explanation + web lookup.
+    candidates = []
 
-            {
-                "error":
-                    str(e)
+    if is_web_request(t):
+        candidates.append(("web", 0.88, "web"))
+        result["prefer_web"] = True
+
+    if is_link_request(t):
+        candidates.append(("link", 0.92, "link"))
+
+    if is_edit_request(t):
+        candidates.append(("edit", 0.88, "edit"))
+        result["prefer_execution"] = True
+
+    if is_spatial_request(t):
+        candidates.append(("spatial", 0.84, "spatial"))
+        result["spatial_scene"] = True
+        result["prefer_renderer"] = True
+
+    if is_renderer_request(t):
+        candidates.append(("render", 0.88, "renderer"))
+        result["prefer_renderer"] = True
+        result["renderer_subtype"] = detect_renderer_subtype(t)
+
+    if is_lightweight_visual_request(t):
+        candidates.append(("lightweight_visual", 0.80, "lightweight_visual"))
+        result["prefer_lightweight"] = True
+        result["lightweight_visual"] = True
+
+    if is_generate_request(t):
+        candidates.append(("generate", 0.90, "generate"))
+        result["explicit_image_generation"] = True
+        result["avoid_heavy_generation"] = False
+
+    if is_text_request(t):
+        candidates.append(("text", 0.84, "text"))
+        result["prefer_guidance"] = True
+
+    if is_real_question(t):
+        candidates.append(("question", 0.72, "question"))
+        result["prefer_guidance"] = True
+
+    # Choose a descriptive primary signal only. This is NOT the final action.
+    if candidates:
+        primary = max(candidates, key=lambda item: item[1])
+        result["intent"], result["confidence"], result["source"] = primary
+        result["candidate_signals"] = [
+            {"intent": intent, "confidence": confidence, "source": source}
+            for intent, confidence, source in candidates
+        ]
+
+    # -------------------------------------------------
+    # Active-flow evidence
+    # -------------------------------------------------
+    active_flow = state.get("active_flow")
+    if active_flow:
+        result["continuation"] = True
+        result["prefer_continuation"] = True
+        result["trajectory_priority"] = max(result["trajectory_priority"], 0.74)
+
+        flow_type = active_flow.get("type") if isinstance(active_flow, dict) else None
+        result["active_flow_type"] = flow_type
+
+        if flow_type in {
+            "renderer_space", "visual_scene", "image_generate",
+            "image_edit", "image", "math",
+        }:
+            result["trajectory_evidence"] = {
+                "flow_type": flow_type,
+                "preserve": True,
             }
-        )
 
-        return (
-            "⚠️ Ошибка анализа изображения."
-        )
+    # -------------------------------------------------
+    # Canonical metadata
+    # -------------------------------------------------
+    result["quantum_evidence"] = {
+        "current_request": t,
+        "candidate_signals": result.get("candidate_signals", []),
+        "continuation": result["continuation"],
+        "active_flow": active_flow or {},
+        "active_visual_scene": state.get("active_visual_scene", {}),
+        "trajectory_priority": result["trajectory_priority"],
+    }
+
+    result["decision_owner"] = DECISION_OWNER
+    result["provider_calls"] = 0
+    result["parallel_route"] = False
+    result["route_selection"] = "delegated"
+    result["renderer_selection"] = "delegated"
+    result["execution_selection"] = "delegated"
+    result.pop("_text", None)
+
+    safe_patch_log(
+        f"INTENT EVIDENCE READY: {result.get('intent')} / "
+        f"{len(result.get('candidate_signals', []))} candidates"
+    )
+    return result
