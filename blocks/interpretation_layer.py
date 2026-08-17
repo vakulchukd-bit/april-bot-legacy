@@ -405,6 +405,26 @@ def _ensure_nli_runtime() -> None:
             raise
 
 
+
+def _lightweight_linguistic(text: str) -> Dict[str, Any]:
+    """Zero-model linguistic pass for very short social turns."""
+    value = normalize_text(text)
+    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9_]+", value)
+    lemmas = [token.lower() for token in tokens]
+    return {
+        "language": None,
+        "tokens": tokens,
+        "lemmas": lemmas,
+        "pos": [],
+        "dependencies": [],
+        "entities": [],
+        "sentences": [value] if value else [],
+        "source": "lightweight_micro_turn",
+        "engine": "quantum_linguistic_engine",
+        "runtime_bypass": True,
+    }
+
+
 class QuantumLinguisticEngine:
     """
     Dedicated linguistic engine.
@@ -416,8 +436,11 @@ class QuantumLinguisticEngine:
     """
 
     def analyze(self, text: str) -> Dict[str, Any]:
+        normalized = normalize_text(text)
+        if len(normalized.split()) <= 3:
+            return _lightweight_linguistic(normalized)
         _runtime_ready_guard()
-        if not text or not text.strip():
+        if not normalized:
             return {
                 "language": None,
                 "tokens": [],
@@ -542,8 +565,9 @@ class QuantumEmbeddingEngine:
         Results are cached by the exact semantic pair set so the same turn does
         not repeatedly encode identical context fields.
         """
-        _runtime_ready_guard()
         text = normalize_text(text)
+        if not text:
+            return {}
         unique = []
         seen = set()
         for candidate in candidates:
@@ -555,6 +579,7 @@ class QuantumEmbeddingEngine:
         if not text or not unique:
             return {candidate: 0.0 for candidate in unique}
 
+        _runtime_ready_guard()
         key = (text, tuple(unique))
         cached = self._batch_cache.get(key)
         if cached is not None:
@@ -1027,6 +1052,8 @@ def _dialogue_signal_contract(
     for item in reversed(history):
         if not isinstance(item, dict):
             continue
+        # Accept both canonical paired records and the legacy role/content
+        # hot-dialog representation produced by State Manager.
         if not last_assistant and isinstance(item.get("april"), dict):
             last_assistant = normalize_text(
                 item["april"].get("answer")
@@ -1034,9 +1061,20 @@ def _dialogue_signal_contract(
                 or item["april"].get("summary")
             )
             last_turn_id = item.get("turn_id")
+        elif not last_assistant and str(item.get("role", "")).lower() in {"assistant", "april"}:
+            last_assistant = normalize_text(
+                item.get("content")
+                or item.get("answer")
+                or item.get("summary")
+            )
+            last_turn_id = item.get("turn_id")
+
         if not last_user and item.get("user"):
             last_user = normalize_text(item.get("user"))
-        if last_assistant:
+        elif not last_user and str(item.get("role", "")).lower() == "user":
+            last_user = normalize_text(item.get("content"))
+
+        if last_assistant and last_user:
             break
 
     cognition = cognition if isinstance(cognition, dict) else {}
