@@ -947,12 +947,52 @@ def _parse_provider_json(raw_text: str) -> dict[str, Any]:
     }
 
 
+def _unwrap_model_answer(value: Any) -> str:
+    """Extract the human answer when the model accidentally returns its own JSON envelope."""
+    if not isinstance(value, str):
+        return normalize_response_text(value)
+    text = normalize_response_text(value)
+    if not text or not text.lstrip().startswith("{"):
+        return text
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return text
+    if not isinstance(obj, dict):
+        return text
+    for key in ("answer", "content", "response", "summary", "final_text", "text"):
+        candidate = obj.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            nested = normalize_response_text(candidate)
+            if nested and nested != text:
+                return _unwrap_model_answer(nested)
+    return text
+
+
+def _sanitize_render_block_texts(blocks: Any, answer: str) -> list:
+    sanitized = []
+    for block in list(blocks or []):
+        if not isinstance(block, dict):
+            continue
+        item = dict(block)
+        block_type = str(item.get("type") or item.get("artifact_type") or "").strip().lower()
+        if block_type in {"text", "markdown"}:
+            raw = item.get("content") or item.get("text") or item.get("answer") or ""
+            clean = _unwrap_model_answer(raw)
+            if not clean or (clean.lstrip().startswith("{") and "render_blocks" in clean):
+                clean = answer
+            item["content"] = clean
+            item["text"] = clean
+        sanitized.append(item)
+    return sanitized
+
+
 def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[str, Any]:
     if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response":
         return raw_text
 
     parsed = raw_text if isinstance(raw_text, dict) else _parse_provider_json(raw_text)
-    answer = normalize_response_text(
+    answer = _unwrap_model_answer(
         parsed.get("answer") or parsed.get("content") or parsed.get("response") or ""
     )
 
@@ -970,7 +1010,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         raise RuntimeError("GPT-5.6 Luna returned an empty canonical answer.")
 
     content = normalize_response_text(parsed.get("content") or answer)
-    blocks = _clean_render_blocks(parsed.get("render_blocks", []) or [])
+    blocks = _sanitize_render_block_texts(
+        _clean_render_blocks(parsed.get("render_blocks", []) or []),
+        answer,
+    )
     if not blocks:
         blocks = [{
             "type": "text",
