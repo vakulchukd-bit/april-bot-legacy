@@ -48,6 +48,7 @@ MEMORY_DAYS = 7
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
 
 SESSION_MEMORY_LIMIT = 1600
+HOT_DIALOG_LIMIT = 30  # canonical Free window: 15 USER + 15 APRIL
 VISUAL_HISTORY_LIMIT = 8
 IMAGE_MEMORY_LIMIT = 5
 TOPIC_MEMORY_LIMIT = 5
@@ -110,10 +111,9 @@ def compact_dialog_message(role, content):
     }
 
 
-def get_dialog_limit(user_id, plan):
-    if user_id == ADMIN_ID:
-        return 50
-    return {"free": 10, "lite": 20, "premium": 30}.get(plan, 10)
+def get_dialog_limit(user_id, plan=None):
+    """One active Free hot-dialog window; future plans remain reserved."""
+    return HOT_DIALOG_LIMIT
 
 
 def utc_day_key():
@@ -910,7 +910,55 @@ def build_visual_scene_summary(state_obj):
     }
 
 
+def _archive_dialog_pair(state_obj, user_id, user_msg, april_msg):
+    """Persist one completed USER↔APRIL pair into today's rolling memory slot."""
+    timeline = state_obj.get("memory_timeline") or build_memory_timeline()
+    day0 = timeline.setdefault("day_0", build_memory_day())
+    dialog_pairs = day0.setdefault("dialog_pairs", [])
+    record = {
+        "record_type": "dialog_pair",
+        "user_id": str(user_id),
+        "user_meaning": safe_trim_text(user_msg, 800),
+        "april_meaning": safe_trim_text(april_msg, 1400),
+        "answer_summary": safe_trim_text(april_msg, 1000),
+        "visual_summary": safe_trim_text(
+            build_visual_scene_summary(state_obj) or "",
+            1000,
+        ),
+        "topic": safe_trim_text(
+            state_obj.get("current_topic") or state_obj.get("active_topic_slot") or "",
+            240,
+        ),
+        "continuation_hint": "available_for_reference",
+        "created_at": time.time(),
+        "expires_after_days": MEMORY_DAYS,
+    }
+    # Deduplicate the same completed pair if a compatibility caller invokes
+    # compression more than once.
+    fingerprint = (
+        record["user_meaning"],
+        record["april_meaning"],
+    )
+    if any(
+        isinstance(item, dict)
+        and (item.get("user_meaning"), item.get("april_meaning")) == fingerprint
+        and item.get("user_id") == record["user_id"]
+        for item in dialog_pairs[-HOT_DIALOG_LIMIT:]
+    ):
+        return
+    dialog_pairs.append(record)
+    day0["dialog_pairs"] = dialog_pairs[-HOT_DIALOG_LIMIT:]
+    state_obj["memory_timeline"] = timeline
+
+
 def compress_dialog_to_summary(state_obj):
+    """
+    Compatibility summary builder.
+
+    The hot dialog is NEVER replaced by a [COMPRESSED_MEMORY] marker anymore.
+    Completed pairs are archived by add_dialog() into day_0 and continue through
+    the existing seven-day rollover.
+    """
     dialog = safe_list(state_obj.get("dialog"))
     if not dialog:
         return
@@ -935,11 +983,10 @@ def compress_dialog_to_summary(state_obj):
         "visual": build_visual_scene_summary(state_obj),
         "dialog": recent,
         "focus_state": deepcopy(state_obj.get("focus_state", {})),
+        "hot_dialog_limit": HOT_DIALOG_LIMIT,
     }
 
     state_obj["memory_summary"] = str(machine_summary)[-SESSION_MEMORY_LIMIT:]
-    state_obj["dialog"] = [{"role": "system", "content": "[COMPRESSED_MEMORY]"}]
-
 
 def trim_image_memory(state_obj):
     memory = safe_list(state_obj.get("image_memory"))
@@ -954,9 +1001,7 @@ def trim_visual_history(state_obj):
 def add_dialog(user_id, role, content):
     state_obj = get_state(user_id)
     dialog = safe_list(state_obj.get("dialog"))
-
     dialog.append(compact_dialog_message(role, content))
-    state_obj["dialog"] = dialog
 
     if role == "user":
         state_obj["last_user_turn"] = safe_trim_text(content, 320)
@@ -965,26 +1010,54 @@ def add_dialog(user_id, role, content):
         state_obj["last_april_turn"] = safe_trim_text(content, 320)
         state_obj["meta"]["last_bot_message"] = safe_trim_text(content, 320)
 
+    # Canonical Free hot window: exactly 30 messages. Completed pairs leave the
+    # hot window only as one semantic memory record and continue through day_0..day_6.
+    while len(dialog) > HOT_DIALOG_LIMIT:
+        if len(dialog) >= 2:
+            first, second = dialog[0], dialog[1]
+            first_role = str(first.get("role") or "").lower() if isinstance(first, dict) else ""
+            second_role = str(second.get("role") or "").lower() if isinstance(second, dict) else ""
+            if first_role == "user" and second_role in {"assistant", "april"}:
+                _archive_dialog_pair(
+                    state_obj,
+                    user_id,
+                    first.get("content", ""),
+                    second.get("content", ""),
+                )
+                dialog = dialog[2:]
+                continue
+        # Preserve the current turn and avoid an infinite loop on malformed
+        # legacy history. Archive the oldest unmatched item as a memory event.
+        oldest = dialog.pop(0)
+        day0 = state_obj["memory_timeline"]["day_0"]
+        day0.setdefault("topics", []).append({
+            "record_type": "dialog_turn",
+            "user_id": str(user_id),
+            "role": oldest.get("role") if isinstance(oldest, dict) else None,
+            "content": safe_trim_text(oldest.get("content", "") if isinstance(oldest, dict) else oldest, 800),
+            "created_at": time.time(),
+            "expires_after_days": MEMORY_DAYS,
+        })
+        day0["topics"] = day0["topics"][-HOT_DIALOG_LIMIT:]
+
+    state_obj["dialog"] = dialog
     state_obj["dialog_state"] = {
         "timeline": deepcopy(dialog),
+        "hot_limit": HOT_DIALOG_LIMIT,
+        "hot_user_target": HOT_DIALOG_LIMIT // 2,
+        "hot_april_target": HOT_DIALOG_LIMIT // 2,
         "last_user_turn": state_obj.get("last_user_turn", ""),
         "last_april_turn": state_obj.get("last_april_turn", ""),
         "active_topic": state_obj.get("current_topic"),
         "focus": deepcopy(state_obj.get("focus_state", {})),
     }
 
-    plan = get_user_plan(user_id) if callable(get_user_plan) else "free"
-    limit = get_dialog_limit(user_id, plan)
-    if len(dialog) > limit:
-        compress_dialog_to_summary(state_obj)
-        state_obj["dialog_state"]["timeline"] = deepcopy(state_obj["dialog"])
-
     trim_image_memory(state_obj)
     trim_visual_history(state_obj)
     trim_topic_memory(state_obj)
     state_obj["active_scene"] = QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
-
     persist_state(user_id)
+
 
 
 def get_dialog_state(user_id):
@@ -1402,11 +1475,27 @@ def update_visual_summary(user_id, visual_summary):
     state_obj["visual_summary"] = visual_summary
 
     scene = state_obj.get("active_visual_scene")
-    has_event = bool(
-        visual_summary.get("scene_events_count")
-        or visual_summary.get("last_event")
-        or visual_summary.get("current_request")
+    last_event = visual_summary.get("last_event")
+    event_type = ""
+    payload_type = ""
+    if isinstance(last_event, dict):
+        event_type = str(last_event.get("event_type") or last_event.get("type") or "").strip().lower()
+        payload = last_event.get("payload")
+        if isinstance(payload, dict):
+            payload_type = str(payload.get("type") or "").strip().lower()
+
+    visual_signal = bool(
+        visual_summary.get("visual_event")
+        or visual_summary.get("scene_id")
+        or visual_summary.get("scene_type")
+        or visual_summary.get("render_block_types")
     )
+
+    has_event = visual_signal and event_type not in {
+        "user_message", "assistant_message", "text", "message",
+    } and payload_type not in {
+        "user_message", "assistant_message", "text", "message",
+    }
 
     # An empty frontend visual summary is not a new scene. Keep the seven-day
     # memory untouched and do not rewrite the active scene with stale text.
