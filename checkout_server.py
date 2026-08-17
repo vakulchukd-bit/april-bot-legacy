@@ -74,7 +74,10 @@ from storage import (
 from core.executor import execute
 from blocks.state_manager import (
     get_state,
-    update_visual_summary
+    update_visual_summary,
+    prepare_visual_context_for_turn,
+    restore_visual_context_after_turn,
+    persist_state,
 )
 from blocks.provider_router import (
     transcribe_voice
@@ -776,459 +779,89 @@ async def process_web_message(
 ):
 
     async def run_with_activity(chat_id, coro):
-
         print("🔥 ACTIVITY WRAPPER START")
         print("🔥 CHAT:", chat_id)
-
         result = await coro
-
         print("🔥 ACTIVITY WRAPPER END")
         print("🔥 RESULT TYPE:", type(result))
-
         return result
 
-    # Canonical CPU bridge
-    result = await gateway_cpu_execute(
-
-        user_id=user_id,
-        text=text,
-        run_with_activity=run_with_activity
-    )
-
-    
-
-    result = executor_contract_passthrough(result)
-
-    if not isinstance(result, dict) or not result.get("scene_contract"):
-        raise RuntimeError("Canonical CPU SceneContract is required.")
-
-    scene_view = scene_contract_view(result["scene_contract"])
-    normalized = {
-        "scene_contract": scene_view,
-        "content": (
-            scene_view.get("content")
-            or scene_view.get("answer")
-            or scene_view.get("summary")
-            or ""
-        ),
-        "answer": scene_view.get("answer"),
-        "summary": scene_view.get("summary"),
-        "render_blocks": scene_view.get("render_blocks", []),
-        "scene": (
-            scene_view.get("machine_scene")
-            or scene_view.get("scene", {})
-        ),
-        "graph": scene_view.get("graph"),
-        "formula": scene_view.get("formula"),
-        "table": scene_view.get("table"),
-        "gallery": scene_view.get("gallery"),
-        "layout": scene_view.get("layout"),
-        "visual": scene_view.get("visual"),
-    }
-    normalized["space_continuity"] = build_space_continuity(normalized)
-
+    visual_turn = prepare_visual_context_for_turn(user_id, text)
+    print("🧠 VISUAL TURN GATE:", visual_turn)
     try:
-        sc = normalized.get("scene_contract") if isinstance(normalized, dict) else None
-        print("="*80)
-        print("🧭 FIBER SCENE CONTRACT AUDIT")
-        print("SCENE_CONTRACT TYPE:", type(sc))
-        if isinstance(sc, dict):
-            print("SCENE_CONTRACT KEYS:", list(sc.keys()))
-            rb = sc.get("render_blocks", [])
-            print("RENDER_BLOCKS COUNT:", len(rb) if isinstance(rb, list) else "not-list")
-            print("RENDERER_STATE KEYS:", list((sc.get("renderer_state") or {}).keys()))
-        else:
-            print("SCENE_CONTRACT VALUE:", sc)
-        print("="*80)
-    except Exception as audit_error:
-        print("SCENE CONTRACT AUDIT ERROR:", audit_error)
-
-    normalized["space_continuity"] = build_space_continuity(normalized)
-    normalized["user_id"] = str(user_id)
-    normalized["canonical_route"] = "/api/v1/chat"
-    normalized["single_route"] = True
-
-    return _json_safe_snapshot(normalized)
-
-
-
-
-# =========================================================
-# GATEWAY TRANSPORT POLICY (Stage 4)
-# =========================================================
-# Checkout Server MUST NOT:
-#   - choose execution routes
-#   - build business logic
-#   - orchestrate subsystems
-#   - own SceneContract semantics
-#
-# Checkout Server MAY:
-#   - receive HTTP requests
-#   - forward requests to April CPU
-#   - return canonical CPU response
-#   - expose infrastructure endpoints
-# =========================================================
-
-def gateway_return_cpu_result(cpu_result):
-    """Final gateway return point.
-    Future logging/trace hooks should be attached here.
-    """
-    return cpu_result
-
-
-# =========================================================
-# LEGACY SCENE CONTRACT STATUS (Stage 3)
-# =========================================================
-# Gateway no longer owns SceneContract semantics.
-# Executor + Artifact Factory are canonical owners.
-# Remaining compatibility code exists only to serialize the
-# canonical transport during migration to AprilWeb.
-# =========================================================
-
-# =========================================================
-# 🧠 FINAL GATEWAY TRANSPORT
-# =========================================================
-
-def build_gateway_transport_payload(normalized):
-    
-    # Forward canonical contract without rebuilding.
-    contract = scene_contract_view(normalized.get("scene_contract"))
-    contract.setdefault("gateway_transport_only", True)
-    contract.setdefault("gateway_owner", "checkout_server")
-    payload = {
-        "scene_contract": _json_safe_snapshot(contract),
-        "transport_authority": "SCENE_CONTRACT",
-        "gateway_role": GATEWAY_ROLE,
-        "gateway_canonical_only": GATEWAY_CANONICAL_ONLY,
-        "parallel_route": GATEWAY_PARALLEL_ROUTE,
-        "provider_calls": GATEWAY_PROVIDER_CALLS,
-        "contract_version": contract.get("version", 1),
-        "transport_mode": "passthrough",
-        "gateway_rebuild":False,
-        "space_continuity": normalized.get("space_continuity", {}),
-        "render_blocks": contract.get("render_blocks", []),
-        "renderer_state": contract.get("renderer_state", {}),
-        "content": contract.get("content", ""),
-        "answer": contract.get("answer", normalized.get("answer")),
-        "summary": contract.get("summary", normalized.get("summary")),
-    }
-    return _json_safe_snapshot(payload)
-
-# =========================================================
-# 🎨 SUCCESS HTML
-# =========================================================
-
-SUCCESS_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-
-<meta charset="utf-8">
-
-<title>APRIL PAYMENT</title>
-
-<style>
-
-body{
-    background:#0f1117;
-    color:white;
-    font-family:Arial;
-    text-align:center;
-    padding-top:80px;
-}
-
-.box{
-    max-width:500px;
-    margin:auto;
-    background:#1c1f2b;
-    padding:40px;
-    border-radius:24px;
-}
-
-.title{
-    font-size:32px;
-    margin-bottom:20px;
-}
-
-.text{
-    font-size:18px;
-    opacity:.8;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<div class="title">
-✅ Оплата успешна
-</div>
-
-<div class="text">
-Возвращаемся в APRIL Space...
-</div>
-
-</div>
-
-</body>
-</html>
-"""
-
-# =========================================================
-# ❌ CANCEL HTML
-# =========================================================
-
-CANCEL_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-
-<meta charset="utf-8">
-
-<title>APRIL PAYMENT</title>
-
-<style>
-
-body{
-    background:#0f1117;
-    color:white;
-    font-family:Arial;
-    text-align:center;
-    padding-top:80px;
-}
-
-.box{
-    max-width:500px;
-    margin:auto;
-    background:#1c1f2b;
-    padding:40px;
-    border-radius:24px;
-}
-
-.title{
-    font-size:32px;
-    margin-bottom:20px;
-}
-
-.text{
-    font-size:18px;
-    opacity:.8;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="box">
-
-<div class="title">
-❌ Оплата отменена
-</div>
-
-<div class="text">
-Можно вернуться позже
-</div>
-
-</div>
-
-</body>
-</html>
-"""
-
-# =========================================================
-# 🟢 HEALTH
-# =========================================================
-
-@app.route("/")
-def health():
-
-    return {
-
-        "status":
-            "APRIL WEB GATEWAY ONLINE",
-
-        "renderer_mode":
-            WEB_RENDERER_MODE,
-
-        "scene_mode":
-            WEB_SCENE_MODE,
-
-        "continuity_mode":
-            WEB_CONTINUITY_MODE,
-
-        "multimodal_mode":
-            WEB_MULTIMODAL_MODE
-    }
-
-
-# =========================================================
-# 🚀 CHECKOUT
-# =========================================================
-
-@app.route("/checkout/<plan>/<user_id>")
-def checkout(plan, user_id):
-
-    if plan == "lite":
-
-        amount = 12
-        plan_name = "⚡ Lite"
-
-    else:
-
-        amount = 69
-        plan_name = "👑 Premium"
-
-    return render_template(
-
-        "checkout.html",
-
-        client_id=PAYPAL_CLIENT_ID,
-
-        amount=amount,
-
-        plan_name=plan,
-
-        user_id=user_id
-    )
-
-
-# =========================================================
-# 🔥 SAFE VOICE TRANSCRIPT
-# =========================================================
-def normalize_voice_transcript(transcript):
-    if transcript is None:
-        return ""
-    if isinstance(transcript,str):
-        return transcript.strip()
-    if isinstance(transcript,dict):
-        for k in ("text","content","response","data"):
-            v=transcript.get(k)
-            if isinstance(v,str):
-                return v.strip()
-        return ""
-    return str(transcript).strip()
-
-
-# =========================================================
-# 🎤 APRIL VOICE
-# =========================================================
-
-@app.route(
-    "/voice",
-    methods=["POST"]
-)
-def voice_chat():
-
-    try:
-
-        print(
-            "🎤 VOICE REQUEST RECEIVED"
+        result = await gateway_cpu_execute(
+            user_id=user_id,
+            text=text,
+            run_with_activity=run_with_activity
         )
 
-        audio_file = request.files.get(
-            "audio"
-        )
+        result = executor_contract_passthrough(result)
+        if not isinstance(result, dict) or not result.get("scene_contract"):
+            raise RuntimeError("Canonical CPU SceneContract is required.")
 
-        if not audio_file:
+        scene_view = scene_contract_view(result["scene_contract"])
+        normalized = {
+            "scene_contract": scene_view,
+            "content": scene_view.get("content") or scene_view.get("answer") or scene_view.get("summary") or "",
+            "answer": scene_view.get("answer"),
+            "summary": scene_view.get("summary"),
+            "render_blocks": scene_view.get("render_blocks", []),
+            "scene": scene_view.get("machine_scene") or scene_view.get("scene", {}),
+            "graph": scene_view.get("graph"),
+            "formula": scene_view.get("formula"),
+            "table": scene_view.get("table"),
+            "gallery": scene_view.get("gallery"),
+            "layout": scene_view.get("layout"),
+            "visual": scene_view.get("visual"),
+        }
+        normalized["space_continuity"] = build_space_continuity(normalized)
 
-            return jsonify({
-
-                "success": False,
-
-                "error":
-                    "audio file missing"
-
-            }), 400
-
-        print(
-            "VOICE FILE:",
-            audio_file.filename
-        )
-
-        # Give every voice upload its own temporary file.  Never use a shared
-        # filename: concurrent users must never be able to overwrite one
-        # another's audio input.
-        temp_path = ""
         try:
-            with tempfile.NamedTemporaryFile(
-                suffix=".webm",
-                prefix="april_voice_",
-                delete=False,
-            ) as temp_file:
-                temp_path = temp_file.name
-                audio_file.save(temp_path)
+            sc = normalized.get("scene_contract")
+            print("="*80)
+            print("🧭 FIBER SCENE CONTRACT AUDIT")
+            print("SCENE_CONTRACT TYPE:", type(sc))
+            if isinstance(sc, dict):
+                print("SCENE_CONTRACT KEYS:", list(sc.keys()))
+                rb = sc.get("render_blocks", [])
+                print("RENDER_BLOCKS COUNT:", len(rb) if isinstance(rb, list) else "not-list")
+                print("RENDERER_STATE KEYS:", list((sc.get("renderer_state") or {}).keys()))
+            print("="*80)
+        except Exception as audit_error:
+            print("SCENE CONTRACT AUDIT ERROR:", audit_error)
 
-            print(
-                "VOICE SAVED:",
-                temp_path
-            )
+        normalized["user_id"] = str(user_id)
+        normalized["canonical_route"] = "/api/v1/chat"
+        normalized["single_route"] = True
+        normalized["space_continuity"] = build_space_continuity(normalized)
 
-            transcript = asyncio.run(
-
-                transcribe_voice(
-                    temp_path
-                )
-            )
-
-            transcript = normalize_voice_transcript(transcript)
-        finally:
-            if temp_path:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-        print(
-            "TRANSCRIPT:",
-            transcript
+        # Commit a new active visual scene only when the canonical output really
+        # contains a visual renderer block. Plain text must not activate it.
+        visual_types = {"graph", "plot", "chart", "diagram", "schematic", "gallery", "image", "media", "visual", "scene", "table"}
+        blocks = normalized.get("render_blocks") or []
+        has_visual = any(
+            isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower() in visual_types
+            for block in blocks
         )
-
-        # Voice is input-only at this boundary.
-        # The transcript is returned to AprilWeb, which attaches it to the
-        # real authenticated user and sends it through the single canonical
-        # /api/v1/chat route.  Never create a shared synthetic identity such
-        # as "web_voice" and never call the Provider from /voice.
-        user_id = (request.form.get("user_id") or "").strip()
-        flow_id = (request.form.get("flow_id") or "").strip()
-
-        if not user_id:
-            return jsonify({
-                "success": False,
-                "error": "user_id required"
-            }), 400
-
-        return jsonify({
-            "success": True,
-            "transcript": transcript,
-            "user_id": user_id,
-            "flow_id": flow_id,
-            "voice_input": True,
-            "processed": False,
-            "canonical_route": "/api/v1/chat",
-        })
-
-    except Exception as e:
-
-        print(
-            "VOICE ERROR:",
-            e
+        if has_visual:
+            # Existing canonical continuation writer remains the sole scene commit point.
+            result["render_blocks"] = blocks
+            result["scene_contract"] = scene_view
+        return normalized
+    finally:
+        # If the turn did not produce a new visual scene, restore the stored scene
+        # for future genuine continuation. It never re-enters the completed turn.
+        blocks = []
+        try:
+            blocks = normalized.get("render_blocks", []) if isinstance(normalized, dict) else []
+        except Exception:
+            pass
+        visual_types = {"graph", "plot", "chart", "diagram", "schematic", "gallery", "image", "media", "visual", "scene", "table"}
+        new_scene_active = any(
+            isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower() in visual_types
+            for block in blocks
         )
-
-        return jsonify({
-
-            "success": False,
-
-            "error":
-                str(e)
-
-        }), 500
-
-
+        restore_visual_context_after_turn(user_id, new_scene_active=new_scene_active)
 
 
 # =========================================================
@@ -1458,17 +1091,20 @@ def web_chat():
                 if visual_ledger else None
         }
 
-        update_visual_summary(
-            user_id,
-            visual_summary
-        )
-
+        # A plain user_message ledger event is dialogue evidence, not a new
+        # visual scene. Do not refresh/extend the active visual scene here.
+        # Scene memory is committed only after a visual SceneContract is
+        # actually produced by the canonical CPU route.
         state_after_update = get_state(
             user_id
         )
+        # Keep the frontend ledger current as evidence, but do not promote a
+        # plain user_message into active visual scene state.
+        state_after_update["visual_summary"] = visual_summary
+        persist_state(user_id)
 
         print(
-            "🧠 VISUAL STATE UPDATED",
+            "🧠 VISUAL STATE PRESERVED",
             state_after_update.get(
                 "active_visual_scene"
             )
