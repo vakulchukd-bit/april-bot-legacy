@@ -352,7 +352,11 @@ async def detect_intent_ai(
         return local
 
     if len(t) <= 15:
-        active_flow = state.get("active_flow")
+        # Greetings and short social turns are authoritative independent turns.
+        # Existing active_flow is preserved in memory, but cannot convert a new
+        # short request into continuation without an explicit reference cue.
+        explicit_reference = normalize(t) in {"продолжай", "дальше", "продолжи", "ещё", "еще"}
+        active_flow = state.get("active_flow") if explicit_reference else None
         result = build_signal_response(
             primary_intent="continuation" if active_flow else "text",
             confidence=0.66 if active_flow else 0.50,
