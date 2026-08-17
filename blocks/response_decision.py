@@ -324,10 +324,13 @@ def _canonical_action(
         for x in (representation.get("requested_outputs") or [])
         if _s(x)
     ]
+    explicit_structured = [name for name in requested if name != "text"]
+    if not explicit_structured:
+        return "talk"
+
     structured_mass = sum(
         _f(representation.get("weights", {}).get(name, 0.0))
-        for name in requested
-        if name != "text"
+        for name in explicit_structured
     )
     dialogue_explanation = bool(
         dialogue.get("explanation") and representation.get("text_explanation")
