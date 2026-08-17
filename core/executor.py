@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+from copy import deepcopy
 from typing import Any
 
 from blocks.context_system import build_deephub_context, build_executor_context_packet
@@ -35,6 +36,7 @@ from blocks.state_manager import get_state, update_dialog_context, update_scene_
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
+from blocks.april_personality import APRIL_IDENTITY
 
 PROCESSOR_VERSION = "april_quantum_processor_quantum64_v17_semantic_fusion_no_triggers"
 SINGLE_ROUTE = True
@@ -397,10 +399,25 @@ def _dialogue_evidence(
     )
 
     # Explicit semantic representation evidence comes from NLI, not keywords.
-    representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
-        text=text,
-        context=active_topic or previous_april,
-    )
+    representation_measurement = semantic.get("quantum_representation_measurement")
+    micro_social = _s(text).lower() in {
+        "привет", "приветик", "здравствуй", "здравствуйте",
+        "добрый день", "добрый вечер", "доброе утро",
+        "кто ты", "как тебя зовут", "как ти бязовут",
+    } or _is_april_identity_request(text)
+    if micro_social:
+        representation_measurement = {
+            "nli": {
+                "labels": ["text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"],
+                "scores": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "source": "micro_social_fast_path",
+            }
+        }
+    elif not isinstance(representation_measurement, dict):
+        representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
+            text=text,
+            context=active_topic or previous_april,
+        )
     nli_labels = representation_measurement.get("nli", {}).get("labels", [])
     nli_scores = representation_measurement.get("nli", {}).get("scores", [])
     rep_scores = {
@@ -996,6 +1013,26 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
             data["visual_context"] = _clip(visual, 900)
     return data
 
+def _is_april_identity_request(text: str) -> bool:
+    """Recognize explicit April self-identity questions without heavy semantic routing."""
+    normalized = re.sub(r"\s+", " ", _s(text).strip().lower())
+    if not normalized:
+        return False
+    phrases = (
+        "кто ты",
+        "как тебя зовут",
+        "расскажи кто ты",
+        "расскажи, кто ты",
+        "кто такая april",
+        "кто такая април",
+        "что ты умеешь",
+        "расскажи о себе",
+        "кто ты такая",
+        "кто ты такой",
+    )
+    return any(normalized.startswith(phrase) for phrase in phrases)
+
+
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
     # An unrelated new topic must not inherit the previous visual memory merely
@@ -1003,11 +1040,13 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     if visual and not bool(visual.get("memory_relevant")):
         evidence["visual_present"] = 0.0
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
-    if mode == "INDEPENDENT" and _s(text).lower() in {
+    if mode == "INDEPENDENT" and (
+        _s(text).lower() in {
         "привет", "приветик", "здравствуй", "здравствуйте",
         "добрый день", "добрый вечер", "доброе утро",
         "кто ты", "как тебя зовут", "как ти бязовут",
-    }:
+        } or _is_april_identity_request(text)
+    ):
         # Do not carry previous dialogue, goal, topic or visual material into
         # a short independent turn.
         semantic["active_topic"] = ""
@@ -1039,6 +1078,23 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "current_request_authoritative": True,
         }
         decision["requested_outputs"] = ["text"]
+        if _is_april_identity_request(text):
+            identity = deepcopy(APRIL_IDENTITY)
+            semantic["assistant_identity"] = identity
+            cognition["assistant_identity"] = identity
+            decision["assistant_identity"] = identity
+            decision["requested_outputs"] = ["text"]
+            decision["preferred_representation"] = "text"
+            decision["representation_authority"] = "text"
+            decision["dialog_act"] = "self_identification"
+            decision["identity_request"] = True
+            semantic["identity_request"] = True
+            semantic["representation_constraints"] = {
+                "positive": ["text"],
+                "negative": ["table", "graph", "diagram", "formula", "code", "gallery", "image", "link"],
+                "current_request_authoritative": True,
+                "identity_request": True,
+            }
         visual = {}
     # Real semantic representation measurement. This is NLI/vector evidence,
     # never a word-trigger map.
@@ -1131,6 +1187,13 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
 
     request_metadata = {
         "processor_version": PROCESSOR_VERSION,
+        "assistant_identity": deepcopy(APRIL_IDENTITY),
+        "assistant_identity_name": APRIL_IDENTITY.get("name", "April"),
+        "identity_request": _is_april_identity_request(text),
+        "micro_social_request": bool(_s(text).lower() in {
+            "привет", "приветик", "здравствуй", "здравствуйте",
+            "добрый день", "добрый вечер", "доброе утро",
+        } or _is_april_identity_request(text)),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -1152,7 +1215,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     request = MachineRequest(
         goal=goal,
         intent={
-            "type": _s(semantic.get("intent")) or "dialogue",
+            "type": _s(semantic.get("intent")) or ("self_identification" if _is_april_identity_request(text) else "dialogue"),
             "normalized_text": _s(text),
             "dialogue_state": mode,
             "coherence": round(coherence, 4),
