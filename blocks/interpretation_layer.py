@@ -32,51 +32,13 @@ from spacy.language import Language
 from sentence_transformers import SentenceTransformer
 from stanza.pipeline.multilingual import MultilingualPipeline
 from transformers import pipeline as hf_pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------------------------------------------------------------------------
 # Canonical semantic vocabulary
 # ---------------------------------------------------------------------------
 
-LIGHTWEIGHT_VISUAL_WORDS = (
-    "покажи", "визуализируй", "иллюстрация", "пример", "схема",
-)
-RENDERER_WORDS = (
-    "renderer", "scene", "graph", "plot", "chart", "diagram", "table",
-    "formula", "график", "таблица", "формула", "схема", "диаграмма",
-)
-MATH_WORDS = ("математика", "формула", "уравнение", "интеграл", "производная")
-WEB_WORDS = ("поиск", "найди", "интернет", "сайт", "веб")
-CODE_WORDS = ("python", "javascript", "typescript", "код", "программирование")
-CONTINUATION_WORDS = ("продолжай", "продолжить", "дальше", "продолжение")
-EXPLORATION_WORDS = ("исследуй", "сравни", "проанализируй", "разбери")
-EXPLICIT_IMAGE_WORDS = ("нарисуй", "создай изображение", "сгенерируй изображение")
-INFORMATIONAL_WORDS = ("что", "почему", "как", "объясни")
-
-DISCUSSION_WORDS = (
-    "поговорим", "обсудим", "как думаешь", "мнение",
-    "рассуждение", "рассуждаем", "объясни", "почему",
-)
-ACTION_WORDS = (
-    "создай", "сделай", "построй", "отрендери", "нарисуй",
-    "покажи", "сгенерируй", "напиши", "реши", "найди",
-)
-
-DOMAIN_WORDS = {
-    "biology": ("биология", "генетика", "эволюция", "клетка", "организм",
-                "экология", "бактерии", "днк", "животные", "растения"),
-    "chemistry": ("химия", "реакция", "молекула", "атом", "вещество"),
-    "physics": ("физика", "энергия", "сила", "ускорение", "электричество"),
-    "engineering": ("инженерия", "конструкция", "механизм", "проектирование"),
-    "it": ("программирование", "алгоритм", "сервер", "код", "разработка"),
-    "literature": ("литература", "роман", "поэзия", "писатель", "произведение"),
-    "politics": ("политика", "государство", "выборы", "правительство"),
-    "news": ("новости", "события", "последние новости"),
-    "social": ("общество", "социум", "социальный"),
-    "web": ("сайт", "интернет", "поиск", "веб"),
-}
-
-DOMAIN_ROOM_MAP = {name: [name] for name in DOMAIN_WORDS}
 
 RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
@@ -100,6 +62,20 @@ NLI_MODEL_NAME = os.getenv(
     "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
 )
 SPACY_MODEL_NAME = os.getenv("APRIL_SPACY_MODEL", "xx_ent_wiki_sm")
+
+# Production hot-path policy:
+# Free/simple turns use a local TF-IDF semantic sketch (no model download,
+# no Stanza, no sentence-transformer inference, no NLI). Heavy semantic models
+# remain available behind an explicit opt-in for future higher tiers/diagnostics.
+APRIL_FAST_SEMANTIC_MODE = (
+    str(os.getenv("APRIL_FAST_SEMANTIC_MODE", "1")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+APRIL_ENABLE_HEAVY_HOTPATH = (
+    str(os.getenv("APRIL_ENABLE_HEAVY_HOTPATH", "0")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
 
 # Real engines are required. Missing packages/models are deployment errors.
 
@@ -227,6 +203,21 @@ def _ensure_semantic_runtime() -> None:
 
         started = time.perf_counter()
         try:
+            if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
+                # The local semantic sketch is already initialized at import
+                # time and is the normal production hot path.
+                SPACY_NLP = None
+                STANZA_NLP = None
+                SEMANTIC_ENCODER = None
+                DIALOGUE_NLI = None
+                _SEMANTIC_RUNTIME_READY = True
+                os.environ["APRIL_STANZA_RUNTIME_READY"] = "0"
+                elapsed = time.perf_counter() - started
+                print(
+                    f"⚡ SEMANTIC ACCELERATOR READY: fast_local=1 elapsed={elapsed:.4f}s",
+                    flush=True,
+                )
+                return
             deep_enabled = (
                 str(os.getenv("APRIL_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
                 and str(os.getenv("APRIL_ALLOW_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -404,6 +395,313 @@ CAPABILITY_HYPOTHESES = {
 }
 
 
+class QuantumFastSemanticEngine:
+    """CPU-light semantic sketch used by the production hot path.
+
+    It is NOT keyword routing and contains no phrase triggers. A fixed set of
+    semantic prototype statements is vectorized once, then the current request
+    is compared by character n-gram TF-IDF cosine similarity. This keeps the
+    interpretation layer deterministic and sub-second on ordinary CPU-only
+    deployments while preserving the existing evidence/processor ownership.
+    """
+
+    def __init__(self) -> None:
+        self.char_vectorizer = TfidfVectorizer(
+            analyzer="char_wb",
+            ngram_range=(3, 5),
+            lowercase=True,
+            sublinear_tf=True,
+        )
+        self.word_vectorizer = TfidfVectorizer(
+            analyzer="word",
+            ngram_range=(1, 2),
+            lowercase=True,
+            sublinear_tf=True,
+        )
+        self.dialogue = {
+            "identity": [
+                "пользователь спрашивает кто такой помощник, как его зовут, какую роль он выполняет и что он умеет",
+                "пользователь хочет узнать имя ассистента и его возможности",
+                "the user asks who the assistant is, its name, role, or capabilities",
+            ],
+            "greeting": [
+                "пользователь приветствует ассистента и начинает разговор",
+                "пользователь открывает непринужденный диалог с помощником",
+                "the user is greeting the assistant or opening a casual conversation",
+            ],
+            "continuation": [
+                "пользователь хочет продолжить предыдущую тему или развить предыдущий ответ",
+                "пользователь просит вернуться к обсуждению и продолжить его",
+                "the user wants to continue or extend the preceding discussion",
+            ],
+            "reference": [
+                "пользователь ссылается на то что уже было обсуждено или создано",
+                "пользователь просит использовать ранее сказанное или предыдущий результат",
+                "the user refers to something previously discussed or produced",
+            ],
+            "independent": [
+                "пользователь задает самостоятельный вопрос который не зависит от предыдущих сообщений",
+                "запрос можно ответить без старого контекста",
+                "the user asks a self contained request independent of earlier turns",
+            ],
+        }
+        self.representations = {
+            "text": [
+                "пользователь хочет обычный текстовый ответ и объяснение",
+                "пользователь просит рассказать объяснить или описать без специального формата",
+                "the user wants a normal textual answer",
+            ],
+            "table": [
+                "пользователь хочет представить информацию в виде таблицы",
+                "пользователь просит структурированную таблицу критериев значений или сравнения",
+                "the user wants the information represented as a table",
+            ],
+            "graph": [
+                "пользователь хочет график диаграмму данных или визуализацию числовых значений",
+                "пользователь просит построить график по данным",
+                "the user wants a graph or chart",
+            ],
+            "diagram": [
+                "пользователь хочет схему диаграмму связей или блоков",
+                "пользователь просит показать структуру процесса или связей",
+                "the user wants a diagram or schematic",
+            ],
+            "formula": [
+                "пользователь хочет математическую формулу уравнение или математическую запись",
+                "пользователь просит показать математическое выражение",
+                "the user wants a mathematical formula",
+            ],
+            "image": [
+                "пользователь хочет изображение картинку или созданную иллюстрацию",
+                "пользователь просит создать изображение",
+                "the user wants an image",
+            ],
+            "gallery": [
+                "пользователь хочет несколько изображений или галерею",
+                "пользователь просит подборку изображений",
+                "the user wants a gallery",
+            ],
+            "code": [
+                "пользователь хочет исходный программный код реализацию или пример кода",
+                "пользователь просит написать программу или функцию",
+                "the user wants executable source code",
+            ],
+            "link": [
+                "пользователь хочет ссылку адрес сайта или веб ресурс",
+                "пользователь просит открыть или дать интернет ресурс",
+                "the user wants a link or web resource",
+            ],
+        }
+        self.domains = {
+            "biology": ["запрос о биологии живых организмах клетках генетике", "biology living organisms genetics"],
+            "chemistry": ["запрос о химии веществах реакциях молекулах", "chemistry substances reactions molecules"],
+            "physics": ["запрос о физике энергии силе движении", "physics energy forces motion"],
+            "engineering": ["запрос об инженерии конструкции проектировании", "engineering design construction"],
+            "it": ["запрос о программировании компьютерах программном обеспечении", "computing programming software"],
+            "literature": ["запрос о литературе писателе поэзии произведениях", "literature writing poetry authors"],
+            "politics": ["запрос о политике государстве правительстве", "politics government"],
+            "news": ["запрос о текущих событиях последних новостях", "current events news"],
+            "social": ["запрос об обществе социальных темах", "society social topics"],
+            "web": ["запрос на интернет ресурс поиск сайте", "web search online resource"],
+        }
+        self.capabilities = {
+            "exploration": ["пользователь хочет анализ сравнение исследование", "analysis comparison investigation"],
+            "web": ["пользователь хочет поиск в интернете или онлайн ресурс", "web search online resource"],
+            "code": ["пользователь хочет код программную реализацию", "programming code implementation"],
+            "information": ["пользователь хочет объяснение фактический ответ разъяснение", "explanation factual answer clarification"],
+            "discussion": ["пользователь хочет обсуждение мнение рассуждение", "discussion opinion reasoning"],
+            "space": ["пользователь обсуждает пространство сцену композицию", "spatial scene visual composition"],
+        }
+
+        docs = []
+        self._families: dict[str, dict[str, list[int]]] = {}
+        for family_name, family in (
+            ("dialogue", self.dialogue),
+            ("representation", self.representations),
+            ("domain", self.domains),
+            ("capability", self.capabilities),
+        ):
+            positions: dict[str, list[int]] = {}
+            for label, variants in family.items():
+                positions[label] = []
+                for text in variants:
+                    positions[label].append(len(docs))
+                    docs.append(text)
+            self._families[family_name] = positions
+        self._char_matrix = self.char_vectorizer.fit_transform(docs)
+        self._word_matrix = self.word_vectorizer.fit_transform(docs)
+        self._cache: dict[tuple, dict[str, Any]] = {}
+        self._cache_limit = 256
+
+    @staticmethod
+    def _family_scores(char_row, word_row, positions: dict[str, list[int]], labels: list[str]) -> dict[str, float]:
+        scores: dict[str, float] = {}
+        for label in labels:
+            idxs = positions[label]
+            if not idxs:
+                scores[label] = 0.0
+                continue
+            char_score = max(float(char_row[idx]) for idx in idxs)
+            word_score = max(float(word_row[idx]) for idx in idxs)
+            scores[label] = max(0.0, min(1.0, 0.6 * char_score + 0.4 * word_score))
+        return scores
+
+    def measure(
+        self,
+        text: str,
+        previous_assistant: str = "",
+        active_topic: str = "",
+        active_goal: str = "",
+    ) -> dict[str, Any]:
+        query = normalize_text(text)
+        key = (
+            query,
+            normalize_text(previous_assistant),
+            normalize_text(active_topic),
+            normalize_text(active_goal),
+        )
+        cached = self._cache.get(key)
+        if cached is not None:
+            return dict(cached)
+
+        char_query = self.char_vectorizer.transform([query])
+        word_query = self.word_vectorizer.transform([query])
+        char_scores_all = cosine_similarity(char_query, self._char_matrix)[0]
+        word_scores_all = cosine_similarity(word_query, self._word_matrix)[0]
+
+        dialogue_scores = self._family_scores(
+            char_scores_all,
+            word_scores_all,
+            self._families["dialogue"],
+            list(self.dialogue),
+        )
+        representation_scores = self._family_scores(
+            char_scores_all,
+            word_scores_all,
+            self._families["representation"],
+            list(self.representations),
+        )
+        domain_scores = self._family_scores(
+            char_scores_all,
+            word_scores_all,
+            self._families["domain"],
+            list(self.domains),
+        )
+        capability_scores = self._family_scores(
+            char_scores_all,
+            word_scores_all,
+            self._families["capability"],
+            list(self.capabilities),
+        )
+
+        dialogue_ranked = sorted(dialogue_scores.items(), key=lambda item: item[1], reverse=True)
+        best_dialogue, best_dialogue_score = dialogue_ranked[0]
+        dialogue_margin = (
+            best_dialogue_score - dialogue_ranked[1][1]
+            if len(dialogue_ranked) > 1 else best_dialogue_score
+        )
+
+        # Context similarity is calculated with the same fixed vector space;
+        # historical content never becomes a routing decision by itself.
+        contexts = {}
+        for label, value in (
+            ("previous_assistant", previous_assistant),
+            ("active_topic", active_topic),
+            ("active_goal", active_goal),
+        ):
+            value = normalize_text(value)
+            if value:
+                cvec = self.char_vectorizer.transform([value])
+                wvec = self.word_vectorizer.transform([value])
+                cscore = float(cosine_similarity(char_query, cvec)[0][0])
+                wscore = float(cosine_similarity(word_query, wvec)[0][0])
+                contexts[label] = 0.6 * cscore + 0.4 * wscore
+            else:
+                contexts[label] = 0.0
+
+        rep_ranked = sorted(representation_scores.items(), key=lambda item: item[1], reverse=True)
+        best_representation, best_rep_score = rep_ranked[0]
+        rep_margin = (
+            best_rep_score - rep_ranked[1][1]
+            if len(rep_ranked) > 1 else best_rep_score
+        )
+        # Uncertain representation measurements collapse safely to text.
+        if best_representation != "text" and (
+            best_rep_score < 0.18 or rep_margin < 0.05
+        ):
+            best_representation = "text"
+            best_rep_score = representation_scores.get("text", 0.0)
+
+        identity_score = dialogue_scores.get("identity", 0.0)
+        continuation_score = dialogue_scores.get("continuation", 0.0)
+        reference_score = dialogue_scores.get("reference", 0.0)
+        greeting_score = dialogue_scores.get("greeting", 0.0)
+        independent_score = dialogue_scores.get("independent", 0.0)
+
+        identity_request = (
+            identity_score >= 0.12
+            and identity_score >= continuation_score + 0.03
+            and identity_score >= reference_score + 0.03
+        )
+        fast_social = (
+            best_dialogue in {"identity", "greeting"}
+            and best_dialogue_score >= 0.12
+            and dialogue_margin >= 0.035
+            and len(query.split()) <= 24
+        )
+
+        profile = {
+            "needs_refinement": False,
+            "identity_score": float(identity_score),
+            "greeting_score": float(greeting_score),
+            "continuation_score": float(continuation_score),
+            "reference_score": float(reference_score),
+            "independent_score": float(independent_score),
+            "dialogue_best": best_dialogue,
+            "dialogue_confidence": float(best_dialogue_score),
+            "dialogue_margin": float(dialogue_margin),
+            "representation_scores": representation_scores,
+            "domain_scores": domain_scores,
+            "capability_scores": capability_scores,
+            "best_representation": best_representation,
+            "best_representation_score": float(best_rep_score),
+            "explicit_representations": [
+                name for name, score in representation_scores.items()
+                if name != "text" and float(score) >= 0.45 and float(score) - representation_scores.get("text", 0.0) >= 0.08
+            ],
+            "context_scores": contexts,
+            "identity_request": bool(identity_request),
+            "fast_social": bool(fast_social or identity_request),
+            "source": "local_tfidf_semantic_sketch",
+            "dialogue_nli": {
+                "labels": list(DIALOGUE_LABELS),
+                "scores": [dialogue_scores.get(label, 0.0) for label in DIALOGUE_LABELS],
+                "source": "local_tfidf_semantic_sketch",
+            },
+            "representation_nli": {
+                "labels": [REPRESENTATION_HYPOTHESES.get(name, name) for name in representation_scores],
+                "scores": [float(representation_scores[name]) for name in representation_scores],
+                "source": "local_tfidf_semantic_sketch",
+            },
+            "domain_nli": {
+                "labels": [DOMAIN_HYPOTHESES.get(name, name) for name in domain_scores],
+                "scores": [float(domain_scores[name]) for name in domain_scores],
+                "source": "local_tfidf_semantic_sketch",
+            },
+            "capability_nli": {
+                "labels": [CAPABILITY_HYPOTHESES.get(name, name) for name in capability_scores],
+                "scores": [float(capability_scores[name]) for name in capability_scores],
+                "source": "local_tfidf_semantic_sketch",
+            },
+        }
+        self._cache[key] = dict(profile)
+        if len(self._cache) > self._cache_limit:
+            self._cache.pop(next(iter(self._cache)))
+        return profile
+
+QUANTUM_FAST_SEMANTIC = QuantumFastSemanticEngine()
+
+
 @dataclass
 class SemanticEvidence:
     label: str
@@ -424,8 +722,11 @@ class SemanticEvidence:
 
 def _runtime_ready_guard() -> None:
     _ensure_semantic_runtime()
-    # Only the shared embedding runtime is mandatory for the production hot path.
-    # Deep linguistic engines are optional and never block ordinary requests.
+    # Fast semantic mode does not require a heavyweight neural encoder.
+    if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
+        if not _SEMANTIC_RUNTIME_READY:
+            raise RuntimeError("Quantum Interpretation fast semantic runtime is not ready")
+        return
     if not _SEMANTIC_RUNTIME_READY or SEMANTIC_ENCODER is None:
         raise RuntimeError("Quantum Interpretation semantic runtime is not ready")
 
@@ -672,8 +973,28 @@ class QuantumEmbeddingEngine:
         }
 
     def similarities(self, text: str, candidates: Sequence[str]) -> Dict[str, float]:
-        """Encode the request once; reuse prewarmed prototype vectors."""
+        """Encode the request once; reuse prewarmed prototype vectors.
+
+        In the production fast path, this delegates to the local semantic sketch
+        instead of waking the heavyweight transformer encoder.
+        """
         text = normalize_text(text)
+        if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
+            fast_engine = globals().get("QUANTUM_FAST_SEMANTIC")
+            if fast_engine is not None:
+                scores = {}
+                for candidate in candidates:
+                    value = normalize_text(candidate)
+                    if not value:
+                        continue
+                    score_map = fast_engine.measure(text)
+                    # Dynamic candidates are compared to the same compact context
+                    # space; if absent, retain a conservative zero instead of
+                    # invoking the heavyweight encoder.
+                    scores[value] = max(
+                        score_map.get("context_scores", {}).values(), default=0.0
+                    )
+                return scores
         if not text:
             return {}
 
@@ -783,10 +1104,31 @@ class QuantumEvidenceFusionEngine:
         self.linguistic = QuantumLinguisticEngine()
         self.embedding = QuantumEmbeddingEngine()
         self.intent = QuantumIntentEngine()
+        self.fast = QUANTUM_FAST_SEMANTIC
         self._turn_cache: dict[tuple, Dict[str, Any]] = {}
         self._linguistic_cache: dict[str, Dict[str, Any]] = {}
         self._nli_cache: dict[str, Dict[str, Any]] = {}
         self._cache_limit = 96
+
+    def _remember(self, cache: dict, key: Any, value: Any, limit: int | None = None) -> None:
+        cache[key] = value
+        cap = int(limit or self._cache_limit)
+        if len(cache) > cap:
+            cache.pop(next(iter(cache)), None)
+
+    def fast_semantic_profile(
+        self,
+        text: str,
+        previous_assistant: str = "",
+        active_topic: str = "",
+        active_goal: str = "",
+    ) -> Dict[str, Any]:
+        return self.fast.measure(
+            text,
+            previous_assistant=previous_assistant,
+            active_topic=active_topic,
+            active_goal=active_goal,
+        )
 
     @staticmethod
     def _best_label(result: Dict[str, Any]) -> tuple[str, float]:
@@ -819,6 +1161,15 @@ class QuantumEvidenceFusionEngine:
         cached = self._turn_cache.get(("fast_profile", key))
         if cached is not None:
             return cached
+        if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
+            result = self.fast.measure(
+                normalized,
+                previous_assistant=previous_assistant,
+                active_topic=active_topic,
+                active_goal=active_goal,
+            )
+            self._remember(self._turn_cache, ("fast_profile", key), result)
+            return result
 
         prototype_items = list(SEMANTIC_TURN_PROTOTYPES.items())
         representation_items = list(REPRESENTATION_HYPOTHESES.items())
@@ -1008,10 +1359,13 @@ class QuantumEvidenceFusionEngine:
         domain_nli = nli_bundle["domain_nli"]
         capability_nli = nli_bundle["capability_nli"]
 
-        embedding_map = self.embedding.similarities(
-            text,
-            [v for v in (previous_assistant, active_topic, active_goal) if v],
-        )
+        if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
+            embedding_map = dict(fast.get("context_scores") or {})
+        else:
+            embedding_map = self.embedding.similarities(
+                text,
+                [v for v in (previous_assistant, active_topic, active_goal) if v],
+            )
 
         result = {
             "linguistic": linguistic,
