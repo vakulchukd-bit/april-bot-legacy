@@ -429,10 +429,27 @@ def gateway_return_cpu_result(result):
         }
 
     # Preserve the canonical CPU object exactly; only add transport metadata.
-    result.setdefault("single_route", True)
-    result.setdefault("canonical_route", "/api/v1/chat")
-    result.setdefault("gateway_transport_only", True)
-    return result
+    # The gateway never creates a second response object or a renderer route.
+    if isinstance(result, dict):
+        result.setdefault("single_route", True)
+        result.setdefault("canonical_route", "/api/v1/chat")
+        result.setdefault("gateway_transport_only", True)
+        # Keep the canonical response visible for downstream transport only.
+        result.setdefault("gateway_contract", True)
+        return result
+
+    return {
+        "success": True,
+        "scene_contract": {},
+        "content": str(result),
+        "answer": str(result),
+        "summary": "",
+        "render_blocks": [],
+        "canonical_route": "/api/v1/chat",
+        "single_route": True,
+        "gateway_transport_only": True,
+        "gateway_contract": True,
+    }
 
 
 def build_gateway_transport_payload(result):
@@ -1008,7 +1025,9 @@ def voice_chat():
                 "error": "user_id required",
             }), 400
 
-        suffix = Path(voice_file.filename or "voice.webm").suffix or ".webm"
+        suffix = Path(voice_file.filename or "voice.webm").suffix.lower() or ".webm"
+        if not suffix.startswith(".") or len(suffix) > 12:
+            suffix = ".webm"
         with tempfile.NamedTemporaryFile(
             prefix="april_voice_",
             suffix=suffix,
@@ -1035,6 +1054,7 @@ def voice_chat():
             }), 422
 
         print("TRANSCRIPT:", transcript)
+        print("🎤 VOICE ROUTE: transcript_only -> /api/v1/chat", flush=True)
 
         flow_id = None
         try:
