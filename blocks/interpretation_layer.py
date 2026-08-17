@@ -1039,6 +1039,22 @@ def detect_scene_type(text: str, cognition=None):
     return candidates[0] if candidates else None
 
 
+def _is_micro_social_turn(text: Any) -> bool:
+    """Fast semantic guard for short social/self-identity turns."""
+    normalized = re.sub(r"\s+", " ", normalize_text(text).lower())
+    if not normalized:
+        return False
+    phrases = (
+        "привет", "приветик", "здравствуй", "здравствуйте",
+        "добрый день", "добрый вечер", "доброе утро",
+        "кто ты", "как тебя зовут", "расскажи кто ты",
+        "расскажи, кто ты", "кто ты такая", "кто ты такой",
+        "кто такая april", "кто такая април",
+        "что ты умеешь", "расскажи о себе",
+    )
+    return any(normalized.startswith(phrase) for phrase in phrases)
+
+
 def _dialogue_signal_contract(
     text: str,
     history: list,
@@ -1094,13 +1110,29 @@ def _dialogue_signal_contract(
         or cognition.get("current_topic")
     )
 
-    measured = QUANTUM_EVIDENCE_FUSION.dialogue(
-        text=text,
-        previous_assistant=last_assistant,
-        previous_user=last_user,
-        active_goal=active_goal,
-        active_topic=active_topic,
-    )
+    if _is_micro_social_turn(text):
+        measured = {
+            "dialogue": {
+                "label": "self_identification" if _is_micro_social_turn(text) and any(
+                    marker in normalize_text(text).lower()
+                    for marker in ("кто ты", "как тебя зовут", "расскажи кто ты", "расскажи, кто ты", "кто ты такая", "кто ты такой", "кто такая april", "кто такая април", "что ты умеешь")
+                ) else "statement",
+                "continuation_score": 0.0,
+                "reference_score": 0.0,
+                "topic_score": 0.0,
+                "goal_score": 0.0,
+                "confidence": 0.99,
+            },
+            "source": "micro_social_fast_path",
+        }
+    else:
+        measured = QUANTUM_EVIDENCE_FUSION.dialogue(
+            text=text,
+            previous_assistant=last_assistant,
+            previous_user=last_user,
+            active_goal=active_goal,
+            active_topic=active_topic,
+        )
     dialogue = measured["dialogue"]
     label = str(dialogue["label"])
     previous_score = float(dialogue["continuation_score"])
@@ -1165,6 +1197,53 @@ def _semantic_context_packet(
     active_topic = dialogue["active_topic"]
     active_goal = dialogue["active_goal"]
 
+    if _is_micro_social_turn(text):
+        is_identity = _is_micro_social_turn(text) and any(
+            marker in normalize_text(text).lower()
+            for marker in (
+                "кто ты", "как тебя зовут", "расскажи кто ты",
+                "расскажи, кто ты", "кто ты такая", "кто ты такой",
+                "кто такая april", "кто такая април", "что ты умеешь",
+                "расскажи о себе",
+            )
+        )
+        representation = {
+            "measurements": [{
+                "type": "text",
+                "score": 1.0,
+                "source": "micro_social_fast_path",
+                "nli": {
+                    "labels": list(REPRESENTATION_HYPOTHESES.keys()),
+                    "scores": [1.0 if name == "text" else 0.0 for name in REPRESENTATION_HYPOTHESES],
+                    "source": "micro_social_fast_path",
+                },
+            }],
+            "context_similarity": {"score": 0.0, "source": "micro_social_fast_path"},
+            "nli": {
+                "labels": list(REPRESENTATION_HYPOTHESES.keys()),
+                "scores": [1.0 if name == "text" else 0.0 for name in REPRESENTATION_HYPOTHESES],
+                "source": "micro_social_fast_path",
+            },
+        }
+        linguistic = _lightweight_linguistic(text)
+        domain = {
+            "measurements": [],
+            "source": "micro_social_fast_path",
+        }
+        context_vectors = {}
+        return {
+            "linguistic": linguistic,
+            "dialogue": dialogue,
+            "representation": representation,
+            "domain": domain,
+            "context_vectors": context_vectors,
+            "identity_request": is_identity,
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "engine": "quantum_interpretation_engine",
+            "evidence_only": True,
+            "fast_path": True,
+        }
+
     representation = QUANTUM_EVIDENCE_FUSION.representations(
         text,
         context=previous_answer or active_topic,
@@ -1183,9 +1262,9 @@ def _semantic_context_packet(
         "representation": representation,
         "domain": QUANTUM_EVIDENCE_FUSION.domains(text),
         "context_vectors": {
-            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer),
-            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic),
-            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal),
+            "previous_answer": QUANTUM_EMBEDDING_ENGINE.similarity(text, previous_answer) if previous_answer else {"score": 0.0},
+            "active_topic": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_topic) if active_topic else {"score": 0.0},
+            "active_goal": QUANTUM_EMBEDDING_ENGINE.similarity(text, active_goal) if active_goal else {"score": 0.0},
         },
         "decision_owner": "QUANTUM_PROCESSOR",
         "engine": "quantum_interpretation_engine",
@@ -1497,14 +1576,29 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
         cognition=cognition,
     )
 
-    domains = [
-        item["domain"]
-        for item in semantic_packet["domain"].get("measurements", [])
-        if float(item["score"]) >= 0.45
-    ]
-    representation_evidence = [
-        item for item in measure_representation_evidence(text)
-    ]
+    if _is_micro_social_turn(text):
+        domains = []
+        representation_evidence = [
+            {
+                "label": "text",
+                "score": 1.0,
+                "source": "micro_social_fast_path",
+                "details": {
+                    "decision_owner": "QUANTUM_PROCESSOR",
+                    "evidence_only": True,
+                    "context_similarity": 0.0,
+                },
+            }
+        ]
+    else:
+        domains = [
+            item["domain"]
+            for item in semantic_packet["domain"].get("measurements", [])
+            if float(item["score"]) >= 0.45
+        ]
+        representation_evidence = [
+            item for item in measure_representation_evidence(text)
+        ]
     semantic_candidates = [
         item["label"]
         for item in representation_evidence
@@ -1536,7 +1630,11 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
     result["required_domains"] = list(
         semantic.get("required_domains", []) or domains
     )
-    result["domain_confidence"] = build_domain_confidence(text)
+    result["domain_confidence"] = (
+        {}
+        if _is_micro_social_turn(text)
+        else build_domain_confidence(text)
+    )
     result["candidate_representations"] = semantic_candidates
     result["representation_evidence"] = representation_evidence
     result["required_representations"] = explicit_required
@@ -1549,7 +1647,11 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
         semantic_packet["dialogue"].get("continuation_score", 0.0)
     )
     result["web_context"] = semantic_evidence_web(text)
-    result["explicit_image_generation"] = semantic_evidence_image(text)
+    result["explicit_image_generation"] = (
+        0.0
+        if _is_micro_social_turn(text)
+        else semantic_evidence_image(text)
+    )
     result["lightweight_visual"] = detect_lightweight_visual(text)
 
     result["contains_object"] = bool(text)
@@ -1561,11 +1663,18 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
     elif result["contains_analysis"]:
         result["content_role"] = "analysis"
 
+    if _is_micro_social_turn(text):
+        math_evidence = 0.0
+        code_evidence = 0.0
+    else:
+        math_evidence = semantic_evidence_math(text)
+        code_evidence = semantic_evidence_code(text)
+
     result["evidence"] = {
         "domain": semantic_packet["domain"],
         "representation": representation_evidence,
-        "math": semantic_evidence_math(text),
-        "code": semantic_evidence_code(text),
+        "math": math_evidence,
+        "code": code_evidence,
         "web": result["web_context"],
         "image": result["explicit_image_generation"],
         "continuation": result["continuation"],
