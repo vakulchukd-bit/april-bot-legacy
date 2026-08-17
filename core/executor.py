@@ -297,16 +297,36 @@ def _dialogue_evidence(
       - the processor only fuses the measured evidence.
     """
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
-    last = dialog[-1] if dialog and isinstance(dialog[-1], dict) else {}
-
-    previous_user = _s(last.get("user"))
+    previous_user = ""
     previous_april = ""
-    if isinstance(last.get("april"), dict):
-        previous_april = _s(
-            last["april"].get("answer")
-            or last["april"].get("content")
-            or last["april"].get("summary")
-        )
+    last_turn_id = None
+
+    for item in reversed(dialog):
+        if not isinstance(item, dict):
+            continue
+        role = _s(item.get("role")).lower()
+        if not previous_april:
+            if role in {"assistant", "april"}:
+                previous_april = _s(
+                    item.get("content")
+                    or item.get("answer")
+                    or item.get("summary")
+                )
+                last_turn_id = item.get("turn_id")
+            elif isinstance(item.get("april"), dict):
+                previous_april = _s(
+                    item["april"].get("answer")
+                    or item["april"].get("content")
+                    or item["april"].get("summary")
+                )
+                last_turn_id = item.get("turn_id")
+        if not previous_user:
+            if role == "user":
+                previous_user = _s(item.get("content"))
+            elif item.get("user"):
+                previous_user = _s(item.get("user"))
+        if previous_user and previous_april:
+            break
 
     active_topic = _s(
         semantic.get("active_topic")
@@ -535,6 +555,8 @@ def _requested_outputs(
     semantic: dict,
     cognition: dict,
     decision: dict,
+    *,
+    independent_turn: bool = False,
 ) -> list[str]:
     """
     Produce the canonical multi-output request.
@@ -548,6 +570,28 @@ def _requested_outputs(
     """
     constraints = _representation_constraints(semantic, cognition, decision)
     blocked = set(constraints["negative"])
+
+    # For an independently measured turn, old requested_outputs/required_outputs
+    # are stale state, not current user intent. Rebuild the representation plan
+    # only from this turn's measured positive evidence.
+    if independent_turn:
+        current_names: list[str] = []
+        positive = constraints.get("positive", []) or []
+        for value in positive:
+            name = _s(value).lower()
+            if name and name not in blocked and name != "text" and name not in current_names:
+                current_names.append(name)
+
+        for candidate in _as_list(semantic.get("quantum_representation_candidates")):
+            if not isinstance(candidate, dict):
+                continue
+            name = _s(candidate.get("type")).lower()
+            score = _bounded01(candidate.get("score", 0.0))
+            if name and name != "text" and name not in blocked and score >= 0.75 and name not in current_names:
+                current_names.append(name)
+
+        return ["text", *current_names] if current_names else ["text"]
+
     locked = _s(semantic.get("representation_authority")).lower()
     if locked in {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"}:
         return [locked] if locked not in blocked else ["text"]
@@ -908,10 +952,35 @@ def _adaptive_output_budget(
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     recent = []
-    for turn in dialog[-4:]:
+    for turn in dialog[-8:]:
         if not isinstance(turn, dict):
             continue
-        recent.append({"user": _clip(turn.get("user"), 450), "april": _clip((turn.get("april") or {}).get("answer") if isinstance(turn.get("april"), dict) else "", 700)})
+        role = _s(turn.get("role")).lower()
+        if role == "user":
+            recent.append({
+                "user": _clip(turn.get("content"), 450),
+                "april": "",
+            })
+        elif role in {"assistant", "april"}:
+            recent.append({
+                "user": "",
+                "april": _clip(
+                    turn.get("content")
+                    or turn.get("answer")
+                    or turn.get("summary"),
+                    700,
+                ),
+            })
+        else:
+            recent.append({
+                "user": _clip(turn.get("user"), 450),
+                "april": _clip(
+                    (turn.get("april") or {}).get("answer")
+                    if isinstance(turn.get("april"), dict)
+                    else turn.get("april") or turn.get("content", ""),
+                    700,
+                ),
+            })
     data = {"current_request": text, "context_mode": mode}
     if mode != "INDEPENDENT":
         if topic: data["active_topic"] = _clip(topic, 300)
@@ -947,6 +1016,29 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         cognition["active_goal"] = ""
         decision["active_topic"] = ""
         decision["active_goal"] = ""
+        # Drop inherited representation decisions as well. The next line rebuilds
+        # outputs strictly from current-turn measurements.
+        for packet in (semantic, cognition, decision):
+            if isinstance(packet, dict):
+                for key in (
+                    "requested_outputs",
+                    "required_outputs",
+                    "required_artifacts",
+                    "required_representations",
+                    "requested_representations",
+                    "candidate_representations",
+                    "artifact_types",
+                    "render_types",
+                ):
+                    packet.pop(key, None)
+                if str(packet.get("representation_authority", "")).lower() not in {"", "text"}:
+                    packet["representation_authority"] = "text"
+        semantic["representation_constraints"] = {
+            "positive": ["text"],
+            "negative": ["table", "graph", "diagram", "formula", "code", "gallery", "image", "link"],
+            "current_request_authoritative": True,
+        }
+        decision["requested_outputs"] = ["text"]
         visual = {}
     # Real semantic representation measurement. This is NLI/vector evidence,
     # never a word-trigger map.
@@ -991,7 +1083,13 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             if item["score"] >= 0.45
         ]
 
-    outputs = _requested_outputs(text, semantic, cognition, decision)
+    outputs = _requested_outputs(
+        text,
+        semantic,
+        cognition,
+        decision,
+        independent_turn=(mode == "INDEPENDENT"),
+    )
     measured_output, representation_state = _representation_consensus(
         outputs, semantic, decision
     )
