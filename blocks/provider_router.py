@@ -365,7 +365,20 @@ def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int
     )
     for value in sources:
         if isinstance(value, int) and value > 0:
-            return min(max(int(value), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+            cap = min(max(int(value), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+            package = str(
+                payload.get("package")
+                or payload.get("plan")
+                or ((payload.get("metadata") or {}).get("package") if isinstance(payload.get("metadata"), dict) else "")
+                or ((payload.get("metadata") or {}).get("plan") if isinstance(payload.get("metadata"), dict) else "")
+                or ((payload.get("constraints") or {}).get("package") if isinstance(payload.get("constraints"), dict) else "")
+                or ((payload.get("constraints") or {}).get("plan") if isinstance(payload.get("constraints"), dict) else "")
+                or ""
+            ).strip().lower()
+            complexity = str(payload.get("response_complexity") or "").strip().upper()
+            if package == "free" and complexity == "LOW":
+                cap = min(cap, 480)
+            return cap
 
     return MIN_OUTPUT_TOKENS
 
