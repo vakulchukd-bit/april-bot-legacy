@@ -126,6 +126,15 @@ def _semantic_profile(text: Any, state: Optional[Dict[str, Any]] = None) -> Dict
         st = _state_dict(state)
         topic = _scene_topic(st.get("scene_state")) if st else ""
         focus = _dict(st.get("focus_state") or st.get("dynamic_focus")) if st else {}
+        if hasattr(QUANTUM_EVIDENCE_FUSION, "fast_semantic_profile"):
+            return QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(
+                normalize_text(text),
+                previous_assistant="",
+                active_topic=topic,
+                active_goal=normalize_text(
+                    focus.get("active_goal") or focus.get("primary_focus") or ""
+                ),
+            )
         return QUANTUM_EVIDENCE_FUSION._fast_measurement(
             normalize_text(text),
             "",
@@ -153,7 +162,10 @@ def _is_independent_short_turn(text: Any, state: Dict[str, Any] | None = None) -
         return True
     try:
         from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
-        profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(value, "", "", "")
+        if hasattr(QUANTUM_EVIDENCE_FUSION, "fast_semantic_profile"):
+            profile = QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(value, "", "", "")
+        else:
+            profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(value, "", "", "")
         independent = float(profile.get("independent_score", 0.0))
         continuation = float(profile.get("continuation_score", 0.0))
         reference = float(profile.get("reference_score", 0.0))
