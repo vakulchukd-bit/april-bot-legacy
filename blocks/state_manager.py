@@ -1425,17 +1425,6 @@ def prepare_visual_context_for_turn(user_id, current_request):
     candidates = [value for value in (topic, scene.get("current_request"), summary[:800]) if value]
 
     semantic_relevance = 0.0
-    if candidates and current:
-        try:
-            semantic_relevance = max(
-                QUANTUM_MEMORY_ENGINE.semantic_scores(current, candidates).values(),
-                default=0.0,
-            )
-        except Exception:
-            semantic_relevance = 0.0
-
-    # Use the existing shared semantic processor to decide whether this turn
-    # is a true continuation/reference. Do not use cue-word rules.
     continuation_score = 0.0
     reference_score = 0.0
     identity_score = 0.0
@@ -1448,6 +1437,12 @@ def prepare_visual_context_for_turn(user_id, current_request):
             "",
             topic,
             str(scene.get("goal") or ""),
+        )
+        context_scores = profile.get("context_scores", {}) or {}
+        semantic_relevance = max(
+            float(context_scores.get("active_topic", 0.0)),
+            float(context_scores.get("active_goal", 0.0)),
+            float(context_scores.get("previous_assistant", 0.0)),
         )
         continuation_score = float(profile.get("continuation_score", 0.0) or 0.0)
         reference_score = float(profile.get("reference_score", 0.0) or 0.0)
