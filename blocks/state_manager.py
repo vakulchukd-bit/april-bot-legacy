@@ -1399,36 +1399,106 @@ def sync_focus_layers(user_id):
 
 
 def prepare_visual_context_for_turn(user_id, current_request):
-    """Detach an unrelated visual scene from the ACTIVE turn without deleting memory."""
+    """Gate visual continuity with semantic evidence only.
+
+    Stored visual memory is never deleted. A scene becomes active for the
+    current turn only when the semantic continuation/reference signal agrees
+    with the scene similarity. Identity/greeting/independent turns release the
+    active scene even when generic wording has high embedding similarity.
+    """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    current = str(current_request or "").strip().lower()
+    current = str(current_request or "").strip()
     scene = state_obj.get("active_visual_scene")
     if not isinstance(scene, dict) or not scene:
         state_obj["active_visual_scene_turn"] = None
         state_obj["stored_visual_scene_turn"] = None
-        return {"active": False, "released": False}
+        return {"active": False, "released": False, "overlap": 0.0, "semantic_relevance": 0.0}
 
-    summary = str(scene.get("summary") or scene.get("topic") or scene.get("current_request") or "").strip().lower()
-    reference_cues = ("продолж", "дальше", "это", "этот", "эта", "тот", "предыдущ", "прошл", "его", "ее", "её", "там")
-    cue = any(token in current for token in reference_cues)
+    summary = str(
+        scene.get("topic")
+        or scene.get("trajectory")
+        or scene.get("current_request")
+        or scene.get("summary")
+        or ""
+    ).strip()
+    topic = str(scene.get("topic") or scene.get("trajectory") or "").strip()
+    candidates = [value for value in (topic, scene.get("current_request"), summary[:800]) if value]
 
-    # Cheap first-pass overlap. It prevents the old visual scene from entering
-    # unrelated turns without invoking the heavy semantic/NLI stack.
-    current_words = {w for w in re.findall(r"[a-zа-яё0-9]{4,}", current) if w}
-    scene_words = {w for w in re.findall(r"[a-zа-яё0-9]{4,}", summary) if w}
-    overlap = len(current_words & scene_words) / max(1, len(current_words))
-    related = cue or overlap >= 0.20
+    semantic_relevance = 0.0
+    if candidates and current:
+        try:
+            semantic_relevance = max(
+                QUANTUM_MEMORY_ENGINE.semantic_scores(current, candidates).values(),
+                default=0.0,
+            )
+        except Exception:
+            semantic_relevance = 0.0
+
+    # Use the existing shared semantic processor to decide whether this turn
+    # is a true continuation/reference. Do not use cue-word rules.
+    continuation_score = 0.0
+    reference_score = 0.0
+    identity_score = 0.0
+    greeting_score = 0.0
+    independent_score = 0.0
+    try:
+        from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
+        profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(
+            current,
+            "",
+            topic,
+            str(scene.get("goal") or ""),
+        )
+        continuation_score = float(profile.get("continuation_score", 0.0) or 0.0)
+        reference_score = float(profile.get("reference_score", 0.0) or 0.0)
+        identity_score = float(profile.get("identity_score", 0.0) or 0.0)
+        greeting_score = float(profile.get("greeting_score", 0.0) or 0.0)
+        independent_score = float(profile.get("independent_score", 0.0) or 0.0)
+    except Exception:
+        pass
+
+    continuation_signal = max(continuation_score, reference_score)
+    social_or_independent = max(identity_score, greeting_score, independent_score)
+    semantic_continuation = continuation_signal >= 0.58 and continuation_signal >= social_or_independent + 0.03
+    overlap_words = {
+        w for w in re.findall(r"[a-zа-яё0-9]{4,}", current.lower()) if w
+    }
+    scene_words = {
+        w for w in re.findall(r"[a-zа-яё0-9]{4,}", summary.lower()) if w
+    }
+    overlap = len(overlap_words & scene_words) / max(1, len(overlap_words))
+
+    related = bool(
+        semantic_continuation
+        and semantic_relevance >= 0.58
+        and (
+            semantic_relevance >= 0.68
+            or overlap >= 0.20
+        )
+    )
 
     if related:
         state_obj["active_visual_scene_turn"] = deepcopy(scene)
         state_obj["stored_visual_scene_turn"] = None
-        return {"active": True, "released": False, "overlap": round(overlap, 4)}
+        return {
+            "active": True,
+            "released": False,
+            "overlap": round(overlap, 4),
+            "semantic_relevance": round(float(semantic_relevance), 4),
+            "continuation_score": round(continuation_signal, 4),
+        }
 
     state_obj["stored_visual_scene_turn"] = deepcopy(scene)
     state_obj["active_visual_scene_turn"] = None
     state_obj["active_visual_scene"] = None
     state_obj["visual_focus"] = {}
-    return {"active": False, "released": True, "overlap": round(overlap, 4)}
+    return {
+        "active": False,
+        "released": True,
+        "overlap": round(overlap, 4),
+        "semantic_relevance": round(float(semantic_relevance), 4),
+        "continuation_score": round(continuation_signal, 4),
+    }
 
 
 def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
