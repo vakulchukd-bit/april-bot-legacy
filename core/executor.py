@@ -341,7 +341,7 @@ def _dialogue_evidence(
     # the processor on one heavy semantic pass for the turn.
     measured = semantic.get("quantum_dialogue_measurement")
     if not isinstance(measured, dict):
-        measured = QUANTUM_DIALOGUE_ENGINE.classify(
+        measured = QUANTUM_DIALOGUE_ENGINE.dialogue(
             text=text,
             previous_assistant=previous_april,
             previous_user=previous_user,
@@ -1039,15 +1039,14 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         }
         coherence = 1.0
     if mode == "INDEPENDENT":
-        # Do not carry previous dialogue, goal, topic or visual material into
-        # a short independent turn.
-        semantic["active_topic"] = ""
-        semantic["active_goal"] = ""
-        cognition["active_topic"] = ""
-        cognition["active_goal"] = ""
-        decision["active_topic"] = ""
-        decision["active_goal"] = ""
-        # Drop inherited representation decisions as well. The next line rebuilds
+        # Processor decides non-inheritance for this request; it never erases
+        # persistent dialogue/context state. State mutation happens after the
+        # canonical response is produced.
+        semantic.setdefault("processor_context_decision", {})["inherit_context"] = False
+        semantic.setdefault("processor_context_decision", {})["state_mutation"] = False
+        # Drop only current-turn inherited representation decisions; persistent
+        # topic/goal/history remain available for the next interpretation pass.
+        # The next line rebuilds
         # outputs strictly from current-turn measurements.
         for packet in (semantic, cognition, decision):
             if isinstance(packet, dict):
@@ -1155,8 +1154,16 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     complexity = _complexity(semantic, cognition, decision, text)
     quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
     response_budget = _quantum_budget_from_64(quantum_budget_field)
-    if bool(semantic.get("fast_social")) or bool(semantic.get("identity_request")):
-        response_budget = min(int(response_budget), 280)
+    if (
+        complexity == "LOW"
+        and len(outputs) <= 1
+        and not semantic.get("required_artifacts")
+        and not cognition.get("multi_step")
+        and not cognition.get("requires_planning")
+        and not decision.get("multi_step")
+        and not decision.get("requires_planning")
+    ):
+        response_budget = min(int(response_budget), 180)
 
     representation_constraints = _representation_constraints(
         semantic, cognition, decision
@@ -1174,16 +1181,19 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                 if value and value not in capabilities:
                     capabilities.append(value)
 
+    interpretation_packet = semantic.get("quantum_interpretation_evidence", {})
+    interpretation_packet = interpretation_packet if isinstance(interpretation_packet, dict) else {}
+    canonical_dialogue = interpretation_packet.get("dialogue_contract", {})
+    canonical_dialogue = canonical_dialogue if isinstance(canonical_dialogue, dict) else {}
     dialogue_contract = {
-        "dialog_act": _s(
-            _field((semantic, decision, cognition), ("dialog_act", "dialogue_act"))
-        ) or "statement",
-        "continuation": bool(
-            _field((semantic, decision, cognition), ("continuation", "followup", "follow_up"))
-        ) or mode == "CONTINUATION",
-        "reply_to": _s(_field((semantic, decision), ("reply_to", "previous_turn_id"))),
-        "active_goal": goal if mode != "INDEPENDENT" else "",
-        "active_topic": topic if mode != "INDEPENDENT" else "",
+        "dialog_act": _s(canonical_dialogue.get("dialog_act") or _field((semantic, decision, cognition), ("dialog_act", "dialogue_act"))) or "statement",
+        "continuation": bool(canonical_dialogue.get("continuation")) or mode == "CONTINUATION",
+        "reference_to_previous": bool(canonical_dialogue.get("reference_to_previous")),
+        "context_dependency": _s(canonical_dialogue.get("context_dependency")) or ("continuation" if mode == "CONTINUATION" else "reference" if mode == "ARTIFACT_REFERENCE" else "independent" if mode == "INDEPENDENT" else "topic"),
+        "reply_to": _s(_field((canonical_dialogue, semantic, decision), ("reply_to", "previous_turn_id"))),
+        "active_goal": _s(canonical_dialogue.get("active_goal")) or goal,
+        "active_topic": _s(canonical_dialogue.get("active_topic")) or topic,
+        "current_request": _s(text),
     }
 
     request_metadata = {
