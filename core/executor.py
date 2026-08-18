@@ -38,12 +38,11 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v17_semantic_fusion_no_triggers"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v18_dialogue_field_matrix"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
 OUTPUT_MAX_TOKENS = 8000
-
 
 def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
     """
@@ -358,6 +357,20 @@ def _dialogue_evidence(
     reference_score = _bounded01(dialogue.get("reference_score", 0.0))
     nli_confidence = _bounded01(dialogue.get("confidence", 0.0))
 
+    canonical_dialogue = _as_dict(
+        _as_dict(semantic.get("quantum_interpretation_evidence")).get("dialogue_contract")
+    )
+    relation_score = _bounded01(canonical_dialogue.get("context_dependency_score", 0.0))
+    if relation_score:
+        continuation_score = max(
+            continuation_score,
+            _bounded01(canonical_dialogue.get("continuation_score", 0.0)),
+        )
+        reference_score = max(
+            reference_score,
+            _bounded01(canonical_dialogue.get("reference_score", 0.0)),
+        )
+
     # Semantic evidence supplied by semantic_core/cognition/decision is allowed
     # to strengthen the measured state, but never to override it by a word.
     same_topic = max(
@@ -467,11 +480,19 @@ def _dialogue_evidence(
         "nli_confidence": nli_confidence,
         "representation_strength": representation_strength,
         "dialogue_label": _s(
-            measured.get("dialog_act") or dialogue.get("label")
+            canonical_dialogue.get("dialog_act")
+            or measured.get("dialog_act")
+            or dialogue.get("label")
+        ),
+        "context_dependency": relation_score,
+        "context_reference": float(
+            _bounded01(canonical_dialogue.get("reference_to_previous", False))
+        ),
+        "context_continuation": float(
+            _bounded01(canonical_dialogue.get("continuation", False))
         ),
         "_current_text": _s(text),
     }
-
 
 def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], float]:
     """Fuse 24 evidence dimensions across 5 competing states, then collapse once."""
@@ -491,7 +512,6 @@ def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], floa
     p = _norm(raw)
     measured = max(p, key=p.get)
     return measured, p, p[measured]
-
 
 def _representation_constraints(*sources: dict) -> dict:
     """
@@ -534,7 +554,6 @@ def _representation_constraints(*sources: dict) -> dict:
         "blocked": sorted(blocked),
         "current_request_authoritative": True,
     }
-
 
 def _representation_audit(
     requested_outputs: list[str],
@@ -663,7 +682,6 @@ def _requested_outputs(
 
     return names or ["text"]
 
-
 def _representation_consensus(
     outputs: list[str],
     semantic: dict,
@@ -704,7 +722,6 @@ def _representation_consensus(
     p = _norm(raw)
     return max(p, key=p.get), p
 
-
 def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> str:
     """Descriptive complexity label only; never selects an output budget."""
     explicit = _s(
@@ -740,8 +757,6 @@ def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> s
     if score >= 2:
         return "MEDIUM"
     return "LOW"
-
-
 
 # ---------------------------------------------------------------------------
 # 8-core × 8-lane quantum-inspired budget field (64 signals)
@@ -953,7 +968,6 @@ def _adaptive_output_budget(
     field = _quantum_64_field(text, semantic, cognition, decision)
     return _quantum_budget_from_64(field)
 
-
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     recent = []
@@ -1011,14 +1025,38 @@ def _is_april_identity_request(text: str, semantic: dict | None = None) -> bool:
     except Exception:
         return False
 
-
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
-    # An unrelated new topic must not inherit the previous visual memory merely
-    # because a scene exists in state.
-    if visual and not bool(visual.get("memory_relevant")):
+    # Visual state is evidence; the processor decides whether it participates.
+    if visual and not bool(visual.get("memory_relevant", True)):
         evidence["visual_present"] = 0.0
+
     mode, dialogue_state, coherence = _collapse_dialogue(evidence)
+
+    interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
+    canonical_dialogue = _as_dict(interpretation_packet.get("dialogue_contract"))
+    context_dependency = bool(canonical_dialogue.get("context_dependency"))
+    structured_continuity = bool(
+        _as_dict(semantic.get("dialogue_context_field")).get("structured_continuity")
+        or _as_dict(canonical_dialogue).get("structured_continuity")
+    )
+
+    # Canonical Interpretation relation has precedence over the processor's
+    # secondary fusion when the dialogue field already measured a dependency.
+    if context_dependency:
+        if bool(canonical_dialogue.get("reference_to_previous")) and structured_continuity:
+            mode = "ARTIFACT_REFERENCE"
+        elif bool(canonical_dialogue.get("continuation")) or bool(canonical_dialogue.get("reference_to_previous")):
+            mode = "CONTINUATION"
+        dialogue_state = {
+            "INDEPENDENT": 0.0,
+            "NEW_TOPIC": 0.0,
+            "SAME_TOPIC": 0.0,
+            "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
+            "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
+        }
+        coherence = max(coherence, _bounded01(canonical_dialogue.get("context_dependency_score", 0.0)))
+
     fast_social = bool(semantic.get("fast_social"))
     identity_semantic = bool(semantic.get("identity_request"))
     identity_score = float(semantic.get("identity_score", 0.0) or 0.0)
@@ -1028,7 +1066,11 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         identity_semantic
         or (identity_score >= 0.56 and identity_score >= continuation_score - 0.03 and identity_score >= reference_score - 0.03)
     )
-    if fast_social and (identity_semantic or float(semantic.get("greeting_score", 0.0) or 0.0) >= continuation_score):
+    if (
+        fast_social
+        and not context_dependency
+        and (identity_semantic or float(semantic.get("greeting_score", 0.0) or 0.0) >= continuation_score)
+    ):
         mode = "INDEPENDENT"
         dialogue_state = {
             "INDEPENDENT": 1.0,
@@ -1148,8 +1190,14 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         outputs, semantic, decision
     )
 
-    topic = _s(_field((semantic, decision, state), ("active_topic", "topic", "current_topic")))
-    goal = _s(_field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))) or text
+    topic = _s(
+        canonical_dialogue.get("active_topic")
+        or _field((semantic, decision, state), ("active_topic", "topic", "current_topic"))
+    )
+    goal = _s(
+        canonical_dialogue.get("active_goal")
+        or _field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))
+    ) or text
 
     complexity = _complexity(semantic, cognition, decision, text)
     quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
@@ -1233,6 +1281,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "current_request": _s(text),
             "dialogue_contract": dialogue_contract,
             "context_mode": mode,
+            "context_dependency": context_dependency,
+            "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
+            "previous_user_turn": _s(canonical_dialogue.get("previous_user_turn")),
+            "previous_april_turn": _s(canonical_dialogue.get("previous_april_turn")),
             **(
                 {
                     "active_topic": _clip(topic, 300),
@@ -1243,7 +1295,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             ),
             **(
                 {"recent_dialogue": context.get("recent_dialogue", [])}
-                if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE"}
+                if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE"} or context_dependency
                 else {}
             ),
         },
@@ -1298,6 +1350,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "dialogue": dialogue_state,
         "representation": representation_state,
         "measured_output": measured_output,
+        "context_dependency": context_dependency,
+        "context_dependency_score": _bounded01(canonical_dialogue.get("context_dependency_score", 0.0)),
+        "reference_to_previous": bool(canonical_dialogue.get("reference_to_previous")),
+        "continuation": bool(canonical_dialogue.get("continuation")),
         "evidence_channels": len(evidence),
         "coherence": round(coherence, 4),
         "response_budget": response_budget,
@@ -1340,7 +1396,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     })
 
     return request
-
 
 def _request_metadata(request: MachineRequest) -> dict:
     constraints = getattr(request, "constraints", {})
@@ -1413,7 +1468,6 @@ def _ensure_visible_answer_block(response: MachineResponse) -> list[dict]:
 
     # Preserve provider structured blocks exactly as received.
     return [visible_text_block, *original]
-
 
 def _canonicalize(
     user_id: str,
@@ -1538,8 +1592,6 @@ def _canonicalize(
         "visible_answer_guaranteed": True,
         "artifact_preservation": True,
     }
-
-
 
 def _validate_quantum_release(request: MachineRequest) -> None:
     constraints = getattr(request, "constraints", {})
