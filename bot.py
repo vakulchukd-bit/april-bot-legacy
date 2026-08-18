@@ -1243,6 +1243,8 @@ def april_web_chat():
 
 if __name__ == "__main__":
 
+    print("[APRIL BOT LEGACY] runtime=APRIL_BOT_LEGACY", flush=True)
+
     app.run(
 
         host="0.0.0.0",
