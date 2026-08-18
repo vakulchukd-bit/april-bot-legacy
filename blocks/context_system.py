@@ -126,24 +126,41 @@ def _semantic_profile(text: Any, state: Optional[Dict[str, Any]] = None) -> Dict
         st = _state_dict(state)
         topic = _scene_topic(st.get("scene_state")) if st else ""
         focus = _dict(st.get("focus_state") or st.get("dynamic_focus")) if st else {}
-        if hasattr(QUANTUM_EVIDENCE_FUSION, "fast_semantic_profile"):
-            return QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(
-                normalize_text(text),
-                previous_assistant="",
+        dialog = st.get("dialog") if isinstance(st.get("dialog"), list) else []
+        previous_assistant = ""
+        previous_user = ""
+        for item in reversed(dialog[-12:]):
+            if not isinstance(item, dict):
+                continue
+            role = normalize_lower(item.get("role"))
+            if not previous_assistant and role in {"assistant", "april", "bot"}:
+                previous_assistant = normalize_text(item.get("answer") or item.get("content") or item.get("summary") or item.get("text"))
+            if not previous_user and role in {"user", "human"}:
+                previous_user = normalize_text(item.get("content") or item.get("text") or item.get("answer"))
+            if previous_assistant and previous_user:
+                break
+        if hasattr(QUANTUM_EVIDENCE_FUSION, "turn_measurement"):
+            measured = QUANTUM_EVIDENCE_FUSION.turn_measurement(
+                normalize_text(text), previous_assistant=previous_assistant,
+                previous_user=previous_user,
                 active_topic=topic,
-                active_goal=normalize_text(
-                    focus.get("active_goal") or focus.get("primary_focus") or ""
-                ),
+                active_goal=normalize_text(focus.get("active_goal") or focus.get("primary_focus") or ""),
             )
-        return QUANTUM_EVIDENCE_FUSION._fast_measurement(
-            normalize_text(text),
-            "",
-            topic,
-            normalize_text(focus.get("active_goal") or focus.get("primary_focus") or ""),
+            dialogue = measured.get("dialogue", {}) if isinstance(measured, dict) else {}
+            return {
+                **(measured if isinstance(measured, dict) else {}),
+                "continuation_score": float(dialogue.get("continuation_score", 0.0) or 0.0),
+                "reference_score": float(dialogue.get("reference_score", 0.0) or 0.0),
+                "previous_assistant_present": bool(previous_assistant),
+                "previous_user_present": bool(previous_user),
+            }
+        return QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(
+            normalize_text(text), previous_assistant=previous_assistant,
+            previous_user=previous_user, active_topic=topic,
+            active_goal=normalize_text(focus.get("active_goal") or focus.get("primary_focus") or ""),
         )
     except Exception:
         return {}
-
 
 def _is_reference(text: Any, state: Optional[Dict[str, Any]] = None) -> bool:
     profile = _semantic_profile(text, state)
@@ -409,60 +426,36 @@ def stabilize_active_flow(state: Dict[str, Any], scene_state: Dict[str, Any]) ->
 
 
 def _v7_clear_stale_scene(state: Dict[str, Any], current_text: str) -> bool:
+    """Measure a possible transition without mutating dialogue state.
+
+    Context owns available state; Interpretation/Quantum Processor own semantic
+    decisions. Nothing is erased before the canonical interpretation pass.
+    """
     scene = _dict(state.get("scene_state"))
     focus = _dict(state.get("focus_state"))
     dynamic = _dict(state.get("dynamic_focus"))
     old_topic = normalize_text(
-        scene.get("trajectory")
-        or focus.get("active_topic")
-        or focus.get("primary_focus")
-        or dynamic.get("primary_focus")
-        or ""
+        scene.get("trajectory") or focus.get("active_topic")
+        or focus.get("primary_focus") or dynamic.get("primary_focus") or ""
     )
-    # A short independent turn must release active topic/visual state even
-    # though the stored memory remains intact. Otherwise an old scene can leak
-    # into greetings and short questions merely because state exists.
-    if _is_reference(current_text):
-        return False
-    if _is_independent_short_turn(current_text):
-        scene["previous_topic"] = old_topic
-        scene["previous_scene"] = dict(scene)
-        for key in (
-            "trajectory", "goal", "active_topic",
-            "active_room", "active_scene_id", "topic_signature"
-        ):
-            scene[key] = ""
-        state["scene_state"] = scene
-        state["focus_state"] = {}
-        state["dynamic_focus"] = {}
-        state["active_visual_scene"] = None
-        state["visual_focus"] = {}
-        state["visual_summary"] = {}
-        state["active_flow"] = None
-        state["current_topic"] = ""
-        state["active_topic"] = ""
-        state["active_goal"] = ""
-        return True
-    if not old_topic or _is_low_information(current_text):
-        return False
-    if _overlap(current_text, old_topic) > 0:
-        return False
-
-    scene["previous_topic"] = old_topic
-    scene["previous_scene"] = dict(scene)
-    for key in (
-        "trajectory", "goal", "active_topic",
-        "active_room", "active_scene_id", "topic_signature"
-    ):
-        scene[key] = ""
-    state["scene_state"] = scene
-    state["focus_state"] = {}
-    state["dynamic_focus"] = {}
-    state["active_visual_scene"] = None
-    state["visual_focus"] = {}
-    state["visual_summary"] = {}
-    return True
-
+    history = state.get("dialog") if isinstance(state.get("dialog"), list) else []
+    reference = bool(_is_reference(current_text, state))
+    independent = bool(_is_independent_short_turn(current_text, state))
+    candidate = {
+        "old_topic": old_topic,
+        "current_request": normalize_text(current_text),
+        "history_available": bool(history),
+        "reference_candidate": reference,
+        "independent_candidate": independent,
+        "topic_shift_candidate": bool(
+            old_topic and not reference and not _is_low_information(current_text)
+            and _overlap(current_text, old_topic) == 0.0
+        ),
+        "mutated": False,
+        "decision_owner": "QUANTUM_PROCESSOR",
+    }
+    state["_context_transition_candidate"] = candidate
+    return bool(candidate["topic_shift_candidate"] or candidate["independent_candidate"])
 
 def detect_dialog_intent(current_text: Any, state: Dict[str, Any]) -> str:
     profile = _semantic_profile(current_text, state)
@@ -593,46 +586,41 @@ def calculate_context_priority_v2(
 
 
 def build_relevant_dialog(
-    dialog: Optional[List[Dict[str, Any]]],
-    text: Any,
-    active_flow: Optional[Dict[str, Any]],
-    scene_state: Optional[Dict[str, Any]],
+    dialog: Optional[List[Dict[str, Any]]], text: Any,
+    active_flow: Optional[Dict[str, Any]], scene_state: Optional[Dict[str, Any]],
 ) -> str:
+    """Normalize user and April history into one dialogue evidence stream."""
     current = normalize_text(text)
     scene = _dict(scene_state)
     topic = _scene_topic(scene)
     selected: List[tuple[int, str]] = []
 
+    def extract(msg: Dict[str, Any]) -> tuple[str, str]:
+        role = normalize_lower(msg.get("role"))
+        if role in {"assistant", "april", "bot"} and isinstance(msg.get("april"), dict):
+            obj = msg["april"]
+            return "assistant", normalize_text(obj.get("answer") or obj.get("content") or obj.get("summary") or obj.get("text"))
+        if role in {"user", "human"} and isinstance(msg.get("user"), dict):
+            obj = msg["user"]
+            return "user", normalize_text(obj.get("content") or obj.get("text") or obj.get("answer"))
+        return role or "user", normalize_text(msg.get("content") or msg.get("answer") or msg.get("summary") or msg.get("text"))
+
     for reverse_index, msg in enumerate(reversed((dialog or [])[-MAX_DIALOG_SCAN:])):
-        content = normalize_text(msg.get("content"))
+        if not isinstance(msg, dict):
+            continue
+        role, content = extract(msg)
         if not content:
             continue
-        score = 0
-        if reverse_index == 0:
-            score += 12
-        elif reverse_index < 3:
-            score += 8
-        elif reverse_index < 6:
-            score += 4
-        if _overlap(current, content) > 0:
-            score += 8
-        if topic and _overlap(topic, content) > 0:
-            score += 6
-        if _is_reference(current):
-            score += 3
+        score = 12 if reverse_index == 0 else 8 if reverse_index < 3 else 4 if reverse_index < 6 else 0
+        if _overlap(current, content) > 0: score += 8
+        if topic and _overlap(topic, content) > 0: score += 6
+        if role in {"assistant", "april", "bot"} and reverse_index < 4: score += 4
         if score >= 6:
-            selected.append(
-                (
-                    reverse_index,
-                    f"{msg.get('role', 'user')}: {safe_slice(content, 500)}",
-                )
-            )
-
+            selected.append((reverse_index, f"{role}: {safe_slice(content, 500)}"))
     selected.sort(key=lambda x: x[0], reverse=True)
     values = [x[1] for x in selected[:MAX_RELEVANT_MESSAGES]]
     values.reverse()
     return "\n".join(values)
-
 
 def build_active_dialog(state: Dict[str, Any], text: Any = "") -> str:
     dialog = state.get("dialog") or []
@@ -837,26 +825,16 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
         scene,
     )
 
-    independent_short = _is_independent_short_turn(text, state)
+    # Context collection never decides that a short turn is independent. Keep
+    # the dialogue/visual field intact; the processor will later select relevance.
     blocks = [
-        build_base_context(),
-        build_current_request(text, scene),
-        build_scene_block(scene),
+        build_base_context(), build_current_request(text, scene), build_scene_block(scene),
+        build_dynamic_focus_block(state), build_dialog_focus_block(state, text),
+        build_visual_scene_block(state.get("active_visual_scene")), build_visual_focus_block(state),
+        build_visual_summary_block(state), build_visual_memory_block(state), build_memory_timeline_block(state),
+        "ACTIVE DIALOG:\n" + build_active_dialog(state, text),
+        "RELEVANT DIALOG:\n" + relevant,
     ]
-    if not independent_short:
-        blocks.extend([
-            build_dynamic_focus_block(state),
-            build_dialog_focus_block(state, text),
-            build_visual_scene_block(state.get("active_visual_scene")),
-            build_visual_focus_block(state),
-            build_visual_summary_block(state),
-            build_visual_memory_block(state),
-            build_memory_timeline_block(state),
-            "ACTIVE DIALOG:\n" + build_active_dialog(state, text),
-            "RELEVANT DIALOG:\n" + relevant,
-        ])
-    else:
-        blocks.append("DIALOGUE MODE: INDEPENDENT SHORT TURN")
 
     image = _dict(state.get("image_context"))
     hint = image.get("hint") or image.get("prompt")
