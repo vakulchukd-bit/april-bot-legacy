@@ -34,6 +34,7 @@ from stanza.pipeline.multilingual import MultilingualPipeline
 from transformers import pipeline as hf_pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Canonical semantic vocabulary
@@ -395,6 +396,202 @@ CAPABILITY_HYPOTHESES = {
 }
 
 
+
+# ---------------------------------------------------------------------------
+# Quantum Scene Interpretation Matrix
+# ---------------------------------------------------------------------------
+
+SCENE_MATRIX_LABELS = (
+    "text", "table", "graph", "diagram", "formula",
+    "image", "gallery", "code", "link",
+)
+
+SCENE_MATRIX_FEATURES = (
+    "dialogue", "representation", "domain", "capability",
+    "continuity", "context", "modality",
+)
+
+SCENE_MATRIX_REPRESENTATION = {label: label for label in SCENE_MATRIX_LABELS}
+
+SCENE_MATRIX_CAPABILITY = {
+    "text": "information",
+    "table": "information",
+    "graph": "exploration",
+    "diagram": "space",
+    "formula": "information",
+    "image": "space",
+    "gallery": "space",
+    "code": "code",
+    "link": "web",
+}
+
+SCENE_MATRIX_DOMAIN_BIAS = {
+    "biology": {"graph": 0.08, "table": 0.06, "diagram": 0.08},
+    "chemistry": {"formula": 0.10, "table": 0.05, "diagram": 0.05},
+    "physics": {"graph": 0.09, "formula": 0.09, "diagram": 0.05},
+    "engineering": {"diagram": 0.10, "graph": 0.06, "table": 0.04},
+    "it": {"code": 0.10, "diagram": 0.06, "table": 0.04},
+    "literature": {"text": 0.08},
+    "politics": {"table": 0.06, "graph": 0.06},
+    "news": {"link": 0.05, "table": 0.05, "graph": 0.05},
+    "social": {"table": 0.04, "graph": 0.04},
+    "web": {"link": 0.10},
+}
+
+# Rows = scene hypotheses; columns = evidence families.
+SCENE_MATRIX_WEIGHTS = np.asarray([
+    [0.12, 0.55, 0.03, 0.20, 0.04, 0.03, 0.03],  # text
+    [0.08, 0.62, 0.03, 0.20, 0.02, 0.03, 0.02],  # table
+    [0.04, 0.68, 0.05, 0.16, 0.02, 0.03, 0.02],  # graph
+    [0.04, 0.62, 0.06, 0.20, 0.02, 0.04, 0.02],  # diagram
+    [0.03, 0.70, 0.07, 0.16, 0.01, 0.02, 0.01],  # formula
+    [0.03, 0.72, 0.03, 0.17, 0.01, 0.02, 0.02],  # image
+    [0.03, 0.74, 0.03, 0.16, 0.01, 0.02, 0.01],  # gallery
+    [0.02, 0.70, 0.03, 0.22, 0.01, 0.01, 0.01],  # code
+    [0.02, 0.66, 0.05, 0.22, 0.01, 0.03, 0.01],  # link
+], dtype=np.float32)
+
+
+class QuantumSceneInterpretationMatrix:
+    """Vectorized scene-evidence accelerator.
+
+    It fuses measured semantic families into one scene evidence vector.
+    It never owns routing, provider selection, room execution, or rendering.
+    """
+
+    def __init__(self) -> None:
+        self.labels = SCENE_MATRIX_LABELS
+        self.features = SCENE_MATRIX_FEATURES
+        self.weights = SCENE_MATRIX_WEIGHTS
+        self._label_to_index = {label: i for i, label in enumerate(self.labels)}
+
+    def _feature_vector(
+        self,
+        dialogue_scores,
+        representation_scores,
+        domain_scores,
+        capability_scores,
+        context_scores,
+        modalities=None,
+    ):
+        dialogue = max(
+            float(dialogue_scores.get(name, 0.0))
+            for name in ("continuation", "reference", "question", "request")
+        )
+        representation = max(
+            (float(value) for value in representation_scores.values()),
+            default=0.0,
+        )
+        domain = max(
+            (float(value) for value in domain_scores.values()),
+            default=0.0,
+        )
+        capability = max(
+            (float(value) for value in capability_scores.values()),
+            default=0.0,
+        )
+        continuity = max(
+            float(context_scores.get("previous_assistant", 0.0)),
+            float(context_scores.get("active_topic", 0.0)),
+            float(context_scores.get("active_goal", 0.0)),
+        )
+        context = max(
+            float(context_scores.get("active_topic", 0.0)),
+            float(context_scores.get("active_goal", 0.0)),
+        )
+        present = sum(
+            1 for value in (modalities or {}).values()
+            if value not in (None, "", {}, [])
+        )
+        modality = min(1.0, present / 3.0)
+
+        return np.asarray([[
+            dialogue, representation, domain, capability,
+            continuity, context, modality,
+        ]], dtype=np.float32)
+
+    def evaluate(
+        self,
+        dialogue_scores=None,
+        representation_scores=None,
+        domain_scores=None,
+        capability_scores=None,
+        context_scores=None,
+        modalities=None,
+    ):
+        dialogue_scores = dialogue_scores or {}
+        representation_scores = representation_scores or {}
+        domain_scores = domain_scores or {}
+        capability_scores = capability_scores or {}
+        context_scores = context_scores or {}
+
+        vector = self._feature_vector(
+            dialogue_scores,
+            representation_scores,
+            domain_scores,
+            capability_scores,
+            context_scores,
+            modalities,
+        )
+
+        raw = (self.weights @ vector.T).reshape(-1)
+
+        # Explicit representation evidence receives the strongest semantic
+        # reinforcement while remaining evidence-only.
+        for scene in self.labels:
+            raw[self._label_to_index[scene]] += 0.34 * float(
+                representation_scores.get(
+                    SCENE_MATRIX_REPRESENTATION[scene], 0.0
+                )
+            )
+
+        for scene, capability in SCENE_MATRIX_CAPABILITY.items():
+            raw[self._label_to_index[scene]] += 0.10 * float(
+                capability_scores.get(capability, 0.0)
+            )
+
+        for domain, bias_map in SCENE_MATRIX_DOMAIN_BIAS.items():
+            domain_score = float(domain_scores.get(domain, 0.0))
+            if domain_score <= 0.0:
+                continue
+            for scene, bias in bias_map.items():
+                raw[self._label_to_index[scene]] += domain_score * float(bias)
+
+        scores = np.clip(raw, 0.0, None)
+        maximum = float(scores.max()) if scores.size else 0.0
+        if maximum > 0.0:
+            scores = scores / maximum
+
+        ranked = sorted(
+            ((label, float(scores[index])) for index, label in enumerate(self.labels)),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        best_label, best_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+
+        return {
+            "labels": [label for label, _ in ranked],
+            "scores": [round(score, 6) for _, score in ranked],
+            "best_scene": best_label,
+            "best_score": round(best_score, 6),
+            "margin": round(best_score - second_score, 6),
+            "feature_order": list(self.features),
+            "feature_vector": [round(float(x), 6) for x in vector[0]],
+            "matrix_shape": [
+                int(self.weights.shape[0]),
+                int(self.weights.shape[1]),
+            ],
+            "engine": "quantum_scene_interpretation_matrix",
+            "mode": "vectorized_evidence_fusion",
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "evidence_only": True,
+        }
+
+
+QUANTUM_SCENE_MATRIX = QuantumSceneInterpretationMatrix()
+
+
 class QuantumFastSemanticEngine:
     """CPU-light semantic sketch used by the production hot path.
 
@@ -657,6 +854,7 @@ class QuantumFastSemanticEngine:
             "continuation_score": float(continuation_score),
             "reference_score": float(reference_score),
             "independent_score": float(independent_score),
+            "dialogue_scores": {name: float(score) for name, score in dialogue_scores.items()},
             "dialogue_best": best_dialogue,
             "dialogue_confidence": float(best_dialogue_score),
             "dialogue_margin": float(dialogue_margin),
@@ -1254,6 +1452,7 @@ class QuantumEvidenceFusionEngine:
             "continuation_score": float(profile["continuation"]),
             "reference_score": float(profile["reference"]),
             "independent_score": float(profile["independent"]),
+            "dialogue_scores": {name: float(score) for name, score in dialogue_options.items()},
             "dialogue_best": best_dialogue,
             "dialogue_confidence": best_dialogue_score,
             "dialogue_margin": float(dialogue_margin),
@@ -2265,6 +2464,21 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
     domain_scores = profile.get("domain_scores", {}) or {}
     capability_scores = profile.get("capability_scores", {}) or {}
 
+    scene_matrix = QUANTUM_SCENE_MATRIX.evaluate(
+        dialogue_scores=profile.get("dialogue_scores", {}) or {},
+        representation_scores=representation_scores,
+        domain_scores=domain_scores,
+        capability_scores=capability_scores,
+        context_scores=profile.get("context_scores", {}) or {},
+        modalities={
+            "text": text,
+            "voice": state.get("voice_context"),
+            "vision": state.get("vision_context"),
+            "gallery": state.get("gallery_context"),
+            "files": state.get("file_context"),
+        },
+    )
+
     if semantic_packet.get("fast_path"):
         domains = []
         representation_evidence = [{
@@ -2315,9 +2529,15 @@ def _base_interpret_request(text, cognition=None, semantic=None, history=None, s
         "domain_scores": domain_scores,
         "capability_scores": capability_scores,
         "context_scores": profile.get("context_scores", {}),
-        "engine": "quantum_interpretation_engine_v4",
+        "engine": "quantum_interpretation_engine_v5_matrix",
     }
     result["scene_profile"] = build_scene_construction_profile(result["semantic_profile"])
+    result["quantum_scene_matrix"] = scene_matrix
+    result["scene_matrix_scores"] = dict(
+        zip(scene_matrix["labels"], scene_matrix["scores"])
+    )
+    result["scene_matrix_best"] = scene_matrix["best_scene"]
+    result["scene_matrix_confidence"] = scene_matrix["best_score"]
     result["artifact_contract"] = build_scene_artifact_contract(
         result["semantic_profile"], result["scene_profile"]
     )
@@ -2490,6 +2710,7 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
             "transformers_nli_refinement",
             "quantum_fast_measurement",
             "quantum_evidence_fusion",
+            "quantum_scene_interpretation_matrix",
         ],
         "engine_mode": "required",
         "fallback_mode": False,
