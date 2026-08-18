@@ -18,6 +18,7 @@ No parallel route. No provider call. No renderer trigger.
 
 from blocks.interpretation_layer import interpret_request
 import math
+import re
 
 APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
 SEMANTIC_MACHINE_CHANNEL = {
@@ -82,29 +83,38 @@ DISCUSSION_WORDS = (
 REFLECTION_WORDS = ("почему","объясни","рассуждай","размышляй","как ты пришла")
 SPACE_WORDS = ("пространство","scene","renderer","блок","галерея","график")
 GRAPH_WORDS = ("график","построй график","графике","функция","plot","chart")
-TABLE_WORDS = ("таблица","таблицу","таблицы","таблиц","таблич","периодическая","менделеева","значения","сводка","сравнение в виде таблицы")
+TABLE_WORDS = ()  # compatibility; representation comes from the semantic matrix
 
-def detect_representation_constraints(text):
-    value = (text or "").lower()
+def detect_representation_constraints(text, interpreted=None):
+    interpreted = interpreted if isinstance(interpreted, dict) else {}
     positive, negative, scores = [], [], {}
-    for name, words in REPRESENTATION_POSITIVES.items():
-        hits = sum(1 for word in words if word in value)
-        if hits:
-            positive.append(name)
-            scores[name] = clamp(0.45 + 0.15 * hits)
-    for name, words in REPRESENTATION_NEGATIONS.items():
-        if any(word in value for word in words):
-            negative.append(name)
-            scores[name] = 0.0
-    negative = list(dict.fromkeys(negative))
-    positive = [x for x in dict.fromkeys(positive) if x not in negative]
-    return {
-        "positive": positive,
-        "negative": negative,
-        "scores": scores,
-        "current_request_authoritative": True,
-        "source": "current_request_semantic_constraints",
-    }
+    def add(name, score=1.0):
+        name = str(name or "").lower().strip()
+        if name in REPRESENTATION_UNIVERSE and name != "text" and name not in negative:
+            if name not in positive:
+                positive.append(name)
+            scores[name] = max(scores.get(name, 0.0), clamp(score))
+    for key in ("required_representations", "requested_representations", "candidate_representations"):
+        values = interpreted.get(key) or []
+        values = [values] if isinstance(values, str) else values
+        for value in values:
+            add(value, 1.0)
+    evidence = [x for x in (interpreted.get("representation_evidence") or []) if isinstance(x, dict)]
+    for item in evidence:
+        label = str(item.get("label") or "").lower().strip()
+        score = float(item.get("score", 0.0) or 0.0)
+        if label in REPRESENTATION_UNIVERSE and label != "text" and score >= 0.24:
+            add(label, score)
+    blocked = interpreted.get("representation_constraints", {})
+    if isinstance(blocked, dict):
+        for value in blocked.get("negative") or []:
+            name = str(value or "").lower().strip()
+            if name in REPRESENTATION_UNIVERSE and name not in negative:
+                negative.append(name)
+                scores[name] = 0.0
+    positive = [x for x in positive if x not in negative]
+    return {"positive": positive, "negative": negative, "scores": scores,
+            "current_request_authoritative": True, "source": "quantum_matrix"}
 
 LINK_WORDS = ("источник","ссылка","ссылоч","документация")
 MATH_WORDS = ("математика","формула","уравнение","интеграл","производная")
@@ -206,6 +216,21 @@ def enrich_artifact_bundle(bundle, semantic_result):
 
 def _state_signals(state, active_flow, dialog_state, history):
     cognition = state.get("cognition", {}) if isinstance(state, dict) else {}
+    last_april = last_user = ""
+    for item in reversed(history if isinstance(history, list) else []):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").lower()
+        if not last_april:
+            obj = item.get("april") if isinstance(item.get("april"), dict) else item
+            if role in {"assistant","april","bot"} or isinstance(item.get("april"), dict):
+                last_april = str(obj.get("answer") or obj.get("content") or obj.get("summary") or obj.get("text") or "").strip()
+        if not last_user:
+            obj = item.get("user") if isinstance(item.get("user"), dict) else item
+            if role in {"user","human"} or isinstance(item.get("user"), dict):
+                last_user = str(obj.get("content") or obj.get("text") or obj.get("answer") or "").strip()
+        if last_april and last_user:
+            break
     return {
         "focus": cognition.get("dynamic_focus", {}),
         "goal": cognition.get("goal_hierarchy", {}),
@@ -220,16 +245,14 @@ def _state_signals(state, active_flow, dialog_state, history):
         "active_flow": active_flow,
         "dialog_state": dialog_state,
         "history_depth": len(history),
-        "last_april_turn": state.get("last_april_turn", ""),
-        "last_user_turn": state.get("last_user_turn", ""),
+        "last_april_turn": last_april or state.get("last_april_turn", ""),
+        "last_user_turn": last_user or state.get("last_user_turn", ""),
     }
-
 
 REPRESENTATION_UNIVERSE = (
     "text", "table", "graph", "diagram", "formula",
     "gallery", "link", "code", "image",
 )
-
 
 def _representation_posteriors(
     text: str,
@@ -263,48 +286,20 @@ def _representation_posteriors(
         if key in scores:
             scores[key] += 0.90
 
-    # "show/present/build" language increases the probability mass already
-    # associated with a representation, rather than selecting a renderer.
-    presentation_language = _weighted_probability(
-        text,
-        ("покажи", "построй", "отобрази", "в блоке", "представь", "нарисуй"),
-        0.08,
-    )
-    if presentation_language:
-        for name in positive:
-            if name in scores:
-                scores[name] += presentation_language
-
-    # Recover previous structured output only for genuine continuation/reference.
-    reference_signal = any(word in low for word in REFERENCE_WORDS)
-    recent_context_available = bool(
-        signals.get("last_april_turn")
-        or signals.get("last_user_turn")
-        or signals.get("continuity_context_storage")
-    )
-    continuation = bool(
+    continuity = bool(
         interpreted.get("continuation")
-        or signals.get("continuity_context_storage")
-        or interpreted.get("dialog_act") == "reference"
-        or (reference_signal and recent_context_available)
+        or interpreted.get("dialogue_contract", {}).get("continuation")
+        or interpreted.get("dialogue_contract", {}).get("reference_to_previous")
     )
-    if continuation:
-        previous_text = " ".join(
-            [
-                str(signals.get("last_april_turn") or ""),
-                str(signals.get("last_user_turn") or ""),
-            ]
-        ).lower()
-        for name, words in REPRESENTATION_POSITIVES.items():
-            if any(word in previous_text for word in words):
-                scores[name] += 0.70
-
-    # Existing active scene can contribute only as weak context evidence.
-    # It never revives a renderer on its own.
-    if continuation and signals.get("active_visual_scene"):
-        scores["graph"] += 0.10
-        scores["diagram"] += 0.10
-        scores["gallery"] += 0.08
+    current_scene = str(interpreted.get("scene_type") or "").lower()
+    previous_types = set()
+    visual = signals.get("active_visual_scene") if isinstance(signals, dict) else {}
+    if isinstance(visual, dict):
+        previous_types.update(str(x).lower() for x in (
+            visual.get("render_block_types") or visual.get("block_types") or []
+        ))
+    if continuity and current_scene in previous_types and current_scene != "text":
+        scores[current_scene] += 0.75
 
     # Negative constraints suppress stale candidates smoothly.
     for name in negative:
@@ -337,17 +332,12 @@ def _representation_posteriors(
     if not selected:
         selected = ["text"]
 
-    # Independent requests default to the current evidence only; continuation
-    # may inherit a prior representation when the posterior supports it.
-    if not continuation and not positive:
-        selected = ["text"]
 
     return posterior, selected, sorted(negative)
 
-
 def _signal_fusion(text, signals, interpreted):
     """Fuse independent evidence without collapsing it into a renderer trigger."""
-    representation_constraints = detect_representation_constraints(text)
+    representation_constraints = detect_representation_constraints(text, interpreted)
     posterior, selected, blocked = _representation_posteriors(
         text,
         signals,
@@ -504,6 +494,52 @@ def _base_result(text, signals):
         "provider_calls": 0,
     }
 
+def _dialogue_context_matrix(text, signals, interpreted):
+    prev_u, prev_a = str(signals.get("last_user_turn") or ""), str(signals.get("last_april_turn") or "")
+    total = max(1, len(str(text).split()))
+    tokens = set(re.findall(r"[a-zа-яё0-9]{3,}", str(text).lower()))
+    incomplete = 1.0 - min(1.0, len(tokens) / total)
+    history = 1.0 if prev_u or prev_a else 0.0
+    def overlap(a, b):
+        aa = set(re.findall(r"[a-zа-яё0-9]{3,}", str(a).lower()))
+        bb = set(re.findall(r"[a-zа-яё0-9]{3,}", str(b).lower()))
+        return len(aa & bb) / max(1.0, min(len(aa), len(bb))) if aa and bb else 0.0
+    affinity = max(overlap(text, prev_u), overlap(text, prev_a))
+    visual = signals.get("active_visual_scene") if isinstance(signals, dict) else {}
+    visual = visual if isinstance(visual, dict) else {}
+    rep = str(interpreted.get("scene_type") or "").lower()
+    previous_types = {str(x).lower() for x in (
+        visual.get("render_block_types") or visual.get("block_types") or []
+    )}
+    structured = 1.0 if rep and rep != "text" and rep in previous_types else 0.0
+    evidence = any(
+        isinstance(x, dict) and str(x.get("label") or "").lower() == rep
+        and float(x.get("score", 0.0) or 0.0) >= 0.24
+        for x in (interpreted.get("representation_evidence") or [])
+    )
+    capitalized = len(re.findall(r"\b[А-ЯA-ZЁ][а-яa-zё-]{2,}\b", prev_a))
+    entity_context = 1.0 if prev_a and incomplete >= 0.30 and capitalized >= 2 else 0.0
+    dc = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
+    semantic_rel = max(float(dc.get("continuation_score", 0.0) or 0.0),
+                       float(dc.get("reference_score", 0.0) or 0.0))
+    score = clamp(
+        0.22*incomplete + 0.12*history + 0.18*structured +
+        0.16*affinity + 0.16*evidence + 0.52*entity_context + 0.10*semantic_rel
+    )
+    if len(tokens) >= 2 and affinity < 0.05 and not structured and incomplete < 0.55:
+        score = clamp(score - 0.14)
+    depends = bool(history and score >= 0.53)
+    reference = bool(depends and (structured or entity_context or float(dc.get("reference_score", 0.0) or 0.0) >= 0.5))
+    continuation = bool(depends and not reference)
+    return {
+        "context_dependency": depends, "context_dependency_score": round(score, 4),
+        "continuation": continuation, "continuation_score": round(score if continuation else 0.0, 4),
+        "reference_to_previous": reference, "reference_score": round(score if reference else 0.0, 4),
+        "dialog_act": "reference" if reference else "continuation" if continuation else dc.get("dialog_act", "request"),
+        "previous_user_turn": prev_u, "previous_april_turn": prev_a,
+        "structured_continuity": bool(structured), "history_available": bool(history),
+    }
+
 def analyze(text: str, state: dict=None, history: list=None,
             active_flow: dict=None, dialog_state: dict=None,
             interpreted: dict=None):
@@ -532,7 +568,8 @@ def analyze(text: str, state: dict=None, history: list=None,
         ) or {}
 
     fusion=_signal_fusion(text, signals, interpreted)
-    current_representation = detect_representation_constraints(text)
+    dialogue_context = _dialogue_context_matrix(text, signals, interpreted)
+    current_representation = detect_representation_constraints(text, interpreted)
     result=_base_result(text, signals)
 
     result["intent"]=interpreted.get("type","text")
@@ -559,6 +596,24 @@ def analyze(text: str, state: dict=None, history: list=None,
     ):
         if key in interpreted:
             result[key]=interpreted[key]
+
+    dc = result.get("dialogue_contract")
+    dc = dc if isinstance(dc, dict) else {}
+    dc.update({
+        "dialog_act": dialogue_context["dialog_act"],
+        "continuation": dialogue_context["continuation"],
+        "reference_to_previous": dialogue_context["reference_to_previous"],
+        "context_dependency": dialogue_context["context_dependency"],
+        "context_dependency_score": dialogue_context["context_dependency_score"],
+        "continuation_score": dialogue_context["continuation_score"],
+        "reference_score": dialogue_context["reference_score"],
+        "previous_user_turn": dialogue_context["previous_user_turn"],
+        "previous_april_turn": dialogue_context["previous_april_turn"],
+        "canonical": True,
+        "version": "quantum_dialogue_field_v2",
+    })
+    result["dialogue_contract"] = dc
+    result["dialogue_context_field"] = dialogue_context
 
     result["requested_representation"]=fusion["requested_representation"]
     result["representation_posteriors"]=fusion["representation_posteriors"]
