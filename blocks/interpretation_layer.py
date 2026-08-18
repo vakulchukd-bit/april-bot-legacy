@@ -1,58 +1,71 @@
 """
-APRIL_INTERPRETATION_LAYER — QUANTUM EVIDENCE V1
+APRIL INTERPRETATION LAYER — QUANTUM MATRIX ENGINE
 
-Role:
-    semantic evidence / context fusion layer.
+Single semantic engine for:
+input -> matrix interpretation -> evidence packet -> QUANTUM_PROCESSOR
+      -> existing provider/rooms -> C_ARTIFACT_CONTRACT -> April Web
 
-Rule:
-    Interpretation does not own routing, provider calls, renderer selection,
-    room execution, or final response generation. It prepares one evidence
-    packet for the Quantum Processor.
-
-Single route:
-    input -> interpretation evidence -> Quantum Processor -> provider/rooms
-            -> C_ARTIFACT_CONTRACT -> April Web
-
-Compatibility:
-    Public helper names from the previous layer are retained so downstream
-    imports do not need a parallel route.
+The interpretation layer never owns routing, providers, renderers, room execution,
+or final response generation. Public compatibility helpers remain available so
+downstream imports can continue using the same single route.
 """
+
+from __future__ import annotations
 
 import os
 import re
 import threading
 import time
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
-import spacy
-import stanza
-from spacy.language import Language
-from sentence_transformers import SentenceTransformer
-from stanza.pipeline.multilingual import MultilingualPipeline
-from transformers import pipeline as hf_pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+except Exception:  # pragma: no cover
+    TfidfVectorizer = None
+    cosine_similarity = None
+
+try:
+    import spacy
+except Exception:  # pragma: no cover
+    spacy = None
+try:
+    import stanza
+    from stanza.pipeline.multilingual import MultilingualPipeline
+    from spacy.language import Language
+except Exception:  # pragma: no cover
+    stanza = None
+    MultilingualPipeline = Any
+    Language = Any
+
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:  # pragma: no cover
+    SentenceTransformer = None
+
+try:
+    from transformers import pipeline as hf_pipeline
+except Exception:  # pragma: no cover
+    hf_pipeline = None
+
 
 # ---------------------------------------------------------------------------
-# Canonical semantic vocabulary
+# Canonical constants
 # ---------------------------------------------------------------------------
-
 
 RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
-# ---------------------------------------------------------------------------
-# Quantum Interpretation Engine
-#
-# One specialized room. One engine stack. One output evidence field.
-#
-# No renderer routing, no provider calls, no fallback semantics, no substring
-# trigger ownership. The Quantum Processor remains the final decision owner.
-# ---------------------------------------------------------------------------
+DECISION_OWNER = "QUANTUM_PROCESSOR"
+TRANSPORT_NAME = "transport_state"
 
 SEMANTIC_MODEL_NAME = os.getenv(
     "APRIL_SENTENCE_MODEL",
@@ -64,277 +77,19 @@ NLI_MODEL_NAME = os.getenv(
 )
 SPACY_MODEL_NAME = os.getenv("APRIL_SPACY_MODEL", "xx_ent_wiki_sm")
 
-# Production hot-path policy:
-# Free/simple turns use a local TF-IDF semantic sketch (no model download,
-# no Stanza, no sentence-transformer inference, no NLI). Heavy semantic models
-# remain available behind an explicit opt-in for future higher tiers/diagnostics.
 APRIL_FAST_SEMANTIC_MODE = (
-    str(os.getenv("APRIL_FAST_SEMANTIC_MODE", "1")).strip().lower()
+    os.getenv("APRIL_FAST_SEMANTIC_MODE", "1").strip().lower()
     in {"1", "true", "yes", "on"}
 )
 APRIL_ENABLE_HEAVY_HOTPATH = (
-    str(os.getenv("APRIL_ENABLE_HEAVY_HOTPATH", "0")).strip().lower()
+    os.getenv("APRIL_ENABLE_HEAVY_HOTPATH", "0").strip().lower()
     in {"1", "true", "yes", "on"}
 )
 
-
-# Real engines are required. Missing packages/models are deployment errors.
-
-# Heavy semantic models are created through one runtime gate instead of during
-# Python import. This keeps deployment import-safe while all required engines
-# remain mandatory for semantic work.
-SPACY_NLP: Language | None = None
-STANZA_NLP: MultilingualPipeline | None = None
-SEMANTIC_ENCODER: SentenceTransformer | None = None
-DIALOGUE_NLI: Any = None
-_SEMANTIC_RUNTIME_READY = False
-
-# Canonical Stanza runtime state. Resources are provisioned once into the
-# configured model directory; live requests never perform resource checks
-# unless the runtime has not been initialized yet.
-STANZA_RESOURCE_DIR = Path(
-    os.getenv(
-        "APRIL_STANZA_RESOURCES_DIR",
-        os.getenv(
-            "STANZA_RESOURCES_DIR",
-            str(Path.home() / "stanza_resources"),
-        ),
-    )
-).expanduser()
-STANZA_BOOTSTRAP_LANGS = tuple(
-    lang.strip().lower()
-    for lang in os.getenv("APRIL_STANZA_LANGS", "ru,en,uk").split(",")
-    if lang.strip()
-)
-STANZA_RESOURCES_FILE = STANZA_RESOURCE_DIR / "resources.json"
-# Keep the semantic accelerator focused on the annotations actually consumed
-# by QuantumLinguisticEngine. MWT is language/package dependent and was the
-# direct cause of the Railway crash ("mwt, default"). Dependency parsing is
-# not required for dialogue-signal measurement, so it is intentionally kept
-# out of the bootstrap path as well.
-STANZA_LANGUAGE_PROCESSORS = os.getenv(
-    "APRIL_STANZA_PROCESSORS",
-    "tokenize,pos,lemma",
-)
-STANZA_LANGID_MODEL_FILE = STANZA_RESOURCE_DIR / "multilingual" / "langid" / "ud.pt"
-_STANZA_BOOTSTRAP_ATTEMPTED = False
-_SEMANTIC_RUNTIME_LOCK = threading.RLock()
-_SEMANTIC_ACCELERATOR_STARTED = False
-_SEMANTIC_ACCELERATOR_ERROR: Exception | None = None
-
-
-def _stanza_lang_ready(lang: str) -> bool:
-    root = STANZA_RESOURCE_DIR / lang
-    required = (
-        root / "tokenize",
-        root / "pos",
-        root / "lemma",
-    )
-    return root.is_dir() and all(path.exists() for path in required)
-
-
-def _stanza_resources_ready() -> bool:
-    """Validate the actual files MultilingualPipeline will open."""
-    if not STANZA_RESOURCES_FILE.is_file() or STANZA_RESOURCES_FILE.stat().st_size <= 0:
-        return False
-
-    # A resources.json alone is insufficient. The previous deployment had the
-    # manifest but not multilingual/langid/ud.pt, which caused the empty bubble
-    # and HTTP 500 during the first semantic request.
-    if not STANZA_LANGID_MODEL_FILE.is_file() or STANZA_LANGID_MODEL_FILE.stat().st_size <= 0:
-        return False
-
-    return all(_stanza_lang_ready(lang) for lang in STANZA_BOOTSTRAP_LANGS)
-
-
-def _provision_stanza_resources() -> None:
-    """Prepare all mandatory Stanza files once, never during normal turns."""
-    global _STANZA_BOOTSTRAP_ATTEMPTED
-
-    with _SEMANTIC_RUNTIME_LOCK:
-        if _stanza_resources_ready():
-            return
-        _STANZA_BOOTSTRAP_ATTEMPTED = True
-        STANZA_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
-
-        try:
-            # IMPORTANT: resources.json is not the readiness signal. Explicitly
-            # provision the multilingual langid model required by MultilingualPipeline.
-            stanza.download(
-                lang="multilingual",
-                model_dir=str(STANZA_RESOURCE_DIR),
-                processors="langid",
-                logging_level="WARN",
-            )
-
-            for language in STANZA_BOOTSTRAP_LANGS:
-                if not _stanza_lang_ready(language):
-                    # Do not request MWT globally. Stanza documents MWT as
-                    # language-dependent; requesting it for every language
-                    # makes the default package lookup fail when one language
-                    # has no MWT model in the installed resources manifest.
-                    stanza.download(
-                        lang=language,
-                        model_dir=str(STANZA_RESOURCE_DIR),
-                        processors=STANZA_LANGUAGE_PROCESSORS,
-                        logging_level="WARN",
-                    )
-
-            if not _stanza_resources_ready():
-                raise RuntimeError(
-                    "STANZA_RESOURCE_BOOTSTRAP_INCOMPLETE: "
-                    f"langid={STANZA_LANGID_MODEL_FILE}; "
-                    f"resources={STANZA_RESOURCES_FILE}; "
-                    f"languages={STANZA_BOOTSTRAP_LANGS}"
-                )
-        except Exception:
-            # A transient Hub/network error must not poison the process forever.
-            _STANZA_BOOTSTRAP_ATTEMPTED = False
-            raise
-
-
-def _ensure_semantic_runtime() -> None:
-    global SPACY_NLP, STANZA_NLP, SEMANTIC_ENCODER, DIALOGUE_NLI, _SEMANTIC_RUNTIME_READY
-    if _SEMANTIC_RUNTIME_READY:
-        return
-
-    with _SEMANTIC_RUNTIME_LOCK:
-        if _SEMANTIC_RUNTIME_READY:
-            return
-
-        started = time.perf_counter()
-        try:
-            if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
-                # The local semantic sketch is already initialized at import
-                # time and is the normal production hot path.
-                SPACY_NLP = None
-                STANZA_NLP = None
-                SEMANTIC_ENCODER = None
-                DIALOGUE_NLI = None
-                _SEMANTIC_RUNTIME_READY = True
-                os.environ["APRIL_STANZA_RUNTIME_READY"] = "0"
-                elapsed = time.perf_counter() - started
-                print(
-                    f"⚡ SEMANTIC ACCELERATOR READY: fast_local=1 elapsed={elapsed:.4f}s",
-                    flush=True,
-                )
-                return
-            deep_enabled = (
-                str(os.getenv("APRIL_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
-                and str(os.getenv("APRIL_ALLOW_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
-            )
-            if deep_enabled:
-                SPACY_NLP = spacy.load(SPACY_MODEL_NAME)
-                if not _stanza_resources_ready():
-                    _provision_stanza_resources()
-
-                lang_subset = list(STANZA_BOOTSTRAP_LANGS)
-                lang_configs = {
-                    lang: {"processors": STANZA_LANGUAGE_PROCESSORS}
-                    for lang in lang_subset
-                }
-
-                STANZA_NLP = MultilingualPipeline(
-                    model_dir=str(STANZA_RESOURCE_DIR),
-                    max_cache_size=12,
-                    download_method=None,
-                    lang_id_config={"langid_lang_subset": lang_subset} if lang_subset else None,
-                    lang_configs=lang_configs or None,
-                )
-            else:
-                SPACY_NLP = None
-                STANZA_NLP = None
-
-            SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
-            # Prewarm static semantic prototypes when module declarations are
-            # already available. A late first-turn guard covers import races.
-            embedding_engine = globals().get("QUANTUM_EMBEDDING_ENGINE")
-            proto_turns = globals().get("SEMANTIC_TURN_PROTOTYPES")
-            proto_reps = globals().get("REPRESENTATION_HYPOTHESES")
-            proto_domains = globals().get("DOMAIN_HYPOTHESES")
-            proto_caps = globals().get("CAPABILITY_HYPOTHESES")
-            if embedding_engine is not None and all(
-                isinstance(value, dict) for value in (proto_turns, proto_reps, proto_domains, proto_caps)
-            ):
-                embedding_engine.prewarm_static([
-                    *proto_turns.values(),
-                    *proto_reps.values(),
-                    *proto_domains.values(),
-                    *proto_caps.values(),
-                ])
-            # NLI is intentionally NOT loaded during the accelerator prewarm.
-            # It is a refinement engine and is loaded only when the fast
-            # measurement marks a turn as genuinely ambiguous.
-            DIALOGUE_NLI = None
-        except Exception:
-            STANZA_NLP = None
-            SEMANTIC_ENCODER = None
-            DIALOGUE_NLI = None
-            raise
-
-        _SEMANTIC_RUNTIME_READY = True
-        os.environ["APRIL_STANZA_RUNTIME_READY"] = "1"
-        elapsed = time.perf_counter() - started
-        print(
-            f"⚡ SEMANTIC ACCELERATOR READY: runtime_preloaded=1 elapsed={elapsed:.2f}s",
-            flush=True,
-        )
-
-
-def preload_semantic_runtime() -> None:
-    """Prewarm the complete semantic stack before the first user request."""
-    _ensure_semantic_runtime()
-
-
-def start_semantic_accelerator() -> None:
-    """Start one background prewarm worker for the existing semantic route."""
-    global _SEMANTIC_ACCELERATOR_STARTED, _SEMANTIC_ACCELERATOR_ERROR
-    if _SEMANTIC_ACCELERATOR_STARTED:
-        return
-
-    _SEMANTIC_ACCELERATOR_STARTED = True
-
-    def _worker() -> None:
-        global _SEMANTIC_ACCELERATOR_ERROR
-        try:
-            print("⚡ SEMANTIC ACCELERATOR: PREWARM START", flush=True)
-            preload_semantic_runtime()
-        except Exception as exc:
-            _SEMANTIC_ACCELERATOR_ERROR = exc
-            print(
-                f"⚡ SEMANTIC ACCELERATOR ERROR: {type(exc).__name__}: {exc}",
-                flush=True,
-            )
-
-    threading.Thread(
-        target=_worker,
-        name="april-semantic-accelerator",
-        daemon=True,
-    ).start()
-
-
-# Start the accelerator without blocking module import. This prevents a
-# missing/downloadable semantic model from crashing bot.py before Flask/Railway
-# can finish booting. If a request arrives first, _ensure_semantic_runtime()
-# still owns the same single runtime gate and waits for the shared lock.
-start_semantic_accelerator()
-
-APRIL_DEEP_LINGUISTICS_ENABLED = (
-    str(os.getenv("APRIL_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
-    and str(os.getenv("APRIL_ALLOW_DEEP_LINGUISTICS", "0")).strip().lower() in {"1", "true", "yes", "on"}
-)
-
 DIALOGUE_LABELS = (
-    "question",
-    "request",
-    "reformulation",
-    "continuation",
-    "correction",
-    "reference",
-    "affirmation",
-    "rejection",
-    "new_topic",
-    "statement",
+    "identity", "greeting", "question", "request", "reformulation",
+    "continuation", "correction", "reference", "affirmation",
+    "rejection", "new_topic", "statement", "independent",
 )
 
 REPRESENTATION_HYPOTHESES = {
@@ -349,556 +104,927 @@ REPRESENTATION_HYPOTHESES = {
     "link": "the user wants a link or web resource",
 }
 
-# Semantic prototypes are evidence, not triggers. They are compared by the
-# shared embedding engine and cached, so wording can vary without adding
-# phrase lists to the routing layer.
 SEMANTIC_TURN_PROTOTYPES = {
-    "identity": (
-        "The user is asking who the assistant is, what it is called, what role it has, "
-        "or what capabilities it provides."
-    ),
-    "greeting": (
-        "The user is opening a casual conversation with the assistant or greeting it."
-    ),
-    "continuation": (
-        "The user wants to continue or extend the immediately preceding discussion."
-    ),
-    "reference": (
-        "The user is referring back to something previously discussed or previously produced."
-    ),
-    "independent": (
-        "The user is asking a self-contained request that can be answered without previous turns."
-    ),
+    "identity": "пользователь спрашивает кто такой помощник как его зовут какую роль он выполняет и что умеет; the user asks who the assistant is, its role or capabilities",
+    "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
+    "question": "пользователь задаёт вопрос просит ответ или разъяснение; the user asks a question requiring an answer",
+    "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
+    "continuation": "пользователь хочет продолжить предыдущую тему развить предыдущий ответ; the user wants to continue the preceding task",
+    "reformulation": "пользователь просит переделать переформулировать переработать предыдущий результат; the user asks to rework previous content",
+    "correction": "пользователь исправляет изменяет уточняет предыдущую инструкцию; the user corrects or modifies a previous instruction",
+    "reference": "пользователь ссылается на ранее обсуждённое или созданное; the user refers back to previous material",
+    "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
+    "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
+    "new_topic": "пользователь начинает новую тему не связанную с предыдущим обсуждением; the user starts a new topic",
+    "statement": "пользователь сообщает утверждение факт или мысль; the user makes a statement",
+    "independent": "самостоятельный запрос не зависящий от предыдущих сообщений; the request is self contained and independent",
 }
+
+REPRESENTATION_HYPOTHESES = {
+    "text": "обычный текстовый ответ объяснение рассказ описание; the user wants a normal textual answer",
+    "table": "таблица таблицу структурированные строки колонки сравнение параметров; information represented as a table",
+    "graph": "график графика диаграмма данных визуализация числовых значений; information represented as a graph or chart",
+    "diagram": "схема диаграмма связей блоков структура процесса; a schematic or diagram with connected elements",
+    "formula": "формула уравнение математическое выражение математическая запись; a mathematical formula or notation",
+    "image": "изображение картинка рисунок иллюстрация создать изображение; an image or generated picture",
+    "gallery": "несколько изображений подборка галерея сравнение изображений; multiple images or a gallery",
+    "code": "код программный код функция программа реализация python; executable source code or software implementation",
+    "link": "ссылка адрес сайта веб ресурс открыть ресурс интернет источник; a link or web resource",
+}
+
 
 DOMAIN_HYPOTHESES = {
-    "biology": "the request is primarily about biology or living organisms",
-    "chemistry": "the request is primarily about chemistry or chemical substances",
-    "physics": "the request is primarily about physics",
-    "engineering": "the request is primarily about engineering or design",
-    "it": "the request is primarily about computing, programming, or software",
-    "literature": "the request is primarily about literature or writing",
-    "politics": "the request is primarily about politics or government",
-    "news": "the request is primarily about current events or news",
-    "social": "the request is primarily about society or social topics",
-    "web": "the request is primarily about finding or using web resources",
+    "biology": "биология живые организмы клетки генетика животные растения; biology living organisms genetics",
+    "chemistry": "химия вещества реакции молекулы атомы химические процессы; chemistry substances reactions molecules",
+    "physics": "физика энергия сила движение скорость масса поля; physics energy forces motion",
+    "engineering": "инженерия конструкции проектирование система устройство архитектура; engineering design construction",
+    "it": "программирование компьютер software код алгоритм приложение система; computing programming software",
+    "literature": "литература писатель поэзия роман стихотворение произведение; literature writing poetry authors",
+    "politics": "политика государство правительство выборы закон; politics government",
+    "news": "новости текущие события последние события; current events news",
+    "social": "общество социальные темы люди отношения; society social topics",
+    "web": "интернет сайт веб поиск онлайн ресурс страница; web search online resource",
 }
 
-# Capability hypotheses are evidence labels, not routing decisions.
-# They are consumed by the Quantum Processor as one semantic evidence family.
+
 CAPABILITY_HYPOTHESES = {
-    "exploration": "the user wants analysis, comparison, investigation, or deeper examination",
-    "web": "the user wants web search, an online resource, or information from the internet",
-    "code": "the user wants programming code or a software implementation",
-    "information": "the user wants an explanation, factual answer, or clarification",
-    "discussion": "the user wants a discussion, opinion, or reasoning about a topic",
-    "space": "the user is discussing spatial arrangement, scene layout, or visual composition",
+    "exploration": "анализ сравнение исследование изучение разбор выводы; analysis comparison investigation",
+    "web": "поиск в интернете онлайн ресурс сайт веб информация; web search online resource",
+    "code": "код программирование программная реализация функция python; programming code implementation",
+    "information": "объяснение информация фактический ответ что означает разъяснение; explanation factual answer",
+    "discussion": "обсуждение мнение рассуждение позиция аргументы; discussion opinion reasoning",
+    "space": "пространство сцена композиция визуальная структура расположение элементов; spatial scene composition",
 }
 
-
-
-# ---------------------------------------------------------------------------
-# Quantum Scene Interpretation Matrix
-# ---------------------------------------------------------------------------
 
 SCENE_MATRIX_LABELS = (
-    "text", "table", "graph", "diagram", "formula",
-    "image", "gallery", "code", "link",
+    "text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link",
 )
-
 SCENE_MATRIX_FEATURES = (
     "dialogue", "representation", "domain", "capability",
     "continuity", "context", "modality",
 )
 
-SCENE_MATRIX_REPRESENTATION = {label: label for label in SCENE_MATRIX_LABELS}
+# One scene matrix: rows=scenes, columns=evidence families.
+_SCENE_WEIGHTS = (
+    (0.12, 0.55, 0.03, 0.20, 0.04, 0.03, 0.03),
+    (0.08, 0.62, 0.03, 0.20, 0.02, 0.03, 0.02),
+    (0.04, 0.68, 0.05, 0.16, 0.02, 0.03, 0.02),
+    (0.04, 0.62, 0.06, 0.20, 0.02, 0.04, 0.02),
+    (0.03, 0.70, 0.07, 0.16, 0.01, 0.02, 0.01),
+    (0.03, 0.72, 0.03, 0.17, 0.01, 0.02, 0.02),
+    (0.03, 0.74, 0.03, 0.16, 0.01, 0.02, 0.01),
+    (0.02, 0.70, 0.03, 0.22, 0.01, 0.01, 0.01),
+    (0.02, 0.66, 0.05, 0.22, 0.01, 0.03, 0.01),
+)
 
 SCENE_MATRIX_CAPABILITY = {
-    "text": "information",
-    "table": "information",
-    "graph": "exploration",
-    "diagram": "space",
-    "formula": "information",
-    "image": "space",
-    "gallery": "space",
-    "code": "code",
-    "link": "web",
+    "text": "information", "table": "information", "graph": "exploration",
+    "diagram": "space", "formula": "information", "image": "space",
+    "gallery": "space", "code": "code", "link": "web",
 }
-
 SCENE_MATRIX_DOMAIN_BIAS = {
-    "biology": {"graph": 0.08, "table": 0.06, "diagram": 0.08},
-    "chemistry": {"formula": 0.10, "table": 0.05, "diagram": 0.05},
-    "physics": {"graph": 0.09, "formula": 0.09, "diagram": 0.05},
-    "engineering": {"diagram": 0.10, "graph": 0.06, "table": 0.04},
-    "it": {"code": 0.10, "diagram": 0.06, "table": 0.04},
-    "literature": {"text": 0.08},
-    "politics": {"table": 0.06, "graph": 0.06},
-    "news": {"link": 0.05, "table": 0.05, "graph": 0.05},
-    "social": {"table": 0.04, "graph": 0.04},
-    "web": {"link": 0.10},
+    "biology": {"graph": .08, "table": .06, "diagram": .08},
+    "chemistry": {"formula": .10, "table": .05, "diagram": .05},
+    "physics": {"graph": .09, "formula": .09, "diagram": .05},
+    "engineering": {"diagram": .10, "graph": .06, "table": .04},
+    "it": {"code": .10, "diagram": .06, "table": .04},
+    "literature": {"text": .08},
+    "politics": {"table": .06, "graph": .06},
+    "news": {"link": .05, "table": .05, "graph": .05},
+    "social": {"table": .04, "graph": .04},
+    "web": {"link": .10},
 }
 
-# Rows = scene hypotheses; columns = evidence families.
-SCENE_MATRIX_WEIGHTS = np.asarray([
-    [0.12, 0.55, 0.03, 0.20, 0.04, 0.03, 0.03],  # text
-    [0.08, 0.62, 0.03, 0.20, 0.02, 0.03, 0.02],  # table
-    [0.04, 0.68, 0.05, 0.16, 0.02, 0.03, 0.02],  # graph
-    [0.04, 0.62, 0.06, 0.20, 0.02, 0.04, 0.02],  # diagram
-    [0.03, 0.70, 0.07, 0.16, 0.01, 0.02, 0.01],  # formula
-    [0.03, 0.72, 0.03, 0.17, 0.01, 0.02, 0.02],  # image
-    [0.03, 0.74, 0.03, 0.16, 0.01, 0.02, 0.01],  # gallery
-    [0.02, 0.70, 0.03, 0.22, 0.01, 0.01, 0.01],  # code
-    [0.02, 0.66, 0.05, 0.22, 0.01, 0.03, 0.01],  # link
-], dtype=np.float32)
 
+# ---------------------------------------------------------------------------
+# Core engine
+# ---------------------------------------------------------------------------
 
-class QuantumSceneInterpretationMatrix:
-    """Vectorized scene-evidence accelerator.
-
-    It fuses measured semantic families into one scene evidence vector.
-    It never owns routing, provider selection, room execution, or rendering.
-    """
+class QuantumInterpretationEngine:
+    """One engine: linguistic evidence + semantic matrix + context fusion."""
 
     def __init__(self) -> None:
-        self.labels = SCENE_MATRIX_LABELS
-        self.features = SCENE_MATRIX_FEATURES
-        self.weights = SCENE_MATRIX_WEIGHTS
-        self._label_to_index = {label: i for i, label in enumerate(self.labels)}
-
-    def _feature_vector(
-        self,
-        dialogue_scores,
-        representation_scores,
-        domain_scores,
-        capability_scores,
-        context_scores,
-        modalities=None,
-    ):
-        dialogue = max(
-            float(dialogue_scores.get(name, 0.0))
-            for name in ("continuation", "reference", "question", "request")
-        )
-        representation = max(
-            (float(value) for value in representation_scores.values()),
-            default=0.0,
-        )
-        domain = max(
-            (float(value) for value in domain_scores.values()),
-            default=0.0,
-        )
-        capability = max(
-            (float(value) for value in capability_scores.values()),
-            default=0.0,
-        )
-        continuity = max(
-            float(context_scores.get("previous_assistant", 0.0)),
-            float(context_scores.get("active_topic", 0.0)),
-            float(context_scores.get("active_goal", 0.0)),
-        )
-        context = max(
-            float(context_scores.get("active_topic", 0.0)),
-            float(context_scores.get("active_goal", 0.0)),
-        )
-        present = sum(
-            1 for value in (modalities or {}).values()
-            if value not in (None, "", {}, [])
-        )
-        modality = min(1.0, present / 3.0)
-
-        return np.asarray([[
-            dialogue, representation, domain, capability,
-            continuity, context, modality,
-        ]], dtype=np.float32)
-
-    def evaluate(
-        self,
-        dialogue_scores=None,
-        representation_scores=None,
-        domain_scores=None,
-        capability_scores=None,
-        context_scores=None,
-        modalities=None,
-    ):
-        dialogue_scores = dialogue_scores or {}
-        representation_scores = representation_scores or {}
-        domain_scores = domain_scores or {}
-        capability_scores = capability_scores or {}
-        context_scores = context_scores or {}
-
-        vector = self._feature_vector(
-            dialogue_scores,
-            representation_scores,
-            domain_scores,
-            capability_scores,
-            context_scores,
-            modalities,
-        )
-
-        raw = (self.weights @ vector.T).reshape(-1)
-
-        # Explicit representation evidence receives the strongest semantic
-        # reinforcement while remaining evidence-only.
-        for scene in self.labels:
-            raw[self._label_to_index[scene]] += 0.34 * float(
-                representation_scores.get(
-                    SCENE_MATRIX_REPRESENTATION[scene], 0.0
-                )
-            )
-
-        for scene, capability in SCENE_MATRIX_CAPABILITY.items():
-            raw[self._label_to_index[scene]] += 0.10 * float(
-                capability_scores.get(capability, 0.0)
-            )
-
-        for domain, bias_map in SCENE_MATRIX_DOMAIN_BIAS.items():
-            domain_score = float(domain_scores.get(domain, 0.0))
-            if domain_score <= 0.0:
-                continue
-            for scene, bias in bias_map.items():
-                raw[self._label_to_index[scene]] += domain_score * float(bias)
-
-        scores = np.clip(raw, 0.0, None)
-        maximum = float(scores.max()) if scores.size else 0.0
-        if maximum > 0.0:
-            scores = scores / maximum
-
-        ranked = sorted(
-            ((label, float(scores[index])) for index, label in enumerate(self.labels)),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        best_label, best_score = ranked[0]
-        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-
-        return {
-            "labels": [label for label, _ in ranked],
-            "scores": [round(score, 6) for _, score in ranked],
-            "best_scene": best_label,
-            "best_score": round(best_score, 6),
-            "margin": round(best_score - second_score, 6),
-            "feature_order": list(self.features),
-            "feature_vector": [round(float(x), 6) for x in vector[0]],
-            "matrix_shape": [
-                int(self.weights.shape[0]),
-                int(self.weights.shape[1]),
-            ],
-            "engine": "quantum_scene_interpretation_matrix",
-            "mode": "vectorized_evidence_fusion",
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "evidence_only": True,
-        }
-
-
-QUANTUM_SCENE_MATRIX = QuantumSceneInterpretationMatrix()
-
-
-class QuantumFastSemanticEngine:
-    """CPU-light semantic sketch used by the production hot path.
-
-    It is NOT keyword routing and contains no phrase triggers. A fixed set of
-    semantic prototype statements is vectorized once, then the current request
-    is compared by character n-gram TF-IDF cosine similarity. This keeps the
-    interpretation layer deterministic and sub-second on ordinary CPU-only
-    deployments while preserving the existing evidence/processor ownership.
-    """
-
-    def __init__(self) -> None:
-        self.char_vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(3, 5),
-            lowercase=True,
-            sublinear_tf=True,
-        )
-        self.word_vectorizer = TfidfVectorizer(
-            analyzer="word",
-            ngram_range=(1, 2),
-            lowercase=True,
-            sublinear_tf=True,
-        )
-        self.dialogue = {
-            "identity": [
-                "пользователь спрашивает кто такой помощник, как его зовут, какую роль он выполняет и что он умеет",
-                "пользователь хочет узнать имя ассистента и его возможности",
-                "the user asks who the assistant is, its name, role, or capabilities",
-            ],
-            "greeting": [
-                "пользователь приветствует ассистента и начинает разговор",
-                "пользователь открывает непринужденный диалог с помощником",
-                "the user is greeting the assistant or opening a casual conversation",
-            ],
-            "continuation": [
-                "пользователь хочет продолжить предыдущую тему или развить предыдущий ответ",
-                "пользователь просит вернуться к обсуждению и продолжить его",
-                "the user wants to continue or extend the preceding discussion",
-            ],
-            "reference": [
-                "пользователь ссылается на то что уже было обсуждено или создано",
-                "пользователь просит использовать ранее сказанное или предыдущий результат",
-                "the user refers to something previously discussed or produced",
-            ],
-            "independent": [
-                "пользователь задает самостоятельный вопрос который не зависит от предыдущих сообщений",
-                "запрос можно ответить без старого контекста",
-                "the user asks a self contained request independent of earlier turns",
-            ],
-        }
-        self.representations = {
-            "text": [
-                "пользователь хочет обычный текстовый ответ и объяснение",
-                "пользователь просит рассказать объяснить или описать без специального формата",
-                "the user wants a normal textual answer",
-            ],
-            "table": [
-                "пользователь хочет представить информацию в виде таблицы",
-                "пользователь просит структурированную таблицу критериев значений или сравнения",
-                "the user wants the information represented as a table",
-            ],
-            "graph": [
-                "пользователь хочет график диаграмму данных или визуализацию числовых значений",
-                "пользователь просит построить график по данным",
-                "the user wants a graph or chart",
-            ],
-            "diagram": [
-                "пользователь хочет схему диаграмму связей или блоков",
-                "пользователь просит показать структуру процесса или связей",
-                "the user wants a diagram or schematic",
-            ],
-            "formula": [
-                "пользователь хочет математическую формулу уравнение или математическую запись",
-                "пользователь просит показать математическое выражение",
-                "the user wants a mathematical formula",
-            ],
-            "image": [
-                "пользователь хочет изображение картинку или созданную иллюстрацию",
-                "пользователь просит создать изображение",
-                "the user wants an image",
-            ],
-            "gallery": [
-                "пользователь хочет несколько изображений или галерею",
-                "пользователь просит подборку изображений",
-                "the user wants a gallery",
-            ],
-            "code": [
-                "пользователь хочет исходный программный код реализацию или пример кода",
-                "пользователь просит написать программу или функцию",
-                "the user wants executable source code",
-            ],
-            "link": [
-                "пользователь хочет ссылку адрес сайта или веб ресурс",
-                "пользователь просит открыть или дать интернет ресурс",
-                "the user wants a link or web resource",
-            ],
-        }
-        self.domains = {
-            "biology": ["запрос о биологии живых организмах клетках генетике", "biology living organisms genetics"],
-            "chemistry": ["запрос о химии веществах реакциях молекулах", "chemistry substances reactions molecules"],
-            "physics": ["запрос о физике энергии силе движении", "physics energy forces motion"],
-            "engineering": ["запрос об инженерии конструкции проектировании", "engineering design construction"],
-            "it": ["запрос о программировании компьютерах программном обеспечении", "computing programming software"],
-            "literature": ["запрос о литературе писателе поэзии произведениях", "literature writing poetry authors"],
-            "politics": ["запрос о политике государстве правительстве", "politics government"],
-            "news": ["запрос о текущих событиях последних новостях", "current events news"],
-            "social": ["запрос об обществе социальных темах", "society social topics"],
-            "web": ["запрос на интернет ресурс поиск сайте", "web search online resource"],
-        }
-        self.capabilities = {
-            "exploration": ["пользователь хочет анализ сравнение исследование", "analysis comparison investigation"],
-            "web": ["пользователь хочет поиск в интернете или онлайн ресурс", "web search online resource"],
-            "code": ["пользователь хочет код программную реализацию", "programming code implementation"],
-            "information": ["пользователь хочет объяснение фактический ответ разъяснение", "explanation factual answer clarification"],
-            "discussion": ["пользователь хочет обсуждение мнение рассуждение", "discussion opinion reasoning"],
-            "space": ["пользователь обсуждает пространство сцену композицию", "spatial scene visual composition"],
-        }
-
-        docs = []
-        self._families: dict[str, dict[str, list[int]]] = {}
-        for family_name, family in (
-            ("dialogue", self.dialogue),
-            ("representation", self.representations),
-            ("domain", self.domains),
-            ("capability", self.capabilities),
-        ):
-            positions: dict[str, list[int]] = {}
-            for label, variants in family.items():
-                positions[label] = []
-                for text in variants:
-                    positions[label].append(len(docs))
-                    docs.append(text)
-            self._families[family_name] = positions
-        self._char_matrix = self.char_vectorizer.fit_transform(docs)
-        self._word_matrix = self.word_vectorizer.fit_transform(docs)
+        self._lock = threading.RLock()
         self._cache: dict[tuple, dict[str, Any]] = {}
         self._cache_limit = 256
+        self._vectorizer = None
+        self._prototype_matrix = None
+        self._prototype_index: dict[str, list[int]] = {}
+        self._semantic_encoder = None
+        self._nli = None
+        self._runtime_ready = True
+        self._heavy_ready = False
+        self._compile_matrix()
+
+    # ----------------------------- primitives -----------------------------
 
     @staticmethod
-    def _family_scores(char_row, word_row, positions: dict[str, list[int]], labels: list[str]) -> dict[str, float]:
-        scores: dict[str, float] = {}
-        for label in labels:
-            idxs = positions[label]
-            if not idxs:
-                scores[label] = 0.0
-                continue
-            char_score = max(float(char_row[idx]) for idx in idxs)
-            word_score = max(float(word_row[idx]) for idx in idxs)
-            scores[label] = max(0.0, min(1.0, 0.6 * char_score + 0.4 * word_score))
-        return scores
+    def normalize(text: Any) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip())
 
-    def measure(
-        self,
-        text: str,
-        previous_assistant: str = "",
-        active_topic: str = "",
-        active_goal: str = "",
-    ) -> dict[str, Any]:
-        query = normalize_text(text)
-        key = (
-            query,
-            normalize_text(previous_assistant),
-            normalize_text(active_topic),
-            normalize_text(active_goal),
-        )
-        cached = self._cache.get(key)
-        if cached is not None:
-            return dict(cached)
+    @staticmethod
+    def _tokens(text: str) -> list[str]:
+        return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", text.lower())
 
-        char_query = self.char_vectorizer.transform([query])
-        word_query = self.word_vectorizer.transform([query])
-        char_scores_all = cosine_similarity(char_query, self._char_matrix)[0]
-        word_scores_all = cosine_similarity(word_query, self._word_matrix)[0]
+    def _compile_matrix(self) -> None:
+        docs: list[str] = []
+        families = (
+            ("dialogue", SEMANTIC_TURN_PROTOTYPES),
+            ("representation", REPRESENTATION_HYPOTHESES),
+            ("domain", DOMAIN_HYPOTHESES),
+            ("capability", CAPABILITY_HYPOTHESES),
+        )
+        self._prototype_index = {}
+        for family, vocab in families:
+            for label, description in vocab.items():
+                self._prototype_index.setdefault(f"{family}:{label}", []).append(len(docs))
+                docs.append(description)
 
-        dialogue_scores = self._family_scores(
-            char_scores_all,
-            word_scores_all,
-            self._families["dialogue"],
-            list(self.dialogue),
-        )
-        representation_scores = self._family_scores(
-            char_scores_all,
-            word_scores_all,
-            self._families["representation"],
-            list(self.representations),
-        )
-        domain_scores = self._family_scores(
-            char_scores_all,
-            word_scores_all,
-            self._families["domain"],
-            list(self.domains),
-        )
-        capability_scores = self._family_scores(
-            char_scores_all,
-            word_scores_all,
-            self._families["capability"],
-            list(self.capabilities),
-        )
+        if TfidfVectorizer is not None and docs:
+            self._vectorizer = TfidfVectorizer(
+                analyzer="char_wb", ngram_range=(3, 5),
+                lowercase=True, sublinear_tf=True,
+            )
+            self._prototype_matrix = self._vectorizer.fit_transform(docs)
 
-        dialogue_ranked = sorted(dialogue_scores.items(), key=lambda item: item[1], reverse=True)
-        best_dialogue, best_dialogue_score = dialogue_ranked[0]
-        dialogue_margin = (
-            best_dialogue_score - dialogue_ranked[1][1]
-            if len(dialogue_ranked) > 1 else best_dialogue_score
-        )
+    def _tfidf_scores(self, text: str) -> dict[str, dict[str, float]]:
+        families = {
+            "dialogue": SEMANTIC_TURN_PROTOTYPES,
+            "representation": REPRESENTATION_HYPOTHESES,
+            "domain": DOMAIN_HYPOTHESES,
+            "capability": CAPABILITY_HYPOTHESES,
+        }
+        if not text:
+            return {name: {key: 0.0 for key in values} for name, values in families.items()}
 
-        # Context similarity is calculated with the same fixed vector space;
-        # historical content never becomes a routing decision by itself.
-        contexts = {}
-        for label, value in (
+        if self._vectorizer is None or self._prototype_matrix is None or cosine_similarity is None:
+            # Tiny deterministic semantic sketch for environments without sklearn.
+            token_set = set(self._tokens(text))
+            out: dict[str, dict[str, float]] = {}
+            for family, vocab in families.items():
+                out[family] = {}
+                for label, description in vocab.items():
+                    words = set(self._tokens(description))
+                    overlap = len(token_set & words)
+                    out[family][label] = min(1.0, overlap / max(2.0, len(words) * 0.20))
+            return out
+
+        q = self._vectorizer.transform([text])
+        sim = cosine_similarity(q, self._prototype_matrix)[0]
+        out = {}
+        offset = 0
+        for family, vocab in families.items():
+            fam = {}
+            for label in vocab:
+                # prototypes are inserted contiguously by family
+                fam[label] = max(0.0, min(1.0, float(sim[offset])))
+                offset += 1
+            out[family] = fam
+        return out
+
+    def _context_scores(
+        self, text: str, previous_assistant: str, active_topic: str, active_goal: str
+    ) -> dict[str, float]:
+        if not text:
+            return {"previous_assistant": 0.0, "active_topic": 0.0, "active_goal": 0.0}
+        scores = {"previous_assistant": 0.0, "active_topic": 0.0, "active_goal": 0.0}
+        query = set(self._tokens(text))
+        for key, value in (
             ("previous_assistant", previous_assistant),
             ("active_topic", active_topic),
             ("active_goal", active_goal),
         ):
-            value = normalize_text(value)
-            if value:
-                cvec = self.char_vectorizer.transform([value])
-                wvec = self.word_vectorizer.transform([value])
-                cscore = float(cosine_similarity(char_query, cvec)[0][0])
-                wscore = float(cosine_similarity(word_query, wvec)[0][0])
-                contexts[label] = 0.6 * cscore + 0.4 * wscore
-            else:
-                contexts[label] = 0.0
+            words = set(self._tokens(self.normalize(value)))
+            scores[key] = (
+                len(query & words) / max(1.0, min(len(query), len(words)))
+                if query and words else 0.0
+            )
+        return scores
 
-        rep_ranked = sorted(representation_scores.items(), key=lambda item: item[1], reverse=True)
-        best_representation, best_rep_score = rep_ranked[0]
-        rep_margin = (
-            best_rep_score - rep_ranked[1][1]
-            if len(rep_ranked) > 1 else best_rep_score
+    def _linguistic(self, text: str) -> dict[str, Any]:
+        tokens = self._tokens(text)
+        return {
+            "language": None,
+            "tokens": tokens,
+            "lemmas": tokens,
+            "pos": [],
+            "dependencies": [],
+            "entities": [],
+            "sentences": [text] if text else [],
+            "source": "quantum_matrix_lightweight",
+            "engine": "quantum_interpretation_engine",
+        }
+
+    # ----------------------------- matrix core ----------------------------
+
+    def _feature_vector(
+        self,
+        dialogue: dict[str, float],
+        representation: dict[str, float],
+        domain: dict[str, float],
+        capability: dict[str, float],
+        context: dict[str, float],
+        modalities: dict[str, Any],
+    ) -> list[float]:
+        dialogue_v = max(
+            [dialogue.get(x, 0.0) for x in ("continuation", "reference", "question", "request")]
+            or [0.0]
         )
-        # Uncertain representation measurements collapse safely to text.
-        if best_representation != "text" and (
-            best_rep_score < 0.18 or rep_margin < 0.05
-        ):
-            best_representation = "text"
-            best_rep_score = representation_scores.get("text", 0.0)
+        representation_v = max(representation.values(), default=0.0)
+        domain_v = max(domain.values(), default=0.0)
+        capability_v = max(capability.values(), default=0.0)
+        continuity_v = max(context.values(), default=0.0)
+        context_v = max(
+            context.get("active_topic", 0.0),
+            context.get("active_goal", 0.0),
+            0.0,
+        )
+        modality_count = sum(
+            v not in (None, "", {}, []) for v in (modalities or {}).values()
+        )
+        modality_v = min(1.0, modality_count / 3.0)
+        return [
+            float(dialogue_v), float(representation_v), float(domain_v),
+            float(capability_v), float(continuity_v), float(context_v),
+            float(modality_v),
+        ]
 
-        identity_score = dialogue_scores.get("identity", 0.0)
-        continuation_score = dialogue_scores.get("continuation", 0.0)
-        reference_score = dialogue_scores.get("reference", 0.0)
-        greeting_score = dialogue_scores.get("greeting", 0.0)
-        independent_score = dialogue_scores.get("independent", 0.0)
+    def scene_matrix(
+        self,
+        *,
+        dialogue: dict[str, float],
+        representation: dict[str, float],
+        domain: dict[str, float],
+        capability: dict[str, float],
+        context: dict[str, float],
+        modalities: dict[str, Any] | None = None,
+        explicit_representations: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        vector = self._feature_vector(
+            dialogue, representation, domain, capability, context, modalities or {}
+        )
+
+        raw = []
+        for row in _SCENE_WEIGHTS:
+            raw.append(sum(a * b for a, b in zip(row, vector)))
+
+        for scene in SCENE_MATRIX_LABELS:
+            raw[SCENE_MATRIX_LABELS.index(scene)] += (
+                0.34 * float(representation.get(scene, 0.0))
+            )
+            raw[SCENE_MATRIX_LABELS.index(scene)] += (
+                0.10 * float(capability.get(SCENE_MATRIX_CAPABILITY[scene], 0.0))
+            )
+
+        for domain_name, bias_map in SCENE_MATRIX_DOMAIN_BIAS.items():
+            ds = float(domain.get(domain_name, 0.0))
+            for scene, bias in bias_map.items():
+                raw[SCENE_MATRIX_LABELS.index(scene)] += ds * bias
+
+        for scene in explicit_representations:
+            if scene in SCENE_MATRIX_LABELS:
+                raw[SCENE_MATRIX_LABELS.index(scene)] += 0.45
+
+        maximum = max(raw, default=0.0)
+        scores = [x / maximum if maximum > 0 else 0.0 for x in raw]
+        ranked = sorted(
+            zip(SCENE_MATRIX_LABELS, scores),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        best, best_score = ranked[0]
+        second = ranked[1][1] if len(ranked) > 1 else 0.0
+        return {
+            "labels": [x[0] for x in ranked],
+            "scores": [round(float(x[1]), 6) for x in ranked],
+            "best_scene": best,
+            "best_score": round(float(best_score), 6),
+            "margin": round(float(best_score - second), 6),
+            "feature_order": list(SCENE_MATRIX_FEATURES),
+            "feature_vector": [round(x, 6) for x in vector],
+            "matrix_shape": [len(_SCENE_WEIGHTS), len(SCENE_MATRIX_FEATURES)],
+            "explicit_representations": list(explicit_representations),
+            "engine": "quantum_matrix",
+            "mode": "vectorized_evidence_fusion",
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+        }
+
+    # ------------------------------ measurement ---------------------------
+
+    def measure(
+        self,
+        text: str,
+        *,
+        previous_assistant: str = "",
+        active_topic: str = "",
+        active_goal: str = "",
+        modalities: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        text = self.normalize(text)
+        key = (
+            text, self.normalize(previous_assistant),
+            self.normalize(active_topic), self.normalize(active_goal),
+            tuple(sorted((modalities or {}).keys())),
+        )
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+
+        families = self._tfidf_scores(text)
+        context = self._context_scores(
+            text, previous_assistant, active_topic, active_goal
+        )
+
+        dialogue = families["dialogue"]
+        representation = families["representation"]
+        domain = families["domain"]
+        capability = families["capability"]
+
+        dialogue_ranked = sorted(dialogue.items(), key=lambda x: x[1], reverse=True)
+        best_dialogue, dialogue_score = dialogue_ranked[0]
+        margin = dialogue_score - (dialogue_ranked[1][1] if len(dialogue_ranked) > 1 else 0.0)
+
+        rep_ranked = sorted(representation.items(), key=lambda x: x[1], reverse=True)
+        best_representation, rep_score = rep_ranked[0]
+        rep_margin = rep_score - (rep_ranked[1][1] if len(rep_ranked) > 1 else 0.0)
+
+        explicit_representations = [
+            name for name, score in representation.items()
+            if name != "text" and score >= 0.45
+            and score - representation.get("text", 0.0) >= 0.08
+        ]
 
         identity_request = (
-            identity_score >= 0.12
-            and identity_score >= continuation_score + 0.03
-            and identity_score >= reference_score + 0.03
+            dialogue.get("identity", 0.0) >= 0.12
+            and dialogue.get("identity", 0.0) >= dialogue.get("continuation", 0.0) + 0.03
+            and dialogue.get("identity", 0.0) >= dialogue.get("reference", 0.0) + 0.03
         )
         fast_social = (
             best_dialogue in {"identity", "greeting"}
-            and best_dialogue_score >= 0.12
-            and dialogue_margin >= 0.035
-            and len(query.split()) <= 24
+            and dialogue_score >= 0.12
+            and margin >= 0.035
+            and len(text.split()) <= 24
+        )
+
+        scene = self.scene_matrix(
+            dialogue=dialogue,
+            representation=representation,
+            domain=domain,
+            capability=capability,
+            context=context,
+            modalities=modalities,
+            explicit_representations=explicit_representations,
         )
 
         profile = {
-            "needs_refinement": False,
-            "identity_score": float(identity_score),
-            "greeting_score": float(greeting_score),
-            "continuation_score": float(continuation_score),
-            "reference_score": float(reference_score),
-            "independent_score": float(independent_score),
-            "dialogue_scores": {name: float(score) for name, score in dialogue_scores.items()},
+            "dialogue_scores": dict(dialogue),
             "dialogue_best": best_dialogue,
-            "dialogue_confidence": float(best_dialogue_score),
-            "dialogue_margin": float(dialogue_margin),
-            "representation_scores": representation_scores,
-            "domain_scores": domain_scores,
-            "capability_scores": capability_scores,
+            "dialogue_confidence": float(dialogue_score),
+            "dialogue_margin": float(margin),
+            "representation_scores": dict(representation),
+            "domain_scores": dict(domain),
+            "capability_scores": dict(capability),
+            "context_scores": dict(context),
             "best_representation": best_representation,
-            "best_representation_score": float(best_rep_score),
-            "explicit_representations": [
-                name for name, score in representation_scores.items()
-                if name != "text" and float(score) >= 0.45 and float(score) - representation_scores.get("text", 0.0) >= 0.08
-            ],
-            "context_scores": contexts,
+            "best_representation_score": float(rep_score),
+            "representation_margin": float(rep_margin),
+            "explicit_representations": explicit_representations,
             "identity_request": bool(identity_request),
             "fast_social": bool(fast_social or identity_request),
-            "source": "local_tfidf_semantic_sketch",
-            "dialogue_nli": {
-                "labels": list(DIALOGUE_LABELS),
-                "scores": [dialogue_scores.get(label, 0.0) for label in DIALOGUE_LABELS],
-                "source": "local_tfidf_semantic_sketch",
-            },
-            "representation_nli": {
-                "labels": [REPRESENTATION_HYPOTHESES.get(name, name) for name in representation_scores],
-                "scores": [float(representation_scores[name]) for name in representation_scores],
-                "source": "local_tfidf_semantic_sketch",
-            },
-            "domain_nli": {
-                "labels": [DOMAIN_HYPOTHESES.get(name, name) for name in domain_scores],
-                "scores": [float(domain_scores[name]) for name in domain_scores],
-                "source": "local_tfidf_semantic_sketch",
-            },
-            "capability_nli": {
-                "labels": [CAPABILITY_HYPOTHESES.get(name, name) for name in capability_scores],
-                "scores": [float(capability_scores[name]) for name in capability_scores],
-                "source": "local_tfidf_semantic_sketch",
-            },
+            "scene_matrix": scene,
+            "source": "quantum_matrix_semantic_measurement",
         }
-        self._cache[key] = dict(profile)
-        if len(self._cache) > self._cache_limit:
-            self._cache.pop(next(iter(self._cache)))
+
+        with self._lock:
+            self._cache[key] = profile
+            if len(self._cache) > self._cache_limit:
+                self._cache.pop(next(iter(self._cache)))
         return profile
 
-QUANTUM_FAST_SEMANTIC = QuantumFastSemanticEngine()
+    # ------------------------------ contracts -----------------------------
 
+    def _history(self, history: Any) -> tuple[str, str, Any]:
+        turns = history if isinstance(history, list) else []
+        last_assistant = ""
+        last_user = ""
+        reply_to = None
+        for item in reversed(turns):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").lower()
+            if not last_assistant:
+                if isinstance(item.get("april"), dict):
+                    obj = item["april"]
+                    last_assistant = self.normalize(
+                        obj.get("answer") or obj.get("content") or obj.get("summary")
+                    )
+                    reply_to = item.get("turn_id")
+                elif role in {"assistant", "april", "bot"}:
+                    last_assistant = self.normalize(
+                        item.get("answer") or item.get("content") or item.get("summary")
+                    )
+                    reply_to = item.get("turn_id")
+            if not last_user:
+                if isinstance(item.get("user"), dict):
+                    obj = item["user"]
+                    last_user = self.normalize(
+                        obj.get("text") or obj.get("content") or obj.get("answer")
+                    )
+                elif role in {"user", "human"}:
+                    last_user = self.normalize(item.get("content") or item.get("text"))
+            if last_assistant and last_user:
+                break
+        return last_assistant, last_user, reply_to
+
+    def fast_semantic_profile(
+        self, text: str, previous_assistant: str = "",
+        active_topic: str = "", active_goal: str = ""
+    ) -> dict[str, Any]:
+        return self.measure(
+            text,
+            previous_assistant=previous_assistant,
+            active_topic=active_topic,
+            active_goal=active_goal,
+        )
+
+    def turn_measurement(
+        self, text: str, previous_assistant: str = "",
+        previous_user: str = "", active_goal: str = "", active_topic: str = ""
+    ) -> dict[str, Any]:
+        profile = self.measure(
+            text,
+            previous_assistant=previous_assistant,
+            active_topic=active_topic,
+            active_goal=active_goal,
+        )
+        return {
+            "linguistic": self._linguistic(self.normalize(text)),
+            "dialogue_nli": {
+                "labels": list(profile["dialogue_scores"]),
+                "scores": list(profile["dialogue_scores"].values()),
+                "source": "quantum_matrix",
+            },
+            "representation_nli": {
+                "labels": [REPRESENTATION_HYPOTHESES[x] for x in profile["representation_scores"]],
+                "scores": list(profile["representation_scores"].values()),
+                "source": "quantum_matrix",
+            },
+            "domain_nli": {
+                "labels": [DOMAIN_HYPOTHESES[x] for x in profile["domain_scores"]],
+                "scores": list(profile["domain_scores"].values()),
+                "source": "quantum_matrix",
+            },
+            "capability_nli": {
+                "labels": [CAPABILITY_HYPOTHESES[x] for x in profile["capability_scores"]],
+                "scores": list(profile["capability_scores"].values()),
+                "source": "quantum_matrix",
+            },
+            "embeddings": dict(profile["context_scores"]),
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+            "engine": "quantum_interpretation_turn_engine",
+        }
+
+    def classify(self, text: str, hypotheses: Sequence[str]) -> dict[str, Any]:
+        profile = self.measure(text)
+        labels = list(hypotheses)
+        family_map = {
+            "dialogue": profile["dialogue_scores"],
+            "representation": profile["representation_scores"],
+            "domain": profile["domain_scores"],
+            "capability": profile["capability_scores"],
+        }
+        scores: dict[str, float] = {}
+        for family in family_map.values():
+            scores.update({str(k): float(v) for k, v in family.items()})
+        ranked = sorted(
+            ((label, scores.get(label, 0.0)) for label in labels),
+            key=lambda x: x[1], reverse=True,
+        )
+        return {
+            "labels": [x[0] for x in ranked],
+            "scores": [x[1] for x in ranked],
+            "source": "quantum_matrix",
+        }
+
+    def similarity(self, text_a: str, text_b: str) -> dict[str, Any]:
+        a, b = set(self._tokens(self.normalize(text_a))), set(self._tokens(self.normalize(text_b)))
+        score = len(a & b) / max(1.0, min(len(a), len(b))) if a and b else 0.0
+        return {"score": float(score), "source": "quantum_matrix", "measured": bool(a and b), "cached": False}
+
+    def similarities(self, text: str, candidates: Sequence[str]) -> dict[str, float]:
+        return {self.normalize(c): self.similarity(text, c)["score"] for c in candidates if self.normalize(c)}
+
+    def prewarm_static(self, candidates: Sequence[str]) -> int:
+        return len({self.normalize(x) for x in candidates if self.normalize(x)})
+
+    def dialogue(
+        self, text: str, previous_assistant: str = "", previous_user: str = "",
+        active_goal: str = "", active_topic: str = "",
+    ) -> dict[str, Any]:
+        profile = self.measure(
+            text, previous_assistant=previous_assistant,
+            active_topic=active_topic, active_goal=active_goal,
+        )
+        dialogue = profile["dialogue_scores"]
+        best = profile["dialogue_best"]
+        continuation_score = max(
+            dialogue.get("continuation", 0.0),
+            profile["context_scores"].get("previous_assistant", 0.0),
+        )
+        reference_score = max(
+            dialogue.get("reference", 0.0),
+            profile["context_scores"].get("previous_assistant", 0.0),
+        )
+        continuation = bool(
+            previous_assistant
+            and (best in {
+                "continuation", "reformulation", "correction",
+                "reference", "affirmation", "rejection",
+            } or continuation_score >= 0.72)
+        )
+        return {
+            "dialogue": {
+                "label": best,
+                "confidence": float(profile["dialogue_confidence"]),
+                "continuation_score": float(continuation_score),
+                "reference_score": float(reference_score),
+                "topic_score": float(profile["context_scores"].get("active_topic", 0.0)),
+                "goal_score": float(profile["context_scores"].get("active_goal", 0.0)),
+            },
+            "linguistic": self._linguistic(self.normalize(text)),
+            "continuation": continuation,
+            "reference_to_previous": bool(previous_assistant and reference_score >= 0.60),
+            "identity_request": bool(profile["identity_request"]),
+            "nli": {
+                "labels": list(profile["dialogue_scores"]),
+                "scores": list(profile["dialogue_scores"].values()),
+                "source": "quantum_matrix",
+            },
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+            "engine": "quantum_dialogue_matrix_view",
+        }
+
+    def representations(self, text: str, context: str = "") -> dict[str, Any]:
+        profile = self.measure(text, active_topic=context)
+        return {
+            "nli": {
+                "labels": [REPRESENTATION_HYPOTHESES[x] for x in profile["representation_scores"]],
+                "scores": list(profile["representation_scores"].values()),
+                "source": "quantum_matrix",
+            },
+            "measurements": [
+                {"type": k, "score": float(v), "source": "quantum_matrix"}
+                for k, v in sorted(profile["representation_scores"].items(), key=lambda x: x[1], reverse=True)
+            ],
+            "context_similarity": {
+                "score": float(profile["context_scores"].get("active_topic", 0.0)),
+                "source": "quantum_matrix",
+            },
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+            "engine": "quantum_representation_matrix_view",
+        }
+
+    def domains(self, text: str) -> dict[str, Any]:
+        profile = self.measure(text)
+        return {
+            "measurements": [
+                {"domain": k, "score": float(v)}
+                for k, v in sorted(profile["domain_scores"].items(), key=lambda x: x[1], reverse=True)
+            ],
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+            "engine": "quantum_domain_matrix_view",
+        }
+
+    def interpret(
+        self, text: str, cognition: dict | None = None, semantic: dict | None = None,
+        history: list | None = None, state: dict | None = None,
+    ) -> dict[str, Any] | None:
+        text = self.normalize(text)
+        if not text:
+            return None
+        cognition = cognition if isinstance(cognition, dict) else {}
+        semantic = semantic if isinstance(semantic, dict) else {}
+        state = state if isinstance(state, dict) else {}
+        history = history if isinstance(history, list) else []
+
+        last_assistant, last_user, reply_to = self._history(history)
+        active_topic = self.normalize(
+            state.get("active_topic") or state.get("current_topic")
+            or semantic.get("active_topic") or semantic.get("current_topic")
+            or cognition.get("active_topic") or cognition.get("current_topic")
+        )
+        active_goal = self.normalize(
+            state.get("active_goal") or state.get("current_goal")
+            or semantic.get("active_goal") or cognition.get("active_goal")
+            or cognition.get("current_goal")
+        )
+
+        started = time.perf_counter()
+        profile = self.measure(
+            text,
+            previous_assistant=last_assistant,
+            active_topic=active_topic,
+            active_goal=active_goal,
+            modalities={
+                "voice": semantic.get("voice_context") or cognition.get("voice_context"),
+                "vision": semantic.get("vision_context") or cognition.get("vision_context"),
+                "gallery": semantic.get("gallery_context") or cognition.get("gallery_context"),
+                "files": semantic.get("file_context") or cognition.get("file_context"),
+            },
+        )
+        matrix = profile["scene_matrix"]
+        dialogue = self.dialogue(
+            text, previous_assistant=last_assistant, previous_user=last_user,
+            active_goal=active_goal, active_topic=active_topic,
+        )["dialogue"]
+
+        explicit_required = [
+            str(x).lower()
+            for x in (
+                semantic.get("required_representations", []) or []
+            ) + (
+                cognition.get("required_representations", []) or []
+            )
+            if str(x).strip()
+        ]
+        required_representations = list(dict.fromkeys(
+            explicit_required or profile["explicit_representations"]
+        ))
+
+        candidate_domains = [
+            k for k, v in profile["domain_scores"].items() if float(v) >= 0.45
+        ]
+        required_domains = list(
+            semantic.get("required_domains", []) or candidate_domains
+        )
+
+        continuation = bool(
+            last_assistant and (
+                dialogue["label"] in {
+                    "continuation", "reformulation", "correction",
+                    "reference", "affirmation", "rejection",
+                }
+                or dialogue["continuation_score"] >= 0.72
+            )
+        )
+        reference = bool(last_assistant and dialogue["reference_score"] >= 0.60)
+        topic_shift = bool(
+            active_topic and not continuation
+            and profile["context_scores"].get("active_topic", 0.0) < 0.35
+        )
+
+        scene_type = (
+            required_representations[0] if required_representations
+            else matrix["best_scene"]
+        )
+        representation_scores = profile["representation_scores"]
+        capability = profile["capability_scores"]
+
+        representation_evidence = [
+            SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
+            for k, v in sorted(
+                representation_scores.items(), key=lambda x: x[1], reverse=True
+            )
+            if float(v) >= 0.20
+        ]
+        dialogue_contract = {
+            "dialog_act": dialogue["label"],
+            "current_request": text,
+            "resolved_request": (
+                f"Continue the previous task naturally.\\n"
+                f"Previous assistant response: {last_assistant}\\n"
+                f"Current user instruction: {text}"
+                if continuation else text
+            ),
+            "continuation": continuation,
+            "reference_to_previous": reference,
+            "previous_april_turn": last_assistant,
+            "previous_user_turn": last_user,
+            "reply_to": reply_to,
+            "active_goal": active_goal,
+            "active_topic": active_topic,
+            "topic_shift": topic_shift,
+            "confidence": dialogue["confidence"],
+            "canonical": True,
+            "version": "quantum_matrix_v1",
+        }
+        domain_evidence = [
+            {"domain": k, "score": float(v)}
+            for k, v in sorted(
+                profile["domain_scores"].items(), key=lambda x: x[1], reverse=True
+            ) if float(v) >= 0.20
+        ]
+
+        result = build_result(text)
+        result.update({
+            "type": profile["dialogue_best"],
+            "subtype": scene_type,
+            "scene_type": scene_type,
+            "candidate_domains": candidate_domains,
+            "required_domains": required_domains,
+            "domain_confidence": {
+                k: round(float(v), 4) for k, v in profile["domain_scores"].items()
+            },
+            "candidate_representations": profile["explicit_representations"],
+            "required_representations": required_representations,
+            "representation_evidence": [
+                SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
+                for k, v in sorted(
+                    representation_scores.items(), key=lambda x: x[1], reverse=True
+                )
+                if float(v) >= 0.20
+            ],
+            "semantic_profile": {
+                "active_topic": active_topic,
+                "active_goal": active_goal,
+                "previous_april_turn": last_assistant,
+                "dialogue_history": history[-8:],
+                "representation_scores": dict(representation_scores),
+                "domain_scores": dict(profile["domain_scores"]),
+                "capability_scores": dict(capability),
+                "context_scores": dict(profile["context_scores"]),
+                "scene_matrix": matrix,
+                "engine": "quantum_interpretation_engine",
+            },
+            "scene_profile": {
+                "scene_type": scene_type,
+                "dialogue_mode": "semantic_unified",
+                "matrix_confidence": matrix["best_score"],
+                "matrix_margin": matrix["margin"],
+                "decision_owner": DECISION_OWNER,
+            },
+            "artifact_contract": {
+                "contract": "scene_artifact",
+                "transport": TRANSPORT_NAME,
+                "scene_type": scene_type,
+                "representation": required_representations or [scene_type],
+                "semantic_profile_ref": "semantic_profile",
+                "decision_owner": DECISION_OWNER,
+            },
+            "dialogue_contract": {
+                "dialog_act": dialogue["label"],
+                "current_request": text,
+                "resolved_request": (
+                    f"Continue the previous task naturally.\n"
+                    f"Previous assistant response: {last_assistant}\n"
+                    f"Current user instruction: {text}"
+                    if continuation else text
+                ),
+                "continuation": continuation,
+                "reference_to_previous": reference,
+                "previous_april_turn": last_assistant,
+                "previous_user_turn": last_user,
+                "reply_to": reply_to,
+                "active_goal": active_goal,
+                "active_topic": active_topic,
+                "topic_shift": topic_shift,
+                "confidence": dialogue["confidence"],
+                "canonical": True,
+                "version": "quantum_matrix_v1",
+            },
+            "dialog_act": dialogue["label"],
+            "continuation": float(dialogue["continuation_score"]),
+            "continuation_target": last_assistant or active_topic,
+            "active_goal": active_goal,
+            "active_topic": active_topic,
+            "resolved_request": (
+                f"Continue the previous task naturally.\n"
+                f"Previous assistant response: {last_assistant}\n"
+                f"Current user instruction: {text}"
+                if continuation else text
+            ),
+            "reply_to": reply_to,
+            "required_capabilities": [
+                "semantic_interpretation", "dialogue_context",
+                *([ "representation_evidence" ] if required_representations else []),
+            ],
+            "context_dependency": (
+                "continuation" if continuation else
+                "reference" if reference else
+                "new_topic" if topic_shift else
+                "independent"
+            ),
+            "context_policy": {
+                "current_request": True,
+                "dialogue_vector": continuation or reference,
+                "previous_turn": bool(reply_to),
+                "active_goal": bool(active_goal),
+                "full_history": True,
+                "semantic_similarity": True,
+                "nli_intent": "refinement_only",
+                "linguistic_structure": True,
+            },
+            "quantum_interpretation_field": {
+                "linguistic": self._linguistic(text),
+                "dialogue": dialogue_contract,
+                "representation": representation_evidence,
+                "domain": [
+                    {"domain": k, "score": float(v)}
+                    for k, v in sorted(
+                        profile["domain_scores"].items(), key=lambda x: x[1], reverse=True
+                    ) if float(v) >= 0.20
+                ],
+                "context_vectors": profile["context_scores"],
+                "profile": profile,
+                "scene_matrix": matrix,
+                "decision_owner": DECISION_OWNER,
+                "evidence_only": True,
+                "engine": "quantum_interpretation_engine",
+            },
+            "quantum_representation_measurement": {
+                "measurements": representation_evidence,
+                "scene_matrix": matrix,
+            },
+            "evidence": {
+                "domain": domain_evidence,
+                "representation": representation_evidence,
+                "math": float(representation_scores.get("formula", 0.0)),
+                "code": float(representation_scores.get("code", 0.0)),
+                "web": float(capability.get("web", 0.0)),
+                "image": float(representation_scores.get("image", 0.0)),
+                "continuation": float(dialogue["continuation_score"]),
+                "exploration": float(capability.get("exploration", 0.0)),
+                "information": float(capability.get("information", 0.0)),
+                "linguistic": self._linguistic(text),
+                "dialogue": dialogue_contract,
+                "context_vectors": profile["context_scores"],
+                "cognition": dict(cognition),
+                "semantic": dict(semantic),
+            },
+            "quantum_matrix": matrix,
+            "matrix_scene": matrix["best_scene"],
+            "matrix_confidence": matrix["best_score"],
+            "decision_owner": DECISION_OWNER,
+            "routing_owner": DECISION_OWNER,
+            "renderer_owner": DECISION_OWNER,
+            "provider_calls": 0,
+            "canonical_transport": TRANSPORT_NAME,
+            "semantic_authority": True,
+            "semantic_decision_source": "quantum_matrix",
+            "representation_resolution": "processor_selection",
+            "legacy_keyword_matching": False,
+            "avoid_trigger_execution": True,
+            "machine_only": True,
+            "single_route": True,
+            "measurement_ms": round((time.perf_counter() - started) * 1000.0, 3),
+        })
+
+        result["discussion_mode"] = float(capability.get("discussion", 0.0)) >= 0.60
+        result["space_discussion"] = float(capability.get("space", 0.0)) >= 0.60
+        result["exploration"] = float(capability.get("exploration", 0.0))
+        result["web_context"] = float(capability.get("web", 0.0))
+        result["explicit_image_generation"] = float(representation_scores.get("image", 0.0))
+        result["lightweight_visual"] = max(
+            float(representation_scores.get("graph", 0.0)),
+            float(representation_scores.get("diagram", 0.0)),
+            float(representation_scores.get("image", 0.0)),
+        ) >= 0.72
+        result["contains_object"] = bool(text)
+        result["contains_explanation"] = float(capability.get("information", 0.0)) >= 0.60
+        result["contains_analysis"] = float(capability.get("exploration", 0.0)) >= 0.60
+        result["content_role"] = (
+            "explanation" if result["contains_explanation"]
+            else "analysis" if result["contains_analysis"] else None
+        )
+
+        result["estimated_action_count"] = estimate_action_count(result)
+        result["response_complexity"] = determine_response_complexity(result)
+        result["factory_order"] = build_factory_order(result)
+        result["scene_strategy"] = build_scene_strategy(result)
+        result["interpretation_state"] = synchronize_interpretation_context(
+            build_interpretation_state(), result
+        )
+        result["transport_state"] = export_transport_state(
+            result["interpretation_state"], result
+        )
+        result["interpretation_state"]["diagnostics"]["matrix"] = matrix
+        result["transport_diagnostics"] = build_transport_diagnostics(result)
+        result["semantic_engine_diagnostics"] = {
+            "engine": "quantum_interpretation_engine",
+            "matrix_shape": matrix["matrix_shape"],
+            "matrix_features": matrix["feature_order"],
+            "single_measurement": True,
+            "single_route": True,
+            "fallback_mode": False,
+            "substring_routing": False,
+            "renderer_selection_owner": DECISION_OWNER,
+            "provider_calls": 0,
+        }
+        propagate_canonical_response(result, result["transport_state"])
+        bridge_machine_response(result, result["transport_state"])
+        validate_response_complexity(result)
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Canonical result / transport helpers
+# ---------------------------------------------------------------------------
 
 @dataclass
 class SemanticEvidence:
@@ -911,1260 +1037,21 @@ class SemanticEvidence:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "label": self.label,
-            "score": float(max(0.0, min(1.0, self.score))),
+            "score": max(0.0, min(1.0, float(self.score))),
             "source": self.source,
             "positive": bool(self.positive),
             "details": self.details or {},
         }
 
 
-def _runtime_ready_guard() -> None:
-    _ensure_semantic_runtime()
-    # Fast semantic mode does not require a heavyweight neural encoder.
-    if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
-        if not _SEMANTIC_RUNTIME_READY:
-            raise RuntimeError("Quantum Interpretation fast semantic runtime is not ready")
-        return
-    if not _SEMANTIC_RUNTIME_READY or SEMANTIC_ENCODER is None:
-        raise RuntimeError("Quantum Interpretation semantic runtime is not ready")
-
-
-_NLI_RUNTIME_LOCK = threading.RLock()
-_NLI_RUNTIME_READY = False
-_NLI_RUNTIME_ERROR: Exception | None = None
-
-def _ensure_nli_runtime() -> None:
-    """Lazy-load the expensive NLI model only for genuinely ambiguous turns."""
-    global DIALOGUE_NLI, _NLI_RUNTIME_READY, _NLI_RUNTIME_ERROR
-    if _NLI_RUNTIME_READY and DIALOGUE_NLI is not None:
-        return
-    with _NLI_RUNTIME_LOCK:
-        if _NLI_RUNTIME_READY and DIALOGUE_NLI is not None:
-            return
-        started = time.perf_counter()
-        try:
-            DIALOGUE_NLI = hf_pipeline(
-                "zero-shot-classification",
-                model=NLI_MODEL_NAME,
-            )
-            _NLI_RUNTIME_READY = True
-            _NLI_RUNTIME_ERROR = None
-            print(f"⚡ NLI REFINEMENT READY: elapsed={time.perf_counter()-started:.3f}s")
-        except Exception as exc:
-            _NLI_RUNTIME_ERROR = exc
-            DIALOGUE_NLI = None
-            raise
-
-
-
-def _lightweight_linguistic(text: str) -> Dict[str, Any]:
-    """Zero-model linguistic pass for very short social turns."""
-    value = normalize_text(text)
-    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9_]+", value)
-    lemmas = [token.lower() for token in tokens]
-    return {
-        "language": None,
-        "tokens": tokens,
-        "lemmas": lemmas,
-        "pos": [],
-        "dependencies": [],
-        "entities": [],
-        "sentences": [value] if value else [],
-        "source": "lightweight_micro_turn",
-        "engine": "quantum_linguistic_engine",
-        "runtime_bypass": True,
-    }
-
-
-class QuantumLinguisticEngine:
-    """
-    Dedicated linguistic engine.
-
-    Stanza performs multilingual neural sentence/token processing, POS and
-    lemma analysis. spaCy supplies entity analysis using the already installed
-    multilingual NER model. Dependency fields are retained in the canonical
-    evidence shape and remain empty when dependency parsing is not provisioned.
-    """
-
-    def analyze(self, text: str) -> Dict[str, Any]:
-        normalized = normalize_text(text)
-        # The production hot path is intentionally model-light. Deep Stanza
-        # parsing is opt-in so a normal user turn can never wait for a lazy
-        # language-package load on the request thread.
-        if not APRIL_DEEP_LINGUISTICS_ENABLED:
-            return _lightweight_linguistic(normalized)
-        _runtime_ready_guard()
-        if not normalized:
-            return {
-                "language": None,
-                "tokens": [],
-                "lemmas": [],
-                "pos": [],
-                "dependencies": [],
-                "entities": [],
-                "sentences": [],
-                "source": "stanza+spacy",
-            }
-
-        docs = STANZA_NLP([text])
-        doc = docs[0] if isinstance(docs, list) else docs
-
-        sentences: list[str] = []
-        tokens: list[str] = []
-        lemmas: list[str] = []
-        pos: list[str] = []
-        dependencies: list[dict[str, Any]] = []
-
-        for sentence in doc.sentences:
-            sentences.append(sentence.text)
-            for word in sentence.words:
-                tokens.append(word.text)
-                lemmas.append((word.lemma or word.text).lower())
-                pos.append(word.upos or "")
-                head_text = ""
-                if word.head:
-                    index = int(word.head) - 1
-                    if 0 <= index < len(sentence.words):
-                        head_text = sentence.words[index].text
-                dependencies.append({
-                    "text": word.text,
-                    "lemma": word.lemma or word.text,
-                    "upos": word.upos,
-                    "xpos": word.xpos,
-                    "feats": word.feats,
-                    "head": head_text,
-                    "deprel": getattr(word, "deprel", None),
-                })
-
-        ner_doc = SPACY_NLP(text)
-        entities = [
-            {
-                "text": entity.text,
-                "label": entity.label_,
-                "start": entity.start_char,
-                "end": entity.end_char,
-            }
-            for entity in ner_doc.ents
-        ]
-
-        return {
-            "language": getattr(doc, "lang", None),
-            "tokens": tokens,
-            "lemmas": lemmas,
-            "pos": pos,
-            "dependencies": dependencies,
-            "entities": entities,
-            "sentences": sentences,
-            "source": "stanza+spacy",
-            "engine": "quantum_linguistic_engine",
-        }
-
-
-class QuantumEmbeddingEngine:
-    """Low-latency semantic vector engine with static prototype prewarm.
-
-    The production hot path encodes the current request once and reuses
-    precomputed vectors for all static semantic prototypes. Dynamic topic/goal
-    strings are encoded only when they are present.
-    """
-
-    def __init__(self):
-        self._pair_cache: dict[tuple[str, str], float] = {}
-        self._batch_cache: dict[tuple[str, tuple[str, ...]], Dict[str, float]] = {}
-        self._query_vector_cache: dict[str, Any] = {}
-        self._static_vectors: dict[str, Any] = {}
-        self._cache_limit = 512
-
-    def _remember(self, cache: dict, key, value, limit=None) -> None:
-        cache[key] = value
-        cap = int(limit or self._cache_limit)
-        if len(cache) > cap:
-            cache.pop(next(iter(cache)))
-
-    def _remember_pair(self, key: tuple[str, str], score: float) -> None:
-        self._remember(self._pair_cache, key, float(score))
-
-    def prewarm_static(self, candidates: Sequence[str]) -> int:
-        """Encode static semantic prototypes once during accelerator prewarm."""
-        unique: list[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            value = normalize_text(candidate)
-            if value and value not in seen:
-                seen.add(value)
-                unique.append(value)
-        if not unique or SEMANTIC_ENCODER is None:
-            return 0
-
-        missing = [value for value in unique if value not in self._static_vectors]
-        if not missing:
-            return len(self._static_vectors)
-
-        vectors = SEMANTIC_ENCODER.encode(
-            missing,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        for candidate, vector in zip(missing, vectors):
-            self._static_vectors[candidate] = vector
-        return len(self._static_vectors)
-
-    def _query_vector(self, text: str):
-        value = normalize_text(text)
-        cached = self._query_vector_cache.get(value)
-        if cached is not None:
-            return cached
-        vector = SEMANTIC_ENCODER.encode(
-            [value],
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )[0]
-        self._remember(self._query_vector_cache, value, vector, limit=256)
-        return vector
-
-    def similarity(self, text_a: str, text_b: str) -> Dict[str, Any]:
-        text_a = normalize_text(text_a)
-        text_b = normalize_text(text_b)
-        if not text_a or not text_b:
-            return {
-                "score": 0.0,
-                "source": "sentence_transformers",
-                "measured": False,
-            }
-
-        key = (text_a, text_b)
-        cached = self._pair_cache.get(key)
-        if cached is not None:
-            return {
-                "score": float(cached),
-                "source": "sentence_transformers",
-                "measured": True,
-                "cached": True,
-            }
-
-        _runtime_ready_guard()
-        query_vector = self._query_vector(text_a)
-        candidate_vector = self._static_vectors.get(text_b)
-        if candidate_vector is None:
-            candidate_vector = SEMANTIC_ENCODER.encode(
-                [text_b],
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )[0]
-
-        score = float(
-            cosine_similarity(
-                query_vector.reshape(1, -1),
-                candidate_vector.reshape(1, -1),
-            )[0][0]
-        )
-        score = max(0.0, min(1.0, score))
-        self._remember_pair(key, score)
-        return {
-            "score": score,
-            "source": "sentence_transformers",
-            "measured": True,
-            "cached": False,
-        }
-
-    def similarities(self, text: str, candidates: Sequence[str]) -> Dict[str, float]:
-        """Encode the request once; reuse prewarmed prototype vectors.
-
-        In the production fast path, this delegates to the local semantic sketch
-        instead of waking the heavyweight transformer encoder.
-        """
-        text = normalize_text(text)
-        if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
-            fast_engine = globals().get("QUANTUM_FAST_SEMANTIC")
-            if fast_engine is not None:
-                scores = {}
-                for candidate in candidates:
-                    value = normalize_text(candidate)
-                    if not value:
-                        continue
-                    score_map = fast_engine.measure(text)
-                    # Dynamic candidates are compared to the same compact context
-                    # space; if absent, retain a conservative zero instead of
-                    # invoking the heavyweight encoder.
-                    scores[value] = max(
-                        score_map.get("context_scores", {}).values(), default=0.0
-                    )
-                return scores
-        if not text:
-            return {}
-
-        unique: list[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            value = normalize_text(candidate)
-            if value and value not in seen:
-                seen.add(value)
-                unique.append(value)
-
-        if not unique:
-            return {}
-
-        key = (text, tuple(unique))
-        cached = self._batch_cache.get(key)
-        if cached is not None:
-            return dict(cached)
-
-        _runtime_ready_guard()
-        if not self._static_vectors:
-            static_vocab = []
-            for vocab_name in (
-                "SEMANTIC_TURN_PROTOTYPES",
-                "REPRESENTATION_HYPOTHESES",
-                "DOMAIN_HYPOTHESES",
-                "CAPABILITY_HYPOTHESES",
-            ):
-                vocab = globals().get(vocab_name)
-                if isinstance(vocab, dict):
-                    static_vocab.extend(vocab.values())
-            if static_vocab:
-                self.prewarm_static(static_vocab)
-        query_vector = self._query_vector(text)
-        static_candidates = [candidate for candidate in unique if candidate in self._static_vectors]
-        dynamic_candidates = [candidate for candidate in unique if candidate not in self._static_vectors]
-
-        result: dict[str, float] = {}
-
-        if static_candidates:
-            matrix = [self._static_vectors[candidate] for candidate in static_candidates]
-            scores = cosine_similarity(
-                query_vector.reshape(1, -1),
-                matrix,
-            )[0]
-            result.update(
-                {
-                    candidate: max(0.0, min(1.0, float(score)))
-                    for candidate, score in zip(static_candidates, scores)
-                }
-            )
-
-        if dynamic_candidates:
-            vectors = SEMANTIC_ENCODER.encode(
-                dynamic_candidates,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
-            scores = cosine_similarity(
-                query_vector.reshape(1, -1),
-                vectors,
-            )[0]
-            result.update(
-                {
-                    candidate: max(0.0, min(1.0, float(score)))
-                    for candidate, score in zip(dynamic_candidates, scores)
-                }
-            )
-
-        self._remember(self._batch_cache, key, dict(result))
-        for candidate, score in result.items():
-            self._remember_pair((text, candidate), score)
-        return result
-
-
-class QuantumIntentEngine:
-    """NLI/zero-shot semantic engine. No keyword routing."""
-
-    def classify(self, text: str, hypotheses: Sequence[str]) -> Dict[str, Any]:
-        _runtime_ready_guard()
-        _ensure_nli_runtime()
-        if DIALOGUE_NLI is None:
-            raise RuntimeError("NLI refinement runtime is unavailable")
-        result = DIALOGUE_NLI(
-            text,
-            candidate_labels=list(hypotheses),
-            multi_label=True,
-        )
-        return {
-            "labels": list(result["labels"]),
-            "scores": [float(score) for score in result["scores"]],
-            "source": "transformers_nli",
-        }
-
-
-class QuantumEvidenceFusionEngine:
-    """
-    Single-turn semantic measurement engine.
-
-    Each turn performs one linguistic pass, one batched embedding pass, and
-    one cached NLI measurement per semantic family. Public helper methods read
-    from the same turn cache instead of re-running heavy models.
-    """
-
-    def __init__(self):
-        self.linguistic = QuantumLinguisticEngine()
-        self.embedding = QuantumEmbeddingEngine()
-        self.intent = QuantumIntentEngine()
-        self.fast = QUANTUM_FAST_SEMANTIC
-        self._turn_cache: dict[tuple, Dict[str, Any]] = {}
-        self._linguistic_cache: dict[str, Dict[str, Any]] = {}
-        self._nli_cache: dict[str, Dict[str, Any]] = {}
-        self._cache_limit = 96
-
-    def _remember(self, cache: dict, key: Any, value: Any, limit: int | None = None) -> None:
-        cache[key] = value
-        cap = int(limit or self._cache_limit)
-        if len(cache) > cap:
-            cache.pop(next(iter(cache)), None)
-
-    def fast_semantic_profile(
-        self,
-        text: str,
-        previous_assistant: str = "",
-        active_topic: str = "",
-        active_goal: str = "",
-    ) -> Dict[str, Any]:
-        return self.fast.measure(
-            text,
-            previous_assistant=previous_assistant,
-            active_topic=active_topic,
-            active_goal=active_goal,
-        )
-
-    @staticmethod
-    def _best_label(result: Dict[str, Any]) -> tuple[str, float]:
-        labels = result.get("labels") or []
-        scores = result.get("scores") or []
-        if not labels:
-            return "statement", 0.0
-        return str(labels[0]), float(scores[0])
-
-    @staticmethod
-    def _fast_family(labels: Sequence[str], positive: Sequence[str] = (), score: float = 0.86) -> Dict[str, Any]:
-        positive_set = {str(x) for x in positive}
-        scores = [float(score if label in positive_set else 0.03) for label in labels]
-        ranked = sorted(zip(labels, scores), key=lambda item: item[1], reverse=True)
-        return {
-            "labels": [x[0] for x in ranked],
-            "scores": [x[1] for x in ranked],
-            "source": "fast_semantic_measurement",
-        }
-
-    def _fast_measurement(self, text: str, previous_assistant: str, active_topic: str, active_goal: str) -> Dict[str, Any]:
-        """One cached semantic measurement for the entire turn."""
-        normalized = normalize_text(text)
-        key = (
-            normalized,
-            normalize_text(previous_assistant),
-            normalize_text(active_topic),
-            normalize_text(active_goal),
-        )
-        cached = self._turn_cache.get(("fast_profile", key))
-        if cached is not None:
-            return cached
-        if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
-            result = self.fast.measure(
-                normalized,
-                previous_assistant=previous_assistant,
-                active_topic=active_topic,
-                active_goal=active_goal,
-            )
-            self._remember(self._turn_cache, ("fast_profile", key), result)
-            return result
-
-        prototype_items = list(SEMANTIC_TURN_PROTOTYPES.items())
-        representation_items = list(REPRESENTATION_HYPOTHESES.items())
-        domain_items = list(DOMAIN_HYPOTHESES.items())
-        capability_items = list(CAPABILITY_HYPOTHESES.items())
-
-        candidates = [
-            *(value for _, value in prototype_items),
-            *(value for _, value in representation_items),
-            *(value for _, value in domain_items),
-            *(value for _, value in capability_items),
-            *(v for v in (active_topic, active_goal, previous_assistant) if v),
-        ]
-        scores = self.embedding.similarities(normalized, candidates)
-
-        profile = {name: float(scores.get(value, 0.0)) for name, value in prototype_items}
-        representation_scores = {
-            name: float(scores.get(value, 0.0))
-            for name, value in representation_items
-        }
-        domain_scores = {
-            name: float(scores.get(value, 0.0))
-            for name, value in domain_items
-        }
-        capability_scores = {
-            name: float(scores.get(value, 0.0))
-            for name, value in capability_items
-        }
-
-        context_scores = {
-            "active_topic": float(scores.get(normalize_text(active_topic), 0.0)) if active_topic else 0.0,
-            "active_goal": float(scores.get(normalize_text(active_goal), 0.0)) if active_goal else 0.0,
-            "previous_assistant": float(scores.get(normalize_text(previous_assistant), 0.0)) if previous_assistant else 0.0,
-        }
-
-        dialogue_options = {
-            "identity": profile["identity"],
-            "greeting": profile["greeting"],
-            "continuation": profile["continuation"],
-            "reference": profile["reference"],
-            "independent": profile["independent"],
-        }
-        best_dialogue = max(dialogue_options, key=dialogue_options.get)
-        best_dialogue_score = float(dialogue_options[best_dialogue])
-        sorted_dialogue = sorted(dialogue_options.values(), reverse=True)
-        dialogue_margin = (
-            sorted_dialogue[0] - sorted_dialogue[1]
-            if len(sorted_dialogue) > 1 else sorted_dialogue[0]
-        )
-
-        explicit_representations = [
-            name for name, score in representation_scores.items()
-            if name != "text" and score >= 0.72
-        ]
-        best_representation = max(representation_scores, key=representation_scores.get)
-        best_rep_score = float(representation_scores[best_representation])
-
-        # Normal requests never wait for NLI. NLI is optional refinement only.
-        enable_refinement = os.getenv("APRIL_ENABLE_NLI_REFINEMENT", "0").strip().lower() in {"1", "true", "yes"}
-        needs_refinement = bool(
-            enable_refinement
-            and len(normalized.split()) > 80
-            and best_dialogue_score < 0.62
-            and dialogue_margin < 0.08
-        )
-
-        dialogue_positive = [best_dialogue] if best_dialogue in DIALOGUE_LABELS else ["statement"]
-        dialogue_fast = self._fast_family(
-            list(DIALOGUE_LABELS),
-            dialogue_positive,
-            max(0.55, best_dialogue_score),
-        )
-
-        rep_ranked = sorted(representation_scores, key=representation_scores.get, reverse=True)
-        domain_ranked = sorted(domain_scores, key=domain_scores.get, reverse=True)
-        capability_ranked = sorted(capability_scores, key=capability_scores.get, reverse=True)
-
-        result = {
-            "needs_refinement": needs_refinement,
-            "identity_score": float(profile["identity"]),
-            "greeting_score": float(profile["greeting"]),
-            "continuation_score": float(profile["continuation"]),
-            "reference_score": float(profile["reference"]),
-            "independent_score": float(profile["independent"]),
-            "dialogue_scores": {name: float(score) for name, score in dialogue_options.items()},
-            "dialogue_best": best_dialogue,
-            "dialogue_confidence": best_dialogue_score,
-            "dialogue_margin": float(dialogue_margin),
-            "representation_scores": representation_scores,
-            "domain_scores": domain_scores,
-            "capability_scores": capability_scores,
-            "best_representation": best_representation,
-            "best_representation_score": best_rep_score,
-            "explicit_representations": explicit_representations,
-            "context_scores": context_scores,
-            "identity_request": (
-                profile["identity"] >= 0.56
-                and profile["identity"] >= profile["greeting"] - 0.02
-                and profile["identity"] >= profile["continuation"] - 0.03
-                and profile["identity"] >= profile["reference"] - 0.03
-            ),
-            "fast_social": (
-                max(profile["identity"], profile["greeting"], profile["independent"]) >= 0.58
-                and len(normalized.split()) <= 24
-                and best_representation == "text"
-                and best_rep_score < 0.72
-            ),
-            "dialogue_nli": dialogue_fast,
-            "representation_nli": {
-                "labels": [REPRESENTATION_HYPOTHESES[name] for name in rep_ranked],
-                "scores": [representation_scores[name] for name in rep_ranked],
-                "source": "shared_embedding_prototypes",
-            },
-            "domain_nli": {
-                "labels": [DOMAIN_HYPOTHESES[name] for name in domain_ranked],
-                "scores": [domain_scores[name] for name in domain_ranked],
-                "source": "shared_embedding_prototypes",
-            },
-            "capability_nli": {
-                "labels": [CAPABILITY_HYPOTHESES[name] for name in capability_ranked],
-                "scores": [capability_scores[name] for name in capability_ranked],
-                "source": "shared_embedding_prototypes",
-            },
-            "source": "single_turn_shared_embedding",
-        }
-        self._remember(self._turn_cache, ("fast_profile", key), result)
-        return result
-
-    def turn_measurement(
-        self,
-        text: str,
-        previous_assistant: str = "",
-        previous_user: str = "",
-        active_goal: str = "",
-        active_topic: str = "",
-    ) -> Dict[str, Any]:
-        key = (
-            str(text or "").strip(),
-            str(previous_assistant or "").strip(),
-            str(active_goal or "").strip(),
-            str(active_topic or "").strip(),
-        )
-        cached = self._turn_cache.get(key)
-        if cached is not None:
-            return cached
-
-        normalized_turn_text = str(text or "").strip()
-        # Reuse lightweight linguistic evidence for the hot path. Deep Stanza is
-        # deliberately not part of normal request latency.
-        linguistic = self._linguistic_cache.get(normalized_turn_text)
-        if linguistic is None:
-            linguistic = _lightweight_linguistic(normalized_turn_text)
-            self._linguistic_cache[normalized_turn_text] = linguistic
-
-        fast = self._fast_measurement(
-            normalized_turn_text,
-            previous_assistant,
-            active_topic,
-            active_goal,
-        )
-        nli_bundle = self._nli_cache.get(normalized_turn_text)
-        if nli_bundle is None and fast.get("needs_refinement"):
-            started_nli = time.perf_counter()
-            nli_bundle = {
-                # One optional refinement family only; never four sequential
-                # NLI passes on the request hot path.
-                "dialogue_nli": self.intent.classify(normalized_turn_text, DIALOGUE_LABELS),
-                "representation_nli": fast["representation_nli"],
-                "domain_nli": fast["domain_nli"],
-                "capability_nli": fast["capability_nli"],
-                "elapsed_ms": (time.perf_counter() - started_nli) * 1000.0,
-                "source": "nli_refinement",
-            }
-            self._nli_cache[normalized_turn_text] = nli_bundle
-
-        if nli_bundle is None:
-            nli_bundle = {
-                "dialogue_nli": fast["dialogue_nli"],
-                "representation_nli": fast["representation_nli"],
-                "domain_nli": fast["domain_nli"],
-                "capability_nli": fast["capability_nli"],
-                "source": "embedding_hot_path",
-                "elapsed_ms": 0.0,
-            }
-
-        dialogue_nli = nli_bundle["dialogue_nli"]
-        representation_nli = nli_bundle["representation_nli"]
-        domain_nli = nli_bundle["domain_nli"]
-        capability_nli = nli_bundle["capability_nli"]
-
-        if APRIL_FAST_SEMANTIC_MODE and not APRIL_ENABLE_HEAVY_HOTPATH:
-            embedding_map = dict(fast.get("context_scores") or {})
-        else:
-            embedding_map = self.embedding.similarities(
-                text,
-                [v for v in (previous_assistant, active_topic, active_goal) if v],
-            )
-
-        result = {
-            "linguistic": linguistic,
-            "dialogue_nli": dialogue_nli,
-            "representation_nli": representation_nli,
-            "domain_nli": domain_nli,
-            "capability_nli": capability_nli,
-            "embeddings": {
-                "previous_assistant": embedding_map.get(previous_assistant, 0.0),
-                "active_topic": embedding_map.get(active_topic, 0.0),
-                "active_goal": embedding_map.get(active_goal, 0.0),
-            },
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "evidence_only": True,
-            "engine": "quantum_interpretation_turn_engine",
-        }
-        self._turn_cache[key] = result
-        if len(self._turn_cache) > self._cache_limit:
-            self._turn_cache.pop(next(iter(self._turn_cache)))
-        return result
-
-    def dialogue(
-        self,
-        text: str,
-        previous_assistant: str = "",
-        previous_user: str = "",
-        active_goal: str = "",
-        active_topic: str = "",
-    ) -> Dict[str, Any]:
-        turn = self.turn_measurement(text, previous_assistant, previous_user, active_goal, active_topic)
-        label, confidence = self._best_label(turn["dialogue_nli"])
-        return {
-            "dialogue": {
-                "label": label,
-                "confidence": confidence,
-                "continuation_score": turn["embeddings"]["previous_assistant"],
-                "reference_score": turn["embeddings"]["previous_assistant"],
-                "topic_score": turn["embeddings"]["active_topic"],
-                "goal_score": turn["embeddings"]["active_goal"],
-            },
-            "linguistic": turn["linguistic"],
-            "nli": turn["dialogue_nli"],
-            "previous_similarity": {"score": turn["embeddings"]["previous_assistant"], "source": "sentence_transformers"},
-            "topic_similarity": {"score": turn["embeddings"]["active_topic"], "source": "sentence_transformers"},
-            "goal_similarity": {"score": turn["embeddings"]["active_goal"], "source": "sentence_transformers"},
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "evidence_only": True,
-            "engine": "quantum_dialogue_engine",
-        }
-
-    def representations(self, text: str, context: str = "") -> Dict[str, Any]:
-        turn = self.turn_measurement(text, active_topic=context)
-        nli = turn["representation_nli"]
-        reverse_map = {value: key for key, value in REPRESENTATION_HYPOTHESES.items()}
-        measurements = [
-            {"type": reverse_map[label], "score": float(score), "source": "transformers_nli"}
-            for label, score in zip(nli["labels"], nli["scores"])
-            if label in reverse_map
-        ]
-        return {
-            "nli": nli,
-            "measurements": measurements,
-            "context_similarity": {"score": turn["embeddings"]["active_topic"], "source": "sentence_transformers"},
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "evidence_only": True,
-            "engine": "quantum_representation_engine",
-        }
-
-    def domains(self, text: str) -> Dict[str, Any]:
-        turn = self.turn_measurement(text)
-        nli = turn["domain_nli"]
-        reverse_map = {value: key for key, value in DOMAIN_HYPOTHESES.items()}
-        measurements = [
-            {"domain": reverse_map[label], "score": float(score), "source": "transformers_nli"}
-            for label, score in zip(nli["labels"], nli["scores"])
-            if label in reverse_map
-        ]
-        return {
-            "nli": nli,
-            "measurements": measurements,
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "evidence_only": True,
-            "engine": "quantum_domain_engine",
-        }
-
-
-
-QUANTUM_LINGUISTIC_ENGINE = QuantumLinguisticEngine()
-QUANTUM_EMBEDDING_ENGINE = QuantumEmbeddingEngine()
-QUANTUM_INTENT_ENGINE = QuantumIntentEngine()
-QUANTUM_EVIDENCE_FUSION = QuantumEvidenceFusionEngine()
-
-
-def normalize_text(text: Any) -> str:
-    return str(text or "").strip()
-
-
-def normalize_lower(text: Any) -> str:
-    return normalize_text(text).lower()
-
-
-def contains_any(text: str, words: Sequence[str]) -> bool:
-    """
-    Compatibility evidence helper.
-
-    This is token/lemma evidence only. It cannot select a route or renderer.
-    """
-    analysis = QUANTUM_EVIDENCE_FUSION.turn_measurement(text)["linguistic"]
-    wanted = {normalize_lower(word) for word in words}
-    return bool(
-        set(analysis["lemmas"]) & wanted
-        or {normalize_lower(word) for word in analysis["tokens"]} & wanted
-    )
-
-
-def _semantic_evidence_stub(kind: str, text: str) -> bool:
-    return contains_any(text, (kind,))
-
-
-def detect_domain_candidates(text: str):
-    measurements = QUANTUM_EVIDENCE_FUSION.domains(text).get("measurements", [])
-    return [
-        item["domain"]
-        for item in measurements
-        if float(item["score"]) >= 0.45
-    ]
-
-
-def build_domain_confidence(text: str):
-    measurements = QUANTUM_EVIDENCE_FUSION.domains(text).get("measurements", [])
-    return {
-        item["domain"]: round(float(item["score"]), 4)
-        for item in measurements
-        if float(item["score"]) >= 0.20
-    }
-
-
-def _capability_scores(text: str) -> Dict[str, float]:
-    turn = QUANTUM_EVIDENCE_FUSION.turn_measurement(text)
-    reverse_map = {value: key for key, value in CAPABILITY_HYPOTHESES.items()}
-    nli = turn["capability_nli"]
-    return {
-        reverse_map[label]: float(score)
-        for label, score in zip(nli["labels"], nli["scores"])
-        if label in reverse_map
-    }
-
-
-
-def measure_representation_evidence(text: str) -> List[Dict[str, Any]]:
-    result = QUANTUM_EVIDENCE_FUSION.representations(text)
-    return [
-        SemanticEvidence(
-            label=item["type"],
-            score=item["score"],
-            source=item["source"],
-            details={
-                "decision_owner": "QUANTUM_PROCESSOR",
-                "evidence_only": True,
-                "context_similarity": result["context_similarity"]["score"],
-            },
-        ).as_dict()
-        for item in result["measurements"]
-    ]
-
-
-def detect_representation_candidates(text: str):
-    return [
-        item["label"]
-        for item in measure_representation_evidence(text)
-        if float(item["score"]) >= 0.45
-    ]
-
-
-def semantic_evidence_math(text: str) -> float:
-    scores = {
-        item["label"]: float(item["score"])
-        for item in measure_representation_evidence(text)
-    }
-    return scores.get("formula", 0.0)
-
-
-def semantic_evidence_renderer(text: str) -> float:
-    measurements = measure_representation_evidence(text)
-    return max((float(item["score"]) for item in measurements), default=0.0)
-
-
-def semantic_evidence_image(text: str) -> float:
-    scores = {
-        item["label"]: float(item["score"])
-        for item in measure_representation_evidence(text)
-    }
-    return scores.get("image", 0.0)
-
-
-def semantic_evidence_exploration(text: str) -> float:
-    return _capability_scores(text).get("exploration", 0.0)
-
-
-def semantic_evidence_continuation(text: str, previous_assistant: str = "") -> float:
-    result = QUANTUM_DIALOGUE_ENGINE.classify(
-        text=text,
-        previous_assistant=previous_assistant,
-    )
-    return float(result.get("dialogue", {}).get("continuation_score", 0.0))
-
-
-def semantic_evidence_web(text: str) -> float:
-    return _capability_scores(text).get("web", 0.0)
-
-
-def semantic_evidence_code(text: str) -> float:
-    return _capability_scores(text).get("code", 0.0)
-
-
-def semantic_evidence_information(text: str) -> float:
-    return _capability_scores(text).get("information", 0.0)
-
-
-def detect_discussion_mode(text: str) -> float:
-    return _capability_scores(text).get("discussion", 0.0)
-
-
-def detect_space_discussion(text: str) -> float:
-    return _capability_scores(text).get("space", 0.0)
-
-
-def detect_lightweight_visual(text: str) -> float:
-    scores = {
-        item["label"]: float(item["score"])
-        for item in measure_representation_evidence(text)
-    }
-    return max(
-        scores.get("image", 0.0),
-        scores.get("diagram", 0.0),
-        scores.get("graph", 0.0),
-    )
-
-
-def detect_scene_type(text: str, cognition=None):
-    cognition = cognition if isinstance(cognition, dict) else {}
-    required = [str(x).lower() for x in cognition.get("required_representations", ()) or ()]
-    if required:
-        return required[0]
-    candidates = detect_representation_candidates(text)
-    return candidates[0] if candidates else None
-
-
-def _is_micro_social_turn(text: Any) -> bool:
-    """Semantic fast-path gate; no lexical trigger list."""
-    normalized = re.sub(r"\s+", " ", normalize_text(text)).strip()
-    if not normalized or len(normalized.split()) > 24:
-        return False
-    profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(
-        normalized, "", "", ""
-    )
-    return bool(profile.get("fast_social"))
-
-
-def _semantic_identity_request(text: Any) -> bool:
-    normalized = normalize_text(text)
-    if not normalized:
-        return False
-    profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(
-        normalized, "", "", ""
-    )
-    return bool(profile.get("identity_request"))
-
-
-def _dialogue_signal_contract(
-    text: str,
-    history: list,
-    state: dict,
-    semantic: dict,
-    cognition: dict | None = None,
-    precomputed_profile: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    last_assistant = ""
-    last_user = ""
-    last_turn_id = None
-    for item in reversed(history):
-        if not isinstance(item, dict):
-            continue
-        # Accept both canonical paired records and the legacy role/content
-        # hot-dialog representation produced by State Manager.
-        if not last_assistant and isinstance(item.get("april"), dict):
-            last_assistant = normalize_text(
-                item["april"].get("answer")
-                or item["april"].get("content")
-                or item["april"].get("summary")
-            )
-            last_turn_id = item.get("turn_id")
-        elif not last_assistant and str(item.get("role", "")).lower() in {"assistant", "april"}:
-            last_assistant = normalize_text(
-                item.get("content")
-                or item.get("answer")
-                or item.get("summary")
-            )
-            last_turn_id = item.get("turn_id")
-
-        if not last_user and item.get("user"):
-            last_user = normalize_text(item.get("user"))
-        elif not last_user and str(item.get("role", "")).lower() == "user":
-            last_user = normalize_text(item.get("content"))
-
-        if last_assistant and last_user:
-            break
-
-    cognition = cognition if isinstance(cognition, dict) else {}
-
-    active_goal = normalize_text(
-        state.get("active_goal")
-        or state.get("current_goal")
-        or semantic.get("active_goal")
-        or cognition.get("active_goal")
-        or cognition.get("current_goal")
-    )
-    active_topic = normalize_text(
-        state.get("active_topic")
-        or state.get("current_topic")
-        or semantic.get("current_topic")
-        or cognition.get("active_topic")
-        or cognition.get("current_topic")
-    )
-
-    profile = precomputed_profile or QUANTUM_EVIDENCE_FUSION._fast_measurement(
-        text, last_assistant, active_topic, active_goal
-    )
-    fast_social = bool(profile.get("fast_social"))
-    if fast_social:
-        label = (
-            "self_identification"
-            if profile.get("identity_request")
-            else (
-                "statement"
-                if profile.get("greeting_score", 0.0) >= profile.get("continuation_score", 0.0)
-                else "question"
-            )
-        )
-        context_scores = profile.get("context_scores", {}) or {}
-        measured = {
-            "dialogue": {
-                "label": label,
-                "continuation_score": float(profile.get("continuation_score", 0.0)),
-                "reference_score": float(profile.get("reference_score", 0.0)),
-                "topic_score": float(context_scores.get("active_topic", 0.0)),
-                "goal_score": float(context_scores.get("active_goal", 0.0)),
-                "confidence": float(profile.get("dialogue_confidence", 0.7)),
-            },
-            "source": "semantic_embedding_fast_path",
-            "identity_request": bool(profile.get("identity_request")),
-            "greeting_score": float(profile.get("greeting_score", 0.0)),
-        }
-    else:
-        measured = QUANTUM_EVIDENCE_FUSION.dialogue(
-            text=text,
-            previous_assistant=last_assistant,
-            previous_user=last_user,
-            active_goal=active_goal,
-            active_topic=active_topic,
-        )
-    dialogue = measured["dialogue"]
-    label = str(dialogue["label"])
-    previous_score = float(dialogue["continuation_score"])
-    reference_score = float(dialogue["reference_score"])
-    topic_score = float(dialogue["topic_score"])
-    goal_score = float(dialogue["goal_score"])
-
-    continuation = bool(
-        last_assistant
-        and (
-            label in {
-                "continuation",
-                "reformulation",
-                "correction",
-                "reference",
-                "affirmation",
-                "rejection",
-            }
-            or previous_score >= 0.72
-        )
-    )
-
-    topic_shift = bool(
-        active_topic and not continuation and topic_score < 0.35
-    )
-
-    return {
-        "dialog_act": label,
-        "current_request": text,
-        "continuation": continuation,
-        "reference_to_previous": bool(last_assistant and reference_score >= 0.60),
-        "previous_april_turn": last_assistant,
-        "previous_user_turn": last_user,
-        "reply_to": last_turn_id,
-        "active_goal": active_goal,
-        "active_topic": active_topic,
-        "topic_score": topic_score,
-        "goal_score": goal_score,
-        "continuation_score": previous_score,
-        "reference_score": reference_score,
-        "topic_shift": topic_shift,
-        "history_available": bool(history),
-        "turn_count": len(history),
-        "semantic_measurement": measured,
-        "confidence": float(dialogue["confidence"]),
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "evidence_only": True,
-        "canonical": True,
-    }
-
-
-def _semantic_context_packet(
-    text: str,
-    history: list,
-    state: dict,
-    semantic: dict,
-    cognition: dict,
-) -> Dict[str, Any]:
-    """Build one canonical semantic packet with one fast measurement."""
-    started = time.perf_counter()
-
-    previous_answer = ""
-    active_topic = normalize_text(
-        state.get("active_topic")
-        or state.get("current_topic")
-        or semantic.get("current_topic")
-        or cognition.get("active_topic")
-        or cognition.get("current_topic")
-    )
-    active_goal = normalize_text(
-        state.get("active_goal")
-        or state.get("current_goal")
-        or semantic.get("active_goal")
-        or cognition.get("active_goal")
-        or cognition.get("current_goal")
-    )
-
-    # Read only the most recent assistant turn; no full-history semantic scan.
-    for item in reversed(history if isinstance(history, list) else []):
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").lower()
-        if isinstance(item.get("april"), dict):
-            previous_answer = normalize_text(
-                item["april"].get("answer")
-                or item["april"].get("content")
-                or item["april"].get("summary")
-            )
-        elif role in {"assistant", "april", "bot"}:
-            previous_answer = normalize_text(
-                item.get("content")
-                or item.get("answer")
-                or item.get("summary")
-            )
-        if previous_answer:
-            break
-
-    profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(
-        text, previous_answer, active_topic, active_goal
-    )
-
-    fast_social = bool(profile.get("fast_social"))
-    is_identity = bool(profile.get("identity_request"))
-    context_scores = profile.get("context_scores", {}) or {}
-
-    if fast_social:
-        dialogue = _dialogue_signal_contract(
-            text,
-            history,
-            state,
-            semantic,
-            cognition,
-            precomputed_profile=profile,
-        )
-        representation = {
-            "measurements": [{
-                "type": "text",
-                "score": 1.0,
-                "source": "shared_embedding_fast_path",
-                "nli": {
-                    "labels": list(REPRESENTATION_HYPOTHESES.keys()),
-                    "scores": [1.0 if name == "text" else 0.0 for name in REPRESENTATION_HYPOTHESES],
-                    "source": "shared_embedding_fast_path",
-                },
-            }],
-            "context_similarity": {"score": max(context_scores.values(), default=0.0), "source": "shared_embedding_fast_path"},
-            "nli": {
-                "labels": list(REPRESENTATION_HYPOTHESES.keys()),
-                "scores": [1.0 if name == "text" else 0.0 for name in REPRESENTATION_HYPOTHESES],
-                "source": "shared_embedding_fast_path",
-            },
-        }
-        linguistic = _lightweight_linguistic(text)
-        domain = {
-            "measurements": [],
-            "source": "shared_embedding_fast_path",
-        }
-        context_vectors = {
-            "previous_answer": {"score": float(context_scores.get("previous_assistant", 0.0))},
-            "active_topic": {"score": float(context_scores.get("active_topic", 0.0))},
-            "active_goal": {"score": float(context_scores.get("active_goal", 0.0))},
-        }
-        return {
-            "linguistic": linguistic,
-            "dialogue": dialogue,
-            "representation": representation,
-            "domain": domain,
-            "context_vectors": context_vectors,
-            "identity_request": is_identity,
-            "fast_path": True,
-            "profile": profile,
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "engine": "quantum_interpretation_engine",
-            "evidence_only": True,
-            "measurement_ms": round((time.perf_counter() - started) * 1000, 2),
-        }
-
-    # One shared measurement drives the evidence families.
-    dialogue = _dialogue_signal_contract(
-        text,
-        history,
-        state,
-        semantic,
-        cognition,
-        precomputed_profile=profile,
-    )
-    representation_scores = profile.get("representation_scores", {}) or {}
-    rep_ranked = sorted(representation_scores, key=representation_scores.get, reverse=True)
-    representation = {
-        "measurements": [
-            {
-                "type": name,
-                "score": float(representation_scores.get(name, 0.0)),
-                "source": "shared_embedding_fast_path",
-                "nli": {
-                    "labels": [REPRESENTATION_HYPOTHESES[n] for n in rep_ranked],
-                    "scores": [float(representation_scores[n]) for n in rep_ranked],
-                    "source": "shared_embedding_fast_path",
-                },
-            }
-            for name in rep_ranked[:6]
-        ],
-        "context_similarity": {"score": max(context_scores.values(), default=0.0), "source": "shared_embedding_fast_path"},
-        "nli": {
-            "labels": [REPRESENTATION_HYPOTHESES[n] for n in rep_ranked],
-            "scores": [float(representation_scores[n]) for n in rep_ranked],
-            "source": "shared_embedding_fast_path",
-        },
-    }
-
-    linguistic = _lightweight_linguistic(text)
-    domain_ranked = sorted(
-        (profile.get("domain_nli", {}) or {}).get("labels", []),
-        key=lambda x: (profile.get("domain_nli", {}) or {}).get("scores", [0] * len((profile.get("domain_nli", {}) or {}).get("labels", [])))[
-            (profile.get("domain_nli", {}) or {}).get("labels", []).index(x)
-        ] if x in (profile.get("domain_nli", {}) or {}).get("labels", []) else 0,
-        reverse=True,
-    )
-    domain_scores = profile.get("domain_scores", {}) or {}
-
-    return {
-        "linguistic": linguistic,
-        "dialogue": dialogue,
-        "representation": representation,
-        "domain": {
-            "measurements": [
-                {"domain": name, "score": float(score)}
-                for name, score in sorted(domain_scores.items(), key=lambda kv: kv[1], reverse=True)
-                if float(score) >= 0.45
-            ],
-            "source": "shared_embedding_fast_path",
-        },
-        "context_vectors": {
-            "previous_answer": {"score": float(context_scores.get("previous_assistant", 0.0))},
-            "active_topic": {"score": float(context_scores.get("active_topic", 0.0))},
-            "active_goal": {"score": float(context_scores.get("active_goal", 0.0))},
-        },
-        "identity_request": is_identity,
-        "fast_path": False,
-        "profile": profile,
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "engine": "quantum_interpretation_engine",
-        "evidence_only": True,
-        "measurement_ms": round((time.perf_counter() - started) * 1000, 2),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Evidence packet
-# ---------------------------------------------------------------------------
-
-def build_result(text):
+def build_result(text: str) -> dict[str, Any]:
     return {
         "type": "text",
         "subtype": None,
         "scene_type": None,
         "normalized": text,
         "content_role": None,
-        "contains_object": False,
+        "contains_object": bool(text),
         "contains_explanation": False,
         "contains_analysis": False,
         "contains_legend": False,
@@ -2204,63 +1091,15 @@ def build_result(text):
         "domain_confidence": {},
         "response_complexity": None,
         "estimated_action_count": 0,
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "routing_owner": "QUANTUM_PROCESSOR",
-        "renderer_owner": "QUANTUM_PROCESSOR",
+        "decision_owner": DECISION_OWNER,
+        "routing_owner": DECISION_OWNER,
+        "renderer_owner": DECISION_OWNER,
         "provider_calls": 0,
+        "single_route": True,
     }
 
 
-def detect_explanation_content(text):
-    return contains_any(text, (
-        "объясни", "объяснение", "пояснение", "расшифровка",
-        "что означает", "что значит",
-    ))
-
-
-def detect_analysis_content(text):
-    return contains_any(text, ("анализ", "вывод", "заключение", "интерпретация"))
-
-
-def detect_legend_content(text):
-    return contains_any(text, ("обозначение", "обозначения", "легенда", "расшифровка"))
-
-
-def detect_object_content(text):
-    return bool(normalize_text(text))
-
-
-def build_factory_order(result):
-    domains = result.get("required_domains", []) or []
-    return {
-        "intent": result.get("type"),
-        "goal": result.get("subtype"),
-        "required_domains": domains,
-        "required_rooms": [room for d in domains for room in DOMAIN_ROOM_MAP.get(d, [])],
-        "required_artifacts": [],
-        "quality_target": 0.95,
-        "owner": "QUANTUM_PROCESSOR",
-        "status": "evidence_only",
-    }
-
-
-def build_scene_strategy(result):
-    reps = result.get("required_representations", []) or []
-    role = result.get("content_role")
-    return {
-        "scene_strategy": "evidence_only",
-        "preferred_blocks": list(reps),
-        "content_role": role,
-        "scene_priority": "normal",
-        "scene_contribution_mode": True,
-        "scene_builder_profile": "processor_selected",
-        "decision_owner": "QUANTUM_PROCESSOR",
-    }
-
-
-def estimate_action_count(result):
-    if not isinstance(result, dict):
-        return 0
+def estimate_action_count(result: dict[str, Any]) -> int:
     reps = set(result.get("required_representations", []) or [])
     domains = set(result.get("required_domains", []) or [])
     count = len(reps) + len(domains)
@@ -2269,7 +1108,7 @@ def estimate_action_count(result):
     return max(1, count)
 
 
-def determine_response_complexity(result):
+def determine_response_complexity(result: dict[str, Any]) -> str:
     actions = estimate_action_count(result)
     if actions <= 1:
         return RESPONSE_COMPLEXITY_LOW
@@ -2278,460 +1117,44 @@ def determine_response_complexity(result):
     return RESPONSE_COMPLEXITY_HIGH
 
 
-# ---------------------------------------------------------------------------
-# Quantum dialogue understanding engine
-
-class QuantumDialogueEngine:
-    """Real semantic dialogue understanding: NLP + vectors + NLI + context."""
-
-    def classify(
-        self,
-        text: str,
-        previous_assistant: str = "",
-        previous_user: str = "",
-        active_goal: str = "",
-        active_topic: str = "",
-    ) -> Dict[str, Any]:
-        evidence = QUANTUM_EVIDENCE_FUSION.dialogue(
-            text, previous_assistant, active_goal, active_topic
-        )
-        dialog = evidence["dialogue"]
-        continuation = bool(
-            previous_assistant and (
-                dialog["label"] in {
-                    "continuation", "reformulation", "correction",
-                    "reference", "affirmation", "rejection",
-                } or dialog["continuation_score"] >= 0.72
-            )
-        )
-        return {
-            **evidence,
-            "dialog_act": dialog["label"],
-            "confidence": float(dialog["confidence"]),
-            "continuation": continuation,
-            "reference_to_previous": bool(
-                previous_assistant and dialog["reference_score"] >= 0.60
-            ),
-            "representation_decision": None,
-            "decision_owner": "QUANTUM_PROCESSOR",
-            "evidence_only": True,
-        }
-
-
-QUANTUM_DIALOGUE_ENGINE = QuantumDialogueEngine()
-
-# Canonical dialogue contract
-# ---------------------------------------------------------------------------
-
-def _dialog_turn_text(turn, role=None):
-    if not isinstance(turn, dict):
-        return ""
-    if isinstance(turn.get("content"), str):
-        return turn["content"].strip()
-    if role and isinstance(turn.get(role), dict):
-        obj = turn[role]
-        return str(obj.get("text") or obj.get("content") or obj.get("answer") or "").strip()
-    for key in ("text", "answer", "content", "response", "message"):
-        if isinstance(turn.get(key), str) and turn[key].strip():
-            return turn[key].strip()
-    return ""
-
-
-def _dialog_history_pairs(history):
-    if not isinstance(history, list):
-        return []
-    pairs = []
-    for item in history:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").lower()
-        if role in {"user", "human"}:
-            pairs.append(("user", _dialog_turn_text(item), item))
-        elif role in {"assistant", "april", "bot"}:
-            pairs.append(("assistant", _dialog_turn_text(item), item))
-        else:
-            if isinstance(item.get("user"), dict):
-                pairs.append(("user", _dialog_turn_text(item, "user"), item))
-            if isinstance(item.get("april"), dict):
-                pairs.append(("assistant", _dialog_turn_text(item, "april"), item))
-    return [(r, t, raw) for r, t, raw in pairs if t]
-
-
-def _canonical_dialogue_contract(text, history=None, state=None, semantic=None):
-    text = normalize_text(text)
-    history = history if isinstance(history, list) else []
-    state = state if isinstance(state, dict) else {}
-    semantic = semantic if isinstance(semantic, dict) else {}
-    turns = _dialog_history_pairs(history)
-
-    last_assistant = next((x for x in reversed(turns) if x[0] == "assistant"), None)
-    last_user = next((x for x in reversed(turns) if x[0] == "user" and x[1] != text), None)
-
-    previous_assistant = last_assistant[1] if last_assistant else ""
-    active_goal = (
-        state.get("active_goal") or state.get("current_goal") or
-        (state.get("goal_hierarchy") or {}).get("active_goal") or
-        semantic.get("active_goal") or semantic.get("goal") or ""
-    )
-    active_topic = (
-        state.get("active_topic") or state.get("current_topic") or state.get("topic") or
-        semantic.get("current_topic") or semantic.get("topic") or ""
-    )
-
-    measured = QUANTUM_DIALOGUE_ENGINE.classify(
-        text=text,
-        previous_assistant=previous_assistant,
-        previous_user=last_user[1] if last_user else "",
-        active_goal=active_goal,
-        active_topic=active_topic,
-    )
-
-    reply_to = (
-        last_assistant[2].get("turn_id")
-        if last_assistant and isinstance(last_assistant[2], dict)
-        else None
-    )
-
-    continuation = bool(measured.get("continuation"))
-    dialog_act = measured.get("dialog_act") or "statement"
-    identity_request = bool(semantic.get("identity_request") or measured.get("identity_request"))
-
-    if continuation and previous_assistant:
-        resolved_request = (
-            f"Continue the previous task naturally. "
-            f"Previous assistant response: {previous_assistant}\n"
-            f"Current user instruction: {text}"
-        )
-    else:
-        resolved_request = text
-
-    capabilities = []
-    if semantic.get("candidate_representations"):
-        capabilities.append("structured_rendering")
-    if float(measured.get("analysis_score", 0.0)) >= 0.62:
-        capabilities.append("analysis")
-    if measured.get("reference_to_previous"):
-        capabilities.append("dialogue_continuity")
-
+def build_factory_order(result: dict[str, Any]) -> dict[str, Any]:
+    domains = list(result.get("required_domains", []) or [])
     return {
-        "dialog_act": dialog_act,
-        "current_request": text,
-        "resolved_request": resolved_request,
-        "continuation": continuation,
-        "reply_to": reply_to,
-        "previous_april_turn": previous_assistant,
-        "previous_user_turn": last_user[1] if last_user else "",
-        "active_goal": active_goal,
-        "active_topic": active_topic,
-        "topic_shift": bool(
-            active_topic and
-            not measured.get("reference_to_previous") and
-            measured.get("topic_similarity", {}).get("score", 0.0) < 0.35
-        ),
-        "required_capabilities": list(dict.fromkeys(capabilities)),
-        "confidence": float(measured.get("confidence", 0.0)),
-        "identity_request": identity_request,
-        "history_available": bool(turns),
-        "turn_count": len(turns),
-        "semantic_measurement": measured,
-        "canonical": True,
-        "version": "dialogue_v4_quantum_semantic_fusion",
+        "intent": result.get("type"),
+        "goal": result.get("subtype"),
+        "required_domains": domains,
+        "required_rooms": list(domains),
+        "required_artifacts": list(result.get("required_representations", []) or []),
+        "quality_target": 0.95,
+        "owner": DECISION_OWNER,
+        "status": "evidence_only",
     }
 
 
-def _base_interpret_request(text, cognition=None, semantic=None, history=None, state=None):
-    text = normalize_text(text)
-    if not text:
-        return None
-
-    cognition = cognition if isinstance(cognition, dict) else {}
-    semantic = semantic if isinstance(semantic, dict) else {}
-    history = history if isinstance(history, list) else []
-    state = state if isinstance(state, dict) else {}
-
-    result = build_result(text)
-
-    semantic_packet = _semantic_context_packet(
-        text=text,
-        history=history,
-        state=state,
-        semantic=semantic,
-        cognition=cognition,
-    )
-
-    profile = semantic_packet.get("profile", {}) if isinstance(semantic_packet.get("profile"), dict) else {}
-    representation_scores = profile.get("representation_scores", {}) or {}
-    domain_scores = profile.get("domain_scores", {}) or {}
-    capability_scores = profile.get("capability_scores", {}) or {}
-
-    scene_matrix = QUANTUM_SCENE_MATRIX.evaluate(
-        dialogue_scores=profile.get("dialogue_scores", {}) or {},
-        representation_scores=representation_scores,
-        domain_scores=domain_scores,
-        capability_scores=capability_scores,
-        context_scores=profile.get("context_scores", {}) or {},
-        modalities={
-            "text": text,
-            "voice": state.get("voice_context"),
-            "vision": state.get("vision_context"),
-            "gallery": state.get("gallery_context"),
-            "files": state.get("file_context"),
-        },
-    )
-
-    if semantic_packet.get("fast_path"):
-        domains = []
-        representation_evidence = [{
-            "label": "text",
-            "score": 1.0,
-            "source": "shared_embedding_fast_path",
-            "details": {"decision_owner": "QUANTUM_PROCESSOR", "evidence_only": True},
-        }]
-    else:
-        domains = [
-            name for name, score in domain_scores.items()
-            if float(score) >= 0.45
-        ]
-        representation_evidence = [
-            {
-                "label": name,
-                "score": float(score),
-                "source": "shared_embedding_fast_path",
-                "details": {"decision_owner": "QUANTUM_PROCESSOR", "evidence_only": True},
-            }
-            for name, score in sorted(
-                representation_scores.items(), key=lambda item: item[1], reverse=True
-            )
-            if float(score) >= 0.45
-        ]
-
-    semantic_candidates = [
-        item["label"] for item in representation_evidence if float(item["score"]) >= 0.45
-    ]
-
-    explicit_required = [
-        str(x).lower()
-        for x in (
-            (semantic.get("required_representations", []) or [])
-            + (cognition.get("required_representations", []) or [])
-        )
-        if str(x).strip()
-    ]
-
-    result["semantic_profile"] = {
-        "dialogue_history": history[-8:],
-        "previous_april_turn": semantic_packet["dialogue"].get("previous_april_turn", ""),
-        "active_topic": semantic_packet["dialogue"].get("active_topic", ""),
-        "active_goal": semantic_packet["dialogue"].get("active_goal", ""),
-        "identity_request": bool(semantic_packet.get("identity_request")),
-        "fast_path": bool(semantic_packet.get("fast_path")),
-        "representation_scores": representation_scores,
-        "domain_scores": domain_scores,
-        "capability_scores": capability_scores,
-        "context_scores": profile.get("context_scores", {}),
-        "engine": "quantum_interpretation_engine_v5_matrix",
-    }
-    result["scene_profile"] = build_scene_construction_profile(result["semantic_profile"])
-    result["quantum_scene_matrix"] = scene_matrix
-    result["scene_matrix_scores"] = dict(
-        zip(scene_matrix["labels"], scene_matrix["scores"])
-    )
-    result["scene_matrix_best"] = scene_matrix["best_scene"]
-    result["scene_matrix_confidence"] = scene_matrix["best_score"]
-    result["artifact_contract"] = build_scene_artifact_contract(
-        result["semantic_profile"], result["scene_profile"]
-    )
-
-    result["candidate_domains"] = domains
-    result["required_domains"] = list(
-        semantic.get("required_domains", []) or domains
-    )
-    result["domain_confidence"] = {
-        name: round(float(score), 4) for name, score in domain_scores.items()
-    }
-    result["candidate_representations"] = semantic_candidates
-    result["representation_evidence"] = representation_evidence
-    result["required_representations"] = explicit_required
-    result["scene_type"] = explicit_required[0] if explicit_required else None
-
-    # Capability evidence comes from the same single embedding measurement.
-    result["discussion_mode"] = float(capability_scores.get("discussion", 0.0)) >= 0.60
-    result["space_discussion"] = float(capability_scores.get("space", 0.0)) >= 0.60
-    result["exploration"] = float(capability_scores.get("exploration", 0.0))
-    result["continuation"] = float(
-        semantic_packet["dialogue"].get("continuation_score", 0.0)
-    )
-    result["web_context"] = float(capability_scores.get("web", 0.0))
-    result["explicit_image_generation"] = float(representation_scores.get("image", 0.0))
-    result["lightweight_visual"] = max(
-        float(representation_scores.get("graph", 0.0)),
-        float(representation_scores.get("diagram", 0.0)),
-        float(representation_scores.get("image", 0.0)),
-    ) >= 0.72
-
-    result["contains_object"] = bool(text)
-    result["contains_explanation"] = float(capability_scores.get("information", 0.0)) >= 0.60
-    result["contains_analysis"] = float(capability_scores.get("exploration", 0.0)) >= 0.60
-    result["contains_legend"] = False
-    if result["contains_explanation"]:
-        result["content_role"] = "explanation"
-    elif result["contains_analysis"]:
-        result["content_role"] = "analysis"
-
-    result["evidence"] = {
-        "domain": semantic_packet["domain"],
-        "representation": representation_evidence,
-        "math": float(representation_scores.get("formula", 0.0)),
-        "code": float(representation_scores.get("code", 0.0)),
-        "web": result["web_context"],
-        "image": result["explicit_image_generation"],
-        "continuation": result["continuation"],
-        "exploration": result["exploration"],
-        "information": float(capability_scores.get("information", 0.0)),
-        "linguistic": semantic_packet["linguistic"],
-        "dialogue": semantic_packet["dialogue"],
-        "context_vectors": semantic_packet["context_vectors"],
-        "cognition": dict(cognition),
-        "semantic": dict(semantic),
+def build_scene_strategy(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scene_strategy": "evidence_only",
+        "preferred_blocks": list(result.get("required_representations", []) or []),
+        "content_role": result.get("content_role"),
+        "scene_priority": "normal",
+        "scene_contribution_mode": True,
+        "scene_builder_profile": "processor_selected",
+        "decision_owner": DECISION_OWNER,
     }
 
-    result["identity_request"] = bool(semantic_packet.get("identity_request"))
-    result["fast_social"] = bool(semantic_packet.get("fast_path"))
-    result["quantum_interpretation_field"] = semantic_packet
-    result["quantum_representation_measurement"] = semantic_packet.get("representation", {})
-    result["factory_order"] = build_factory_order(result)
-    result["scene_strategy"] = build_scene_strategy(result)
-    result["estimated_action_count"] = estimate_action_count(result)
-    result["response_complexity"] = determine_response_complexity(result)
 
-    # Interpretation only emits evidence. Quantum Processor decides.
-    result["semantic_authority"] = True
-    result["decision_source"] = "QUANTUM_PROCESSOR"
-    result["semantic_decision_source"] = "quantum_evidence_fusion"
-    result["representation_resolution"] = "processor_selection"
-    result["legacy_keyword_matching"] = False
-    result["avoid_trigger_execution"] = True
-    result["factory_order"]["status"] = "evidence_only"
-
-    return result
-
-
-def interpret_request(text, cognition=None, semantic=None, history=None, state=None):
-    result = _base_interpret_request(
-        text,
-        cognition=cognition,
-        semantic=semantic,
-        history=history,
-        state=state,
-    )
-    if result is None:
-        return None
-
-    contract = (
-        result.get("quantum_interpretation_field", {}).get("dialogue")
-        if isinstance(result.get("quantum_interpretation_field"), dict)
-        else None
-    )
-    if not isinstance(contract, dict):
-        contract = _dialogue_signal_contract(
-            text,
-            history or [],
-            state or {},
-            result,
-            cognition or {},
-        )
-
-    result["dialogue_contract"] = contract
-    result["dialog_act"] = contract["dialog_act"]
-    result["continuation"] = bool(contract["continuation"])
-    result["continuation_target"] = (
-        contract["previous_april_turn"]
-        or contract["active_topic"]
-    )
-    result["active_goal"] = contract["active_goal"]
-    result["active_topic"] = contract["active_topic"]
-    result["resolved_request"] = (
-        text
-        if not contract["continuation"]
-        else (
-            "Continue the previous task naturally.\n"
-            f"Previous assistant response: {contract['previous_april_turn']}\n"
-            f"Current user instruction: {text}"
-        )
-    )
-    result["reply_to"] = contract["reply_to"]
-    result["required_capabilities"] = [
-        "semantic_interpretation",
-        "dialogue_context",
-    ]
-    if result.get("candidate_representations"):
-        result["required_capabilities"].append("representation_evidence")
-
-    result["dialogue_understanding"] = contract
-    result["context_dependency"] = (
-        "continuation" if contract.get("continuation")
-        else "reference" if contract.get("reference_to_previous")
-        else "new_topic" if contract.get("topic_shift")
-        else "independent"
-    )
-    result["context_policy"] = {
-        "current_request": True,
-        "dialogue_vector": bool(
-            contract.get("continuation")
-            or contract.get("reference_to_previous")
-        ),
-        "previous_turn": bool(contract.get("reply_to")),
-        "active_goal": bool(contract.get("active_goal")),
-        "full_history": True,
-        "semantic_similarity": True,
-        "nli_intent": "refinement_only",
-        "linguistic_structure": True,
+def build_interpretation_state() -> dict[str, dict[str, Any]]:
+    return {
+        "dialogue": {},
+        "evidence": {},
+        "cognition": {},
+        "scene": {},
+        "artifacts": {},
+        "executor": {},
+        "diagnostics": {},
     }
 
-    result["canonical_transport"] = "transport_state"
-    result["decision_owner"] = "QUANTUM_PROCESSOR"
-    result["routing_owner"] = "QUANTUM_PROCESSOR"
-    result["renderer_owner"] = "QUANTUM_PROCESSOR"
-    result["provider_calls"] = 0
-    result["avoid_trigger_execution"] = True
-    result["unresolved_intent"] = False
 
-    result = validate_response_complexity(result)
-    state_out = build_interpretation_state()
-    state_out = synchronize_interpretation_context(state_out, result)
-    state_out = export_transport_state(state_out, result)
-    result["transport_state"] = state_out
-    result["primary_contract"] = "transport_state"
-    result["semantic_engine_diagnostics"] = {
-        "engines": [
-            "stanza_multilingual_linguistic",
-            "spacy_ner",
-            "sentence_transformers_embedding",
-            "transformers_nli_refinement",
-            "quantum_fast_measurement",
-            "quantum_evidence_fusion",
-            "quantum_scene_interpretation_matrix",
-        ],
-        "engine_mode": "required",
-        "fallback_mode": False,
-        "substring_routing": False,
-        "candidate_to_required_promotion": False,
-        "renderer_selection_owner": "QUANTUM_PROCESSOR",
-        "single_route": True,
-    }
-    result["interpretation_state"] = state_out
-    result["transport_diagnostics"] = build_transport_diagnostics(result)
-    result = propagate_canonical_response(result, state_out)
-    result = bridge_machine_response(result, state_out)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Canonical transport / compatibility helpers
-# ---------------------------------------------------------------------------
-
-INTERPRETATION_ENTRYPOINT = "transport_state"
 INTERPRETATION_TRANSPORT_FIELDS = {
     "dialogue_profile": ("dialogue", "profile"),
     "semantic_evidence_engine": ("evidence", "engine"),
@@ -2742,79 +1165,69 @@ INTERPRETATION_TRANSPORT_FIELDS = {
     "executor_preparation_contract": ("executor", "contract"),
 }
 INTERPRETATION_ROUTE = tuple(INTERPRETATION_TRANSPORT_FIELDS)
-INTERPRETATION_CONTEXT_SCHEMA = {
-    "state": "interpretation_state",
-    "dialogue": "semantic_profile",
-    "evidence": "semantic_evidence_engine",
-    "scene": "scene_profile",
-    "artifact": "artifact_contract",
-    "executor": "executor_preparation_contract",
-}
-INTERPRETATION_STATE_TEMPLATE = {
-    "dialogue": {}, "evidence": {}, "cognition": {}, "scene": {},
-    "artifacts": {}, "executor": {}, "diagnostics": {},
-}
+INTERPRETATION_ENTRYPOINT = TRANSPORT_NAME
+INTERPRETATION_STATE_TEMPLATE = build_interpretation_state()
 
 
-def resolve_interpretation_payload(result):
-    return result.get("transport_state", {}) if isinstance(result, dict) else {}
-
-
-def export_transport_state(state, result):
-    for field, (section, key) in INTERPRETATION_TRANSPORT_FIELDS.items():
-        if field in result:
-            state.setdefault(section, {})[key] = result[field]
-    return state
-
-
-def build_interpretation_route(state, result):
-    route = [{
-        "node": node,
-        "status": "evidence",
-        "payload": result.get(node),
-    } for node in INTERPRETATION_ROUTE]
-    state.setdefault("diagnostics", {})["route"] = route
-    return route
-
-
-def synchronize_interpretation_context(state, result):
-    state.setdefault("dialogue", {})["profile"] = result.get("semantic_profile")
-    state.setdefault("evidence", {})["engine"] = result.get("semantic_evidence_engine", result.get("evidence", {}))
-    state.setdefault("scene", {})["profile"] = result.get("scene_profile")
-    state.setdefault("artifacts", {})["contract"] = result.get("artifact_contract")
-    state.setdefault("executor", {})["contract"] = result.get("executor_preparation_contract")
-    return state
-
-
-def build_interpretation_state():
-    return {key: dict(value) for key, value in INTERPRETATION_STATE_TEMPLATE.items()}
-
-
-def safe_result_get(result, key, default=None):
+def safe_result_get(result: Any, key: str, default: Any = None) -> Any:
     if not isinstance(result, dict):
         return default
     value = result.get(key, default)
     return default if value is None else value
 
 
-def ensure_transport_defaults(state):
+def ensure_transport_defaults(state: dict[str, Any] | None) -> dict[str, Any]:
     state = state or {}
     for key in ("dialogue", "scene", "executor", "artifacts", "diagnostics"):
         state.setdefault(key, {})
     return state
 
 
-def propagate_canonical_response(result, state):
+def synchronize_interpretation_context(
+    state: dict[str, Any], result: dict[str, Any]
+) -> dict[str, Any]:
+    state = ensure_transport_defaults(state)
+    state["dialogue"]["profile"] = result.get("semantic_profile")
+    state["dialogue"]["contract"] = result.get("dialogue_contract")
+    state["evidence"]["engine"] = result.get("quantum_interpretation_field")
+    state["scene"]["profile"] = result.get("scene_profile")
+    state["scene"]["matrix"] = result.get("quantum_matrix")
+    state["artifacts"]["contract"] = result.get("artifact_contract")
+    state["executor"]["contract"] = result.get("executor_preparation_contract")
+    return state
+
+
+def export_transport_state(state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    state = ensure_transport_defaults(state)
+    for field, (section, key) in INTERPRETATION_TRANSPORT_FIELDS.items():
+        if field in result:
+            state[section][key] = result[field]
+    state["diagnostics"]["route"] = [
+        {"node": node, "status": "evidence", "payload": result.get(node)}
+        for node in INTERPRETATION_ROUTE
+    ]
+    return state
+
+
+def resolve_interpretation_payload(result: dict[str, Any]) -> dict[str, Any]:
+    return result.get(TRANSPORT_NAME, {}) if isinstance(result, dict) else {}
+
+
+def propagate_canonical_response(result: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     transport = state.setdefault("transport", {})
     response = transport.setdefault("response", {})
-    response["content"] = safe_result_get(result, "normalized") or safe_result_get(result, "assistant_response", "")
+    response["content"] = safe_result_get(result, "normalized") or safe_result_get(
+        result, "assistant_response", ""
+    )
     return result
 
 
-def bridge_machine_response(result, state):
+def bridge_machine_response(result: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     machine = state.setdefault("machine_response", {})
     scene = state.setdefault("scene_contract", {})
-    content = machine.get("content") or result.get("normalized") or result.get("assistant_response") or ""
+    content = machine.get("content") or result.get("normalized") or result.get(
+        "assistant_response", ""
+    )
     machine["content"] = content
     scene.update({"content": content, "answer": content, "summary": content})
     result["machine_response"] = machine
@@ -2822,24 +1235,30 @@ def bridge_machine_response(result, state):
     return result
 
 
-def export_response_complexity(result):
-    return {key: result.get(key) for key in (
-        "response_complexity", "estimated_action_count",
-        "semantic_response_complexity", "machine_response_complexity",
-    )}
-
-
-def validate_response_complexity(result):
-    result["response_complexity"] = result.get("response_complexity") or RESPONSE_COMPLEXITY_LOW
+def validate_response_complexity(result: dict[str, Any]) -> dict[str, Any]:
+    complexity = result.get("response_complexity") or RESPONSE_COMPLEXITY_LOW
+    result["response_complexity"] = complexity
     result["estimated_action_count"] = result.get("estimated_action_count") or 0
-    result["semantic_response_complexity"] = result["response_complexity"]
-    result["machine_response_complexity"] = result["response_complexity"]
+    result["semantic_response_complexity"] = complexity
+    result["machine_response_complexity"] = complexity
     return result
 
 
-def build_transport_diagnostics(result):
+def export_response_complexity(result: dict[str, Any]) -> dict[str, Any]:
     return {
-        "has_transport": bool(result.get("transport_state")),
+        key: result.get(key)
+        for key in (
+            "response_complexity",
+            "estimated_action_count",
+            "semantic_response_complexity",
+            "machine_response_complexity",
+        )
+    }
+
+
+def build_transport_diagnostics(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "has_transport": bool(result.get(TRANSPORT_NAME)),
         "has_machine_response": bool(result.get("machine_response")),
         "has_scene_contract": bool(result.get("scene_contract")),
         "normalized": bool(result.get("normalized")),
@@ -2848,13 +1267,241 @@ def build_transport_diagnostics(result):
     }
 
 
+def build_interpretation_route(state: dict[str, Any], result: dict[str, Any]):
+    state = export_transport_state(state, result)
+    return state["diagnostics"]["route"]
+
+
 # ---------------------------------------------------------------------------
-# Semantic profile / scene / processor compatibility builders
+# Compatibility helpers: all point into the one engine.
 # ---------------------------------------------------------------------------
 
-def build_semantic_dialog_profile(text, cognition=None, semantic=None,
-                                  assistant_response=None, dialogue_history=None,
-                                  vision_context=None):
+QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
+
+# Compatibility singleton names intentionally reference the same engine object.
+QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_LINGUISTIC_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_INTENT_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_EVIDENCE_FUSION = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_DIALOGUE_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+
+# Public class aliases preserve import names without reinstating parallel engines.
+QuantumFastSemanticEngine = QuantumInterpretationEngine
+QuantumLinguisticEngine = QuantumInterpretationEngine
+QuantumEmbeddingEngine = QuantumInterpretationEngine
+QuantumIntentEngine = QuantumInterpretationEngine
+QuantumEvidenceFusionEngine = QuantumInterpretationEngine
+QuantumDialogueEngine = QuantumInterpretationEngine
+QuantumSceneInterpretationMatrix = QuantumInterpretationEngine
+
+
+def normalize_text(text: Any) -> str:
+    return QUANTUM_INTERPRETATION_ENGINE.normalize(text)
+
+
+def normalize_lower(text: Any) -> str:
+    return normalize_text(text).lower()
+
+
+def contains_any(text: str, words: Sequence[str]) -> bool:
+    tokens = set(QUANTUM_INTERPRETATION_ENGINE._tokens(normalize_text(text)))
+    return bool(tokens & {normalize_lower(x) for x in words})
+
+
+def _semantic_evidence_stub(kind: str, text: str) -> bool:
+    return contains_any(text, (kind,))
+
+
+def detect_domain_candidates(text: str):
+    return [
+        x["domain"] for x in QUANTUM_INTERPRETATION_ENGINE.domains(text)["measurements"]
+        if float(x["score"]) >= 0.45
+    ]
+
+
+def build_domain_confidence(text: str):
+    return {
+        x["domain"]: round(float(x["score"]), 4)
+        for x in QUANTUM_INTERPRETATION_ENGINE.domains(text)["measurements"]
+        if float(x["score"]) >= 0.20
+    }
+
+
+def _capability_scores(text: str) -> dict[str, float]:
+    return QUANTUM_INTERPRETATION_ENGINE.measure(text)["capability_scores"]
+
+
+def measure_representation_evidence(text: str) -> list[dict[str, Any]]:
+    return [
+        SemanticEvidence(x["type"], float(x["score"]), "quantum_matrix").as_dict()
+        for x in QUANTUM_INTERPRETATION_ENGINE.representations(text)["measurements"]
+    ]
+
+
+def detect_representation_candidates(text: str):
+    return [
+        x["label"] for x in measure_representation_evidence(text)
+        if float(x["score"]) >= 0.45
+    ]
+
+
+def semantic_evidence_math(text: str) -> float:
+    return QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"].get("formula", 0.0)
+
+
+def semantic_evidence_renderer(text: str) -> float:
+    return max(
+        QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"].values(),
+        default=0.0,
+    )
+
+
+def semantic_evidence_image(text: str) -> float:
+    return QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"].get("image", 0.0)
+
+
+def semantic_evidence_exploration(text: str) -> float:
+    return _capability_scores(text).get("exploration", 0.0)
+
+
+def semantic_evidence_continuation(text: str, previous_assistant: str = "") -> float:
+    return QUANTUM_INTERPRETATION_ENGINE.dialogue(
+        text, previous_assistant=previous_assistant
+    )["dialogue"]["continuation_score"]
+
+
+def semantic_evidence_web(text: str) -> float:
+    return _capability_scores(text).get("web", 0.0)
+
+
+def semantic_evidence_code(text: str) -> float:
+    return _capability_scores(text).get("code", 0.0)
+
+
+def semantic_evidence_information(text: str) -> float:
+    return _capability_scores(text).get("information", 0.0)
+
+
+def detect_discussion_mode(text: str) -> float:
+    return _capability_scores(text).get("discussion", 0.0)
+
+
+def detect_space_discussion(text: str) -> float:
+    return _capability_scores(text).get("space", 0.0)
+
+
+def detect_lightweight_visual(text: str) -> float:
+    scores = QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"]
+    return max(scores.get("image", 0.0), scores.get("diagram", 0.0), scores.get("graph", 0.0))
+
+
+def detect_scene_type(text: str, cognition=None):
+    cognition = cognition if isinstance(cognition, dict) else {}
+    required = [str(x).lower() for x in cognition.get("required_representations", ()) or ()]
+    return required[0] if required else QUANTUM_INTERPRETATION_ENGINE.measure(text)["scene_matrix"]["best_scene"]
+
+
+def _is_micro_social_turn(text: Any) -> bool:
+    p = QUANTUM_INTERPRETATION_ENGINE.measure(normalize_text(text))
+    return bool(p["fast_social"] and len(normalize_text(text).split()) <= 24)
+
+
+def _semantic_identity_request(text: Any) -> bool:
+    return bool(QUANTUM_INTERPRETATION_ENGINE.measure(normalize_text(text))["identity_request"])
+
+
+def _dialogue_signal_contract(
+    text: str, history: list, state: dict, semantic: dict, cognition: dict | None = None,
+    precomputed_profile: dict[str, Any] | None = None,
+):
+    cognition = cognition if isinstance(cognition, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+    previous_assistant, previous_user, reply_to = QUANTUM_INTERPRETATION_ENGINE._history(history)
+    active_goal = normalize_text(
+        state.get("active_goal") or state.get("current_goal")
+        or semantic.get("active_goal") or cognition.get("active_goal")
+    )
+    active_topic = normalize_text(
+        state.get("active_topic") or state.get("current_topic")
+        or semantic.get("current_topic") or cognition.get("active_topic")
+    )
+    measured = QUANTUM_INTERPRETATION_ENGINE.dialogue(
+        text, previous_assistant=previous_assistant, previous_user=previous_user,
+        active_goal=active_goal, active_topic=active_topic,
+    )
+    d = measured["dialogue"]
+    continuation = bool(
+        previous_assistant and (
+            d["label"] in {"continuation", "reformulation", "correction", "reference", "affirmation", "rejection"}
+            or d["continuation_score"] >= 0.72
+        )
+    )
+    return {
+        "dialog_act": d["label"],
+        "current_request": text,
+        "continuation": continuation,
+        "reference_to_previous": bool(previous_assistant and d["reference_score"] >= 0.60),
+        "previous_april_turn": previous_assistant,
+        "previous_user_turn": previous_user,
+        "reply_to": reply_to,
+        "active_goal": active_goal,
+        "active_topic": active_topic,
+        "topic_score": d["topic_score"],
+        "goal_score": d["goal_score"],
+        "continuation_score": d["continuation_score"],
+        "reference_score": d["reference_score"],
+        "topic_shift": bool(active_topic and not continuation and d["topic_score"] < 0.35),
+        "history_available": bool(history),
+        "turn_count": len(history),
+        "semantic_measurement": measured,
+        "confidence": d["confidence"],
+        "decision_owner": DECISION_OWNER,
+        "evidence_only": True,
+        "canonical": True,
+    }
+
+
+def _semantic_context_packet(
+    text: str, history: list, state: dict, semantic: dict, cognition: dict
+) -> dict[str, Any]:
+    result = QUANTUM_INTERPRETATION_ENGINE.interpret(
+        text, cognition=cognition, semantic=semantic, history=history, state=state
+    )
+    return result.get("quantum_interpretation_field", {})
+
+
+def _base_interpret_request(
+    text, cognition=None, semantic=None, history=None, state=None
+):
+    return interpret_request(text, cognition, semantic, history, state)
+
+
+# ---------------------------------------------------------------------------
+# Canonical interpretation entrypoint
+# ---------------------------------------------------------------------------
+
+def interpret_request(
+    text, cognition=None, semantic=None, history=None, state=None
+):
+    return QUANTUM_INTERPRETATION_ENGINE.interpret(
+        text,
+        cognition=cognition,
+        semantic=semantic,
+        history=history,
+        state=state,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compatibility builders retained as thin views, not separate engines.
+# ---------------------------------------------------------------------------
+
+def build_semantic_dialog_profile(
+    text, cognition=None, semantic=None, assistant_response=None,
+    dialogue_history=None, vision_context=None
+):
     cognition = cognition or {}
     semantic = semantic or {}
     return {
@@ -2866,7 +1513,7 @@ def build_semantic_dialog_profile(text, cognition=None, semantic=None,
         "active_topic": cognition.get("active_topic_slot") or semantic.get("current_topic"),
         "semantic_state": semantic,
         "requires_scene_builder": False,
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
@@ -2875,32 +1522,28 @@ def build_scene_construction_profile(semantic_profile):
         "requires_scene_builder": False,
         "scene_type": "dialogue",
         "dialogue_mode": "semantic_unified",
-        "context_source": "evidence_packet",
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "profile_version": "quantum_interpretation_engine_v3",
+        "context_source": "quantum_matrix",
+        "decision_owner": DECISION_OWNER,
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_scene_artifact_contract(semantic_profile, scene_profile):
     return {
         "contract": "scene_artifact",
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "semantic_profile": semantic_profile or {},
         "scene_profile": scene_profile or {},
-        "dialogue_history": (semantic_profile or {}).get("dialogue_history", []),
-        "assistant_response": (semantic_profile or {}).get("assistant_response"),
-        "active_goal": (semantic_profile or {}).get("active_goal"),
-        "scene_type": (scene_profile or {}).get("scene_type", "dialogue"),
         "representation": "processor_decides",
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
-def build_unified_scene_context(semantic_profile, scene_profile, artifact_contract,
-                                voice_context=None, vision_context=None,
-                                gallery_context=None, file_context=None,
-                                assistant_response=None, dialogue_history=None,
-                                memory_state=None):
+def build_unified_scene_context(
+    semantic_profile, scene_profile, artifact_contract,
+    voice_context=None, vision_context=None, gallery_context=None, file_context=None,
+    assistant_response=None, dialogue_history=None, memory_state=None
+):
     return {
         "semantic_profile": semantic_profile or {},
         "scene_profile": scene_profile or {},
@@ -2910,54 +1553,59 @@ def build_unified_scene_context(semantic_profile, scene_profile, artifact_contra
         "gallery_context": gallery_context or {},
         "file_context": file_context or {},
         "assistant_response": assistant_response,
-        "dialogue_history": dialogue_history or (semantic_profile or {}).get("dialogue_history", []),
+        "dialogue_history": dialogue_history or [],
         "active_goal": (semantic_profile or {}).get("active_goal"),
         "active_scene": (scene_profile or {}).get("scene_type", "dialogue"),
         "memory_state": memory_state or {},
-        "continuity_state": {"single_route": True, "transport": "transport_state", "scene_contract": "canonical"},
-        "profile_version": "quantum_interpretation_engine_v3",
+        "continuity_state": {
+            "single_route": True,
+            "transport": TRANSPORT_NAME,
+            "scene_contract": "canonical",
+        },
+        "profile_version": "quantum_matrix_v1",
     }
 
 
-def build_scene_execution_plan(semantic_profile, scene_profile, artifact_contract, unified_scene_context=None):
+def build_scene_execution_plan(
+    semantic_profile, scene_profile, artifact_contract, unified_scene_context=None
+):
     context = unified_scene_context or build_unified_scene_context(
         semantic_profile, scene_profile, artifact_contract
     )
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "scene_contract": "canonical",
         "scene_context": context,
         "scene_type": (scene_profile or {}).get("scene_type", "dialogue"),
         "representation": "processor_decides",
-        "execution_mode": "single_semantic_pipeline",
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "profile_version": "quantum_interpretation_engine_v3",
+        "execution_mode": "single_quantum_matrix_pipeline",
+        "decision_owner": DECISION_OWNER,
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_unified_interpretation_state(scene_context, processor_state=None):
-    scene_context = scene_context or {}
     return {
-        "transport": "transport_state",
-        "scene_context": scene_context,
+        "transport": TRANSPORT_NAME,
+        "scene_context": scene_context or {},
         "processor_state": processor_state or {},
-        "dialogue_vector": scene_context.get("dialogue_history", []),
-        "assistant_response": scene_context.get("assistant_response"),
-        "voice_context": scene_context.get("voice_context", {}),
-        "vision_context": scene_context.get("vision_context", {}),
-        "gallery_context": scene_context.get("gallery_context", {}),
-        "file_context": scene_context.get("file_context", {}),
-        "active_goal": scene_context.get("active_goal"),
-        "active_scene": scene_context.get("active_scene"),
+        "dialogue_vector": (scene_context or {}).get("dialogue_history", []),
+        "assistant_response": (scene_context or {}).get("assistant_response"),
+        "voice_context": (scene_context or {}).get("voice_context", {}),
+        "vision_context": (scene_context or {}).get("vision_context", {}),
+        "gallery_context": (scene_context or {}).get("gallery_context", {}),
+        "file_context": (scene_context or {}).get("file_context", {}),
+        "active_goal": (scene_context or {}).get("active_goal"),
+        "active_scene": (scene_context or {}).get("active_scene"),
         "executor_mode": "single_scene_contract",
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_semantic_processor_state(interpretation_state, execution_plan=None):
     state = interpretation_state or {}
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "processor_contract": "canonical",
         "interpretation_state": state,
         "execution_plan": execution_plan or {},
@@ -2976,14 +1624,14 @@ def build_semantic_processor_state(interpretation_state, execution_plan=None):
             "continuity": True,
             "single_route": True,
         },
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_dialogue_understanding_core(processor_state, executor_state=None):
     inputs = (processor_state or {}).get("semantic_inputs", {})
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "dialogue_understanding": {
             "user_text": inputs.get("text"),
             "voice": inputs.get("voice"),
@@ -3000,13 +1648,13 @@ def build_dialogue_understanding_core(processor_state, executor_state=None):
             "response_context": True,
             "executor_shared_context": executor_state or {},
         },
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def optimize_dialogue_understanding(dialogue_core):
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "dialogue_understanding": (dialogue_core or {}).get("dialogue_understanding", {}),
         "optimization": {
             "semantic_priority": ["current_request", "active_goal", "dialogue_history", "multimodal_context"],
@@ -3019,22 +1667,20 @@ def optimize_dialogue_understanding(dialogue_core):
             "single_scene": True, "single_contract": True, "single_transport": True,
             "preserve_dialogue_vector": True,
         },
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_semantic_interpretation_contract(dialogue_optimization):
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "semantic_contract": {
             "mode": "canonical_semantic",
-            "compatibility_isolated": True,
             "single_scene": True,
             "single_dialogue": True,
             "single_processor": True,
             "single_executor": True,
         },
-        "disabled_legacy_flags": [],
         "dialogue_optimization": dialogue_optimization or {},
         "reasoning_policy": {
             "current_request_authoritative": True,
@@ -3043,14 +1689,14 @@ def build_semantic_interpretation_contract(dialogue_optimization):
             "trigger_independent": True,
             "scene_continuity": True,
         },
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_canonical_semantic_runtime(semantic_contract, processor_state, dialogue_core):
     dialogue = (dialogue_core or {}).get("dialogue_understanding", {})
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "scene": dialogue.get("scene_understanding", {}),
         "dialogue": dialogue,
         "processor": processor_state or {},
@@ -3060,17 +1706,12 @@ def build_canonical_semantic_runtime(semantic_contract, processor_state, dialogu
             "assistant": dialogue.get("assistant_response"),
             "goal": dialogue.get("scene_understanding", {}).get("active_goal"),
         },
-        "compatibility": {"enabled": False, "trigger_execution": False, "keyword_matching": False},
-        "input_sources": {
-            key: value for key, value in {
-                "text": dialogue.get("user_text"),
-                "voice": dialogue.get("voice"),
-                "images": dialogue.get("images"),
-                "gallery": dialogue.get("gallery"),
-                "files": dialogue.get("files"),
-            }.items() if value not in (None, {}, [], "")
+        "compatibility": {
+            "enabled": False,
+            "trigger_execution": False,
+            "keyword_matching": False,
         },
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
@@ -3079,12 +1720,12 @@ def fuse_semantic_inputs(runtime_state):
     inputs = dict(runtime_state.get("input_sources", {}))
     continuity = runtime_state.get("continuity_vector", {})
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "scene": runtime_state.get("scene", {}),
         "goal": continuity.get("goal"),
         "history": continuity.get("history", []),
         "assistant_response": continuity.get("assistant"),
-        "modalities": {key: inputs.get(key) for key in ("text", "voice", "images", "gallery", "files")},
+        "modalities": {k: inputs.get(k) for k in ("text", "voice", "images", "gallery", "files")},
         "semantic_state": {
             "single_route": True,
             "multimodal_fusion": True,
@@ -3092,23 +1733,22 @@ def fuse_semantic_inputs(runtime_state):
             "context_complete": True,
         },
         "available_modalities": [k for k, v in inputs.items() if v not in (None, {}, [], "")],
-        "profile_version": "quantum_interpretation_engine_v3",
+        "profile_version": "quantum_matrix_v1",
     }
 
 
 def build_processor_execution_context(runtime_state):
     fused = fuse_semantic_inputs(runtime_state or {})
     return {
-        "transport": "transport_state",
+        "transport": TRANSPORT_NAME,
         "semantic_context": fused,
         "executor_context": fused,
         "processor_context": fused,
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "profile_version": "quantum_interpretation_engine_v3",
+        "decision_owner": DECISION_OWNER,
+        "profile_version": "quantum_matrix_v1",
     }
 
 
-# Compatibility aliases used by older integrations.
 SEMANTIC_EVIDENCE_PRIORITY = (
     "current_request", "active_goal", "dialogue_history",
     "voice_context", "vision_context", "gallery_context",
@@ -3116,15 +1756,15 @@ SEMANTIC_EVIDENCE_PRIORITY = (
 )
 LEGACY_TRIGGER_FLAGS = ()
 CANONICAL_SEMANTIC_RUNTIME = {
-    "transport": "transport_state",
-    "reasoning": "semantic_evidence",
+    "transport": TRANSPORT_NAME,
+    "reasoning": "quantum_matrix",
     "legacy_trigger_execution": False,
     "single_scene": True,
     "single_processor": True,
     "single_executor": True,
 }
 SEMANTIC_INTERPRETATION_CORE = {
-    "decision_source": "QUANTUM_PROCESSOR",
+    "decision_source": DECISION_OWNER,
     "routing": "processor_owned",
     "legacy_mode": "isolated",
     "scene_contract": "artifact_first",
@@ -3132,8 +1772,44 @@ SEMANTIC_INTERPRETATION_CORE = {
     "history_model": "evidence_based",
     "confidence_policy": "multi_evidence",
 }
-SEMANTIC_PIPELINE = (
-    "dialogue_profile", "semantic_evidence_engine", "dialogue_cognition_matrix",
-    "semantic_dialogue_graph", "scene_profile", "artifact_contract",
-    "executor_preparation_contract",
-)
+SEMANTIC_PIPELINE = INTERPRETATION_ROUTE
+
+
+# ---------------------------------------------------------------------------
+# Deep-model API compatibility
+# ---------------------------------------------------------------------------
+
+def _runtime_ready_guard() -> None:
+    return None
+
+
+def _ensure_semantic_runtime() -> None:
+    return None
+
+
+def preload_semantic_runtime() -> None:
+    return None
+
+
+def start_semantic_accelerator() -> None:
+    return None
+
+
+def _ensure_nli_runtime() -> None:
+    return None
+
+
+def _lightweight_linguistic(text: str) -> Dict[str, Any]:
+    return QUANTUM_INTERPRETATION_ENGINE._linguistic(normalize_text(text))
+
+
+def _stanza_lang_ready(lang: str) -> bool:
+    return False
+
+
+def _stanza_resources_ready() -> bool:
+    return False
+
+
+def _provision_stanza_resources() -> None:
+    return None
