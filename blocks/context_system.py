@@ -31,7 +31,6 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
-
 FILE_ID = "APRIL_SCENE_CONTEXT_COORDINATION_SYSTEM"
 ROOM = "CONTEXT_ROOM"
 VERSION = "QUANTUM_CONTEXT_V8"
@@ -73,14 +72,12 @@ MAX_IMAGE_HINT = 180
 MAX_MATH_EXPR = 120
 MAX_GOAL_LENGTH = 300
 
-
 def APRIL_LOG_IN(room: str, metadata: Optional[Dict[str, Any]] = None) -> None:
     try:
         print({"type": "APRIL_LOG_IN", "room": room, "file": FILE_ID,
                "version": VERSION, "metadata": metadata or {}})
     except Exception:
         pass
-
 
 def APRIL_LOG_OUT(room: str, metadata: Optional[Dict[str, Any]] = None) -> None:
     try:
@@ -89,28 +86,22 @@ def APRIL_LOG_OUT(room: str, metadata: Optional[Dict[str, Any]] = None) -> None:
     except Exception:
         pass
 
-
 def normalize_text(text: Any) -> str:
     return str(text or "").strip()
-
 
 def normalize_lower(text: Any) -> str:
     return normalize_text(text).lower()
 
-
 def safe_slice(value: Any, limit: int) -> str:
     return normalize_text(value)[:max(0, int(limit))]
-
 
 def contains_any(text: Any, words: Iterable[str]) -> bool:
     value = normalize_lower(text)
     return any(word in value for word in words)
 
-
 def _tokens(value: Any) -> set[str]:
     words = re.findall(r"[a-zа-яё0-9]{4,}", normalize_lower(value))
     return {w for w in words if w not in CONTEXT_STOPWORDS}
-
 
 def _is_low_information(text: Any) -> bool:
     value = normalize_text(text)
@@ -118,7 +109,6 @@ def _is_low_information(text: Any) -> bool:
         return True
     tokens = _tokens(value)
     return len(tokens) <= 1
-
 
 def _semantic_profile(text: Any, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     try:
@@ -169,27 +159,31 @@ def _is_reference(text: Any, state: Optional[Dict[str, Any]] = None) -> bool:
     independent = float(profile.get("independent_score", 0.0) or 0.0)
     return max(reference, continuation) >= 0.58 and max(reference, continuation) >= independent + 0.03
 
-
 def _is_independent_short_turn(text: Any, state: Dict[str, Any] | None = None) -> bool:
-    """Semantic context gate; no phrase/keyword routing."""
+    """Measure independence against the real conversation field.
+
+    This is evidence only. It never clears state and never routes the request.
+    """
     value = normalize_text(text)
     if not value or len(value.split()) > 24:
         return False
-    if _is_low_information(value):
-        return True
-    try:
-        from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
-        if hasattr(QUANTUM_EVIDENCE_FUSION, "fast_semantic_profile"):
-            profile = QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(value, "", "", "")
-        else:
-            profile = QUANTUM_EVIDENCE_FUSION._fast_measurement(value, "", "", "")
-        independent = float(profile.get("independent_score", 0.0))
-        continuation = float(profile.get("continuation_score", 0.0))
-        reference = float(profile.get("reference_score", 0.0))
-        return independent >= 0.58 and independent >= max(continuation, reference) + 0.03
-    except Exception:
-        return len(value.split()) <= 4
 
+    st = _state_dict(state)
+    dialog = st.get("dialog") if isinstance(st.get("dialog"), list) else []
+    if not dialog:
+        return _is_low_information(value)
+
+    profile = _semantic_profile(value, st)
+    independent = float(profile.get("independent_score", 0.0) or 0.0)
+    continuation = float(profile.get("continuation_score", 0.0) or 0.0)
+    reference = float(profile.get("reference_score", 0.0) or 0.0)
+
+    # A short request remains independent only when its measured independence
+    # clearly dominates the measured dialogue relationship.
+    return bool(
+        independent >= 0.58
+        and independent >= max(continuation, reference) + 0.08
+    )
 
 def _overlap(a: Any, b: Any) -> float:
     aa, bb = _tokens(a), _tokens(b)
@@ -197,14 +191,11 @@ def _overlap(a: Any, b: Any) -> float:
         return 0.0
     return len(aa & bb) / max(1, min(len(aa), len(bb)))
 
-
 def _state_dict(state: Any) -> Dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
-
 def _dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
 
 def build_scene_focus_snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
     scene = _dict(state.get("active_scene") or state.get("scene_state"))
@@ -214,7 +205,6 @@ def build_scene_focus_snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
         "visual": scene.get("visual_summary", ""),
         "last_visual_event": scene.get("last_visual_event", ""),
     }
-
 
 def build_context_telemetry() -> Dict[str, Any]:
     return {
@@ -232,7 +222,6 @@ def build_context_telemetry() -> Dict[str, Any]:
         "renderer_selection": "delegated",
     }
 
-
 INPUT_MACHINE_CHANNEL = {
     "source": "executor",
     "type": "machine_context_input",
@@ -243,7 +232,6 @@ OUTPUT_MACHINE_CHANNEL = {
     "type": "machine_context_output",
     "isolated": True,
 }
-
 
 def build_machine_context_payload(
     trajectory: Any = None,
@@ -265,7 +253,6 @@ def build_machine_context_payload(
         "telemetry": build_context_telemetry(),
     }
 
-
 def _scene_topic(scene_state: Any) -> str:
     scene = _dict(scene_state)
     return normalize_text(
@@ -273,7 +260,6 @@ def _scene_topic(scene_state: Any) -> str:
         or scene.get("active_topic")
         or ""
     )
-
 
 def detect_topic_shift(
     text: Any,
@@ -285,7 +271,6 @@ def detect_topic_shift(
         return False
     topic = _scene_topic(scene_state)
     return bool(topic and _overlap(current, topic) == 0.0)
-
 
 def archive_completed_flow(state: Dict[str, Any], active_flow: Optional[Dict[str, Any]]) -> None:
     if not active_flow:
@@ -301,7 +286,6 @@ def archive_completed_flow(state: Dict[str, Any], active_flow: Optional[Dict[str
         memory.append(item)
     state["passive_memory"] = memory[-MAX_PASSIVE_MEMORY:]
 
-
 def build_scene_block(scene_state: Optional[Dict[str, Any]]) -> str:
     scene = _dict(scene_state)
     lines: List[str] = []
@@ -316,7 +300,6 @@ def build_scene_block(scene_state: Optional[Dict[str, Any]]) -> str:
     if scene.get("continuity_mode"):
         lines.append(f"Continuity: {scene['continuity_mode']}")
     return "\nSCENE STATE:\n" + "\n".join(lines) if lines else ""
-
 
 def build_visual_scene_block(active_visual_scene: Optional[Dict[str, Any]]) -> str:
     scene = _dict(active_visual_scene)
@@ -338,7 +321,6 @@ def build_visual_scene_block(active_visual_scene: Optional[Dict[str, Any]]) -> s
         lines.append(f"Last Event: {safe_slice(scene['last_event'], 120)}")
     return "\n".join(lines)
 
-
 def build_visual_focus_block(state: Dict[str, Any]) -> str:
     focus = _dict(state.get("visual_focus"))
     if not focus:
@@ -351,7 +333,6 @@ def build_visual_focus_block(state: Dict[str, Any]) -> str:
     if focus.get("confidence") is not None:
         lines.append(f"Confidence: {focus['confidence']}")
     return "\n".join(lines)
-
 
 def build_visual_summary_block(state: Dict[str, Any]) -> str:
     summary = _dict(state.get("visual_summary"))
@@ -366,12 +347,10 @@ def build_visual_summary_block(state: Dict[str, Any]) -> str:
         lines.append(f"Last Event: {safe_slice(summary['last_event'], 120)}")
     return "\n".join(lines)
 
-
 def build_visual_memory_block(state: Dict[str, Any]) -> str:
     timeline = _dict(state.get("memory_timeline"))
     memory = _dict(timeline.get("day_0")).get("visual_scenes", [])
     return f"\nVISUAL MEMORY:\nSnapshots: {len(memory)}" if memory else ""
-
 
 def build_memory_timeline_block(state: Dict[str, Any]) -> str:
     timeline = _dict(state.get("memory_timeline"))
@@ -384,7 +363,6 @@ def build_memory_timeline_block(state: Dict[str, Any]) -> str:
     if day1:
         lines.append("Yesterday Memory Available")
     return "\n".join(lines)
-
 
 def build_base_context() -> str:
     return """
@@ -405,14 +383,12 @@ QUANTUM RULES:
 - historical context may clarify but never replace the current request.
 """
 
-
 def build_current_request(text: Any, scene_state: Optional[Dict[str, Any]] = None) -> str:
     return (
         "CURRENT REQUEST — AUTHORITATIVE:\n"
         f"{normalize_text(text)}\n"
         "RULE: current request has highest semantic priority."
     )
-
 
 def stabilize_active_flow(state: Dict[str, Any], scene_state: Dict[str, Any]) -> None:
     flow = state.get("active_flow")
@@ -423,7 +399,6 @@ def stabilize_active_flow(state: Dict[str, Any], scene_state: Dict[str, Any]) ->
         flow["trajectory"] = trajectory
         flow["scene_bound"] = True
         flow["continuity_priority"] = True
-
 
 def _v7_clear_stale_scene(state: Dict[str, Any], current_text: str) -> bool:
     """Measure a possible transition without mutating dialogue state.
@@ -468,11 +443,9 @@ def detect_dialog_intent(current_text: Any, state: Dict[str, Any]) -> str:
         return "REFERENCE_OBJECT"
     return "NEW_TOPIC"
 
-
 def should_include_archived_memory(current_text: Any, state: Dict[str, Any]) -> bool:
     intent = detect_dialog_intent(current_text, state)
     return intent != "NEW_TOPIC"
-
 
 def build_context_focus_snapshot(text: Any, state: Dict[str, Any]) -> Dict[str, Any]:
     focus = _dict(state.get("focus_state") or state.get("dynamic_focus"))
@@ -490,12 +463,10 @@ def build_context_focus_snapshot(text: Any, state: Dict[str, Any]) -> Dict[str, 
         "context_policy": "CURRENT_REQUEST_FIRST",
     }
 
-
 def detect_context_refresh_needed(text: Any, state: Dict[str, Any]) -> bool:
     focus = _dict(state.get("focus_state") or state.get("dynamic_focus"))
     active = normalize_lower(focus.get("primary_focus", ""))
     return bool(active and _overlap(text, active) == 0.0)
-
 
 def build_dynamic_focus_block(state: Dict[str, Any]) -> str:
     focus = _dict(state.get("focus_state") or state.get("dynamic_focus"))
@@ -509,7 +480,6 @@ def build_dynamic_focus_block(state: Dict[str, Any]) -> str:
     if focus.get("focus_strength") is not None:
         lines.append(f"Focus Strength: {focus['focus_strength']}")
     return "\n".join(lines)
-
 
 def build_unified_focus_block(state: Dict[str, Any]) -> str:
     focus = _dict(state.get("focus_state"))
@@ -526,7 +496,6 @@ def build_unified_focus_block(state: Dict[str, Any]) -> str:
             lines.append(f"{label}: {focus[key]}")
     return "\n".join(lines)
 
-
 def build_visual_anchors_block(state: Dict[str, Any]) -> str:
     scene = _dict(state.get("active_visual_scene"))
     focus = _dict(state.get("visual_focus"))
@@ -537,7 +506,6 @@ def build_visual_anchors_block(state: Dict[str, Any]) -> str:
     if objects:
         lines.append("Scene Objects: " + ", ".join(map(str, objects[:10])))
     return "" if len(lines) == 1 else "\n".join(lines)
-
 
 def build_focus_priority_score(
     lowered: str,
@@ -560,7 +528,6 @@ def build_focus_priority_score(
         score += 6
     return score
 
-
 def calculate_context_priority(
     lowered: str,
     dynamic_focus: Dict[str, Any],
@@ -570,7 +537,6 @@ def calculate_context_priority(
     return build_focus_priority_score(
         lowered, dynamic_focus, visual_focus, trajectory
     )
-
 
 def calculate_context_priority_v2(
     lowered: str,
@@ -583,7 +549,6 @@ def calculate_context_priority_v2(
     return calculate_context_priority(
         lowered, dynamic_focus, visual_focus, trajectory
     ) + int(focus_state.get("priority_score", 0) or 0)
-
 
 def build_relevant_dialog(
     dialog: Optional[List[Dict[str, Any]]], text: Any,
@@ -631,7 +596,6 @@ def build_active_dialog(state: Dict[str, Any], text: Any = "") -> str:
         state.get("scene_state"),
     )
 
-
 def build_dialog_focus_block(state: Dict[str, Any], current_text: Any) -> str:
     scene = _dict(state.get("scene_state"))
     focus = _dict(state.get("focus_state") or state.get("dynamic_focus"))
@@ -643,7 +607,6 @@ def build_dialog_focus_block(state: Dict[str, Any], current_text: Any) -> str:
         f"Vector: {focus.get('primary_focus', scene.get('trajectory', ''))}\n"
         f"Direction: {intent}"
     )
-
 
 def compute_dialog_focus(state: Dict[str, Any], current_text: Any) -> Dict[str, Any]:
     scene = _dict(state.get("scene_state"))
@@ -660,7 +623,6 @@ def compute_dialog_focus(state: Dict[str, Any], current_text: Any) -> Dict[str, 
         },
     }
 
-
 def build_context_memory_bridge(state: Dict[str, Any]) -> Dict[str, Any]:
     timeline = _dict(state.get("memory_timeline"))
     return {
@@ -675,7 +637,6 @@ def build_context_memory_bridge(state: Dict[str, Any]) -> Dict[str, Any]:
         "active_visual_scene": _dict(state.get("active_visual_scene")),
         "today_visual_memory": _dict(timeline.get("day_0")).get("visual_scenes", []),
     }
-
 
 def build_user_space(state: Dict[str, Any]) -> Dict[str, Any]:
     scene = _dict(state.get("scene_state"))
@@ -698,7 +659,6 @@ def build_user_space(state: Dict[str, Any]) -> Dict[str, Any]:
         },
     }
 
-
 def build_scene_contract(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "version": 2,
@@ -708,7 +668,6 @@ def build_scene_contract(state: Dict[str, Any]) -> Dict[str, Any]:
         "context_role": "EVIDENCE_ONLY",
         "decision_owner": "QUANTUM_PROCESSOR",
     }
-
 
 def build_workspace_summary(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -721,7 +680,6 @@ def build_workspace_summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "renderer_state": _dict(state.get("renderer_state")),
     }
 
-
 def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "user_space": build_user_space(state),
@@ -730,7 +688,6 @@ def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
         "context_role": "EVIDENCE_ONLY",
         "decision_owner": "QUANTUM_PROCESSOR",
     }
-
 
 def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str, Any]:
     """Compact quantum input: memory is evidence, not a decision."""
@@ -743,7 +700,6 @@ def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str,
         "reference_request": _is_reference(text),
     }
 
-
 def _v7_latest_substantive_user_message(dialog: List[Dict[str, Any]]) -> str:
     for msg in reversed(dialog):
         if normalize_lower(msg.get("role")) not in {"user", "human"}:
@@ -753,21 +709,87 @@ def _v7_latest_substantive_user_message(dialog: List[Dict[str, Any]]) -> str:
             return content
     return ""
 
-
 def build_quantum_context_evidence(
     user_id: Any,
     text: Any,
     state: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Single compact evidence surface consumed by Quantum Processor."""
+    """Build one context field; semantic decisions belong to the processor."""
     scene = _dict(state.get("scene_state"))
     focus = _dict(state.get("focus_state") or state.get("dynamic_focus"))
     visual = _dict(state.get("active_visual_scene"))
+    dialog = state.get("dialog") if isinstance(state.get("dialog"), list) else []
+
+    previous_april = ""
+    previous_user = ""
+    recent_dialogue: list[dict[str, str]] = []
+    for item in reversed(dialog[-12:]):
+        if not isinstance(item, dict):
+            continue
+        role = normalize_lower(item.get("role"))
+        if role in {"assistant", "april", "bot"}:
+            content = normalize_text(
+                item.get("answer") or item.get("content")
+                or item.get("summary") or item.get("text")
+            )
+            if content and not previous_april:
+                previous_april = content
+            if content:
+                recent_dialogue.append({"role": "assistant", "content": safe_slice(content, 700)})
+        elif role in {"user", "human"}:
+            content = normalize_text(
+                item.get("content") or item.get("text") or item.get("answer")
+            )
+            if content and not previous_user:
+                previous_user = content
+            if content:
+                recent_dialogue.append({"role": "user", "content": safe_slice(content, 500)})
+        else:
+            if isinstance(item.get("april"), dict):
+                content = normalize_text(
+                    item["april"].get("answer")
+                    or item["april"].get("content")
+                    or item["april"].get("summary")
+                )
+                if content:
+                    if not previous_april:
+                        previous_april = content
+                    recent_dialogue.append({"role": "assistant", "content": safe_slice(content, 700)})
+            if isinstance(item.get("user"), dict):
+                content = normalize_text(
+                    item["user"].get("content")
+                    or item["user"].get("text")
+                    or item["user"].get("answer")
+                )
+                if content:
+                    if not previous_user:
+                        previous_user = content
+                    recent_dialogue.append({"role": "user", "content": safe_slice(content, 500)})
+
+    recent_dialogue.reverse()
     return {
         "version": VERSION,
         "user_id": str(user_id) if user_id is not None else "",
         "current_request": normalize_text(text),
         "current_request_authoritative": True,
+        "dialogue": {
+            "previous_user_turn": previous_user,
+            "previous_april_turn": previous_april,
+            "recent_turns": recent_dialogue[-8:],
+            "history_depth": len(dialog),
+            "active_topic": normalize_text(
+                focus.get("active_topic")
+                or focus.get("primary_focus")
+                or scene.get("trajectory")
+                or ""
+            ),
+            "active_goal": normalize_text(
+                focus.get("active_goal")
+                or scene.get("goal")
+                or ""
+            ),
+            "role": "context_evidence_only",
+        },
         "scene": {
             "trajectory": scene.get("trajectory", ""),
             "goal": safe_slice(scene.get("goal", ""), MAX_GOAL_LENGTH),
@@ -783,18 +805,18 @@ def build_quantum_context_evidence(
             "scene_type": visual.get("scene_type", ""),
             "summary": safe_slice(visual.get("summary", ""), 300),
             "objects": list(visual.get("objects") or [])[:10],
+            "render_block_types": list(
+                visual.get("render_block_types")
+                or visual.get("block_types")
+                or []
+            )[:8],
         },
-        "dialog_intent_evidence": detect_dialog_intent(text, state),
         "memory": build_memory_context_evidence(state, text),
-        "topic_shift_evidence": detect_topic_shift(
-            text, state.get("active_flow"), scene
-        ),
         "decision_owner": "QUANTUM_PROCESSOR",
         "renderer_owner": "QUANTUM_PROCESSOR",
         "route_owner": "QUANTUM_PROCESSOR",
         "provider_calls": 0,
     }
-
 
 def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
     """
@@ -860,7 +882,6 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
 
     return "\n\n".join(x for x in blocks if x)
 
-
 def update_memory_summary(state: Dict[str, Any], user_text: Any, bot_reply: Any) -> None:
     user = normalize_text(user_text)
     reply = normalize_text(bot_reply)
@@ -876,7 +897,6 @@ def update_memory_summary(state: Dict[str, Any], user_text: Any, bot_reply: Any)
     combined = (old + " | " + chunk).strip()
     state["memory_summary"] = combined[-MAX_SUMMARY_LENGTH:]
 
-
 def synchronize_scene_state(state: Dict[str, Any]) -> None:
     scene = _dict(state.get("scene_state"))
     flow = state.get("active_flow")
@@ -887,7 +907,6 @@ def synchronize_scene_state(state: Dict[str, Any]) -> None:
         state["execution_mode"] = scene["execution_mode"]
     if scene.get("visual_mode"):
         state["visual_mode"] = scene["visual_mode"]
-
 
 def build_deephub_context(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
     """
@@ -900,9 +919,8 @@ def build_deephub_context(user_id: Any, text: Any, state: Dict[str, Any]) -> str
     state["current_request"] = text
     synchronize_scene_state(state)
 
-    # Resolve stale-scene / continuation state BEFORE any evidence or executor
-    # packet is built. This preserves the single route while preventing an
-    # unrelated previous visual scene from entering the quantum field first.
+    # Context is collected before semantic collapse. It never erases or reroutes
+    # dialogue state; the Quantum Processor decides relevance after measurement.
     canonical_context_text = build_context_text(user_id, text, state)
 
     evidence = build_quantum_context_evidence(
@@ -930,7 +948,6 @@ def build_deephub_context(user_id: Any, text: Any, state: Dict[str, Any]) -> str
 
     return canonical_context_text
 
-
 def build_context_telemetry_v2(state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     state = _dict(state)
     evidence = _dict(_dict(state.get("_executor_context_packet")).get("quantum_evidence"))
@@ -941,7 +958,6 @@ def build_context_telemetry_v2(state: Optional[Dict[str, Any]] = None) -> Dict[s
         "parallel_route": False,
         "telegram_transport": False,
     }
-
 
 # Compatibility aliases used by older callers.
 FOCUS_FIRST_MODE = True
