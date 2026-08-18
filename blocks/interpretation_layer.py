@@ -284,14 +284,15 @@ class QuantumInterpretationEngine:
         return out
 
     def _context_scores(
-        self, text: str, previous_assistant: str, active_topic: str, active_goal: str
+        self, text: str, previous_assistant: str, previous_user: str, active_topic: str, active_goal: str
     ) -> dict[str, float]:
         if not text:
-            return {"previous_assistant": 0.0, "active_topic": 0.0, "active_goal": 0.0}
-        scores = {"previous_assistant": 0.0, "active_topic": 0.0, "active_goal": 0.0}
+            return {"previous_assistant": 0.0, "previous_user": 0.0, "active_topic": 0.0, "active_goal": 0.0}
+        scores = {"previous_assistant": 0.0, "previous_user": 0.0, "active_topic": 0.0, "active_goal": 0.0}
         query = set(self._tokens(text))
         for key, value in (
             ("previous_assistant", previous_assistant),
+            ("previous_user", previous_user),
             ("active_topic", active_topic),
             ("active_goal", active_goal),
         ):
@@ -418,13 +419,14 @@ class QuantumInterpretationEngine:
         text: str,
         *,
         previous_assistant: str = "",
+        previous_user: str = "",
         active_topic: str = "",
         active_goal: str = "",
         modalities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         text = self.normalize(text)
         key = (
-            text, self.normalize(previous_assistant),
+            text, self.normalize(previous_assistant), self.normalize(previous_user),
             self.normalize(active_topic), self.normalize(active_goal),
             tuple(sorted((modalities or {}).keys())),
         )
@@ -434,7 +436,7 @@ class QuantumInterpretationEngine:
 
         families = self._tfidf_scores(text)
         context = self._context_scores(
-            text, previous_assistant, active_topic, active_goal
+            text, previous_assistant, previous_user, active_topic, active_goal
         )
 
         dialogue = families["dialogue"]
@@ -545,6 +547,7 @@ class QuantumInterpretationEngine:
         return self.measure(
             text,
             previous_assistant=previous_assistant,
+            previous_user=previous_user,
             active_topic=active_topic,
             active_goal=active_goal,
         )
@@ -556,6 +559,7 @@ class QuantumInterpretationEngine:
         profile = self.measure(
             text,
             previous_assistant=previous_assistant,
+            previous_user=previous_user,
             active_topic=active_topic,
             active_goal=active_goal,
         )
@@ -626,18 +630,29 @@ class QuantumInterpretationEngine:
     ) -> dict[str, Any]:
         profile = self.measure(
             text, previous_assistant=previous_assistant,
+            previous_user=previous_user,
             active_topic=active_topic, active_goal=active_goal,
         )
         dialogue = profile["dialogue_scores"]
         best = profile["dialogue_best"]
+        assistant_relation = profile["context_scores"].get("previous_assistant", 0.0)
+        user_relation = profile["context_scores"].get("previous_user", 0.0)
+        topic_relation = profile["context_scores"].get("active_topic", 0.0)
         continuation_score = max(
-            dialogue.get("continuation", 0.0),
-            profile["context_scores"].get("previous_assistant", 0.0),
+            dialogue.get("continuation", 0.0), 0.72 * assistant_relation,
+            0.58 * user_relation, 0.64 * topic_relation,
         )
         reference_score = max(
-            dialogue.get("reference", 0.0),
-            profile["context_scores"].get("previous_assistant", 0.0),
+            dialogue.get("reference", 0.0), 0.86 * assistant_relation,
+            0.62 * user_relation, 0.70 * topic_relation,
         )
+        # A relational attribute question with an existing dialogue field is
+        # context-dependent even when lexical overlap is zero. This is a
+        # structural discourse relation, not a word/name trigger.
+        if previous_assistant or previous_user:
+            if profile.get("dialogue_best") == "identity" or dialogue.get("identity", 0.0) >= 0.12:
+                reference_score = max(reference_score, 0.72)
+                continuation_score = max(continuation_score, 0.62)
         continuation = bool(
             previous_assistant
             and (best in {
@@ -729,6 +744,7 @@ class QuantumInterpretationEngine:
         profile = self.measure(
             text,
             previous_assistant=last_assistant,
+            previous_user=last_user,
             active_topic=active_topic,
             active_goal=active_goal,
             modalities={
@@ -775,7 +791,7 @@ class QuantumInterpretationEngine:
         )
         reference = bool(last_assistant and dialogue["reference_score"] >= 0.60)
         topic_shift = bool(
-            active_topic and not continuation
+            active_topic and not continuation and not reference
             and profile["context_scores"].get("active_topic", 0.0) < 0.35
         )
 
@@ -893,12 +909,15 @@ class QuantumInterpretationEngine:
             "continuation_target": last_assistant or active_topic,
             "active_goal": active_goal,
             "active_topic": active_topic,
-            "resolved_request": (
-                f"Continue the previous task naturally.\n"
-                f"Previous assistant response: {last_assistant}\n"
-                f"Current user instruction: {text}"
-                if continuation else text
-            ),
+            "resolved_request": text,
+            "context_resolution": {
+                "depends_on_previous_dialogue": bool(continuation or reference),
+                "previous_user_turn": last_user,
+                "previous_assistant_turn": last_assistant,
+                "active_topic": active_topic,
+                "active_goal": active_goal,
+                "relation": "continuation" if continuation else "reference" if reference else "topic" if active_topic and not topic_shift else "independent",
+            },
             "reply_to": reply_to,
             "required_capabilities": [
                 "semantic_interpretation", "dialogue_context",
