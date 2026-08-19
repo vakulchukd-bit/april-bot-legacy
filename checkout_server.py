@@ -248,7 +248,9 @@ def resolve_scene_content(result):
     contract = scene_contract_view(result.get("scene_contract"))
     gateway = scene_contract_view(result.get("gateway_transport"))
 
-    for k in ("answer", "content", "summary"):
+    # Only canonical human fields may become transport text. Summary is
+    # memory/context and is preserved separately below.
+    for k in ("answer", "content"):
         value = _checkout_best_text(
             contract.get(k),
             contract.get("metadata", {}).get(k),
@@ -263,15 +265,12 @@ def resolve_scene_content(result):
     content = _checkout_best_text(
         result.get("answer"),
         result.get("content"),
-        result.get("summary"),
         result.get("response"),
         result.get("data"),
         contract.get("content"),
         contract.get("answer"),
-        contract.get("summary"),
         gateway.get("content"),
         gateway.get("answer"),
-        gateway.get("summary"),
     )
 
     if content:
@@ -471,29 +470,22 @@ def build_gateway_transport_payload(result):
         or []
     )
 
-    content = _checkout_best_text(
-        scene.get("content"),
-        scene.get("answer"),
-        scene.get("summary"),
-        machine.get("content"),
-        machine.get("answer"),
-        machine.get("summary"),
-        result.get("content"),
-        result.get("answer"),
-        result.get("summary"),
+    # SceneContract is already authoritative. Transport must preserve the
+    # fields as distinct values and never use summary as a fallback for text.
+    content = (
+        scene.get("content")
+        if scene.get("content") not in (None, "")
+        else result.get("content", "")
     )
-
-    answer = _checkout_best_text(
-        scene.get("answer"),
-        machine.get("answer"),
-        result.get("answer"),
-        content,
+    answer = (
+        scene.get("answer")
+        if scene.get("answer") not in (None, "")
+        else result.get("answer", "")
     )
-
-    summary = _checkout_best_text(
-        scene.get("summary"),
-        machine.get("summary"),
-        result.get("summary"),
+    summary = (
+        scene.get("summary")
+        if scene.get("summary") not in (None, "")
+        else result.get("summary", "")
     )
 
     return {
@@ -505,6 +497,28 @@ def build_gateway_transport_payload(result):
         "content": content,
         "answer": answer,
         "summary": summary,
+        "renderer_state": safe_json(
+            scene.get("renderer_state")
+            or result.get("renderer_state")
+            or {}
+        ),
+        "machine_scene": safe_json(
+            scene.get("machine_scene")
+            or result.get("machine_scene")
+            or {}
+        ),
+        "scene_plan": safe_json(
+            scene.get("scene_plan")
+            or result.get("scene_plan")
+            or {}
+        ),
+        "artifacts": safe_json(
+            scene.get("artifacts")
+            or result.get("artifacts")
+            or machine.get("artifacts")
+            or []
+        ),
+        "metadata": safe_json(scene.get("metadata") or result.get("metadata") or {}),
         "active_visual_scene": safe_json(
             result.get("active_visual_scene")
             or scene.get("active_visual_scene")
@@ -923,12 +937,14 @@ async def process_web_message(
             raise RuntimeError("Canonical CPU SceneContract is required.")
 
         scene_view = scene_contract_view(result["scene_contract"])
+        # SceneContract is authoritative. Keep every field separate so the
+        # Gateway cannot silently turn summary/memory into visible content.
         normalized = {
             "scene_contract": scene_view,
-            "content": scene_view.get("content") or scene_view.get("answer") or scene_view.get("summary") or "",
-            "answer": scene_view.get("answer"),
-            "summary": scene_view.get("summary"),
-            "render_blocks": scene_view.get("render_blocks", []),
+            "content": scene_view.get("content") or "",
+            "answer": scene_view.get("answer") or "",
+            "summary": scene_view.get("summary") or "",
+            "render_blocks": list(scene_view.get("render_blocks") or scene_view.get("blocks") or []),
             "scene": scene_view.get("machine_scene") or scene_view.get("scene", {}),
             "graph": scene_view.get("graph"),
             "formula": scene_view.get("formula"),
@@ -936,6 +952,11 @@ async def process_web_message(
             "gallery": scene_view.get("gallery"),
             "layout": scene_view.get("layout"),
             "visual": scene_view.get("visual"),
+            "renderer_state": scene_view.get("renderer_state") or {},
+            "machine_scene": scene_view.get("machine_scene") or {},
+            "scene_plan": scene_view.get("scene_plan") or {},
+            "artifacts": scene_view.get("artifacts") or [],
+            "metadata": scene_view.get("metadata") or {},
         }
         normalized["space_continuity"] = build_space_continuity(normalized)
 
