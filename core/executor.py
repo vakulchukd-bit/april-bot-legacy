@@ -11,6 +11,7 @@ import ast
 import json
 import math
 import re
+import time
 from copy import deepcopy
 from typing import Any
 
@@ -1470,12 +1471,33 @@ def _machine_payload_dict(value: Any) -> dict:
 
 
 def _response(value: Any) -> MachineResponse:
+    """Materialize the Provider result without losing non-schema evidence.
+
+    Known fields become the canonical MachineResponse. Any additional Provider
+    payload keys are preserved inside ``metadata.provider_extras`` so the
+    quantum post-processor can inspect them instead of silently discarding
+    information at the Executor boundary.
+    """
     payload = _machine_payload_dict(value)
     allowed = {
         k: v
         for k, v in payload.items()
         if k in MachineResponse.__dataclass_fields__
     }
+
+    extras = {
+        str(k): v
+        for k, v in payload.items()
+        if k not in MachineResponse.__dataclass_fields__
+        and k not in {"processor_input", "provider_source_request"}
+    }
+
+    metadata = allowed.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    if extras:
+        metadata.setdefault("provider_extras", _quantum_snapshot(extras))
+    allowed["metadata"] = metadata
+
     return MachineResponse(**allowed)
 
 def _ensure_visible_answer_block(response: MachineResponse) -> list[dict]:
@@ -1530,6 +1552,513 @@ def _ensure_visible_answer_block(response: MachineResponse) -> list[dict]:
     # Preserve provider structured blocks exactly as received.
     return [visible_text_block, *original]
 
+
+# ============================================================
+# QUANTUM POST-PROVIDER RECONCILIATION MATRIX
+# ============================================================
+# This is intentionally inside the ONE Executor. It does not create another
+# route, Provider, Executor, renderer or transport. The Processor receives the
+# complete Provider result, reconciles it with the request/dialogue/memory/
+# visual evidence, preserves all meaningful payloads, and releases one
+# canonical SceneContract for the existing Web route.
+# ============================================================
+
+_QUANTUM_RELATION_TYPES = {
+    "text": "narrative",
+    "markdown": "narrative",
+    "table": "structured_table",
+    "graph": "structured_graph",
+    "diagram": "structured_diagram",
+    "formula": "structured_formula",
+    "code": "structured_code",
+    "link": "structured_link",
+    "gallery": "structured_gallery",
+    "image": "structured_image",
+    "function": "structured_function",
+    "file": "structured_file",
+}
+
+def _normalize_machine_text(value: Any) -> str:
+    """Return clean human text, recursively unwrapping one or more envelopes."""
+    text = normalize_response_text(value)
+    if not text:
+        return ""
+    for _ in range(6):
+        envelope = _parse_machine_envelope(text)
+        if not envelope:
+            return text
+        next_value = (
+            envelope.get("answer")
+            or envelope.get("content")
+            or envelope.get("response")
+            or envelope.get("final_text")
+            or envelope.get("text")
+        )
+        if not isinstance(next_value, str) or not next_value.strip():
+            return ""
+        next_text = normalize_response_text(next_value)
+        if next_text == text:
+            return text
+        text = next_text
+    return text
+
+
+def _post_provider_snapshot(value: Any) -> Any:
+    """Detach the Provider result so response analysis cannot mutate Provider data."""
+    return _quantum_snapshot(value)
+
+
+def _block_type(block: Any) -> str:
+    if not isinstance(block, dict):
+        return "text"
+    return _s(
+        block.get("type")
+        or block.get("artifact_type")
+        or block.get("representation")
+        or "text"
+    ).lower()
+
+
+def _block_text(block: Any) -> str:
+    if not isinstance(block, dict):
+        return _s(block)
+    for key in ("content", "text", "answer", "message", "value"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_machine_text(value)
+    return ""
+
+
+def _machine_payload_fields(value: Any) -> dict:
+    payload = _machine_payload_dict(value)
+    return {
+        str(k): _quantum_snapshot(v)
+        for k, v in payload.items()
+    }
+
+
+def _provider_response_matrix(
+    *,
+    user_id: str,
+    request: MachineRequest,
+    response: MachineResponse,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    state: dict,
+) -> dict:
+    """Build the internal reconciliation matrix for one Provider result."""
+    request_text = _s(
+        (request.conversation or {}).get("current_request")
+        or getattr(request, "goal", "")
+    )
+    requested_outputs = [
+        _s(item).lower()
+        for item in list(getattr(request, "requested_outputs", []) or [])
+        if _s(item)
+    ]
+    requested_outputs = list(dict.fromkeys(requested_outputs)) or ["text"]
+
+    conversation = _as_dict(getattr(request, "conversation", {}))
+    memory = _as_dict(getattr(request, "memory", {}))
+    visual_context = _as_dict(getattr(request, "visual_context", {}))
+    dialogue_contract = _as_dict(
+        conversation.get("dialogue_contract")
+        or getattr(request, "dialogue_contract", {})
+    )
+
+    answer = _normalize_machine_text(
+        getattr(response, "answer", "")
+        or getattr(response, "content", "")
+        or getattr(response, "response", "")
+    )
+    content = _normalize_machine_text(
+        getattr(response, "content", "") or answer
+    )
+    summary = _normalize_machine_text(getattr(response, "summary", ""))
+
+    blocks = list(getattr(response, "render_blocks", []) or [])
+    artifacts = list(getattr(response, "artifacts", []) or [])
+
+    observed_types = []
+    block_relations = []
+    text_blocks = 0
+    structured_blocks = 0
+
+    for index, raw_block in enumerate(blocks):
+        btype = _block_type(raw_block)
+        if btype not in observed_types:
+            observed_types.append(btype)
+        human_text = _block_text(raw_block)
+
+        if btype in {"text", "markdown"}:
+            text_blocks += 1
+            role = "answer_explanation"
+        else:
+            structured_blocks += 1
+            role = _QUANTUM_RELATION_TYPES.get(
+                btype,
+                "structured_artifact",
+            )
+
+        block_relations.append({
+            "index": index,
+            "type": btype,
+            "role": role,
+            "has_payload": bool(
+                isinstance(raw_block, dict)
+                and any(
+                    key in raw_block
+                    for key in (
+                        "payload", "table", "graph", "images", "url",
+                        "code", "formula", "data", "artifact"
+                    )
+                )
+            ),
+            "has_text": bool(human_text),
+        })
+
+    observed_structured = [
+        kind for kind in observed_types if kind not in {"text", "markdown"}
+    ]
+
+    artifact_types = []
+    for artifact in artifacts:
+        if isinstance(artifact, dict):
+            kind = _s(
+                artifact.get("type")
+                or artifact.get("artifact_type")
+                or artifact.get("representation")
+            ).lower()
+            if kind and kind not in artifact_types:
+                artifact_types.append(kind)
+
+    # Reconcile requested representations with actual returned representations.
+    matched_outputs = []
+    missing_outputs = []
+    for expected in requested_outputs:
+        expected = expected.lower()
+        aliases = {
+            "markdown": "text",
+            "renderer_scene": "diagram",
+            "visual": "graph",
+        }
+        expected_norm = aliases.get(expected, expected)
+        present = (
+            expected_norm in observed_types
+            or expected_norm in artifact_types
+            or (expected_norm == "text" and bool(answer))
+        )
+        if present:
+            matched_outputs.append(expected_norm)
+        else:
+            missing_outputs.append(expected_norm)
+
+    # The current request remains authoritative; stale memory/visual state can
+    # only be used as relational evidence.
+    context_relation_score = max(
+        _bounded01(dialogue_contract.get("context_dependency_score", 0.0)),
+        _bounded01(dialogue_contract.get("reference_to_previous", False)),
+        _bounded01(dialogue_contract.get("continuation", False)),
+    )
+    memory_relevant = bool(
+        context_relation_score > 0.0
+        or getattr(request, "memory", None)
+        or dialogue_contract.get("continuation")
+        or dialogue_contract.get("reference_to_previous")
+    )
+    visual_relevant = bool(
+        visual_context
+        or state.get("active_visual_scene")
+        or state.get("active_scene_contract")
+        or dialogue_contract.get("reference_to_previous")
+    )
+
+    # A small, deterministic semantic agreement signal: does the answer share
+    # meaningful tokens with the current request or the resolved goal? This is
+    # evidence only; it never discards a response.
+    answer_request_overlap = _overlap(
+        answer,
+        request_text,
+    )
+    answer_goal_overlap = _overlap(
+        answer,
+        getattr(request, "goal", ""),
+    )
+
+    matrix = {
+        "version": f"{PROCESSOR_VERSION}:post_provider_matrix_v1",
+        "owner": "QUANTUM_PROCESSOR",
+        "single_route": True,
+        "provider_calls": 1,
+        "user_id": _s(user_id),
+        "request": {
+            "text": request_text,
+            "goal": _s(getattr(request, "goal", "")),
+            "requested_outputs": requested_outputs,
+        },
+        "dialogue": {
+            "contract": _quantum_snapshot(dialogue_contract),
+            "context_mode": _s(
+                conversation.get("context_mode")
+                or (getattr(request, "constraints", {}) or {}).get("metadata", {}).get("context_mode")
+            ),
+            "relation_score": context_relation_score,
+            "continuation": bool(dialogue_contract.get("continuation")),
+            "reference_to_previous": bool(dialogue_contract.get("reference_to_previous")),
+        },
+        "memory": {
+            "present": bool(memory),
+            "relevant": memory_relevant,
+            "snapshot": _quantum_snapshot(memory),
+        },
+        "visual": {
+            "present": bool(visual_context or state.get("active_visual_scene")),
+            "relevant": visual_relevant,
+            "snapshot": _quantum_snapshot(
+                visual_context
+                or state.get("active_visual_scene")
+                or state.get("visual_summary")
+                or {}
+            ),
+        },
+        "semantic": {
+            "request_overlap": round(answer_request_overlap, 4),
+            "goal_overlap": round(answer_goal_overlap, 4),
+            "semantic_state": _quantum_snapshot(semantic),
+            "cognition_state": _quantum_snapshot(cognition),
+            "decision_state": _quantum_snapshot(decision),
+        },
+        "provider_result": {
+            "answer_present": bool(answer),
+            "content_present": bool(content),
+            "summary_present": bool(summary),
+            "answer_length": len(answer),
+            "content_length": len(content),
+            "summary_length": len(summary),
+            "block_count": len(blocks),
+            "artifact_count": len(artifacts),
+        },
+        "representation": {
+            "requested": requested_outputs,
+            "observed_blocks": observed_types,
+            "observed_structured": observed_structured,
+            "artifact_types": artifact_types,
+            "matched": matched_outputs,
+            "missing": missing_outputs,
+            "multi_output": len(set(matched_outputs)) > 1,
+        },
+        "relations": block_relations,
+        "completeness": {
+            "request_has_answer": bool(answer),
+            "requested_outputs_covered": not missing_outputs,
+            "structured_payload_preserved": bool(
+                observed_structured or artifacts or len(requested_outputs) == 1 and requested_outputs[0] == "text"
+            ),
+            "no_machine_envelope_visible": not (
+                answer.lstrip().startswith("{")
+                and bool(_parse_machine_envelope(answer))
+            ),
+        },
+    }
+    return matrix
+
+
+def _reconcile_provider_response(
+    *,
+    user_id: str,
+    request: MachineRequest,
+    response: MachineResponse,
+    state: dict,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+) -> tuple[MachineResponse, dict]:
+    """Full post-Provider computation without changing the existing route."""
+    started_ns = time.monotonic_ns()
+
+    # Snapshot the complete incoming object before mutating anything.
+    incoming_payload = _machine_payload_fields(response)
+
+    # Re-decode any embedded MachineResponse envelope at the processor boundary.
+    payload = _machine_payload_dict(response)
+    embedded = None
+    for key in ("answer", "content", "response"):
+        embedded = _parse_machine_envelope(payload.get(key))
+        if embedded:
+            payload.update(embedded)
+            break
+
+    # Never let summary become the answer. Answer/content/response are the only
+    # human-channel candidates.
+    answer = _normalize_machine_text(
+        payload.get("answer")
+        or payload.get("content")
+        or payload.get("response")
+    )
+    if not answer:
+        # Structured text may carry the answer when the top-level field is empty.
+        for raw_block in list(payload.get("render_blocks") or []):
+            candidate = _block_text(raw_block)
+            if candidate:
+                answer = candidate
+                break
+    if not answer:
+        raise RuntimeError(
+            "Quantum post-analysis blocked: Provider returned no human answer."
+        )
+
+    content = _normalize_machine_text(payload.get("content") or answer)
+    response_text = _normalize_machine_text(payload.get("response") or answer)
+    summary = _normalize_machine_text(payload.get("summary") or "")
+
+    blocks = list(payload.get("render_blocks") or [])
+    artifacts = list(payload.get("artifacts") or [])
+
+    # Preserve every block. Only rewrite the text-bearing fields of a text block
+    # if those fields contain a serialized MachineResponse envelope.
+    reconciled_blocks: list[dict] = []
+    for index, raw_block in enumerate(blocks):
+        if not isinstance(raw_block, dict):
+            reconciled_blocks.append(raw_block)
+            continue
+        block = dict(raw_block)
+        btype = _block_type(block)
+
+        if btype in {"text", "markdown"}:
+            clean = _block_text(block)
+            if clean:
+                block["content"] = clean
+                block["text"] = clean
+            elif index == 0:
+                block["content"] = answer
+                block["text"] = answer
+
+        # Relationship metadata is additive; original payload keys remain intact.
+        block.setdefault("scene_contract", True)
+        block.setdefault(
+            "processor_relation",
+            _QUANTUM_RELATION_TYPES.get(btype, "structured_artifact"),
+        )
+        block.setdefault("processor_source", "quantum_post_provider_analysis")
+        reconciled_blocks.append(block)
+
+    # Guarantee one clean human text block while preserving all original blocks.
+    has_clean_text = any(
+        isinstance(block, dict)
+        and _block_type(block) in {"text", "markdown"}
+        and bool(_block_text(block))
+        for block in reconciled_blocks
+    )
+    if not has_clean_text:
+        reconciled_blocks.insert(
+            0,
+            {
+                "type": "text",
+                "artifact_type": "text",
+                "content": answer,
+                "text": answer,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "scene_contract": True,
+                "source": "quantum_post_provider_analysis",
+                "processor_relation": "answer_explanation",
+            },
+        )
+
+    # Build the response matrix from the reconciled evidence, not from a
+    # half-parsed object.
+    original_blocks = getattr(response, "render_blocks", None)
+    response.render_blocks = reconciled_blocks
+
+    # Keep every provider field and add an internal response-matrix record.
+    matrix = _provider_response_matrix(
+        user_id=user_id,
+        request=request,
+        response=response,
+        semantic=semantic,
+        cognition=cognition,
+        decision=decision,
+        state=state,
+    )
+
+    # Provider summary is memory/context evidence only. If it is absent, create
+    # a compact internal summary from the reconciled answer; never expose it as
+    # the human answer and never overwrite the answer with it.
+    if not summary:
+        summary = _compact_summary(
+            answer,
+            reconciled_blocks,
+        )
+
+    metadata = dict(getattr(response, "metadata", {}) or {})
+    metadata["quantum_post_analysis"] = {
+        "version": matrix["version"],
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "answer_source": "provider_machine_response",
+        "summary_role": "memory_context_only",
+        "render_role": "structured_scene_payload",
+        "complete_payload_preserved": True,
+        "request_context_reconciled": True,
+        "dialogue_reconciled": True,
+        "memory_reconciled": True,
+        "visual_reconciled": True,
+        "representation_reconciled": True,
+        "completeness_checked": True,
+        "observed_blocks": matrix["representation"]["observed_blocks"],
+        "matched_outputs": matrix["representation"]["matched"],
+        "missing_outputs": matrix["representation"]["missing"],
+        "answer_overlap": matrix["semantic"]["request_overlap"],
+        "goal_overlap": matrix["semantic"]["goal_overlap"],
+        "timing_started_ns": started_ns,
+    }
+
+    # Keep the original unknown Provider fields that _response() preserved.
+    # Nothing is deleted from the inbound metadata branch.
+    provider_extras = metadata.get("provider_extras")
+    if provider_extras not in (None, {}, []):
+        metadata["quantum_post_analysis"]["provider_extras_preserved"] = True
+
+    # The human channel is now canonical and clean; summary remains separate.
+    response.answer = answer
+    response.content = content
+    response.response = response_text
+    response.summary = summary
+    response.render_blocks = reconciled_blocks
+    response.metadata = metadata
+
+    # Store the full matrix in the Processor state, not in the visible text.
+    response.quantum_state = dict(
+        _as_dict(getattr(response, "quantum_state", {}))
+    )
+    response.quantum_state["post_provider_matrix"] = _quantum_snapshot(matrix)
+    response.quantum_state["post_provider_timing"] = {
+        "started_ns": started_ns,
+        "finished_ns": time.monotonic_ns(),
+        "elapsed_ms": round(
+            (time.monotonic_ns() - started_ns) / 1_000_000,
+            3,
+        ),
+    }
+
+    # Keep a canonical in-memory conversation projection with the human answer
+    # and machine metadata separated.
+    response.conversation_space = {
+        "current_turn": {
+            "user": _s(request.conversation.get("current_request")),
+            "april": {
+                "answer": answer,
+                "summary": summary,
+                "render_blocks": _quantum_snapshot(reconciled_blocks),
+                "artifacts": _quantum_snapshot(artifacts),
+                "post_provider_matrix": _quantum_snapshot(matrix),
+            },
+        }
+    }
+
+    return response, matrix
+
+
 def _canonicalize(
     user_id: str,
     response: MachineResponse,
@@ -1563,8 +2092,9 @@ def _canonicalize(
 
     response.answer = answer
     response.content = answer
-    if not response.summary:
-        response.summary = answer[:500]
+    # Summary is a separate memory/context field. Never synthesize it by
+    # copying the human answer here; post-provider reconciliation already
+    # classified/derived it when necessary.
 
     # Critical invariant:
     # answer must survive independently of structured artifacts/renderers.
@@ -2024,19 +2554,56 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     )
     response = _response(provider_result)
 
-    # The Provider may legitimately return structured artifacts without a
-    # standalone visible text block. Canonicalize once here so Web never sees
-    # an artifact-only SceneContract for an answer that exists.
-    response.render_blocks = _ensure_visible_answer_block(response)
+    # ============================================================
+    # QUANTUM POST-PROVIDER COMPUTATION
+    # ============================================================
+    # Provider/OpenAI has finished generation. The Executor now performs the
+    # actual second-half processor work: decode → reconcile → interpret →
+    # relate → classify memory/visual/render payloads → completeness audit.
+    # This does not create another route or model call.
+    response, post_provider_matrix = _reconcile_provider_response(
+        user_id=user_id,
+        request=request,
+        response=response,
+        state=state,
+        semantic=semantic,
+        cognition=cognition,
+        decision=decision,
+    )
+
     request.constraints.setdefault("metadata", {})["visible_answer_audit"] = {
-        "answer_present": bool(_s(response.answer) or _s(response.content) or _s(response.response)),
-        "render_blocks_before_canonicalize": len(getattr(response, "render_blocks", []) or []),
-        "artifacts_preserved": len(getattr(response, "artifacts", []) or []),
+        "answer_present": bool(
+            _s(response.answer)
+            or _s(response.content)
+            or _s(response.response)
+        ),
+        "render_blocks_before_canonicalize": len(
+            getattr(response, "render_blocks", []) or []
+        ),
+        "artifacts_preserved": len(
+            getattr(response, "artifacts", []) or []
+        ),
         "text_block_guaranteed": any(
             isinstance(block, dict)
-            and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
+            and _s(
+                block.get("type")
+                or block.get("artifact_type")
+            ).lower() in {"text", "markdown"}
+            and bool(_block_text(block))
             for block in getattr(response, "render_blocks", []) or []
         ),
+        "post_provider_matrix_version": post_provider_matrix.get(
+            "version"
+        ),
+        "post_provider_analysis": True,
     }
 
-    return _canonicalize(user_id, response, state, semantic, cognition, decision, request)
+    return _canonicalize(
+        user_id,
+        response,
+        state,
+        semantic,
+        cognition,
+        decision,
+        request,
+    )
