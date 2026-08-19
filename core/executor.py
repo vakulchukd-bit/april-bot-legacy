@@ -1164,15 +1164,21 @@ def _decode_json_envelope(value: Any, *, max_depth: int = 5) -> Any:
 
 
 def _clean_text_value(value: Any) -> str:
-    """Return only human-readable text from a Provider field."""
+    """Return only the final human-readable text from a Provider field."""
     current = _decode_json_envelope(value)
+
     if isinstance(current, dict):
-        for key in ("answer", "content", "response", "text", "message"):
+        for key in ("answer", "content", "response", "text", "message", "final_text"):
             if current.get(key) not in (None, "", [], {}):
                 nested = _decode_json_envelope(current.get(key))
                 if isinstance(nested, str):
                     return nested.strip()
+                if isinstance(nested, dict):
+                    resolved = _clean_text_value(nested)
+                    if resolved:
+                        return resolved
         return ""
+
     return _s(current)
 
 
@@ -1224,35 +1230,86 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
 
 
 def _decode_provider_payload(value: Any) -> dict:
-    """Unpack the Provider envelope completely, preserving every structured field."""
+    """Fully decode the Provider envelope while preserving every structured field.
+
+    The Provider may return:
+      1) a dict,
+      2) a MachineResponse dataclass,
+      3) a JSON string containing either,
+      4) an answer/content field that itself contains another JSON envelope.
+
+    Nested canonical fields must WIN over the outer serialized wrapper.  We
+    therefore merge metadata first and canonical inner fields second, instead
+    of letting the raw outer ``answer`` overwrite the decoded answer.
+    """
     decoded = _decode_json_envelope(value)
     if isinstance(decoded, MachineResponse):
         decoded = {
             name: getattr(decoded, name)
             for name in decoded.__dataclass_fields__
         }
+
     if not isinstance(decoded, dict):
         return {"answer": _clean_text_value(decoded)}
 
+    def merge_nested(base: dict, nested: dict, source_key: str) -> dict:
+        # Preserve every unrelated outer field, but let decoded inner fields
+        # own answer/content/summary/render/artifact semantics.
+        outer = {k: v for k, v in base.items() if k != source_key}
+        merged = {**outer, **nested}
+
+        # When the inner envelope omitted a machine field, retain the outer one.
+        for key in (
+            "render_blocks", "blocks", "artifacts", "artifacts_payload",
+            "scene", "scene_plan", "renderer_state", "metadata",
+            "active_scene", "supported_payloads", "links", "graph", "formula",
+            "table", "gallery", "layout", "visual",
+        ):
+            if key not in nested and key in base:
+                merged[key] = base[key]
+        return merged
+
     payload = dict(decoded)
 
+    # First unwrap explicit nested machine_response envelopes.
     embedded = _decode_json_envelope(payload.get("machine_response"))
     if isinstance(embedded, dict):
-        outer = {k: v for k, v in payload.items() if k != "machine_response"}
-        payload = {**embedded, **outer}
+        payload = merge_nested(payload, embedded, "machine_response")
 
-    for key in ("answer", "content", "response"):
-        nested = _decode_json_envelope(payload.get(key))
-        if isinstance(nested, dict) and any(
-            k in nested for k in ("answer", "content", "summary", "render_blocks", "artifacts")
-        ):
-            outer = {k: v for k, v in payload.items() if k != key}
-            payload = {**nested, **outer}
+    # Repeatedly unwrap a canonical answer/content/response envelope until the
+    # visible fields are no longer machine JSON.  Inner canonical fields win.
+    for _ in range(4):
+        changed = False
+        for key in ("answer", "content", "response", "payload", "data"):
+            nested = _decode_json_envelope(payload.get(key))
+            if isinstance(nested, dict) and any(
+                k in nested
+                for k in (
+                    "answer", "content", "response", "summary",
+                    "render_blocks", "artifacts", "machine_response"
+                )
+            ):
+                payload = merge_nested(payload, nested, key)
+                changed = True
+                break
+        if not changed:
             break
 
-    payload["render_blocks"] = _clean_render_blocks(payload.get("render_blocks") or [])
+    payload["render_blocks"] = _clean_render_blocks(
+        payload.get("render_blocks") or payload.get("blocks") or []
+    )
     if isinstance(payload.get("summary"), str):
         payload["summary"] = _clean_text_value(payload.get("summary"))
+
+    # Canonical human fields are always flattened to plain text here.
+    answer = (
+        _clean_text_value(payload.get("answer"))
+        or _clean_text_value(payload.get("content"))
+        or _clean_text_value(payload.get("response"))
+    )
+    if answer:
+        payload["answer"] = answer
+        payload["content"] = answer
 
     return payload
 
@@ -1373,6 +1430,15 @@ def _canonicalize(
     if not answer:
         raise RuntimeError("Quantum canonicalization blocked: empty MachineResponse answer")
 
+    # Final human-field invariant: SceneContract.answer/content can only contain
+    # plain human text, never the serialized MachineResponse envelope.
+    decoded_answer = _decode_json_envelope(answer)
+    if isinstance(decoded_answer, dict):
+        answer = _clean_text_value(decoded_answer)
+    answer = _s(answer)
+    if not answer:
+        raise RuntimeError("Quantum canonicalization blocked: decoded answer is empty")
+
     response.answer = answer
     response.content = answer
 
@@ -1462,6 +1528,18 @@ def _canonicalize(
         pass
 
     contract = build_scene_contract(scene)
+
+    # SceneContract is the release boundary: force the canonical human answer
+    # into answer/content, keep summary isolated, and keep every renderer block.
+    try:
+        contract.answer = answer
+        contract.content = answer
+        contract.summary = response.summary
+        contract.render_blocks = list(provider_blocks)
+        contract.blocks = list(provider_blocks)
+    except Exception:
+        pass
+
     render_blocks = list(getattr(contract, "render_blocks", []) or [])
     if not render_blocks:
         render_blocks = provider_blocks
