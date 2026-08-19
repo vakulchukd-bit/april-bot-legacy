@@ -1371,10 +1371,23 @@ async def transcribe_voice(file_path: str) -> str:
                 model="gpt-4o-mini-transcribe",
                 file=handle,
             )
-        return normalize_response_text(getattr(result, "text", ""))
+
+        transcript = normalize_response_text(
+            getattr(result, "text", "")
+        )
+
+        provider_log(
+            "[VOICE] transcription completed:",
+            {"has_text": bool(transcript), "chars": len(transcript)},
+        )
+
+        return transcript
+
     except Exception as exc:
         provider_log("[VOICE] transcription error:", exc)
-        return ""
+        # Keep an actual transcription-service failure distinguishable from a
+        # successful transcription that simply contains no words.
+        raise RuntimeError("VOICE_TRANSCRIPTION_FAILED") from exc
 
 
 async def analyze_image(path: str, prompt: str):
