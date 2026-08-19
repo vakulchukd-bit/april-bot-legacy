@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import json
-import math
 import re
 from copy import deepcopy
 from typing import Any
@@ -40,7 +39,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v20_unified_matrix_center"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v21_integrated_no_triggers_no_scoring"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -90,22 +89,6 @@ def _clip(v: Any, n: int = 900) -> str:
 
 def _tokens(v: Any) -> set[str]:
     return set(re.findall(r"[\wА-Яа-яЁё]+", _s(v).lower()))
-
-def _overlap(a: Any, b: Any) -> float:
-    x, y = _tokens(a), _tokens(b)
-    return len(x & y) / max(1, len(x | y))
-
-def _clamp(x: float) -> float:
-    return max(0.001, min(0.999, float(x)))
-
-def _norm(scores: dict[str, float]) -> dict[str, float]:
-    m = max(scores.values()) if scores else 1.0
-    ex = {k: math.exp(v - m) for k, v in scores.items()}
-    z = sum(ex.values()) or 1.0
-    return {k: ex[k] / z for k in scores}
-
-def _bool_signal(*values: Any) -> float:
-    return 1.0 if any(bool(v) for v in values) else 0.0
 
 def _as_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
@@ -283,21 +266,18 @@ def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
                 return src[name]
     return ""
 
+
 def _dialogue_evidence(
     text: str,
     semantic: dict,
     cognition: dict,
     decision: dict,
     state: dict,
-) -> dict[str, float]:
-    """
-    Semantic dialogue measurement.
+) -> dict:
+    """Read the already-measured dialogue contract without local trigger rules or score thresholds.
 
-    IMPORTANT:
-      - no word list decides continuation;
-      - no renderer keyword decides the dialogue state;
-      - previous-turn relation comes from semantic vectors + NLI;
-      - the processor only fuses the measured evidence.
+    The Executor does not score the dialog itself. It accepts the semantic engines'
+    structured interpretation and only materializes one canonical state.
     """
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     previous_user = ""
@@ -313,14 +293,12 @@ def _dialogue_evidence(
                 previous_april = _s(
                     item.get("content")
                     or item.get("answer")
-                    or item.get("summary")
                 )
                 last_turn_id = item.get("turn_id")
             elif isinstance(item.get("april"), dict):
                 previous_april = _s(
                     item["april"].get("answer")
                     or item["april"].get("content")
-                    or item["april"].get("summary")
                 )
                 last_turn_id = item.get("turn_id")
         if not previous_user:
@@ -331,200 +309,103 @@ def _dialogue_evidence(
         if previous_user and previous_april:
             break
 
+    interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
+    dialogue_contract = _as_dict(interpretation_packet.get("dialogue_contract"))
+    if not dialogue_contract:
+        dialogue_contract = _as_dict(
+            semantic.get("dialogue_context_field")
+        )
+
+    mode = _s(
+        dialogue_contract.get("context_mode")
+        or dialogue_contract.get("dialogue_state")
+        or semantic.get("dialogue_state")
+        or decision.get("dialogue_state")
+    ).upper()
+
+    if mode not in {
+        "INDEPENDENT",
+        "NEW_TOPIC",
+        "SAME_TOPIC",
+        "CONTINUATION",
+        "ARTIFACT_REFERENCE",
+    }:
+        mode = "CONTINUATION" if bool(dialogue_contract.get("continuation")) else "INDEPENDENT"
+
     active_topic = _s(
-        semantic.get("active_topic")
+        dialogue_contract.get("active_topic")
+        or semantic.get("active_topic")
         or decision.get("active_topic")
         or state.get("active_topic")
         or state.get("topic")
     )
-
-    # Reuse the canonical interpretation measurement when available. This keeps
-    # the processor on one heavy semantic pass for the turn.
-    measured = semantic.get("quantum_dialogue_measurement")
-    if not isinstance(measured, dict):
-        measured = QUANTUM_DIALOGUE_ENGINE.dialogue(
-            text=text,
-            previous_assistant=previous_april,
-            previous_user=previous_user,
-            active_goal=_s(
-                semantic.get("active_goal")
-                or decision.get("active_goal")
-                or state.get("active_goal")
-            ),
-            active_topic=active_topic,
-        )
-
-    dialogue = measured.get("dialogue", {}) if isinstance(measured, dict) else {}
-    continuation_score = _bounded01(dialogue.get("continuation_score", 0.0))
-    reference_score = _bounded01(dialogue.get("reference_score", 0.0))
-    nli_confidence = _bounded01(dialogue.get("confidence", 0.0))
-
-    canonical_dialogue = _as_dict(
-        _as_dict(semantic.get("quantum_interpretation_evidence")).get("dialogue_contract")
-    )
-    relation_score = _bounded01(canonical_dialogue.get("context_dependency_score", 0.0))
-    if relation_score:
-        continuation_score = max(
-            continuation_score,
-            _bounded01(canonical_dialogue.get("continuation_score", 0.0)),
-        )
-        reference_score = max(
-            reference_score,
-            _bounded01(canonical_dialogue.get("reference_score", 0.0)),
-        )
-
-    # Semantic evidence supplied by semantic_core/cognition/decision is allowed
-    # to strengthen the measured state, but never to override it by a word.
-    same_topic = max(
-        _bounded01(measured.get("topic_similarity", {}).get("score", 0.0)),
-        _bounded01(semantic.get("same_topic_score", 0.0)),
-        _bounded01(cognition.get("same_topic_score", 0.0)),
-        _bounded01(decision.get("same_topic_score", 0.0)),
-    )
-    artifact_reference = max(
-        _bounded01(measured.get("previous_similarity", {}).get("score", 0.0)),
-        _bounded01(semantic.get("artifact_reference_score", 0.0)),
-        _bounded01(cognition.get("artifact_reference_score", 0.0)),
-        _bounded01(decision.get("artifact_reference_score", 0.0)),
+    active_goal = _s(
+        dialogue_contract.get("active_goal")
+        or semantic.get("active_goal")
+        or cognition.get("active_goal")
+        or decision.get("active_goal")
+        or state.get("active_goal")
     )
 
-    # Structural complexity is measured from payload shape, not from trigger
-    # words. It is only used as evidence for the quantum budget.
-    words = _tokens(text)
-    list_density = min(
-        1.0,
-        (
-            text.count("\n-")
-            + text.count("\n*")
-            + text.count("\n1.")
-            + text.count(";")
-        ) / 4.0,
+    context_dependency = bool(
+        dialogue_contract.get("context_dependency")
+        and _s(dialogue_contract.get("context_dependency")).lower() not in {"independent", "none", "false", "0"}
     )
-    code_density = min(
-        1.0,
-        sum(text.count(marker) for marker in ("```", "=>", "{", "}")) / 5.0,
-    )
-    formula_density = min(
-        1.0,
-        sum(text.count(marker) for marker in ("=", "^", "√", "∑", "∫", "π")) / 5.0,
-    )
-    numeric_density = min(
-        1.0,
-        sum(char.isdigit() for char in text) / max(1, len(text)),
-    )
+    continuation = bool(dialogue_contract.get("continuation"))
+    reference_to_previous = bool(dialogue_contract.get("reference_to_previous"))
 
-    # Explicit semantic representation evidence comes from NLI, not keywords.
-    representation_measurement = semantic.get("quantum_representation_measurement")
-    micro_social = bool(semantic.get("fast_social") or semantic.get("identity_request"))
-    if micro_social:
-        representation_measurement = {
-            "nli": {
-                "labels": ["text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"],
-                "scores": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "source": "micro_social_fast_path",
-            }
-        }
-    elif not isinstance(representation_measurement, dict):
-        representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
-            text=text,
-            context=active_topic or previous_april,
-        )
-    nli_labels = representation_measurement.get("nli", {}).get("labels", [])
-    nli_scores = representation_measurement.get("nli", {}).get("scores", [])
-    rep_scores = {
-        _s(label).lower(): _bounded01(score)
-        for label, score in zip(nli_labels, nli_scores)
-    }
-    representation_strength = max(rep_scores.values(), default=0.0)
+    if context_dependency:
+        if reference_to_previous:
+            mode = "ARTIFACT_REFERENCE" if mode == "ARTIFACT_REFERENCE" else "CONTINUATION"
+        elif continuation:
+            mode = "CONTINUATION"
+        elif mode == "INDEPENDENT":
+            mode = "SAME_TOPIC"
+
+    if not dialog and mode != "INDEPENDENT":
+        mode = "INDEPENDENT"
+        context_dependency = False
+        continuation = False
+        reference_to_previous = False
 
     return {
-        "history": float(bool(dialog)),
-        "topic_overlap": same_topic,
-        "answer_overlap": reference_score,
-        "word_overlap": same_topic,
-        "char_overlap": same_topic,
-        "question": float(text.rstrip().endswith("?")),
-        "exclamation": float(text.rstrip().endswith("!")),
-        "short_turn": float(0 < len(words) <= 8),
-        "long_turn": float(len(words) > 80),
-        "continuation": continuation_score,
-        "same_topic": same_topic,
-        "artifact": artifact_reference,
-        "deictic": reference_score,
-        "explicit_output": representation_strength,
-        "code_density": code_density,
-        "formula_density": formula_density,
-        "numeric_density": numeric_density,
-        "list_density": list_density,
-        "semantic_strength": nli_confidence,
-        "cognition_strength": _bounded01(
-            float(bool(cognition.get("reasoning_needed")))
-            + float(bool(cognition.get("multi_step")))
-            + float(bool(cognition.get("requires_planning")))
+        "mode": mode,
+        "previous_user": previous_user,
+        "previous_april": previous_april,
+        "last_turn_id": last_turn_id,
+        "active_topic": active_topic,
+        "active_goal": active_goal,
+        "context_dependency": context_dependency,
+        "continuation": continuation,
+        "reference_to_previous": reference_to_previous,
+        "dialog_act": _s(
+            dialogue_contract.get("dialog_act")
+            or semantic.get("dialog_act")
+            or decision.get("dialog_act")
+            or "statement"
         ),
-        "decision_strength": _bounded01(
-            float(bool(decision.get("render_intent")))
-            + float(bool(decision.get("analysis_mode")))
-            + float(bool(decision.get("explanation_mode")))
+        "reply_to": _s(
+            dialogue_contract.get("reply_to")
+            or dialogue_contract.get("previous_turn_id")
         ),
-        "goal_present": float(bool(
-            semantic.get("active_goal")
-            or cognition.get("active_goal")
-            or decision.get("active_goal")
-            or state.get("active_goal")
-        )),
-        "topic_present": float(bool(active_topic)),
-        "visual_present": float(bool(
-            state.get("active_visual_scene")
-            or state.get("visual_summary")
-            or semantic.get("visual_context")
-        )),
-        "nli_confidence": nli_confidence,
-        "representation_strength": representation_strength,
-        "dialogue_label": _s(
-            canonical_dialogue.get("dialog_act")
-            or measured.get("dialog_act")
-            or dialogue.get("label")
-        ),
-        "context_dependency": relation_score,
-        "context_reference": float(
-            _bounded01(canonical_dialogue.get("reference_to_previous", False))
-        ),
-        "context_continuation": float(
-            _bounded01(canonical_dialogue.get("continuation", False))
-        ),
-        "_current_text": _s(text),
     }
 
-def _collapse_dialogue(e: dict[str, float]) -> tuple[str, dict[str, float], float]:
-    """Fuse 24 evidence dimensions across 5 competing states, then collapse once."""
-    W = {
-        "INDEPENDENT": {"history":-1.4,"topic_overlap":-1.8,"answer_overlap":-1.4,"word_overlap":-1.0,"question":.4,"short_turn":-.4,"continuation":-2.0,"same_topic":-1.8,"artifact":-1.8,"deictic":-1.2,"explicit_output":.5,"semantic_strength":-.2,"cognition_strength":-.2,"decision_strength":-.2,"goal_present":-.3,"topic_present":-.5},
-        "NEW_TOPIC": {"history":.4,"topic_overlap":-2.0,"answer_overlap":-1.4,"word_overlap":-1.0,"question":.5,"long_turn":.8,"continuation":-1.6,"same_topic":-1.5,"artifact":-1.0,"deictic":-.8,"explicit_output":.5,"semantic_strength":.2,"goal_present":.3},
-        "SAME_TOPIC": {"history":1.0,"topic_overlap":3.0,"answer_overlap":1.8,"word_overlap":2.2,"char_overlap":1.2,"question":.3,"continuation":1.0,"same_topic":3.2,"artifact":1.2,"deictic":1.0,"topic_present":1.5},
-        "CONTINUATION": {"history":1.2,"topic_overlap":1.5,"answer_overlap":2.8,"word_overlap":2.0,"question":.8,"short_turn":1.2,"continuation":4.0,"same_topic":2.0,"artifact":1.5,"deictic":1.4,"semantic_strength":1.0,"decision_strength":1.0},
-        "ARTIFACT_REFERENCE": {"history":1.0,"topic_overlap":1.2,"answer_overlap":2.0,"word_overlap":1.2,"question":.4,"short_turn":.8,"continuation":1.8,"same_topic":1.4,"artifact":5.0,"deictic":3.0,"explicit_output":2.0,"visual_present":1.5},
+
+def _collapse_dialogue(e: dict[str, Any]) -> tuple[str, dict[str, float], float]:
+    """Compatibility bridge: no local score collapse; semantic engines own the state."""
+    mode = _s(e.get("mode")).upper() or "INDEPENDENT"
+    states = {
+        "INDEPENDENT": 1.0 if mode == "INDEPENDENT" else 0.0,
+        "NEW_TOPIC": 1.0 if mode == "NEW_TOPIC" else 0.0,
+        "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
+        "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
+        "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
     }
-    raw = {}
-    for state, weights in W.items():
-        score = math.log(.2)
-        for feature, weight in weights.items():
-            score += weight * e.get(feature, 0.0)
-        raw[state] = score
-    p = _norm(raw)
-    measured = max(p, key=p.get)
-    return measured, p, p[measured]
+    return mode, states, 1.0
+
 
 def _representation_constraints(*sources: dict) -> dict:
-    """
-    Canonical representation constraints.
-
-    Positive evidence can add a requested representation.
-    Negative evidence blocks a representation from stale candidates.
-    The processor never invents a renderer just because a keyword appears;
-    it reconciles structured constraints already produced by the evidence
-    layers and preserves the complete multi-output plan.
-    """
+    """Merge explicit representation constraints without local scoring or triggers."""
     positive: list[str] = []
     negative: list[str] = []
 
@@ -544,8 +425,11 @@ def _representation_constraints(*sources: dict) -> dict:
 
         preferred = _s(src.get("preferred_representation")).lower()
         if preferred and preferred not in positive:
-            # Preferred is evidence, not authority; consensus still decides.
             positive.append(preferred)
+
+        authority = _s(src.get("representation_authority")).lower()
+        if authority and authority not in {"", "adaptive"} and authority not in positive:
+            positive.append(authority)
 
     blocked = set(negative)
     positive = [item for item in positive if item not in blocked]
@@ -576,6 +460,7 @@ def _representation_audit(
         "canonical": True,
     }
 
+
 def _requested_outputs(
     text: str,
     semantic: dict,
@@ -584,79 +469,37 @@ def _requested_outputs(
     *,
     independent_turn: bool = False,
 ) -> list[str]:
-    """
-    Produce the canonical multi-output request.
-
-    Priority:
-      1. explicit structured positive/negative representation constraints;
-      2. requested outputs from Decision/Semantic;
-      3. compatible representation candidates.
-
-    No renderer is selected by a single keyword or by an old visual scene.
-    """
+    """Preserve the processor's measured representation plan; no trigger/score routing."""
     constraints = _representation_constraints(semantic, cognition, decision)
     blocked = set(constraints["negative"])
-
-    # For an independently measured turn, old requested_outputs/required_outputs
-    # are stale state, not current user intent. Rebuild the representation plan
-    # only from this turn's measured positive evidence.
-    if independent_turn:
-        current_names: list[str] = []
-        positive = constraints.get("positive", []) or []
-        for value in positive:
-            name = _s(value).lower()
-            if name and name not in blocked and name != "text" and name not in current_names:
-                current_names.append(name)
-
-        for candidate in _as_list(semantic.get("quantum_representation_candidates")):
-            if not isinstance(candidate, dict):
-                continue
-            name = _s(candidate.get("type")).lower()
-            score = _bounded01(candidate.get("score", 0.0))
-            if name and name != "text" and name not in blocked and score >= 0.75 and name not in current_names:
-                current_names.append(name)
-
-        return ["text", *current_names] if current_names else ["text"]
-
-    locked = _s(semantic.get("representation_authority")).lower()
-    if locked in {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"}:
-        return [locked] if locked not in blocked else ["text"]
     names: list[str] = []
 
     def add(value: Any) -> None:
-        if isinstance(value, str):
-            values = [value]
-        elif isinstance(value, (list, tuple, set)):
-            values = list(value)
-        else:
-            values = []
-        for value in values:
-            name = _s(value).lower()
+        values = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple, set)) else []
+        for raw in values:
+            name = _s(raw).lower()
             aliases = {
                 "markdown": "text",
                 "renderer_scene": "diagram",
                 "visual": "graph",
                 "image_generate": "image",
-                # Formula transport is rendered by TextBlock/KaTeX in the
-                # current Web architecture; no FormulaBlock is required.
-                "formula": "text",
             }
             name = aliases.get(name, name)
             if name and name not in blocked and name not in names:
                 names.append(name)
 
+    # Explicit current-turn outputs are authoritative.
     for src in (decision, semantic):
         if not isinstance(src, dict):
             continue
         add(src.get("requested_outputs"))
         add(src.get("required_outputs"))
 
-    # Positive structured constraints are strong evidence, but do not replace
-    # outputs already present in the canonical plan.
+    # Explicit structured constraints come next.
     add(constraints["positive"])
 
-    # Candidate representations are added only when they are not explicitly
-    # blocked and the evidence layer has not supplied a concrete plan yet.
+    # For independent turns, stale inherited output plans are deliberately not
+    # reused; current semantic/decision output evidence remains authoritative.
     if not names:
         for src in (semantic, cognition, decision):
             if not isinstance(src, dict):
@@ -670,114 +513,53 @@ def _requested_outputs(
                 "representations",
             ):
                 add(src.get(key))
+        add(src.get("preferred_representation") if isinstance(src, dict) else "")
 
-    # NLI/vector candidates are semantic evidence, not lexical triggers.
-    if not names:
-        for candidate in _as_list(semantic.get("quantum_representation_candidates")):
-            if not isinstance(candidate, dict):
-                continue
-            if _bounded01(candidate.get("score", 0.0)) >= 0.45:
-                add(candidate.get("type"))
-
-    if any(name != "text" for name in names) and "text" not in names:
+    if "text" not in names:
         names.insert(0, "text")
 
+    # Preserve the current plan as a full multi-output set; never collapse it to
+    # one representation.
     return names or ["text"]
+
 
 def _representation_consensus(
     outputs: list[str],
     semantic: dict,
     decision: dict,
-) -> tuple[str, dict[str, float]]:
-    """
-    Quantum-inspired representation measurement.
-
-    Multiple candidates coexist. Current-request negative evidence suppresses
-    stale alternatives. One preferred representation is measured, while the
-    complete output plan remains in request.requested_outputs.
-    """
-    candidates = ["text", "table", "graph", "diagram", "formula", "code", "gallery", "image", "link"]
-    raw = {x: -1.0 for x in candidates}
-
-    for x in outputs:
-        if x in raw:
-            raw[x] += 4.0
-
+) -> tuple[str, dict[str, Any]]:
+    """Select the declared preferred representation without local scoring."""
+    plan = list(dict.fromkeys(outputs or ["text"]))
     preferred = _s(
         decision.get("preferred_representation")
         or semantic.get("preferred_representation")
+        or (plan[0] if plan else "text")
     ).lower()
-    if preferred in raw:
-        raw[preferred] += 1.5
+    if preferred not in plan:
+        preferred = plan[0] if plan else "text"
 
-    constraints = semantic.get("representation_constraints", {})
-    if isinstance(constraints, dict):
-        for blocked in constraints.get("negative", []) or []:
-            blocked = _s(blocked).lower()
-            if blocked in raw:
-                raw[blocked] = -8.0
-        for positive in constraints.get("positive", []) or []:
-            positive = _s(positive).lower()
-            if positive in raw:
-                raw[positive] += 2.5
+    return preferred, {
+        "outputs": plan,
+        "preferred": preferred,
+        "selection_method": "declared_semantic_plan",
+        "scoring": False,
+        "triggers": False,
+    }
 
-    p = _norm(raw)
-    return max(p, key=p.get), p
 
-def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> str:
-    """Descriptive complexity label only; never selects an output budget."""
+def _complexity(
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    text: str,
+) -> str:
+    """Carry the semantic complexity declaration without local score tiers."""
     explicit = _s(
         semantic.get("response_complexity")
         or cognition.get("response_complexity")
         or decision.get("response_complexity")
     ).upper()
-    if explicit in {"LOW", "MEDIUM", "HIGH"}:
-        return explicit
-
-    parts = max(
-        1,
-        len(
-            semantic.get("task_parts") or
-            semantic.get("subtasks") or
-            semantic.get("requested_tasks") or
-            []
-        ),
-    )
-    outputs = semantic.get("requested_outputs") or semantic.get("required_outputs") or []
-    artifacts = semantic.get("required_artifacts") or []
-    domains = semantic.get("required_domains") or semantic.get("required_competencies") or []
-    score = (
-        max(0, parts - 1)
-        + max(0, len(outputs) - 1)
-        + max(0, len(artifacts) - 1)
-        + min(2, len(domains))
-        + int(bool(cognition.get("multi_step") or cognition.get("requires_planning")))
-        + int(bool(decision.get("multi_step") or decision.get("requires_planning")))
-    )
-    if score >= 5:
-        return "HIGH"
-    if score >= 2:
-        return "MEDIUM"
-    return "LOW"
-
-# ---------------------------------------------------------------------------
-# 8-core × 8-lane quantum-inspired budget field (64 signals)
-# ---------------------------------------------------------------------------
-
-QUANTUM_CORES = (
-    "meaning", "intent", "context", "structure",
-    "evidence", "representation", "economy", "completion",
-)
-QUANTUM_LANES = (
-    "relevance", "density", "complexity", "dependency",
-    "structure", "continuity", "sufficiency", "confidence",
-)
-
-def _bounded01(value: Any) -> float:
-    try:
-        return max(0.0, min(1.0, float(value)))
-    except Exception:
-        return 0.0
+    return explicit if explicit in {"LOW", "MEDIUM", "HIGH"} else "ADAPTIVE"
 
 def _quantum_64_field(
     text: str,
@@ -785,14 +567,14 @@ def _quantum_64_field(
     cognition: dict,
     decision: dict,
 ) -> dict:
-    """Evaluate 8 semantic cores × 8 lanes; no lane selects a fixed tier."""
-    words = _tokens(text)
-    request_density = _bounded01(len(words) / 120.0)
-    outputs = _as_list(
-        semantic.get("requested_outputs")
-        or semantic.get("required_outputs")
-        or decision.get("requested_outputs")
-    )
+    """Build a 64-lane structural measurement field without score weighting or triggers."""
+    outputs = list(dict.fromkeys(
+        _as_list(
+            semantic.get("requested_outputs")
+            or semantic.get("required_outputs")
+            or decision.get("requested_outputs")
+        )
+    ))
     artifacts = _as_list(
         semantic.get("required_artifacts")
         or decision.get("required_artifacts")
@@ -808,96 +590,105 @@ def _quantum_64_field(
         or semantic.get("requested_tasks")
         or []
     ))
-    continuation = _bounded01(bool(
-        semantic.get("continuation")
-        or cognition.get("continuation")
-        or decision.get("continuation")
-    ))
-    structured = _bounded01(
-        (len(outputs) + len(artifacts)) / 6.0
-    )
-    dependency = _bounded01(
-        len(domains) / 8.0
-    )
-    context_strength = _bounded01(
-        bool(semantic.get("same_topic") or semantic.get("artifact_reference")
-             or cognition.get("same_topic") or decision.get("same_topic"))
-    )
-    planning = _bounded01(bool(
-        cognition.get("multi_step") or cognition.get("requires_planning")
-        or decision.get("multi_step") or decision.get("requires_planning")
-    ))
-    renderer_density = _bounded01(
-        sum(1 for item in outputs if _s(item).lower() in {
-            "table","graph","diagram","gallery","image","code","formula","link"
-        }) / 4.0
-    )
-    # Scope is a representation-size signal, not a renderer trigger. It
-    # measures how much material the request is asking the provider to carry.
-    # Scope is measured from semantic structure and payload density only.
-    # No lexical scope list is allowed to change the budget.
-    semantic_scope = _bounded01(
-        0.45 * _bounded01(len(outputs) / 6.0)
-        + 0.25 * _bounded01(len(artifacts) / 6.0)
-        + 0.15 * _bounded01(len(domains) / 8.0)
-        + 0.15 * _bounded01(parts / 8.0)
-    )
-    lexical_free_scope = _bounded01(
-        0.45 * semantic_scope
-        + 0.25 * request_density
-        + 0.15 * _bounded01(sum(c.isdigit() for c in text) / 12.0)
-        + 0.15 * _bounded01(len(words) / 24.0)
-    )
-    scope_density = lexical_free_scope
+    word_count = len(_tokens(text))
 
-    base = {
-        "meaning":      (request_density, 0.60, 0.35, 0.30, 0.45, context_strength, 0.60, 0.70),
-        "intent":       (0.65, 0.45, 0.45, 0.40, 0.50, continuation, 0.65, 0.70),
-        "context":      (0.45, 0.35, 0.30, context_strength, 0.35, continuation, 0.55, 0.65),
-        "structure":    (structured, 0.60, 0.55, 0.35, renderer_density, continuation, 0.70, 0.72),
-        "evidence":     (request_density, 0.55, 0.50, dependency, 0.40, context_strength, 0.62, 0.68),
-        "representation": (structured, renderer_density, 0.58, 0.40, renderer_density, continuation, 0.72, 0.74),
-        "economy":      (1.0-request_density, 0.40, 0.30, 0.25, 0.30, 0.20, 0.78, 0.76),
-        "completion":   (request_density, 0.55, 0.50, 0.35, 0.55, continuation, 0.82, 0.80),
+    field = {
+        "meaning": {
+            "request_length": word_count,
+            "has_context": bool(semantic.get("active_topic") or semantic.get("context")),
+            "has_goal": bool(semantic.get("active_goal") or decision.get("active_goal")),
+            "semantic_state": _s(semantic.get("dialogue_state") or semantic.get("dialog_act")),
+            "declared_complexity": _complexity(semantic, cognition, decision, text),
+            "measured": True,
+            "source": "semantic_engines",
+            "scoring": False,
+            "triggering": False,
+        },
+        "intent": {
+            "intent": _s(semantic.get("intent") or decision.get("intent")),
+            "dialogue_state": _s(semantic.get("dialogue_state")),
+            "dialog_act": _s(semantic.get("dialog_act") or decision.get("dialog_act")),
+            "goal_present": bool(decision.get("active_goal") or semantic.get("active_goal")),
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
+        "context": {
+            "history_present": bool(semantic.get("history_present")),
+            "continuation": bool(semantic.get("continuation")),
+            "reference_to_previous": bool(semantic.get("reference_to_previous")),
+            "context_dependency": bool(semantic.get("context_dependency")),
+            "topic": _s(semantic.get("active_topic") or decision.get("active_topic")),
+            "goal": _s(semantic.get("active_goal") or decision.get("active_goal")),
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
+        "structure": {
+            "requested_outputs": outputs,
+            "artifact_types": list(dict.fromkeys(map(_s, artifacts))),
+            "domains": list(dict.fromkeys(map(_s, domains))),
+            "task_parts": parts,
+            "word_count": word_count,
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
+        "evidence": {
+            "semantic_evidence_present": bool(semantic),
+            "cognition_evidence_present": bool(cognition),
+            "decision_evidence_present": bool(decision),
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
+        "representation": {
+            "requested_outputs": outputs or ["text"],
+            "preferred": _s(
+                decision.get("preferred_representation")
+                or semantic.get("preferred_representation")
+                or "text"
+            ),
+            "constraints": _representation_constraints(semantic, cognition, decision),
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
+        "economy": {
+            "input_text_chars": len(text),
+            "word_count": word_count,
+            "requested_output_count": len(outputs),
+            "artifact_count": len(artifacts),
+            "domain_count": len(domains),
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
+        "completion": {
+            "requested_output_count": len(outputs),
+            "artifact_count": len(artifacts),
+            "task_parts": parts,
+            "measured": True,
+            "scoring": False,
+            "triggering": False,
+        },
     }
 
-    # Small contextual refinements from already computed processor evidence.
-    base["structure"] = tuple(min(1.0, x + (0.08 if parts > 1 else 0.0))
-                               if i == 4 else x
-                               for i, x in enumerate(base["structure"]))
-    base["completion"] = tuple(min(1.0, x + (0.08 if parts > 1 else 0.0))
-                                if i in (2,4,6) else x
-                                for i, x in enumerate(base["completion"]))
-    base["economy"] = tuple(max(0.0, x - (0.08 if structured > 0.66 else 0.0))
-                             if i == 0 else x
-                             for i, x in enumerate(base["economy"]))
-
-    field = {}
-    for core, values in base.items():
-        field[core] = {lane: _bounded01(values[i]) for i, lane in enumerate(QUANTUM_LANES)}
-
-    # Fused confidence = agreement among all 64 lanes, not a fixed tier.
-    values=[v for core in field.values() for v in core.values()]
-    mean=sum(values)/len(values)
-    variance=sum((v-mean)**2 for v in values)/len(values)
-    agreement=max(0.0, 1.0-math.sqrt(variance))
     return {
         "cores": field,
         "core_count": len(QUANTUM_CORES),
         "lane_count": len(QUANTUM_LANES),
-        "signal_count": len(QUANTUM_CORES)*len(QUANTUM_LANES),
-        "mean_need": mean,
-        "agreement": agreement,
-        "structured_density": structured,
-        "request_density": request_density,
-        "continuation": continuation,
-        "planning": planning,
-        "renderer_density": renderer_density,
-        "output_count": len(outputs),
+        "signal_count": len(QUANTUM_CORES) * len(QUANTUM_LANES),
+        "measurement_mode": "structural_no_trigger_no_score",
+        "request_word_count": word_count,
+        "requested_output_count": len(outputs),
         "artifact_count": len(artifacts),
-        "parts": parts,
-        "scope_density": scope_density,
+        "domain_count": len(domains),
+        "task_parts": parts,
+        "scoring": False,
+        "triggering": False,
     }
+
 
 def _quantum_budget_from_64(
     field: dict,
@@ -905,60 +696,48 @@ def _quantum_budget_from_64(
     minimum: int = OUTPUT_MIN_TOKENS,
     maximum: int = OUTPUT_MAX_TOKENS,
 ) -> int:
-    """Collapse 64 continuous evidence signals into the minimum sufficient budget."""
-    mean_need = _bounded01(field.get("mean_need", 0.0))
-    agreement = _bounded01(field.get("agreement", 0.0))
-    structured = _bounded01(field.get("structured_density", 0.0))
-    request_density = _bounded01(field.get("request_density", 0.0))
-    continuation = _bounded01(field.get("continuation", 0.0))
-    planning = _bounded01(field.get("planning", 0.0))
-    renderer_density = _bounded01(field.get("renderer_density", 0.0))
-    output_count = max(0, int(field.get("output_count", 0) or 0))
-    artifact_count = max(0, int(field.get("artifact_count", 0) or 0))
-    parts = max(1, int(field.get("parts", 1) or 1))
-    scope_density = _bounded01(field.get("scope_density", 0.0))
+    """Estimate output capacity from explicit structural workload, not scores."""
+    cores = field.get("cores", {}) if isinstance(field, dict) else {}
+    economy = cores.get("economy", {}) if isinstance(cores, dict) else {}
+    structure = cores.get("structure", {}) if isinstance(cores, dict) else {}
+    completion = cores.get("completion", {}) if isinstance(cores, dict) else {}
 
-    # Economy is deliberately part of the decision, but structured output has
-    # a real serialization cost. The processor therefore estimates the minimum
-    # sufficient payload continuously instead of using entitlement tiers.
-    informational_need = (
-        0.22 * mean_need
-        + 0.20 * structured
-        + 0.18 * renderer_density
-        + 0.14 * request_density
-        + 0.08 * continuation
-        + 0.06 * planning
-        + 0.06 * (1.0 - agreement)
-        + 0.03 * _bounded01(output_count / 4.0)
-        + 0.03 * _bounded01(artifact_count / 4.0)
+    word_count = max(1, int(economy.get("word_count", field.get("request_word_count", 1)) or 1))
+    output_count = max(1, int(
+        economy.get("requested_output_count", field.get("requested_output_count", 1)) or 1
+    ))
+    artifact_count = max(0, int(
+        economy.get("artifact_count", field.get("artifact_count", 0)) or 0
+    ))
+    domain_count = max(0, int(
+        economy.get("domain_count", field.get("domain_count", 0)) or 0
+    ))
+    parts = max(1, int(
+        structure.get("task_parts", field.get("task_parts", 1)) or 1
+    ))
+
+    # Capacity is a direct structural measurement:
+    # text length + number of requested outputs + artifacts + domains + task parts.
+    # There are no tiers, triggers, weights, probabilities, or score cutoffs.
+    budget = (
+        96
+        + (word_count * 3)
+        + (output_count * 640)
+        + (artifact_count * 480)
+        + (domain_count * 160)
+        + (parts * 320)
     )
-    need = _bounded01(informational_need)
 
-    # Continuous base frontier: short/simple answers stay small, while dense
-    # requests move smoothly toward the 8000-token ceiling.
-    shaped = need ** 1.90
-    budget = minimum + (maximum - minimum) * shaped
+    # Extra representation reserve is proportional to actual declared
+    # structured outputs, not to a score.
+    structured_outputs = sum(
+        1 for item in _as_list(structure.get("requested_outputs"))
+        if _s(item).lower() not in {"", "text", "markdown"}
+    )
+    budget += structured_outputs * 720
 
-    # Structured payload reserve. This is not renderer routing and not a fixed
-    # tier: it is a continuous serialization-capacity estimate derived from the
-    # already measured representation plan. Larger tables/scenes can therefore
-    # receive more room without forcing every request to 8k.
-    if structured > 0.0:
-        representation_need = (
-            0.52 * structured
-            + 0.28 * renderer_density
-            + 0.10 * _bounded01(output_count / 4.0)
-            + 0.10 * _bounded01(parts / 6.0)
-            + 0.18 * scope_density
-        )
-        reserve = (maximum - minimum) * (0.50 * _bounded01(representation_need) ** 1.15)
-        scope_reserve = (maximum - minimum) * (0.55 * scope_density ** 1.12)
-        budget = max(budget, minimum + reserve + scope_reserve)
+    return int(max(minimum, min(maximum, budget)))
 
-    # Never exceed the canonical processor envelope. If the logical payload
-    # would require more than 8000, the provider receives 8000 and the machine
-    # prompt instructs it to compact the representation rather than truncate it.
-    return int(round(max(minimum, min(maximum, budget))))
 
 def _adaptive_output_budget(
     text: str,
@@ -966,7 +745,7 @@ def _adaptive_output_budget(
     cognition: dict,
     decision: dict,
 ) -> int:
-    """Continuous 1..8000 budget produced by the 64-signal processor field."""
+    """Continuous structural capacity calculation with no trigger/scoring logic."""
     field = _quantum_64_field(text, semantic, cognition, decision)
     return _quantum_budget_from_64(field)
 
@@ -1017,81 +796,54 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
             data["visual_context"] = _clip(visual, 900)
     return data
 
-def _is_april_identity_request(text: str, semantic: dict | None = None) -> bool:
-    """Semantic identity evidence only; no phrase triggers."""
-    if isinstance(semantic, dict) and "identity_request" in semantic:
-        return bool(semantic.get("identity_request"))
-    try:
-        from blocks.interpretation_layer import _semantic_identity_request
-        return bool(_semantic_identity_request(text))
-    except Exception:
-        return False
 
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
-    # Visual state is evidence; the processor decides whether it participates.
+    # Visual state is carried as context evidence only. It never triggers routing.
     if visual and not bool(visual.get("memory_relevant", True)):
-        evidence["visual_present"] = 0.0
+        evidence["visual_present"] = False
 
-    mode, dialogue_state, coherence = _collapse_dialogue(evidence)
+    mode = _s(evidence.get("mode")).upper() or "INDEPENDENT"
+    dialogue_state = {
+        "INDEPENDENT": 1.0 if mode == "INDEPENDENT" else 0.0,
+        "NEW_TOPIC": 1.0 if mode == "NEW_TOPIC" else 0.0,
+        "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
+        "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
+        "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
+    }
+    coherence = 1.0
 
     interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
     canonical_dialogue = _as_dict(interpretation_packet.get("dialogue_contract"))
-    context_dependency = bool(canonical_dialogue.get("context_dependency"))
+    context_dependency = bool(evidence.get("context_dependency"))
     structured_continuity = bool(
         _as_dict(semantic.get("dialogue_context_field")).get("structured_continuity")
         or _as_dict(canonical_dialogue).get("structured_continuity")
     )
 
-    # Canonical Interpretation relation has precedence over the processor's
-    # secondary fusion when the dialogue field already measured a dependency.
+    # The canonical semantic dialogue contract is authoritative.
     if context_dependency:
-        if bool(canonical_dialogue.get("reference_to_previous")) and structured_continuity:
+        if bool(evidence.get("reference_to_previous")) and structured_continuity:
             mode = "ARTIFACT_REFERENCE"
-        elif bool(canonical_dialogue.get("continuation")) or bool(canonical_dialogue.get("reference_to_previous")):
+        elif bool(evidence.get("continuation")) or bool(evidence.get("reference_to_previous")):
             mode = "CONTINUATION"
         dialogue_state = {
-            "INDEPENDENT": 0.0,
-            "NEW_TOPIC": 0.0,
-            "SAME_TOPIC": 0.0,
+            "INDEPENDENT": 1.0 if mode == "INDEPENDENT" else 0.0,
+            "NEW_TOPIC": 1.0 if mode == "NEW_TOPIC" else 0.0,
+            "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
             "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
             "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
         }
-        coherence = max(coherence, _bounded01(canonical_dialogue.get("context_dependency_score", 0.0)))
-
-    fast_social = bool(semantic.get("fast_social"))
-    identity_semantic = bool(semantic.get("identity_request"))
-    identity_score = float(semantic.get("identity_score", 0.0) or 0.0)
-    continuation_score = float(semantic.get("continuation_score", 0.0) or 0.0)
-    reference_score = float(semantic.get("reference_score", 0.0) or 0.0)
-    identity_semantic = bool(
-        identity_semantic
-        or (identity_score >= 0.56 and identity_score >= continuation_score - 0.03 and identity_score >= reference_score - 0.03)
-    )
-    if (
-        fast_social
-        and not context_dependency
-        and (identity_semantic or float(semantic.get("greeting_score", 0.0) or 0.0) >= continuation_score)
-    ):
-        mode = "INDEPENDENT"
-        dialogue_state = {
-            "INDEPENDENT": 1.0,
-            "NEW_TOPIC": 0.0,
-            "SAME_TOPIC": 0.0,
-            "CONTINUATION": 0.0,
-            "ARTIFACT_REFERENCE": 0.0,
-        }
         coherence = 1.0
+
+    identity_semantic = bool(semantic.get("identity_request"))
+
     if mode == "INDEPENDENT":
-        # Processor decides non-inheritance for this request; it never erases
-        # persistent dialogue/context state. State mutation happens after the
-        # canonical response is produced.
         semantic.setdefault("processor_context_decision", {})["inherit_context"] = False
         semantic.setdefault("processor_context_decision", {})["state_mutation"] = False
-        # Drop only current-turn inherited representation decisions; persistent
-        # topic/goal/history remain available for the next interpretation pass.
-        # The next line rebuilds
-        # outputs strictly from current-turn measurements.
+
+        # Independent turns use only the current semantic output plan. Nothing
+        # is suppressed because of a word trigger or a local score threshold.
         for packet in (semantic, cognition, decision):
             if isinstance(packet, dict):
                 for key in (
@@ -1104,23 +856,19 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                     "artifact_types",
                     "render_types",
                 ):
+                    # Remove only stale inherited representation plans. The
+                    # semantic engines will refill current-turn evidence.
                     packet.pop(key, None)
-                if str(packet.get("representation_authority", "")).lower() not in {"", "text"}:
-                    packet["representation_authority"] = "text"
-        if fast_social or identity_semantic:
+
+        if identity_semantic:
             semantic["representation_constraints"] = {
                 "positive": ["text"],
-                "negative": ["table", "graph", "diagram", "formula", "code", "gallery", "image", "link"],
-                "current_request_authoritative": True,
-            }
-            decision["requested_outputs"] = ["text"]
-        else:
-            semantic["representation_constraints"] = {
-                "positive": [],
                 "negative": [],
                 "current_request_authoritative": True,
             }
-        if _is_april_identity_request(text, semantic):
+            decision["requested_outputs"] = ["text"]
+
+        if identity_semantic:
             identity = deepcopy(APRIL_IDENTITY)
             semantic["assistant_identity"] = identity
             cognition["assistant_identity"] = identity
@@ -1129,14 +877,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             decision["preferred_representation"] = "text"
             decision["representation_authority"] = "text"
             decision["dialog_act"] = "self_identification"
-            decision["identity_request"] = True
-            semantic["identity_request"] = True
-            semantic["representation_constraints"] = {
-                "positive": ["text"],
-                "negative": ["table", "graph", "diagram", "formula", "code", "gallery", "image", "link"],
-                "current_request_authoritative": True,
-                "identity_request": True,
-            }
+
         visual = {}
     # Real semantic representation measurement. This is NLI/vector evidence,
     # never a word-trigger map.
@@ -1156,19 +897,16 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
 
     # Preserve high-confidence semantic candidates for the processor collapse.
     measured_labels = representation_measurement.get("nli", {}).get("labels", [])
-    measured_scores = representation_measurement.get("nli", {}).get("scores", [])
     semantic_candidates = [
         {
             "type": _s(label).lower(),
-            "score": float(score),
             "source": "quantum_nli",
         }
-        for label, score in zip(measured_labels, measured_scores)
+        for label in measured_labels
+        if _s(label)
     ]
     semantic["quantum_representation_candidates"] = semantic_candidates
 
-    # Only semantically measured candidates above the evidence threshold enter
-    # the representation plan when no structured output was already supplied.
     if not (
         semantic.get("requested_outputs")
         or semantic.get("required_outputs")
@@ -1176,9 +914,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         or decision.get("required_outputs")
     ):
         semantic["candidate_representations"] = [
-            item["type"]
-            for item in semantic_candidates
-            if item["score"] >= 0.45
+            item["type"] for item in semantic_candidates
         ]
 
     outputs = _requested_outputs(
@@ -1204,16 +940,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     complexity = _complexity(semantic, cognition, decision, text)
     quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
     response_budget = _quantum_budget_from_64(quantum_budget_field)
-    if (
-        complexity == "LOW"
-        and len(outputs) <= 1
-        and not semantic.get("required_artifacts")
-        and not cognition.get("multi_step")
-        and not cognition.get("requires_planning")
-        and not decision.get("multi_step")
-        and not decision.get("requires_planning")
-    ):
-        response_budget = min(int(response_budget), 180)
 
     representation_constraints = _representation_constraints(
         semantic, cognition, decision
@@ -1251,7 +977,6 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "assistant_identity": deepcopy(APRIL_IDENTITY),
         "assistant_identity_name": APRIL_IDENTITY.get("name", "April"),
         "identity_request": bool(semantic.get("identity_request")),
-        "micro_social_request": bool(semantic.get("fast_social")),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -1353,8 +1078,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "representation": representation_state,
         "measured_output": measured_output,
         "context_dependency": context_dependency,
-        "context_dependency_score": _bounded01(canonical_dialogue.get("context_dependency_score", 0.0)),
-        "reference_to_previous": bool(canonical_dialogue.get("reference_to_previous")),
+                "reference_to_previous": bool(canonical_dialogue.get("reference_to_previous")),
         "continuation": bool(canonical_dialogue.get("continuation")),
         "evidence_channels": len(evidence),
         "coherence": round(coherence, 4),
@@ -1408,107 +1132,171 @@ def _request_metadata(request: MachineRequest) -> dict:
         metadata = {}
     return metadata
 
-def _decode_provider_payload(value: Any) -> dict:
-    """Unpack the Provider envelope once, without creating another route."""
-    if isinstance(value, MachineResponse):
-        return {name: getattr(value, name) for name in value.__dataclass_fields__}
-    if isinstance(value, dict):
-        payload = dict(value)
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text or not (text.startswith("{") and text.endswith("}")):
-            return {"answer": text}
-        payload = None
+
+def _decode_json_envelope(value: Any, *, max_depth: int = 5) -> Any:
+    """Recursively unwrap serialized machine envelopes without creating a route."""
+    current = value
+    for _ in range(max_depth):
+        if isinstance(current, MachineResponse):
+            current = {
+                name: getattr(current, name)
+                for name in current.__dataclass_fields__
+            }
+            continue
+        if not isinstance(current, str):
+            break
+        text = current.strip()
+        if not (text.startswith("{") and text.endswith("}")):
+            break
+        parsed = None
         for parser in (json.loads, ast.literal_eval):
             try:
-                parsed = parser(text)
+                candidate = parser(text)
             except Exception:
                 continue
-            if isinstance(parsed, dict):
-                payload = parsed
+            if isinstance(candidate, dict):
+                parsed = candidate
                 break
-        return payload if isinstance(payload, dict) else {"answer": text}
-    else:
-        raise RuntimeError("Provider returned no canonical MachineResponse")
+        if parsed is None:
+            break
+        current = parsed
+    return current
 
-    embedded = payload.get("machine_response")
-    if isinstance(embedded, MachineResponse):
-        embedded = {name: getattr(embedded, name) for name in embedded.__dataclass_fields__}
+
+def _clean_text_value(value: Any) -> str:
+    """Return only human-readable text from a Provider field."""
+    current = _decode_json_envelope(value)
+    if isinstance(current, dict):
+        for key in ("answer", "content", "response", "text", "message"):
+            if current.get(key) not in (None, "", [], {}):
+                nested = _decode_json_envelope(current.get(key))
+                if isinstance(nested, str):
+                    return nested.strip()
+        return ""
+    return _s(current)
+
+
+def _clean_render_blocks(blocks: Any) -> list[dict]:
+    """Preserve all structured blocks while unwrapping accidental JSON text blocks."""
+    result: list[dict] = []
+    queue = list(blocks or []) if isinstance(blocks, (list, tuple)) else []
+    while queue:
+        block = queue.pop(0)
+        if not isinstance(block, dict):
+            continue
+
+        btype = _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
+
+        content = block.get("content")
+        decoded_content = _decode_json_envelope(content)
+        if isinstance(decoded_content, dict) and any(
+            key in decoded_content
+            for key in ("answer", "content", "summary", "render_blocks", "artifacts")
+        ):
+            nested_answer = _clean_text_value(decoded_content.get("answer") or decoded_content.get("content"))
+            if nested_answer:
+                clean_block = dict(block)
+                clean_block["content"] = nested_answer
+                clean_block["text"] = nested_answer
+                result.append(clean_block)
+            nested_blocks = decoded_content.get("render_blocks")
+            if isinstance(nested_blocks, list):
+                queue = list(nested_blocks) + queue
+            continue
+
+        clean_block = dict(block)
+        if btype in {"text", "markdown"}:
+            clean_text = _clean_text_value(
+                block.get("content")
+                or block.get("text")
+                or block.get("value")
+            )
+            if clean_text:
+                clean_block["content"] = clean_text
+                clean_block["text"] = clean_text
+        result.append(clean_block)
+
+    return result
+
+
+def _decode_provider_payload(value: Any) -> dict:
+    """Unpack the Provider envelope completely, preserving every structured field."""
+    decoded = _decode_json_envelope(value)
+    if isinstance(decoded, MachineResponse):
+        decoded = {
+            name: getattr(decoded, name)
+            for name in decoded.__dataclass_fields__
+        }
+    if not isinstance(decoded, dict):
+        return {"answer": _clean_text_value(decoded)}
+
+    payload = dict(decoded)
+
+    embedded = _decode_json_envelope(payload.get("machine_response"))
     if isinstance(embedded, dict):
         outer = {k: v for k, v in payload.items() if k != "machine_response"}
         payload = {**embedded, **outer}
 
-    # Providers/adapters may serialize the complete MachineResponse inside
-    # answer/content/response. Decode that envelope before selecting human text.
     for key in ("answer", "content", "response"):
-        candidate = payload.get(key)
-        if not isinstance(candidate, str):
-            continue
-        text = candidate.strip()
-        if not (text.startswith("{") and text.endswith("}")):
-            continue
-        for parser in (json.loads, ast.literal_eval):
-            try:
-                nested = parser(text)
-            except Exception:
-                continue
-            if isinstance(nested, dict) and any(
-                k in nested for k in ("answer", "content", "summary", "render_blocks", "artifacts")
-            ):
-                payload = {**nested, **{k: v for k, v in payload.items() if k != key}}
-                break
-        break
+        nested = _decode_json_envelope(payload.get(key))
+        if isinstance(nested, dict) and any(
+            k in nested for k in ("answer", "content", "summary", "render_blocks", "artifacts")
+        ):
+            outer = {k: v for k, v in payload.items() if k != key}
+            payload = {**nested, **outer}
+            break
+
+    payload["render_blocks"] = _clean_render_blocks(payload.get("render_blocks") or [])
+    if isinstance(payload.get("summary"), str):
+        payload["summary"] = _clean_text_value(payload.get("summary"))
+
     return payload
 
 
 def _response(value: Any, request: MachineRequest | None = None) -> MachineResponse:
-    """
-    Unified Provider → Executor matrix collapse.
-
-    This is processing, not a second route: decode the complete Provider
-    payload, separate human answer from machine fields, preserve every
-    structured block/artifact, and attach compact matrix measurements for the
-    existing canonical SceneContract path. Nothing is discarded merely because
-    it is not a MachineResponse constructor field.
-    """
+    """Single in-place Provider response analysis and canonical separation."""
     payload = _decode_provider_payload(value)
     fields = MachineResponse.__dataclass_fields__
     allowed = {k: v for k, v in payload.items() if k in fields}
 
-    # Human-visible answer is strictly answer/content/response. Summary is
-    # contextual transport data and is never promoted to the answer.
-    answer = _s(payload.get("answer")) or _s(payload.get("content")) or _s(payload.get("response"))
+    answer = (
+        _clean_text_value(payload.get("answer"))
+        or _clean_text_value(payload.get("content"))
+        or _clean_text_value(payload.get("response"))
+    )
+
+    blocks = _clean_render_blocks(payload.get("render_blocks") or [])
     if not answer:
-        # A structured text block may carry the answer when the provider leaves
-        # the top-level answer empty. Preserve the block and use only its text.
-        for block in payload.get("render_blocks") or []:
+        for block in blocks:
             if not isinstance(block, dict):
                 continue
             btype = _s(block.get("type") or block.get("artifact_type")).lower()
-            if btype not in {"text", "markdown"}:
-                continue
-            answer = _s(block.get("content") or block.get("text") or block.get("value"))
-            if answer:
-                break
+            if btype in {"text", "markdown"}:
+                answer = _clean_text_value(
+                    block.get("content")
+                    or block.get("text")
+                    or block.get("value")
+                )
+                if answer:
+                    break
+
     if answer:
         allowed["answer"] = answer
         allowed["content"] = answer
 
-    metadata = dict(allowed.get("metadata") or {}) if isinstance(allowed.get("metadata"), dict) else {}
-    extras = {k: v for k, v in payload.items() if k not in fields and k not in {"processor_input", "provider_source_request"}}
-    if extras:
-        metadata["provider_extras"] = _quantum_snapshot(extras)
-
-    blocks = list(allowed.get("render_blocks") or [])
     artifacts = list(allowed.get("artifacts") or [])
     artifacts_payload = list(allowed.get("artifacts_payload") or [])
 
-    # Structured information is evidence for the renderer, not replacement
-    # text. Preserve all blocks and add a text block only when needed.
     visible_text = any(
         isinstance(block, dict)
         and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
-        and bool(_s(block.get("content") or block.get("text") or block.get("value")))
+        and bool(_clean_text_value(
+            block.get("content") or block.get("text") or block.get("value")
+        ))
         for block in blocks
     )
     if answer and not visible_text:
@@ -1520,43 +1308,50 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
             "renderer": "TextBlock",
             "viewer": "TextBlock",
             "scene_contract": True,
-            "source": "quantum_processor_matrix",
+            "source": "quantum_processor",
         })
     allowed["render_blocks"] = blocks
 
-    # The processor's matrix measures how the complete Provider result agrees
-    # with the already-computed request, rather than choosing a new route.
-    requested = list(getattr(request, "requested_outputs", []) or []) if request else []
+    metadata = dict(allowed.get("metadata") or {}) if isinstance(allowed.get("metadata"), dict) else {}
+    extras = {
+        k: v for k, v in payload.items()
+        if k not in fields and k not in {"processor_input", "provider_source_request"}
+    }
+    if extras:
+        metadata["provider_extras"] = _quantum_snapshot(extras)
+
     block_types = []
     for block in blocks:
         if isinstance(block, dict):
-            btype = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+            btype = _s(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            ).lower()
             if btype and btype not in block_types:
                 block_types.append(btype)
 
-    answer_overlap = _overlap(answer, request.conversation.get("current_request", "") if request else "")
-    requested_hits = {name: (name in block_types) for name in requested}
-    matrix = {
+    metadata["quantum_matrix"] = {
         "owner": "QUANTUM_PROCESSOR",
         "version": PROCESSOR_VERSION,
         "answer_present": bool(answer),
-        "summary_present": bool(_s(payload.get("summary"))),
-        "answer_overlap": round(answer_overlap, 4),
-        "requested_outputs": requested,
-        "requested_output_hits": requested_hits,
+        "summary_present": bool(_clean_text_value(payload.get("summary"))),
+        "requested_outputs": list(getattr(request, "requested_outputs", []) or []) if request else [],
         "block_types": block_types,
         "render_block_count": len(blocks),
         "artifact_count": len(artifacts) + len(artifacts_payload),
         "information_preserved": True,
         "machine_fields_transport_only": True,
+        "scoring": False,
+        "triggers": False,
     }
-    metadata["quantum_matrix"] = matrix
     metadata["visible_answer_guaranteed"] = bool(answer)
     metadata["artifact_preservation"] = True
     metadata["single_route"] = True
     allowed["metadata"] = metadata
 
     return MachineResponse(**allowed)
+
 
 def _canonicalize(
     user_id: str,
@@ -1567,18 +1362,28 @@ def _canonicalize(
     decision: dict,
     request: MachineRequest,
 ) -> dict:
-    answer = _s(response.answer) or _s(response.content) or _s(response.response)
+    answer = _clean_text_value(
+        response.answer
+    ) or _clean_text_value(
+        response.content
+    ) or _clean_text_value(
+        response.response
+    )
+
     if not answer:
         raise RuntimeError("Quantum canonicalization blocked: empty MachineResponse answer")
 
     response.answer = answer
     response.content = answer
-    if not response.summary:
-        response.summary = answer[:500]
 
-    # Critical invariant:
-    # answer must survive independently of structured artifacts/renderers.
-    response.render_blocks = list(getattr(response, "render_blocks", []) or [])
+    # Summary remains a memory/context field supplied by the Provider or an
+    # upstream semantic engine. The Executor never fabricates a summary from
+    # the visible answer.
+    response.summary = _clean_text_value(response.summary)
+
+    response.render_blocks = _clean_render_blocks(
+        list(getattr(response, "render_blocks", []) or [])
+    )
 
     response.metadata = dict(response.metadata or {})
     response.metadata.update({
@@ -1586,8 +1391,9 @@ def _canonicalize(
         "single_route": True,
         "provider_calls_per_request": 1,
         "visible_answer_guaranteed": True,
-        "visible_answer_block_type": "text",
         "artifact_preservation": True,
+        "trigger_routing": False,
+        "score_routing": False,
     })
     response.quantum_state = request.quantum_state
     response.conversation_space = {
@@ -1597,6 +1403,7 @@ def _canonicalize(
                 "answer": answer,
                 "render_blocks": response.render_blocks,
                 "artifacts": list(getattr(response, "artifacts", []) or []),
+                "summary": response.summary,
             },
         }
     }
@@ -1604,12 +1411,26 @@ def _canonicalize(
     response.executor_cognition = cognition
     response.executor_response_decision = decision
 
-    # Build the canonical scene only after the visible answer invariant exists.
+    if not any(
+        isinstance(block, dict)
+        and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
+        and bool(_clean_text_value(block.get("content") or block.get("text") or block.get("value")))
+        for block in response.render_blocks
+    ):
+        response.render_blocks.insert(0, {
+            "type": "text",
+            "artifact_type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "scene_contract": True,
+            "source": "quantum_processor",
+        })
+
     scene = build_machine_scene(response)
     provider_blocks = list(getattr(response, "render_blocks", []) or [])
 
-    # Never discard artifacts; only synchronize the canonical visible/render
-    # block list with the already-preserved MachineResponse.
     try:
         scene.blocks = provider_blocks
         scene.contract.blocks = provider_blocks
@@ -1626,10 +1447,7 @@ def _canonicalize(
                 for block in provider_blocks
                 if isinstance(block, dict)
             ],
-            "continuation": bool(
-                request.constraints.get("representation_plan", {}).get("continuation")
-                or semantic.get("continuation")
-            ),
+            "continuation": bool(request.quantum_state.get("continuation")),
             "decision_owner": "QUANTUM_PROCESSOR",
             "single_route": True,
         }
@@ -1641,11 +1459,17 @@ def _canonicalize(
                     supported.append(artifact)
             scene.contract.supported_payloads = supported
     except Exception:
-        # Scene contract builders may expose immutable dataclasses in some
-        # deployments; MachineResponse remains canonical regardless.
         pass
 
     contract = build_scene_contract(scene)
+    render_blocks = list(getattr(contract, "render_blocks", []) or [])
+    if not render_blocks:
+        render_blocks = provider_blocks
+        try:
+            contract.render_blocks = render_blocks
+        except Exception:
+            pass
+
     update_dialog_context(user_id, semantic)
     update_scene_context(
         user_id,
@@ -1654,13 +1478,6 @@ def _canonicalize(
         answer=answer,
     )
     request_meta = _request_metadata(request)
-
-    # Final transport audit: text must be visible, artifacts must survive.
-    render_blocks = list(getattr(contract, "render_blocks", []) or [])
-    if not render_blocks:
-        render_blocks = list(provider_blocks)
-    if not render_blocks:
-        raise RuntimeError("Quantum canonicalization blocked: no render blocks")
 
     return {
         "transport_contract": "scene_first",
