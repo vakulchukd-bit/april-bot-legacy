@@ -1027,16 +1027,36 @@ def voice_chat():
         print("VOICE FILE:", voice_file.filename or "voice.webm")
         print("VOICE SAVED:", temp_path)
 
-        transcript = asyncio.run(transcribe_voice(temp_path))
-        transcript = _checkout_best_text(transcript)
+        language = str(
+            request.form.get("language") or "en"
+        ).strip().lower()
+
+        try:
+            transcript = asyncio.run(transcribe_voice(temp_path))
+            transcript = _checkout_best_text(transcript)
+        except Exception as exc:
+            import traceback as _traceback
+            print("VOICE TRANSCRIPTION FAILURE:", exc)
+            _traceback.print_exc()
+            return jsonify({
+                "success": False,
+                "error_code": "VOICE_TRANSCRIPTION_FAILED",
+                "error": str(exc),
+                "canonical_route": "/api/v1/chat",
+                "voice_input": True,
+                "processed": False,
+                "language": language,
+            }), 502
 
         if not transcript:
             return jsonify({
                 "success": False,
+                "error_code": "VOICE_TRANSCRIPTION_EMPTY",
                 "error": "voice transcription returned empty text",
                 "canonical_route": "/api/v1/chat",
                 "voice_input": True,
                 "processed": False,
+                "language": language,
             }), 422
 
         print("TRANSCRIPT:", transcript)
@@ -1055,6 +1075,7 @@ def voice_chat():
             "transcript": transcript,
             "user_id": user_id,
             "voice_input": True,
+            "language": language,
         }
         if flow_id:
             payload["flow_id"] = flow_id
@@ -1385,11 +1406,24 @@ def web_chat():
         )
         _traceback.print_exc()
 
+        error_text = str(e)
+        normalized_error = error_text.lower()
+
+        if (
+            "gpt-5.6 luna returned no textual output" in normalized_error
+            or "canonical machineresponse contains no visible answer" in normalized_error
+            or "gpt-5.6 luna returned an empty canonical answer" in normalized_error
+        ):
+            error_code = "PROVIDER_NO_TEXT"
+        else:
+            error_code = "WEB_EXECUTION_ERROR"
+
         return jsonify({
-
             "success": False,
-
-            "error": str(e)
+            "error_code": error_code,
+            "error": error_text,
+            "canonical_route": "/api/v1/chat",
+            "gateway_transport_only": True,
         }), 500
 
 
