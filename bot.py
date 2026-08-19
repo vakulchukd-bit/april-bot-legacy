@@ -377,6 +377,7 @@ def compact_mapping_hint(mapping):
 
 
 def _best_text(*candidates):
+    """Generic machine-text helper retained for compatibility paths."""
     for candidate in candidates:
         if candidate is None:
             continue
@@ -394,6 +395,46 @@ def _best_text(*candidates):
                 "text",
                 "response",
                 "data",
+            ):
+                value = candidate.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        elif isinstance(candidate, str):
+            value = candidate.strip()
+            if value:
+                return value
+
+        else:
+            value = str(candidate).strip()
+            if value:
+                return value
+
+    return ""
+
+
+def _human_visible_text(*candidates):
+    """Resolve only fields that are allowed to become user-visible text.
+
+    Summary is deliberately excluded: it belongs to memory/context and must
+    remain a machine field even when answer/content are empty.
+    """
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        if isinstance(candidate, dict):
+            nested = resolve_canonical_scene_contract(candidate)
+            if nested:
+                candidate = nested
+
+            for key in (
+                "answer",
+                "content",
+                "final_text",
+                "text",
+                "response",
+                "message",
             ):
                 value = candidate.get(key)
                 if isinstance(value, str) and value.strip():
@@ -541,10 +582,9 @@ def machine_to_human(
         if result_type in RENDERER_TYPES:
             return payload
 
-        candidate_text = _best_text(
+        candidate_text = _human_visible_text(
             source_mapping.get("answer"),
             source_mapping.get("content"),
-            source_mapping.get("summary"),
             source_mapping.get("final_text"),
             source_mapping.get("text"),
             source_mapping.get("response"),
@@ -872,10 +912,9 @@ def normalize_executor_response(
 
     # Fiber Route Stage 1: preserve canonical Executor transport.
     if isinstance(scene_contract, dict):
-        normalized["final_text"] = _best_text(
+        normalized["final_text"] = _human_visible_text(
             scene_contract.get("answer"),
             scene_contract.get("content"),
-            scene_contract.get("summary"),
             normalized["final_text"],
         )
         normalized["render_blocks"] = (
@@ -1060,14 +1099,12 @@ def organize_multimodal_response(
     result_type = result.get("type", "text")
     scene_contract = resolve_canonical_scene_contract(result)
 
-    canonical_text = _best_text(
-        scene_contract.get("content"),
+    canonical_text = _human_visible_text(
         scene_contract.get("answer"),
-        scene_contract.get("summary"),
+        scene_contract.get("content"),
         scene_contract.get("final_text"),
-        result.get("content"),
         result.get("answer"),
-        result.get("summary"),
+        result.get("content"),
         result.get("final_text"),
         result.get("response"),
     )
@@ -1145,15 +1182,47 @@ async def process_april_request(
     result = preserve_executor_scene_contract(result)
     if not isinstance(result.get("scene_contract"), dict):
         raise RuntimeError("Canonical CPU SceneContract is required.")
-    result.setdefault("gateway_transport", {})
-    normalized = organize_multimodal_response(result)
 
-    # Write April's final human-visible answer back into the SAME dialog.
-    # This closes the turn pair used by the next request.
+    # Canonical SceneContract is already finalized by the Quantum Executor.
+    # Bot.ru is transport-only here: preserve every machine/render field and
+    # never rebuild human text from summary or renderer payloads.
+    scene_contract = scene_contract_to_dict(result.get("scene_contract")) or {}
+    render_blocks = list(
+        scene_contract.get("render_blocks")
+        or scene_contract.get("blocks")
+        or result.get("render_blocks")
+        or []
+    )
+
+    normalized = {
+        "type": result.get("type", "text"),
+        "content": scene_contract.get("content") or "",
+        "answer": scene_contract.get("answer") or "",
+        "summary": scene_contract.get("summary") or "",
+        "blocks": render_blocks,
+        "render_blocks": render_blocks,
+        "graph": scene_contract.get("graph"),
+        "formula": scene_contract.get("formula"),
+        "scene": scene_contract.get("scene") or {},
+        "layout": scene_contract.get("layout"),
+        "visual": scene_contract.get("visual"),
+        "table": scene_contract.get("table"),
+        "gallery": scene_contract.get("gallery"),
+        "links": scene_contract.get("links") or result.get("links", []),
+        "scene_contract": scene_contract,
+        "gateway_transport": result.get("gateway_transport") or scene_contract,
+        "renderer_state": scene_contract.get("renderer_state"),
+        "machine_scene": result.get("machine_scene"),
+        "scene_plan": result.get("scene_plan"),
+        "active_visual_scene": result.get("active_visual_scene"),
+    }
+
+    # Write ONLY the canonical human answer/content back to dialog history.
+    # Summary remains available inside SceneContract/memory and is never used
+    # as an assistant message fallback.
     visible_answer = (
         normalized.get("answer")
         or normalized.get("content")
-        or normalized.get("final_text")
         or ""
     )
     if visible_answer:
