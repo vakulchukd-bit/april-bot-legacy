@@ -84,89 +84,6 @@ def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
 def _s(v: Any) -> str:
     return str(v or "").strip()
 
-
-def _parse_machine_envelope(value: Any) -> dict | None:
-    """Parse a provider-returned MachineResponse envelope when it was serialized into a text field."""
-    if not isinstance(value, str):
-        return None
-
-    text = value.strip()
-    if not text or not (text.startswith("{") and text.endswith("}")):
-        return None
-
-    for parser in (json.loads, ast.literal_eval):
-        try:
-            parsed = parser(text)
-        except Exception:
-            continue
-
-        if not isinstance(parsed, dict):
-            continue
-
-        marker_keys = {
-            "answer", "content", "summary", "response",
-            "scene", "artifacts", "render_blocks",
-            "scene_plan", "renderer_state", "metadata",
-        }
-        if marker_keys.intersection(parsed.keys()):
-            return parsed
-
-    return None
-
-
-def _unwrap_machine_response_payload(value: Any) -> dict:
-    """
-    Normalize a Provider payload without losing structured fields.
-
-    The Provider is allowed to return a canonical MachineResponse dict, but
-    some adapters may serialize that same object into answer/content/response.
-    This helper unwraps that serialization exactly once and preserves all
-    machine fields for the canonical SceneContract.
-    """
-    if isinstance(value, MachineResponse):
-        return {
-            field_name: getattr(value, field_name)
-            for field_name in value.__dataclass_fields__
-        }
-
-    if not isinstance(value, dict):
-        raise RuntimeError("Provider returned no canonical MachineResponse")
-
-    payload = dict(value)
-
-    embedded = payload.get("machine_response")
-    if isinstance(embedded, dict):
-        payload = {
-            **embedded,
-            **{k: v for k, v in payload.items() if k != "machine_response"},
-        }
-
-    for text_key in ("answer", "content", "response"):
-        nested = _parse_machine_envelope(payload.get(text_key))
-        if not nested:
-            continue
-
-        # The serialized envelope is authoritative for canonical response
-        # fields, while already-structured outer fields are preserved when
-        # the nested envelope does not carry them.
-        merged = dict(payload)
-        for key, nested_value in nested.items():
-            if nested_value not in (None, "", [], {}):
-                merged[key] = nested_value
-        payload = merged
-        break
-
-    # A nested machine_response may itself be serialized in a text field.
-    nested_machine = _parse_machine_envelope(payload.get("machine_response"))
-    if nested_machine:
-        payload.update({
-            key: value
-            for key, value in nested_machine.items()
-            if value not in (None, "", [], {})
-        })
-
-    return payload
-
 def _clip(v: Any, n: int = 900) -> str:
     s = _s(v)
     return s if len(s) <= n else s[-n:]
@@ -1491,11 +1408,69 @@ def _request_metadata(request: MachineRequest) -> dict:
         metadata = {}
     return metadata
 
-def _response(value: Any) -> MachineResponse:
-    if isinstance(value, MachineResponse):
-        return value
+def _parse_machine_envelope(value: Any) -> dict | None:
+    """Parse a serialized MachineResponse without touching ordinary human text."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(text)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        marker_keys = {
+            "answer", "content", "summary", "response", "scene",
+            "artifacts", "render_blocks", "scene_plan",
+            "renderer_state", "metadata",
+        }
+        if marker_keys.intersection(parsed):
+            return parsed
+    return None
 
-    payload = _unwrap_machine_response_payload(value)
+
+def _machine_payload_dict(value: Any) -> dict:
+    """Convert any Provider MachineResponse form to one detached dict and unwrap one envelope."""
+    if isinstance(value, MachineResponse):
+        payload = {
+            field_name: getattr(value, field_name)
+            for field_name in value.__dataclass_fields__
+        }
+    elif isinstance(value, dict):
+        payload = dict(value)
+    else:
+        raise RuntimeError("Provider returned no canonical MachineResponse")
+
+    embedded = payload.get("machine_response")
+    if isinstance(embedded, MachineResponse):
+        embedded = {
+            field_name: getattr(embedded, field_name)
+            for field_name in embedded.__dataclass_fields__
+        }
+    if isinstance(embedded, dict):
+        outer = {k: v for k, v in payload.items() if k != "machine_response"}
+        payload = {**embedded, **outer}
+
+    # Provider adapters can serialize the SAME MachineResponse into answer/content.
+    # The inner machine envelope is authoritative for those canonical fields.
+    for key in ("answer", "content", "response"):
+        nested = _parse_machine_envelope(payload.get(key))
+        if nested:
+            merged = dict(payload)
+            for nested_key, nested_value in nested.items():
+                if nested_value not in (None, "", [], {}):
+                    merged[nested_key] = nested_value
+            payload = merged
+            break
+
+    return payload
+
+
+def _response(value: Any) -> MachineResponse:
+    payload = _machine_payload_dict(value)
     allowed = {
         k: v
         for k, v in payload.items()
@@ -1564,9 +1539,27 @@ def _canonicalize(
     decision: dict,
     request: MachineRequest,
 ) -> dict:
-    answer = _s(response.answer) or _s(response.content) or _s(response.response)
+    # Final single-point guard: never let a serialized MachineResponse survive
+    # into SceneContract even if a Provider adapter bypassed _response normalization.
+    payload = _machine_payload_dict(response)
+    envelope = None
+    for key in ("answer", "content", "response"):
+        envelope = _parse_machine_envelope(payload.get(key))
+        if envelope:
+            payload.update(envelope)
+            break
+
+    answer = _s(payload.get("answer")) or _s(payload.get("content")) or _s(payload.get("response"))
     if not answer:
         raise RuntimeError("Quantum canonicalization blocked: empty MachineResponse answer")
+
+    if envelope:
+        for field_name in MachineResponse.__dataclass_fields__:
+            if field_name in payload and payload[field_name] not in (None, "", [], {}):
+                try:
+                    setattr(response, field_name, payload[field_name])
+                except Exception:
+                    pass
 
     response.answer = answer
     response.content = answer
@@ -1585,17 +1578,6 @@ def _canonicalize(
         "visible_answer_guaranteed": True,
         "visible_answer_block_type": "text",
         "artifact_preservation": True,
-        "field_roles": {
-            "answer": "human_visible",
-            "content": "human_canonical_content",
-            "summary": "memory_only",
-            "render_blocks": "renderer_input",
-            "artifacts": "artifact_transport",
-            "scene": "scene_transport",
-            "scene_plan": "processor_internal",
-            "renderer_state": "renderer_state",
-            "metadata": "machine_internal",
-        },
     })
     response.quantum_state = request.quantum_state
     response.conversation_space = {
@@ -1680,9 +1662,6 @@ def _canonicalize(
         "answer": answer,
         "content": answer,
         "summary": response.summary,
-        "field_roles": dict(
-            (response.metadata or {}).get("field_roles", {})
-        ),
         "render_blocks": render_blocks,
         "artifacts": list(getattr(response, "artifacts", []) or []),
         "single_route": True,
