@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import math
 import re
-import time
 from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from blocks.context_system import build_deephub_context, build_executor_context_packet
 from blocks.interpretation_layer import (
@@ -45,128 +43,6 @@ SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
 OUTPUT_MAX_TOKENS = 8000
-
-
-# ---------------------------------------------------------------------------
-# QUANTUM QUARTZ CLOCK / WORK SCHEDULER
-# ---------------------------------------------------------------------------
-# One balanced control mechanism for the whole executor.
-# Auxiliary engines only produce evidence. This clock owns dispatch order,
-# receipt order and stage completion. It is intentionally small: no parallel
-# route, no second executor, no background queue.
-# ---------------------------------------------------------------------------
-
-QUARTZ_VERSION = "quartz_matrix_1"
-QUARTZ_STAGES = (
-    "CONTEXT_SNAPSHOT",
-    "INTERPRETATION",
-    "SEMANTIC",
-    "COGNITION",
-    "INTENT",
-    "ROUTING",
-    "AUXILIARY_EVIDENCE",
-    "QUANTUM_COLLAPSE",
-    "REQUEST_RELEASE",
-    "PROVIDER",
-    "SCENE_COMMIT",
-)
-
-@dataclass(slots=True)
-class QuantumWorkReceipt:
-    stage: str
-    sequence: int
-    dispatched_ns: int
-    received_ns: int = 0
-    duration_ms: float = 0.0
-    status: str = "DISPATCHED"
-    evidence_keys: tuple[str, ...] = field(default_factory=tuple)
-
-class QuartzMatrix:
-    """
-    Minimal temporal control plane inside the existing Quantum Processor.
-
-    Invariants:
-      1. one stage at a time;
-      2. a later stage cannot be received before the previous stage is sealed;
-      3. every stage has a dispatch/receive timestamp;
-      4. only the processor owns the schedule; helper engines only return data.
-    """
-
-    def __init__(self, flow_id: str = "", turn_id: str = "") -> None:
-        self.flow_id = _s(flow_id)
-        self.turn_id = _s(turn_id)
-        self.started_ns = time.monotonic_ns()
-        self._next_sequence = 1
-        self._open: QuantumWorkReceipt | None = None
-        self._receipts: list[QuantumWorkReceipt] = []
-
-    def dispatch(self, stage: str) -> QuantumWorkReceipt:
-        if stage not in QUARTZ_STAGES:
-            raise RuntimeError(f"Quartz dispatch blocked: unknown stage={stage}")
-        if self._open is not None:
-            raise RuntimeError(
-                f"Quartz dispatch blocked: stage {self._open.stage} is not sealed"
-            )
-        expected_index = len(self._receipts)
-        if expected_index >= len(QUARTZ_STAGES):
-            raise RuntimeError("Quartz dispatch blocked: schedule exhausted")
-        if QUARTZ_STAGES[expected_index] != stage:
-            raise RuntimeError(
-                f"Quartz order violation: expected={QUARTZ_STAGES[expected_index]} got={stage}"
-            )
-        receipt = QuantumWorkReceipt(
-            stage=stage,
-            sequence=self._next_sequence,
-            dispatched_ns=time.monotonic_ns(),
-        )
-        self._next_sequence += 1
-        self._open = receipt
-        return receipt
-
-    def receive(self, receipt: QuantumWorkReceipt, result: Any = None) -> Any:
-        if self._open is not receipt:
-            raise RuntimeError("Quartz receive blocked: receipt is not the active stage")
-        received_ns = time.monotonic_ns()
-        receipt.received_ns = received_ns
-        receipt.duration_ms = round(
-            (received_ns - receipt.dispatched_ns) / 1_000_000.0,
-            3,
-        )
-        receipt.status = "RECEIVED"
-        if isinstance(result, dict):
-            receipt.evidence_keys = tuple(sorted(str(k) for k in result.keys())[:32])
-        self._receipts.append(receipt)
-        self._open = None
-        return result
-
-    def snapshot(self) -> dict[str, Any]:
-        now = time.monotonic_ns()
-        return {
-            "version": QUARTZ_VERSION,
-            "flow_id": self.flow_id,
-            "turn_id": self.turn_id,
-            "schedule_mode": "single_clocked_sequential",
-            "stage_count": len(QUARTZ_STAGES),
-            "completed_stages": len(self._receipts),
-            "open_stage": self._open.stage if self._open else "",
-            "elapsed_ms": round((now - self.started_ns) / 1_000_000.0, 3),
-            "receipts": [
-                {
-                    "stage": item.stage,
-                    "sequence": item.sequence,
-                    "dispatched_ns": item.dispatched_ns,
-                    "received_ns": item.received_ns,
-                    "duration_ms": item.duration_ms,
-                    "status": item.status,
-                    "evidence_keys": list(item.evidence_keys),
-                }
-                for item in self._receipts
-            ],
-        }
-
-    @property
-    def complete(self) -> bool:
-        return self._open is None and len(self._receipts) == len(QUARTZ_STAGES)
 
 def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
     """
@@ -1742,42 +1618,21 @@ def _validate_quantum_release(request: MachineRequest) -> None:
     if not isinstance(metadata, dict):
         raise RuntimeError("Quantum release blocked: metadata bridge missing")
 
-
-def _ensure_turn_id(state: dict, user_id: Any, text: str) -> str:
-    """Deterministic-enough per-request identifier without adding a new route."""
-    active = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
-    existing = _s(state.get("turn_id") or active.get("turn_id"))
-    if existing:
-        return existing
-    stamp = time.time_ns()
-    return f"{_s(user_id)}:{stamp}:{abs(hash(_s(text))) & 0xffff:04x}"
-
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     """
-    ONE ROUTE / ONE QUARTZ CLOCK / MANY EVIDENCE ORGANS / ONE COLLAPSE / ONE PROVIDER.
+    ONE ROUTE / TEN EVIDENCE ENGINES / ONE COLLAPSE / ONE PROVIDER CALL.
 
-    The Quartz Matrix is the temporal control plane of this existing executor.
-    It does not add a second processor or route. It only schedules, timestamps,
-    receives and seals the work produced by helper engines before the processor
-    advances to the next stage.
+    The ten quantumized modules are not ten routes. They are ten independent
+    evidence lenses feeding one processor field. The processor arbitrates the
+    combined field, creates one MachineRequest, then uses the existing Provider
+    path once and the existing C-Artifact/SceneContract path once.
     """
     state = get_state(user_id)
     state = state if isinstance(state, dict) else {}
-
-    turn_id = _ensure_turn_id(state, user_id, text)
+    history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
-    if not active_flow.get("flow_id"):
-        active_flow["flow_id"] = _s(state.get("flow_id")) or ""
-        state["active_flow"] = active_flow
-    quartz = QuartzMatrix(
-        flow_id=_s(state.get("flow_id") or active_flow.get("flow_id")),
-        turn_id=turn_id,
-    )
+    dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
 
-    # ------------------------------------------------------------------
-    # T0 — context snapshot: evidence intake only, never a routing decision.
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("CONTEXT_SNAPSHOT")
     build_deephub_context(user_id, text, state)
     context_packet = state.get("_executor_context_packet")
     if not isinstance(context_packet, dict):
@@ -1785,18 +1640,13 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     context_evidence = state.get("_machine_context", {}).get("quantum_evidence", {})
     if not isinstance(context_evidence, dict):
         context_evidence = {}
-    quartz.receive(r, context_evidence)
 
-    history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
-    if not isinstance(history, list):
-        history = []
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
+    history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
 
-    # ------------------------------------------------------------------
-    # T1 — interpretation
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("INTERPRETATION")
+    # One canonical heavy Interpretation pass per turn. Semantic Core reuses
+    # the same evidence packet instead of re-running Stanza/NLI.
     interpretation = interpret_request(
         text,
         cognition=state.get("cognition", {}) if isinstance(state.get("cognition"), dict) else {},
@@ -1804,20 +1654,19 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         state=state,
     ) or {}
+
+    # Freeze canonical interpretation measurements for downstream engines.
     field = interpretation.get("quantum_interpretation_field", {})
     if isinstance(field, dict):
         dialogue_field = field.get("dialogue")
         representation_field = field.get("representation")
-        if isinstance(dialogue_field, dict) and isinstance(dialogue_field.get("semantic_measurement"), dict):
+        if isinstance(dialogue_field, dict) and isinstance(
+            dialogue_field.get("semantic_measurement"), dict
+        ):
             interpretation["quantum_dialogue_measurement"] = dialogue_field["semantic_measurement"]
         if isinstance(representation_field, dict):
             interpretation["quantum_representation_measurement"] = representation_field
-    quartz.receive(r, interpretation)
 
-    # ------------------------------------------------------------------
-    # T2 — semantic engine
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("SEMANTIC")
     semantic = semantic_analyze(
         text=text,
         state=state,
@@ -1826,21 +1675,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dialog_state=dialog_state,
         interpreted=interpretation,
     ) or {}
-    quartz.receive(r, semantic)
 
-    # ------------------------------------------------------------------
-    # T3 — cognition engine
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("COGNITION")
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
     cognition = analyze_cognition(
         text=text, semantic=semantic, reasoning=reasoning, state=state
     ) or {}
-    interpretation["cognition"] = _quantum_snapshot(cognition)
-    quartz.receive(r, cognition)
 
-    # Canonical semantic evidence freeze happens only after the ordered
-    # interpretation -> semantic -> cognition trio has completed.
+    interpretation["cognition"] = _quantum_snapshot(cognition)
+
     _merge_evidence_fields(semantic, (interpretation,))
     semantic["quantum_interpretation_evidence"] = interpretation
     if isinstance(interpretation.get("quantum_representation_measurement"), dict):
@@ -1852,17 +1694,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             interpretation["quantum_dialogue_measurement"]
         )
 
-    # ------------------------------------------------------------------
-    # T4 — intent / resolver
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("INTENT")
     intent = detect_intent(text, state) or {}
     intent_ai = await detect_intent_ai(text, state)
     intent_ai = intent_ai if isinstance(intent_ai, dict) else {}
     resolver = resolve_input(history, state) or {}
     focus_intent = build_focus_intent_state(text, state) or {}
+
     intent_ai["provider_calls"] = 0
     intent_ai["decision_owner"] = "QUANTUM_PROCESSOR"
+
     _merge_evidence_fields(semantic, (intent, intent_ai, resolver))
     semantic["quantum_intent_evidence"] = {
         "intent_system": intent,
@@ -1870,17 +1710,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "intent_resolver": resolver,
         "focus": focus_intent,
     }
-    quartz.receive(r, {
-        "intent": intent,
-        "intent_ai": intent_ai,
-        "resolver": resolver,
-        "focus": focus_intent,
-    })
 
-    # ------------------------------------------------------------------
-    # T5 — routing hints (evidence only)
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("ROUTING")
     router_context = {
         "semantic": semantic,
         "cognition": cognition,
@@ -1900,7 +1730,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     router_evidence = semantic.get("quantum_router_evidence", {})
     if not isinstance(router_evidence, dict):
         router_evidence = {}
+
     router_system = decide_action(text, history) or {}
+
     _merge_evidence_fields(semantic, (router_evidence, router_system))
     semantic["quantum_router_evidence"] = {
         "router": router_evidence,
@@ -1911,34 +1743,41 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     visual = build_visual_reference(
         semantic=semantic, cognition=cognition, text=text, state=state
     ) or {}
-    quartz.receive(r, {
-        "router": router_evidence,
-        "router_system": router_system,
-        "visual_reference": visual,
-    })
 
-    # ------------------------------------------------------------------
-    # T6 — auxiliary evidence organs
-    # They are always subordinate to the processor: results are received as
-    # evidence, not executed as independent routing decisions.
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("AUXILIARY_EVIDENCE")
-    experience = build_experience_evidence(text=text, state=state) or {}
-    experience_manager_state = get_experience(user_id) or {}
+    # -------------------------------------------------------------
+    # FOUR NEW QUANTUM EVIDENCE LENSES
+    # These do not own routing or memory. They only contribute compact,
+    # JSON-safe evidence to the single processor field.
+    # -------------------------------------------------------------
+    experience = build_experience_evidence(
+        text=text,
+        state=state,
+    ) or {}
+
+    experience_manager_state = get_experience(
+        user_id
+    ) or {}
+
+    # The experience manager is a short-lived per-user signal source.
+    # Only the latest compact state is admitted to the quantum field.
     experience_manager_evidence = {
         "user_id": _s(experience_manager_state.get("user_id") or user_id),
-        "latest": _quantum_snapshot(experience_manager_state.get("latest", {})),
+        "latest": _quantum_snapshot(
+            experience_manager_state.get("latest", {})
+        ),
         "has_experience": bool(experience_manager_state.get("events")),
         "temporary": True,
         "machine_only": True,
         "decision_owner": "QUANTUM_PROCESSOR",
         "provider_calls": 0,
     }
+
     goal_evidence = build_goal_evidence(
         text=text,
         state=state,
         semantic=semantic,
     ) or {}
+
     decision = build_response_decision(
         semantic=semantic,
         cognition=cognition,
@@ -1952,6 +1791,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_experience_manager_evidence"] = _quantum_snapshot(
         experience_manager_evidence
     )
+
+    # Reuse interpretation-layer measurement; no second heavy NLP pass.
     if not isinstance(semantic.get("quantum_dialogue_measurement"), dict):
         semantic["quantum_dialogue_measurement"] = _quantum_snapshot(
             interpretation.get("quantum_dialogue_measurement", {})
@@ -1974,6 +1815,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "goal": goal_evidence,
         "visual_reference": visual,
     })
+
     quantum_field = _build_quantum_field(
         user_id=user_id,
         text=text,
@@ -1993,6 +1835,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         goal=goal_evidence,
         visual_reference=visual,
     )
+
     detached_quantum_field = _quantum_snapshot(quantum_field)
     state["_quantum_evidence_field"] = detached_quantum_field
     state["_quantum_processor_context"] = _quantum_snapshot(processor_context)
@@ -2003,20 +1846,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["parallel_route"] = False
     semantic["quantum_processor_version"] = PROCESSOR_VERSION
     semantic["semantic_decision_owner"] = "QUANTUM_PROCESSOR"
-    quartz.receive(r, {
-        "experience": experience,
-        "experience_manager": experience_manager_evidence,
-        "goal": goal_evidence,
-        "decision": decision,
-        "processor_context": processor_context,
-        "quantum_field": quantum_field,
-    })
 
-    # ------------------------------------------------------------------
-    # T7 — quantum collapse: the processor now decides context, order and
-    # representation from the already received evidence.
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("QUANTUM_COLLAPSE")
     request = _make_request(text, semantic, cognition, decision, state, visual)
     request.quantum_state["evidence_channels"] = 14
     request.quantum_state["evidence_field"] = quantum_field
@@ -2034,15 +1864,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             request.constraints.get("representation_plan", {}).get("audit", {})
         ),
         "processor_context": processor_context,
-        "quartz_matrix": quartz.snapshot(),
     })
     request.constraints["metadata"] = request_meta
-    quartz.receive(r, request.quantum_state)
 
-    # ------------------------------------------------------------------
-    # T8 — request release and energy/contract validation
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("REQUEST_RELEASE")
     energy_profile = build_quantum_acceleration_profile(
         user_id,
         flow_id=(state.get("flow_id") if isinstance(state, dict) else "") or "",
@@ -2057,6 +1881,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     acceleration_check = validate_quantum_acceleration(request, energy_profile)
     if not acceleration_check.get("ok"):
         raise RuntimeError("Quantum energy acceleration invariant failed")
+
     _validate_quantum_release(request)
 
     representation_plan = request.constraints.get("representation_plan", {})
@@ -2069,12 +1894,22 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     if any(output in blocked_outputs for output in requested_outputs):
         raise RuntimeError("Quantum release blocked: contradictory representation plan")
 
+    # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    #
+    # IMPORTANT:
+    # The 64-signal budget field is owned by the MachineRequest created by
+    # _make_request(). It must never be read from execute()'s local scope,
+    # because that would make the processor depend on a variable that only
+    # exists inside _make_request(). Reading the canonical field from the
+    # request keeps the budget calculation single-source and preserves the
+    # single-route processor invariant.
     quantum_budget_field = (
         getattr(request, "quantum_state", {}) or {}
     ).get("quantum_budget_field", {})
     if not isinstance(quantum_budget_field, dict):
         raise RuntimeError("Quantum release blocked: canonical 64-signal budget field missing")
 
+    # Final quantum release audit: 14 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
         "evidence_channels": 14,
         "decision_owner": "QUANTUM_PROCESSOR",
@@ -2097,79 +1932,32 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         ],
         "word_trigger_routing": False,
         "fallback_semantics": False,
+        "quantum_budget_field": quantum_budget_field,
         "experience": True,
         "experience_manager": True,
         "goal_engine": True,
         "visual_reference_system": True,
-        "quartz_matrix": quartz.snapshot(),
     }
-    quartz.receive(r, {
-        "energy": energy_profile,
-        "acceleration": acceleration_check,
-        "release": True,
-    })
 
-    # ------------------------------------------------------------------
-    # T9 — provider
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("PROVIDER")
     provider_result = await generate_text(
         request,
         max_output_tokens=request.response_output_tokens,
     )
     response = _response(provider_result)
+
+    # The Provider may legitimately return structured artifacts without a
+    # standalone visible text block. Canonicalize once here so Web never sees
+    # an artifact-only SceneContract for an answer that exists.
     response.render_blocks = _ensure_visible_answer_block(response)
     request.constraints.setdefault("metadata", {})["visible_answer_audit"] = {
-        "answer_present": bool(
-            _s(response.answer) or _s(response.content) or _s(response.response)
-        ),
-        "render_blocks_before_canonicalize": len(
-            getattr(response, "render_blocks", []) or []
-        ),
+        "answer_present": bool(_s(response.answer) or _s(response.content) or _s(response.response)),
+        "render_blocks_before_canonicalize": len(getattr(response, "render_blocks", []) or []),
         "artifacts_preserved": len(getattr(response, "artifacts", []) or []),
         "text_block_guaranteed": any(
             isinstance(block, dict)
-            and _s(block.get("type") or block.get("artifact_type")).lower()
-            in {"text", "markdown"}
+            and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
             for block in getattr(response, "render_blocks", []) or []
         ),
     }
-    quartz.receive(r, {
-        "answer": _s(response.answer),
-        "render_blocks": getattr(response, "render_blocks", []),
-        "artifacts": getattr(response, "artifacts", []),
-    })
 
-    # ------------------------------------------------------------------
-    # T10 — final scene commit / API release
-    # ------------------------------------------------------------------
-    r = quartz.dispatch("SCENE_COMMIT")
-    request.constraints.setdefault("metadata", {})["quartz_matrix"] = quartz.snapshot()
-    result = _canonicalize(
-        user_id,
-        response,
-        state,
-        semantic,
-        cognition,
-        decision,
-        request,
-    )
-    result["quartz_matrix"] = quartz.snapshot()
-    result["turn_id"] = turn_id
-    if not quartz.complete:
-        raise RuntimeError("Quartz release blocked: temporal schedule incomplete")
-    quartz.receive(r, {
-        "scene_contract": result.get("scene_contract"),
-        "render_blocks": result.get("render_blocks", []),
-        "answer": result.get("answer", ""),
-    })
-    # Replace the pre-receive snapshot with the final sealed audit.
-    final_quartz = quartz.snapshot()
-    result["quartz_matrix"] = final_quartz
-    request.constraints.setdefault("metadata", {})["quartz_matrix"] = final_quartz
-    request.quantum_state["quartz_matrix"] = final_quartz
-    result["machine_response"].metadata = dict(
-        getattr(result["machine_response"], "metadata", {}) or {}
-    )
-    result["machine_response"].metadata["quartz_matrix"] = final_quartz
-    return result
+    return _canonicalize(user_id, response, state, semantic, cognition, decision, request)
