@@ -389,7 +389,6 @@ def _best_text(*candidates):
             for key in (
                 "answer",
                 "content",
-                "summary",
                 "final_text",
                 "text",
                 "response",
@@ -911,10 +910,9 @@ def normalize_executor_response(
 
     # Fiber Route Stage 1: preserve canonical Executor transport.
     if isinstance(scene_contract, dict):
-        normalized["final_text"] = _best_text(
+        normalized["final_text"] = _human_text_only(
             scene_contract.get("answer"),
             scene_contract.get("content"),
-            scene_contract.get("summary"),
             normalized["final_text"],
         )
         normalized["render_blocks"] = (
@@ -1180,19 +1178,43 @@ async def process_april_request(
         result = {"content": str(result), "type": "text"}
 
     result = preserve_executor_scene_contract(result)
-    if not isinstance(result.get("scene_contract"), dict):
+    scene_contract = result.get("scene_contract")
+    if not isinstance(scene_contract, dict):
         raise RuntimeError("Canonical CPU SceneContract is required.")
-    result.setdefault("gateway_transport", {})
-    normalized = organize_multimodal_response(result)
 
-    # Write April's final human-visible answer back into the SAME dialog.
-    # This closes the turn pair used by the next request.
-    visible_answer = (
-        normalized.get("answer")
-        or normalized.get("content")
-        or normalized.get("final_text")
-        or ""
+    # Canonical route: Bot.ru does not reinterpret or rebuild the answer.
+    # Executor owns the human answer and the renderer scene. Bot.ru only
+    # transports those canonical fields and closes the same dialog turn.
+    visible_answer = _human_text_only(
+        scene_contract.get("answer"),
+        scene_contract.get("content"),
     )
+
+    canonical = {
+        "type": result.get("type", "text"),
+        "content": visible_answer,
+        "answer": visible_answer,
+        "summary": scene_contract.get("summary"),
+        "blocks": normalize_blocks(scene_contract.get("render_blocks", [])),
+        "final_text": visible_answer,
+        "graph": scene_contract.get("graph"),
+        "formula": scene_contract.get("formula"),
+        "scene": scene_contract.get("scene"),
+        "layout": scene_contract.get("layout"),
+        "visual": scene_contract.get("visual"),
+        "table": scene_contract.get("table"),
+        "gallery": scene_contract.get("gallery"),
+        "links": scene_contract.get("links", []),
+        "scene_contract": scene_contract,
+        "gateway_transport": result.get("gateway_transport") or scene_contract,
+        "render_blocks": scene_contract.get("render_blocks", []),
+        "active_visual_scene": result.get("active_visual_scene"),
+        "renderer_state": scene_contract.get("renderer_state"),
+        "machine_scene": scene_contract.get("machine_scene"),
+        "scene_plan": scene_contract.get("scene_plan"),
+    }
+
+    # Write only the canonical human answer to the same dialog.
     if visible_answer:
         add_dialog(
             user_id,
@@ -1201,11 +1223,10 @@ async def process_april_request(
             metadata={"source": "april_web", "modality": "text"},
         )
 
-    # Preserve continuity only if a visual scene exists.
-    if normalized.get("scene_contract") or normalized.get("render_blocks"):
-        synchronize_scene_continuity(user_id, normalized)
+    if canonical.get("render_blocks"):
+        synchronize_scene_continuity(user_id, canonical)
 
-    return normalized
+    return canonical
 
 
 # =========================================================
