@@ -45,6 +45,13 @@ PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
 OUTPUT_MAX_TOKENS = 8000
 
+# Canonical structural dimensions of the single processor matrix.
+# These are fixed engine dimensions, not routing triggers or score thresholds.
+QUANTUM_CORE_COUNT = 8
+QUANTUM_LANE_COUNT = 8
+QUANTUM_CORES = tuple(f"core_{i+1}" for i in range(QUANTUM_CORE_COUNT))
+QUANTUM_LANES = tuple(f"lane_{i+1}" for i in range(QUANTUM_LANE_COUNT))
+
 def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
     """
     Convert runtime evidence into a detached, JSON-safe snapshot.
@@ -676,9 +683,9 @@ def _quantum_64_field(
 
     return {
         "cores": field,
-        "core_count": len(QUANTUM_CORES),
-        "lane_count": len(QUANTUM_LANES),
-        "signal_count": len(QUANTUM_CORES) * len(QUANTUM_LANES),
+        "core_count": QUANTUM_CORE_COUNT,
+        "lane_count": QUANTUM_LANE_COUNT,
+        "signal_count": QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT,
         "measurement_mode": "structural_no_trigger_no_score",
         "request_word_count": word_count,
         "requested_output_count": len(outputs),
