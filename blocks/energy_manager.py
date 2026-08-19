@@ -333,14 +333,29 @@ def apply_quantum_acceleration(request: Any, profile: dict) -> Any:
 
 def validate_quantum_acceleration(request: Any, profile: dict) -> dict:
     constraints = getattr(request, "constraints", {}) or {}
-    effective = _s(getattr(request, "response_complexity", ""))
+
+    # The processor owns a continuous 1..8000 output budget.  ADAPTIVE is
+    # therefore a valid processor complexity state, not a legacy energy tier.
+    # The accelerator may calculate an effective energy level internally, but
+    # it must not reject the request because its canonical complexity remains
+    # ADAPTIVE.
+    metadata = getattr(request, "metadata", {}) or {}
+    energy_meta = metadata.get("energy_acceleration", {}) if isinstance(metadata, dict) else {}
+    requested = _s(getattr(request, "response_complexity", "")).upper()
+    effective = _s(
+        energy_meta.get("effective_complexity")
+        or profile.get("effective_complexity")
+        or requested
+    ).upper()
+    valid_complexity = effective in OUTPUT_TOKENS or requested == "ADAPTIVE"
+
     return {
         "ok": bool(
             profile.get("machine_only") is True
             and constraints.get("one_provider_call") is True
             and constraints.get("canonical_scene") is True
             and constraints.get("request_intact") is True
-            and effective in OUTPUT_TOKENS
+            and valid_complexity
         ),
         "single_route": True,
         "provider_calls_allowed": 1,
