@@ -785,9 +785,15 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     if competencies:
         fields.append(("COMPETENCIES", competencies))
 
+    memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+    memory_mode = _safe_text(memory.get("retrieval_mode") or "").lower()
+    dynamic_memory = memory.get("dynamic_memory")
+    if memory_mode == "memory_query" and dynamic_memory:
+        fields.append(("MEMORY_RECALL", dynamic_memory))
+
     # Visual context is sent only for an actual visual/artifact relation.
     visual = payload.get("visual_context")
-    if visual and (reference or "structured_rendering" in competencies or requested_outputs):
+    if visual and memory_mode != "memory_query" and (reference or "structured_rendering" in competencies or requested_outputs):
         fields.append(("VISUAL_CONTEXT", visual))
 
     # Semantic/decision packets are compact and only used after a relation exists.
