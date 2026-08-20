@@ -89,7 +89,7 @@ APRIL_ENABLE_HEAVY_HOTPATH = (
 DIALOGUE_LABELS = (
     "identity", "greeting", "question", "request", "reformulation",
     "continuation", "correction", "reference", "affirmation",
-    "rejection", "new_topic", "statement", "independent",
+    "rejection", "new_topic", "statement", "independent", "memory_query",
 )
 
 REPRESENTATION_HYPOTHESES = {
@@ -105,14 +105,15 @@ REPRESENTATION_HYPOTHESES = {
 }
 
 SEMANTIC_TURN_PROTOTYPES = {
-    "identity": "пользователь спрашивает кто такой помощник как его зовут какую роль он выполняет и что умеет; the user asks who the assistant is, its role or capabilities",
+    "identity": "пользователь спрашивает кто ты как тебя зовут представься назови себя; the user asks who you are or what your name is",
     "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
-    "question": "пользователь задаёт вопрос просит ответ или разъяснение; the user asks a question requiring an answer",
+    "question": "пользователь задаёт вопрос просит ответ или разъяснение сколько равен вычисли посчитай значение; the user asks a question requiring an answer or calculation",
     "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
     "continuation": "пользователь хочет продолжить предыдущую тему развить предыдущий ответ; the user wants to continue the preceding task",
     "reformulation": "пользователь просит переделать переформулировать переработать предыдущий результат; the user asks to rework previous content",
     "correction": "пользователь исправляет изменяет уточняет предыдущую инструкцию; the user corrects or modifies a previous instruction",
     "reference": "пользователь ссылается на ранее обсуждённое или созданное; the user refers back to previous material",
+    "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
     "new_topic": "пользователь начинает новую тему не связанную с предыдущим обсуждением; the user starts a new topic",
@@ -452,11 +453,56 @@ class QuantumInterpretationEngine:
         best_representation, rep_score = rep_ranked[0]
         rep_margin = rep_score - (rep_ranked[1][1] if len(rep_ranked) > 1 else 0.0)
 
+        # Representation is selected from a compatibility matrix rather than
+        # lexical triggers. A representation must have enough semantic mass
+        # AND a compatible dialogue/domain/capability signal. This prevents a
+        # weak gallery/table prototype from winning an ordinary numeric or
+        # memory question.
+        text_rep_score = float(representation.get("text", 0.0) or 0.0)
+        domain_scores = domain
+        capability_scores = capability
+        best_dialogue = str(best_dialogue or "")
+
+        def compatible(name: str) -> bool:
+            if name == "formula":
+                return (float(domain_scores.get("physics", 0.0)) >= 0.005
+                        or float(domain_scores.get("chemistry", 0.0)) >= 0.005
+                        or float(capability_scores.get("information", 0.0)) >= 0.04)
+            if name == "link":
+                return (best_dialogue == "reference"
+                        or float(capability_scores.get("web", 0.0)) >= 0.02)
+            if name == "table":
+                return (float(capability_scores.get("information", 0.0)) >= 0.04
+                        or float(capability_scores.get("exploration", 0.0)) >= 0.03
+                        or float(domain_scores.get("politics", 0.0)) >= 0.01
+                        or float(domain_scores.get("news", 0.0)) >= 0.01)
+            if name == "graph":
+                return (float(capability_scores.get("exploration", 0.0)) >= 0.03
+                        or float(domain_scores.get("physics", 0.0)) >= 0.02
+                        or float(domain_scores.get("biology", 0.0)) >= 0.02)
+            if name in {"diagram", "gallery", "image"}:
+                return float(capability_scores.get("space", 0.0)) >= 0.03
+            if name == "code":
+                return float(capability_scores.get("code", 0.0)) >= 0.03
+            return False
+
+        effective = {}
+        for name, score in representation.items():
+            if name == "text":
+                continue
+            value = float(score or 0.0)
+            if compatible(name):
+                value += 0.10
+            effective[name] = value
+
         explicit_representations = [
-            name for name, score in representation.items()
-            if name != "text" and score >= 0.45
-            and score - representation.get("text", 0.0) >= 0.08
+            name for name, score in effective.items()
+            if score >= 0.20
+            and score - text_rep_score >= 0.08
         ]
+        explicit_representations.sort(
+            key=lambda name: effective.get(name, 0.0), reverse=True
+        )
 
         identity_request = (
             dialogue.get("identity", 0.0) >= 0.12
@@ -646,6 +692,12 @@ class QuantumInterpretationEngine:
             dialogue.get("reference", 0.0), 0.86 * assistant_relation,
             0.62 * user_relation, 0.70 * topic_relation,
         )
+        memory_query_score = float(dialogue.get("memory_query", 0.0) or 0.0)
+        if memory_query_score >= 0.10:
+            # Recall requests are a semantic discourse mode, not an ordinary
+            # continuation of the immediately preceding visual scene.
+            reference_score = max(reference_score, memory_query_score)
+
         # A relational attribute question with an existing dialogue field is
         # context-dependent even when lexical overlap is zero. This is a
         # structural discourse relation, not a word/name trigger.
@@ -655,6 +707,7 @@ class QuantumInterpretationEngine:
                 continuation_score = max(continuation_score, 0.62)
         continuation = bool(
             previous_assistant
+            and best != "memory_query"
             and (best in {
                 "continuation", "reformulation", "correction",
                 "reference", "affirmation", "rejection",
@@ -789,16 +842,20 @@ class QuantumInterpretationEngine:
                 or dialogue["continuation_score"] >= 0.72
             )
         )
-        reference = bool(last_assistant and dialogue["reference_score"] >= 0.60)
+        memory_query = dialogue["label"] == "memory_query"
+        reference = bool(
+            last_assistant and (dialogue["reference_score"] >= 0.60 or memory_query)
+        )
         topic_shift = bool(
             active_topic and not continuation and not reference
             and profile["context_scores"].get("active_topic", 0.0) < 0.35
         )
 
-        scene_type = (
-            required_representations[0] if required_representations
-            else matrix["best_scene"]
-        )
+        # Scene type is an execution decision only when the representation
+        # matrix has produced an explicit current-turn representation.
+        # Otherwise every ordinary answer stays a text scene; a raw matrix
+        # winner (table/gallery/etc.) is evidence, not a trigger.
+        scene_type = required_representations[0] if required_representations else "text"
         representation_scores = profile["representation_scores"]
         capability = profile["capability_scores"]
 
@@ -849,6 +906,7 @@ class QuantumInterpretationEngine:
             },
             "candidate_representations": profile["explicit_representations"],
             "required_representations": required_representations,
+            "memory_query": bool(memory_query),
             "representation_evidence": [
                 SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
                 for k, v in sorted(
@@ -916,14 +974,22 @@ class QuantumInterpretationEngine:
                 "previous_assistant_turn": last_assistant,
                 "active_topic": active_topic,
                 "active_goal": active_goal,
-                "relation": "continuation" if continuation else "reference" if reference else "topic" if active_topic and not topic_shift else "independent",
+                "relation": (
+                "memory_query" if memory_query else
+                "continuation" if continuation else
+                "reference" if reference else
+                "topic" if active_topic and not topic_shift else
+                "independent"
+            ),
             },
             "reply_to": reply_to,
             "required_capabilities": [
                 "semantic_interpretation", "dialogue_context",
-                *([ "representation_evidence" ] if required_representations else []),
+                *( ["memory_retrieval"] if memory_query else [] ),
+                *(["representation_evidence"] if required_representations else []),
             ],
             "context_dependency": (
+                "memory_query" if memory_query else
                 "continuation" if continuation else
                 "reference" if reference else
                 "new_topic" if topic_shift else
@@ -931,8 +997,9 @@ class QuantumInterpretationEngine:
             ),
             "context_policy": {
                 "current_request": True,
-                "dialogue_vector": continuation or reference,
+                "dialogue_vector": continuation or reference or memory_query,
                 "previous_turn": bool(reply_to),
+                "memory_retrieval": bool(memory_query),
                 "active_goal": bool(active_goal),
                 "full_history": True,
                 "semantic_similarity": True,
@@ -994,6 +1061,7 @@ class QuantumInterpretationEngine:
             "measurement_ms": round((time.perf_counter() - started) * 1000.0, 3),
         })
 
+        result["memory_query"] = bool(memory_query)
         result["discussion_mode"] = float(capability.get("discussion", 0.0)) >= 0.60
         result["space_discussion"] = float(capability.get("space", 0.0)) >= 0.60
         result["exploration"] = float(capability.get("exploration", 0.0))
