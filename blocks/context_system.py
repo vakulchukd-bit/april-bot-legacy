@@ -444,8 +444,8 @@ def detect_dialog_intent(current_text: Any, state: Dict[str, Any]) -> str:
     return "NEW_TOPIC"
 
 def should_include_archived_memory(current_text: Any, state: Dict[str, Any]) -> bool:
-    intent = detect_dialog_intent(current_text, state)
-    return intent != "NEW_TOPIC"
+    """Compatibility API: archived memory is retrieved only by semantic memory engine."""
+    return False
 
 def build_context_focus_snapshot(text: Any, state: Dict[str, Any]) -> Dict[str, Any]:
     focus = _dict(state.get("focus_state") or state.get("dynamic_focus"))
@@ -690,14 +690,43 @@ def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str, Any]:
-    """Compact quantum input: memory is evidence, not a decision."""
+    """Expose only current-scene evidence; archived memory stays in storage.
+
+    Archived A-E/7D content is not injected into the Provider as raw text.
+    Dynamic recall is performed by the Quantum Processor when the measured
+    dialogue contract requires it. This prevents stale legacy summaries from
+    resurfacing as answers while preserving every stored record.
+    """
     dialog = state.get("dialog") or []
     substantive = _v7_latest_substantive_user_message(dialog)
+    scene = _dict(state.get("active_visual_scene") or state.get("current_visual_scene"))
+    latest_scene_user = safe_slice(
+        scene.get("user_request") or scene.get("current_request") or "",
+        500,
+    )
+    latest_scene_april = safe_slice(
+        scene.get("april_answer") or scene.get("answer") or scene.get("summary") or "",
+        700,
+    )
     return {
-        "has_memory": bool(state.get("memory_summary") or substantive),
-        "latest_substantive_user": safe_slice(substantive, 500),
-        "memory_summary": safe_slice(state.get("memory_summary", ""), 800),
-        "reference_request": _is_reference(text),
+        "has_memory": bool(
+            substantive
+            or latest_scene_user
+            or latest_scene_april
+            or state.get("memory_timeline")
+        ),
+        "latest_substantive_user": safe_slice(substantive or latest_scene_user, 500),
+        "current_scene_user_request": latest_scene_user,
+        "current_scene_april_answer": latest_scene_april,
+        "current_visual_scene_present": bool(scene),
+        "current_visual_scene_id": str(scene.get("scene_id") or ""),
+        "current_visual_user_id": str(scene.get("user_id") or ""),
+        "current_visual_conversation_id": str(scene.get("conversation_id") or ""),
+        "dynamic_memory_available": bool(
+            _dict(state.get("memory_timeline")).get("day_0")
+        ),
+        "reference_request": False,
+        "archived_memory_role": "semantic_retrieval_only",
     }
 
 def _v7_latest_substantive_user_message(dialog: List[Dict[str, Any]]) -> str:
@@ -867,18 +896,9 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
     if math.get("expr"):
         blocks.append("\nMATH CONTEXT:\n" + safe_slice(math["expr"], MAX_MATH_EXPR))
 
-    if state.get("passive_memory") and should_include_archived_memory(text, state):
-        blocks.append(
-            "\nARCHIVED TRAJECTORIES (REFERENCE ONLY):\n"
-            + "\n".join(state["passive_memory"][-4:])
-        )
-
-    summary = state.get("memory_summary")
-    if summary and (_is_reference(text) or _overlap(text, summary) > 0):
-        blocks.append(
-            "\nMEMORY SUMMARY (REFERENCE ONLY):\n"
-            + safe_slice(summary, 800)
-        )
+    # Legacy passive_memory / memory_summary remain persisted for durability,
+    # but they are no longer injected as raw Provider context. Archived topics
+    # are recalled only through the Quantum Memory Engine's semantic evidence.
 
     return "\n\n".join(x for x in blocks if x)
 
