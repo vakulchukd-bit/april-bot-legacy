@@ -944,18 +944,10 @@ async def process_web_message(
         normalized["single_route"] = True
         normalized["space_continuity"] = build_space_continuity(normalized)
 
-        # Commit a new active visual scene only when the canonical output really
-        # contains a visual renderer block. Plain text must not activate it.
-        visual_types = {"graph", "plot", "chart", "diagram", "schematic", "gallery", "image", "media", "visual", "scene", "table"}
-        blocks = normalized.get("render_blocks") or []
-        has_visual = any(
-            isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower() in visual_types
-            for block in blocks
-        )
-        if has_visual:
-            # Existing canonical continuation writer remains the sole scene commit point.
-            result["render_blocks"] = blocks
-            result["scene_contract"] = scene_view
+        # The Executor's update_scene_context() is the sole scene commit point.
+        # Every completed USER↔APRIL turn becomes the current scene, including
+        # text-only turns. Visual renderer types describe presentation; they do
+        # not decide whether memory is a scene.
         return normalized
     finally:
         # If the turn did not produce a new visual scene, restore the stored scene
@@ -1291,10 +1283,34 @@ def web_chat():
                 "error": "user_id required"
             }), 400
 
-        text = data.get(
+        text = str(data.get(
             "text",
             ""
-        )
+        ) or "").strip()
+
+        # Browser page-hide sends only visual_ledger synchronization. It is not
+        # a user turn and must never create/replace the current USER↔APRIL scene.
+        if not text:
+            current_state = get_state(user_id)
+            return jsonify({
+                "success": True,
+                "gateway_transport": {},
+                "scene_contract": safe_json({
+                    "active_visual_scene": current_state.get("active_visual_scene"),
+                    "user_id": user_id,
+                    "conversation_id": current_state.get("conversation_id"),
+                }),
+                "render_blocks": [],
+                "content": "",
+                "answer": "",
+                "summary": "",
+                "renderer_mode": WEB_RENDERER_MODE,
+                "scene_mode": WEB_SCENE_MODE,
+                "visual_summary": safe_json(current_state.get("visual_summary") or {}),
+                "active_visual_scene": safe_json(current_state.get("active_visual_scene")),
+                "canonical_route": "/api/v1/chat",
+                "memory_sync_only": True,
+            })
 
         visual_ledger = data.get(
             "visual_ledger",
