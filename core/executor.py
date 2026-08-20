@@ -381,8 +381,13 @@ def _dialogue_evidence(
         "SAME_TOPIC",
         "CONTINUATION",
         "ARTIFACT_REFERENCE",
+        "MEMORY_QUERY",
     }:
-        mode = "CONTINUATION" if bool(dialogue_contract.get("continuation")) else "INDEPENDENT"
+        mode = (
+            "MEMORY_QUERY" if dialogue_contract.get("dialog_act") == "memory_query"
+            else "CONTINUATION" if bool(dialogue_contract.get("continuation"))
+            else "INDEPENDENT"
+        )
 
     active_topic = _s(
         dialogue_contract.get("active_topic")
@@ -407,14 +412,16 @@ def _dialogue_evidence(
     reference_to_previous = bool(dialogue_contract.get("reference_to_previous"))
 
     if context_dependency:
-        if reference_to_previous:
+        if _s(dialogue_contract.get("dialog_act")).lower() == "memory_query":
+            mode = "MEMORY_QUERY"
+        elif reference_to_previous:
             mode = "ARTIFACT_REFERENCE" if mode == "ARTIFACT_REFERENCE" else "CONTINUATION"
         elif continuation:
             mode = "CONTINUATION"
         elif mode == "INDEPENDENT":
             mode = "SAME_TOPIC"
 
-    if not dialog and mode != "INDEPENDENT":
+    if not dialog and mode not in {"INDEPENDENT", "MEMORY_QUERY"}:
         mode = "INDEPENDENT"
         context_dependency = False
         continuation = False
@@ -452,6 +459,7 @@ def _collapse_dialogue(e: dict[str, Any]) -> tuple[str, dict[str, float], float]
         "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
         "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
         "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
+        "MEMORY_QUERY": 1.0 if mode == "MEMORY_QUERY" else 0.0,
     }
     return mode, states, 1.0
 
@@ -863,6 +871,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
         "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
         "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
+        "MEMORY_QUERY": 1.0 if mode == "MEMORY_QUERY" else 0.0,
     }
     coherence = 1.0
 
@@ -886,6 +895,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
             "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
             "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
+            "MEMORY_QUERY": 1.0 if mode == "MEMORY_QUERY" else 0.0,
         }
         coherence = 1.0
 
@@ -1079,7 +1089,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             ),
             **(
                 {"recent_dialogue": context.get("recent_dialogue", [])}
-                if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE"} or context_dependency
+                if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"} or context_dependency
                 else {}
             ),
         },
@@ -1087,9 +1097,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             {
                 "active_topic": _clip(topic, 300),
                 "active_goal": _clip(goal, 500),
+                "retrieval_mode": "memory_query" if mode == "MEMORY_QUERY" else "semantic",
                 "dynamic_memory": (
                     dynamic_memory_evidence
-                    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE"}
+                    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
                     or bool(evidence.get("reference_to_previous"))
                     else {"available": bool(dynamic_memory_evidence.get("matches"))}
                 ),
@@ -2252,7 +2263,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     # Archived A-E/7D memory is queried as evidence only after the semantic
     # interpretation pass has run. No archived item is copied into the current
     # scene automatically.
-    dynamic_memory = query_dynamic_memory(user_id, text, limit=8)
+    retrieval_mode = (
+        "memory_query"
+        if _s(interpretation.get("dialog_act")).lower() == "memory_query"
+        else "semantic"
+    )
+    dynamic_memory = query_dynamic_memory(
+        user_id, text, limit=8, retrieval_mode=retrieval_mode
+    )
     if not isinstance(dynamic_memory, dict):
         dynamic_memory = {}
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
