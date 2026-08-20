@@ -39,7 +39,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v21_integrated_no_triggers_no_scoring"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v22_presentation_signals_no_triggers_no_scoring"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1321,6 +1321,113 @@ def _decode_provider_payload(value: Any) -> dict:
     return payload
 
 
+
+def _presentation_signal_for_block(block: dict) -> dict:
+    """Attach renderer hints without rewriting the original payload."""
+    source = dict(block or {})
+    btype = _s(
+        source.get("type")
+        or source.get("artifact_type")
+        or source.get("representation")
+    ).lower()
+    representation = _s(
+        source.get("representation")
+        or source.get("presentation")
+    ).lower()
+
+    kind = btype or representation or "text"
+    signal = {
+        "version": "presentation_signal_v1",
+        "kind": kind,
+        "renderer": "",
+        "engine": "",
+        "preserve_payload": True,
+    }
+
+    if kind in {"text", "markdown"}:
+        signal.update({
+            "renderer": "mcdowell",
+            "engine": "markdown",
+            "inline_math_engine": "katex",
+            "allow_math_segments": True,
+        })
+    elif kind == "formula":
+        signal.update({
+            "renderer": "mcdowell",
+            "engine": "katex",
+            "math_mode": "display",
+        })
+    elif kind == "table":
+        signal.update({
+            "renderer": "table",
+            "engine": "table",
+            "cell_text_engine": "mcdowell",
+            "cell_math_engine": "katex",
+        })
+    elif kind in {"graph", "plot", "chart"}:
+        signal.update({
+            "renderer": "graph",
+            "engine": "graph",
+            "label_text_engine": "mcdowell",
+            "label_math_engine": "katex",
+        })
+    elif kind == "code":
+        signal.update({
+            "renderer": "code",
+            "engine": "syntax",
+        })
+    elif kind == "link":
+        signal.update({
+            "renderer": "link",
+            "engine": "link_card",
+            "description_engine": "mcdowell",
+        })
+    elif kind in {"gallery", "image", "media"}:
+        signal.update({
+            "renderer": "gallery",
+            "engine": "media",
+            "caption_engine": "mcdowell",
+        })
+    elif kind in {"diagram", "scene", "layout", "visual"}:
+        signal.update({
+            "renderer": "graph",
+            "engine": "diagram",
+            "label_text_engine": "mcdowell",
+            "label_math_engine": "katex",
+        })
+    elif kind == "mixed":
+        signal.update({
+            "renderer": "message",
+            "engine": "mixed",
+            "delegated_segments": True,
+        })
+    else:
+        signal.update({
+            "renderer": "mcdowell",
+            "engine": "markdown",
+            "inline_math_engine": "katex",
+        })
+
+    # Preserve explicit provider hints while keeping the original payload intact.
+    explicit_signal = source.get("signal")
+    if isinstance(explicit_signal, dict):
+        merged = dict(signal)
+        merged.update(_quantum_snapshot(explicit_signal))
+        signal = merged
+
+    return signal
+
+
+def _attach_presentation_signals(blocks: Any) -> list[dict]:
+    enriched: list[dict] = []
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        clean = dict(block)
+        clean["signal"] = _presentation_signal_for_block(clean)
+        enriched.append(clean)
+    return enriched
+
 def _response(value: Any, request: MachineRequest | None = None) -> MachineResponse:
     """Single in-place Provider response analysis and canonical separation."""
     payload = _decode_provider_payload(value)
@@ -1333,7 +1440,7 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
         or _clean_text_value(payload.get("response"))
     )
 
-    blocks = _clean_render_blocks(payload.get("render_blocks") or [])
+    blocks = _attach_presentation_signals(_clean_render_blocks(payload.get("render_blocks") or []))
     if not answer:
         for block in blocks:
             if not isinstance(block, dict):
@@ -1454,8 +1561,8 @@ def _canonicalize(
     # the visible answer.
     response.summary = _clean_text_value(response.summary)
 
-    response.render_blocks = _clean_render_blocks(
-        list(getattr(response, "render_blocks", []) or [])
+    response.render_blocks = _attach_presentation_signals(
+        _clean_render_blocks(list(getattr(response, "render_blocks", []) or []))
     )
 
     response.metadata = dict(response.metadata or {})
@@ -1499,6 +1606,7 @@ def _canonicalize(
             "viewer": "TextBlock",
             "scene_contract": True,
             "source": "quantum_processor",
+            "signal": _presentation_signal_for_block({"type": "text"}),
         })
 
     scene = build_machine_scene(response)
