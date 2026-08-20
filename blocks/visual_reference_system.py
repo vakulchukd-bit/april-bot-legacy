@@ -161,7 +161,7 @@ def build_visual_reference(
         semantic.get("context_dependency")
         or dialogue_contract.get("context_dependency")
     )
-    new_topic_guard = context_dependency in {"independent", "new_topic"}
+    new_topic_guard = context_dependency in {"independent", "new_topic", "memory_query"}
 
     # A measured new/independent topic immediately releases the stored visual
     # scene from the current response context. The scene remains in 7D memory.
