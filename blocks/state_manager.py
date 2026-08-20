@@ -504,6 +504,9 @@ class QuantumMemoryEngine:
             record.get("summary"),
             record.get("text"),
             record.get("current_request"),
+            record.get("user_meaning"),
+            record.get("april_meaning"),
+            record.get("answer_summary"),
             record.get("goal"),
             record.get("object"),
         ]
@@ -542,6 +545,16 @@ class QuantumMemoryEngine:
                         "day_index": age,
                     }
 
+            # Completed USER↔APRIL pairs are the canonical dynamic dialogue
+            # memory. They were previously stored but never queried here.
+            for item in day.get("dialog_pairs", []):
+                if isinstance(item, dict):
+                    yield {
+                        **item,
+                        "memory_kind": "dialog_pair",
+                        "day_index": age,
+                    }
+
             for item in day.get("intent_signals", []):
                 if isinstance(item, dict):
                     yield {
@@ -550,7 +563,8 @@ class QuantumMemoryEngine:
                         "day_index": age,
                     }
 
-    def query(self, state_obj, query, *, limit=8):
+    def query(self, state_obj, query, *, limit=8, retrieval_mode="semantic"):
+
         """
         Produce memory evidence. Stored visual scenes remain in the 7-day
         memory, but the current active visual context is exposed only when its
@@ -558,6 +572,7 @@ class QuantumMemoryEngine:
         """
         self.ensure_runtime(state_obj)
         query = str(query or "").strip()
+        retrieval_mode = str(retrieval_mode or "semantic").strip().lower()
 
         if not query:
             return {
@@ -577,6 +592,14 @@ class QuantumMemoryEngine:
         current_visual = state_obj.get("active_visual_scene")
 
         candidates = list(self.iter_memory_records(state_obj))
+        if retrieval_mode == "memory_query":
+            # A recall request asks "what did I ask / discuss", so the memory
+            # field should search completed dialogue pairs first rather than
+            # visually rendered artifacts or old topic labels.
+            dialogue_pairs = [r for r in candidates if r.get("memory_kind") == "dialog_pair"]
+            candidates = dialogue_pairs or [
+                r for r in candidates if r.get("memory_kind") in {"topic", "dialog_pair"}
+            ]
         candidate_texts = []
         candidate_records = []
         for record in candidates:
@@ -605,18 +628,35 @@ class QuantumMemoryEngine:
             if active_scene_text else 0.0
         )
 
+        latest_created_at = max(
+            [float(r.get("created_at") or r.get("timestamp") or 0.0) for r in candidate_records] or [0.0]
+        )
         ranked = []
         for record, candidate_text in zip(candidate_records, candidate_texts):
             semantic = float(semantic_map.get(candidate_text, 0.0))
-            recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_DAYS))
+            day_recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_DAYS))
+            created_at = float(record.get("created_at") or record.get("timestamp") or 0.0)
+            temporal_recency = (
+                max(0.0, min(1.0, created_at / latest_created_at))
+                if latest_created_at > 0.0 and created_at > 0.0
+                else day_recency
+            )
 
             # Memory relation is semantic, never substring/keyword routing.
             relation = 0.10 * active_topic_score
             if record.get("memory_kind") == "visual_scene":
                 relation += 0.15 * active_scene_similarity
 
-            score = min(1.0, (semantic * 0.65) + (recency * 0.20) + relation)
-            if score >= 0.30:
+            if retrieval_mode == "memory_query":
+                # Within completed dialogue pairs, chronological order is the
+                # decisive axis for an unqualified recall request; semantics
+                # differentiates ties instead of replacing temporal order.
+                score = min(1.0, (semantic * 0.30) + (temporal_recency * 0.70))
+                threshold = 0.20
+            else:
+                score = min(1.0, (semantic * 0.65) + (day_recency * 0.20) + relation)
+                threshold = 0.30
+            if score >= threshold:
                 ranked.append((score, record))
 
         ranked.sort(key=lambda x: x[0], reverse=True)
@@ -627,10 +667,14 @@ class QuantumMemoryEngine:
                 "day_index": record.get("day_index", 0),
                 "memory_kind": record.get("memory_kind"),
                 "slot": record.get("slot"),
+                "record_type": record.get("record_type"),
                 "topic": record.get("topic"),
+                "user_meaning": safe_trim_text(record.get("user_meaning"), 800),
+                "april_meaning": safe_trim_text(record.get("april_meaning"), 1200),
+                "answer_summary": safe_trim_text(record.get("answer_summary"), 800),
                 "summary": safe_trim_text(
-                    record.get("summary") or record.get("text") or self._record_text(record),
-                    600,
+                    record.get("summary") or record.get("text") or record.get("answer_summary") or self._record_text(record),
+                    800,
                 ),
                 "scene": record.get("scene"),
                 "visual": record.get("scene") if record.get("memory_kind") == "visual_scene" else None,
@@ -660,6 +704,7 @@ class QuantumMemoryEngine:
             "stored_visual_scene": current_visual,
             "active_visual_context_relevant": active_visual_context_relevant,
             "active_topic_similarity": round(active_topic_score, 6),
+            "retrieval_mode": retrieval_mode,
             "focus_state": deepcopy(focus),
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
@@ -1592,20 +1637,20 @@ def prepare_visual_context_for_turn(user_id, current_request):
             "current_request": current,
         }
 
-    # The latest scene remains the hot user-scoped scene until the canonical
-    # Executor finishes the current turn and rotates it into dynamic memory
-    # when the semantic dialogue contract says the topic changed.
-    state_obj["active_visual_scene_turn"] = deepcopy(scene)
+    # The persisted scene is durable evidence, not an automatic continuation.
+    # Do not promote it into the turn-local context before the semantic matrix
+    # has established a relation to the current request.
+    state_obj["active_visual_scene_turn"] = None
     state_obj["stored_visual_scene_turn"] = None
 
     return {
-        "active": True,
-        "released": False,
+        "active": False,
+        "released": True,
         "overlap": 0.0,
-        "semantic_relevance": 1.0,
+        "semantic_relevance": 0.0,
         "continuation_score": 0.0,
         "decision_owner": "QUANTUM_PROCESSOR",
-        "memory_role": "current_scene_evidence",
+        "memory_role": "evidence_only",
         "user_id": str(user_id),
         "current_request": current,
         "scene_id": str(scene.get("scene_id") or ""),
@@ -2088,13 +2133,13 @@ def update_dialog_context(user_id, semantic_result):
 # DIRECT QUANTUM MEMORY QUERY API
 # =====================================================
 
-def query_dynamic_memory(user_id, query, limit=8):
+def query_dynamic_memory(user_id, query, limit=8, retrieval_mode="semantic"):
     """
     Return semantic memory evidence for the existing Quantum Processor.
     No route/renderer decision is made here.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    result = QUANTUM_MEMORY_ENGINE.query(state_obj, query, limit=limit)
+    result = QUANTUM_MEMORY_ENGINE.query(state_obj, query, limit=limit, retrieval_mode=retrieval_mode)
     return result
 
 
