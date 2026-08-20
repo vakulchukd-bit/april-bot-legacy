@@ -231,6 +231,22 @@ def _state_signals(state, active_flow, dialog_state, history):
                 last_user = str(obj.get("content") or obj.get("text") or obj.get("answer") or "").strip()
         if last_april and last_user:
             break
+    current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+    if isinstance(current_scene, dict):
+        if not last_user:
+            last_user = str(
+                current_scene.get("user_request")
+                or current_scene.get("current_request")
+                or ""
+            ).strip()
+        if not last_april:
+            last_april = str(
+                current_scene.get("april_answer")
+                or current_scene.get("answer")
+                or current_scene.get("summary")
+                or ""
+            ).strip()
+
     return {
         "focus": cognition.get("dynamic_focus", {}),
         "goal": cognition.get("goal_hierarchy", {}),
@@ -241,12 +257,18 @@ def _state_signals(state, active_flow, dialog_state, history):
         "continuity_context_storage": state.get("continuity_context_storage", []),
         "memory_anchor_storage": state.get("memory_anchor_storage", []),
         "active_topic_slot": state.get("active_topic_slot", "A"),
-        "active_visual_scene": state.get("active_visual_scene"),
+        "active_visual_scene": current_scene,
         "active_flow": active_flow,
         "dialog_state": dialog_state,
         "history_depth": len(history),
         "last_april_turn": last_april or state.get("last_april_turn", ""),
         "last_user_turn": last_user or state.get("last_user_turn", ""),
+        "current_scene_user_request": (
+            current_scene.get("user_request") if isinstance(current_scene, dict) else ""
+        ),
+        "current_scene_april_answer": (
+            current_scene.get("april_answer") if isinstance(current_scene, dict) else ""
+        ),
     }
 
 REPRESENTATION_UNIVERSE = (
