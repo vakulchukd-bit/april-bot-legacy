@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import time
 import threading
 import re
+import hashlib
 from copy import deepcopy
 
 try:
@@ -176,6 +177,10 @@ def build_default_state():
         "stored_visual_scene_turn": None,
         "active_visual_topic": None,
         "visual_topic_history": [],
+        "conversation_id": None,
+        "current_visual_scene": None,
+        "visual_scene_turn_id": None,
+        "visual_scene_version": 0,
         "visual_scene_history": [],
         "visual_topic_registry": [],
         "task_context_storage": [],
@@ -1552,47 +1557,33 @@ def prepare_visual_context_for_turn(user_id, current_request):
 
 
 def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
-    """Finalize the visual hot pointer without resurrecting stale visual memory.
+    """Finalize the current scene without resurrecting stale visual memory.
 
-    ``stored_visual_scene_turn`` is archival/dynamic memory only. It is never
-    promoted back to ``active_visual_scene`` after an unrelated turn.
-    ``active_visual_scene_turn`` is the only scene that may remain active after
-    a confirmed continuation.
+    The active visual scene is the latest canonical USER↔APRIL dialogue scene.
+    Archived scenes remain in A-E/7D and are never promoted by a blind restore.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    approved = state_obj.get("active_visual_scene_turn")
-
-    if new_scene_active:
-        # A newly produced visual scene is already installed by update_scene_context.
-        approved = state_obj.get("active_visual_scene")
-    elif isinstance(approved, dict) and approved:
-        # Keep the scene only when the turn was semantically approved as a
-        # continuation/reference of the current visual topic.
-        state_obj["active_visual_scene"] = deepcopy(approved)
+    if isinstance(state_obj.get("active_visual_scene_turn"), dict):
+        state_obj["active_visual_scene"] = deepcopy(state_obj["active_visual_scene_turn"])
+        state_obj["current_visual_scene"] = deepcopy(state_obj["active_visual_scene_turn"])
         state_obj["active_visual_topic"] = {
             "topic": safe_trim_text(
-                approved.get("topic")
-                or approved.get("trajectory")
-                or approved.get("current_request")
-                or approved.get("summary"),
+                state_obj["active_visual_scene_turn"].get("topic")
+                or state_obj["active_visual_scene_turn"].get("current_request")
+                or state_obj["active_visual_scene_turn"].get("summary"),
                 500,
             ),
-            "scene_id": str(approved.get("scene_id") or ""),
-            "timestamp": approved.get("timestamp", time.time()),
-            "source": "approved_visual_continuation",
+            "scene_id": str(state_obj["active_visual_scene_turn"].get("scene_id") or ""),
+            "conversation_id": str(state_obj.get("conversation_id") or ""),
+            "user_id": str(user_id),
+            "turn_id": state_obj["active_visual_scene_turn"].get("turn_id"),
+            "source": "current_dialogue_scene",
         }
-    else:
-        # Independent/new-topic turn: the previous visual scene stays only in
-        # the seven-day timeline and must not be resurrected.
-        state_obj["active_visual_scene"] = None
-        state_obj["active_visual_topic"] = None
-        state_obj["visual_focus"] = {}
-
-    state_obj["active_visual_scene_turn"] = None
+    # Critical invariant: stored_visual_scene_turn is archival only.
     state_obj["stored_visual_scene_turn"] = None
+    state_obj["active_visual_scene_turn"] = None
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
     persist_state(user_id)
-
 
 def bind_current_visual_scene(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
@@ -1699,15 +1690,107 @@ def build_visual_memory_bridge(user_id):
     }
 
 
-def update_scene_context(user_id, scene_contract, current_request="", answer=""):
-    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    contract = scene_contract if isinstance(scene_contract, dict) else {}
+def _ensure_conversation_scope(state_obj, user_id):
+    """Keep all memory under one authenticated user scope and one stable conversation."""
+    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(state_obj)
+    user_scope = str(user_id or "").strip()
+    if not user_scope:
+        raise ValueError("Authenticated user_id is required for memory scope")
 
+    conversation_id = str(state_obj.get("conversation_id") or "").strip()
+    if not conversation_id:
+        # Stable per-user conversation identity; not a routing identifier.
+        conversation_id = f"april-{hashlib.sha256(user_scope.encode("utf-8")).hexdigest()[:24]}"
+        state_obj["conversation_id"] = conversation_id
+
+    state_obj["memory_scope"] = {
+        "user_id": user_scope,
+        "conversation_id": conversation_id,
+        "scope_version": "USER_SCOPED_SCENE_V1",
+    }
+    return conversation_id
+
+
+def _next_visual_topic_slot(state_obj):
+    current = str(state_obj.get("active_topic_slot") or "A").upper()
+    slots = TOPIC_CLASSES
+    try:
+        idx = slots.index(current)
+    except ValueError:
+        idx = 0
+    return slots[(idx + 1) % len(slots)]
+
+
+def _archive_current_visual_scene_to_dynamic(state_obj, user_id):
+    """Archive the current scene without deleting it or restoring it later."""
+    current = state_obj.get("current_visual_scene") or state_obj.get("active_visual_scene")
+    if not isinstance(current, dict) or not current:
+        return
+
+    slot = str(state_obj.get("active_topic_slot") or "A").upper()
+    if slot not in TOPIC_CLASSES:
+        slot = "A"
+
+    archived = deepcopy(current)
+    archived["memory_kind"] = "visual_dialogue_scene"
+    archived["user_id"] = str(user_id)
+    archived["conversation_id"] = str(state_obj.get("conversation_id") or "")
+    archived["archived_from_active_visual"] = True
+    archived["archived_at"] = time.time()
+
+    day0 = state_obj["memory_timeline"]["day_0"]
+    day0.setdefault(slot, []).append({
+        "record_type": "visual_dialogue_scene",
+        "user_id": str(user_id),
+        "conversation_id": str(state_obj.get("conversation_id") or ""),
+        "topic": safe_trim_text(
+            archived.get("topic")
+            or archived.get("current_request")
+            or archived.get("summary"),
+            500,
+        ),
+        "summary": safe_trim_text(
+            archived.get("summary")
+            or archived.get("april_answer")
+            or archived.get("answer"),
+            1000,
+        ),
+        "scene": deepcopy(archived),
+        "timestamp": archived.get("archived_at", time.time()),
+        "memory_kind": "visual_dialogue_scene",
+    })
+    day0[slot] = day0[slot][-TOPIC_MEMORY_LIMIT:]
+
+    # Keep it in the visual-scene ledger as durable 7-day memory too.
+    day0.setdefault("visual_scenes", []).append(archived)
+    day0["visual_scenes"] = day0["visual_scenes"][-TOPIC_MEMORY_LIMIT:]
+    state_obj.setdefault("visual_topic_history", []).append(archived)
+    state_obj["visual_topic_history"] = state_obj["visual_topic_history"][-VISUAL_HISTORY_LIMIT:]
+
+
+def update_scene_context(user_id, scene_contract, current_request="", answer=""):
+    """
+    One canonical dialogue-scene update.
+
+    Every completed USER→APRIL turn becomes the current visual dialogue scene,
+    regardless of whether it contains a graphic/table/formula. The scene stores
+    the compact meaning of the user request + April answer + current rendering
+    state. When the semantic dialogue contract says the turn is independent/new,
+    the previous scene is archived into the existing A-E / 7-day memory and the
+    new turn becomes the only active scene.
+
+    No deletion, no trigger routing, no word rules and no renderer decisions.
+    """
+    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
+    conversation_id = _ensure_conversation_scope(state_obj, user_id)
+
+    contract = scene_contract if isinstance(scene_contract, dict) else {}
     if not contract and hasattr(scene_contract, "__dict__"):
         contract = dict(scene_contract.__dict__)
 
     render_blocks = contract.get("render_blocks") or contract.get("blocks") or []
     block_types = []
+    presentation_types = []
     for block in render_blocks:
         if isinstance(block, dict):
             block_type = str(
@@ -1718,6 +1801,17 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
             ).strip().lower()
             if block_type and block_type not in block_types:
                 block_types.append(block_type)
+            presentation = block.get("presentation")
+            if isinstance(presentation, dict):
+                pkind = safe_trim_text(
+                    presentation.get("kind")
+                    or presentation.get("mode")
+                    or presentation.get("renderer")
+                    or "",
+                    80,
+                ).lower()
+                if pkind and pkind not in presentation_types:
+                    presentation_types.append(pkind)
 
     current_request_text = str(current_request or "").strip()
     answer_text = str(answer or "").strip()[:4000]
@@ -1729,44 +1823,142 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "metadata": deepcopy(contract.get("metadata") or {}),
         "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
         "render_block_types": block_types,
+        "presentation_types": presentation_types,
         "current_request": current_request_text,
         "answer": answer_text,
         "scene_id": str(contract.get("scene_id") or ""),
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
     }
     state_obj["current_scene_request"] = current_request_text
     state_obj["last_april_turn"] = answer_text
 
-    is_visual_scene = QUANTUM_MEMORY_ENGINE._is_visual_scene_contract(block_types)
-    continuity = QUANTUM_MEMORY_ENGINE._continuity_context(state_obj, state_obj["active_scene_contract"])
+    continuity = QUANTUM_MEMORY_ENGINE._continuity_context(
+        state_obj, state_obj["active_scene_contract"]
+    )
+    context_mode = str(continuity.get("context_dependency") or "").strip().lower()
+    is_continuation = bool(
+        continuity.get("continuation")
+        or continuity.get("reference_to_previous")
+        or context_mode in {"continuation", "same_topic", "reference"}
+    )
 
-    if is_visual_scene:
-        previous_scene_id = (
-            str((state_obj.get("active_visual_scene") or {}).get("scene_id") or "")
-            if continuity["continuation"] else ""
+    current_scene = state_obj.get("current_visual_scene")
+    if not isinstance(current_scene, dict):
+        current_scene = state_obj.get("active_visual_scene")
+    current_scene = current_scene if isinstance(current_scene, dict) else None
+
+    # If there is an existing scene and the semantic contract says the new turn
+    # is independent/new, move the previous scene into A-E/7D before replacing it.
+    if current_scene and not is_continuation:
+        previous_topic = safe_trim_text(
+            current_scene.get("topic")
+            or current_scene.get("current_request")
+            or current_scene.get("summary"),
+            500,
         )
-        scene_record = {
-            "scene_id": state_obj["active_scene_contract"]["scene_id"],
-            "scene_type": state_obj["active_scene_contract"]["active_scene"],
-            "summary": answer_text,
-            "current_request": current_request_text,
-            "render_block_types": block_types,
-            "timestamp": time.time(),
-            "continuation": continuity["continuation"],
-            "context_dependency": continuity["context_dependency"],
-            "previous_scene_id": previous_scene_id,
-        }
-        QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, scene_record)
+        if previous_topic or current_scene.get("scene_id"):
+            _archive_current_visual_scene_to_dynamic(state_obj, user_id)
+        state_obj["active_topic_slot"] = _next_visual_topic_slot(state_obj)
 
-    # Text-only responses update dialogue/scene state but do not restore an older
-    # visual scene. The latest approved visual scene remains the hot pointer only
-    # when the current turn explicitly continues it; otherwise the old scene lives
-    # only in the dynamic seven-day visual ledger.
-    if not is_visual_scene:
-        approved = state_obj.get("active_visual_scene_turn")
-        if not isinstance(approved, dict) or not approved:
-            state_obj["active_visual_scene"] = None
-            state_obj["active_visual_topic"] = None
-    QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
+    previous_scene_id = (
+        str(current_scene.get("scene_id") or "")
+        if is_continuation and isinstance(current_scene, dict)
+        else ""
+    )
+
+    state_obj["visual_scene_version"] = int(state_obj.get("visual_scene_version") or 0) + 1
+    scene_id = str(
+        contract.get("scene_id")
+        or f"{conversation_id}:{state_obj['visual_scene_version']}"
+    )
+
+    # Canonical "visual dialogue scene": request + answer + semantic state +
+    # render/presentation inventory. This is the active scene regardless of
+    # whether the visible content is text, formula, table, graph or media.
+    scene_record = {
+        "scene_id": scene_id,
+        "scene_type": str(contract.get("active_scene") or "dialogue"),
+        "topic": safe_trim_text(
+            state_obj.get("current_topic")
+            or state_obj.get("focus_state", {}).get("active_topic")
+            or current_request_text,
+            500,
+        ),
+        "user_request": safe_trim_text(current_request_text, 1200),
+        "april_answer": safe_trim_text(answer_text, 2200),
+        "summary": safe_trim_text(
+            contract.get("summary")
+            or answer_text,
+            1400,
+        ),
+        "continuation": is_continuation,
+        "context_dependency": context_mode,
+        "previous_scene_id": previous_scene_id,
+        "render_block_types": block_types,
+        "presentation_types": presentation_types,
+        "renderer_state": deepcopy(contract.get("renderer_state") or {}),
+        "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
+        "turn_id": state_obj.get("visual_scene_version"),
+        "timestamp": time.time(),
+        "memory_kind": "current_visual_dialogue",
+    }
+
+    state_obj["current_visual_scene"] = deepcopy(scene_record)
+    state_obj["active_visual_scene"] = deepcopy(scene_record)
+    state_obj["active_visual_topic"] = {
+        "topic": scene_record["topic"],
+        "scene_id": scene_id,
+        "conversation_id": conversation_id,
+        "turn_id": scene_record["turn_id"],
+        "user_id": str(user_id),
+        "source": "current_dialogue_scene",
+    }
+
+    # Preserve every turn in the existing seven-day dialogue archive as one
+    # compact USER↔APRIL unit. This is the durable fallback for semantic recall.
+    day0 = state_obj["memory_timeline"]["day_0"]
+    pairs = day0.setdefault("dialog_pairs", [])
+    pair = {
+        "record_type": "dialog_pair",
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
+        "user_meaning": safe_trim_text(current_request_text, 800),
+        "april_meaning": safe_trim_text(answer_text, 1400),
+        "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
+        "visual_scene_id": scene_id,
+        "continuation": is_continuation,
+        "created_at": time.time(),
+        "expires_after_days": MEMORY_DAYS,
+    }
+    if not any(
+        isinstance(item, dict)
+        and item.get("user_id") == str(user_id)
+        and item.get("conversation_id") == conversation_id
+        and item.get("user_meaning") == pair["user_meaning"]
+        and item.get("april_meaning") == pair["april_meaning"]
+        for item in pairs[-HOT_DIALOG_LIMIT:]
+    ):
+        pairs.append(pair)
+    day0["dialog_pairs"] = pairs[-HOT_DIALOG_LIMIT:]
+
+    # Keep the scene in durable visual history, without allowing old entries to
+    # become active again merely because a new request is text-only.
+    vs = day0.setdefault("visual_scenes", [])
+    vs.append(deepcopy(scene_record))
+    day0["visual_scenes"] = vs[-VISUAL_HISTORY_LIMIT:]
+
+    state_obj.setdefault("visual_scene_history", []).append(deepcopy(scene_record))
+    state_obj["visual_scene_history"] = state_obj["visual_scene_history"][-VISUAL_HISTORY_LIMIT:]
+
+    # Ensure active scene is always the current turn; old scenes remain only in
+    # dynamic memory/history and are recalled by semantic retrieval.
+    state_obj["active_visual_scene_turn"] = deepcopy(scene_record)
+    state_obj["stored_visual_scene_turn"] = None
+
+    state_obj["active_scene"] = QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
     persist_state(user_id)
     return state_obj["active_scene_contract"]
 
