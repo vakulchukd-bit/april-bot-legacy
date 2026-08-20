@@ -61,87 +61,27 @@ def safe_probability(value, boost=0.0):
 # ----------------------------------------------------------------
 # Evidence vocabulary. These are evidence sources, not commands.
 # ----------------------------------------------------------------
-RENDERER_WORDS = (
-    "график","графика","функция","формула","уравнение","таблица",
-    "сетка","layout","diagram","схема","line","стрелка","plot","chart",
-    "y=","f(x)","sin(","cos(","tan("
-)
-IMAGE_WORDS = (
-    "создай изображение","сгенерируй изображение","нарисуй картинку",
-    "создай арт","draw image","generate image"
-)
-VISUAL_WORDS = (
-    "пример","визуально","референс","атмосфера","концепт","дизайн",
-    "стиль","схема","чертеж","layout"
-)
-EXECUTION_WORDS = ("сделай","создай","выполни","отправь","построй","покажи")
-DISCUSSION_WORDS = (
-    "давай обсудим","как думаешь","что думаешь","поговорим","обсудим",
-    "подскажи","посоветуй","объясни","расскажи","помоги понять",
-    "можешь показать","интересно","хочу понять","какой лучше"
-)
-REFLECTION_WORDS = ("почему","объясни","рассуждай","размышляй","как ты пришла")
-SPACE_WORDS = ("пространство","scene","renderer","блок","галерея","график")
-GRAPH_WORDS = ("график","построй график","графике","функция","plot","chart")
-TABLE_WORDS = ()  # compatibility; representation comes from the semantic matrix
+# Legacy lexical trigger vocabularies are intentionally removed from the
+# decision path. These projections are derived only from the Interpretation
+# matrix and its capability/representation measurements.
+RENDERER_WORDS = ()
+IMAGE_WORDS = ()
+VISUAL_WORDS = ()
+EXECUTION_WORDS = ()
+DISCUSSION_WORDS = ()
+REFLECTION_WORDS = ()
+SPACE_WORDS = ()
+GRAPH_WORDS = ()
+TABLE_WORDS = ()
+LINK_WORDS = ()
+MATH_WORDS = ()
 
-def detect_representation_constraints(text, interpreted=None):
-    interpreted = interpreted if isinstance(interpreted, dict) else {}
-    positive, negative, scores = [], [], {}
-    def add(name, score=1.0):
-        name = str(name or "").lower().strip()
-        if name in REPRESENTATION_UNIVERSE and name != "text" and name not in negative:
-            if name not in positive:
-                positive.append(name)
-            scores[name] = max(scores.get(name, 0.0), clamp(score))
-    for key in ("required_representations", "requested_representations", "candidate_representations"):
-        values = interpreted.get(key) or []
-        values = [values] if isinstance(values, str) else values
-        for value in values:
-            add(value, 1.0)
-    evidence = [x for x in (interpreted.get("representation_evidence") or []) if isinstance(x, dict)]
-    for item in evidence:
-        label = str(item.get("label") or "").lower().strip()
-        score = float(item.get("score", 0.0) or 0.0)
-        if label in REPRESENTATION_UNIVERSE and label != "text" and score >= 0.24:
-            add(label, score)
-    blocked = interpreted.get("representation_constraints", {})
-    if isinstance(blocked, dict):
-        for value in blocked.get("negative") or []:
-            name = str(value or "").lower().strip()
-            if name in REPRESENTATION_UNIVERSE and name not in negative:
-                negative.append(name)
-                scores[name] = 0.0
-    positive = [x for x in positive if x not in negative]
-    return {"positive": positive, "negative": negative, "scores": scores,
-            "current_request_authoritative": True, "source": "quantum_matrix"}
+REPRESENTATION_NEGATIONS = {}
+REPRESENTATION_POSITIVES = {}
 
-LINK_WORDS = ("источник","ссылка","ссылоч","документация")
-MATH_WORDS = ("математика","формула","уравнение","интеграл","производная")
+CONTINUATION_WORDS = ()
+REFERENCE_WORDS = ()
 
-REPRESENTATION_NEGATIONS = {
-    "graph": ("без графика", "без графиков", "без график", "не создавай график", "не создавай графики", "не нужен график"),
-    "table": ("без таблицы", "без таблиц", "не создавай таблицу", "не создавай таблицы", "не нужна таблица"),
-    "code": ("без кода", "без код", "не создавай код", "не нужен код"),
-    "image": ("без изображения", "без картинк", "не создавай изображение", "не создавай картинку", "не нужна картинка"),
-}
-REPRESENTATION_POSITIVES = {
-    "graph": GRAPH_WORDS,
-    "table": TABLE_WORDS,
-    "link": LINK_WORDS,
-    "diagram": ("диаграмма","диаграмм","diagram","схема","схем"),
-    "formula": ("формула","формул","уравнение","уравнен","formula"),
-}
-
-CONTINUATION_WORDS = (
-    "продолжай","дальше","продолжение","о чём мы говорили","о чем мы говорили",
-    "помнишь","вспомни","продолжи","это","этот","эта","этом","него","неё","ее","его"
-)
-REFERENCE_WORDS = (
-    "ту, которую", "то, что", "тот, который", "та, которую", "этой формулой",
-    "этой", "этот", "это", "ту", "тот", "того", "которую", "который",
-    "предыдущ", "к этой", "с этой"
-)
 DOMAIN_WORDS = {
     "biology": ("биология","генетика","эволюция","клетка","организм","экология","бактерии","днк","животные","растения"),
     "chemistry": ("химия","реакция","молекула","атом","вещество"),
@@ -155,50 +95,110 @@ DOMAIN_WORDS = {
     "web": ("сайт","интернет","поиск","веб"),
 }
 
-def _weighted_probability(text, vocabulary, weight):
-    t=(text or "").lower()
-    hits=sum(1 for word in vocabulary if word in t)
-    return clamp(hits * weight)
+def _matrix_score(interpreted, family, label):
+    profile = interpreted.get("quantum_interpretation_evidence") if isinstance(interpreted, dict) else {}
+    if isinstance(profile, dict):
+        scores = profile.get(f"{family}_scores")
+        if isinstance(scores, dict):
+            try:
+                return clamp(scores.get(label, 0.0))
+            except Exception:
+                pass
+    scores = interpreted.get(f"{family}_scores") if isinstance(interpreted, dict) else {}
+    if isinstance(scores, dict):
+        return clamp(scores.get(label, 0.0))
+    return 0.0
 
-def detect_renderer_probability(text):
-    return _weighted_probability(text, RENDERER_WORDS, 0.12)
+def detect_renderer_probability(text, interpreted=None):
+    reps = interpreted.get("quantum_representation_measurement", {}) if isinstance(interpreted, dict) else {}
+    measurements = reps.get("measurements") if isinstance(reps, dict) else []
+    values = [
+        float(item.get("score", 0.0) or 0.0)
+        for item in measurements if isinstance(item, dict) and item.get("type") != "text"
+    ]
+    return clamp(max(values, default=0.0))
 
-def detect_image_generation_probability(text):
-    return _weighted_probability(text, IMAGE_WORDS, 0.25)
+def detect_image_generation_probability(text, interpreted=None):
+    return _matrix_score(interpreted or {}, "representation", "image")
 
-def detect_visual_probability(text):
-    return _weighted_probability(text, VISUAL_WORDS, 0.10)
+def detect_visual_probability(text, interpreted=None):
+    return detect_renderer_probability(text, interpreted)
 
-def detect_execution_probability(text):
-    return _weighted_probability(text, EXECUTION_WORDS, 0.12)
+def detect_execution_probability(text, interpreted=None):
+    return _matrix_score(interpreted or {}, "capability", "exploration")
 
-def detect_discussion_probability(text):
-    return _weighted_probability(text, DISCUSSION_WORDS, 0.18)
+def detect_discussion_probability(text, interpreted=None):
+    return _matrix_score(interpreted or {}, "capability", "discussion")
 
-def detect_reflection_probability(text):
-    return _weighted_probability(text, REFLECTION_WORDS, 0.15)
+def detect_reflection_probability(text, interpreted=None):
+    return _matrix_score(interpreted or {}, "capability", "information")
 
-def detect_space_discussion_probability(text):
-    return _weighted_probability(text, SPACE_WORDS, 0.12)
+def detect_space_discussion_probability(text, interpreted=None):
+    return _matrix_score(interpreted or {}, "capability", "space")
 
-def detect_representation_request(text):
-    constraints = detect_representation_constraints(text)
+def detect_representation_request(text, interpreted=None):
+    constraints = detect_representation_constraints(text, interpreted)
     positive = constraints.get("positive", [])
     return positive[0] if positive else None
 
-def detect_graph_action(text):
-    t=(text or "").lower()
-    if "почему" in t: return "explain"
-    if "исправ" in t: return "fix"
-    if "анализ" in t: return "analyze"
-    if "сравни" in t: return "compare"
-    if "построй" in t or "нарисуй" in t: return "build"
-    return "unknown"
+def detect_graph_action(text, interpreted=None):
+    profile = interpreted if isinstance(interpreted, dict) else {}
+    requested = profile.get("requested_representation") or profile.get("preferred_representation")
+    return "build" if requested == "graph" else "unknown"
 
-def detect_domain_candidates(text):
-    t=(text or "").lower()
-    return [domain for domain, words in DOMAIN_WORDS.items()
-            if any(word in t for word in words)]
+def detect_domain_candidates(text, interpreted=None):
+    candidates = []
+    src = interpreted if isinstance(interpreted, dict) else {}
+    values = src.get("candidate_domains") or src.get("required_domains") or []
+    for domain in values:
+        if str(domain) not in candidates:
+            candidates.append(str(domain))
+    return candidates
+
+
+def detect_representation_constraints(text, interpreted=None):
+    interpreted = interpreted if isinstance(interpreted, dict) else {}
+    positive = []
+    negative = []
+    scores = {}
+
+    raw_scores = interpreted.get("representation_scores")
+    if not isinstance(raw_scores, dict):
+        evidence = interpreted.get("representation_evidence") or []
+        raw_scores = {
+            str(item.get("label") or "").lower(): float(item.get("score", 0.0) or 0.0)
+            for item in evidence if isinstance(item, dict)
+        }
+
+    explicit = list(interpreted.get("required_representations") or [])
+    if not explicit:
+        explicit = list(interpreted.get("candidate_representations") or [])
+
+    for name in explicit:
+        name = str(name or "").lower().strip()
+        if name in REPRESENTATION_UNIVERSE and name != "text" and name not in negative:
+            positive.append(name)
+            scores[name] = max(scores.get(name, 0.0), float(raw_scores.get(name, 0.0) or 0.0))
+
+    # Keep a matrix candidate only when it is separated from text strongly
+    # enough to be a current-turn representation signal.
+    text_score = float(raw_scores.get("text", 0.0) or 0.0)
+    for name, value in raw_scores.items():
+        name = str(name).lower().strip()
+        value = float(value or 0.0)
+        if (name in REPRESENTATION_UNIVERSE and name != "text"
+                and value >= 0.20 and value - text_score >= 0.08):
+            if name not in positive:
+                positive.append(name)
+            scores[name] = max(scores.get(name, 0.0), value)
+
+    return {
+        "positive": list(dict.fromkeys(positive)),
+        "negative": list(dict.fromkeys(negative)),
+        "scores": scores,
+        "current_request_authoritative": True,
+        "source": "quantum_matrix",
+    }
 
 def build_artifact_bundle():
     return {"domain":"general","primary":[],"secondary":[]}
@@ -232,7 +232,12 @@ def _state_signals(state, active_flow, dialog_state, history):
         if last_april and last_user:
             break
     current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
-    if isinstance(current_scene, dict):
+    dialog_act = str(
+        (dialog_state.get("dialog_act") if isinstance(dialog_state, dict) else "")
+        or ""
+    ).strip().lower()
+    allow_scene_as_previous = dialog_act not in {"memory_query", "new_topic", "independent"}
+    if isinstance(current_scene, dict) and allow_scene_as_previous:
         if not last_user:
             last_user = str(
                 current_scene.get("user_request")
@@ -308,10 +313,10 @@ def _representation_posteriors(
         if key in scores:
             scores[key] += 0.90
 
+    dialogue_contract = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
     continuity = bool(
-        interpreted.get("continuation")
-        or interpreted.get("dialogue_contract", {}).get("continuation")
-        or interpreted.get("dialogue_contract", {}).get("reference_to_previous")
+        dialogue_contract.get("continuation")
+        or dialogue_contract.get("reference_to_previous")
     )
     current_scene = str(interpreted.get("scene_type") or "").lower()
     previous_types = set()
@@ -368,12 +373,12 @@ def _signal_fusion(text, signals, interpreted):
     )
 
     requested = next((x for x in selected if x != "text"), selected[0] if selected else "text")
-    renderer = detect_renderer_probability(text)
-    image = detect_image_generation_probability(text)
-    visual = detect_visual_probability(text)
-    execution = detect_execution_probability(text)
-    discussion = detect_discussion_probability(text)
-    reflection = detect_reflection_probability(text)
+    renderer = detect_renderer_probability(text, interpreted)
+    image = detect_image_generation_probability(text, interpreted)
+    visual = detect_visual_probability(text, interpreted)
+    execution = detect_execution_probability(text, interpreted)
+    discussion = detect_discussion_probability(text, interpreted)
+    reflection = detect_reflection_probability(text, interpreted)
 
     history = signals["history_depth"]
     continuity = bool(
@@ -385,15 +390,19 @@ def _signal_fusion(text, signals, interpreted):
     goal = bool(signals["goal"])
     memory = bool(signals["memory_signals"])
 
-    structured_mass = sum(
-        posterior.get(k, 0.0)
-        for k in ("table", "graph", "diagram", "formula", "gallery", "link", "code", "image")
+    current_nontext = [
+        name for name in (interpreted.get("required_representations") or interpreted.get("candidate_representations") or [])
+        if str(name).lower() not in {"", "text"}
+    ]
+    structured_mass = max(
+        (posterior.get(str(name).lower(), 0.0) for name in current_nontext),
+        default=0.0,
     )
 
     render_score = clamp(
-        structured_mass * 0.70
-        + renderer * 0.20
-        + (0.10 if continuity and active_scene else 0.0)
+        structured_mass * 0.85
+        + renderer * 0.15
+        if current_nontext else 0.0
     )
     continuity_score = clamp(
         (0.30 if continuity else 0.0)
@@ -434,7 +443,7 @@ def _signal_fusion(text, signals, interpreted):
                 for p in posterior.values()
             ),
         },
-        "candidate_domains": detect_domain_candidates(text),
+        "candidate_domains": detect_domain_candidates(text, interpreted),
         "evidence_count": sum(bool(x) for x in (
             selected, continuity, active_scene, goal, memory, discussion, reflection
         )),
@@ -518,6 +527,21 @@ def _base_result(text, signals):
 
 def _dialogue_context_matrix(text, signals, interpreted):
     prev_u, prev_a = str(signals.get("last_user_turn") or ""), str(signals.get("last_april_turn") or "")
+    dc = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
+    if str(dc.get("dialog_act") or "").lower() == "memory_query":
+        return {
+            "context_dependency": True,
+            "context_dependency_score": 1.0,
+            "continuation": False,
+            "continuation_score": 0.0,
+            "reference_to_previous": True,
+            "reference_score": 1.0,
+            "dialog_act": "memory_query",
+            "previous_user_turn": prev_u,
+            "previous_april_turn": prev_a,
+            "structured_continuity": False,
+            "history_available": bool(prev_u or prev_a),
+        }
     total = max(1, len(str(text).split()))
     tokens = set(re.findall(r"[a-zа-яё0-9]{3,}", str(text).lower()))
     incomplete = 1.0 - min(1.0, len(tokens) / total)
@@ -634,6 +658,16 @@ def analyze(text: str, state: dict=None, history: list=None,
         "canonical": True,
         "version": "quantum_dialogue_field_v2",
     })
+    if str(dc.get("dialog_act") or "").lower() == "memory_query":
+        dc.update({
+            "dialog_act": "memory_query",
+            "continuation": False,
+            "reference_to_previous": True,
+            "context_dependency": "memory_query",
+            "context_dependency_score": 1.0,
+            "continuation_score": 0.0,
+            "reference_score": 1.0,
+        })
     result["dialogue_contract"] = dc
     result["dialogue_context_field"] = dialogue_context
 
@@ -735,7 +769,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         result["possible_capability"]="image_generation"
 
     result["should_execute"]=False  # execution authority remains downstream
-    result["response_mode"]="structured" if current_positive else "talk"
+    result["response_mode"]="structured" if any(str(x).lower() != "text" for x in current_positive) else "talk"
     result["renderer_first"]=bool(current_positive)
     result["semantic_evidence"]={
         "fusion":fusion,
