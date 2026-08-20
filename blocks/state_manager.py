@@ -174,6 +174,8 @@ def build_default_state():
         "active_visual_scene": None,
         "active_visual_scene_turn": None,
         "stored_visual_scene_turn": None,
+        "active_visual_topic": None,
+        "visual_topic_history": [],
         "visual_scene_history": [],
         "visual_topic_registry": [],
         "task_context_storage": [],
@@ -488,6 +490,7 @@ class QuantumMemoryEngine:
             if active_scene_text else 0.0
         )
 
+        ranked = []
         for record, candidate_text in zip(candidate_records, candidate_texts):
             semantic = float(semantic_map.get(candidate_text, 0.0))
             recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_DAYS))
@@ -606,6 +609,13 @@ class QuantumMemoryEngine:
         self._trim_topic_memory(state_obj)
 
     def record_visual_scene(self, state_obj, scene_payload):
+        """Promote one confirmed visual scene to active and archive it in 7-day memory.
+
+        Active visual state is a one-scene hot pointer. The seven-day timeline is
+        the durable dynamic memory. A new scene replaces the hot pointer; older
+        scenes remain retrievable from the timeline and are never restored merely
+        because the new turn is text-only.
+        """
         self.ensure_runtime(state_obj)
         if not isinstance(scene_payload, dict):
             return
@@ -620,11 +630,38 @@ class QuantumMemoryEngine:
         if scene_id:
             existing[:] = [
                 item for item in existing
-                if not (isinstance(item, dict) and str(item.get("scene_id") or "").strip() == scene_id)
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("scene_id") or "").strip() == scene_id
+                )
             ]
 
         existing.append(record)
+        state_obj["memory_timeline"]["day_0"]["visual_scenes"] = existing[-TOPIC_MEMORY_LIMIT:]
+
+        # The latest visual topic is the only hot visual pointer.
+        visual_topic = (
+            safe_trim_text(
+                record.get("topic")
+                or record.get("trajectory")
+                or record.get("current_request")
+                or record.get("summary"),
+                500,
+            )
+            or None
+        )
+        state_obj["active_visual_topic"] = {
+            "topic": visual_topic,
+            "scene_id": scene_id,
+            "timestamp": record.get("timestamp"),
+            "source": "visual_scene",
+        } if visual_topic else None
+
+        state_obj["visual_topic_history"].append(deepcopy(state_obj["active_visual_topic"]))
+        state_obj["visual_topic_history"] = state_obj["visual_topic_history"][-VISUAL_HISTORY_LIMIT:]
+
         state_obj["active_visual_scene"] = record
+        state_obj["active_visual_scene_turn"] = deepcopy(record)
         state_obj["visual_scene_history"].append(record)
         state_obj["visual_scene_history"] = state_obj["visual_scene_history"][-VISUAL_HISTORY_LIMIT:]
 
@@ -672,6 +709,8 @@ class QuantumMemoryEngine:
             "memory_signals": deepcopy(state_obj.get("memory_signals", {})),
             "active_flow": deepcopy(state_obj.get("active_flow")),
             "active_visual_scene": deepcopy(state_obj.get("active_visual_scene")),
+            "active_visual_topic": deepcopy(state_obj.get("active_visual_topic")),
+            "visual_topic_history": deepcopy(state_obj.get("visual_topic_history", [])),
             "visual_summary": deepcopy(state_obj.get("visual_summary", {})),
             "today_visual_memory": deepcopy(
                 state_obj["memory_timeline"]["day_0"].get("visual_scenes", [])
@@ -1496,9 +1535,12 @@ def prepare_visual_context_for_turn(user_id, current_request):
             "continuation_score": round(continuation_signal, 4),
         }
 
+    # Release only the hot pointer. The old scene remains in the 7-day visual
+    # ledger and is therefore still available to semantic retrieval.
     state_obj["stored_visual_scene_turn"] = deepcopy(scene)
     state_obj["active_visual_scene_turn"] = None
     state_obj["active_visual_scene"] = None
+    state_obj["active_visual_topic"] = None
     state_obj["visual_focus"] = {}
     return {
         "active": False,
@@ -1510,10 +1552,42 @@ def prepare_visual_context_for_turn(user_id, current_request):
 
 
 def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
+    """Finalize the visual hot pointer without resurrecting stale visual memory.
+
+    ``stored_visual_scene_turn`` is archival/dynamic memory only. It is never
+    promoted back to ``active_visual_scene`` after an unrelated turn.
+    ``active_visual_scene_turn`` is the only scene that may remain active after
+    a confirmed continuation.
+    """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    stored = state_obj.get("stored_visual_scene_turn")
-    if not new_scene_active and isinstance(stored, dict) and stored:
-        state_obj["active_visual_scene"] = deepcopy(stored)
+    approved = state_obj.get("active_visual_scene_turn")
+
+    if new_scene_active:
+        # A newly produced visual scene is already installed by update_scene_context.
+        approved = state_obj.get("active_visual_scene")
+    elif isinstance(approved, dict) and approved:
+        # Keep the scene only when the turn was semantically approved as a
+        # continuation/reference of the current visual topic.
+        state_obj["active_visual_scene"] = deepcopy(approved)
+        state_obj["active_visual_topic"] = {
+            "topic": safe_trim_text(
+                approved.get("topic")
+                or approved.get("trajectory")
+                or approved.get("current_request")
+                or approved.get("summary"),
+                500,
+            ),
+            "scene_id": str(approved.get("scene_id") or ""),
+            "timestamp": approved.get("timestamp", time.time()),
+            "source": "approved_visual_continuation",
+        }
+    else:
+        # Independent/new-topic turn: the previous visual scene stays only in
+        # the seven-day timeline and must not be resurrected.
+        state_obj["active_visual_scene"] = None
+        state_obj["active_visual_topic"] = None
+        state_obj["visual_focus"] = {}
+
     state_obj["active_visual_scene_turn"] = None
     state_obj["stored_visual_scene_turn"] = None
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
@@ -1522,9 +1596,21 @@ def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
 
 def bind_current_visual_scene(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    visual = state_obj.get("active_visual_scene")
-    if visual:
+    visual = state_obj.get("active_visual_scene_turn") or state_obj.get("active_visual_scene")
+    if isinstance(visual, dict) and visual:
         state_obj["active_visual_scene"] = deepcopy(visual)
+        state_obj["active_visual_topic"] = {
+            "topic": safe_trim_text(
+                visual.get("topic")
+                or visual.get("trajectory")
+                or visual.get("current_request")
+                or visual.get("summary"),
+                500,
+            ),
+            "scene_id": str(visual.get("scene_id") or ""),
+            "timestamp": visual.get("timestamp", time.time()),
+            "source": "bind_current_visual_scene",
+        }
         persist_state(user_id)
 
 
@@ -1602,6 +1688,8 @@ def build_visual_memory_bridge(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     return {
         "user_visual_scene": deepcopy(state_obj.get("active_visual_scene", {})),
+        "active_visual_topic": deepcopy(state_obj.get("active_visual_topic")),
+        "visual_topic_history": deepcopy(state_obj.get("visual_topic_history", [])),
         "visual_summary": deepcopy(state_obj.get("visual_summary", {})),
         "today_visual_memory": deepcopy(
             state_obj["memory_timeline"]["day_0"].get("visual_scenes", [])
@@ -1669,8 +1757,15 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         }
         QUANTUM_MEMORY_ENGINE.record_visual_scene(state_obj, scene_record)
 
-    # Text-only responses update dialogue/scene contract state but never replace
-    # the stored visual scene. That scene remains available for true continuation.
+    # Text-only responses update dialogue/scene state but do not restore an older
+    # visual scene. The latest approved visual scene remains the hot pointer only
+    # when the current turn explicitly continues it; otherwise the old scene lives
+    # only in the dynamic seven-day visual ledger.
+    if not is_visual_scene:
+        approved = state_obj.get("active_visual_scene_turn")
+        if not isinstance(approved, dict) or not approved:
+            state_obj["active_visual_scene"] = None
+            state_obj["active_visual_topic"] = None
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
     persist_state(user_id)
     return state_obj["active_scene_contract"]
