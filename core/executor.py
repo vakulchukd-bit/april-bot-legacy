@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import hashlib
 from copy import deepcopy
 from typing import Any
 
@@ -39,7 +40,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v25_canonical_presentation_matrix"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v26_user_scoped_scene_presentation_matrix"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -114,6 +115,31 @@ def _unique_strings(values: Any) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _user_scope(state: dict, user_id: Any) -> dict:
+    """Canonical identity scope carried through the one route and scene contract."""
+    uid = _s(user_id)
+    if not uid:
+        raise RuntimeError("Quantum release blocked: authenticated user_id missing")
+
+    conversation_id = _s(
+        state.get("conversation_id")
+        or state.get("memory_scope", {}).get("conversation_id")
+        or ""
+    )
+    if not conversation_id:
+        conversation_id = f"april-{hashlib.sha256(uid.encode("utf-8")).hexdigest()[:24]}"
+        state["conversation_id"] = conversation_id
+
+    scope = {
+        "user_id": uid,
+        "conversation_id": conversation_id,
+        "identity_bound": True,
+        "scope_version": "USER_SCOPED_SCENE_V1",
+    }
+    state["memory_scope"] = dict(scope)
+    return scope
 
 def _merge_evidence_fields(target: dict, sources: tuple[dict, ...]) -> dict:
     """
@@ -204,6 +230,7 @@ def _build_quantum_field(
         "current_request": _s(text),
         "current_request_authoritative": True,
         "decision_owner": "QUANTUM_PROCESSOR",
+        "identity_scope": _quantum_snapshot(state.get("memory_scope", {})),
         "single_route": True,
         "provider_calls": 0,
         "parallel_route": False,
@@ -805,6 +832,7 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
 
 
 def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
+    scope = _user_scope(state, state.get("_request_user_id") or state.get("user_id"))
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
     # Visual state is carried as context evidence only. It never triggers routing.
     if visual and not bool(visual.get("memory_relevant", True)):
@@ -988,6 +1016,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "provider_calls_per_request": 1,
         "context_mode": mode,
         "dialogue_coherence": round(coherence, 4),
+        "identity_scope": deepcopy(scope),
     }
 
     if isinstance(state, dict):
@@ -1050,6 +1079,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "single_route": True,
             "processor": PROCESSOR_VERSION,
             "measured_state": mode,
+            "identity_scope": deepcopy(scope),
         },
         constraints={
             **{
@@ -1065,6 +1095,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
                 "provider_input_token_budget": 900,
                 "provider_context_strategy": "provider_router_semantic_field_selection",
                 "current_request_must_remain_intact": True,
+                "identity_scope": deepcopy(scope),
                 "representation_plan": {
                     "requested_outputs": list(outputs),
                     "preferred_representation": measured_output,
@@ -1123,6 +1154,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "quantum_signal_count": 64,
         "quantum_budget_field": quantum_budget_field,
         "requested_outputs": list(outputs),
+        "identity_scope": deepcopy(scope),
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
         ),
@@ -1853,6 +1885,7 @@ def _canonicalize(
         _clean_render_blocks(list(getattr(response, "render_blocks", []) or []))
     )
 
+    scope = _user_scope(state, user_id)
     response.metadata = dict(response.metadata or {})
     response.metadata.update({
         "processor_version": PROCESSOR_VERSION,
@@ -1862,9 +1895,11 @@ def _canonicalize(
         "artifact_preservation": True,
         "trigger_routing": False,
         "score_routing": False,
+        "identity_scope": deepcopy(scope),
     })
     response.quantum_state = request.quantum_state
     response.conversation_space = {
+        "identity_scope": deepcopy(scope),
         "current_turn": {
             "user": _s(request.conversation.get("current_request")),
             "april": {
@@ -1905,6 +1940,7 @@ def _canonicalize(
         scene.contract.blocks = provider_blocks
         scene.contract.render_blocks = list(provider_blocks)
         scene.contract.metadata = dict(scene.contract.metadata or {})
+        scene.contract.metadata["identity_scope"] = deepcopy(scope)
         scene.contract.metadata["renderer_state"] = {
             "active_scene": scene.contract.active_scene,
             "block_types": [
@@ -1978,6 +2014,7 @@ def _canonicalize(
         "energy_acceleration": request_meta.get("energy_acceleration", {}),
         "visible_answer_guaranteed": True,
         "artifact_preservation": True,
+        "identity_scope": deepcopy(scope),
     }
 
 def _validate_quantum_release(request: MachineRequest) -> None:
@@ -2004,6 +2041,9 @@ def _validate_quantum_release(request: MachineRequest) -> None:
     metadata = constraints.get("metadata")
     if not isinstance(metadata, dict):
         raise RuntimeError("Quantum release blocked: metadata bridge missing")
+    identity_scope = metadata.get("identity_scope")
+    if not isinstance(identity_scope, dict) or not identity_scope.get("user_id"):
+        raise RuntimeError("Quantum release blocked: identity scope missing")
 
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     """
@@ -2016,6 +2056,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     """
     state = get_state(user_id)
     state = state if isinstance(state, dict) else {}
+    state["user_id"] = _s(user_id)
+    scope = _user_scope(state, user_id)
+    state["_request_user_id"] = _s(user_id)
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
