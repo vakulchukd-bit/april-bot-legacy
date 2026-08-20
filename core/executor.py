@@ -34,7 +34,7 @@ from blocks.intent_ai import detect_intent_ai
 from blocks.intent_resolver import resolve_input, build_focus_intent_state
 from blocks.router import route_request
 from blocks.router_system import decide_action
-from blocks.state_manager import get_state, update_dialog_context, update_scene_context
+from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
@@ -342,6 +342,24 @@ def _dialogue_evidence(
                 previous_user = _s(item.get("user"))
         if previous_user and previous_april:
             break
+
+    # Web-only canonical route may not have a hot dialog list yet. The current
+    # USER↔APRIL scene is therefore the authoritative immediate history fallback.
+    current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+    if isinstance(current_scene, dict):
+        if not previous_user:
+            previous_user = _s(
+                current_scene.get("user_request")
+                or current_scene.get("current_request")
+            )
+        if not previous_april:
+            previous_april = _s(
+                current_scene.get("april_answer")
+                or current_scene.get("answer")
+                or current_scene.get("summary")
+            )
+        if not last_turn_id:
+            last_turn_id = current_scene.get("turn_id")
 
     interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
     dialogue_contract = _as_dict(interpretation_packet.get("dialogue_contract"))
@@ -980,6 +998,9 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         semantic, cognition, decision
     )
     context = _compact_context(text, state, mode, topic, goal)
+    dynamic_memory_evidence = _as_dict(
+        semantic.get("quantum_dynamic_memory_evidence")
+    )
 
     capabilities = []
     for src in (semantic, cognition):
@@ -1063,9 +1084,22 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             ),
         },
         memory=(
-            {"active_topic": _clip(topic, 300), "active_goal": _clip(goal, 500)}
-            if mode != "INDEPENDENT" and (topic or goal)
-            else {}
+            {
+                "active_topic": _clip(topic, 300),
+                "active_goal": _clip(goal, 500),
+                "dynamic_memory": (
+                    dynamic_memory_evidence
+                    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE"}
+                    or bool(evidence.get("reference_to_previous"))
+                    else {"available": bool(dynamic_memory_evidence.get("matches"))}
+                ),
+            }
+            if mode != "INDEPENDENT"
+            else {
+                "active_scene_id": str(
+                    _as_dict(state.get("current_visual_scene")).get("scene_id") or ""
+                )
+            }
         ),
         visual_context=(
             visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict)
@@ -2215,6 +2249,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         visual_reference=visual,
     ) or {}
 
+    # Archived A-E/7D memory is queried as evidence only after the semantic
+    # interpretation pass has run. No archived item is copied into the current
+    # scene automatically.
+    dynamic_memory = query_dynamic_memory(user_id, text, limit=8)
+    if not isinstance(dynamic_memory, dict):
+        dynamic_memory = {}
+    semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
+    semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
+
     semantic["quantum_experience_evidence"] = _quantum_snapshot(experience)
     semantic["quantum_goal_evidence"] = _quantum_snapshot(goal_evidence)
     semantic["quantum_visual_reference_evidence"] = _quantum_snapshot(visual)
@@ -2244,6 +2287,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "experience_manager": experience_manager_evidence,
         "goal": goal_evidence,
         "visual_reference": visual,
+        "dynamic_memory": dynamic_memory,
     })
 
     quantum_field = _build_quantum_field(
@@ -2282,6 +2326,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     request.quantum_state["evidence_field"] = quantum_field
     request_meta = _request_metadata(request)
     request_meta.update({
+        "dynamic_memory_available": bool(dynamic_memory.get("matches")),
+        "dynamic_memory_match_count": len(dynamic_memory.get("matches") or []),
         "quantum_evidence_channels": 14,
         "quantum_evidence_field_version": PROCESSOR_VERSION,
         "provider_calls_per_request": 1,
