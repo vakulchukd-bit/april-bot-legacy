@@ -324,7 +324,117 @@ class QuantumMemoryEngine:
         safe_state_log("MEMORY_WINDOW_ROLLED: 7D")
         return True
 
+    @staticmethod
+    def _ensure_user_scope_for_runtime(state_obj):
+        scope = state_obj.get("memory_scope")
+        user_id = str(
+            (scope or {}).get("user_id")
+            or state_obj.get("user_id")
+            or ""
+        ).strip()
+        if not user_id:
+            return
+        conversation_id = str(
+            (scope or {}).get("conversation_id")
+            or state_obj.get("conversation_id")
+            or f"april-{hashlib.sha256(user_id.encode('utf-8')).hexdigest()[:24]}"
+        )
+        state_obj["user_id"] = user_id
+        state_obj["conversation_id"] = conversation_id
+        state_obj["memory_scope"] = {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "scope_version": "USER_SCOPED_SCENE_V2",
+        }
+
+    @staticmethod
+    def _migrate_legacy_visual_hot_pointer(state_obj):
+        """Move legacy visual hot pointers into dynamic memory without deleting them.
+
+        Old deployments stored rendered tables/images as active_visual_scene without
+        the canonical USER↔APRIL scene fields. Such records are preserved in the
+        seven-day visual ledger, but are never allowed to remain the hot pointer.
+        """
+        scene = state_obj.get("active_visual_scene")
+        if not isinstance(scene, dict) or not scene:
+            return
+
+        canonical_current = bool(
+            scene.get("memory_kind") == "current_visual_dialogue"
+            and scene.get("user_request")
+            and scene.get("april_answer")
+            and scene.get("user_id")
+            and scene.get("conversation_id")
+        )
+        if canonical_current:
+            return
+
+        if scene.get("legacy_hot_pointer_migrated"):
+            state_obj["active_visual_scene"] = None
+            return
+
+        user_id = str(state_obj.get("memory_scope", {}).get("user_id") or "")
+        if not user_id:
+            return
+
+        # Preserve the old record as an archival visual scene.
+        archived = deepcopy(scene)
+        archived["memory_kind"] = "visual_dialogue_archive"
+        archived["legacy_hot_pointer_migrated"] = True
+        archived["user_id"] = user_id
+        archived["conversation_id"] = str(
+            state_obj.get("memory_scope", {}).get("conversation_id")
+            or state_obj.get("conversation_id")
+            or ""
+        )
+        archived["archived_at"] = time.time()
+
+        day0 = state_obj["memory_timeline"]["day_0"]
+        day0.setdefault("visual_scenes", []).append(archived)
+        day0["visual_scenes"] = day0["visual_scenes"][-VISUAL_HISTORY_LIMIT:]
+
+        slot = str(state_obj.get("active_topic_slot") or "A").upper()
+        if slot not in TOPIC_CLASSES:
+            slot = "A"
+        day0.setdefault(slot, []).append({
+            "record_type": "visual_dialogue_scene",
+            "user_id": user_id,
+            "conversation_id": archived["conversation_id"],
+            "topic": safe_trim_text(
+                archived.get("topic")
+                or archived.get("current_request")
+                or archived.get("summary"),
+                500,
+            ),
+            "summary": safe_trim_text(
+                archived.get("summary")
+                or archived.get("april_answer")
+                or archived.get("answer"),
+                1000,
+            ),
+            "scene": deepcopy(archived),
+            "timestamp": archived["archived_at"],
+            "memory_kind": "visual_dialogue_scene",
+        })
+        day0[slot] = day0[slot][-TOPIC_MEMORY_LIMIT:]
+
+        state_obj.setdefault("visual_topic_history", []).append(archived)
+        state_obj["visual_topic_history"] = state_obj["visual_topic_history"][-VISUAL_HISTORY_LIMIT:]
+        state_obj["active_visual_scene"] = None
+        state_obj["current_visual_scene"] = None
+        state_obj["active_visual_scene_turn"] = None
+        state_obj["stored_visual_scene_turn"] = None
+        state_obj["active_visual_topic"] = None
+
     def ensure_runtime(self, state_obj):
+        self.ensure(state_obj)
+        # Normalize legacy hot visual pointers exactly once. Nothing is deleted;
+        # the old scene is preserved in dynamic/7-day memory.
+        self._ensure_user_scope_for_runtime(state_obj)
+        self._migrate_legacy_visual_hot_pointer(state_obj)
+        self.rollover(state_obj)
+        return state_obj
+
         self.ensure(state_obj)
         self.rollover(state_obj)
         return state_obj
@@ -782,6 +892,16 @@ def get_state(user_id):
                 state[key] = build_default_state()
                 safe_state_log(f"NEW STATE: {key}")
 
+        state[key]["user_id"] = key
+        if not state[key].get("conversation_id"):
+            state[key]["conversation_id"] = (
+                f"april-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}"
+            )
+        state[key]["memory_scope"] = {
+            "user_id": key,
+            "conversation_id": state[key]["conversation_id"],
+            "scope_version": "USER_SCOPED_SCENE_V2",
+        }
         QUANTUM_MEMORY_ENGINE.ensure(state[key])
         return state[key]
 
@@ -1042,10 +1162,13 @@ def trim_visual_history(state_obj):
     state_obj["visual_scene_history"] = history[-VISUAL_HISTORY_LIMIT:]
 
 
-def add_dialog(user_id, role, content):
+def add_dialog(user_id, role, content, metadata=None):
     state_obj = get_state(user_id)
     dialog = safe_list(state_obj.get("dialog"))
-    dialog.append(compact_dialog_message(role, content))
+    message = compact_dialog_message(role, content)
+    if isinstance(metadata, dict) and metadata:
+        message["metadata"] = deepcopy(metadata)
+    dialog.append(message)
 
     if role == "user":
         state_obj["last_user_turn"] = safe_trim_text(content, 320)
@@ -1443,143 +1566,81 @@ def sync_focus_layers(user_id):
 
 
 def prepare_visual_context_for_turn(user_id, current_request):
-    """Gate visual continuity with semantic evidence only.
+    """Expose the current user-scoped scene as memory evidence without deciding relevance.
 
-    Stored visual memory is never deleted. A scene becomes active for the
-    current turn only when the semantic continuation/reference signal agrees
-    with the scene similarity. Identity/greeting/independent turns release the
-    active scene even when generic wording has high embedding similarity.
+    The current scene is already the compact USER↔APRIL dialogue state. The
+    Quantum Processor/interpretation layer decides whether the turn continues
+    it or starts a new topic. State Manager never resurrects an archived scene,
+    never routes by words, and never scores a renderer.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     current = str(current_request or "").strip()
+
     scene = state_obj.get("active_visual_scene")
     if not isinstance(scene, dict) or not scene:
         state_obj["active_visual_scene_turn"] = None
         state_obj["stored_visual_scene_turn"] = None
-        return {"active": False, "released": False, "overlap": 0.0, "semantic_relevance": 0.0}
-
-    summary = str(
-        scene.get("topic")
-        or scene.get("trajectory")
-        or scene.get("current_request")
-        or scene.get("summary")
-        or ""
-    ).strip()
-    topic = str(scene.get("topic") or scene.get("trajectory") or "").strip()
-    candidates = [value for value in (topic, scene.get("current_request"), summary[:800]) if value]
-
-    semantic_relevance = 0.0
-    continuation_score = 0.0
-    reference_score = 0.0
-    identity_score = 0.0
-    greeting_score = 0.0
-    independent_score = 0.0
-    try:
-        from blocks.interpretation_layer import QUANTUM_EVIDENCE_FUSION
-        profile = (
-            QUANTUM_EVIDENCE_FUSION.fast_semantic_profile(
-                current,
-                previous_assistant="",
-                active_topic=topic,
-                active_goal=str(scene.get("goal") or ""),
-            )
-            if hasattr(QUANTUM_EVIDENCE_FUSION, "fast_semantic_profile")
-            else QUANTUM_EVIDENCE_FUSION._fast_measurement(
-                current,
-                "",
-                topic,
-                str(scene.get("goal") or ""),
-            )
-        )
-        context_scores = profile.get("context_scores", {}) or {}
-        semantic_relevance = max(
-            float(context_scores.get("active_topic", 0.0)),
-            float(context_scores.get("active_goal", 0.0)),
-            float(context_scores.get("previous_assistant", 0.0)),
-        )
-        continuation_score = float(profile.get("continuation_score", 0.0) or 0.0)
-        reference_score = float(profile.get("reference_score", 0.0) or 0.0)
-        identity_score = float(profile.get("identity_score", 0.0) or 0.0)
-        greeting_score = float(profile.get("greeting_score", 0.0) or 0.0)
-        independent_score = float(profile.get("independent_score", 0.0) or 0.0)
-    except Exception:
-        pass
-
-    continuation_signal = max(continuation_score, reference_score)
-    social_or_independent = max(identity_score, greeting_score, independent_score)
-    semantic_continuation = (
-        continuation_signal >= 0.62
-        and continuation_signal >= social_or_independent + 0.05
-        and semantic_relevance >= 0.58
-    )
-    overlap_words = {
-        w for w in re.findall(r"[a-zа-яё0-9]{4,}", current.lower()) if w
-    }
-    scene_words = {
-        w for w in re.findall(r"[a-zа-яё0-9]{4,}", summary.lower()) if w
-    }
-    overlap = len(overlap_words & scene_words) / max(1, len(overlap_words))
-
-    related = bool(
-        semantic_continuation
-        and semantic_relevance >= 0.58
-        and (
-            semantic_relevance >= 0.68
-            or overlap >= 0.20
-        )
-    )
-
-    if related:
-        state_obj["active_visual_scene_turn"] = deepcopy(scene)
-        state_obj["stored_visual_scene_turn"] = None
         return {
-            "active": True,
+            "active": False,
             "released": False,
-            "overlap": round(overlap, 4),
-            "semantic_relevance": round(float(semantic_relevance), 4),
-            "continuation_score": round(continuation_signal, 4),
+            "overlap": 0.0,
+            "semantic_relevance": 0.0,
+            "continuation_score": 0.0,
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "memory_role": "evidence_only",
+            "user_id": str(user_id),
+            "current_request": current,
         }
 
-    # Release only the hot pointer. The old scene remains in the 7-day visual
-    # ledger and is therefore still available to semantic retrieval.
-    state_obj["stored_visual_scene_turn"] = deepcopy(scene)
-    state_obj["active_visual_scene_turn"] = None
-    state_obj["active_visual_scene"] = None
-    state_obj["active_visual_topic"] = None
-    state_obj["visual_focus"] = {}
-    return {
-        "active": False,
-        "released": True,
-        "overlap": round(overlap, 4),
-        "semantic_relevance": round(float(semantic_relevance), 4),
-        "continuation_score": round(continuation_signal, 4),
-    }
+    # The latest scene remains the hot user-scoped scene until the canonical
+    # Executor finishes the current turn and rotates it into dynamic memory
+    # when the semantic dialogue contract says the topic changed.
+    state_obj["active_visual_scene_turn"] = deepcopy(scene)
+    state_obj["stored_visual_scene_turn"] = None
 
+    return {
+        "active": True,
+        "released": False,
+        "overlap": 0.0,
+        "semantic_relevance": 1.0,
+        "continuation_score": 0.0,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "memory_role": "current_scene_evidence",
+        "user_id": str(user_id),
+        "current_request": current,
+        "scene_id": str(scene.get("scene_id") or ""),
+    }
 
 def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
-    """Finalize the current scene without resurrecting stale visual memory.
+    """Finalize turn-local markers without resurrecting or erasing scene memory.
 
-    The active visual scene is the latest canonical USER↔APRIL dialogue scene.
-    Archived scenes remain in A-E/7D and are never promoted by a blind restore.
+    The canonical USER↔APRIL scene is already committed by update_scene_context()
+    inside the Executor. This compatibility hook must therefore be idempotent:
+    it may finalize transient fields, but it must never promote an archived scene
+    or clear the current scene after a text-only turn.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    if isinstance(state_obj.get("active_visual_scene_turn"), dict):
-        state_obj["active_visual_scene"] = deepcopy(state_obj["active_visual_scene_turn"])
-        state_obj["current_visual_scene"] = deepcopy(state_obj["active_visual_scene_turn"])
+
+    current = state_obj.get("active_visual_scene_turn")
+    if isinstance(current, dict) and current:
+        state_obj["active_visual_scene"] = deepcopy(current)
+        state_obj["current_visual_scene"] = deepcopy(current)
         state_obj["active_visual_topic"] = {
             "topic": safe_trim_text(
-                state_obj["active_visual_scene_turn"].get("topic")
-                or state_obj["active_visual_scene_turn"].get("current_request")
-                or state_obj["active_visual_scene_turn"].get("summary"),
+                current.get("topic")
+                or current.get("current_request")
+                or current.get("summary"),
                 500,
             ),
-            "scene_id": str(state_obj["active_visual_scene_turn"].get("scene_id") or ""),
+            "scene_id": str(current.get("scene_id") or ""),
             "conversation_id": str(state_obj.get("conversation_id") or ""),
             "user_id": str(user_id),
-            "turn_id": state_obj["active_visual_scene_turn"].get("turn_id"),
+            "turn_id": current.get("turn_id"),
             "source": "current_dialogue_scene",
         }
-    # Critical invariant: stored_visual_scene_turn is archival only.
+
+    # Do NOT resurrect stored_visual_scene_turn and do NOT clear active_visual_scene.
+    # Archived scenes remain in A-E/7D until semantic retrieval explicitly uses them.
     state_obj["stored_visual_scene_turn"] = None
     state_obj["active_visual_scene_turn"] = None
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
@@ -1880,9 +1941,17 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "scene_id": scene_id,
         "scene_type": str(contract.get("active_scene") or "dialogue"),
         "topic": safe_trim_text(
-            state_obj.get("current_topic")
-            or state_obj.get("focus_state", {}).get("active_topic")
-            or current_request_text,
+            (
+                current_scene.get("topic")
+                if is_continuation and isinstance(current_scene, dict)
+                else (
+                    contract.get("active_topic")
+                    or contract.get("topic")
+                    or state_obj.get("current_topic")
+                    or state_obj.get("focus_state", {}).get("active_topic")
+                    or current_request_text
+                )
+            ),
             500,
         ),
         "user_request": safe_trim_text(current_request_text, 1200),
