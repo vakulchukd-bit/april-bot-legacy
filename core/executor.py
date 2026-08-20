@@ -1418,6 +1418,302 @@ def _presentation_signal_for_block(block: dict) -> dict:
     return signal
 
 
+def _math_structure_profile(value: Any) -> dict:
+    """Measure mathematical structure without semantic word triggers."""
+    source = _s(value)
+    if not source:
+        return {
+            "present": False,
+            "confidence": 0.0,
+            "ranges": [],
+            "notation": [],
+            "operator_density": 0.0,
+        }
+
+    # Structural notation only: delimiters, operators, grouping, numeric
+    # relations, superscripts/subscripts, and unit-like exponent structure.
+    delimiter_patterns = (
+        (r"\\\((.+?)\\\)", "inline_latex"),
+        (r"\\\[(.+?)\\\]", "display_latex"),
+        (r"\$\$(.+?)\$\$", "display_dollar"),
+        (r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", "inline_dollar"),
+        (r"(?<!\w)(?:[√∛∜])\s*[\(\[]?[0-9A-Za-zΑ-Ωα-ω_]+\s*[\)\]]?", "radical"),
+    )
+
+    ranges: list[dict] = []
+    notation: list[str] = []
+    occupied: list[tuple[int, int]] = []
+
+    for pattern, label in delimiter_patterns:
+        for match in re.finditer(pattern, source, flags=re.DOTALL):
+            start, end = match.span()
+            if any(start < b and end > a for a, b in occupied):
+                continue
+            occupied.append((start, end))
+            ranges.append({
+                "start": start,
+                "end": end,
+                "kind": "formula",
+                "renderer": "mcdowell",
+                "engine": "katex",
+                "source": label,
+            })
+            notation.append(label)
+
+    # Undelimited structural spans are recognized from mathematical notation,
+    # not domain words. The accepted shape requires multiple independent
+    # mathematical features, preventing generic prose from becoming math.
+    undelimited = re.compile(
+        r"""(?P<expr>
+            (?:
+                [A-Za-zΑ-Ωα-ω0-9_]+\s*
+                (?:[=≈≃≅≤≥±·×÷/*^])\s*
+            |
+                [√∛∜]\s*(?:\([^()\n]{1,64}\)|[A-Za-zΑ-Ωα-ω0-9_]+)
+            |
+                [A-Za-zΑ-Ωα-ω0-9_]+\s*(?:\^|_)\s*\{?[-+]?[A-Za-zΑ-Ωα-ω0-9.]+\}?
+            )
+            (?:
+                \s*
+                (?:[A-Za-zΑ-Ωα-ω0-9_]+|[√∛∜]|\([^()\n]{1,64}\))
+                \s*
+                (?:[=≈≃≅≤≥±·×÷/*^])\s*
+                [A-Za-zΑ-Ωα-ω0-9_().,\s+\-]{1,96}
+            )?
+        )""",
+        flags=re.VERBOSE,
+    )
+
+    for match in undelimited.finditer(source):
+        start, end = match.span("expr")
+        if any(start < b and end > a for a, b in occupied):
+            continue
+        candidate = match.group("expr").strip()
+        # Structural validation: require at least one relation/operator and
+        # at least one digit or grouping/operator structure.
+        operator_count = len(re.findall(r"[=≈≃≅≤≥±·×÷/*^_]", candidate))
+        numeric_or_radical = bool(re.search(r"\d|[√∛∜]", candidate))
+        if operator_count < 1 or not numeric_or_radical:
+            continue
+
+        occupied.append((start, end))
+        ranges.append({
+            "start": start,
+            "end": end,
+            "kind": "formula",
+            "renderer": "mcdowell",
+            "engine": "katex",
+            "source": "structural_math",
+        })
+        notation.append("structural_math")
+
+    # Merge overlaps and sort in source order.
+    ranges.sort(key=lambda item: (item["start"], item["end"]))
+    merged: list[dict] = []
+    for item in ranges:
+        if not merged or item["start"] >= merged[-1]["end"]:
+            merged.append(item)
+        else:
+            merged[-1]["end"] = max(merged[-1]["end"], item["end"])
+
+    chars = len(source)
+    operator_count = len(re.findall(r"[=≈≃≅≤≥±·×÷/*^_√∛∜]", source))
+    numeric_count = len(re.findall(r"\d", source))
+    density = (operator_count + min(numeric_count, 12)) / max(chars, 1)
+    structural_strength = 0.0
+    if merged:
+        structural_strength = min(
+            1.0,
+            0.45
+            + (0.12 * min(len(merged), 3))
+            + min(0.25, density * 8.0),
+        )
+
+    return {
+        "present": bool(merged),
+        "confidence": round(structural_strength, 6),
+        "ranges": merged,
+        "notation": sorted(set(notation)),
+        "operator_density": round(density, 6),
+    }
+
+
+def _presentation_segments(content: Any) -> dict:
+    """Build renderer segments while preserving the original string byte-for-byte."""
+    source = _s(content)
+    profile = _math_structure_profile(source)
+    ranges = profile.get("ranges", []) if isinstance(profile, dict) else []
+
+    if not source or not ranges:
+        return {
+            "mode": "text",
+            "segments": [{
+                "kind": "text",
+                "start": 0,
+                "end": len(source),
+                "renderer": "mcdowell",
+                "engine": "markdown",
+            }] if source else [],
+            "analysis": profile,
+        }
+
+    segments: list[dict] = []
+    cursor = 0
+    for item in sorted(ranges, key=lambda x: (x["start"], x["end"])):
+        start = max(0, int(item["start"]))
+        end = min(len(source), int(item["end"]))
+        if start > cursor:
+            segments.append({
+                "kind": "text",
+                "start": cursor,
+                "end": start,
+                "renderer": "mcdowell",
+                "engine": "markdown",
+            })
+        segments.append({
+            "kind": "formula",
+            "start": start,
+            "end": end,
+            "renderer": "mcdowell",
+            "engine": "katex",
+            "preserve_payload": True,
+        })
+        cursor = end
+
+    if cursor < len(source):
+        segments.append({
+            "kind": "text",
+            "start": cursor,
+            "end": len(source),
+            "renderer": "mcdowell",
+            "engine": "markdown",
+        })
+
+    compacted: list[dict] = []
+    for segment in segments:
+        if compacted and segment["kind"] == "text" and compacted[-1]["kind"] == "text":
+            compacted[-1]["end"] = segment["end"]
+        else:
+            compacted.append(segment)
+
+    return {
+        "mode": "mixed",
+        "segments": compacted,
+        "analysis": profile,
+    }
+
+
+def _presentation_signal_for_block(block: dict) -> dict:
+    """Attach renderer hints without rewriting the original payload."""
+    source = dict(block or {})
+    btype = _s(
+        source.get("type")
+        or source.get("artifact_type")
+        or source.get("representation")
+    ).lower()
+    representation = _s(
+        source.get("representation")
+        or source.get("presentation")
+    ).lower()
+
+    kind = btype or representation or "text"
+    signal = {
+        "version": "presentation_signal_v2",
+        "kind": kind,
+        "renderer": "",
+        "engine": "",
+        "preserve_payload": True,
+    }
+
+    if kind in {"text", "markdown"}:
+        content = source.get("content") or source.get("text") or source.get("value") or ""
+        segmented = _presentation_segments(content)
+        if segmented.get("mode") == "mixed":
+            signal.update({
+                "kind": "mixed",
+                "renderer": "message",
+                "engine": "presentation_matrix",
+                "segments": segmented["segments"],
+                "analysis": segmented["analysis"],
+                "delegated_segments": True,
+                "text_engine": "mcdowell",
+                "formula_engine": "katex",
+            })
+        else:
+            signal.update({
+                "renderer": "mcdowell",
+                "engine": "markdown",
+                "inline_math_engine": "katex",
+                "allow_math_segments": True,
+                "analysis": segmented["analysis"],
+                "segments": segmented["segments"],
+            })
+    elif kind == "formula":
+        signal.update({
+            "renderer": "mcdowell",
+            "engine": "katex",
+            "math_mode": "display",
+        })
+    elif kind == "table":
+        signal.update({
+            "renderer": "table",
+            "engine": "table",
+            "cell_text_engine": "mcdowell",
+            "cell_math_engine": "katex",
+        })
+    elif kind in {"graph", "plot", "chart"}:
+        signal.update({
+            "renderer": "graph",
+            "engine": "graph",
+            "label_text_engine": "mcdowell",
+            "label_math_engine": "katex",
+        })
+    elif kind == "code":
+        signal.update({
+            "renderer": "code",
+            "engine": "syntax",
+        })
+    elif kind == "link":
+        signal.update({
+            "renderer": "link",
+            "engine": "link_card",
+            "description_engine": "mcdowell",
+        })
+    elif kind in {"gallery", "image", "media"}:
+        signal.update({
+            "renderer": "gallery",
+            "engine": "media",
+            "caption_engine": "mcdowell",
+        })
+    elif kind in {"diagram", "scene", "layout", "visual"}:
+        signal.update({
+            "renderer": "graph",
+            "engine": "diagram",
+            "label_text_engine": "mcdowell",
+            "label_math_engine": "katex",
+        })
+    elif kind == "mixed":
+        signal.update({
+            "renderer": "message",
+            "engine": "presentation_matrix",
+            "delegated_segments": True,
+        })
+    else:
+        signal.update({
+            "renderer": "mcdowell",
+            "engine": "markdown",
+            "inline_math_engine": "katex",
+        })
+
+    explicit_signal = source.get("signal")
+    if isinstance(explicit_signal, dict):
+        merged = dict(signal)
+        merged.update(_quantum_snapshot(explicit_signal))
+        signal = merged
+
+    return signal
+
+
 def _attach_presentation_signals(blocks: Any) -> list[dict]:
     enriched: list[dict] = []
     for block in blocks if isinstance(blocks, list) else []:
