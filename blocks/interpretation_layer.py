@@ -529,8 +529,21 @@ QUANTUM_SCENE_STATE_ENGINE = QuantumSceneStateEngine()
 class QuantumInterpretationEngine:
     """One engine: linguistic evidence + semantic matrix + context fusion."""
 
+    # Runtime states are explicit so readiness never means "the object exists".
+    # MATRIX_READY means the local quantum matrix is compiled. SEMANTIC_READY
+    # means the sentence encoder has actually been loaded and can be used.
+    RUNTIME_INITIALIZING = "INITIALIZING"
+    RUNTIME_MATRIX_READY = "MATRIX_READY"
+    RUNTIME_SEMANTIC_READY = "SEMANTIC_READY"
+    RUNTIME_FAILED = "FAILED"
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._runtime_condition = threading.Condition(self._lock)
+        self._runtime_thread: threading.Thread | None = None
+        self._runtime_error: str | None = None
+        self._runtime_started_at: float | None = None
+        self._runtime_finished_at: float | None = None
         self._cache: dict[tuple, dict[str, Any]] = {}
         self._cache_limit = 256
         self._vectorizer = None
@@ -538,9 +551,130 @@ class QuantumInterpretationEngine:
         self._prototype_index: dict[str, list[int]] = {}
         self._semantic_encoder = None
         self._nli = None
-        self._runtime_ready = True
+        self._runtime_ready = False
         self._heavy_ready = False
+        self._matrix_ready = False
         self._compile_matrix()
+        self._runtime_state = (
+            self.RUNTIME_MATRIX_READY if self._matrix_ready
+            else self.RUNTIME_FAILED
+        )
+
+    def runtime_status(self) -> dict[str, Any]:
+        """Return the real state of this one interpretation engine.
+
+        No status is inferred from object construction.  SEMANTIC_READY is set
+        only after SentenceTransformer has successfully loaded.
+        """
+        with self._lock:
+            return {
+                "state": self._runtime_state,
+                "runtime_ready": bool(self._runtime_ready),
+                "matrix_ready": bool(self._matrix_ready),
+                "semantic_ready": bool(self._heavy_ready and self._semantic_encoder is not None),
+                "model": SEMANTIC_MODEL_NAME,
+                "started_at": self._runtime_started_at,
+                "finished_at": self._runtime_finished_at,
+                "error": self._runtime_error,
+                "engine": "quantum_interpretation_engine",
+                "single_route": True,
+                "decision_owner": DECISION_OWNER,
+            }
+
+    def wait_for_semantic_runtime(self, timeout: float | None = None) -> bool:
+        """Wait for the existing semantic runtime to finish initialization."""
+        with self._runtime_condition:
+            if self._heavy_ready and self._semantic_encoder is not None:
+                return True
+            thread = self._runtime_thread
+            if thread is None:
+                return False
+            self._runtime_condition.wait_for(
+                lambda: self._heavy_ready
+                or self._runtime_state == self.RUNTIME_FAILED,
+                timeout=timeout,
+            )
+            return bool(self._heavy_ready and self._semantic_encoder is not None)
+
+    def start_semantic_runtime(self, *, background: bool = True) -> dict[str, Any]:
+        """Start the existing sentence-semantic runtime exactly once.
+
+        The runtime is part of QuantumInterpretationEngine itself; this method
+        does not introduce a second interpreter or a parallel route.
+        """
+        with self._runtime_condition:
+            if self._heavy_ready and self._semantic_encoder is not None:
+                self._runtime_state = self.RUNTIME_SEMANTIC_READY
+                self._runtime_ready = True
+                return self.runtime_status()
+
+            if SentenceTransformer is None:
+                # The local matrix is already a complete installed measurement
+                # engine. Keep its readiness explicit rather than pretending a
+                # missing optional dependency loaded successfully.
+                self._runtime_state = (
+                    self.RUNTIME_MATRIX_READY if self._matrix_ready
+                    else self.RUNTIME_FAILED
+                )
+                self._runtime_ready = bool(self._matrix_ready)
+                self._runtime_error = (
+                    "sentence_transformers is unavailable; "
+                    "semantic encoder was not started"
+                )
+                self._runtime_condition.notify_all()
+                return self.runtime_status()
+
+            if self._runtime_thread is not None and self._runtime_thread.is_alive():
+                if not background:
+                    # Never hold the condition while joining.
+                    thread = self._runtime_thread
+                else:
+                    return self.runtime_status()
+
+            else:
+                self._runtime_state = self.RUNTIME_INITIALIZING
+                self._runtime_ready = False
+                self._runtime_error = None
+                self._runtime_started_at = time.perf_counter()
+                thread = threading.Thread(
+                    target=self._load_semantic_runtime,
+                    name="april-quantum-semantic-runtime",
+                    daemon=True,
+                )
+                self._runtime_thread = thread
+                thread.start()
+                if background:
+                    return self.runtime_status()
+
+        # Synchronous callers wait outside the lock.
+        self.wait_for_semantic_runtime(timeout=None)
+        return self.runtime_status()
+
+    def _load_semantic_runtime(self) -> None:
+        encoder = None
+        error = None
+        try:
+            # Model construction is intentionally outside the request path.
+            encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+
+        with self._runtime_condition:
+            self._semantic_encoder = encoder
+            self._heavy_ready = encoder is not None
+            self._runtime_finished_at = time.perf_counter()
+            if self._heavy_ready:
+                self._runtime_state = self.RUNTIME_SEMANTIC_READY
+                self._runtime_ready = True
+                self._runtime_error = None
+            else:
+                self._runtime_state = (
+                    self.RUNTIME_MATRIX_READY if self._matrix_ready
+                    else self.RUNTIME_FAILED
+                )
+                self._runtime_ready = bool(self._matrix_ready)
+                self._runtime_error = error or "semantic encoder failed to initialize"
+            self._runtime_condition.notify_all()
 
     # ----------------------------- primitives -----------------------------
 
@@ -573,24 +707,32 @@ class QuantumInterpretationEngine:
             )
             self._prototype_matrix = self._vectorizer.fit_transform(docs)
 
-    def _ensure_cognitive_runtime(self) -> None:
-        """Load the semantic model lazily inside this existing interpretation engine.
+        self._matrix_ready = bool(
+            self._vectorizer is not None
+            and self._prototype_matrix is not None
+        )
 
-        This is not a second route: it is the engine used by the canonical
-        interpretation path.  If the optional model package is unavailable,
-        the already-installed matrix implementation remains the measurement
-        implementation rather than creating another decision path.
+    def _ensure_cognitive_runtime(self) -> None:
+        """Ensure the one semantic runtime is initialized before semantic use.
+
+        Startup may prewarm this runtime in the background. If a request arrives
+        before it finishes, the request waits for the same runtime instead of
+        creating a second encoder or silently inventing another route.
         """
-        if self._heavy_ready:
+        with self._lock:
+            ready = self._heavy_ready and self._semantic_encoder is not None
+            thread = self._runtime_thread
+
+        if ready:
             return
-        if SentenceTransformer is None:
+
+        if thread is None:
+            # Compatibility callers can still invoke measurement directly.
+            # Start the same existing runtime synchronously; no parallel engine.
+            self.start_semantic_runtime(background=False)
             return
-        try:
-            self._semantic_encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
-            self._heavy_ready = True
-        except Exception:
-            self._semantic_encoder = None
-            self._heavy_ready = False
+
+        self.wait_for_semantic_runtime(timeout=None)
 
     def _encode(self, texts: Sequence[str]):
         values = [self.normalize(x) for x in texts if self.normalize(x)]
@@ -1871,6 +2013,7 @@ class QuantumInterpretationEngine:
             "machine_only": True,
             "single_route": True,
             "measurement_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            "semantic_runtime": self.runtime_status(),
         })
 
         result["memory_query"] = bool(memory_query)
@@ -2176,6 +2319,11 @@ def build_interpretation_route(state: dict[str, Any], result: dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
+
+# Begin warming the same canonical engine during module startup.  A request
+# arriving before completion waits on this exact runtime when semantic scoring
+# is needed; no second interpreter/provider/route is created.
+start_semantic_accelerator()
 
 # Compatibility singleton names intentionally reference the same engine object.
 QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
@@ -2678,20 +2826,22 @@ SEMANTIC_PIPELINE = INTERPRETATION_ROUTE
 # Deep-model API compatibility
 # ---------------------------------------------------------------------------
 
-def _runtime_ready_guard() -> None:
-    return None
+def _runtime_ready_guard() -> dict[str, Any]:
+    return QUANTUM_INTERPRETATION_ENGINE.runtime_status()
 
 
 def _ensure_semantic_runtime() -> None:
-    return None
+    QUANTUM_INTERPRETATION_ENGINE.start_semantic_runtime(background=False)
 
 
-def preload_semantic_runtime() -> None:
-    return None
+def preload_semantic_runtime() -> dict[str, Any]:
+    """Preload the canonical semantic runtime before user traffic."""
+    return QUANTUM_INTERPRETATION_ENGINE.start_semantic_runtime(background=False)
 
 
-def start_semantic_accelerator() -> None:
-    return None
+def start_semantic_accelerator() -> dict[str, Any]:
+    """Start the canonical semantic runtime in the background."""
+    return QUANTUM_INTERPRETATION_ENGINE.start_semantic_runtime(background=True)
 
 
 def _ensure_nli_runtime() -> None:
