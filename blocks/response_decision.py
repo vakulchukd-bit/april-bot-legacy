@@ -243,7 +243,20 @@ def _execution_score(semantic: Dict[str, Any], cognition: Dict[str, Any], ambigu
     explicit = _f(semantic.get("execution_pressure", cognition.get("execution_pressure", 0.0)))
     wants_result = _f(cognition.get("wants_result", semantic.get("wants_result", 0.0)))
     action = _f(cognition.get("wants_action", 0.0))
-    base = max(explicit, wants_result, action)
+    scene_state = _d(semantic.get("scene_semantic_state"))
+    task_phase = _s(scene_state.get("task_phase")).lower()
+    scene_relation = _d(semantic.get("dialogue_relation"))
+    phase_mass = {
+        "execution": 0.92,
+        "modification": 0.82,
+        "comparison": 0.48,
+        "proposal": 0.08,
+        "explanation": 0.06,
+        "recall": 0.02,
+        "continuation": 0.58,
+    }.get(task_phase, 0.0)
+    relation_mass = _f(scene_relation.get("confidence", 0.0)) if scene_relation.get("same_scene") else 0.0
+    base = max(explicit, wants_result, action, phase_mass * max(0.65, relation_mass))
     return _clamp(base * (1.0 - 0.55 * ambiguity))
 
 
@@ -307,6 +320,7 @@ def _artifact_scene(semantic: Dict[str, Any]) -> tuple[Dict[str, Any], List[Any]
 
 def _canonical_action(
     *,
+    semantic: Dict[str, Any],
     dialogue: Dict[str, Any],
     representation: Dict[str, Any],
     execution_score: float,
@@ -319,6 +333,9 @@ def _canonical_action(
     if clarification:
         return "clarify"
 
+    scene_state = _d(cognition.get("scene_semantic_state") or semantic.get("scene_semantic_state"))
+    task_phase = _s(scene_state.get("task_phase")).lower()
+    scene_relation = _d(semantic.get("dialogue_relation"))
     requested = [
         _s(x).lower()
         for x in (representation.get("requested_outputs") or [])
@@ -327,6 +344,17 @@ def _canonical_action(
     explicit_structured = [name for name in requested if name != "text"]
     if not explicit_structured:
         return "talk"
+
+    # Execution is a task phase, not a renderer trigger. When the current
+    # semantic scene says the user has moved from proposal/explanation into
+    # execution, the processor owns that phase transition and the selected
+    # artifact remains the output of the same execution.
+    if (
+        task_phase in {"execution", "modification"}
+        and scene_relation.get("same_scene")
+        and execution_score >= 0.45
+    ):
+        return "execute"
 
     structured_mass = sum(
         _f(representation.get("weights", {}).get(name, 0.0))
@@ -378,6 +406,10 @@ def build_response_decision(
     cognition = _d(cognition)
     visual_reference = _d(visual_reference)
     state = _d(state)
+    scene_state = _d(
+        cognition.get("scene_semantic_state")
+        or semantic.get("scene_semantic_state")
+    )
 
     representation = _representation_signals(semantic, cognition)
     continuity = _continuity_signals(cognition, state)
@@ -407,6 +439,7 @@ def build_response_decision(
     should_continue = continuity["continuation"]
 
     final_action = _canonical_action(
+        semantic=semantic,
         dialogue=dialogue,
         representation=representation,
         execution_score=execution_score,
@@ -497,8 +530,8 @@ def build_response_decision(
 
         "should_execute": final_action == "execute",
         "execution_allowed": final_action == "execute",
-        "should_render": final_action == "render",
-        "render_allowed": final_action == "render",
+        "should_render": final_action in {"render", "execute"},
+        "render_allowed": final_action in {"render", "execute"},
         "renderer_first_mode": final_action == "render",
         "renderer_hard_lock": False,
 
@@ -562,7 +595,10 @@ def build_response_decision(
         "scene_priority": True,
         "dialog_priority": dialogue["dialogue_active"],
 
-        "goal_stage": semantic.get("goal_stage", "exploration"),
+        "goal_stage": semantic.get("goal_stage", scene_state.get("task_phase", "exploration")),
+        "task_phase": scene_state.get("task_phase"),
+        "operation": scene_state.get("operation"),
+        "requested_scene_representation": scene_state.get("requested_representation"),
         "memory_priority": continuity["memory_priority"],
         "focus_locked": continuity["focus_locked"],
         "has_open_loops": continuity["open_loops"],
