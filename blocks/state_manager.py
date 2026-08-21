@@ -236,6 +236,7 @@ def build_default_state():
         "active_scene_contract": {},
         "current_scene_request": "",
         "visual_summary": {},
+        "semantic_scene_state": {},
     }
 
 
@@ -2194,6 +2195,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
     current_request_text = str(current_request or "").strip()
     answer_text = str(answer or "").strip()[:4000]
 
+    semantic_scene_state = {}
+    metadata = contract.get("metadata") if isinstance(contract.get("metadata"), dict) else {}
+    if isinstance(metadata.get("semantic_scene_state"), dict):
+        semantic_scene_state = deepcopy(metadata["semantic_scene_state"])
+
     state_obj["active_scene_contract"] = {
         "scene_version": str(contract.get("scene_version") or ""),
         "active_scene": str(contract.get("active_scene") or ""),
@@ -2285,6 +2291,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "presentation_types": presentation_types,
         "renderer_state": deepcopy(contract.get("renderer_state") or {}),
         "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
+        "semantic_state": deepcopy(semantic_scene_state),
         "user_id": str(user_id),
         "conversation_id": conversation_id,
         "turn_id": state_obj.get("visual_scene_version"),
@@ -2292,6 +2299,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "memory_kind": "current_visual_dialogue",
     }
 
+    state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
     state_obj["current_visual_scene"] = deepcopy(scene_record)
     state_obj["active_visual_scene"] = deepcopy(scene_record)
     state_obj["active_visual_topic"] = {
