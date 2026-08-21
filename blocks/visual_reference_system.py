@@ -61,6 +61,8 @@ def build_scene_snapshot(active_visual_scene: Any, active_scene_contract: Any = 
         "continuity_weight": _clamp(source.get("continuity_weight", 0.65)),
         "render_block_types": list(source.get("render_block_types") or [])[:8],
         "scene_id": _text(source.get("scene_id")),
+        "semantic_state": dict(source.get("semantic_state") or {}) if isinstance(source.get("semantic_state"), dict) else {},
+        "renderer_state": dict(source.get("renderer_state") or {}) if isinstance(source.get("renderer_state"), dict) else {},
     }
 
 
@@ -130,6 +132,16 @@ def build_visual_reference(
         if isinstance(semantic.get("dialogue_contract"), dict)
         else {}
     )
+    scene_semantics = (
+        semantic.get("scene_semantic_state")
+        if isinstance(semantic.get("scene_semantic_state"), dict)
+        else {}
+    )
+    scene_relation = (
+        semantic.get("dialogue_relation")
+        if isinstance(semantic.get("dialogue_relation"), dict)
+        else {}
+    )
     measurement = (
         semantic.get("quantum_dialogue_measurement")
         if isinstance(semantic.get("quantum_dialogue_measurement"), dict)
@@ -145,6 +157,8 @@ def build_visual_reference(
         dialogue_contract.get("continuation")
         or dialogue_contract.get("reference_to_previous")
         or semantic.get("continuation")
+        or scene_relation.get("continuation")
+        or scene_relation.get("same_scene")
         or measured_dialogue.get("continuation_score", 0.0) >= 0.72
     )
     explicit_reference = bool(
@@ -201,8 +215,14 @@ def build_visual_reference(
     # For a genuine continuation/reference, consume the semantic measurement
     # already produced by Interpretation when it is present. Otherwise make
     # one shared batch embedding measurement here.
-    context_similarity = 0.0
-    if scene.get("exists") and scene.get("summary"):
+    context_similarity = _clamp(
+        max(
+            float(scene_relation.get("confidence", 0.0) or 0.0),
+            float(scene_relation.get("vector_similarity", 0.0) or 0.0),
+            float(scene_relation.get("profile_similarity", 0.0) or 0.0),
+        )
+    )
+    if scene.get("exists") and scene.get("summary") and context_similarity < 0.35:
         existing_measurement = (
             measurement.get("context_vectors", {})
             if isinstance(measurement, dict)
@@ -214,7 +234,7 @@ def build_visual_reference(
             else None
         )
         if measured_scene_score is not None:
-            context_similarity = _clamp(measured_scene_score)
+            context_similarity = max(context_similarity, _clamp(measured_scene_score))
         else:
             scene_reference_text = " ".join(
                 part for part in (
@@ -225,11 +245,14 @@ def build_visual_reference(
                 ) if part
             ).strip()
             if scene_reference_text:
-                context_similarity = float(
-                    QUANTUM_EMBEDDING_ENGINE.similarities(
-                        text,
-                        [scene_reference_text],
-                    ).get(scene_reference_text, 0.0)
+                context_similarity = max(
+                    context_similarity,
+                    float(
+                        QUANTUM_EMBEDDING_ENGINE.similarities(
+                            text,
+                            [scene_reference_text],
+                        ).get(scene_reference_text, 0.0)
+                    ),
                 )
 
     scene_relevant = bool(
@@ -272,6 +295,8 @@ def build_visual_reference(
         "context_dependency": context_dependency or "unresolved",
         "new_topic_guard": new_topic_guard,
         "semantic_inheritance": scene_relevant,
+        "scene_semantic_state": scene_semantics if scene_relevant else {},
+        "scene_relation": scene_relation,
         "provider_calls": 0,
         "decision_owner": DECISION_OWNER,
         "renderer_selection": "delegated",
