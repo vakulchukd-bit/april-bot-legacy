@@ -684,6 +684,18 @@ class QuantumInterpretationEngine:
         assistant_relation = profile["context_scores"].get("previous_assistant", 0.0)
         user_relation = profile["context_scores"].get("previous_user", 0.0)
         topic_relation = profile["context_scores"].get("active_topic", 0.0)
+
+        # Structural discourse signal: unresolved references (pronouns/demonstratives)
+        # are evidence that the current turn depends on the immediately previous
+        # turn. This is language interpretation, not topic/keyword routing.
+        tokens = set(self._tokens(self.normalize(text)))
+        anaphoric_tokens = {
+            "он", "она", "они", "его", "ее", "её", "их", "ему", "ей",
+            "это", "этот", "эта", "эти", "этого", "этой", "них", "ней",
+            "тот", "та", "те", "того", "той", "ними", "ним",
+        }
+        anaphora_score = min(1.0, len(tokens & anaphoric_tokens) / 1.5)
+
         continuation_score = max(
             dialogue.get("continuation", 0.0), 0.72 * assistant_relation,
             0.58 * user_relation, 0.64 * topic_relation,
@@ -694,17 +706,25 @@ class QuantumInterpretationEngine:
         )
         memory_query_score = float(dialogue.get("memory_query", 0.0) or 0.0)
         if memory_query_score >= 0.10:
-            # Recall requests are a semantic discourse mode, not an ordinary
-            # continuation of the immediately preceding visual scene.
             reference_score = max(reference_score, memory_query_score)
 
-        # A relational attribute question with an existing dialogue field is
-        # context-dependent even when lexical overlap is zero. This is a
-        # structural discourse relation, not a word/name trigger.
         if previous_assistant or previous_user:
             if profile.get("dialogue_best") == "identity" or dialogue.get("identity", 0.0) >= 0.12:
                 reference_score = max(reference_score, 0.72)
                 continuation_score = max(continuation_score, 0.62)
+
+        # If the user refers to an unresolved entity from the immediately prior
+        # turn, preserve the previous scene even when lexical overlap is zero.
+        # A true recall request ("what did we discuss") remains separate.
+        if previous_assistant and anaphora_score >= 0.60 and best != "memory_query":
+            reference_score = max(reference_score, 0.82)
+            continuation_score = max(continuation_score, 0.78)
+        elif previous_assistant and anaphora_score >= 0.60 and best == "memory_query":
+            best = "reference"
+            reference_score = max(reference_score, 0.82)
+            continuation_score = max(continuation_score, 0.78)
+            memory_query_score = min(memory_query_score, 0.09)
+
         continuation = bool(
             previous_assistant
             and best != "memory_query"
@@ -719,6 +739,7 @@ class QuantumInterpretationEngine:
                 "confidence": float(profile["dialogue_confidence"]),
                 "continuation_score": float(continuation_score),
                 "reference_score": float(reference_score),
+                "anaphora_score": float(anaphora_score),
                 "topic_score": float(profile["context_scores"].get("active_topic", 0.0)),
                 "goal_score": float(profile["context_scores"].get("active_goal", 0.0)),
             },
