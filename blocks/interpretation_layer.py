@@ -94,17 +94,6 @@ DIALOGUE_LABELS = (
     "rejection", "new_topic", "statement", "independent", "memory_query",
 )
 
-REPRESENTATION_HYPOTHESES = {
-    "text": "the user wants a normal textual answer",
-    "table": "the user wants the information represented as a table",
-    "graph": "the user wants the information represented as a graph or chart",
-    "diagram": "the user wants a schematic or diagram with connected elements",
-    "formula": "the user wants a mathematical formula or mathematical notation",
-    "image": "the user wants an image or generated picture",
-    "gallery": "the user wants multiple images or a gallery",
-    "code": "the user wants executable source code",
-    "link": "the user wants a link or web resource",
-}
 
 SEMANTIC_TURN_PROTOTYPES = {
     "identity": "пользователь спрашивает кто ты как тебя зовут представься назови себя; the user asks who you are or what your name is",
@@ -249,278 +238,6 @@ SCENE_REPRESENTATION_PROTOTYPES = {
     "code": "код программа исходный код функция",
     "link": "ссылка сайт веб ресурс источник адрес",
 }
-
-class QuantumSceneStateEngine:
-    """Builds a reusable semantic state for every turn and renderer type.
-
-    It does not route. It describes the task state so the Quantum Processor can
-    compare turns and decide whether a scene continues, changes phase, or ends.
-    """
-
-    def __init__(self) -> None:
-        self._vectorizer = None
-        self._prototype_docs: list[str] = []
-        self._prototype_keys: list[tuple[str, str]] = []
-        self._compile()
-
-    def _compile(self) -> None:
-        groups = (
-            ("request_role", SCENE_REQUEST_PROTOTYPES),
-            ("operation", SCENE_OPERATION_PROTOTYPES),
-            ("representation", SCENE_REPRESENTATION_PROTOTYPES),
-        )
-        for family, values in groups:
-            for key, description in values.items():
-                self._prototype_keys.append((family, key))
-                self._prototype_docs.append(description)
-        if TfidfVectorizer is not None and self._prototype_docs:
-            self._vectorizer = TfidfVectorizer(
-                analyzer="char_wb",
-                ngram_range=(2, 5),
-                lowercase=True,
-                sublinear_tf=True,
-                min_df=1,
-            )
-            self._vectorizer.fit(self._prototype_docs)
-
-    def _scores(self, text: str, family: str) -> dict[str, float]:
-        values = {
-            "request_role": SCENE_REQUEST_PROTOTYPES,
-            "operation": SCENE_OPERATION_PROTOTYPES,
-            "representation": SCENE_REPRESENTATION_PROTOTYPES,
-        }[family]
-        normalized = text.strip()
-        if not normalized:
-            return {key: 0.0 for key in values}
-        if self._vectorizer is None or cosine_similarity is None:
-            return {key: 0.0 for key in values}
-        try:
-            q = self._vectorizer.transform([normalized])
-            indices = [
-                i for i, (group, _) in enumerate(self._prototype_keys)
-                if group == family
-            ]
-            if not indices:
-                return {key: 0.0 for key in values}
-            sims = cosine_similarity(q, self._vectorizer.transform(
-                [self._prototype_docs[i] for i in indices]
-            ))[0]
-            return {
-                key: float(max(0.0, min(1.0, score)))
-                for (_, key), score in zip(
-                    [self._prototype_keys[i] for i in indices], sims
-                )
-            }
-        except Exception:
-            return {key: 0.0 for key in values}
-
-    @staticmethod
-    def _anaphora_features(text: str) -> dict[str, Any]:
-        """Measure grammatical reference pressure, not routing triggers."""
-        tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", str(text or "").lower())
-        # Pronoun classes are linguistic structure: they indicate that the
-        # current utterance may depend on an antecedent already present in the
-        # previous scene. They never select a renderer or provider.
-        pronoun_forms = {
-            "он","она","они","его","ее","её","их","ему","ей","это","этот","эта","эти",
-            "этого","этой","того","та","те","них","ней","ним","ними","тот",
-            "he","she","they","it","his","her","their","this","that","these","those",
-        }
-        hits=[t for t in tokens if t in pronoun_forms]
-        return {
-            "count": len(hits),
-            "density": min(1.0, len(hits)/max(1.0, len(tokens))),
-            "forms": hits[:8],
-        }
-
-    @staticmethod
-    def _numbers(text: str) -> list[str]:
-        return re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", text)
-
-    @staticmethod
-    def _entities(text: str) -> list[str]:
-        """Extract structural named candidates without using them as triggers."""
-        value = str(text or "")
-        tokens = re.findall(r"\b[А-ЯЁ][а-яё]{2,}\b", value)
-        # Do not count a sentence-initial capitalized token as an entity by
-        # itself. Names/objects appearing after the first position remain evidence.
-        out = []
-        for token in tokens:
-            if not out and value.lstrip().startswith(token):
-                continue
-            if token not in out:
-                out.append(token)
-        return out[:12]
-
-    @staticmethod
-    def _representation_mentions(text: str) -> list[tuple[str, int]]:
-        tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", text.lower())
-        lexemes = {
-            "formula": {"формула", "формулу", "формулы", "уравнение", "выражение"},
-            "graph": {"график", "графика", "графики", "графический"},
-            "table": {"таблица", "таблицу", "таблицы"},
-            "diagram": {"схема", "схему", "диаграмма", "диаграмму"},
-            "image": {"изображение", "изображение", "картинка", "картинку", "рисунок", "рисунок", "фото", "фотографию"},
-            "gallery": {"галерея", "галерею", "галереи", "подборка", "подборку"},
-            "code": {"код", "программа", "скрипт"},
-            "link": {"ссылка", "ссылку", "ссылки", "сайт", "источник"},
-        }
-        out = []
-        for index, token in enumerate(tokens):
-            for representation, words in lexemes.items():
-                if token in words:
-                    out.append((representation, index))
-        return out
-
-    def build(
-        self,
-        text: str,
-        *,
-        answer: str = "",
-        previous: dict[str, Any] | None = None,
-        profile: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        normalized = re.sub(r"\s+", " ", str(text or "").strip())
-        answer = re.sub(r"\s+", " ", str(answer or "").strip())
-        combined = " ".join(x for x in (normalized, answer) if x)
-        anaphora = self._anaphora_features(normalized)
-        entities = self._entities(normalized)
-
-        previous = previous if isinstance(previous, dict) else {}
-        role_scores = self._scores(normalized, "request_role")
-        operation_scores = self._scores(normalized, "operation")
-        # A fresh turn that contains a concrete named subject is semantically
-        # unlikely to be a recall-about-previous-conversation request. Reduce
-        # the recall posterior rather than branching on a word trigger.
-        if not previous and entities and "recall" in role_scores:
-            role_scores["recall"] *= 0.30
-        representation_scores = self._scores(normalized, "representation")
-
-        role = max(role_scores, key=role_scores.get, default="explanation")
-        role_conf = float(role_scores.get(role, 0.0))
-        operation = max(operation_scores, key=operation_scores.get, default="")
-        operation_conf = float(operation_scores.get(operation, 0.0))
-        if operation_conf < 0.18:
-            operation = ""
-        rep = max(representation_scores, key=representation_scores.get, default="text")
-        rep_conf = float(representation_scores.get(rep, 0.0))
-
-        mentions = self._representation_mentions(normalized)
-        representation_roles = []
-        if mentions:
-            # Position is interpreted as syntactic evidence. For a proposal/
-            # explanation request, an earlier artifact mention is normally the
-            # requested object while a later mention often describes its purpose.
-            first_index = min(index for _, index in mentions)
-            token_count = max(1, len(normalized.split()))
-            for name, index in mentions:
-                proximity = 1.0 - min(1.0, index / max(1.0, token_count))
-                role_score = 0.55 * float(representation_scores.get(name, 0.0)) + 0.45 * proximity
-                representation_roles.append({
-                    "representation": name,
-                    "position": index,
-                    "request_role_score": round(role_score, 6),
-                })
-            representation_roles.sort(key=lambda item: item["request_role_score"], reverse=True)
-
-        requested_representation = "text"
-        explicit_representation = False
-        if representation_roles:
-            candidate = representation_roles[0]["representation"]
-            if role in {"proposal", "explanation"}:
-                requested_representation = candidate
-                explicit_representation = True
-            elif role in {"execution", "modification", "comparison", "continuation", "proposal"} and rep_conf >= 0.12:
-                requested_representation = candidate
-                explicit_representation = True
-        elif rep_conf >= 0.22 and rep != "text":
-            requested_representation = rep
-            explicit_representation = True
-
-        # Role calibration uses whether this is the first scene; no renderer or
-        # provider routing is performed here.
-        if not previous and entities:
-            role_scores["recall"] = float(role_scores.get("recall", 0.0)) * 0.30
-        prev_operation = str(previous.get("operation") or "")
-        prev_representation = str(previous.get("requested_representation") or previous.get("representation") or "")
-        prev_role = str(previous.get("request_role") or "")
-        prev_numbers = list(previous.get("numbers") or [])
-        numbers = self._numbers(normalized)
-
-        short_turn = len(normalized.split()) <= max(6, int(len(str(previous.get("text") or "").split()) * 0.55)) if previous else False
-        inherited_operation = False
-        inherited_representation = False
-
-        can_inherit = bool(
-            previous
-            and short_turn
-            and (
-                role in {"execution", "modification", "continuation"}
-                or role_conf < 0.18
-            )
-        )
-        if can_inherit:
-            if operation_conf < 0.20 and prev_operation:
-                operation = prev_operation
-                operation_conf = max(operation_conf, 0.78)
-                inherited_operation = True
-            if not explicit_representation and prev_representation:
-                requested_representation = prev_representation
-                rep_conf = max(rep_conf, 0.78)
-                inherited_representation = True
-
-        operation_output = SCENE_OPERATION_OUTPUT.get(operation)
-        if role in {"execution", "modification"} and operation_output:
-            requested_representation = operation_output
-            explicit_representation = True
-            rep_conf = max(rep_conf, operation_conf)
-
-        parameter_change = bool(previous and prev_numbers and numbers and prev_numbers != numbers)
-
-        phase = role
-        if inherited_operation or inherited_representation:
-            phase = "continuation" if role not in {"modification", "comparison"} else role
-        if role == "execution":
-            phase = "execution"
-        elif role == "proposal":
-            phase = "proposal"
-        elif role == "explanation":
-            phase = "explanation"
-        elif role == "modification":
-            phase = "modification"
-        elif role == "comparison":
-            phase = "comparison"
-        elif role == "recall":
-            phase = "recall"
-
-        semantic_identity = {
-            "request_role": role,
-            "request_role_confidence": round(role_conf, 6),
-            "task_phase": phase,
-            "operation": operation,
-            "operation_confidence": round(operation_conf, 6),
-            "requested_representation": requested_representation or "text",
-            "representation_confidence": round(rep_conf, 6),
-            "explicit_representation": explicit_representation,
-            "inherited_operation": inherited_operation,
-            "inherited_representation": inherited_representation,
-            "previous_operation": prev_operation,
-            "previous_representation": prev_representation,
-            "previous_request_role": prev_role,
-            "numbers": numbers,
-            "previous_numbers": prev_numbers,
-            "parameter_change": parameter_change,
-            "anaphora": anaphora,
-            "entities": entities,
-            "representation_roles": representation_roles[:8],
-            "text": normalized,
-            "answer": answer,
-            "combined": combined,
-            "source": "quantum_scene_state_engine",
-        }
-        return semantic_identity
-
-QUANTUM_SCENE_STATE_ENGINE = QuantumSceneStateEngine()
 
 # ---------------------------------------------------------------------------
 # Core engine
@@ -688,15 +405,22 @@ class QuantumInterpretationEngine:
 
     def _compile_matrix(self) -> None:
         docs: list[str] = []
+        # One canonical evidence matrix. Scene-state semantics are measured
+        # inside this matrix; there is no second interpreter.
         families = (
             ("dialogue", SEMANTIC_TURN_PROTOTYPES),
             ("representation", REPRESENTATION_HYPOTHESES),
             ("domain", DOMAIN_HYPOTHESES),
             ("capability", CAPABILITY_HYPOTHESES),
+            ("request_role", SCENE_REQUEST_PROTOTYPES),
+            ("operation", SCENE_OPERATION_PROTOTYPES),
+            ("scene_representation", SCENE_REPRESENTATION_PROTOTYPES),
         )
         self._prototype_index = {}
+        self._prototype_keys: list[tuple[str, str]] = []
         for family, vocab in families:
             for label, description in vocab.items():
+                self._prototype_keys.append((family, label))
                 self._prototype_index.setdefault(f"{family}:{label}", []).append(len(docs))
                 docs.append(description)
 
@@ -836,6 +560,241 @@ class QuantumInterpretationEngine:
             "source": "quantum_matrix_lightweight",
             "engine": "quantum_interpretation_engine",
         }
+
+    def _scores(self, text: str, family: str) -> dict[str, float]:
+        values = {
+            "request_role": SCENE_REQUEST_PROTOTYPES,
+            "operation": SCENE_OPERATION_PROTOTYPES,
+            "scene_representation": SCENE_REPRESENTATION_PROTOTYPES,
+        }[family]
+        normalized = text.strip()
+        if not normalized:
+            return {key: 0.0 for key in values}
+        if self._vectorizer is None or self._prototype_matrix is None or cosine_similarity is None:
+            return {key: 0.0 for key in values}
+        try:
+            q = self._vectorizer.transform([normalized])
+            indices = [
+                i for i, (group, _) in enumerate(self._prototype_keys)
+                if group == family
+            ]
+            if not indices:
+                return {key: 0.0 for key in values}
+            sims = cosine_similarity(q, self._prototype_matrix[indices])[0]
+            return {
+                key: float(max(0.0, min(1.0, score)))
+                for (_, key), score in zip(
+                    [self._prototype_keys[i] for i in indices], sims
+                )
+            }
+        except Exception:
+            return {key: 0.0 for key in values}
+
+    @staticmethod
+    def _anaphora_features(text: str) -> dict[str, Any]:
+        """Measure grammatical reference pressure, not routing triggers."""
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", str(text or "").lower())
+        # Pronoun classes are linguistic structure: they indicate that the
+        # current utterance may depend on an antecedent already present in the
+        # previous scene. They never select a renderer or provider.
+        pronoun_forms = {
+            "он","она","они","его","ее","её","их","ему","ей","это","этот","эта","эти",
+            "этого","этой","того","та","те","них","ней","ним","ними","тот",
+            "he","she","they","it","his","her","their","this","that","these","those",
+        }
+        hits=[t for t in tokens if t in pronoun_forms]
+        return {
+            "count": len(hits),
+            "density": min(1.0, len(hits)/max(1.0, len(tokens))),
+            "forms": hits[:8],
+        }
+
+    @staticmethod
+    def _numbers(text: str) -> list[str]:
+        return re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", text)
+
+    @staticmethod
+    def _entities(text: str) -> list[str]:
+        """Extract structural named candidates without using them as triggers."""
+        value = str(text or "")
+        tokens = re.findall(r"\b[А-ЯЁ][а-яё]{2,}\b", value)
+        # Do not count a sentence-initial capitalized token as an entity by
+        # itself. Names/objects appearing after the first position remain evidence.
+        out = []
+        for token in tokens:
+            if not out and value.lstrip().startswith(token):
+                continue
+            if token not in out:
+                out.append(token)
+        return out[:12]
+
+    @staticmethod
+    def _representation_mentions(text: str) -> list[tuple[str, int]]:
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", text.lower())
+        lexemes = {
+            "formula": {"формула", "формулу", "формулы", "уравнение", "выражение"},
+            "graph": {"график", "графика", "графики", "графический"},
+            "table": {"таблица", "таблицу", "таблицы"},
+            "diagram": {"схема", "схему", "диаграмма", "диаграмму"},
+            "image": {"изображение", "изображение", "картинка", "картинку", "рисунок", "рисунок", "фото", "фотографию"},
+            "gallery": {"галерея", "галерею", "галереи", "подборка", "подборку"},
+            "code": {"код", "программа", "скрипт"},
+            "link": {"ссылка", "ссылку", "ссылки", "сайт", "источник"},
+        }
+        out = []
+        for index, token in enumerate(tokens):
+            for representation, words in lexemes.items():
+                if token in words:
+                    out.append((representation, index))
+        return out
+
+    def build_scene_state(
+        self,
+        text: str,
+        *,
+        answer: str = "",
+        previous: dict[str, Any] | None = None,
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip())
+        answer = re.sub(r"\s+", " ", str(answer or "").strip())
+        combined = " ".join(x for x in (normalized, answer) if x)
+        anaphora = self._anaphora_features(normalized)
+        entities = self._entities(normalized)
+
+        previous = previous if isinstance(previous, dict) else {}
+        role_scores = self._scores(normalized, "request_role")
+        operation_scores = self._scores(normalized, "operation")
+        # A fresh turn that contains a concrete named subject is semantically
+        # unlikely to be a recall-about-previous-conversation request. Reduce
+        # the recall posterior rather than branching on a word trigger.
+        if not previous and entities and "recall" in role_scores:
+            role_scores["recall"] *= 0.30
+        representation_scores = self._scores(normalized, "scene_representation")
+
+        role = max(role_scores, key=role_scores.get, default="explanation")
+        role_conf = float(role_scores.get(role, 0.0))
+        operation = max(operation_scores, key=operation_scores.get, default="")
+        operation_conf = float(operation_scores.get(operation, 0.0))
+        if operation_conf < 0.18:
+            operation = ""
+        rep = max(representation_scores, key=representation_scores.get, default="text")
+        rep_conf = float(representation_scores.get(rep, 0.0))
+
+        mentions = self._representation_mentions(normalized)
+        representation_roles = []
+        if mentions:
+            # Position is interpreted as syntactic evidence. For a proposal/
+            # explanation request, an earlier artifact mention is normally the
+            # requested object while a later mention often describes its purpose.
+            first_index = min(index for _, index in mentions)
+            token_count = max(1, len(normalized.split()))
+            for name, index in mentions:
+                proximity = 1.0 - min(1.0, index / max(1.0, token_count))
+                role_score = 0.55 * float(representation_scores.get(name, 0.0)) + 0.45 * proximity
+                representation_roles.append({
+                    "representation": name,
+                    "position": index,
+                    "request_role_score": round(role_score, 6),
+                })
+            representation_roles.sort(key=lambda item: item["request_role_score"], reverse=True)
+
+        requested_representation = "text"
+        explicit_representation = False
+        if representation_roles:
+            candidate = representation_roles[0]["representation"]
+            if role in {"proposal", "explanation"}:
+                requested_representation = candidate
+                explicit_representation = True
+            elif role in {"execution", "modification", "comparison", "continuation", "proposal"} and rep_conf >= 0.12:
+                requested_representation = candidate
+                explicit_representation = True
+        elif rep_conf >= 0.22 and rep != "text":
+            requested_representation = rep
+            explicit_representation = True
+
+        # Role calibration uses whether this is the first scene; no renderer or
+        # provider routing is performed here.
+        if not previous and entities:
+            role_scores["recall"] = float(role_scores.get("recall", 0.0)) * 0.30
+        prev_operation = str(previous.get("operation") or "")
+        prev_representation = str(previous.get("requested_representation") or previous.get("representation") or "")
+        prev_role = str(previous.get("request_role") or "")
+        prev_numbers = list(previous.get("numbers") or [])
+        numbers = self._numbers(normalized)
+
+        short_turn = len(normalized.split()) <= max(6, int(len(str(previous.get("text") or "").split()) * 0.55)) if previous else False
+        inherited_operation = False
+        inherited_representation = False
+
+        can_inherit = bool(
+            previous
+            and short_turn
+            and (
+                role in {"execution", "modification", "continuation"}
+                or role_conf < 0.18
+            )
+        )
+        if can_inherit:
+            if operation_conf < 0.20 and prev_operation:
+                operation = prev_operation
+                operation_conf = max(operation_conf, 0.78)
+                inherited_operation = True
+            if not explicit_representation and prev_representation:
+                requested_representation = prev_representation
+                rep_conf = max(rep_conf, 0.78)
+                inherited_representation = True
+
+        operation_output = SCENE_OPERATION_OUTPUT.get(operation)
+        if role in {"execution", "modification"} and operation_output:
+            requested_representation = operation_output
+            explicit_representation = True
+            rep_conf = max(rep_conf, operation_conf)
+
+        parameter_change = bool(previous and prev_numbers and numbers and prev_numbers != numbers)
+
+        phase = role
+        if inherited_operation or inherited_representation:
+            phase = "continuation" if role not in {"modification", "comparison"} else role
+        if role == "execution":
+            phase = "execution"
+        elif role == "proposal":
+            phase = "proposal"
+        elif role == "explanation":
+            phase = "explanation"
+        elif role == "modification":
+            phase = "modification"
+        elif role == "comparison":
+            phase = "comparison"
+        elif role == "recall":
+            phase = "recall"
+
+        semantic_identity = {
+            "request_role": role,
+            "request_role_confidence": round(role_conf, 6),
+            "task_phase": phase,
+            "operation": operation,
+            "operation_confidence": round(operation_conf, 6),
+            "requested_representation": requested_representation or "text",
+            "representation_confidence": round(rep_conf, 6),
+            "explicit_representation": explicit_representation,
+            "inherited_operation": inherited_operation,
+            "inherited_representation": inherited_representation,
+            "previous_operation": prev_operation,
+            "previous_representation": prev_representation,
+            "previous_request_role": prev_role,
+            "numbers": numbers,
+            "previous_numbers": prev_numbers,
+            "parameter_change": parameter_change,
+            "anaphora": anaphora,
+            "entities": entities,
+            "representation_roles": representation_roles[:8],
+            "text": normalized,
+            "answer": answer,
+            "combined": combined,
+            "source": "quantum_interpretation_engine",
+        }
+        return semantic_identity
 
     # ----------------------------- matrix core ----------------------------
 
@@ -1310,7 +1269,7 @@ class QuantumInterpretationEngine:
         combined = " ".join(x for x in (normalized, answer) if x)
         numbers = self._scene_numbers(normalized)
         entities = self._scene_entities(normalized)
-        semantic_identity = QUANTUM_SCENE_STATE_ENGINE.build(
+        semantic_identity = self.build_scene_state(
             normalized,
             answer=answer,
             previous=previous,
@@ -2327,6 +2286,7 @@ QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_INTENT_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_EVIDENCE_FUSION = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_DIALOGUE_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_SCENE_STATE_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 
 # Public class aliases preserve import names without reinstating parallel engines.
 QuantumFastSemanticEngine = QuantumInterpretationEngine
