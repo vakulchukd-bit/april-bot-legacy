@@ -57,14 +57,13 @@ def build_goal_evidence(
     if not goal:
         goal = _text(text)
 
-    exploration = _contains(
-        text,
-        ("пример", "примерно", "идея", "вариант", "атмосфера", "как думаешь"),
-    )
-    explicit_execution = _contains(
-        text,
-        ("сделай", "создай", "построй", "реши", "исправь", "вычисли"),
-    )
+    scene_semantics = semantic.get("scene_semantic_state")
+    scene_semantics = scene_semantics if isinstance(scene_semantics, dict) else {}
+    task_phase = _text(scene_semantics.get("task_phase"))
+    operation = _text(scene_semantics.get("operation"))
+    exploration = 1.0 if task_phase in {"proposal", "explanation"} else 0.0
+    execution_mass = 1.0 if task_phase == "execution" else 0.0
+    modification_mass = 1.0 if task_phase == "modification" else 0.0
 
     return {
         "goal": goal[:500],
@@ -73,12 +72,21 @@ def build_goal_evidence(
             scene.get("trajectory")
             or active_flow.get("type")
             or semantic.get("trajectory")
+            or operation
             or ""
         )[:300],
+        "task_phase": task_phase,
+        "operation": operation,
+        "requested_representation": _text(
+            scene_semantics.get("requested_representation")
+            or semantic.get("requested_representation")
+            or ""
+        ),
         "signals": {
             "exploration": float(exploration),
-            "explicit_execution": float(explicit_execution),
-            "continuation": float(bool(active_flow)),
+            "execution": float(execution_mass),
+            "modification": float(modification_mass),
+            "continuation": float(bool(active_flow) or bool(scene_semantics.get("inherited_operation"))),
             "ambiguity": _clamp(semantic.get("ambiguity_level", 0.0)),
         },
         "goal_should_persist": True,
