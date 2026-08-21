@@ -2077,7 +2077,10 @@ def _canonicalize(
     # Persist the semantic state of the just-completed scene into the same
     # canonical SceneContract so the next turn can reason over meaning rather
     # than re-parsing a detached text history.
-    scene_semantics = interpretation.get("scene_semantic_state")
+    interpretation_packet = semantic.get("quantum_interpretation_evidence")
+    if not isinstance(interpretation_packet, dict):
+        interpretation_packet = {}
+    scene_semantics = interpretation_packet.get("scene_semantic_state")
     if isinstance(scene_semantics, dict):
         try:
             metadata = getattr(contract, "metadata", None)
