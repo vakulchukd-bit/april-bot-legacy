@@ -731,6 +731,24 @@ class QuantumMemoryEngine:
                 scene.get("scene_type"),
                 scene.get("topic"),
                 scene.get("goal"),
+                scene.get("current_request"),
+                scene.get("april_answer"),
+            ])
+            scene_semantics = scene.get("semantic_state")
+            if isinstance(scene_semantics, dict):
+                parts.extend([
+                    scene_semantics.get("task_phase"),
+                    scene_semantics.get("operation"),
+                    scene_semantics.get("requested_representation"),
+                    scene_semantics.get("previous_operation"),
+                    scene_semantics.get("previous_representation"),
+                ])
+        semantic_state = record.get("semantic_state")
+        if isinstance(semantic_state, dict):
+            parts.extend([
+                semantic_state.get("task_phase"),
+                semantic_state.get("operation"),
+                semantic_state.get("requested_representation"),
             ])
         return " ".join(str(x) for x in parts if x)
 
@@ -939,15 +957,32 @@ class QuantumMemoryEngine:
         # Visual memory is already TTL-cleaned before this query. This block
         # only measures whether still-live visual context is relevant now.
         dialog_state = state_obj.get("dialog_state") if isinstance(state_obj.get("dialog_state"), dict) else {}
-        context_dependency = str(dialog_state.get("context_dependency") or "").strip().lower()
+        turn_relation = (
+            state_obj.get("_turn_dialogue_relation")
+            if isinstance(state_obj.get("_turn_dialogue_relation"), dict)
+            else {}
+        )
+        context_dependency = str(
+            turn_relation.get("relation")
+            or dialog_state.get("context_dependency")
+            or ""
+        ).strip().lower()
         measured_continuation = bool(
-            dialog_state.get("continuation") or dialog_state.get("reference_to_previous")
+            turn_relation.get("continuation")
+            or turn_relation.get("same_scene")
+            or dialog_state.get("continuation")
+            or dialog_state.get("reference_to_previous")
         )
         if context_dependency in {"new_topic", "independent"} and not measured_continuation:
             active_visual_context_relevant = False
         else:
             active_visual_context_relevant = bool(
-                current_visual and active_scene_similarity >= 0.55
+                current_visual and (
+                    active_scene_similarity >= 0.55
+                    or turn_relation.get("same_scene")
+                    or turn_relation.get("continuation")
+                    or turn_relation.get("reference_to_previous")
+                )
             )
 
         matrix = self.build_memory_matrix(state_obj, query=query, limit=limit)
@@ -2322,6 +2357,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "user_meaning": safe_trim_text(current_request_text, 800),
         "april_meaning": safe_trim_text(answer_text, 1400),
         "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
+        "semantic_state": deepcopy(semantic_scene_state),
         "visual_scene_id": scene_id,
         "continuation": is_continuation,
         "created_at": time.time(),
