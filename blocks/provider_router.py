@@ -424,6 +424,38 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
     return result or ["text"]
 
 
+def _strip_repeated_structured_fragments(answer: str, requested_outputs: list[str]) -> str:
+    """Remove a repeated heading/suffix emitted beside a structured artifact."""
+    if not answer or not requested_outputs:
+        return answer
+    structured = {str(x).strip().lower() for x in requested_outputs}
+    if not structured.intersection({"formula", "table", "graph", "diagram", "gallery", "image", "code", "link"}):
+        return answer
+
+    lines = answer.splitlines()
+    nonempty = [(i, line.strip()) for i, line in enumerate(lines) if line.strip()]
+    if len(nonempty) < 3:
+        return answer
+
+    def norm(line: str) -> list[str]:
+        value = re.sub(r"[^\w\u0400-\u04ff]+", " ", line.lower(), flags=re.UNICODE)
+        return [x for x in value.split() if x]
+
+    first_tokens = norm(nonempty[0][1])
+    if len(first_tokens) < 3:
+        return answer
+
+    remove = set()
+    for idx, line in nonempty[1:]:
+        tokens = norm(line)
+        if len(tokens) >= 3 and (tokens == first_tokens or tokens == first_tokens[:len(tokens)]):
+            remove.add(idx)
+    if not remove:
+        return answer
+    cleaned = "\n".join(line for i, line in enumerate(lines) if i not in remove).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
     """Keep the visible answer aligned with the canonical output plan.
 
@@ -1144,6 +1176,7 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
+    answer = _strip_repeated_structured_fragments(answer, requested_outputs)
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
