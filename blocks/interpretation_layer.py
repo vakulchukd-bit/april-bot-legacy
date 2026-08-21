@@ -17,6 +17,7 @@ import re
 import math
 import threading
 import time
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -108,13 +109,13 @@ REPRESENTATION_HYPOTHESES = {
 SEMANTIC_TURN_PROTOTYPES = {
     "identity": "пользователь спрашивает кто ты как тебя зовут представься назови себя; the user asks who you are or what your name is",
     "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
-    "question": "пользователь задаёт вопрос просит ответ или разъяснение сколько равен вычисли посчитай значение; the user asks a question requiring an answer or calculation",
+    "question": "пользователь задаёт обычный содержательный вопрос просит объяснение ответ или расчёт что такое почему как работает сколько равен вычисли посчитай значение; the user asks for an answer or explanation",
     "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
     "continuation": "пользователь хочет продолжить предыдущую тему развить предыдущий ответ; the user wants to continue the preceding task",
     "reformulation": "пользователь просит переделать переформулировать переработать предыдущий результат; the user asks to rework previous content",
     "correction": "пользователь исправляет изменяет уточняет предыдущую инструкцию; the user corrects or modifies a previous instruction",
     "reference": "пользователь ссылается на ранее обсуждённое или созданное; the user refers back to previous material",
-    "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
+    "memory_query": "пользователь просит вспомнить предыдущий разговор, восстановить прошлую тему, назвать ранее обсуждавшийся вопрос, вернуться к прошлому сообщению или теме; the user explicitly asks to recall prior conversation",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
     "new_topic": "пользователь начинает новую тему не связанную с предыдущим обсуждением; the user starts a new topic",
@@ -314,8 +315,42 @@ class QuantumSceneStateEngine:
             return {key: 0.0 for key in values}
 
     @staticmethod
+    def _anaphora_features(text: str) -> dict[str, Any]:
+        """Measure grammatical reference pressure, not routing triggers."""
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", str(text or "").lower())
+        # Pronoun classes are linguistic structure: they indicate that the
+        # current utterance may depend on an antecedent already present in the
+        # previous scene. They never select a renderer or provider.
+        pronoun_forms = {
+            "он","она","они","его","ее","её","их","ему","ей","это","этот","эта","эти",
+            "этого","этой","того","та","те","них","ней","ним","ними","тот",
+            "he","she","they","it","his","her","their","this","that","these","those",
+        }
+        hits=[t for t in tokens if t in pronoun_forms]
+        return {
+            "count": len(hits),
+            "density": min(1.0, len(hits)/max(1.0, len(tokens))),
+            "forms": hits[:8],
+        }
+
+    @staticmethod
     def _numbers(text: str) -> list[str]:
         return re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", text)
+
+    @staticmethod
+    def _entities(text: str) -> list[str]:
+        """Extract structural named candidates without using them as triggers."""
+        value = str(text or "")
+        tokens = re.findall(r"\b[А-ЯЁ][а-яё]{2,}\b", value)
+        # Do not count a sentence-initial capitalized token as an entity by
+        # itself. Names/objects appearing after the first position remain evidence.
+        out = []
+        for token in tokens:
+            if not out and value.lstrip().startswith(token):
+                continue
+            if token not in out:
+                out.append(token)
+        return out[:12]
 
     @staticmethod
     def _representation_mentions(text: str) -> list[tuple[str, int]]:
@@ -348,9 +383,17 @@ class QuantumSceneStateEngine:
         normalized = re.sub(r"\s+", " ", str(text or "").strip())
         answer = re.sub(r"\s+", " ", str(answer or "").strip())
         combined = " ".join(x for x in (normalized, answer) if x)
+        anaphora = self._anaphora_features(normalized)
+        entities = self._entities(normalized)
 
+        previous = previous if isinstance(previous, dict) else {}
         role_scores = self._scores(normalized, "request_role")
         operation_scores = self._scores(normalized, "operation")
+        # A fresh turn that contains a concrete named subject is semantically
+        # unlikely to be a recall-about-previous-conversation request. Reduce
+        # the recall posterior rather than branching on a word trigger.
+        if not previous and entities and "recall" in role_scores:
+            role_scores["recall"] *= 0.30
         representation_scores = self._scores(normalized, "representation")
 
         role = max(role_scores, key=role_scores.get, default="explanation")
@@ -394,7 +437,10 @@ class QuantumSceneStateEngine:
             requested_representation = rep
             explicit_representation = True
 
-        previous = previous if isinstance(previous, dict) else {}
+        # Role calibration uses whether this is the first scene; no renderer or
+        # provider routing is performed here.
+        if not previous and entities:
+            role_scores["recall"] = float(role_scores.get("recall", 0.0)) * 0.30
         prev_operation = str(previous.get("operation") or "")
         prev_representation = str(previous.get("requested_representation") or previous.get("representation") or "")
         prev_role = str(previous.get("request_role") or "")
@@ -464,6 +510,8 @@ class QuantumSceneStateEngine:
             "numbers": numbers,
             "previous_numbers": prev_numbers,
             "parameter_change": parameter_change,
+            "anaphora": anaphora,
+            "entities": entities,
             "representation_roles": representation_roles[:8],
             "text": normalized,
             "answer": answer,
@@ -525,7 +573,67 @@ class QuantumInterpretationEngine:
             )
             self._prototype_matrix = self._vectorizer.fit_transform(docs)
 
+    def _ensure_cognitive_runtime(self) -> None:
+        """Load the semantic model lazily inside this existing interpretation engine.
+
+        This is not a second route: it is the engine used by the canonical
+        interpretation path.  If the optional model package is unavailable,
+        the already-installed matrix implementation remains the measurement
+        implementation rather than creating another decision path.
+        """
+        if self._heavy_ready:
+            return
+        if SentenceTransformer is None:
+            return
+        try:
+            self._semantic_encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
+            self._heavy_ready = True
+        except Exception:
+            self._semantic_encoder = None
+            self._heavy_ready = False
+
+    def _encode(self, texts: Sequence[str]):
+        values = [self.normalize(x) for x in texts if self.normalize(x)]
+        if not values:
+            return None
+        self._ensure_cognitive_runtime()
+        encoder = self._semantic_encoder
+        if encoder is None:
+            return None
+        try:
+            return encoder.encode(values, normalize_embeddings=True, convert_to_numpy=True)
+        except Exception:
+            return None
+
+    def _semantic_scores(self, text: str) -> dict[str, dict[str, float]] | None:
+        families = {
+            "dialogue": SEMANTIC_TURN_PROTOTYPES,
+            "representation": REPRESENTATION_HYPOTHESES,
+            "domain": DOMAIN_HYPOTHESES,
+            "capability": CAPABILITY_HYPOTHESES,
+        }
+        labels=[]; docs=[]
+        for family, vocab in families.items():
+            for label, description in vocab.items():
+                labels.append((family,label)); docs.append(description)
+        encoded=self._encode([text, *docs])
+        if encoded is None:
+            return None
+        q=encoded[0]
+        sims=(encoded[1:] @ q).tolist()
+        out={family:{label:0.0 for label in vocab} for family,vocab in families.items()}
+        for (family,label),score in zip(labels,sims):
+            # Cosine similarity is a continuous semantic measurement.
+            out[family][label]=float(max(-1.0,min(1.0,score)) * 0.5 + 0.5)
+        return out
+
     def _tfidf_scores(self, text: str) -> dict[str, dict[str, float]]:
+        """Return one semantic measurement across all evidence families.
+
+        The primary engine is sentence-level semantic encoding when available.
+        The matrix below is the existing local measurement implementation; it
+        is not a renderer selector and never owns routing.
+        """
         families = {
             "dialogue": SEMANTIC_TURN_PROTOTYPES,
             "representation": REPRESENTATION_HYPOTHESES,
@@ -533,52 +641,45 @@ class QuantumInterpretationEngine:
             "capability": CAPABILITY_HYPOTHESES,
         }
         if not text:
-            return {name: {key: 0.0 for key in values} for name, values in families.items()}
+            return {name:{key:0.0 for key in values} for name,values in families.items()}
+
+        semantic=self._semantic_scores(text)
+        if semantic is not None:
+            return semantic
 
         if self._vectorizer is None or self._prototype_matrix is None or cosine_similarity is None:
-            # Tiny deterministic semantic sketch for environments without sklearn.
-            token_set = set(self._tokens(text))
-            out: dict[str, dict[str, float]] = {}
-            for family, vocab in families.items():
-                out[family] = {}
-                for label, description in vocab.items():
-                    words = set(self._tokens(description))
-                    overlap = len(token_set & words)
-                    out[family][label] = min(1.0, overlap / max(2.0, len(words) * 0.20))
-            return out
-
-        q = self._vectorizer.transform([text])
-        sim = cosine_similarity(q, self._prototype_matrix)[0]
-        out = {}
-        offset = 0
-        for family, vocab in families.items():
-            fam = {}
+            return {name:{key:0.0 for key in values} for name,values in families.items()}
+        q=self._vectorizer.transform([text])
+        sim=cosine_similarity(q,self._prototype_matrix)[0]
+        out={}; offset=0
+        for family,vocab in families.items():
+            fam={}
             for label in vocab:
-                # prototypes are inserted contiguously by family
-                fam[label] = max(0.0, min(1.0, float(sim[offset])))
-                offset += 1
-            out[family] = fam
+                fam[label]=max(0.0,min(1.0,float(sim[offset])))
+                offset+=1
+            out[family]=fam
         return out
 
     def _context_scores(
         self, text: str, previous_assistant: str, previous_user: str, active_topic: str, active_goal: str
     ) -> dict[str, float]:
-        if not text:
-            return {"previous_assistant": 0.0, "previous_user": 0.0, "active_topic": 0.0, "active_goal": 0.0}
-        scores = {"previous_assistant": 0.0, "previous_user": 0.0, "active_topic": 0.0, "active_goal": 0.0}
-        query = set(self._tokens(text))
-        for key, value in (
-            ("previous_assistant", previous_assistant),
-            ("previous_user", previous_user),
-            ("active_topic", active_topic),
-            ("active_goal", active_goal),
-        ):
-            words = set(self._tokens(self.normalize(value)))
-            scores[key] = (
-                len(query & words) / max(1.0, min(len(query), len(words)))
-                if query and words else 0.0
-            )
-        return scores
+        values={
+            "previous_assistant": previous_assistant,
+            "previous_user": previous_user,
+            "active_topic": active_topic,
+            "active_goal": active_goal,
+        }
+        if not self.normalize(text):
+            return {key:0.0 for key in values}
+        encoded=self._encode([text, *[self.normalize(v) for v in values.values()]])
+        if encoded is not None:
+            q=encoded[0]
+            sims=encoded[1:] @ q
+            return {key:float(max(0.0,min(1.0,float(s)*0.5+0.5))) if self.normalize(value) else 0.0
+                    for (key,value),s in zip(values.items(),sims)}
+        # Existing local vector matrix remains the measurement implementation.
+        return {key:self.similarity(text,value)["score"] if self.normalize(value) else 0.0
+                for key,value in values.items()}
 
     def _linguistic(self, text: str) -> dict[str, Any]:
         tokens = self._tokens(text)
@@ -972,7 +1073,7 @@ class QuantumInterpretationEngine:
             "score": float(score),
             "vector_score": float(vector_score),
             "token_score": float(token_score),
-            "source": "quantum_hybrid_semantic_engine",
+            "source": "quantum_cognitive_semantic_engine",
             "measured": True,
             "cached": False,
         }
@@ -983,15 +1084,21 @@ class QuantumInterpretationEngine:
         return re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", self.normalize(text))
 
     def _scene_entities(self, text: str) -> list[str]:
-        # Entity extraction is structural: capitalized names, quoted spans and
-        # stable noun-like tokens. It is evidence, not routing.
+        # Entity extraction is structural: capitalized names and quoted spans.
+        # The first capitalized token is excluded when it is merely sentence
+        # capitalization, while named spans elsewhere remain semantic evidence.
         value = self.normalize(text)
         quoted = re.findall(r"[\"«](.+?)[\"»]", value)
         names = re.findall(r"\b[А-ЯЁ][а-яё]{2,}\b", value)
+        first_word = (value.split() or [""])[0].strip(".,!?;:()[]{}")
         out = []
         for token in quoted + names:
             token = self.normalize(token)
-            if token and token not in out:
+            if not token:
+                continue
+            if token == first_word and not quoted:
+                continue
+            if token not in out:
                 out.append(token)
         return out[:12]
 
@@ -1068,7 +1175,7 @@ class QuantumInterpretationEngine:
             profile=profile,
         )
         semantic_identity.update({
-            "version": "QUANTUM-SCENE-SEMANTICS-V2",
+            "version": "QUANTUM-COGNITIVE-SCENE-SEMANTICS-V3",
             "text": normalized,
             "answer": answer,
             "combined": combined,
@@ -1096,135 +1203,106 @@ class QuantumInterpretationEngine:
         reference_to_previous: bool = False,
         continuation_score: float = 0.0,
     ) -> dict[str, Any]:
-        if not isinstance(current, dict) or not isinstance(previous, dict):
-            return {
-                "same_scene": False,
-                "continuation": False,
-                "reference_to_previous": bool(reference_to_previous),
-                "confidence": 0.0,
-                "relation": "independent",
-                "parameter_change": False,
-                "state_transfer": {},
-            }
+        if not isinstance(current,dict) or not isinstance(previous,dict):
+            return {"same_scene":False,"continuation":False,"reference_to_previous":False,
+                    "confidence":0.0,"relation":"independent","parameter_change":False,
+                    "state_transfer":{},"engine":"quantum_cognitive_scene_relation"}
 
-        current_text = self.normalize(current.get("combined") or current.get("text"))
-        previous_text = self.normalize(previous.get("combined") or previous.get("text"))
-        vector_similarity = self._vector_similarity_pair(current_text, previous_text)
+        current_text=self.normalize(current.get("combined") or current.get("text"))
+        previous_text=self.normalize(previous.get("combined") or previous.get("text"))
+        vector_similarity=self.similarity(current_text,previous_text)["score"] if current_text and previous_text else 0.0
 
-        prev_operation = self.normalize(previous.get("operation"))
-        curr_operation = self.normalize(current.get("operation"))
-        prev_rep = self.normalize(previous.get("requested_representation") or previous.get("representation"))
-        curr_rep = self.normalize(current.get("requested_representation") or current.get("representation"))
-        operation_same = bool(prev_operation and curr_operation and prev_operation == curr_operation)
-        representation_same = bool(prev_rep and curr_rep and prev_rep == curr_rep)
+        prev_operation=self.normalize(previous.get("operation"))
+        curr_operation=self.normalize(current.get("operation"))
+        prev_rep=self.normalize(previous.get("requested_representation") or previous.get("representation"))
+        curr_rep=self.normalize(current.get("requested_representation") or current.get("representation"))
+        operation_same=bool(prev_operation and curr_operation and prev_operation==curr_operation)
+        representation_same=bool(prev_rep and curr_rep and prev_rep==curr_rep)
 
-        prev_numbers = list(previous.get("numbers") or [])
-        curr_numbers = list(current.get("numbers") or [])
-        parameter_change = bool(prev_numbers and curr_numbers and prev_numbers != curr_numbers)
+        prev_numbers=list(previous.get("numbers") or [])
+        curr_numbers=list(current.get("numbers") or [])
+        parameter_change=bool(prev_numbers and curr_numbers and prev_numbers!=curr_numbers)
+        prev_entities={str(x).strip().lower() for x in (previous.get("entities") or []) if str(x).strip()}
+        curr_entities={str(x).strip().lower() for x in (current.get("entities") or []) if str(x).strip()}
+        entity_overlap=(len(prev_entities & curr_entities)/max(1,len(prev_entities|curr_entities))) if (prev_entities or curr_entities) else 0.0
+        anaphora=current.get("anaphora") if isinstance(current.get("anaphora"),dict) else {}
+        anaphora_score=float(anaphora.get("density",0.0) or 0.0)
 
-        current_words = len(current_text.split())
-        previous_words = len(previous_text.split())
-        compactness = (
-            1.0
-            if previous_words and current_words <= max(7, int(previous_words * 0.55))
-            else 0.0
+        phase_now=self.normalize(current.get("task_phase"))
+        phase_prev=self.normalize(previous.get("task_phase"))
+        phase_relation=self.similarity(phase_now,phase_prev)["score"] if phase_now and phase_prev else 0.0
+
+        profile_components=[]
+        for key in ("dialogue_profile","representation_profile","domain_profile","capability_profile"):
+            a=previous.get(key,{}) if isinstance(previous.get(key),dict) else {}
+            b=current.get(key,{}) if isinstance(current.get(key),dict) else {}
+            keys=sorted(set(a)|set(b))
+            if keys:
+                va=[float(a.get(k,0.0) or 0.0) for k in keys]; vb=[float(b.get(k,0.0) or 0.0) for k in keys]
+                na=math.sqrt(sum(x*x for x in va)); nb=math.sqrt(sum(y*y for y in vb))
+                if na and nb: profile_components.append(max(0.0,min(1.0,sum(x*y for x,y in zip(va,vb))/(na*nb))))
+        profile_similarity=sum(profile_components)/len(profile_components) if profile_components else 0.0
+
+        compactness=1.0/(1.0+abs(len(current_text.split())-len(previous_text.split()))) if previous_text else 0.0
+        semantic_continuity=(
+            0.32*vector_similarity +
+            0.22*profile_similarity +
+            0.14*float(operation_same) +
+            0.08*float(representation_same) +
+            0.08*phase_relation +
+            0.06*entity_overlap +
+            0.06*anaphora_score +
+            0.04*compactness
         )
+        semantic_continuity=max(0.0,min(1.0,0.70*semantic_continuity+0.30*float(continuation_score or 0.0)))
 
-        profile_components = []
-        for key in ("dialogue_profile", "representation_profile", "domain_profile"):
-            a = previous.get(key, {}) if isinstance(previous.get(key), dict) else {}
-            b = current.get(key, {}) if isinstance(current.get(key), dict) else {}
-            keys = sorted(set(a) | set(b))
-            if not keys:
-                continue
-            va = [float(a.get(k, 0.0) or 0.0) for k in keys]
-            vb = [float(b.get(k, 0.0) or 0.0) for k in keys]
-            na = math.sqrt(sum(x * x for x in va))
-            nb = math.sqrt(sum(y * y for y in vb))
-            if na and nb:
-                profile_components.append(
-                    max(0.0, min(1.0, sum(x * y for x, y in zip(va, vb)) / (na * nb)))
-                )
-        profile_similarity = (
-            sum(profile_components) / len(profile_components)
-            if profile_components else 0.0
-        )
-
-        continuation_phase = current.get("task_phase") in {
-            "execution", "modification", "continuation"
+        # Relation is selected from competing semantic states. No phrase list or
+        # renderer threshold decides it. Parameter change is structural evidence.
+        scores={
+            "independent": max(0.0,1.0-semantic_continuity),
+            "reference": 0.20*semantic_continuity+0.34*anaphora_score+0.22*(1.0 if reference_to_previous else 0.0)+0.24*entity_overlap,
+            "continuation": 0.44*semantic_continuity+0.22*(1.0 if operation_same else 0.0)+0.18*phase_relation+0.16*compactness,
+            "parameter_update": 0.52*semantic_continuity+0.28*(1.0 if parameter_change else 0.0)+0.20*(1.0 if operation_same or prev_operation else 0.0),
         }
-        semantic_relation = (
-            0.30 * vector_similarity
-            + 0.25 * profile_similarity
-            + 0.25 * float(operation_same)
-            + 0.10 * float(representation_same)
-            + 0.10 * compactness * float(continuation_phase)
-        )
-        if parameter_change and (operation_same or prev_operation):
-            semantic_relation += 0.12
-        if reference_to_previous:
-            semantic_relation += 0.10
+        relation=max(scores,key=scores.get)
+        confidence=float(scores[relation])
+        if relation=="parameter_update" and not parameter_change:
+            # Without a structural parameter delta, continuation/reference is
+            # the semantically honest state.
+            relation=max((k for k in scores if k!="parameter_update"),key=scores.get)
+            confidence=float(scores[relation])
 
-        continuity = max(
-            float(continuation_score or 0.0) * 0.55,
-            semantic_relation,
-        )
-        continuity = max(0.0, min(1.0, continuity))
-
-        if parameter_change and (operation_same or prev_operation) and continuity >= 0.42:
-            relation = "parameter_update"
-        elif (
-            (
-                continuation_phase
-                and operation_same
-                and continuity >= 0.38
-            )
-            or (
-                continuation_phase
-                and representation_same
-                and continuity >= 0.42
-            )
-            or (
-                reference_to_previous
-                and compactness
-                and continuity >= 0.42
-            )
-        ):
-            relation = "continuation"
-        elif reference_to_previous and continuity >= 0.42:
-            relation = "reference"
-        else:
-            relation = "independent"
-
-        state_transfer = {
-            "operation": prev_operation if not curr_operation or curr_operation == "explanation" else curr_operation,
-            "representation": prev_rep if not curr_rep or curr_rep == "text" else curr_rep,
-            "previous_numbers": prev_numbers,
-            "current_numbers": curr_numbers,
-            "parameter_change": parameter_change,
-            "operation_same": operation_same,
-            "representation_same": representation_same,
-            "task_phase": current.get("task_phase") or previous.get("task_phase"),
-        }
-
+        inherited_operation=prev_operation if (not curr_operation and prev_operation) else curr_operation
+        inherited_rep=prev_rep if (not curr_rep and prev_rep) else curr_rep
         return {
-            "same_scene": relation != "independent",
-            "continuation": relation in {"continuation", "parameter_update"},
-            "reference_to_previous": bool(reference_to_previous or relation in {"continuation", "parameter_update", "reference"}),
-            "confidence": round(float(continuity), 6),
+            "same_scene": relation!="independent",
+            "continuation": relation in {"continuation","parameter_update"},
+            "reference_to_previous": bool(reference_to_previous or relation in {"continuation","parameter_update","reference"}),
+            "confidence": round(confidence,6),
             "relation": relation,
+            "relation_scores": {k:round(float(v),6) for k,v in scores.items()},
             "parameter_change": parameter_change,
             "previous_numbers": prev_numbers,
             "current_numbers": curr_numbers,
-            "vector_similarity": round(float(vector_similarity), 6),
-            "profile_similarity": round(float(profile_similarity), 6),
-            "compactness": round(float(compactness), 6),
-            "operation_same": operation_same,
-            "representation_same": representation_same,
-            "state_transfer": state_transfer,
-            "engine": "quantum_scene_relation_engine_v2",
-            "decision_owner": DECISION_OWNER,
-            "evidence_only": True,
+            "vector_similarity": round(float(vector_similarity),6),
+            "profile_similarity": round(float(profile_similarity),6),
+            "phase_similarity": round(float(phase_relation),6),
+            "entity_overlap": round(float(entity_overlap),6),
+            "anaphora_score": round(float(anaphora_score),6),
+            "state_transfer": {
+                "operation": inherited_operation,
+                "representation": inherited_rep,
+                "previous_numbers": prev_numbers,
+                "current_numbers": curr_numbers,
+                "parameter_change": parameter_change,
+                "operation_same": operation_same,
+                "representation_same": representation_same,
+                "task_phase": current.get("task_phase") or previous.get("task_phase"),
+                "entity_continuity": entity_overlap,
+            },
+            "engine":"quantum_cognitive_scene_relation",
+            "decision_owner":DECISION_OWNER,
+            "evidence_only":True,
         }
 
     def similarities(self, text: str, candidates: Sequence[str]) -> dict[str, float]:
@@ -1283,6 +1361,13 @@ class QuantumInterpretationEngine:
         topic_relation = profile["context_scores"].get("active_topic", 0.0)
 
         previous_scene = previous_scene_semantics if isinstance(previous_scene_semantics, dict) else {}
+        if not previous_scene and (previous_user or previous_assistant):
+            previous_scene = self.build_scene_semantic_state(
+                previous_user or previous_assistant,
+                answer=previous_assistant,
+                profile=self.measure(previous_user or previous_assistant, previous_assistant=previous_assistant),
+                previous={},
+            )
         current_scene_semantics = self.build_scene_semantic_state(
             text,
             answer=previous_assistant if previous_assistant else "",
@@ -1300,9 +1385,30 @@ class QuantumInterpretationEngine:
             dialogue.get("reference", 0.0), 0.86 * assistant_relation,
             0.62 * user_relation, 0.70 * topic_relation,
         )
+        semantic_relation_probe = self.relate_scene_semantics(
+            current_scene_semantics,
+            previous_scene,
+            reference_to_previous=bool(previous_assistant),
+            continuation_score=max(continuation_score, reference_score),
+        ) if previous_scene else {}
+        if semantic_relation_probe.get("relation") in {"continuation", "parameter_update", "reference"}:
+            continuation_score = max(continuation_score, float(semantic_relation_probe.get("confidence", 0.0)) * 0.92)
+            reference_score = max(reference_score, float(semantic_relation_probe.get("confidence", 0.0)) * 0.96)
+
         memory_query_score = float(dialogue.get("memory_query", 0.0) or 0.0)
-        if memory_query_score >= 0.10:
-            reference_score = max(reference_score, memory_query_score)
+        reference_score = max(reference_score, memory_query_score)
+        if best == "memory_query":
+            semantic_relation_probe = {
+                **(semantic_relation_probe or {}),
+                "same_scene": False,
+                "continuation": False,
+                "reference_to_previous": bool(previous_assistant),
+                "confidence": max(float(memory_query_score), 0.70 if previous_assistant else 0.0),
+                "relation": "memory_query",
+                "engine": "quantum_scene_relation_engine_v2",
+                "decision_owner": DECISION_OWNER,
+                "evidence_only": True,
+            }
 
         if previous_assistant or previous_user:
             if profile.get("dialogue_best") == "identity" or dialogue.get("identity", 0.0) >= 0.12:
@@ -1352,6 +1458,20 @@ class QuantumInterpretationEngine:
             "engine": "quantum_scene_relation_engine",
             "evidence_only": True,
         }
+        # Memory recall is a retrieval operation, not a continuation of the
+        # active visual scene. Preserve the distinction for the Processor.
+        if best == "memory_query":
+            relation = {
+                **relation,
+                "same_scene": False,
+                "continuation": False,
+                "reference_to_previous": bool(previous_assistant),
+                "confidence": max(float(relation.get("confidence", 0.0) or 0.0), 0.70 if previous_assistant else 0.0),
+                "relation": "memory_query",
+                "engine": "quantum_scene_relation_engine_v2",
+                "decision_owner": DECISION_OWNER,
+                "evidence_only": True,
+            }
 
         continuation = bool(continuation or relation.get("continuation"))
         reference_to_previous = bool(
@@ -1743,7 +1863,8 @@ class QuantumInterpretationEngine:
             "provider_calls": 0,
             "canonical_transport": TRANSPORT_NAME,
             "semantic_authority": True,
-            "semantic_decision_source": "quantum_matrix",
+            "semantic_decision_source": "quantum_cognitive_scene_state",
+            "cognitive_scene_state": scene_semantic_state,
             "representation_resolution": "processor_selection",
             "legacy_keyword_matching": False,
             "avoid_trigger_execution": True,
