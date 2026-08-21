@@ -664,6 +664,201 @@ class QuantumInterpretationEngine:
         score = len(a & b) / max(1.0, min(len(a), len(b))) if a and b else 0.0
         return {"score": float(score), "source": "quantum_matrix", "measured": bool(a and b), "cached": False}
 
+
+    # ------------------------ dynamic scene semantics -----------------------
+    def _scene_numbers(self, text: str) -> list[str]:
+        return re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", self.normalize(text))
+
+    def _scene_entities(self, text: str) -> list[str]:
+        # Entity extraction is structural: capitalized names, quoted spans and
+        # stable noun-like tokens. It is evidence, not routing.
+        value = self.normalize(text)
+        quoted = re.findall(r"[\"«](.+?)[\"»]", value)
+        names = re.findall(r"\b[А-ЯЁ][а-яё]{2,}\b", value)
+        out = []
+        for token in quoted + names:
+            token = self.normalize(token)
+            if token and token not in out:
+                out.append(token)
+        return out[:12]
+
+    def _scene_content_vector(self, text: str) -> dict[str, Any]:
+        normalized = self.normalize(text)
+        vectorizer = getattr(self, "_scene_vectorizer", None)
+        matrix = getattr(self, "_scene_vector_matrix", None)
+        if vectorizer is None:
+            vectorizer = TfidfVectorizer(
+                analyzer="char_wb",
+                ngram_range=(2, 5),
+                lowercase=True,
+                sublinear_tf=True,
+                min_df=1,
+            ) if TfidfVectorizer is not None else None
+            self._scene_vectorizer = vectorizer
+            self._scene_vector_matrix = None
+
+        if vectorizer is None or not normalized:
+            return {"norm": normalized, "vector": None}
+
+        try:
+            # Fit on a minimal stable semantic basis, then transform current
+            # state text. This is a true vector-space measurement, not routing.
+            basis = [
+                "continuation reference previous same topic same operation",
+                "new independent request new subject",
+                "change parameter value preserve operation",
+                "ask explain calculate compare modify previous result",
+            ]
+            if matrix is None:
+                self._scene_vector_matrix = vectorizer.fit_transform(basis)
+            q = vectorizer.transform([normalized])
+            return {"norm": normalized, "vector": q}
+        except Exception:
+            return {"norm": normalized, "vector": None}
+
+    def _scene_vector_similarity(self, a: str, b: str) -> float:
+        if not a or not b or cosine_similarity is None:
+            return 0.0
+        try:
+            va = self._scene_content_vector(a).get("vector")
+            vb = self._scene_content_vector(b).get("vector")
+            if va is None or vb is None:
+                return 0.0
+            # Rebuild over the same fitted vocabulary with both strings.
+            vec = TfidfVectorizer(
+                analyzer="char_wb", ngram_range=(2, 5),
+                lowercase=True, sublinear_tf=True, min_df=1
+            )
+            mx = vec.fit_transform([a, b])
+            return float(max(0.0, min(1.0, cosine_similarity(mx[0], mx[1])[0][0])))
+        except Exception:
+            return 0.0
+
+    def build_scene_semantic_state(
+        self,
+        text: str,
+        *,
+        answer: str = "",
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        profile = profile or self.measure(text)
+        normalized = self.normalize(text)
+        answer = self.normalize(answer)
+        combined = " ".join(x for x in (normalized, answer) if x)
+        numbers = self._scene_numbers(combined)
+        entities = self._scene_entities(combined)
+        return {
+            "version": "QUANTUM-SCENE-SEMANTICS-V1",
+            "text": normalized,
+            "answer": answer,
+            "combined": combined,
+            "numbers": numbers,
+            "entities": entities,
+            "dialogue_profile": dict(profile.get("dialogue_scores", {})),
+            "representation_profile": dict(profile.get("representation_scores", {})),
+            "domain_profile": dict(profile.get("domain_scores", {})),
+            "capability_profile": dict(profile.get("capability_scores", {})),
+            "scene_matrix": dict(profile.get("scene_matrix", {})),
+            "semantic_vector_source": "sklearn_tfidf_char_ngram",
+            "turn_features": {
+                "length": len(normalized.split()),
+                "number_count": len(numbers),
+                "entity_count": len(entities),
+            },
+        }
+
+    def relate_scene_semantics(
+        self,
+        current: dict[str, Any],
+        previous: dict[str, Any] | None,
+        *,
+        reference_to_previous: bool = False,
+        continuation_score: float = 0.0,
+    ) -> dict[str, Any]:
+        if not isinstance(current, dict) or not isinstance(previous, dict):
+            return {
+                "same_scene": False,
+                "continuation": False,
+                "reference_to_previous": bool(reference_to_previous),
+                "confidence": 0.0,
+                "relation": "independent",
+                "parameter_change": False,
+            }
+
+        current_text = self.normalize(current.get("combined") or current.get("text"))
+        previous_text = self.normalize(previous.get("combined") or previous.get("text"))
+        vector_similarity = self._scene_vector_similarity(current_text, previous_text)
+
+        prev_dialogue = previous.get("dialogue_profile", {}) or {}
+        curr_dialogue = current.get("dialogue_profile", {}) or {}
+        prev_repr = previous.get("representation_profile", {}) or {}
+        curr_repr = current.get("representation_profile", {}) or {}
+
+        profile_similarity = 0.0
+        profile_components = []
+        for source_a, source_b in (
+            (prev_dialogue, curr_dialogue),
+            (prev_repr, curr_repr),
+            (previous.get("domain_profile", {}) or {}, current.get("domain_profile", {}) or {}),
+        ):
+            keys = set(source_a) | set(source_b)
+            if not keys:
+                continue
+            va = [float(source_a.get(k, 0.0)) for k in sorted(keys)]
+            vb = [float(source_b.get(k, 0.0)) for k in sorted(keys)]
+            na = math.sqrt(sum(x*x for x in va))
+            nb = math.sqrt(sum(x*x for x in vb))
+            if na and nb:
+                profile_components.append(max(0.0, min(1.0, sum(x*y for x,y in zip(va,vb))/(na*nb))))
+        if profile_components:
+            profile_similarity = sum(profile_components) / len(profile_components)
+
+        prev_numbers = list(previous.get("numbers") or [])
+        curr_numbers = list(current.get("numbers") or [])
+        parameter_change = bool(reference_to_previous and prev_numbers and curr_numbers and prev_numbers != curr_numbers)
+
+        # A compact reference is interpreted as a state-preserving edit when:
+        # 1) the semantic profile remains compatible, and
+        # 2) the current turn is much shorter than the previous state, and
+        # 3) a concrete parameter is changed.
+        length_current = float((current.get("turn_features") or {}).get("length", 0) or 0)
+        length_previous = float((previous.get("turn_features") or {}).get("length", 0) or 0)
+        compactness = 1.0 if length_previous and length_current <= max(6.0, length_previous * 0.55) else 0.0
+
+        continuity = max(
+            float(continuation_score or 0.0),
+            0.55 * vector_similarity + 0.45 * profile_similarity,
+            0.62 * compactness * (1.0 if reference_to_previous else 0.0),
+            0.78 if (reference_to_previous and parameter_change) else 0.0,
+        )
+        continuity = max(0.0, min(1.0, continuity))
+
+        if parameter_change and reference_to_previous:
+            relation = "parameter_update"
+        elif reference_to_previous and continuity >= 0.60:
+            relation = "reference"
+        elif continuity >= 0.72:
+            relation = "continuation"
+        else:
+            relation = "independent"
+
+        return {
+            "same_scene": relation != "independent",
+            "continuation": relation in {"continuation", "parameter_update"},
+            "reference_to_previous": bool(reference_to_previous),
+            "confidence": round(float(continuity), 6),
+            "relation": relation,
+            "parameter_change": parameter_change,
+            "previous_numbers": prev_numbers,
+            "current_numbers": curr_numbers,
+            "vector_similarity": round(float(vector_similarity), 6),
+            "profile_similarity": round(float(profile_similarity), 6),
+            "compactness": round(float(compactness), 6),
+            "engine": "quantum_scene_relation_engine",
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+        }
+
     def similarities(self, text: str, candidates: Sequence[str]) -> dict[str, float]:
         return {self.normalize(c): self.similarity(text, c)["score"] for c in candidates if self.normalize(c)}
 
@@ -673,6 +868,7 @@ class QuantumInterpretationEngine:
     def dialogue(
         self, text: str, previous_assistant: str = "", previous_user: str = "",
         active_goal: str = "", active_topic: str = "",
+        previous_scene_semantics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         profile = self.measure(
             text, previous_assistant=previous_assistant,
@@ -733,6 +929,32 @@ class QuantumInterpretationEngine:
                 "reference", "affirmation", "rejection",
             } or continuation_score >= 0.72)
         )
+
+        current_scene_semantics = self.build_scene_semantic_state(
+            text,
+            answer=previous_assistant if previous_assistant else "",
+            profile=profile,
+        )
+        relation = self.relate_scene_semantics(
+            current_scene_semantics,
+            previous_scene_semantics,
+            reference_to_previous=bool(previous_assistant and reference_score >= 0.60),
+            continuation_score=continuation_score,
+        ) if previous_scene_semantics else {
+            "same_scene": bool(continuation or reference_score >= 0.60),
+            "continuation": continuation,
+            "reference_to_previous": bool(previous_assistant and reference_score >= 0.60),
+            "confidence": float(max(continuation_score, reference_score)),
+            "relation": "continuation" if continuation else ("reference" if reference_score >= 0.60 else "independent"),
+            "parameter_change": False,
+            "engine": "quantum_scene_relation_engine",
+            "evidence_only": True,
+        }
+
+        continuation = bool(continuation or relation.get("continuation"))
+        reference_to_previous = bool(
+            previous_assistant and (reference_score >= 0.60 or relation.get("reference_to_previous"))
+        )
         return {
             "dialogue": {
                 "label": best,
@@ -745,7 +967,8 @@ class QuantumInterpretationEngine:
             },
             "linguistic": self._linguistic(self.normalize(text)),
             "continuation": continuation,
-            "reference_to_previous": bool(previous_assistant and reference_score >= 0.60),
+            "reference_to_previous": reference_to_previous,
+            "relation": relation,
             "identity_request": bool(profile["identity_request"]),
             "nli": {
                 "labels": list(profile["dialogue_scores"]),
@@ -829,10 +1052,20 @@ class QuantumInterpretationEngine:
             },
         )
         matrix = profile["scene_matrix"]
-        dialogue = self.dialogue(
+        previous_scene_semantics = {}
+        current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+        if isinstance(current_scene, dict):
+            previous_scene_semantics = (
+                current_scene.get("semantic_state")
+                if isinstance(current_scene.get("semantic_state"), dict)
+                else {}
+            )
+        dialogue_result = self.dialogue(
             text, previous_assistant=last_assistant, previous_user=last_user,
             active_goal=active_goal, active_topic=active_topic,
-        )["dialogue"]
+            previous_scene_semantics=previous_scene_semantics,
+        )
+        dialogue = dialogue_result["dialogue"]
 
         explicit_required = [
             str(x).lower()
@@ -962,6 +1195,12 @@ class QuantumInterpretationEngine:
                 "semantic_profile_ref": "semantic_profile",
                 "decision_owner": DECISION_OWNER,
             },
+            "scene_semantic_state": self.build_scene_semantic_state(
+                text,
+                answer=last_assistant,
+                profile=profile,
+            ),
+            "dialogue_relation": dialogue.get("relation", {}),
             "dialogue_contract": {
                 "dialog_act": dialogue["label"],
                 "current_request": text,
@@ -981,7 +1220,9 @@ class QuantumInterpretationEngine:
                 "topic_shift": topic_shift,
                 "confidence": dialogue["confidence"],
                 "canonical": True,
-                "version": "quantum_matrix_v1",
+                "version": "quantum_matrix_v2",
+                "scene_relation": dialogue.get("relation", {}),
+                "continuation_confidence": float(dialogue.get("relation", {}).get("confidence", dialogue["continuation_score"])),
             },
             "dialog_act": dialogue["label"],
             "continuation": float(dialogue["continuation_score"]),
