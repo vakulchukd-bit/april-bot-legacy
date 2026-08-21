@@ -2320,11 +2320,6 @@ def build_interpretation_route(state: dict[str, Any], result: dict[str, Any]):
 
 QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
 
-# Begin warming the same canonical engine during module startup.  A request
-# arriving before completion waits on this exact runtime when semantic scoring
-# is needed; no second interpreter/provider/route is created.
-start_semantic_accelerator()
-
 # Compatibility singleton names intentionally reference the same engine object.
 QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_LINGUISTIC_ENGINE = QUANTUM_INTERPRETATION_ENGINE
@@ -2862,3 +2857,8 @@ def _stanza_resources_ready() -> bool:
 
 def _provision_stanza_resources() -> None:
     return None
+
+# Canonical module initialization: start the already-created interpretation
+# engine only after its public startup entrypoint has been defined.
+# No parallel engine, provider, memory, or route is created.
+start_semantic_accelerator()
