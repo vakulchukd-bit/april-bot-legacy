@@ -1078,6 +1078,12 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "active_goal": _s(canonical_dialogue.get("active_goal")) or goal,
         "active_topic": _s(canonical_dialogue.get("active_topic")) or topic,
         "current_request": _s(text),
+        "scene_semantic_state": _quantum_snapshot(
+            semantic.get("scene_semantic_state", {})
+        ),
+        "scene_relation": _quantum_snapshot(
+            semantic.get("dialogue_relation", {})
+        ),
     }
 
     request_metadata = {
@@ -1155,8 +1161,11 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             }
         ),
         visual_context=(
-            visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict)
-            else {}
+            visual if (
+                mode in {"ARTIFACT_REFERENCE", "CONTINUATION", "SAME_TOPIC"}
+                and isinstance(visual, dict)
+                and bool(visual.get("memory_relevant"))
+            ) else {}
         ),
         available_tools=capabilities[:12],
         requested_outputs=outputs,
@@ -1309,7 +1318,13 @@ def _clean_text_value(value: Any) -> str:
 
 
 def _clean_render_blocks(blocks: Any) -> list[dict]:
-    """Preserve all structured blocks while unwrapping accidental JSON text blocks."""
+    """Canonicalize provider blocks without inventing new presentation blocks.
+
+    Structured artifacts are authoritative. Text is retained as the human
+    explanation, while exact duplicates of an already separate formula artifact
+    are removed from that text. This keeps McDowell/KaTeX from displaying the
+    same mathematical payload twice.
+    """
     result: list[dict] = []
     queue = list(blocks or []) if isinstance(blocks, (list, tuple)) else []
     while queue:
@@ -1329,7 +1344,9 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
             key in decoded_content
             for key in ("answer", "content", "summary", "render_blocks", "artifacts")
         ):
-            nested_answer = _clean_text_value(decoded_content.get("answer") or decoded_content.get("content"))
+            nested_answer = _clean_text_value(
+                decoded_content.get("answer") or decoded_content.get("content")
+            )
             if nested_answer:
                 clean_block = dict(block)
                 clean_block["content"] = nested_answer
@@ -1352,7 +1369,53 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
                 clean_block["text"] = clean_text
         result.append(clean_block)
 
-    return result
+    formula_values: list[str] = []
+    for block in result:
+        btype = _s(
+            block.get("type") or block.get("artifact_type") or block.get("representation")
+        ).lower()
+        if btype != "formula":
+            continue
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else block
+        value = _s(
+            payload.get("latex")
+            or payload.get("formula")
+            or payload.get("equation")
+            or payload.get("expression")
+            or payload.get("content")
+            or payload.get("text")
+        ).strip()
+        if value and value not in formula_values:
+            formula_values.append(value)
+
+    seen_text: set[str] = set()
+    normalized: list[dict] = []
+    for block in result:
+        btype = _s(
+            block.get("type") or block.get("artifact_type") or block.get("representation")
+        ).lower()
+        if btype in {"text", "markdown"}:
+            text = _clean_text_value(
+                block.get("content") or block.get("text") or block.get("value")
+            )
+            for formula in formula_values:
+                if formula and formula in text:
+                    text = text.replace(formula, "").strip()
+            text = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", text)
+            signature = text.strip()
+            if not signature:
+                continue
+            if signature in seen_text:
+                continue
+            seen_text.add(signature)
+            clean_block = dict(block)
+            clean_block["content"] = signature
+            clean_block["text"] = signature
+            normalized.append(clean_block)
+            continue
+        normalized.append(block)
+
+    return normalized
 
 
 def _decode_provider_payload(value: Any) -> dict:
@@ -1983,6 +2046,12 @@ def _canonicalize(
         "trigger_routing": False,
         "score_routing": False,
         "identity_scope": deepcopy(scope),
+        "scene_semantic_state": _quantum_snapshot(
+            semantic.get("scene_semantic_state", {})
+        ),
+        "scene_relation": _quantum_snapshot(
+            semantic.get("dialogue_relation", {})
+        ),
     })
     response.quantum_state = request.quantum_state
     response.conversation_space = {
@@ -2220,6 +2289,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         text=text, semantic=semantic, reasoning=reasoning, state=state
     ) or {}
 
+    # The scene semantic state is the canonical task state for this turn.
+    # It is copied into cognition as evidence so the processor can arbitrate
+    # phase transitions without a second interpretation pass.
+    cognition["scene_semantic_state"] = _quantum_snapshot(
+        semantic.get("scene_semantic_state", {})
+    )
+    cognition["dialogue_relation"] = _quantum_snapshot(
+        semantic.get("dialogue_relation", {})
+    )
+
     interpretation["cognition"] = _quantum_snapshot(cognition)
 
     _merge_evidence_fields(semantic, (interpretation,))
@@ -2337,6 +2416,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     )
     if not isinstance(dynamic_memory, dict):
         dynamic_memory = {}
+    state["_turn_dialogue_relation"] = _quantum_snapshot(
+        semantic.get("dialogue_relation", {})
+    )
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
     semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
     dialogue_diag = interpretation.get("dialogue_contract") if isinstance(interpretation.get("dialogue_contract"), dict) else {}
