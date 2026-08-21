@@ -267,6 +267,14 @@ def _build_quantum_field(
             "dialogue": _quantum_snapshot(
                 semantic.get("quantum_dialogue_measurement", {})
             ),
+            "scene_relation": _quantum_snapshot(
+                semantic.get("quantum_interpretation_evidence", {}).get("dialogue_relation", {})
+                if isinstance(semantic.get("quantum_interpretation_evidence"), dict) else {}
+            ),
+            "scene_semantics": _quantum_snapshot(
+                semantic.get("quantum_interpretation_evidence", {}).get("scene_semantic_state", {})
+                if isinstance(semantic.get("quantum_interpretation_evidence"), dict) else {}
+            ),
             "representation": _quantum_snapshot(
                 semantic.get("quantum_representation_measurement", {})
             ),
@@ -2065,6 +2073,24 @@ def _canonicalize(
             contract.render_blocks = render_blocks
         except Exception:
             pass
+
+    # Persist the semantic state of the just-completed scene into the same
+    # canonical SceneContract so the next turn can reason over meaning rather
+    # than re-parsing a detached text history.
+    scene_semantics = interpretation.get("scene_semantic_state")
+    if isinstance(scene_semantics, dict):
+        try:
+            metadata = getattr(contract, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = {}
+                setattr(contract, "metadata", metadata)
+            metadata["semantic_scene_state"] = _quantum_snapshot(scene_semantics)
+        except Exception:
+            try:
+                if isinstance(contract, dict):
+                    contract.setdefault("metadata", {})["semantic_scene_state"] = _quantum_snapshot(scene_semantics)
+            except Exception:
+                pass
 
     update_dialog_context(user_id, semantic)
     update_scene_context(
