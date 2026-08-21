@@ -301,6 +301,40 @@ def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
     return ""
 
 
+def _history_with_current_scene(state: dict, history: list) -> list:
+    """Use the existing current USER↔APRIL scene as immediate history when the
+    hot dialog list is not populated on the web route. This is the same canonical
+    scene state, not a second memory path.
+    """
+    base = list(history) if isinstance(history, list) else []
+    current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+    if not isinstance(current_scene, dict) or not current_scene:
+        return base
+
+    scene_turn = current_scene.get("turn_id")
+    scene_user = _s(current_scene.get("user_request") or current_scene.get("current_request"))
+    scene_april = _s(current_scene.get("april_answer") or current_scene.get("answer") or current_scene.get("summary"))
+    if not scene_user or not scene_april:
+        return base
+
+    for item in reversed(base[-8:]):
+        if not isinstance(item, dict):
+            continue
+        existing_turn = item.get("turn_id")
+        existing_user = _s(item.get("content") or item.get("user_request") or item.get("user", {}).get("text") if isinstance(item.get("user"), dict) else "")
+        existing_april = _s(item.get("answer") or item.get("april_answer") or item.get("april", {}).get("answer") if isinstance(item.get("april"), dict) else "")
+        if (scene_turn is not None and existing_turn == scene_turn) or (existing_user == scene_user and existing_april == scene_april):
+            return base
+
+    return base + [{
+        "turn_id": scene_turn,
+        "user": {"text": scene_user, "content": scene_user},
+        "april": {"answer": scene_april, "content": scene_april},
+        "scene_id": current_scene.get("scene_id"),
+        "memory_kind": "current_visual_dialogue",
+    }]
+
+
 def _dialogue_evidence(
     text: str,
     semantic: dict,
@@ -2119,6 +2153,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
+    interpretation_history = _history_with_current_scene(state, history)
 
     # One canonical heavy Interpretation pass per turn. Semantic Core reuses
     # the same evidence packet instead of re-running Stanza/NLI.
@@ -2126,7 +2161,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         text,
         cognition=state.get("cognition", {}) if isinstance(state.get("cognition"), dict) else {},
         semantic={},
-        history=history,
+        history=interpretation_history,
         state=state,
     ) or {}
 
@@ -2172,7 +2207,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     intent = detect_intent(text, state) or {}
     intent_ai = await detect_intent_ai(text, state)
     intent_ai = intent_ai if isinstance(intent_ai, dict) else {}
-    resolver = resolve_input(history, state) or {}
+    resolver = resolve_input(interpretation_history, state) or {}
     focus_intent = build_focus_intent_state(text, state) or {}
 
     intent_ai["provider_calls"] = 0
@@ -2275,6 +2310,22 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dynamic_memory = {}
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
     semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
+    dialogue_diag = interpretation.get("dialogue_contract") if isinstance(interpretation.get("dialogue_contract"), dict) else {}
+    current_scene_diag = state.get("current_visual_scene") if isinstance(state.get("current_visual_scene"), dict) else {}
+    print("🧠 QUANTUM CONTINUITY:", {
+        "has_current_scene": bool(current_scene_diag),
+        "scene_id": current_scene_diag.get("scene_id"),
+        "continuation": bool(dialogue_diag.get("continuation")),
+        "reference_to_previous": bool(dialogue_diag.get("reference_to_previous")),
+        "dialog_act": dialogue_diag.get("dialog_act"),
+        "active_topic": dialogue_diag.get("active_topic"),
+        "previous_turn_id": dialogue_diag.get("reply_to") or current_scene_diag.get("turn_id"),
+    })
+    print("🧠 QUANTUM MEMORY MATRIX:", {
+        "window": dynamic_memory.get("window_days"),
+        "matches": len(dynamic_memory.get("matches", []) or []),
+        "matrix_version": dynamic_memory.get("matrix_version"),
+    })
 
     semantic["quantum_experience_evidence"] = _quantum_snapshot(experience)
     semantic["quantum_goal_evidence"] = _quantum_snapshot(goal_evidence)
