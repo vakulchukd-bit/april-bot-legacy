@@ -170,8 +170,9 @@ def detect_representation_constraints(text, interpreted=None):
             for item in evidence if isinstance(item, dict)
         }
 
-    explicit = list(interpreted.get("required_representations") or [])
-    if not explicit:
+    explicit_required = list(interpreted.get("required_representations") or [])
+    explicit = explicit_required if explicit_required else []
+    if not explicit and not interpreted.get("scene_semantic_state"):
         explicit = list(interpreted.get("candidate_representations") or [])
 
     for name in explicit:
@@ -183,6 +184,11 @@ def detect_representation_constraints(text, interpreted=None):
     # Keep a matrix candidate only when it is separated from text strongly
     # enough to be a current-turn representation signal.
     text_score = float(raw_scores.get("text", 0.0) or 0.0)
+    if explicit_required:
+        raw_scores = {
+            name: float(raw_scores.get(name, 0.0) or 0.0)
+            for name in explicit_required
+        }
     for name, value in raw_scores.items():
         name = str(name).lower().strip()
         value = float(value or 0.0)
@@ -372,6 +378,22 @@ def _signal_fusion(text, signals, interpreted):
         representation_constraints,
     )
 
+    authoritative = [
+        str(x).strip().lower()
+        for x in (
+            interpreted.get("required_representations")
+            or interpreted.get("requested_representations")
+            or []
+        )
+        if str(x).strip()
+    ]
+    if authoritative:
+        selected = list(dict.fromkeys(authoritative))
+    else:
+        selected = [x for x in selected if x == "text"]
+        if not selected:
+            selected = ["text"]
+
     requested = next((x for x in selected if x != "text"), selected[0] if selected else "text")
     renderer = detect_renderer_probability(text, interpreted)
     image = detect_image_generation_probability(text, interpreted)
@@ -528,6 +550,30 @@ def _base_result(text, signals):
 def _dialogue_context_matrix(text, signals, interpreted):
     prev_u, prev_a = str(signals.get("last_user_turn") or ""), str(signals.get("last_april_turn") or "")
     dc = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
+    scene_relation = (
+        interpreted.get("dialogue_relation")
+        if isinstance(interpreted.get("dialogue_relation"), dict)
+        else {}
+    )
+    if scene_relation.get("same_scene"):
+        confidence = clamp(scene_relation.get("confidence", 0.0))
+        return {
+            "context_dependency": True,
+            "context_dependency_score": round(confidence, 4),
+            "continuation": bool(scene_relation.get("continuation")),
+            "continuation_score": round(confidence if scene_relation.get("continuation") else 0.0, 4),
+            "reference_to_previous": bool(scene_relation.get("reference_to_previous")),
+            "reference_score": round(confidence if scene_relation.get("reference_to_previous") else 0.0, 4),
+            "dialog_act": (
+                "continuation" if scene_relation.get("continuation")
+                else "reference" if scene_relation.get("reference_to_previous")
+                else dc.get("dialog_act", "request")
+            ),
+            "previous_user_turn": prev_u,
+            "previous_april_turn": prev_a,
+            "structured_continuity": True,
+            "history_available": bool(prev_u or prev_a),
+        }
     if str(dc.get("dialog_act") or "").lower() == "memory_query":
         return {
             "context_dependency": True,
@@ -638,7 +684,8 @@ def analyze(text: str, state: dict=None, history: list=None,
         "contains_analysis","contains_legend","scene_composition_ready",
         "requested_representations","representation_constraints",
         "required_domains","candidate_domains","required_representations",
-        "candidate_representations","scene_type"
+        "candidate_representations","scene_type","scene_semantic_state",
+        "dialogue_relation","task_phase","operation"
     ):
         if key in interpreted:
             result[key]=interpreted[key]
@@ -670,6 +717,16 @@ def analyze(text: str, state: dict=None, history: list=None,
         })
     result["dialogue_contract"] = dc
     result["dialogue_context_field"] = dialogue_context
+    result["scene_semantic_state"] = (
+        interpreted.get("scene_semantic_state")
+        if isinstance(interpreted.get("scene_semantic_state"), dict)
+        else result.get("scene_semantic_state", {})
+    )
+    result["dialogue_relation"] = (
+        interpreted.get("dialogue_relation")
+        if isinstance(interpreted.get("dialogue_relation"), dict)
+        else result.get("dialogue_relation", {})
+    )
 
     result["requested_representation"]=fusion["requested_representation"]
     result["representation_posteriors"]=fusion["representation_posteriors"]
