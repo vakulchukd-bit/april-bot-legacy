@@ -206,7 +206,7 @@ SCENE_REQUEST_PROTOTYPES = {
 
 SCENE_OPERATION_PROTOTYPES = {
     "square_root": "квадратный корень корень sqrt извлечение корня",
-    "calculation": "вычисление расчет посчитать значение арифметика",
+    "calculation": "вычисление расчет посчитать значение арифметика умножить умножь перемножить разделить деление раздели сложить сложение вычесть вычитание предыдущий результат",
     "graph_build": "построение графика график функции координатная плоскость построить",
     "formula_definition": "формула уравнение математическое выражение запись",
     "table_build": "таблица строки колонки структурированные данные",
@@ -803,6 +803,20 @@ class QuantumInterpretationEngine:
 
         role, role_conf = best(role_scores, "question")
         operation, operation_conf = best(operation_scores, "")
+
+        # Arithmetic continuation is an operation state. If the current
+        # utterance semantically asks to multiply/divide/add/subtract a prior
+        # result, do not inherit the previous domain operation (for example
+        # square_root) as the current operation.
+        calculation_score = float(operation_scores.get("calculation", 0.0) or 0.0)
+        arithmetic_terms = (
+            "умнож", "раздел", "слож", "выч",
+            "multiply", "divide", "add", "subtract",
+        )
+        if any(term in normalized.lower() for term in arithmetic_terms) and calculation_score >= 0.20:
+            operation = "calculation"
+            operation_conf = max(operation_conf, calculation_score)
+
         requested_representation = str(
             profile.get("resolved_representation") or "text"
         )
@@ -1799,9 +1813,11 @@ class QuantumInterpretationEngine:
                 profile=self.measure(previous_user or previous_assistant, previous_assistant=previous_assistant),
                 previous={},
             )
+        # The current turn has no assistant answer yet. The previous answer is
+        # dialogue context and must not become the current scene's answer.
         current_scene_semantics = self.build_scene_semantic_state(
             text,
-            answer=previous_assistant if previous_assistant else "",
+            answer="",
             profile=profile,
             previous=previous_scene,
         )
@@ -2103,40 +2119,55 @@ class QuantumInterpretationEngine:
         scene_type = required_representations[0] if required_representations else "text"
         if scene_semantic_state.get("task_phase") in {"proposal", "explanation"} and scene_representation:
             scene_type = scene_representation
-        representation_scores = profile["representation_scores"]
-        # Full presentation evidence is transported separately from the single
-        # production representation. This preserves rich formatting signals
-        # without authorizing unrelated renderers.
-        presentation_signal_scores = dict(
-            profile.get(
-                "presentation_signal_scores",
-                profile.get("representation_measurements", {}),
-            )
-        )
-        production_representation_scores = dict(
-            profile.get(
-                "production_representation_scores",
-                representation_scores,
-            )
-        )
-        capability = profile["capability_scores"]
-
-        representation_measurements = dict(
-            profile.get("representation_measurements", presentation_signal_scores)
-        )
-        canonical_representation = str(
-            scene_semantic_state.get("requested_representation") or "text"
-        )
+        # Presentation evidence and production selection are two views of the
+        # same semantic measurement. Initialize both unconditionally so the
+        # signal transport can never fail because of a missing local binding.
+        representation_scores = dict(profile.get("representation_scores", {}))
+        representation_measurements = {
+            str(k): float(v)
+            for k, v in dict(profile.get("representation_measurements", {})).items()
+        }
+        presentation_signal_scores = {
+            str(k): float(v)
+            for k, v in dict(
+                profile.get(
+                    "presentation_signal_scores",
+                    representation_measurements,
+                )
+            ).items()
+        }
         if not presentation_signal_scores:
-            presentation_signal_scores = {
-                str(k): float(v)
-                for k, v in representation_measurements.items()
-            }
-        if not production_representation_scores:
-            production_representation_scores = {
-                str(k): (1.0 if k == canonical_representation else 0.0)
-                for k in representation_measurements
-            }
+            presentation_signal_scores = dict(representation_measurements)
+
+        profile_resolved_representation = str(
+            profile.get("resolved_representation") or "text"
+        ).strip().lower()
+        profile_resolved_locked = bool(
+            profile.get("resolved_representation_locked")
+        )
+        scene_resolved_representation = str(
+            scene_semantic_state.get("requested_representation") or ""
+        ).strip().lower()
+
+        if profile_resolved_locked and profile_resolved_representation:
+            canonical_representation = profile_resolved_representation
+        elif scene_rep_explicit and scene_resolved_representation:
+            canonical_representation = scene_resolved_representation
+        elif scene_semantic_state.get("inherited_representation") and scene_resolved_representation:
+            canonical_representation = scene_resolved_representation
+        else:
+            canonical_representation = "text"
+
+        if canonical_representation not in presentation_signal_scores:
+            canonical_representation = "text"
+
+        # Exactly one production representation; all other measurements remain
+        # formatting/presentation evidence only.
+        production_representation_scores = {
+            str(k): (1.0 if k == canonical_representation else 0.0)
+            for k in presentation_signal_scores
+        }
+        capability = profile["capability_scores"]
 
         representation_evidence = [
             SemanticEvidence(
@@ -2197,13 +2228,12 @@ class QuantumInterpretationEngine:
                 )
                 if float(v) >= 0.02
             ],
-            "production_representation": (
-                required_representations[0]
-                if len(required_representations) == 1
-                else canonical_representation
-            ),
+            "production_representation": canonical_representation,
             "production_representation_locked": bool(
-                len(required_representations) == 1
+                profile_resolved_locked
+                or scene_semantic_state.get("explicit_representation")
+                or scene_semantic_state.get("inherited_representation")
+                or required_representations
             ),
             "semantic_profile": {
                 "active_topic": active_topic,
@@ -2437,6 +2467,9 @@ class QuantumInterpretationEngine:
         }
         result["semantic_engine_diagnostics"] = {
             "engine": "quantum_interpretation_engine",
+            "presentation_signal_count": len(presentation_signal_scores),
+            "production_representation": canonical_representation,
+            "presentation_signals_transport_only": True,
             "matrix_shape": matrix["matrix_shape"],
             "matrix_features": matrix["feature_order"],
             "single_measurement": True,
@@ -2449,6 +2482,19 @@ class QuantumInterpretationEngine:
         propagate_canonical_response(result, result["transport_state"])
         bridge_machine_response(result, result["transport_state"])
         validate_response_complexity(result)
+
+        # Final audit of the single route: rich presentation evidence is allowed,
+        # but production selection remains a singleton.
+        selected = [
+            str(item.get("type"))
+            for item in (result.get("presentation_signals", {}).get("signals", []) or [])
+            if item.get("selected")
+        ]
+        result["presentation_signal_transport"]["selected_representation_count"] = len(selected)
+        result["presentation_signal_transport"]["selected_representation"] = (
+            selected[0] if selected else canonical_representation
+        )
+        result["presentation_signal_transport"]["production_singleton"] = True
         return result
 
 
