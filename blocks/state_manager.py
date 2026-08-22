@@ -1033,11 +1033,21 @@ class QuantumMemoryEngine:
         if explicit_continuation is not None:
             continuation = bool(explicit_continuation)
         else:
-            continuation = bool(dialogue_state.get("continuation") or dialogue_state.get("reference_to_previous"))
+            # Never reuse the previous turn's continuation bit as a new-turn
+            # decision.  Missing current-turn relation means independent until
+            # the Interpretation Engine explicitly resolves continuity.
+            continuation = False
 
+        turn_relation = state_obj.get("_turn_dialogue_relation")
+        turn_dependency = (
+            turn_relation.get("context_dependency")
+            if isinstance(turn_relation, dict)
+            else ""
+        )
         dependency = str(
             explicit_dependency
-            or dialogue_state.get("context_dependency")
+            if explicit_dependency is not None
+            else turn_dependency
             or ""
         ).strip().lower()
 
@@ -2243,6 +2253,12 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
         "render_block_types": block_types,
         "presentation_types": presentation_types,
+        "render_blocks": deepcopy(render_blocks) if isinstance(render_blocks, list) else [],
+        "presentation_signals": [
+            deepcopy(block.get("presentation"))
+            for block in render_blocks
+            if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
+        ],
         "current_request": current_request_text,
         "answer": answer_text,
         "scene_id": str(contract.get("scene_id") or ""),
@@ -2326,6 +2342,12 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "presentation_types": presentation_types,
         "renderer_state": deepcopy(contract.get("renderer_state") or {}),
         "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
+        "render_blocks": deepcopy(render_blocks) if isinstance(render_blocks, list) else [],
+        "presentation_signals": [
+            deepcopy(block.get("presentation"))
+            for block in render_blocks
+            if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
+        ],
         "semantic_state": deepcopy(semantic_scene_state),
         "user_id": str(user_id),
         "conversation_id": conversation_id,
