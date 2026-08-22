@@ -78,6 +78,7 @@ Rules:
 - Use dialogue_contract only to preserve necessary continuity.
 - When the request is independent, do not invent old context.
 - When it is a continuation/reference, use only the supplied relevant context.
+- RESOLVED_SCENE_CONTEXT is authoritative semantic evidence selected by April's Interpretation Layer; use it to resolve references and preserve relevant presentation context, never as a keyword trigger.
 - Preserve the complete logical answer; never cut a sentence or scene for style.
 - The output budget is dynamic and canonical: use only the tokens logically required, from 1 through 8000.
 - If the complete logical answer would exceed 8000 tokens, compact the representation (especially structured payloads) while preserving all requested information; never stop mid-JSON, mid-row, or mid-scene.
@@ -424,38 +425,6 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
     return result or ["text"]
 
 
-def _strip_repeated_structured_fragments(answer: str, requested_outputs: list[str]) -> str:
-    """Remove a repeated heading/suffix emitted beside a structured artifact."""
-    if not answer or not requested_outputs:
-        return answer
-    structured = {str(x).strip().lower() for x in requested_outputs}
-    if not structured.intersection({"formula", "table", "graph", "diagram", "gallery", "image", "code", "link"}):
-        return answer
-
-    lines = answer.splitlines()
-    nonempty = [(i, line.strip()) for i, line in enumerate(lines) if line.strip()]
-    if len(nonempty) < 3:
-        return answer
-
-    def norm(line: str) -> list[str]:
-        value = re.sub(r"[^\w\u0400-\u04ff]+", " ", line.lower(), flags=re.UNICODE)
-        return [x for x in value.split() if x]
-
-    first_tokens = norm(nonempty[0][1])
-    if len(first_tokens) < 3:
-        return answer
-
-    remove = set()
-    for idx, line in nonempty[1:]:
-        tokens = norm(line)
-        if len(tokens) >= 3 and (tokens == first_tokens or tokens == first_tokens[:len(tokens)]):
-            remove.add(idx)
-    if not remove:
-        return answer
-    cleaned = "\n".join(line for i, line in enumerate(lines) if i not in remove).strip()
-    return re.sub(r"\n{3,}", "\n\n", cleaned)
-
-
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
     """Keep the visible answer aligned with the canonical output plan.
 
@@ -789,18 +758,40 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     # A small self-contained dialogue vector is nearly always useful when the
     # processor has already resolved a continuation/reference relation.
     if continuation or reference or topic_relation:
+        resolved_scene = dialogue.get("resolved_scene")
         vector = {
             "dialog_act": dialogue.get("dialog_act"),
             "continuation": continuation,
             "reply_to": dialogue.get("reply_to"),
             "active_goal": dialogue.get("active_goal"),
             "active_topic": dialogue.get("active_topic"),
-            "previous_april_turn": dialogue.get("previous_april_turn"),
             "previous_user_turn": dialogue.get("previous_user_turn"),
         }
+        if not (isinstance(resolved_scene, dict) and resolved_scene.get("scene_id")):
+            vector["previous_april_turn"] = dialogue.get("previous_april_turn")
         fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=8)))
 
-    if continuation and dialogue.get("previous_april_turn"):
+    resolved_scene = dialogue.get("resolved_scene")
+    if isinstance(resolved_scene, dict) and resolved_scene.get("scene_id"):
+        # The interpretation layer has already resolved which scene is relevant.
+        # Pass its semantic result and presentation evidence without creating a
+        # second memory path or imposing a renderer trigger.
+        fields.append(("RESOLVED_SCENE_CONTEXT", _compact_value(
+            {
+                "relation": resolved_scene.get("relation"),
+                "scene_id": resolved_scene.get("scene_id"),
+                "turn_id": resolved_scene.get("turn_id"),
+                "topic": resolved_scene.get("topic"),
+                "user_request": resolved_scene.get("user_request"),
+                "answer": resolved_scene.get("answer"),
+                "summary": resolved_scene.get("summary"),
+                "render_block_types": resolved_scene.get("render_block_types"),
+                "presentation_types": resolved_scene.get("presentation_types"),
+                "confidence": resolved_scene.get("confidence"),
+            },
+            max_items=10, max_keys=12,
+        )))
+    elif continuation and dialogue.get("previous_april_turn"):
         fields.append(("PREVIOUS_APRIL_TURN", dialogue.get("previous_april_turn")))
 
     if same_goal:
@@ -1176,7 +1167,6 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
-    answer = _strip_repeated_structured_fragments(answer, requested_outputs)
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
