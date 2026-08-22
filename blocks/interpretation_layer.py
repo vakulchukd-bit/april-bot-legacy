@@ -314,6 +314,9 @@ class QuantumInterpretationEngine:
         self._prototype_matrix = None
         self._prototype_index: dict[str, list[int]] = {}
         self._semantic_encoder = None
+        self._semantic_prototype_embeddings = None
+        self._semantic_prototype_labels: list[tuple[str, str]] = []
+        self._context_embedding_cache: dict[str, Any] = {}
         self._nli = None
         self._runtime_ready = False
         self._heavy_ready = False
@@ -420,6 +423,15 @@ class QuantumInterpretationEngine:
         try:
             # Model construction is intentionally outside the request path.
             encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
+            # Compile the same canonical hypothesis matrix once. The hot path
+            # encodes only the current request after this point.
+            if encoder is not None and self._prototype_docs:
+                self._semantic_prototype_embeddings = encoder.encode(
+                    self._prototype_docs,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                )
+                self._semantic_prototype_labels = list(self._prototype_keys)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
 
@@ -533,28 +545,36 @@ class QuantumInterpretationEngine:
 
 
     def _semantic_scores(self, text: str) -> dict[str, dict[str, float]] | None:
-        """Measure every hypothesis family once using the same semantic space.
+        """Measure the single semantic matrix without re-encoding prototypes.
 
-        Cosine similarities are converted into a normalized competition inside
-        each family. This prevents unrelated renderer hypotheses from all
-        appearing highly confident simply because embedding cosine values share
-        a positive baseline.
+        Prototype embeddings are compiled once during runtime initialization.
+        Each request encodes only its own text, then compares against the cached
+        matrix. This preserves the same semantic engine while removing the
+        repeated N*prototype model work from the request hot path.
         """
         families = self._matrix_families
-        if not families:
+        encoder = self._semantic_encoder
+        prototypes = self._semantic_prototype_embeddings
+        labels = self._semantic_prototype_labels or list(self._prototype_keys)
+        if not families or encoder is None or prototypes is None:
             return None
-        labels: list[tuple[str, str]] = []
-        docs: list[str] = []
-        for family, vocab in families.items():
-            for label, description in vocab.items():
-                labels.append((family, label))
-                docs.append(description)
-        encoded = self._encode([text, *docs])
-        if encoded is None:
+        value = self.normalize(text)
+        if not value:
+            return {
+                family: {label: 0.0 for label in vocab}
+                for family, vocab in families.items()
+            }
+        try:
+            q = encoder.encode(
+                [value],
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+            )[0]
+            raw = (prototypes @ q).tolist()
+        except Exception:
             return None
-        q = encoded[0]
-        raw = (encoded[1:] @ q).tolist()
-        out: dict[str, dict[str, float]] = {
+
+        out = {
             family: {label: 0.0 for label in vocab}
             for family, vocab in families.items()
         }
@@ -569,8 +589,8 @@ class QuantumInterpretationEngine:
             peak = max(values)
             exps = [math.exp((value - peak) / temperature) for value in values]
             total = sum(exps) or 1.0
-            for label, value in zip(family_labels, exps):
-                out[family][label] = float(value / total)
+            for label, value_exp in zip(family_labels, exps):
+                out[family][label] = float(value_exp / total)
         return out
 
 
@@ -623,25 +643,57 @@ class QuantumInterpretationEngine:
         return out
 
     def _context_scores(
-        self, text: str, previous_assistant: str, previous_user: str, active_topic: str, active_goal: str
+        self,
+        text: str,
+        previous_assistant: str,
+        previous_user: str,
+        active_topic: str,
+        active_goal: str,
     ) -> dict[str, float]:
-        values={
+        values = {
             "previous_assistant": previous_assistant,
             "previous_user": previous_user,
             "active_topic": active_topic,
             "active_goal": active_goal,
         }
         if not self.normalize(text):
-            return {key:0.0 for key in values}
-        encoded=self._encode([text, *[self.normalize(v) for v in values.values()]])
-        if encoded is not None:
-            q=encoded[0]
-            sims=encoded[1:] @ q
-            return {key:float(max(0.0,min(1.0,float(s)*0.5+0.5))) if self.normalize(value) else 0.0
-                    for (key,value),s in zip(values.items(),sims)}
-        # Existing local vector matrix remains the measurement implementation.
-        return {key:self.similarity(text,value)["score"] if self.normalize(value) else 0.0
-                for key,value in values.items()}
+            return {key: 0.0 for key in values}
+
+        encoder = self._semantic_encoder
+        if encoder is not None:
+            try:
+                q = encoder.encode(
+                    [self.normalize(text)],
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                )[0]
+                result: dict[str, float] = {}
+                for key, value in values.items():
+                    normalized = self.normalize(value)
+                    if not normalized:
+                        result[key] = 0.0
+                        continue
+                    cached_vec = self._context_embedding_cache.get(normalized)
+                    if cached_vec is None:
+                        cached_vec = encoder.encode(
+                            [normalized],
+                            normalize_embeddings=True,
+                            convert_to_numpy=True,
+                        )[0]
+                        self._context_embedding_cache[normalized] = cached_vec
+                        if len(self._context_embedding_cache) > 128:
+                            self._context_embedding_cache.pop(next(iter(self._context_embedding_cache)))
+                    score = float(cached_vec @ q)
+                    result[key] = max(0.0, min(1.0, score * 0.5 + 0.5))
+                return result
+            except Exception:
+                pass
+
+        return {
+            key: self.similarity(text, value)["score"] if self.normalize(value) else 0.0
+            for key, value in values.items()
+        }
+
 
     def _linguistic(self, text: str) -> dict[str, Any]:
         tokens = self._tokens(text)
@@ -1582,6 +1634,133 @@ class QuantumInterpretationEngine:
     def prewarm_static(self, candidates: Sequence[str]) -> int:
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
 
+    def resolve_context_relation(
+        self,
+        current_text: str,
+        *,
+        previous_scene: dict[str, Any] | None = None,
+        history: Sequence[dict[str, Any]] | None = None,
+        active_topic: str = "",
+    ) -> dict[str, Any]:
+        """Resolve the current request to one of three semantic context states.
+
+        NEW_TOPIC:
+            self-contained request with no justified dependency on a prior scene.
+
+        PREVIOUS_SCENE:
+            implicit continuation/reference to the immediate previous completed scene.
+
+        HISTORICAL_SCENE:
+            explicit request to bring back an older scene from the available history.
+
+        The resolver produces evidence and a source turn, but does not route to a
+        provider or renderer.
+        """
+        current = self.normalize(current_text)
+        previous_scene = previous_scene if isinstance(previous_scene, dict) else {}
+        turns = [t for t in (history or []) if isinstance(t, dict)]
+
+        prev_user = self.normalize(
+            previous_scene.get("user_request")
+            or previous_scene.get("text")
+            or previous_scene.get("user")
+        )
+        prev_answer = self.normalize(
+            previous_scene.get("april_answer")
+            or previous_scene.get("answer")
+            or (previous_scene.get("semantic_state") or {}).get("answer")
+        )
+        prev_summary = self.normalize(previous_scene.get("summary"))
+        prev_scene_id = previous_scene.get("scene_id")
+
+        linguistic = self._anaphora_features(current)
+        previous_result_relation = self.similarity(
+            current,
+            "previous result previous answer this result divide multiply add subtract"
+        )["score"]
+        explicit_memory_relation = self.similarity(
+            current,
+            "remember earlier previous conversation old topic we discussed before bring back that scene"
+        )["score"]
+        current_prev_similarity = (
+            self.similarity(current, " ".join(x for x in (prev_user, prev_answer, prev_summary) if x))["score"]
+            if (prev_user or prev_answer or prev_summary) else 0.0
+        )
+
+        # Explicit historical retrieval is a structural intent: the request
+        # refers to an earlier conversation/scene, not merely to the last turn.
+        historical_score = max(
+            explicit_memory_relation,
+            float(linguistic.get("density", 0.0)) * 0.55,
+        )
+
+        # Immediate continuation is driven by relation to the completed scene
+        # and anaphoric dependence. The current scene remains highest priority.
+        immediate_score = max(
+            current_prev_similarity,
+            previous_result_relation,
+            float(linguistic.get("density", 0.0)) * 0.80,
+        )
+
+        # If the user explicitly names an older topic/entity found in history,
+        # select the best historical turn while avoiding automatic recall.
+        historical_match = None
+        historical_match_score = 0.0
+        if turns:
+            for turn in turns[:-1]:  # exclude the immediate tail; current scene is handled above
+                user_obj = turn.get("user") if isinstance(turn.get("user"), dict) else {}
+                april_obj = turn.get("april") if isinstance(turn.get("april"), dict) else {}
+                candidate_text = self.normalize(
+                    " ".join(
+                        x for x in (
+                            user_obj.get("text") or user_obj.get("content") or turn.get("text"),
+                            april_obj.get("answer") or april_obj.get("content"),
+                            turn.get("summary"),
+                        ) if x
+                    )
+                )
+                if not candidate_text:
+                    continue
+                score = self.similarity(current, candidate_text)["score"]
+                if score > historical_match_score:
+                    historical_match_score = score
+                    historical_match = turn
+
+        # Explicitly old-topic requests need a stronger historical match than a
+        # generic continuation. A vague "tell me something" remains NEW_TOPIC.
+        if historical_score >= 0.52 and historical_match is not None and historical_match_score >= 0.42:
+            state = "HISTORICAL_SCENE"
+            source = historical_match
+            confidence = max(historical_score, historical_match_score)
+        elif previous_scene and immediate_score >= 0.42:
+            state = "PREVIOUS_SCENE"
+            source = previous_scene
+            confidence = immediate_score
+        else:
+            state = "NEW_TOPIC"
+            source = None
+            confidence = max(0.0, 1.0 - max(immediate_score, historical_score))
+
+        return {
+            "state": state,
+            "confidence": round(float(min(1.0, confidence)), 6),
+            "immediate_score": round(float(immediate_score), 6),
+            "historical_score": round(float(historical_score), 6),
+            "historical_match_score": round(float(historical_match_score), 6),
+            "previous_scene_id": prev_scene_id,
+            "historical_turn_id": (
+                (historical_match or {}).get("turn_id")
+                if historical_match is not None else None
+            ),
+            "source_scene": source,
+            "previous_result": prev_answer,
+            "previous_summary": prev_summary,
+            "anaphora": linguistic,
+            "engine": "quantum_interpretation_engine.context_relation",
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+        }
+
     def dialogue(
         self, text: str, previous_assistant: str = "", previous_user: str = "",
         active_goal: str = "", active_topic: str = "",
@@ -1821,6 +2000,12 @@ class QuantumInterpretationEngine:
                 if isinstance(current_scene.get("semantic_state"), dict)
                 else {}
             )
+        context_relation = self.resolve_context_relation(
+            text,
+            previous_scene=current_scene if isinstance(current_scene, dict) else None,
+            history=history,
+            active_topic=active_topic,
+        )
         dialogue_result = self.dialogue(
             text, previous_assistant=last_assistant, previous_user=last_user,
             active_goal=active_goal, active_topic=active_topic,
@@ -2013,6 +2198,7 @@ class QuantumInterpretationEngine:
                 "decision_owner": DECISION_OWNER,
             },
             "dialogue_relation": dialogue_result.get("relation", {}),
+            "context_relation": context_relation,
             "dialogue_contract": {
                 "dialog_act": dialogue["label"],
                 "current_request": text,
@@ -2048,13 +2234,8 @@ class QuantumInterpretationEngine:
                 "previous_assistant_turn": last_assistant,
                 "active_topic": active_topic,
                 "active_goal": active_goal,
-                "relation": (
-                "memory_query" if memory_query else
-                "continuation" if continuation else
-                "reference" if reference else
-                "topic" if active_topic and not topic_shift else
-                "independent"
-            ),
+                "relation": context_relation.get("state", "NEW_TOPIC").lower(),
+                "context_relation": context_relation,
             },
             "reply_to": reply_to,
             "required_capabilities": [
@@ -2063,11 +2244,10 @@ class QuantumInterpretationEngine:
                 *(["representation_evidence"] if required_representations else []),
             ],
             "context_dependency": (
+                "historical_scene" if context_relation.get("state") == "HISTORICAL_SCENE" else
+                "previous_scene" if context_relation.get("state") == "PREVIOUS_SCENE" else
                 "memory_query" if memory_query else
-                "continuation" if continuation else
-                "reference" if reference else
-                "new_topic" if topic_shift else
-                "independent"
+                "new_topic"
             ),
             "context_policy": {
                 "current_request": True,
@@ -2094,6 +2274,7 @@ class QuantumInterpretationEngine:
                 "profile": profile,
                 "scene_matrix": matrix,
                 "scene_semantic_state": scene_semantic_state,
+                "context_relation": context_relation,
                 "decision_owner": DECISION_OWNER,
                 "evidence_only": True,
                 "engine": "quantum_interpretation_engine",
