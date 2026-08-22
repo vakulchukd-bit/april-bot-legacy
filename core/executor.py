@@ -267,14 +267,6 @@ def _build_quantum_field(
             "dialogue": _quantum_snapshot(
                 semantic.get("quantum_dialogue_measurement", {})
             ),
-            "scene_relation": _quantum_snapshot(
-                semantic.get("quantum_interpretation_evidence", {}).get("dialogue_relation", {})
-                if isinstance(semantic.get("quantum_interpretation_evidence"), dict) else {}
-            ),
-            "scene_semantics": _quantum_snapshot(
-                semantic.get("quantum_interpretation_evidence", {}).get("scene_semantic_state", {})
-                if isinstance(semantic.get("quantum_interpretation_evidence"), dict) else {}
-            ),
             "representation": _quantum_snapshot(
                 semantic.get("quantum_representation_measurement", {})
             ),
@@ -307,40 +299,6 @@ def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
             if src.get(name) not in (None, "", [], {}):
                 return src[name]
     return ""
-
-
-def _history_with_current_scene(state: dict, history: list) -> list:
-    """Use the existing current USER↔APRIL scene as immediate history when the
-    hot dialog list is not populated on the web route. This is the same canonical
-    scene state, not a second memory path.
-    """
-    base = list(history) if isinstance(history, list) else []
-    current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
-    if not isinstance(current_scene, dict) or not current_scene:
-        return base
-
-    scene_turn = current_scene.get("turn_id")
-    scene_user = _s(current_scene.get("user_request") or current_scene.get("current_request"))
-    scene_april = _s(current_scene.get("april_answer") or current_scene.get("answer") or current_scene.get("summary"))
-    if not scene_user or not scene_april:
-        return base
-
-    for item in reversed(base[-8:]):
-        if not isinstance(item, dict):
-            continue
-        existing_turn = item.get("turn_id")
-        existing_user = _s(item.get("content") or item.get("user_request") or item.get("user", {}).get("text") if isinstance(item.get("user"), dict) else "")
-        existing_april = _s(item.get("answer") or item.get("april_answer") or item.get("april", {}).get("answer") if isinstance(item.get("april"), dict) else "")
-        if (scene_turn is not None and existing_turn == scene_turn) or (existing_user == scene_user and existing_april == scene_april):
-            return base
-
-    return base + [{
-        "turn_id": scene_turn,
-        "user": {"text": scene_user, "content": scene_user},
-        "april": {"answer": scene_april, "content": scene_april},
-        "scene_id": current_scene.get("scene_id"),
-        "memory_kind": "current_visual_dialogue",
-    }]
 
 
 def _dialogue_evidence(
@@ -1077,13 +1035,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "reply_to": _s(_field((canonical_dialogue, semantic, decision), ("reply_to", "previous_turn_id"))),
         "active_goal": _s(canonical_dialogue.get("active_goal")) or goal,
         "active_topic": _s(canonical_dialogue.get("active_topic")) or topic,
+        "resolved_scene": _as_dict(canonical_dialogue.get("resolved_scene")),
         "current_request": _s(text),
-        "scene_semantic_state": _quantum_snapshot(
-            semantic.get("scene_semantic_state", {})
-        ),
-        "scene_relation": _quantum_snapshot(
-            semantic.get("dialogue_relation", {})
-        ),
     }
 
     request_metadata = {
@@ -1127,6 +1080,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
             "previous_user_turn": _s(canonical_dialogue.get("previous_user_turn")),
             "previous_april_turn": _s(canonical_dialogue.get("previous_april_turn")),
+            "resolved_scene": _as_dict(canonical_dialogue.get("resolved_scene")),
             **(
                 {
                     "active_topic": _clip(topic, 300),
@@ -1161,11 +1115,8 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             }
         ),
         visual_context=(
-            visual if (
-                mode in {"ARTIFACT_REFERENCE", "CONTINUATION", "SAME_TOPIC"}
-                and isinstance(visual, dict)
-                and bool(visual.get("memory_relevant"))
-            ) else {}
+            visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict)
+            else {}
         ),
         available_tools=capabilities[:12],
         requested_outputs=outputs,
@@ -1318,13 +1269,7 @@ def _clean_text_value(value: Any) -> str:
 
 
 def _clean_render_blocks(blocks: Any) -> list[dict]:
-    """Canonicalize provider blocks without inventing new presentation blocks.
-
-    Structured artifacts are authoritative. Text is retained as the human
-    explanation, while exact duplicates of an already separate formula artifact
-    are removed from that text. This keeps McDowell/KaTeX from displaying the
-    same mathematical payload twice.
-    """
+    """Preserve all structured blocks while unwrapping accidental JSON text blocks."""
     result: list[dict] = []
     queue = list(blocks or []) if isinstance(blocks, (list, tuple)) else []
     while queue:
@@ -1344,9 +1289,7 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
             key in decoded_content
             for key in ("answer", "content", "summary", "render_blocks", "artifacts")
         ):
-            nested_answer = _clean_text_value(
-                decoded_content.get("answer") or decoded_content.get("content")
-            )
+            nested_answer = _clean_text_value(decoded_content.get("answer") or decoded_content.get("content"))
             if nested_answer:
                 clean_block = dict(block)
                 clean_block["content"] = nested_answer
@@ -1369,53 +1312,7 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
                 clean_block["text"] = clean_text
         result.append(clean_block)
 
-    formula_values: list[str] = []
-    for block in result:
-        btype = _s(
-            block.get("type") or block.get("artifact_type") or block.get("representation")
-        ).lower()
-        if btype != "formula":
-            continue
-        payload = block.get("payload") if isinstance(block.get("payload"), dict) else block
-        value = _s(
-            payload.get("latex")
-            or payload.get("formula")
-            or payload.get("equation")
-            or payload.get("expression")
-            or payload.get("content")
-            or payload.get("text")
-        ).strip()
-        if value and value not in formula_values:
-            formula_values.append(value)
-
-    seen_text: set[str] = set()
-    normalized: list[dict] = []
-    for block in result:
-        btype = _s(
-            block.get("type") or block.get("artifact_type") or block.get("representation")
-        ).lower()
-        if btype in {"text", "markdown"}:
-            text = _clean_text_value(
-                block.get("content") or block.get("text") or block.get("value")
-            )
-            for formula in formula_values:
-                if formula and formula in text:
-                    text = text.replace(formula, "").strip()
-            text = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", text)
-            signature = text.strip()
-            if not signature:
-                continue
-            if signature in seen_text:
-                continue
-            seen_text.add(signature)
-            clean_block = dict(block)
-            clean_block["content"] = signature
-            clean_block["text"] = signature
-            normalized.append(clean_block)
-            continue
-        normalized.append(block)
-
-    return normalized
+    return result
 
 
 def _decode_provider_payload(value: Any) -> dict:
@@ -2046,12 +1943,6 @@ def _canonicalize(
         "trigger_routing": False,
         "score_routing": False,
         "identity_scope": deepcopy(scope),
-        "scene_semantic_state": _quantum_snapshot(
-            semantic.get("scene_semantic_state", {})
-        ),
-        "scene_relation": _quantum_snapshot(
-            semantic.get("dialogue_relation", {})
-        ),
     })
     response.quantum_state = request.quantum_state
     response.conversation_space = {
@@ -2143,27 +2034,6 @@ def _canonicalize(
         except Exception:
             pass
 
-    # Persist the semantic state of the just-completed scene into the same
-    # canonical SceneContract so the next turn can reason over meaning rather
-    # than re-parsing a detached text history.
-    interpretation_packet = semantic.get("quantum_interpretation_evidence")
-    if not isinstance(interpretation_packet, dict):
-        interpretation_packet = {}
-    scene_semantics = interpretation_packet.get("scene_semantic_state")
-    if isinstance(scene_semantics, dict):
-        try:
-            metadata = getattr(contract, "metadata", None)
-            if not isinstance(metadata, dict):
-                metadata = {}
-                setattr(contract, "metadata", metadata)
-            metadata["semantic_scene_state"] = _quantum_snapshot(scene_semantics)
-        except Exception:
-            try:
-                if isinstance(contract, dict):
-                    contract.setdefault("metadata", {})["semantic_scene_state"] = _quantum_snapshot(scene_semantics)
-            except Exception:
-                pass
-
     update_dialog_context(user_id, semantic)
     update_scene_context(
         user_id,
@@ -2251,7 +2121,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
-    interpretation_history = _history_with_current_scene(state, history)
 
     # One canonical heavy Interpretation pass per turn. Semantic Core reuses
     # the same evidence packet instead of re-running Stanza/NLI.
@@ -2259,7 +2128,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         text,
         cognition=state.get("cognition", {}) if isinstance(state.get("cognition"), dict) else {},
         semantic={},
-        history=interpretation_history,
+        history=history,
         state=state,
     ) or {}
 
@@ -2289,16 +2158,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         text=text, semantic=semantic, reasoning=reasoning, state=state
     ) or {}
 
-    # The scene semantic state is the canonical task state for this turn.
-    # It is copied into cognition as evidence so the processor can arbitrate
-    # phase transitions without a second interpretation pass.
-    cognition["scene_semantic_state"] = _quantum_snapshot(
-        semantic.get("scene_semantic_state", {})
-    )
-    cognition["dialogue_relation"] = _quantum_snapshot(
-        semantic.get("dialogue_relation", {})
-    )
-
     interpretation["cognition"] = _quantum_snapshot(cognition)
 
     _merge_evidence_fields(semantic, (interpretation,))
@@ -2315,7 +2174,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     intent = detect_intent(text, state) or {}
     intent_ai = await detect_intent_ai(text, state)
     intent_ai = intent_ai if isinstance(intent_ai, dict) else {}
-    resolver = resolve_input(interpretation_history, state) or {}
+    resolver = resolve_input(history, state) or {}
     focus_intent = build_focus_intent_state(text, state) or {}
 
     intent_ai["provider_calls"] = 0
@@ -2416,27 +2275,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     )
     if not isinstance(dynamic_memory, dict):
         dynamic_memory = {}
-    state["_turn_dialogue_relation"] = _quantum_snapshot(
-        semantic.get("dialogue_relation", {})
-    )
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
     semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
-    dialogue_diag = interpretation.get("dialogue_contract") if isinstance(interpretation.get("dialogue_contract"), dict) else {}
-    current_scene_diag = state.get("current_visual_scene") if isinstance(state.get("current_visual_scene"), dict) else {}
-    print("🧠 QUANTUM CONTINUITY:", {
-        "has_current_scene": bool(current_scene_diag),
-        "scene_id": current_scene_diag.get("scene_id"),
-        "continuation": bool(dialogue_diag.get("continuation")),
-        "reference_to_previous": bool(dialogue_diag.get("reference_to_previous")),
-        "dialog_act": dialogue_diag.get("dialog_act"),
-        "active_topic": dialogue_diag.get("active_topic"),
-        "previous_turn_id": dialogue_diag.get("reply_to") or current_scene_diag.get("turn_id"),
-    })
-    print("🧠 QUANTUM MEMORY MATRIX:", {
-        "window": dynamic_memory.get("window_days"),
-        "matches": len(dynamic_memory.get("matches", []) or []),
-        "matrix_version": dynamic_memory.get("matrix_version"),
-    })
 
     semantic["quantum_experience_evidence"] = _quantum_snapshot(experience)
     semantic["quantum_goal_evidence"] = _quantum_snapshot(goal_evidence)
