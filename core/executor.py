@@ -2262,6 +2262,25 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         visual_reference=visual,
     ) or {}
 
+    # Publish the current-turn semantic relation into the existing memory
+    # engine.  This is a measured relation, not a trigger, and lets the visual
+    # memory field expose the same active scene when the turn refers to it.
+    resolved_for_turn = _as_dict(dialogue_contract.get("resolved_scene"))
+    state["_turn_dialogue_relation"] = {
+        "relation": resolved_for_turn.get("relation") or (
+            "current_scene" if continuation or reference_to_previous else
+            "new_topic" if mode == "NEW_TOPIC" else "independent"
+        ),
+        "scene_id": resolved_for_turn.get("scene_id") or "",
+        "continuation": bool(continuation),
+        "reference_to_previous": bool(reference_to_previous),
+        "same_scene": bool(
+            resolved_for_turn.get("relation") == "current_scene"
+            and resolved_for_turn.get("scene_id")
+        ),
+        "context_dependency": _s(dialogue_contract.get("context_dependency")),
+    }
+
     # Archived A-E/7D memory is queried as evidence only after the semantic
     # interpretation pass has run. No archived item is copied into the current
     # scene automatically.
