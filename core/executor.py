@@ -2263,22 +2263,55 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     ) or {}
 
     # Publish the current-turn semantic relation into the existing memory
-    # engine.  This is a measured relation, not a trigger, and lets the visual
-    # memory field expose the same active scene when the turn refers to it.
+    # engine. This reuses the canonical interpretation contract already
+    # produced for this turn; it does not add a trigger or a parallel route.
+    interpretation_evidence = _as_dict(semantic.get("quantum_interpretation_evidence"))
+    dialogue_contract = _as_dict(interpretation_evidence.get("dialogue_contract"))
+    if not dialogue_contract:
+        dialogue_contract = _as_dict(semantic.get("dialogue_context_field"))
+
+    # Keep one canonical dialogue relation in this execution scope.
+    mode = _s(
+        dialogue_contract.get("context_mode")
+        or dialogue_contract.get("dialogue_state")
+        or semantic.get("dialogue_state")
+        or decision.get("dialogue_state")
+    ).upper()
+    if mode not in {
+        "INDEPENDENT",
+        "NEW_TOPIC",
+        "SAME_TOPIC",
+        "CONTINUATION",
+        "ARTIFACT_REFERENCE",
+        "MEMORY_QUERY",
+    }:
+        mode = "CONTINUATION" if bool(dialogue_contract.get("continuation")) else "INDEPENDENT"
+
+    continuation = bool(dialogue_contract.get("continuation"))
+    reference_to_previous = bool(dialogue_contract.get("reference_to_previous"))
+    context_dependency = _s(dialogue_contract.get("context_dependency"))
+
     resolved_for_turn = _as_dict(dialogue_contract.get("resolved_scene"))
+    relation = _s(resolved_for_turn.get("relation"))
+    if not relation:
+        relation = (
+            "current_scene"
+            if continuation or reference_to_previous
+            else "new_topic"
+            if mode == "NEW_TOPIC"
+            else "independent"
+        )
+
     state["_turn_dialogue_relation"] = {
-        "relation": resolved_for_turn.get("relation") or (
-            "current_scene" if continuation or reference_to_previous else
-            "new_topic" if mode == "NEW_TOPIC" else "independent"
-        ),
-        "scene_id": resolved_for_turn.get("scene_id") or "",
-        "continuation": bool(continuation),
-        "reference_to_previous": bool(reference_to_previous),
+        "relation": relation,
+        "scene_id": _s(resolved_for_turn.get("scene_id")),
+        "continuation": continuation,
+        "reference_to_previous": reference_to_previous,
         "same_scene": bool(
-            resolved_for_turn.get("relation") == "current_scene"
+            relation == "current_scene"
             and resolved_for_turn.get("scene_id")
         ),
-        "context_dependency": _s(dialogue_contract.get("context_dependency")),
+        "context_dependency": context_dependency,
     }
 
     # Archived A-E/7D memory is queried as evidence only after the semantic
