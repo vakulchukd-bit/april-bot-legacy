@@ -1156,9 +1156,12 @@ class QuantumInterpretationEngine:
             label: (1.0 if label == production_representation else 0.0)
             for label in representation_measurements
         }
-        # Backward-compatible field: downstream components that consume
-        # representation_scores must still see the full semantic evidence.
-        canonical_representation_scores = dict(presentation_signal_scores)
+        # Backward-compatible field: renderer/executor consumers must keep
+        # seeing only the canonical production decision. The complete semantic
+        # presentation measurements travel separately under
+        # presentation_signal_scores, so evidence cannot fan out into multiple
+        # renderer commands.
+        canonical_representation_scores = dict(production_representation_scores)
         identity_request = (
             best_dialogue == "identity"
             and dialogue_score >= 0.40
@@ -2101,14 +2104,40 @@ class QuantumInterpretationEngine:
         if scene_semantic_state.get("task_phase") in {"proposal", "explanation"} and scene_representation:
             scene_type = scene_representation
         representation_scores = profile["representation_scores"]
+        # Full presentation evidence is transported separately from the single
+        # production representation. This preserves rich formatting signals
+        # without authorizing unrelated renderers.
+        presentation_signal_scores = dict(
+            profile.get(
+                "presentation_signal_scores",
+                profile.get("representation_measurements", {}),
+            )
+        )
+        production_representation_scores = dict(
+            profile.get(
+                "production_representation_scores",
+                representation_scores,
+            )
+        )
         capability = profile["capability_scores"]
 
         representation_measurements = dict(
-            profile.get("representation_measurements", representation_scores)
+            profile.get("representation_measurements", presentation_signal_scores)
         )
         canonical_representation = str(
             scene_semantic_state.get("requested_representation") or "text"
         )
+        if not presentation_signal_scores:
+            presentation_signal_scores = {
+                str(k): float(v)
+                for k, v in representation_measurements.items()
+            }
+        if not production_representation_scores:
+            production_representation_scores = {
+                str(k): (1.0 if k == canonical_representation else 0.0)
+                for k in representation_measurements
+            }
+
         representation_evidence = [
             SemanticEvidence(
                 canonical_representation,
@@ -2316,6 +2345,7 @@ class QuantumInterpretationEngine:
                     or scene_semantic_state.get("inherited_representation")
                     or required_representations
                 ),
+                "transport_only": True,
                 "single_route": True,
                 "decision_owner": DECISION_OWNER,
             },
