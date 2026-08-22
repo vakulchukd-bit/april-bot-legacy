@@ -588,7 +588,7 @@ class QuantumInterpretationEngine:
 
     def fast_semantic_profile(
         self, text: str, previous_assistant: str = "",
-        active_topic: str = "", active_goal: str = ""
+        previous_user: str = "", active_topic: str = "", active_goal: str = ""
     ) -> dict[str, Any]:
         return self.measure(
             text,
@@ -679,13 +679,12 @@ class QuantumInterpretationEngine:
         reference: bool,
         active_topic: str = "",
     ) -> dict[str, Any]:
-        """Resolve the semantic scene that the current turn refers to.
+        """Resolve the most relevant existing scene as semantic context.
 
-        This is interpretation evidence only.  It does not execute routing,
-        use keyword triggers, or create a second memory.  The current scene is
-        preferred for a true continuation; a historical scene may be selected
-        by semantic similarity when the turn is a reference rather than a
-        direct continuation.
+        The relation is inferred from the dialogue state and scene evidence.
+        No keyword/phrase trigger decides the scene.  For a genuine
+        continuation, the current active scene has priority.  For a semantic
+        reference, the best matching historical scene is selected.
         """
         if not isinstance(state, dict) or (not continuation and not reference):
             return {}
@@ -715,41 +714,193 @@ class QuantumInterpretationEngine:
                 for key in ("topic", "user_request", "summary", "april_answer")
             ))
 
-        # A continuation means the immediately active scene is the semantic
-        # referent.  No lexical trigger is used here.
+        def scene_payload(scene: dict[str, Any]) -> dict[str, Any]:
+            semantic_state = scene.get("semantic_state")
+            semantic_state = dict(semantic_state) if isinstance(semantic_state, dict) else {}
+            render_blocks = scene.get("render_blocks")
+            render_blocks = [dict(x) for x in render_blocks if isinstance(x, dict)] if isinstance(render_blocks, list) else []
+            presentation_signals = scene.get("presentation_signals")
+            presentation_signals = [dict(x) for x in presentation_signals if isinstance(x, dict)] if isinstance(presentation_signals, list) else []
+
+            # Preserve a scene's already-resolved presentation contract so the
+            # next turn can continue the same visual language without creating
+            # a second renderer route.
+            if not presentation_signals and render_blocks:
+                for block in render_blocks:
+                    signal = block.get("presentation")
+                    if isinstance(signal, dict):
+                        presentation_signals.append(dict(signal))
+
+            return {
+                "render_blocks": render_blocks,
+                "presentation_signals": presentation_signals,
+                "semantic_state": semantic_state,
+                "supported_payloads": list(scene.get("supported_payloads") or []),
+            }
+
+        # A direct continuation is a semantic relationship to the active
+        # scene, not a keyword match.
         if continuation and isinstance(current, dict) and current.get("scene_id"):
             selected = current
             relation = "current_scene"
             confidence = 1.0
         else:
             scored: list[tuple[float, int, dict[str, Any]]] = []
+            query_tokens = set(self._tokens(text))
+            short_turn = len(query_tokens) <= 14
             for index, scene in enumerate(candidates):
                 candidate_text = scene_text(scene)
-                score = self.similarity(text, candidate_text)["score"] if candidate_text else 0.0
-                if active_topic and candidate_text:
-                    score = max(score, self.similarity(active_topic, candidate_text)["score"])
+                lexical = self.similarity(text, candidate_text)["score"] if candidate_text else 0.0
+                topic_match = (
+                    self.similarity(active_topic, candidate_text)["score"]
+                    if active_topic and candidate_text else 0.0
+                )
+
+                # Structural discourse evidence: a short dependent question/
+                # request with no new topic/goal evidence is naturally more
+                # connected to the active scene than an unrelated long turn.
+                structural = 0.0
+                if short_turn:
+                    structural += 0.18
+                if candidate_text:
+                    structural += 0.14
+                if active_topic and topic_match >= 0.12:
+                    structural += 0.18
+                relation_floor = 0.0
+                if continuation:
+                    relation_floor = 0.60
+                elif reference:
+                    relation_floor = 0.35
+
+                score = max(lexical, topic_match * 0.92) + structural + relation_floor
+                # Prefer the active scene when evidence is otherwise close.
+                if isinstance(current, dict) and scene.get("scene_id") == current.get("scene_id"):
+                    score += 0.12
                 scored.append((float(score), -index, scene))
+
             scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
             confidence, _, selected = scored[0]
-            relation = "historical_scene" if selected.get("scene_id") != (current or {}).get("scene_id") else "current_scene"
+            relation = (
+                "historical_scene"
+                if selected.get("scene_id") != (current or {}).get("scene_id")
+                else "current_scene"
+            )
+            # A historical scene must still have semantic evidence of relation.
+            if relation == "historical_scene" and confidence < 0.45 and not reference:
+                return {}
 
         answer = self.normalize(
-            selected.get("april_answer") or selected.get("answer") or selected.get("content")
+            selected.get("april_answer")
+            or selected.get("answer")
+            or selected.get("content")
+            or ""
         )
         summary = self.normalize(selected.get("summary") or "")
+        payload = scene_payload(selected)
+
         return {
             "relation": relation,
-            "confidence": round(float(confidence), 6),
+            "confidence": round(float(min(1.0, confidence)), 6),
             "scene_id": str(selected.get("scene_id") or ""),
             "turn_id": selected.get("turn_id"),
             "topic": self.normalize(selected.get("topic") or ""),
-            "user_request": self.normalize(selected.get("user_request") or selected.get("current_request") or ""),
+            "user_request": self.normalize(
+                selected.get("user_request")
+                or selected.get("current_request")
+                or ""
+            ),
             "answer": answer,
             "summary": summary,
             "render_block_types": list(selected.get("render_block_types") or []),
             "presentation_types": list(selected.get("presentation_types") or []),
-            "renderer_state": selected.get("renderer_state") if isinstance(selected.get("renderer_state"), dict) else {},
+            "render_blocks": payload["render_blocks"],
+            "presentation_signals": payload["presentation_signals"],
+            "semantic_state": payload["semantic_state"],
+            "supported_payloads": payload["supported_payloads"],
+            "renderer_state": (
+                dict(selected.get("renderer_state"))
+                if isinstance(selected.get("renderer_state"), dict)
+                else {}
+            ),
             "semantic_source": "interpretation_scene_resolution",
+            "evidence_only": True,
+        }
+
+    @staticmethod
+    def _build_presentation_transport(
+        *,
+        required_representations: Sequence[str],
+        resolved_scene: dict[str, Any],
+        scene_type: str,
+    ) -> dict[str, Any]:
+        """Canonical presentation signal transport.
+
+        This does not render anything.  It declares the semantic presentation
+        contract for the existing executor/McDowell route and preserves the
+        current scene's already-known presentation payloads.
+        """
+        resolved = resolved_scene if isinstance(resolved_scene, dict) else {}
+        requested = [str(x).strip().lower() for x in required_representations if str(x).strip()]
+        inherited = [
+            str(x).strip().lower()
+            for x in (resolved.get("presentation_types") or [])
+            if str(x).strip()
+        ]
+
+        effective = []
+        for item in [*requested, *inherited]:
+            if item not in effective:
+                effective.append(item)
+
+        # Keep text as the base transport, while allowing formula/etc. to
+        # travel as structured evidence.  No renderer is launched here.
+        if not effective:
+            effective = [scene_type or "text"]
+
+        signals: list[dict[str, Any]] = []
+        for item in effective:
+            if item == "formula":
+                signals.append({
+                    "type": "formula",
+                    "renderer": "mcdowell",
+                    "engine": "katex",
+                    "mode": "formula",
+                    "source": "quantum_interpretation_engine",
+                    "evidence_only": True,
+                })
+            elif item in {"table", "graph", "diagram", "image", "gallery", "code", "link"}:
+                signals.append({
+                    "type": item,
+                    "renderer": "mcdowell",
+                    "engine": item,
+                    "source": "quantum_interpretation_engine",
+                    "evidence_only": True,
+                })
+            else:
+                signals.append({
+                    "type": "text",
+                    "renderer": "mcdowell",
+                    "engine": "markdown",
+                    "source": "quantum_interpretation_engine",
+                    "evidence_only": True,
+                })
+
+        return {
+            "version": "presentation_transport_v1",
+            "decision_owner": DECISION_OWNER,
+            "single_route": True,
+            "renderer": "mcdowell",
+            "text_engine": "mcdowell",
+            "formula_engine": "katex",
+            "resolved_representation": effective[0],
+            "signals": signals,
+            "preserve_existing_scene": bool(resolved.get("scene_id")),
+            "resolved_scene_id": resolved.get("scene_id"),
+            "resolved_scene_presentation": {
+                "types": inherited,
+                "render_blocks": list(resolved.get("render_blocks") or []),
+                "presentation_signals": list(resolved.get("presentation_signals") or []),
+            },
             "evidence_only": True,
         }
 
@@ -916,6 +1067,21 @@ class QuantumInterpretationEngine:
             semantic.get("required_domains", []) or candidate_domains
         )
 
+        current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+        current_scene_exists = bool(isinstance(current_scene, dict) and current_scene.get("scene_id"))
+
+        current_scene_text = ""
+        if isinstance(current_scene, dict):
+            current_scene_text = self.normalize(" ".join(
+                str(current_scene.get(key) or "")
+                for key in ("topic", "user_request", "summary", "april_answer")
+            ))
+
+        current_scene_similarity = (
+            self.similarity(text, current_scene_text)["score"]
+            if current_scene_text else 0.0
+        )
+
         continuation = bool(
             last_assistant and (
                 dialogue["label"] in {
@@ -925,16 +1091,72 @@ class QuantumInterpretationEngine:
                 or dialogue["continuation_score"] >= 0.72
             )
         )
-        memory_query = dialogue["label"] == "memory_query"
-        reference = bool(
-            last_assistant and (dialogue["reference_score"] >= 0.60 or memory_query)
+        memory_query_score = float(profile["dialogue_scores"].get("memory_query", 0.0) or 0.0)
+        memory_query = bool(
+            dialogue["label"] == "memory_query"
+            and memory_query_score >= 0.12
         )
+        reference = bool(
+            last_assistant and dialogue["reference_score"] >= 0.60
+        )
+
+        # Structural scene relation: when a current scene exists and the turn
+        # is a short dependent request/question without strong new-topic
+        # evidence, interpret it as a request about the current scene.  This is
+        # semantic fusion of dialogue/context evidence, not phrase triggering.
+        topic_shift_evidence = False
+        if current_scene_exists and last_assistant and not memory_query:
+            token_count = len(self._tokens(text))
+            current_query_context = self._context_scores(
+                text,
+                previous_assistant=last_assistant,
+                previous_user=last_user,
+                active_topic=active_topic,
+                active_goal=active_goal,
+            )
+            dependent_score = max(
+                dialogue["continuation_score"],
+                dialogue["reference_score"],
+                current_query_context.get("active_topic", 0.0),
+                current_query_context.get("active_goal", 0.0),
+            )
+            # Structural continuation: a short dependent turn with some
+            # relationship evidence can continue the active scene even when
+            # there is little literal overlap.
+            if token_count <= 18 and dependent_score >= 0.20:
+                continuation = True
+                reference = True
+
+            # Conversely, a substantive request with strong semantic mismatch
+            # is a new topic. This is a relation decision, not a phrase trigger.
+            if (
+                not continuation
+                and dialogue["continuation_score"] < 0.20
+                and dialogue["reference_score"] < 0.20
+                and token_count >= 3
+                and current_scene_similarity < 0.08
+                and current_query_context.get("active_topic", 0.0) < 0.08
+                and current_query_context.get("active_goal", 0.0) < 0.08
+            ):
+                topic_shift_evidence = True
+
+        if topic_shift_evidence:
+            memory_query = False
+            reference = False
+            continuation = False
+
         resolved_scene = self._resolve_scene_context(
-            text, state, continuation=continuation, reference=reference, active_topic=active_topic
+            text,
+            state,
+            continuation=continuation,
+            reference=reference,
+            active_topic=active_topic,
         )
         topic_shift = bool(
-            active_topic and not continuation and not reference
-            and profile["context_scores"].get("active_topic", 0.0) < 0.35
+            topic_shift_evidence or (
+                active_topic and not continuation and not reference
+                and profile["context_scores"].get("active_topic", 0.0) < 0.35
+            )
         )
 
         # Scene type is an execution decision only when the representation
@@ -944,6 +1166,12 @@ class QuantumInterpretationEngine:
         scene_type = required_representations[0] if required_representations else "text"
         representation_scores = profile["representation_scores"]
         capability = profile["capability_scores"]
+
+        presentation_transport = self._build_presentation_transport(
+            required_representations=required_representations,
+            resolved_scene=resolved_scene,
+            scene_type=scene_type,
+        )
 
         representation_evidence = [
             SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
@@ -970,6 +1198,7 @@ class QuantumInterpretationEngine:
             "active_topic": active_topic,
             "topic_shift": topic_shift,
             "resolved_scene": resolved_scene,
+            "presentation_transport": presentation_transport,
             "context_dependency": (
                 "memory_query" if memory_query else
                 "continuation" if continuation else
@@ -979,7 +1208,7 @@ class QuantumInterpretationEngine:
             ),
             "confidence": dialogue["confidence"],
             "canonical": True,
-            "version": "quantum_matrix_v1",
+            "version": "quantum_matrix_v2",
         }
         domain_evidence = [
             {"domain": k, "score": float(v)}
@@ -1001,6 +1230,7 @@ class QuantumInterpretationEngine:
             "candidate_representations": profile["explicit_representations"],
             "required_representations": required_representations,
             "resolved_scene": resolved_scene,
+            "presentation_transport": presentation_transport,
             "memory_query": bool(memory_query),
             "representation_evidence": [
                 SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
@@ -1014,6 +1244,11 @@ class QuantumInterpretationEngine:
                 "active_goal": active_goal,
                 "previous_april_turn": last_assistant,
                 "resolved_scene": resolved_scene,
+                "resolved_scene_state": resolved_scene.get("semantic_state", {}) if isinstance(resolved_scene, dict) else {},
+                "resolved_scene_answer": resolved_scene.get("answer", "") if isinstance(resolved_scene, dict) else "",
+                "resolved_scene_summary": resolved_scene.get("summary", "") if isinstance(resolved_scene, dict) else "",
+                "resolved_scene_render_blocks": resolved_scene.get("render_blocks", []) if isinstance(resolved_scene, dict) else [],
+                "resolved_scene_presentation": presentation_transport,
                 "dialogue_history": history[-8:],
                 "representation_scores": dict(representation_scores),
                 "domain_scores": dict(profile["domain_scores"]),
@@ -1055,6 +1290,7 @@ class QuantumInterpretationEngine:
                 "active_topic": active_topic,
                 "topic_shift": topic_shift,
                 "resolved_scene": resolved_scene,
+                "presentation_transport": presentation_transport,
                 "context_dependency": (
                     "memory_query" if memory_query else
                     "continuation" if continuation else
@@ -1064,7 +1300,7 @@ class QuantumInterpretationEngine:
                 ),
                 "confidence": dialogue["confidence"],
                 "canonical": True,
-                "version": "quantum_matrix_v1",
+                "version": "quantum_matrix_v2",
             },
             "dialog_act": dialogue["label"],
             "continuation": float(dialogue["continuation_score"]),
@@ -1115,6 +1351,7 @@ class QuantumInterpretationEngine:
             "quantum_interpretation_field": {
                 "linguistic": self._linguistic(text),
                 "dialogue": dialogue_contract,
+                "presentation_transport": presentation_transport,
                 "representation": representation_evidence,
                 "domain": [
                     {"domain": k, "score": float(v)}
@@ -1129,6 +1366,9 @@ class QuantumInterpretationEngine:
                 "evidence_only": True,
                 "engine": "quantum_interpretation_engine",
             },
+            "presentation_signal": presentation_transport,
+            "presentation_signals": list(presentation_transport.get("signals") or []),
+            "resolved_scene_context": resolved_scene,
             "quantum_representation_measurement": {
                 "measurements": representation_evidence,
                 "scene_matrix": matrix,
@@ -1145,6 +1385,7 @@ class QuantumInterpretationEngine:
                 "information": float(capability.get("information", 0.0)),
                 "linguistic": self._linguistic(text),
                 "dialogue": dialogue_contract,
+                "presentation_transport": presentation_transport,
                 "context_vectors": profile["context_scores"],
                 "cognition": dict(cognition),
                 "semantic": dict(semantic),
@@ -1385,6 +1626,8 @@ def synchronize_interpretation_context(
     state["evidence"]["engine"] = result.get("quantum_interpretation_field")
     state["scene"]["profile"] = result.get("scene_profile")
     state["scene"]["matrix"] = result.get("quantum_matrix")
+    state["scene"]["resolved"] = result.get("resolved_scene")
+    state["scene"]["presentation"] = result.get("presentation_transport")
     state["artifacts"]["contract"] = result.get("artifact_contract")
     state["executor"]["contract"] = result.get("executor_preparation_contract")
     return state
@@ -1395,6 +1638,9 @@ def export_transport_state(state: dict[str, Any], result: dict[str, Any]) -> dic
     for field, (section, key) in INTERPRETATION_TRANSPORT_FIELDS.items():
         if field in result:
             state[section][key] = result[field]
+    state.setdefault("presentation", {})
+    state["presentation"]["transport"] = result.get("presentation_transport")
+    state["presentation"]["signals"] = list(result.get("presentation_signals") or [])
     state["diagnostics"]["route"] = [
         {"node": node, "status": "evidence", "payload": result.get(node)}
         for node in INTERPRETATION_ROUTE
@@ -1415,6 +1661,25 @@ def propagate_canonical_response(result: dict[str, Any], state: dict[str, Any]) 
     return result
 
 
+
+def _quantum_scene_projection(scene: dict[str, Any] | None) -> dict[str, Any]:
+    scene = scene if isinstance(scene, dict) else {}
+    return {
+        "scene_id": scene.get("scene_id"),
+        "turn_id": scene.get("turn_id"),
+        "relation": scene.get("relation"),
+        "topic": scene.get("topic"),
+        "user_request": scene.get("user_request"),
+        "answer": scene.get("answer"),
+        "summary": scene.get("summary"),
+        "semantic_state": scene.get("semantic_state") or {},
+        "render_blocks": scene.get("render_blocks") or [],
+        "presentation_signals": scene.get("presentation_signals") or [],
+        "presentation_types": scene.get("presentation_types") or [],
+        "renderer_state": scene.get("renderer_state") or {},
+    }
+
+
 def bridge_machine_response(result: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     machine = state.setdefault("machine_response", {})
     scene = state.setdefault("scene_contract", {})
@@ -1423,6 +1688,10 @@ def bridge_machine_response(result: dict[str, Any], state: dict[str, Any]) -> di
     )
     machine["content"] = content
     scene.update({"content": content, "answer": content, "summary": content})
+    if isinstance(result.get("resolved_scene"), dict):
+        scene["resolved_scene"] = _quantum_scene_projection(result.get("resolved_scene"))
+    if isinstance(result.get("presentation_transport"), dict):
+        scene["presentation_transport"] = result.get("presentation_transport")
     result["machine_response"] = machine
     result["scene_contract"] = scene
     return result
@@ -1706,7 +1975,7 @@ def build_semantic_dialog_profile(
         "active_topic": cognition.get("active_topic_slot") or semantic.get("current_topic"),
         "semantic_state": semantic,
         "requires_scene_builder": False,
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1717,7 +1986,7 @@ def build_scene_construction_profile(semantic_profile):
         "dialogue_mode": "semantic_unified",
         "context_source": "quantum_matrix",
         "decision_owner": DECISION_OWNER,
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1728,7 +1997,7 @@ def build_scene_artifact_contract(semantic_profile, scene_profile):
         "semantic_profile": semantic_profile or {},
         "scene_profile": scene_profile or {},
         "representation": "processor_decides",
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1755,7 +2024,7 @@ def build_unified_scene_context(
             "transport": TRANSPORT_NAME,
             "scene_contract": "canonical",
         },
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1773,7 +2042,7 @@ def build_scene_execution_plan(
         "representation": "processor_decides",
         "execution_mode": "single_quantum_matrix_pipeline",
         "decision_owner": DECISION_OWNER,
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1791,7 +2060,7 @@ def build_unified_interpretation_state(scene_context, processor_state=None):
         "active_goal": (scene_context or {}).get("active_goal"),
         "active_scene": (scene_context or {}).get("active_scene"),
         "executor_mode": "single_scene_contract",
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1817,7 +2086,7 @@ def build_semantic_processor_state(interpretation_state, execution_plan=None):
             "continuity": True,
             "single_route": True,
         },
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1841,7 +2110,7 @@ def build_dialogue_understanding_core(processor_state, executor_state=None):
             "response_context": True,
             "executor_shared_context": executor_state or {},
         },
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1860,7 +2129,7 @@ def optimize_dialogue_understanding(dialogue_core):
             "single_scene": True, "single_contract": True, "single_transport": True,
             "preserve_dialogue_vector": True,
         },
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1882,7 +2151,7 @@ def build_semantic_interpretation_contract(dialogue_optimization):
             "trigger_independent": True,
             "scene_continuity": True,
         },
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1904,7 +2173,7 @@ def build_canonical_semantic_runtime(semantic_contract, processor_state, dialogu
             "trigger_execution": False,
             "keyword_matching": False,
         },
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1926,7 +2195,7 @@ def fuse_semantic_inputs(runtime_state):
             "context_complete": True,
         },
         "available_modalities": [k for k, v in inputs.items() if v not in (None, {}, [], "")],
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
@@ -1938,7 +2207,7 @@ def build_processor_execution_context(runtime_state):
         "executor_context": fused,
         "processor_context": fused,
         "decision_owner": DECISION_OWNER,
-        "profile_version": "quantum_matrix_v1",
+        "profile_version": "quantum_matrix_v2",
     }
 
 
