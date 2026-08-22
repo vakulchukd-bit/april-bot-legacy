@@ -227,6 +227,53 @@ SCENE_OPERATION_OUTPUT = {
     "link_retrieval": "link",
 }
 
+# Semantic compatibility matrices. These are learned-logic priors over concepts,
+# not phrase triggers: operation/role/representation relations are measured by
+# the same interpretation engine and resolved into one production representation.
+OPERATION_REPRESENTATION_MATRIX = {
+    "square_root": {"formula": 1.00, "text": 0.72, "table": 0.18, "graph": 0.05},
+    "calculation": {"text": 0.90, "formula": 0.72, "table": 0.30, "graph": 0.18},
+    "graph_build": {"graph": 1.00, "formula": 0.82, "text": 0.48, "table": 0.18},
+    "formula_definition": {"formula": 1.00, "text": 0.70, "graph": 0.16},
+    "table_build": {"table": 1.00, "text": 0.60, "graph": 0.18},
+    "comparison": {"text": 0.86, "table": 0.78, "graph": 0.54, "formula": 0.28},
+    "explanation": {"text": 1.00, "formula": 0.30, "table": 0.22, "diagram": 0.18},
+    "code_implementation": {"code": 1.00, "text": 0.45, "diagram": 0.15},
+    "image_generation": {"image": 1.00, "gallery": 0.72, "text": 0.25},
+    "link_retrieval": {"link": 1.00, "text": 0.45},
+    "diagram_build": {"diagram": 1.00, "graph": 0.52, "text": 0.28},
+}
+
+ROLE_OPERATION_REPRESENTATION_MATRIX = {
+    ("proposal", "graph_build"): {"formula": 1.00, "graph": 0.34, "text": 0.78},
+    ("proposal", "square_root"): {"formula": 1.00, "text": 0.76},
+    ("proposal", "table_build"): {"table": 1.00, "text": 0.72},
+    ("explanation", "graph_build"): {"formula": 0.92, "text": 0.88, "graph": 0.20},
+    ("explanation", "square_root"): {"formula": 0.92, "text": 0.95},
+    ("question", "square_root"): {"text": 1.00, "formula": 0.78},
+    ("execution", "graph_build"): {"graph": 1.00, "formula": 0.40, "text": 0.30},
+    ("execution", "table_build"): {"table": 1.00, "text": 0.30},
+    ("execution", "diagram_build"): {"diagram": 1.00, "text": 0.30},
+    ("execution", "image_generation"): {"image": 1.00, "gallery": 0.60},
+    ("execution", "code_implementation"): {"code": 1.00, "text": 0.25},
+    ("execution", "link_retrieval"): {"link": 1.00, "text": 0.25},
+    ("modification", "graph_build"): {"graph": 0.92, "text": 0.42},
+    ("modification", "square_root"): {"text": 1.00, "formula": 0.38},
+}
+
+ROLE_REPRESENTATION_MATRIX = {
+    "question": {"text": 1.00, "formula": 0.72, "table": 0.24, "graph": 0.18},
+    "proposal": {"text": 0.82, "formula": 0.82, "table": 0.45, "graph": 0.42},
+    "explanation": {"text": 1.00, "formula": 0.34, "table": 0.28, "diagram": 0.22},
+    "execution": {"text": 0.70, "graph": 0.80, "table": 0.80, "formula": 0.50, "image": 0.80, "gallery": 0.70, "diagram": 0.80, "code": 0.80, "link": 0.80},
+    "modification": {"text": 0.72, "formula": 0.60, "graph": 0.78, "table": 0.78, "image": 0.72, "gallery": 0.70, "diagram": 0.76, "code": 0.76, "link": 0.72},
+    "comparison": {"text": 0.86, "table": 0.78, "graph": 0.54, "formula": 0.28},
+    "recall": {"text": 1.00, "table": 0.20, "graph": 0.15, "formula": 0.15},
+    "continuation": {"text": 0.78, "formula": 0.45, "table": 0.50, "graph": 0.55, "diagram": 0.50, "image": 0.50, "code": 0.50, "link": 0.45},
+    "reformulation": {"text": 0.92, "formula": 0.45, "table": 0.52, "graph": 0.52},
+    "correction": {"text": 0.92, "formula": 0.48, "table": 0.52, "graph": 0.50},
+}
+
 SCENE_REPRESENTATION_PROTOTYPES = {
     "text": "текстовый ответ объяснение рассказ описание",
     "formula": "формула уравнение математическое выражение",
@@ -403,10 +450,15 @@ class QuantumInterpretationEngine:
     def _tokens(text: str) -> list[str]:
         return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", text.lower())
 
+
     def _compile_matrix(self) -> None:
+        """Compile one canonical hypothesis matrix.
+
+        All semantic families live in the same matrix and are measured once per
+        request. Scene role, operation and representation are evidence dimensions
+        of the same engine, not a second interpreter.
+        """
         docs: list[str] = []
-        # One canonical evidence matrix. Scene-state semantics are measured
-        # inside this matrix; there is no second interpreter.
         families = (
             ("dialogue", SEMANTIC_TURN_PROTOTYPES),
             ("representation", REPRESENTATION_HYPOTHESES),
@@ -416,24 +468,32 @@ class QuantumInterpretationEngine:
             ("operation", SCENE_OPERATION_PROTOTYPES),
             ("scene_representation", SCENE_REPRESENTATION_PROTOTYPES),
         )
-        self._prototype_index = {}
+        self._matrix_families = {
+            family: dict(vocab) for family, vocab in families
+        }
         self._prototype_keys: list[tuple[str, str]] = []
+        self._prototype_docs: list[str] = []
+        self._family_indices: dict[str, list[int]] = {}
         for family, vocab in families:
+            indices: list[int] = []
             for label, description in vocab.items():
+                idx = len(docs)
                 self._prototype_keys.append((family, label))
-                self._prototype_index.setdefault(f"{family}:{label}", []).append(len(docs))
+                self._prototype_docs.append(description)
+                self._family_indices.setdefault(family, []).append(idx)
+                indices.append(idx)
                 docs.append(description)
-
         if TfidfVectorizer is not None and docs:
             self._vectorizer = TfidfVectorizer(
-                analyzer="char_wb", ngram_range=(3, 5),
-                lowercase=True, sublinear_tf=True,
+                analyzer="char_wb",
+                ngram_range=(3, 5),
+                lowercase=True,
+                sublinear_tf=True,
+                min_df=1,
             )
             self._prototype_matrix = self._vectorizer.fit_transform(docs)
-
         self._matrix_ready = bool(
-            self._vectorizer is not None
-            and self._prototype_matrix is not None
+            self._vectorizer is not None and self._prototype_matrix is not None
         )
 
     def _ensure_cognitive_runtime(self) -> None:
@@ -471,59 +531,95 @@ class QuantumInterpretationEngine:
         except Exception:
             return None
 
+
     def _semantic_scores(self, text: str) -> dict[str, dict[str, float]] | None:
-        families = {
-            "dialogue": SEMANTIC_TURN_PROTOTYPES,
-            "representation": REPRESENTATION_HYPOTHESES,
-            "domain": DOMAIN_HYPOTHESES,
-            "capability": CAPABILITY_HYPOTHESES,
-        }
-        labels=[]; docs=[]
+        """Measure every hypothesis family once using the same semantic space.
+
+        Cosine similarities are converted into a normalized competition inside
+        each family. This prevents unrelated renderer hypotheses from all
+        appearing highly confident simply because embedding cosine values share
+        a positive baseline.
+        """
+        families = self._matrix_families
+        if not families:
+            return None
+        labels: list[tuple[str, str]] = []
+        docs: list[str] = []
         for family, vocab in families.items():
             for label, description in vocab.items():
-                labels.append((family,label)); docs.append(description)
-        encoded=self._encode([text, *docs])
+                labels.append((family, label))
+                docs.append(description)
+        encoded = self._encode([text, *docs])
         if encoded is None:
             return None
-        q=encoded[0]
-        sims=(encoded[1:] @ q).tolist()
-        out={family:{label:0.0 for label in vocab} for family,vocab in families.items()}
-        for (family,label),score in zip(labels,sims):
-            # Cosine similarity is a continuous semantic measurement.
-            out[family][label]=float(max(-1.0,min(1.0,score)) * 0.5 + 0.5)
+        q = encoded[0]
+        raw = (encoded[1:] @ q).tolist()
+        out: dict[str, dict[str, float]] = {
+            family: {label: 0.0 for label in vocab}
+            for family, vocab in families.items()
+        }
+        temperature = 0.18
+        cursor = 0
+        for family, vocab in families.items():
+            family_labels = list(vocab)
+            values = [float(raw[cursor + i]) for i in range(len(family_labels))]
+            cursor += len(family_labels)
+            if not values:
+                continue
+            peak = max(values)
+            exps = [math.exp((value - peak) / temperature) for value in values]
+            total = sum(exps) or 1.0
+            for label, value in zip(family_labels, exps):
+                out[family][label] = float(value / total)
         return out
 
+
     def _tfidf_scores(self, text: str) -> dict[str, dict[str, float]]:
-        """Return one semantic measurement across all evidence families.
+        """Return one normalized semantic matrix for all evidence families.
 
-        The primary engine is sentence-level semantic encoding when available.
-        The matrix below is the existing local measurement implementation; it
-        is not a renderer selector and never owns routing.
+        The local TF-IDF matrix is the deterministic measurement engine when a
+        sentence encoder is unavailable. Each hypothesis family still competes
+        internally, so a single weak representation cannot activate many
+        unrelated renderers at once.
         """
-        families = {
-            "dialogue": SEMANTIC_TURN_PROTOTYPES,
-            "representation": REPRESENTATION_HYPOTHESES,
-            "domain": DOMAIN_HYPOTHESES,
-            "capability": CAPABILITY_HYPOTHESES,
-        }
+        families = self._matrix_families
         if not text:
-            return {name:{key:0.0 for key in values} for name,values in families.items()}
+            return {
+                name: {key: 0.0 for key in values}
+                for name, values in families.items()
+            }
 
-        semantic=self._semantic_scores(text)
+        semantic = self._semantic_scores(text)
         if semantic is not None:
             return semantic
 
-        if self._vectorizer is None or self._prototype_matrix is None or cosine_similarity is None:
-            return {name:{key:0.0 for key in values} for name,values in families.items()}
-        q=self._vectorizer.transform([text])
-        sim=cosine_similarity(q,self._prototype_matrix)[0]
-        out={}; offset=0
-        for family,vocab in families.items():
-            fam={}
-            for label in vocab:
-                fam[label]=max(0.0,min(1.0,float(sim[offset])))
-                offset+=1
-            out[family]=fam
+        if (
+            self._vectorizer is None
+            or self._prototype_matrix is None
+            or cosine_similarity is None
+        ):
+            return {
+                name: {key: 0.0 for key in values}
+                for name, values in families.items()
+            }
+
+        q = self._vectorizer.transform([text])
+        sim = cosine_similarity(q, self._prototype_matrix)[0]
+        out: dict[str, dict[str, float]] = {}
+        temperature = 0.08
+        for family, values in families.items():
+            indices = self._family_indices.get(family, [])
+            raw = [float(sim[idx]) for idx in indices]
+            if not raw:
+                out[family] = {key: 0.0 for key in values}
+                continue
+            peak = max(raw)
+            exps = [math.exp((value - peak) / temperature) for value in raw]
+            total = sum(exps) or 1.0
+            out[family] = {
+                label: float(exp_value / total)
+                for label, exp_value in zip(values, exps)
+            }
         return out
 
     def _context_scores(
@@ -561,34 +657,14 @@ class QuantumInterpretationEngine:
             "engine": "quantum_interpretation_engine",
         }
 
+
     def _scores(self, text: str, family: str) -> dict[str, float]:
-        values = {
-            "request_role": SCENE_REQUEST_PROTOTYPES,
-            "operation": SCENE_OPERATION_PROTOTYPES,
-            "scene_representation": SCENE_REPRESENTATION_PROTOTYPES,
-        }[family]
-        normalized = text.strip()
-        if not normalized:
-            return {key: 0.0 for key in values}
-        if self._vectorizer is None or self._prototype_matrix is None or cosine_similarity is None:
-            return {key: 0.0 for key in values}
-        try:
-            q = self._vectorizer.transform([normalized])
-            indices = [
-                i for i, (group, _) in enumerate(self._prototype_keys)
-                if group == family
-            ]
-            if not indices:
-                return {key: 0.0 for key in values}
-            sims = cosine_similarity(q, self._prototype_matrix[indices])[0]
-            return {
-                key: float(max(0.0, min(1.0, score)))
-                for (_, key), score in zip(
-                    [self._prototype_keys[i] for i in indices], sims
-                )
-            }
-        except Exception:
-            return {key: 0.0 for key in values}
+        """Compatibility view into the canonical matrix measurement.
+
+        No independent vectorizer or interpreter is created here.
+        """
+        measured = self._tfidf_scores(self.normalize(text))
+        return dict(measured.get(family, {}))
 
     @staticmethod
     def _anaphora_features(text: str) -> dict[str, Any]:
@@ -648,6 +724,8 @@ class QuantumInterpretationEngine:
                     out.append((representation, index))
         return out
 
+
+
     def build_scene_state(
         self,
         text: str,
@@ -656,147 +734,113 @@ class QuantumInterpretationEngine:
         previous: dict[str, Any] | None = None,
         profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized = re.sub(r"\s+", " ", str(text or "").strip())
-        answer = re.sub(r"\s+", " ", str(answer or "").strip())
+        normalized = self.normalize(text)
+        answer = self.normalize(answer)
         combined = " ".join(x for x in (normalized, answer) if x)
-        anaphora = self._anaphora_features(normalized)
-        entities = self._entities(normalized)
-
         previous = previous if isinstance(previous, dict) else {}
-        role_scores = self._scores(normalized, "request_role")
-        operation_scores = self._scores(normalized, "operation")
-        # A fresh turn that contains a concrete named subject is semantically
-        # unlikely to be a recall-about-previous-conversation request. Reduce
-        # the recall posterior rather than branching on a word trigger.
-        if not previous and entities and "recall" in role_scores:
-            role_scores["recall"] *= 0.30
-        representation_scores = self._scores(normalized, "scene_representation")
+        profile = profile or self.measure(normalized)
 
-        role = max(role_scores, key=role_scores.get, default="explanation")
-        role_conf = float(role_scores.get(role, 0.0))
-        operation = max(operation_scores, key=operation_scores.get, default="")
-        operation_conf = float(operation_scores.get(operation, 0.0))
-        if operation_conf < 0.18:
-            operation = ""
-        rep = max(representation_scores, key=representation_scores.get, default="text")
-        rep_conf = float(representation_scores.get(rep, 0.0))
+        role_scores = profile.get("request_role_scores", {})
+        operation_scores = profile.get("operation_scores", {})
 
-        mentions = self._representation_mentions(normalized)
-        representation_roles = []
-        if mentions:
-            # Position is interpreted as syntactic evidence. For a proposal/
-            # explanation request, an earlier artifact mention is normally the
-            # requested object while a later mention often describes its purpose.
-            first_index = min(index for _, index in mentions)
-            token_count = max(1, len(normalized.split()))
-            for name, index in mentions:
-                proximity = 1.0 - min(1.0, index / max(1.0, token_count))
-                role_score = 0.55 * float(representation_scores.get(name, 0.0)) + 0.45 * proximity
-                representation_roles.append({
-                    "representation": name,
-                    "position": index,
-                    "request_role_score": round(role_score, 6),
-                })
-            representation_roles.sort(key=lambda item: item["request_role_score"], reverse=True)
+        def best(values: dict[str, float], default: str = ""):
+            ordered = sorted(values.items(), key=lambda x: x[1], reverse=True)
+            if not ordered:
+                return default, 0.0
+            return ordered[0][0], float(ordered[0][1])
 
-        requested_representation = "text"
-        explicit_representation = False
-        if representation_roles:
-            candidate = representation_roles[0]["representation"]
-            if role in {"proposal", "explanation"}:
-                requested_representation = candidate
-                explicit_representation = True
-            elif role in {"execution", "modification", "comparison", "continuation", "proposal"} and rep_conf >= 0.12:
-                requested_representation = candidate
-                explicit_representation = True
-        elif rep_conf >= 0.22 and rep != "text":
-            requested_representation = rep
-            explicit_representation = True
+        role, role_conf = best(role_scores, "question")
+        operation, operation_conf = best(operation_scores, "")
+        requested_representation = str(
+            profile.get("resolved_representation") or "text"
+        )
+        explicit_representation = bool(
+            profile.get("resolved_representation_locked")
+            and requested_representation != "text"
+        )
 
-        # Role calibration uses whether this is the first scene; no renderer or
-        # provider routing is performed here.
-        if not previous and entities:
-            role_scores["recall"] = float(role_scores.get("recall", 0.0)) * 0.30
-        prev_operation = str(previous.get("operation") or "")
-        prev_representation = str(previous.get("requested_representation") or previous.get("representation") or "")
-        prev_role = str(previous.get("request_role") or "")
-        prev_numbers = list(previous.get("numbers") or [])
+        previous_operation = str(previous.get("operation") or "")
+        previous_representation = str(
+            previous.get("requested_representation")
+            or previous.get("representation")
+            or ""
+        )
+        previous_role = str(previous.get("request_role") or "")
+        previous_numbers = list(previous.get("numbers") or [])
         numbers = self._numbers(normalized)
 
-        short_turn = len(normalized.split()) <= max(6, int(len(str(previous.get("text") or "").split()) * 0.55)) if previous else False
+        short_turn = bool(previous and len(normalized.split()) <= max(
+            6, int(len(str(previous.get("text") or "").split()) * 0.55)
+        ))
         inherited_operation = False
         inherited_representation = False
 
-        can_inherit = bool(
-            previous
-            and short_turn
-            and (
-                role in {"execution", "modification", "continuation"}
-                or role_conf < 0.18
-            )
-        )
-        if can_inherit:
-            if operation_conf < 0.20 and prev_operation:
-                operation = prev_operation
+        if previous and short_turn:
+            if operation_conf < 0.34 and previous_operation:
+                operation = previous_operation
                 operation_conf = max(operation_conf, 0.78)
                 inherited_operation = True
-            if not explicit_representation and prev_representation:
-                requested_representation = prev_representation
-                rep_conf = max(rep_conf, 0.78)
+            if requested_representation == "text" and previous_representation:
+                requested_representation = previous_representation
+                explicit_representation = previous_representation != "text"
                 inherited_representation = True
 
         operation_output = SCENE_OPERATION_OUTPUT.get(operation)
-        if role in {"execution", "modification"} and operation_output:
+        if (
+            operation_output
+            and role in {"execution", "modification"}
+            and operation_conf >= 0.40
+        ):
             requested_representation = operation_output
             explicit_representation = True
-            rep_conf = max(rep_conf, operation_conf)
 
-        parameter_change = bool(previous and prev_numbers and numbers and prev_numbers != numbers)
+        parameter_change = bool(
+            previous and previous_numbers and numbers and previous_numbers != numbers
+        )
+
+        # A short parameter update normally asks for the updated result of the
+        # active operation. It does not independently request a new renderer.
+        if parameter_change and role in {"modification", "correction", "question", "continuation"}:
+            if not profile.get("explicit_representations"):
+                requested_representation = "text"
+                explicit_representation = False
 
         phase = role
         if inherited_operation or inherited_representation:
             phase = "continuation" if role not in {"modification", "comparison"} else role
-        if role == "execution":
-            phase = "execution"
-        elif role == "proposal":
-            phase = "proposal"
-        elif role == "explanation":
-            phase = "explanation"
-        elif role == "modification":
-            phase = "modification"
-        elif role == "comparison":
-            phase = "comparison"
-        elif role == "recall":
-            phase = "recall"
 
-        semantic_identity = {
+        return {
             "request_role": role,
             "request_role_confidence": round(role_conf, 6),
             "task_phase": phase,
             "operation": operation,
             "operation_confidence": round(operation_conf, 6),
             "requested_representation": requested_representation or "text",
-            "representation_confidence": round(rep_conf, 6),
+            "representation_confidence": round(
+                float(profile.get("resolved_representation_confidence", 0.0)), 6
+            ),
             "explicit_representation": explicit_representation,
             "inherited_operation": inherited_operation,
             "inherited_representation": inherited_representation,
-            "previous_operation": prev_operation,
-            "previous_representation": prev_representation,
-            "previous_request_role": prev_role,
+            "previous_operation": previous_operation,
+            "previous_representation": previous_representation,
+            "previous_request_role": previous_role,
             "numbers": numbers,
-            "previous_numbers": prev_numbers,
+            "previous_numbers": previous_numbers,
             "parameter_change": parameter_change,
-            "anaphora": anaphora,
-            "entities": entities,
-            "representation_roles": representation_roles[:8],
+            "anaphora": self._anaphora_features(normalized),
+            "entities": self._entities(normalized),
             "text": normalized,
             "answer": answer,
             "combined": combined,
+            "dialogue_profile": dict(profile.get("dialogue_scores", {})),
+            "representation_profile": dict(profile.get("representation_scores", {})),
+            "representation_measurements": dict(profile.get("representation_measurements", {})),
+            "domain_profile": dict(profile.get("domain_scores", {})),
+            "capability_profile": dict(profile.get("capability_scores", {})),
+            "scene_matrix": dict(profile.get("scene_matrix", {})),
             "source": "quantum_interpretation_engine",
         }
-        return semantic_identity
-
-    # ----------------------------- matrix core ----------------------------
 
     def _feature_vector(
         self,
@@ -893,6 +937,101 @@ class QuantumInterpretationEngine:
 
     # ------------------------------ measurement ---------------------------
 
+
+
+    def _resolve_production_representation(
+        self,
+        representation_scores: dict[str, float],
+        *,
+        request_role: str,
+        operation: str,
+        operation_confidence: float,
+        operation_margin: float,
+        context: dict[str, float],
+        previous_representation: str = "",
+        parameter_change: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve one production representation from the single semantic field."""
+        candidates = {
+            key: float(value)
+            for key, value in representation_scores.items()
+            if key in SCENE_MATRIX_LABELS
+        }
+        scored: dict[str, float] = {}
+        op_matrix = OPERATION_REPRESENTATION_MATRIX.get(operation, {})
+        role_matrix = ROLE_REPRESENTATION_MATRIX.get(request_role, {})
+        phase_matrix = ROLE_OPERATION_REPRESENTATION_MATRIX.get(
+            (request_role, operation), {}
+        )
+
+        if request_role in {"proposal", "explanation", "question"}:
+            operation_weight = 0.11
+        elif request_role in {"execution", "modification", "continuation"}:
+            operation_weight = 0.30
+        else:
+            operation_weight = 0.18
+
+        for rep, evidence in candidates.items():
+            score = 0.46 * evidence
+            score += operation_weight * float(op_matrix.get(rep, 0.0)) * min(
+                1.0, operation_confidence * 1.20
+            )
+            score += 0.20 * float(role_matrix.get(rep, 0.0))
+            score += 0.28 * float(phase_matrix.get(rep, 0.0))
+            score += 0.03 * float(context.get("active_goal", 0.0) or 0.0)
+            score += 0.03 * float(context.get("active_topic", 0.0) or 0.0)
+            if previous_representation == rep:
+                score += 0.08
+            scored[rep] = score
+
+        if not scored:
+            return {
+                "representation": "text",
+                "confidence": 0.0,
+                "margin": 0.0,
+                "scores": {"text": 1.0},
+                "evidence": {},
+                "locked": False,
+            }
+
+        ranked = sorted(scored.items(), key=lambda x: x[1], reverse=True)
+        best, best_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        margin = best_score - second_score
+
+        inherited = bool(previous_representation and best == previous_representation)
+        lock = bool(
+            best != "text"
+            and best_score >= 0.34
+            and margin >= 0.08
+            and (
+                operation_confidence >= 0.30
+                or request_role in {"proposal", "execution", "modification", "explanation"}
+                or inherited
+            )
+        )
+
+        if request_role in {"question", "explanation"} and best != "formula":
+            lock = False
+        if request_role == "explanation" and best == "formula":
+            lock = bool(
+                best_score >= 0.42
+                and margin >= 0.10
+                and float(op_matrix.get("formula", 0.0)) >= 0.85
+            )
+
+        return {
+            "representation": best if lock else "text",
+            "confidence": round(float(best_score), 6),
+            "margin": round(float(margin), 6),
+            "scores": {
+                k: round(float(v), 6)
+                for k, v in sorted(scored.items(), key=lambda x: x[1], reverse=True)
+            },
+            "evidence": dict(representation_scores),
+            "locked": lock,
+        }
+
     def measure(
         self,
         text: str,
@@ -905,13 +1044,17 @@ class QuantumInterpretationEngine:
     ) -> dict[str, Any]:
         text = self.normalize(text)
         key = (
-            text, self.normalize(previous_assistant), self.normalize(previous_user),
-            self.normalize(active_topic), self.normalize(active_goal),
+            text,
+            self.normalize(previous_assistant),
+            self.normalize(previous_user),
+            self.normalize(active_topic),
+            self.normalize(active_goal),
             tuple(sorted((modalities or {}).keys())),
         )
         with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
 
         families = self._tfidf_scores(text)
         context = self._context_scores(
@@ -919,108 +1062,104 @@ class QuantumInterpretationEngine:
         )
 
         dialogue = families["dialogue"]
-        representation = families["representation"]
+        representation_measurements = families["representation"]
         domain = families["domain"]
         capability = families["capability"]
+        request_role = families["request_role"]
+        operation = families["operation"]
 
-        dialogue_ranked = sorted(dialogue.items(), key=lambda x: x[1], reverse=True)
-        best_dialogue, dialogue_score = dialogue_ranked[0]
-        margin = dialogue_score - (dialogue_ranked[1][1] if len(dialogue_ranked) > 1 else 0.0)
+        def ranked(values: dict[str, float]):
+            ordered = sorted(values.items(), key=lambda x: x[1], reverse=True)
+            best = ordered[0][0] if ordered else ""
+            score = float(ordered[0][1]) if ordered else 0.0
+            margin = score - (float(ordered[1][1]) if len(ordered) > 1 else 0.0)
+            return ordered, best, score, margin
 
-        rep_ranked = sorted(representation.items(), key=lambda x: x[1], reverse=True)
-        best_representation, rep_score = rep_ranked[0]
-        rep_margin = rep_score - (rep_ranked[1][1] if len(rep_ranked) > 1 else 0.0)
+        dialogue_ranked, best_dialogue, dialogue_score, dialogue_margin = ranked(dialogue)
+        role_ranked, best_role, role_score, role_margin = ranked(request_role)
+        op_ranked, best_operation, operation_score, operation_margin = ranked(operation)
+        _, best_representation_measurement, rep_score, rep_margin = ranked(representation_measurements)
 
-        # Representation is selected from a compatibility matrix rather than
-        # lexical triggers. A representation must have enough semantic mass
-        # AND a compatible dialogue/domain/capability signal. This prevents a
-        # weak gallery/table prototype from winning an ordinary numeric or
-        # memory question.
-        text_rep_score = float(representation.get("text", 0.0) or 0.0)
-        domain_scores = domain
-        capability_scores = capability
-        best_dialogue = str(best_dialogue or "")
-
-        def compatible(name: str) -> bool:
-            if name == "formula":
-                return (float(domain_scores.get("physics", 0.0)) >= 0.005
-                        or float(domain_scores.get("chemistry", 0.0)) >= 0.005
-                        or float(capability_scores.get("information", 0.0)) >= 0.04)
-            if name == "link":
-                return (best_dialogue == "reference"
-                        or float(capability_scores.get("web", 0.0)) >= 0.02)
-            if name == "table":
-                return (float(capability_scores.get("information", 0.0)) >= 0.04
-                        or float(capability_scores.get("exploration", 0.0)) >= 0.03
-                        or float(domain_scores.get("politics", 0.0)) >= 0.01
-                        or float(domain_scores.get("news", 0.0)) >= 0.01)
-            if name == "graph":
-                return (float(capability_scores.get("exploration", 0.0)) >= 0.03
-                        or float(domain_scores.get("physics", 0.0)) >= 0.02
-                        or float(domain_scores.get("biology", 0.0)) >= 0.02)
-            if name in {"diagram", "gallery", "image"}:
-                return float(capability_scores.get("space", 0.0)) >= 0.03
-            if name == "code":
-                return float(capability_scores.get("code", 0.0)) >= 0.03
-            return False
-
-        effective = {}
-        for name, score in representation.items():
-            if name == "text":
-                continue
-            value = float(score or 0.0)
-            if compatible(name):
-                value += 0.10
-            effective[name] = value
-
-        explicit_representations = [
-            name for name, score in effective.items()
-            if score >= 0.20
-            and score - text_rep_score >= 0.08
-        ]
-        explicit_representations.sort(
-            key=lambda name: effective.get(name, 0.0), reverse=True
+        resolved = self._resolve_production_representation(
+            representation_measurements,
+            request_role=best_role,
+            operation=best_operation,
+            operation_confidence=operation_score,
+            operation_margin=operation_margin,
+            context=context,
+            previous_representation="",
         )
+        production_representation = str(resolved["representation"])
 
+        # Expose one canonical production representation while retaining the
+        # complete matrix under diagnostics for analysis. Downstream renderers
+        # therefore cannot mistake evidence for multiple production commands.
+        canonical_representation_scores = {
+            label: (1.0 if label == production_representation else 0.0)
+            for label in representation_measurements
+        }
         identity_request = (
-            dialogue.get("identity", 0.0) >= 0.12
-            and dialogue.get("identity", 0.0) >= dialogue.get("continuation", 0.0) + 0.03
-            and dialogue.get("identity", 0.0) >= dialogue.get("reference", 0.0) + 0.03
+            best_dialogue == "identity"
+            and dialogue_score >= 0.40
+            and dialogue_margin >= 0.08
         )
         fast_social = (
             best_dialogue in {"identity", "greeting"}
-            and dialogue_score >= 0.12
-            and margin >= 0.035
+            and dialogue_score >= 0.45
+            and dialogue_margin >= 0.10
             and len(text.split()) <= 24
         )
 
+        # Matrix scene remains an evidence diagnostic; it never grants renderer
+        # execution rights.
         scene = self.scene_matrix(
             dialogue=dialogue,
-            representation=representation,
+            representation=canonical_representation_scores,
             domain=domain,
             capability=capability,
             context=context,
             modalities=modalities,
-            explicit_representations=explicit_representations,
+            explicit_representations=(
+                [production_representation]
+                if resolved["locked"] and production_representation != "text"
+                else []
+            ),
         )
 
         profile = {
             "dialogue_scores": dict(dialogue),
             "dialogue_best": best_dialogue,
             "dialogue_confidence": float(dialogue_score),
-            "dialogue_margin": float(margin),
-            "representation_scores": dict(representation),
+            "dialogue_margin": float(dialogue_margin),
+            "representation_scores": canonical_representation_scores,
+            "representation_measurements": dict(representation_measurements),
+            "resolved_representation": production_representation,
+            "resolved_representation_confidence": float(resolved["confidence"]),
+            "resolved_representation_margin": float(resolved["margin"]),
+            "resolved_representation_locked": bool(resolved["locked"]),
             "domain_scores": dict(domain),
             "capability_scores": dict(capability),
             "context_scores": dict(context),
-            "best_representation": best_representation,
-            "best_representation_score": float(rep_score),
-            "representation_margin": float(rep_margin),
-            "explicit_representations": explicit_representations,
+            "best_representation": production_representation,
+            "best_representation_score": float(resolved["confidence"]),
+            "representation_margin": float(resolved["margin"]),
+            "explicit_representations": (
+                [production_representation]
+                if resolved["locked"] and production_representation != "text"
+                else []
+            ),
+            "request_role_scores": dict(request_role),
+            "request_role_best": best_role,
+            "request_role_confidence": float(role_score),
+            "request_role_margin": float(role_margin),
+            "operation_scores": dict(operation),
+            "operation_best": best_operation,
+            "operation_confidence": float(operation_score),
+            "operation_margin": float(operation_margin),
             "identity_request": bool(identity_request),
             "fast_social": bool(fast_social or identity_request),
             "scene_matrix": scene,
-            "source": "quantum_matrix_semantic_measurement",
+            "source": "quantum_interpretation_engine",
         }
 
         with self._lock:
@@ -1028,8 +1167,6 @@ class QuantumInterpretationEngine:
             if len(self._cache) > self._cache_limit:
                 self._cache.pop(next(iter(self._cache)))
         return profile
-
-    # ------------------------------ contracts -----------------------------
 
     def _history(self, history: Any) -> tuple[str, str, Any]:
         turns = history if isinstance(history, list) else []
@@ -1276,7 +1413,7 @@ class QuantumInterpretationEngine:
             profile=profile,
         )
         semantic_identity.update({
-            "version": "QUANTUM-COGNITIVE-SCENE-SEMANTICS-V3",
+            "version": "QUANTUM-INTERPRETATION-MATRIX-V4",
             "text": normalized,
             "answer": answer,
             "combined": combined,
@@ -1307,7 +1444,7 @@ class QuantumInterpretationEngine:
         if not isinstance(current,dict) or not isinstance(previous,dict):
             return {"same_scene":False,"continuation":False,"reference_to_previous":False,
                     "confidence":0.0,"relation":"independent","parameter_change":False,
-                    "state_transfer":{},"engine":"quantum_cognitive_scene_relation"}
+                    "state_transfer":{},"engine":"quantum_interpretation_engine.scene_relation"}
 
         current_text=self.normalize(current.get("combined") or current.get("text"))
         previous_text=self.normalize(previous.get("combined") or previous.get("text"))
@@ -1401,7 +1538,7 @@ class QuantumInterpretationEngine:
                 "task_phase": current.get("task_phase") or previous.get("task_phase"),
                 "entity_continuity": entity_overlap,
             },
-            "engine":"quantum_cognitive_scene_relation",
+            "engine":"quantum_interpretation_engine.scene_relation",
             "decision_owner":DECISION_OWNER,
             "evidence_only":True,
         }
@@ -1506,7 +1643,7 @@ class QuantumInterpretationEngine:
                 "reference_to_previous": bool(previous_assistant),
                 "confidence": max(float(memory_query_score), 0.70 if previous_assistant else 0.0),
                 "relation": "memory_query",
-                "engine": "quantum_scene_relation_engine_v2",
+                "engine": "quantum_interpretation_engine.scene_relation",
                 "decision_owner": DECISION_OWNER,
                 "evidence_only": True,
             }
@@ -1569,7 +1706,7 @@ class QuantumInterpretationEngine:
                 "reference_to_previous": bool(previous_assistant),
                 "confidence": max(float(relation.get("confidence", 0.0) or 0.0), 0.70 if previous_assistant else 0.0),
                 "relation": "memory_query",
-                "engine": "quantum_scene_relation_engine_v2",
+                "engine": "quantum_interpretation_engine.scene_relation",
                 "decision_owner": DECISION_OWNER,
                 "evidence_only": True,
             }
@@ -1702,7 +1839,14 @@ class QuantumInterpretationEngine:
             if str(x).strip()
         ]
         required_representations = list(dict.fromkeys(
-            explicit_required or profile["explicit_representations"]
+            explicit_required
+            if explicit_required
+            else (
+                [str(scene_semantic_state.get("requested_representation")).lower()]
+                if scene_semantic_state.get("explicit_representation")
+                and scene_semantic_state.get("requested_representation") not in {None, "", "text"}
+                else []
+            )
         ))
 
         # The scene-state engine owns the semantic role of a representation.
@@ -1763,12 +1907,22 @@ class QuantumInterpretationEngine:
         representation_scores = profile["representation_scores"]
         capability = profile["capability_scores"]
 
+        representation_measurements = dict(
+            profile.get("representation_measurements", representation_scores)
+        )
+        canonical_representation = str(
+            scene_semantic_state.get("requested_representation") or "text"
+        )
         representation_evidence = [
-            SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
-            for k, v in sorted(
-                representation_scores.items(), key=lambda x: x[1], reverse=True
-            )
-            if float(v) >= 0.20
+            SemanticEvidence(
+                canonical_representation,
+                1.0,
+                "quantum_matrix_resolved",
+                details={
+                    "production": True,
+                    "matrix_measurements": representation_measurements,
+                },
+            ).as_dict()
         ]
         dialogue_contract = {
             "dialog_act": dialogue["label"],
@@ -1808,7 +1962,7 @@ class QuantumInterpretationEngine:
             "domain_confidence": {
                 k: round(float(v), 4) for k, v in profile["domain_scores"].items()
             },
-            "candidate_representations": profile["explicit_representations"],
+            "candidate_representations": list(required_representations),
             "required_representations": required_representations,
             "memory_query": bool(memory_query),
             "representation_evidence": [
@@ -1816,14 +1970,23 @@ class QuantumInterpretationEngine:
                 for k, v in sorted(
                     representation_scores.items(), key=lambda x: x[1], reverse=True
                 )
-                if float(v) >= 0.20
+                if float(v) >= 0.02
             ],
+            "production_representation": (
+                required_representations[0]
+                if len(required_representations) == 1
+                else "text"
+            ),
+            "production_representation_locked": bool(
+                len(required_representations) == 1
+            ),
             "semantic_profile": {
                 "active_topic": active_topic,
                 "active_goal": active_goal,
                 "previous_april_turn": last_assistant,
                 "dialogue_history": history[-8:],
-                "representation_scores": dict(representation_scores),
+                "representation_scores": dict(profile.get("representation_scores", {})),
+                "representation_measurements": dict(profile.get("representation_measurements", {})),
                 "domain_scores": dict(profile["domain_scores"]),
                 "capability_scores": dict(capability),
                 "context_scores": dict(profile["context_scores"]),
@@ -1936,7 +2099,11 @@ class QuantumInterpretationEngine:
                 "engine": "quantum_interpretation_engine",
             },
             "quantum_representation_measurement": {
-                "measurements": representation_evidence,
+                "resolved": canonical_representation,
+                "production": True,
+                "measurements": dict(
+                    profile.get("representation_measurements", representation_scores)
+                ),
                 "scene_matrix": matrix,
             },
             "evidence": {
