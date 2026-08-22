@@ -787,6 +787,9 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
                 "summary": resolved_scene.get("summary"),
                 "render_block_types": resolved_scene.get("render_block_types"),
                 "presentation_types": resolved_scene.get("presentation_types"),
+                "render_blocks": resolved_scene.get("render_blocks") or [],
+                "presentation_signals": resolved_scene.get("presentation_signals") or [],
+                "semantic_state": resolved_scene.get("semantic_state") or {},
                 "confidence": resolved_scene.get("confidence"),
             },
             max_items=10, max_keys=12,
@@ -1026,6 +1029,32 @@ def _unwrap_model_answer(value: Any) -> str:
     return text
 
 
+def _decode_json_envelope(value: Any) -> Any:
+    """
+    Decode a machine envelope only when the value is itself serialized JSON.
+    This is transport normalization, not semantic routing: natural prose is
+    returned unchanged and no representation is inferred from its wording.
+    """
+    if not isinstance(value, str):
+        return value
+    text = normalize_response_text(value)
+    if not text:
+        return value
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+            if text.lower().startswith("json\n"):
+                text = text[5:].lstrip("\n")
+    if not text.startswith(("{", "[")):
+        return value
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return value
+    return parsed
+
+
 def _sanitize_render_block_texts(blocks: Any, answer: str) -> list:
     sanitized = []
     for block in list(blocks or []):
@@ -1049,6 +1078,29 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         return raw_text
 
     parsed = raw_text if isinstance(raw_text, dict) else _parse_provider_json(raw_text)
+
+    # The canonical model contract may itself be serialized inside answer/content.
+    # Decode that envelope before selecting render_blocks so structured table,
+    # graph, formula, link, gallery and diagram payloads cannot be trapped inside
+    # a human-text field.
+    for envelope_key in ("answer", "content", "response", "payload", "data"):
+        nested = _decode_json_envelope(parsed.get(envelope_key))
+        if isinstance(nested, dict) and any(
+            key in nested
+            for key in ("answer", "content", "summary", "render_blocks", "artifacts", "scene")
+        ):
+            merged = dict(parsed)
+            merged.update(nested)
+            for key in (
+                "answer", "content", "summary", "render_blocks", "artifacts",
+                "scene", "scene_plan", "render_priority", "metadata",
+                "renderer_state", "presentation",
+            ):
+                if key in nested:
+                    merged[key] = nested[key]
+            parsed = merged
+            break
+
     answer = _unwrap_model_answer(
         parsed.get("answer") or parsed.get("content") or parsed.get("response") or ""
     )
