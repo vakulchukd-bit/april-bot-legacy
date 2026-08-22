@@ -1143,13 +1143,22 @@ class QuantumInterpretationEngine:
         )
         production_representation = str(resolved["representation"])
 
-        # Expose one canonical production representation while retaining the
-        # complete matrix under diagnostics for analysis. Downstream renderers
-        # therefore cannot mistake evidence for multiple production commands.
-        canonical_representation_scores = {
+        # Preserve the complete presentation evidence for the downstream
+        # presentation/formatting path.  The selected production representation
+        # remains separate, so rich signals (formula/markdown/etc.) can travel
+        # with the response without turning every measured representation into
+        # an execution command.
+        presentation_signal_scores = {
+            label: float(score)
+            for label, score in representation_measurements.items()
+        }
+        production_representation_scores = {
             label: (1.0 if label == production_representation else 0.0)
             for label in representation_measurements
         }
+        # Backward-compatible field: downstream components that consume
+        # representation_scores must still see the full semantic evidence.
+        canonical_representation_scores = dict(presentation_signal_scores)
         identity_request = (
             best_dialogue == "identity"
             and dialogue_score >= 0.40
@@ -1166,7 +1175,7 @@ class QuantumInterpretationEngine:
         # execution rights.
         scene = self.scene_matrix(
             dialogue=dialogue,
-            representation=canonical_representation_scores,
+            representation=production_representation_scores,
             domain=domain,
             capability=capability,
             context=context,
@@ -1184,6 +1193,8 @@ class QuantumInterpretationEngine:
             "dialogue_confidence": float(dialogue_score),
             "dialogue_margin": float(dialogue_margin),
             "representation_scores": canonical_representation_scores,
+            "presentation_signal_scores": dict(presentation_signal_scores),
+            "production_representation_scores": dict(production_representation_scores),
             "representation_measurements": dict(representation_measurements),
             "resolved_representation": production_representation,
             "resolved_representation_confidence": float(resolved["confidence"]),
@@ -2160,7 +2171,7 @@ class QuantumInterpretationEngine:
             "production_representation": (
                 required_representations[0]
                 if len(required_representations) == 1
-                else "text"
+                else canonical_representation
             ),
             "production_representation_locked": bool(
                 len(required_representations) == 1
@@ -2171,6 +2182,8 @@ class QuantumInterpretationEngine:
                 "previous_april_turn": last_assistant,
                 "dialogue_history": history[-8:],
                 "representation_scores": dict(profile.get("representation_scores", {})),
+                "presentation_signal_scores": dict(profile.get("presentation_signal_scores", {})),
+                "production_representation_scores": dict(profile.get("production_representation_scores", {})),
                 "representation_measurements": dict(profile.get("representation_measurements", {})),
                 "domain_scores": dict(profile["domain_scores"]),
                 "capability_scores": dict(capability),
@@ -2279,9 +2292,38 @@ class QuantumInterpretationEngine:
                 "evidence_only": True,
                 "engine": "quantum_interpretation_engine",
             },
+            "presentation_signals": {
+                "engine": "quantum_interpretation_engine",
+                "signals": [
+                    {
+                        "type": label,
+                        "score": float(score),
+                        "selected": bool(label == canonical_representation),
+                        "production_allowed": bool(label == canonical_representation),
+                        "evidence_only": bool(label != canonical_representation),
+                        "source": "quantum_matrix",
+                    }
+                    for label, score in sorted(
+                        presentation_signal_scores.items(),
+                        key=lambda x: x[1],
+                        reverse=True,
+                    )
+                ],
+                "resolved": canonical_representation,
+                "production_representation": canonical_representation,
+                "production_locked": bool(
+                    scene_semantic_state.get("explicit_representation")
+                    or scene_semantic_state.get("inherited_representation")
+                    or required_representations
+                ),
+                "single_route": True,
+                "decision_owner": DECISION_OWNER,
+            },
             "quantum_representation_measurement": {
                 "resolved": canonical_representation,
                 "production": True,
+                "signals": dict(presentation_signal_scores),
+                "production_scores": dict(production_representation_scores),
                 "measurements": dict(
                     profile.get("representation_measurements", representation_scores)
                 ),
@@ -2354,6 +2396,15 @@ class QuantumInterpretationEngine:
         )
         result["interpretation_state"]["diagnostics"]["matrix"] = matrix
         result["transport_diagnostics"] = build_transport_diagnostics(result)
+        result["presentation_signal_transport"] = {
+            "source": "quantum_interpretation_engine",
+            "signals": result.get("presentation_signals", {}),
+            "production_representation": result.get("production_representation"),
+            "production_representation_locked": result.get("production_representation_locked"),
+            "evidence_only": True,
+            "single_route": True,
+            "next_node": "existing_presentation_pipeline",
+        }
         result["semantic_engine_diagnostics"] = {
             "engine": "quantum_interpretation_engine",
             "matrix_shape": matrix["matrix_shape"],
