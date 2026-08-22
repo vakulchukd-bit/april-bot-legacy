@@ -109,10 +109,10 @@ SEMANTIC_TURN_PROTOTYPES = {
     "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
     "question": "пользователь задаёт вопрос просит ответ или разъяснение сколько равен вычисли посчитай значение; the user asks a question requiring an answer or calculation",
     "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
-    "continuation": "пользователь хочет продолжить предыдущую тему развить предыдущий ответ; the user wants to continue the preceding task",
-    "reformulation": "пользователь просит переделать переформулировать переработать предыдущий результат; the user asks to rework previous content",
-    "correction": "пользователь исправляет изменяет уточняет предыдущую инструкцию; the user corrects or modifies a previous instruction",
-    "reference": "пользователь ссылается на ранее обсуждённое или созданное; the user refers back to previous material",
+    "continuation": "пользователь продолжает текущую мысль, просит развить, объяснить, проверить, вычислить дальше или изменить уже полученный результат; the user continues the current reasoning thread, asks to explain, verify, calculate further, or modify an existing result",
+    "reformulation": "пользователь просит переработать, развернуть, уточнить, переписать или представить заново уже полученный результат; the user asks to expand, clarify, rewrite, or re-present an existing result",
+    "correction": "пользователь уточняет, исправляет, дополняет или меняет предыдущую инструкцию, ответ или вывод; the user clarifies, corrects, extends, or changes the preceding instruction, answer, or conclusion",
+    "reference": "пользователь обращается к предыдущему ответу, выводу, результату, объекту, сцене или уже созданному материалу и хочет продолжить работу с ним; the user refers to a previous answer, result, object, scene, or produced material and wants to continue working with it",
     "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
@@ -125,10 +125,10 @@ REPRESENTATION_HYPOTHESES = {
     "text": "обычный текстовый ответ объяснение рассказ описание; the user wants a normal textual answer",
     "table": "таблица таблицу структурированные строки колонки сравнение параметров; information represented as a table",
     "graph": "график графика диаграмма данных визуализация числовых значений; information represented as a graph or chart",
-    "diagram": "схема диаграмма связей блоков структура процесса; a schematic or diagram with connected elements",
-    "formula": "формула уравнение математическое выражение математическая запись; a mathematical formula or notation",
-    "image": "изображение картинка рисунок иллюстрация создать изображение; an image or generated picture",
-    "gallery": "несколько изображений подборка галерея сравнение изображений; multiple images or a gallery",
+    "diagram": "схема соединение элементов блоки связи последовательность процесса чертёж структурная диаграмма подключение проводов источник питания выключатель лампочка электрическая цепь; a schematic, wiring diagram, connected structure, electrical circuit, or process diagram",
+    "formula": "формула уравнение математическое выражение математическая запись равенство обозначение величин степени корни E mc2; a mathematical formula, equation, notation, or quantitative relationship",
+    "image": "изображение картинка рисунок иллюстрация создать изображение фотография; an image or generated picture",
+    "gallery": "несколько изображений много картинок подборка галерея набор карточек сравнение изображений; multiple images, a gallery, or an image collection",
     "code": "код программный код функция программа реализация python; executable source code or software implementation",
     "link": "ссылка адрес сайта веб ресурс открыть ресурс интернет источник; a link or web resource",
 }
@@ -288,20 +288,28 @@ class QuantumInterpretationEngine:
         self, text: str, previous_assistant: str, previous_user: str, active_topic: str, active_goal: str
     ) -> dict[str, float]:
         if not text:
-            return {"previous_assistant": 0.0, "previous_user": 0.0, "active_topic": 0.0, "active_goal": 0.0}
-        scores = {"previous_assistant": 0.0, "previous_user": 0.0, "active_topic": 0.0, "active_goal": 0.0}
-        query = set(self._tokens(text))
+            return {
+                "previous_assistant": 0.0,
+                "previous_user": 0.0,
+                "active_topic": 0.0,
+                "active_goal": 0.0,
+            }
+
+        scores = {
+            "previous_assistant": 0.0,
+            "previous_user": 0.0,
+            "active_topic": 0.0,
+            "active_goal": 0.0,
+        }
         for key, value in (
             ("previous_assistant", previous_assistant),
             ("previous_user", previous_user),
             ("active_topic", active_topic),
             ("active_goal", active_goal),
         ):
-            words = set(self._tokens(self.normalize(value)))
-            scores[key] = (
-                len(query & words) / max(1.0, min(len(query), len(words)))
-                if query and words else 0.0
-            )
+            if not self.normalize(value):
+                continue
+            scores[key] = float(self.similarity(text, value).get("score", 0.0))
         return scores
 
     def _linguistic(self, text: str) -> dict[str, Any]:
@@ -465,9 +473,9 @@ class QuantumInterpretationEngine:
 
         def compatible(name: str) -> bool:
             if name == "formula":
-                return (float(domain_scores.get("physics", 0.0)) >= 0.005
-                        or float(domain_scores.get("chemistry", 0.0)) >= 0.005
-                        or float(capability_scores.get("information", 0.0)) >= 0.04)
+                return (float(domain_scores.get("physics", 0.0)) >= 0.0025
+                        or float(domain_scores.get("chemistry", 0.0)) >= 0.0025
+                        or float(capability_scores.get("information", 0.0)) >= 0.03)
             if name == "link":
                 return (best_dialogue == "reference"
                         or float(capability_scores.get("web", 0.0)) >= 0.02)
@@ -480,8 +488,21 @@ class QuantumInterpretationEngine:
                 return (float(capability_scores.get("exploration", 0.0)) >= 0.03
                         or float(domain_scores.get("physics", 0.0)) >= 0.02
                         or float(domain_scores.get("biology", 0.0)) >= 0.02)
-            if name in {"diagram", "gallery", "image"}:
-                return float(capability_scores.get("space", 0.0)) >= 0.03
+            if name == "diagram":
+                return (
+                    float(capability_scores.get("space", 0.0)) >= 0.03
+                    or float(domain_scores.get("engineering", 0.0)) >= 0.005
+                    or float(domain_scores.get("physics", 0.0)) >= 0.005
+                )
+            if name in {"gallery", "image"}:
+                return (
+                    float(capability_scores.get("space", 0.0)) >= 0.03
+                    or float(representation.get(name, 0.0) or 0.0) >= 0.30
+                    or (
+                        best_dialogue in {"request", "reformulation"}
+                        and float(representation.get(name, 0.0) or 0.0) >= 0.20
+                    )
+                )
             if name == "code":
                 return float(capability_scores.get("code", 0.0)) >= 0.03
             return False
@@ -491,8 +512,47 @@ class QuantumInterpretationEngine:
             if name == "text":
                 continue
             value = float(score or 0.0)
-            if compatible(name):
-                value += 0.10
+            if not compatible(name):
+                # Structured representations are evidence only until the
+                # semantic compatibility matrix validates them. Incompatible
+                # low-level prototype noise must not leak into Web rendering.
+                effective[name] = 0.0
+                continue
+            value += 0.10
+
+            # Table selection is exclusive against weak media companions unless
+            # the media signal independently dominates the table signal. This
+            # keeps a request for a table from becoming table+gallery+image.
+            if name in {"gallery", "image"}:
+                table_score = float(representation.get("table", 0.0) or 0.0)
+                if table_score >= 0.20 and table_score >= value - 0.02:
+                    value = min(value, 0.12)
+
+                image_score = float(representation.get("image", 0.0) or 0.0)
+                gallery_score = float(representation.get("gallery", 0.0) or 0.0)
+                if image_score >= 0.20 and image_score >= gallery_score + 0.04 and name == "gallery":
+                    value = 0.0
+                if gallery_score >= 0.30 and gallery_score >= image_score + 0.04 and name == "image":
+                    value = 0.0
+
+            if name == "diagram":
+                table_score = float(representation.get("table", 0.0) or 0.0)
+                diagram_score = float(representation.get("diagram", 0.0) or 0.0)
+                if table_score >= 0.20 and table_score >= diagram_score + 0.05:
+                    value = 0.0
+
+            if name == "link":
+                dominant_structured = max(
+                    float(representation.get("table", 0.0) or 0.0),
+                    float(representation.get("graph", 0.0) or 0.0),
+                    float(representation.get("diagram", 0.0) or 0.0),
+                    float(representation.get("formula", 0.0) or 0.0),
+                    float(representation.get("image", 0.0) or 0.0),
+                    float(representation.get("gallery", 0.0) or 0.0),
+                )
+                if dominant_structured >= 0.20 and dominant_structured >= float(representation.get("link", 0.0) or 0.0) + 0.05:
+                    value = 0.0
+
             effective[name] = value
 
         explicit_representations = [
@@ -660,9 +720,36 @@ class QuantumInterpretationEngine:
         }
 
     def similarity(self, text_a: str, text_b: str) -> dict[str, Any]:
-        a, b = set(self._tokens(self.normalize(text_a))), set(self._tokens(self.normalize(text_b)))
+        left = self.normalize(text_a)
+        right = self.normalize(text_b)
+        if not left or not right:
+            return {"score": 0.0, "source": "quantum_matrix_tfidf", "measured": False, "cached": False}
+
+        # Use the engine's already-compiled semantic space. This keeps scene
+        # relation decisions inside the existing interpretation engine instead
+        # of falling back to keyword/token matching.
+        if self._vectorizer is not None and cosine_similarity is not None:
+            try:
+                vectors = self._vectorizer.transform([left, right])
+                score = float(cosine_similarity(vectors[0], vectors[1])[0][0])
+                return {
+                    "score": max(0.0, min(1.0, score)),
+                    "source": "quantum_matrix_tfidf",
+                    "measured": True,
+                    "cached": False,
+                }
+            except Exception:
+                pass
+
+        a = set(self._tokens(left))
+        b = set(self._tokens(right))
         score = len(a & b) / max(1.0, min(len(a), len(b))) if a and b else 0.0
-        return {"score": float(score), "source": "quantum_matrix", "measured": bool(a and b), "cached": False}
+        return {
+            "score": float(score),
+            "source": "quantum_matrix_token_fallback",
+            "measured": bool(a and b),
+            "cached": False,
+        }
 
     def similarities(self, text: str, candidates: Sequence[str]) -> dict[str, float]:
         return {self.normalize(c): self.similarity(text, c)["score"] for c in candidates if self.normalize(c)}
@@ -1102,10 +1189,11 @@ class QuantumInterpretationEngine:
 
         # Structural scene relation: when a current scene exists and the turn
         # is a short dependent request/question without strong new-topic
-        # evidence, interpret it as a request about the current scene.  This is
-        # semantic fusion of dialogue/context evidence, not phrase triggering.
+        # evidence, interpret it as a request about the current scene. This is
+        # semantic fusion of the active-scene relation, dialogue relation and
+        # representation compatibility; it never matches fixed phrases.
         topic_shift_evidence = False
-        if current_scene_exists and last_assistant and not memory_query:
+        if current_scene_exists and last_assistant:
             token_count = len(self._tokens(text))
             current_query_context = self._context_scores(
                 text,
@@ -1114,29 +1202,100 @@ class QuantumInterpretationEngine:
                 active_topic=active_topic,
                 active_goal=active_goal,
             )
+
+            dialogue_scores = profile.get("dialogue_scores", {}) or {}
+            dialogue_relation_score = max(
+                float(dialogue_scores.get("continuation", 0.0) or 0.0),
+                float(dialogue_scores.get("reference", 0.0) or 0.0),
+                float(dialogue_scores.get("reformulation", 0.0) or 0.0),
+                float(dialogue_scores.get("correction", 0.0) or 0.0),
+                float(dialogue_scores.get("question", 0.0) or 0.0),
+                float(dialogue_scores.get("request", 0.0) or 0.0),
+                float(dialogue_scores.get("affirmation", 0.0) or 0.0),
+                float(dialogue_scores.get("rejection", 0.0) or 0.0),
+            )
             dependent_score = max(
-                dialogue["continuation_score"],
-                dialogue["reference_score"],
+                dialogue_relation_score,
+                current_query_context.get("previous_assistant", 0.0),
+                current_query_context.get("previous_user", 0.0),
                 current_query_context.get("active_topic", 0.0),
                 current_query_context.get("active_goal", 0.0),
             )
-            # Structural continuation: a short dependent turn with some
-            # relationship evidence can continue the active scene even when
-            # there is little literal overlap.
-            if token_count <= 18 and dependent_score >= 0.20:
+
+            scene_similarity_to_answer = float(
+                self.similarity(text, last_assistant).get("score", 0.0)
+            )
+            scene_relation_score = max(
+                float(current_scene_similarity or 0.0),
+                float(current_query_context.get("previous_assistant", 0.0) or 0.0),
+                float(current_query_context.get("previous_user", 0.0) or 0.0),
+                float(current_query_context.get("active_topic", 0.0) or 0.0),
+                float(current_query_context.get("active_goal", 0.0) or 0.0),
+                scene_similarity_to_answer,
+                float(dialogue_scores.get("reference", 0.0) or 0.0),
+                float(dialogue_scores.get("continuation", 0.0) or 0.0),
+                float(dialogue_scores.get("reformulation", 0.0) or 0.0),
+                float(dialogue_scores.get("correction", 0.0) or 0.0),
+                float(dialogue_scores.get("affirmation", 0.0) or 0.0),
+                float(dialogue_scores.get("rejection", 0.0) or 0.0),
+            )
+
+            # A structured representation mismatch is evidence against reusing
+            # the active scene unless the dialogue relation itself is strong
+            # enough to indicate an intentional transformation of that scene.
+            current_scene_obj = state.get("current_visual_scene") or state.get("active_visual_scene") or {}
+            active_representation_types = set()
+            if isinstance(current_scene_obj, dict):
+                for value in (
+                    current_scene_obj.get("render_block_types") or [],
+                    current_scene_obj.get("presentation_types") or [],
+                ):
+                    if isinstance(value, (list, tuple, set)):
+                        active_representation_types.update(
+                            str(x).strip().lower() for x in value if str(x).strip()
+                        )
+
+            explicit_current = set(str(x).strip().lower() for x in required_representations if str(x).strip())
+            representation_conflict = False
+            if explicit_current and active_representation_types:
+                structural_active = {
+                    x for x in active_representation_types
+                    if x not in {"text", "markdown", "mixed", "mcdowell", "katex"}
+                }
+                structural_current = {
+                    x for x in explicit_current
+                    if x not in {"text", "markdown", "mixed"}
+                }
+                if structural_active and structural_current and structural_active.isdisjoint(structural_current):
+                    representation_conflict = True
+
+            # The relation engine may continue a scene even when the next turn
+            # changes representation, but only when the measured dialogue
+            # dependency is strong enough. Weak unrelated requests stay new.
+            required_relation_anchor = 0.05 if memory_query else 0.04
+            required_dependency = 0.05 if memory_query else 0.08
+            relation_ready = (
+                dependent_score >= required_dependency
+                and scene_relation_score >= required_relation_anchor
+            )
+            if representation_conflict and dependent_score < 0.20:
+                relation_ready = False
+
+            if token_count <= 30 and relation_ready:
                 continuation = True
                 reference = True
 
-            # Conversely, a substantive request with strong semantic mismatch
-            # is a new topic. This is a relation decision, not a phrase trigger.
+            # A substantive request with no meaningful scene relation becomes
+            # a new topic. Representation mismatch is already considered above.
             if (
                 not continuation
-                and dialogue["continuation_score"] < 0.20
-                and dialogue["reference_score"] < 0.20
+                and not memory_query
+                and dialogue_relation_score < 0.14
                 and token_count >= 3
-                and current_scene_similarity < 0.08
-                and current_query_context.get("active_topic", 0.0) < 0.08
-                and current_query_context.get("active_goal", 0.0) < 0.08
+                and current_scene_similarity < 0.06
+                and current_query_context.get("previous_assistant", 0.0) < 0.06
+                and current_query_context.get("active_topic", 0.0) < 0.06
+                and current_query_context.get("active_goal", 0.0) < 0.06
             ):
                 topic_shift_evidence = True
 
