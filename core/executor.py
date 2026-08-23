@@ -2341,6 +2341,27 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         visual_reference=visual,
     ) or {}
 
+    # Canonical dynamic-memory evidence is resolved exactly once for this turn,
+    # after interpretation/semantic measurement and before the Quantum Control
+    # Plane is collapsed. It remains evidence only; it does not create a route
+    # or independently decide dialogue state.
+    retrieval_mode = (
+        "memory_query"
+        if _s(interpretation.get("dialog_act")).lower() == "memory_query"
+        else "semantic"
+    )
+    dynamic_memory = query_dynamic_memory(
+        user_id,
+        text,
+        limit=8,
+        retrieval_mode=retrieval_mode,
+    )
+    if not isinstance(dynamic_memory, dict):
+        dynamic_memory = {}
+
+    semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
+    semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
+
     # One authoritative control plane for dialogue, representation, memory relation,
     # capability delegation, and single-route ownership. Individual engines remain
     # evidence sources; downstream code consumes this collapsed state.
@@ -2352,6 +2373,13 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         state=state,
         dynamic_memory=dynamic_memory,
     )
+    print("🧠 QUANTUM MEMORY MATRIX:", {
+        "window": dynamic_memory.get("window_days"),
+        "matches": len(dynamic_memory.get("matches", []) or []),
+        "matrix_version": dynamic_memory.get("matrix_version"),
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "memory_role": "evidence_only",
+    })
     state["_turn_dialogue_relation"] = {
         "relation": _s(control_plane.get("relation")),
         "scene_id": _s(_as_dict(control_plane.get("resolved_scene")).get("scene_id")),
