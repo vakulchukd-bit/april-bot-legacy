@@ -857,128 +857,52 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
     return data
 
 
-def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict) -> MachineRequest:
-    scope = _user_scope(state, state.get("_request_user_id") or state.get("user_id"))
+
+def _build_processor_control_plane(
+    *,
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    state: dict,
+    dynamic_memory: dict | None = None,
+) -> dict:
+    """
+    Build ONE authoritative post-interpretation control plane.
+
+    Authority:
+      dialogue/context -> canonical Interpretation dialogue_contract
+      representation   -> current semantic/decision plan
+      capabilities     -> semantic/cognition union
+      memory           -> already queried dynamic memory
+      presentation     -> produced only after Provider response
+
+    Other engines contribute evidence; this function collapses their compatible
+    signals into one executable state. It does not invent a second route,
+    trigger map, or score-based arbitration.
+    """
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
-    # Visual state is carried as context evidence only. It never triggers routing.
-    if visual and not bool(visual.get("memory_relevant", True)):
-        evidence["visual_present"] = False
+    interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
+    canonical_dialogue = _as_dict(
+        interpretation_packet.get("dialogue_contract")
+        or semantic.get("dialogue_context_field")
+    )
 
     mode = _s(evidence.get("mode")).upper() or "INDEPENDENT"
-    dialogue_state = {
-        "INDEPENDENT": 1.0 if mode == "INDEPENDENT" else 0.0,
-        "NEW_TOPIC": 1.0 if mode == "NEW_TOPIC" else 0.0,
-        "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
-        "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
-        "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
-        "MEMORY_QUERY": 1.0 if mode == "MEMORY_QUERY" else 0.0,
-    }
-    coherence = 1.0
-
-    interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
-    canonical_dialogue = _as_dict(interpretation_packet.get("dialogue_contract"))
+    continuation = bool(evidence.get("continuation"))
+    reference_to_previous = bool(evidence.get("reference_to_previous"))
     context_dependency = bool(evidence.get("context_dependency"))
-    structured_continuity = bool(
-        _as_dict(semantic.get("dialogue_context_field")).get("structured_continuity")
-        or _as_dict(canonical_dialogue).get("structured_continuity")
-    )
 
-    # The canonical semantic dialogue contract is authoritative.
-    if context_dependency:
-        if bool(evidence.get("reference_to_previous")) and structured_continuity:
-            mode = "ARTIFACT_REFERENCE"
-        elif bool(evidence.get("continuation")) or bool(evidence.get("reference_to_previous")):
-            mode = "CONTINUATION"
-        dialogue_state = {
-            "INDEPENDENT": 1.0 if mode == "INDEPENDENT" else 0.0,
-            "NEW_TOPIC": 1.0 if mode == "NEW_TOPIC" else 0.0,
-            "SAME_TOPIC": 1.0 if mode == "SAME_TOPIC" else 0.0,
-            "CONTINUATION": 1.0 if mode == "CONTINUATION" else 0.0,
-            "ARTIFACT_REFERENCE": 1.0 if mode == "ARTIFACT_REFERENCE" else 0.0,
-            "MEMORY_QUERY": 1.0 if mode == "MEMORY_QUERY" else 0.0,
-        }
-        coherence = 1.0
-
-    identity_semantic = bool(semantic.get("identity_request"))
-
-    if mode == "INDEPENDENT":
-        semantic.setdefault("processor_context_decision", {})["inherit_context"] = False
-        semantic.setdefault("processor_context_decision", {})["state_mutation"] = False
-
-        # Independent turns use only the current semantic output plan. Nothing
-        # is suppressed because of a word trigger or a local score threshold.
-        for packet in (semantic, cognition, decision):
-            if isinstance(packet, dict):
-                for key in (
-                    "requested_outputs",
-                    "required_outputs",
-                    "required_artifacts",
-                    "required_representations",
-                    "requested_representations",
-                    "candidate_representations",
-                    "artifact_types",
-                    "render_types",
-                ):
-                    # Remove only stale inherited representation plans. The
-                    # semantic engines will refill current-turn evidence.
-                    packet.pop(key, None)
-
-        if identity_semantic:
-            semantic["representation_constraints"] = {
-                "positive": ["text"],
-                "negative": [],
-                "current_request_authoritative": True,
-            }
-            decision["requested_outputs"] = ["text"]
-
-        if identity_semantic:
-            identity = deepcopy(APRIL_IDENTITY)
-            semantic["assistant_identity"] = identity
-            cognition["assistant_identity"] = identity
-            decision["assistant_identity"] = identity
-            decision["requested_outputs"] = ["text"]
-            decision["preferred_representation"] = "text"
-            decision["representation_authority"] = "text"
-            decision["dialog_act"] = "self_identification"
-
-        visual = {}
-    # Real semantic representation measurement. This is NLI/vector evidence,
-    # never a word-trigger map.
-    representation_measurement = semantic.get("quantum_representation_measurement")
-    if not isinstance(representation_measurement, dict):
-        representation_measurement = QUANTUM_EVIDENCE_FUSION.representations(
-            text=text,
-            context=_s(
-                semantic.get("active_topic")
-                or decision.get("active_topic")
-                or state.get("active_topic")
-            ),
+    resolved_scene = _as_dict(canonical_dialogue.get("resolved_scene"))
+    relation = _s(resolved_scene.get("relation"))
+    if not relation:
+        relation = (
+            "current_scene"
+            if continuation or reference_to_previous
+            else "new_topic"
+            if mode == "NEW_TOPIC"
+            else "independent"
         )
-    semantic["quantum_representation_measurement"] = _quantum_snapshot(
-        representation_measurement
-    )
-
-    # Preserve high-confidence semantic candidates for the processor collapse.
-    measured_labels = representation_measurement.get("nli", {}).get("labels", [])
-    semantic_candidates = [
-        {
-            "type": _s(label).lower(),
-            "source": "quantum_nli",
-        }
-        for label in measured_labels
-        if _s(label)
-    ]
-    semantic["quantum_representation_candidates"] = semantic_candidates
-
-    if not (
-        semantic.get("requested_outputs")
-        or semantic.get("required_outputs")
-        or decision.get("requested_outputs")
-        or decision.get("required_outputs")
-    ):
-        semantic["candidate_representations"] = [
-            item["type"] for item in semantic_candidates
-        ]
 
     outputs = _requested_outputs(
         text,
@@ -987,9 +911,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         decision,
         independent_turn=(mode == "INDEPENDENT"),
     )
-    measured_output, representation_state = _representation_consensus(
+    preferred, representation_state = _representation_consensus(
         outputs, semantic, decision
     )
+    constraints = _representation_constraints(semantic, cognition, decision)
 
     topic = _s(
         canonical_dialogue.get("active_topic")
@@ -1000,44 +925,137 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         or _field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))
     ) or text
 
-    complexity = _complexity(semantic, cognition, decision, text)
-    quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
-    response_budget = _quantum_budget_from_64(quantum_budget_field)
-
-    representation_constraints = _representation_constraints(
-        semantic, cognition, decision
-    )
-    context = _compact_context(text, state, mode, topic, goal)
-    dynamic_memory_evidence = _as_dict(
-        semantic.get("quantum_dynamic_memory_evidence")
-    )
-
-    capabilities = []
-    for src in (semantic, cognition):
+    capabilities: list[str] = []
+    for source in (semantic, cognition):
         for key in ("required_capabilities", "required_domains", "available_tools"):
-            values = src.get(key, []) if isinstance(src, dict) else []
-            if isinstance(values, str):
-                values = [values]
-            for value in values:
+            values = source.get(key, []) if isinstance(source, dict) else []
+            for value in _as_list(values):
                 value = _s(value)
                 if value and value not in capabilities:
                     capabilities.append(value)
 
-    interpretation_packet = semantic.get("quantum_interpretation_evidence", {})
-    interpretation_packet = interpretation_packet if isinstance(interpretation_packet, dict) else {}
-    canonical_dialogue = interpretation_packet.get("dialogue_contract", {})
-    canonical_dialogue = canonical_dialogue if isinstance(canonical_dialogue, dict) else {}
+    control = {
+        "version": "QUANTUM_CONTROL_PLANE_V1",
+        "authority": {
+            "dialogue": "interpretation",
+            "representation": "semantic_decision",
+            "capabilities": "semantic_cognition",
+            "memory": "state_manager",
+            "production": "executor_specialized_engines",
+            "presentation": "executor_presentation_matrix",
+            "rendering": "april_web",
+        },
+        "mode": mode,
+        "relation": relation,
+        "continuation": continuation,
+        "reference_to_previous": reference_to_previous,
+        "context_dependency": context_dependency,
+        "resolved_scene": resolved_scene,
+        "active_topic": topic,
+        "active_goal": goal,
+        "dialogue_evidence": evidence,
+        "requested_outputs": outputs,
+        "preferred_representation": preferred,
+        "representation_state": representation_state,
+        "representation_constraints": constraints,
+        "capabilities": capabilities[:12],
+        "dynamic_memory": dynamic_memory if isinstance(dynamic_memory, dict) else {},
+        "single_route": True,
+        "provider_calls": 1,
+        "triggers": False,
+        "score_routing": False,
+    }
+
+    state["_quantum_control_plane"] = _quantum_snapshot(control)
+    semantic["quantum_control_plane"] = _quantum_snapshot(control)
+    return control
+
+
+def _make_request(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    state: dict,
+    visual: dict,
+    control: dict | None = None,
+) -> MachineRequest:
+    """Create the single canonical MachineRequest from the processor control plane."""
+    scope = _user_scope(state, state.get("_request_user_id") or state.get("user_id"))
+    control = control or _build_processor_control_plane(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        decision=decision,
+        state=state,
+        dynamic_memory=_as_dict(semantic.get("quantum_dynamic_memory_evidence")),
+    )
+
+    evidence = _as_dict(control.get("dialogue_evidence"))
+    mode = _s(control.get("mode")).upper() or "INDEPENDENT"
+    dialogue_state = {
+        name: 1.0 if mode == name else 0.0
+        for name in (
+            "INDEPENDENT",
+            "NEW_TOPIC",
+            "SAME_TOPIC",
+            "CONTINUATION",
+            "ARTIFACT_REFERENCE",
+            "MEMORY_QUERY",
+        )
+    }
+    coherence = 1.0
+
+    dialogue_contract_source = _as_dict(
+        _as_dict(semantic.get("quantum_interpretation_evidence")).get("dialogue_contract")
+    )
     dialogue_contract = {
-        "dialog_act": _s(canonical_dialogue.get("dialog_act") or _field((semantic, decision, cognition), ("dialog_act", "dialogue_act"))) or "statement",
-        "continuation": bool(canonical_dialogue.get("continuation")) or mode == "CONTINUATION",
-        "reference_to_previous": bool(canonical_dialogue.get("reference_to_previous")),
-        "context_dependency": _s(canonical_dialogue.get("context_dependency")) or ("continuation" if mode == "CONTINUATION" else "reference" if mode == "ARTIFACT_REFERENCE" else "independent" if mode == "INDEPENDENT" else "topic"),
-        "reply_to": _s(_field((canonical_dialogue, semantic, decision), ("reply_to", "previous_turn_id"))),
-        "active_goal": _s(canonical_dialogue.get("active_goal")) or goal,
-        "active_topic": _s(canonical_dialogue.get("active_topic")) or topic,
-        "resolved_scene": _as_dict(canonical_dialogue.get("resolved_scene")),
+        "dialog_act": _s(
+            dialogue_contract_source.get("dialog_act")
+            or _field((semantic, decision, cognition), ("dialog_act", "dialogue_act"))
+        ) or "statement",
+        "continuation": bool(control.get("continuation")),
+        "reference_to_previous": bool(control.get("reference_to_previous")),
+        "context_dependency": (
+            _s(dialogue_contract_source.get("context_dependency"))
+            or ("continuation" if mode == "CONTINUATION"
+                else "reference" if mode == "ARTIFACT_REFERENCE"
+                else "independent" if mode == "INDEPENDENT"
+                else "topic")
+        ),
+        "reply_to": _s(
+            _field((dialogue_contract_source, semantic, decision), ("reply_to", "previous_turn_id"))
+        ),
+        "active_goal": _s(dialogue_contract_source.get("active_goal"))
+            or _s(control.get("active_goal")),
+        "active_topic": _s(dialogue_contract_source.get("active_topic"))
+            or _s(control.get("active_topic")),
+        "resolved_scene": _as_dict(dialogue_contract_source.get("resolved_scene")),
         "current_request": _s(text),
     }
+
+    context = _compact_context(
+        text,
+        state,
+        mode,
+        _s(control.get("active_topic")),
+        _s(control.get("active_goal")),
+    )
+
+    dynamic_memory_evidence = _as_dict(control.get("dynamic_memory"))
+    complexity = _complexity(semantic, cognition, decision, text)
+    quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
+    response_budget = _quantum_budget_from_64(quantum_budget_field)
+
+    representation_constraints = _as_dict(control.get("representation_constraints"))
+    requested_outputs = list(control.get("requested_outputs") or ["text"])
+    measured_output = _s(control.get("preferred_representation")) or "text"
+
+    representation_audit = _representation_audit(
+        requested_outputs=requested_outputs,
+        measured_output=measured_output,
+        constraints=representation_constraints,
+    )
 
     request_metadata = {
         "processor_version": PROCESSOR_VERSION,
@@ -1049,6 +1067,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "context_mode": mode,
         "dialogue_coherence": round(coherence, 4),
         "identity_scope": deepcopy(scope),
+        "control_plane_version": control.get("version"),
     }
 
     if isinstance(state, dict):
@@ -1057,16 +1076,12 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         if flow_id:
             request_metadata["flow_id"] = flow_id
 
-    representation_audit = _representation_audit(
-        requested_outputs=outputs,
-        measured_output=measured_output,
-        constraints=representation_constraints,
-    )
-
     request = MachineRequest(
-        goal=goal,
+        goal=_s(control.get("active_goal")) or text,
         intent={
-            "type": _s(semantic.get("intent")) or ("self_identification" if semantic.get("identity_request") else "dialogue"),
+            "type": _s(semantic.get("intent")) or (
+                "self_identification" if semantic.get("identity_request") else "dialogue"
+            ),
             "normalized_text": _s(text),
             "dialogue_state": mode,
             "coherence": round(coherence, 4),
@@ -1076,41 +1091,52 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "current_request": _s(text),
             "dialogue_contract": dialogue_contract,
             "context_mode": mode,
-            "context_dependency": context_dependency,
-            "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
-            "previous_user_turn": _s(canonical_dialogue.get("previous_user_turn")),
-            "previous_april_turn": _s(canonical_dialogue.get("previous_april_turn")),
-            "resolved_scene": _as_dict(canonical_dialogue.get("resolved_scene")),
+            "context_dependency": bool(control.get("context_dependency")),
+            "resolved_request": _s(
+                dialogue_contract_source.get("resolved_request") or text
+            ),
+            "previous_user_turn": _s(dialogue_contract_source.get("previous_user_turn")),
+            "previous_april_turn": _s(dialogue_contract_source.get("previous_april_turn")),
+            "resolved_scene": _as_dict(dialogue_contract_source.get("resolved_scene")),
             **(
                 {
-                    "active_topic": _clip(topic, 300),
-                    "active_goal": _clip(goal, 500),
+                    "active_topic": _clip(_s(control.get("active_topic")), 300),
+                    "active_goal": _clip(_s(control.get("active_goal")), 500),
                 }
                 if mode != "INDEPENDENT"
                 else {}
             ),
             **(
                 {"recent_dialogue": context.get("recent_dialogue", [])}
-                if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"} or context_dependency
+                if mode in {
+                    "CONTINUATION",
+                    "SAME_TOPIC",
+                    "ARTIFACT_REFERENCE",
+                    "MEMORY_QUERY",
+                } or bool(control.get("context_dependency"))
                 else {}
             ),
         },
         memory=(
             {
-                "active_topic": _clip(topic, 300),
-                "active_goal": _clip(goal, 500),
+                "active_topic": _clip(_s(control.get("active_topic")), 300),
+                "active_goal": _clip(_s(control.get("active_goal")), 500),
                 "retrieval_mode": "memory_query" if mode == "MEMORY_QUERY" else "semantic",
                 "dynamic_memory": (
                     dynamic_memory_evidence
-                    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-                    or bool(evidence.get("reference_to_previous"))
+                    if mode in {
+                        "CONTINUATION",
+                        "SAME_TOPIC",
+                        "ARTIFACT_REFERENCE",
+                        "MEMORY_QUERY",
+                    } or bool(control.get("reference_to_previous"))
                     else {"available": bool(dynamic_memory_evidence.get("matches"))}
                 ),
             }
             if mode != "INDEPENDENT"
             else {
-                "active_scene_id": str(
-                    _as_dict(state.get("current_visual_scene")).get("scene_id") or ""
+                "active_scene_id": _s(
+                    _as_dict(state.get("current_visual_scene")).get("scene_id")
                 )
             }
         ),
@@ -1118,10 +1144,10 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict)
             else {}
         ),
-        available_tools=capabilities[:12],
-        requested_outputs=outputs,
-        required_competencies=capabilities[:12],
-        required_artifacts=outputs,
+        available_tools=list(control.get("capabilities") or []),
+        requested_outputs=requested_outputs,
+        required_competencies=list(control.get("capabilities") or []),
+        required_artifacts=requested_outputs,
         routing={
             "single_route": True,
             "processor": PROCESSOR_VERSION,
@@ -1129,27 +1155,25 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
             "identity_scope": deepcopy(scope),
         },
         constraints={
-            **{
-                "one_provider_call": True,
-                "one_visible_answer": True,
-                "canonical_scene": True,
-                "dialogue_coherence": round(coherence, 4),
-                "quantum_state": {
-                    "dialogue": dialogue_state,
-                    "representation": representation_state,
-                    "measured_output": measured_output,
-                },
-                "provider_input_token_budget": 900,
-                "provider_context_strategy": "provider_router_semantic_field_selection",
-                "current_request_must_remain_intact": True,
-                "identity_scope": deepcopy(scope),
-                "representation_plan": {
-                    "requested_outputs": list(outputs),
-                    "preferred_representation": measured_output,
-                    "constraints": representation_constraints,
-                    "audit": representation_audit,
-                    "current_request_authoritative": True,
-                },
+            "one_provider_call": True,
+            "one_visible_answer": True,
+            "canonical_scene": True,
+            "dialogue_coherence": round(coherence, 4),
+            "quantum_state": {
+                "dialogue": dialogue_state,
+                "representation": control.get("representation_state", {}),
+                "measured_output": measured_output,
+            },
+            "provider_input_token_budget": 900,
+            "provider_context_strategy": "provider_router_semantic_field_selection",
+            "current_request_must_remain_intact": True,
+            "identity_scope": deepcopy(scope),
+            "representation_plan": {
+                "requested_outputs": requested_outputs,
+                "preferred_representation": measured_output,
+                "constraints": representation_constraints,
+                "audit": representation_audit,
+                "current_request_authoritative": True,
             },
             "metadata": request_metadata,
         },
@@ -1160,32 +1184,30 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     request.max_output_tokens = response_budget
     request.quantum_state = {
         "dialogue": dialogue_state,
-        "representation": representation_state,
+        "representation": control.get("representation_state", {}),
         "measured_output": measured_output,
-        "context_dependency": context_dependency,
-                "reference_to_previous": bool(canonical_dialogue.get("reference_to_previous")),
-        "continuation": bool(canonical_dialogue.get("continuation")),
+        "context_dependency": bool(control.get("context_dependency")),
+        "reference_to_previous": bool(control.get("reference_to_previous")),
+        "continuation": bool(control.get("continuation")),
         "evidence_channels": len(evidence),
         "coherence": round(coherence, 4),
         "response_budget": response_budget,
         "response_budget_min": OUTPUT_MIN_TOKENS,
         "response_budget_max": OUTPUT_MAX_TOKENS,
         "response_budget_mode": "continuous_64_signal_scale",
-        "quantum_cores": 8,
-        "quantum_lanes_per_core": 8,
-        "quantum_signal_count": 64,
+        "quantum_cores": QUANTUM_CORE_COUNT,
+        "quantum_lanes": QUANTUM_LANE_COUNT,
+        "quantum_signal_count": QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT,
         "quantum_budget_field": quantum_budget_field,
         "response_budget_logical": True,
         "response_budget_compression_ceiling": OUTPUT_MAX_TOKENS,
+        "control_plane": _quantum_snapshot(control),
     }
     request.dialogue_contract = dialogue_contract
     request.response_decision = decision
     request.single_route = True
     request.provider_calls_allowed = 1
 
-    # Canonical contract bridge: MachineRequest currently exposes metadata
-    # through constraints["metadata"], not as an __init__ field.
-    request.constraints.setdefault("metadata", {})
     request.constraints["metadata"].update({
         "processor_version": PROCESSOR_VERSION,
         "single_route": True,
@@ -1196,18 +1218,19 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
         "response_budget_min": OUTPUT_MIN_TOKENS,
         "response_budget_max": OUTPUT_MAX_TOKENS,
         "response_budget_mode": "continuous_64_signal_scale",
-        "quantum_cores": 8,
-        "quantum_lanes_per_core": 8,
-        "quantum_signal_count": 64,
+        "quantum_cores": QUANTUM_CORE_COUNT,
+        "quantum_lanes": QUANTUM_LANE_COUNT,
+        "quantum_signal_count": QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT,
         "quantum_budget_field": quantum_budget_field,
-        "requested_outputs": list(outputs),
+        "requested_outputs": requested_outputs,
         "identity_scope": deepcopy(scope),
+        "control_plane": _quantum_snapshot(control),
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
         ),
     })
-
     return request
+
 
 def _request_metadata(request: MachineRequest) -> dict:
     constraints = getattr(request, "constraints", {})
@@ -1490,39 +1513,28 @@ def _math_structure_profile(value: Any) -> dict:
         for match in re.finditer(pattern, source, flags=re.DOTALL):
             add_range(*match.span(), label)
 
-    # A relation-chain is a sequence of structurally mathematical operands
-    # connected by mathematical operators. No domain/word dictionary is used.
-    operand = r"(?:[-+]?\d+(?:[.,]\d+)?\s*[√∛∜]\s*(?:\([^()\n]{1,96}\)|[A-Za-zΑ-Ωα-ω0-9_.]+)|[√∛∜]\s*(?:\([^()\n]{1,96}\)|[A-Za-zΑ-Ωα-ω0-9_.]+)|[-+]?(?:\d+(?:[.,]\d+)?|[A-Za-zΑ-Ωα-ω][A-Za-zΑ-Ωα-ω0-9_]*)(?:\s*(?:\^|_)\s*\{?[-+]?[A-Za-zΑ-Ωα-ω0-9.,]+\}?)?)"
-    relation_chain = re.compile(
-        rf"(?P<expr>{operand}(?:\s*(?:=|≈|≃|≅|≤|≥|±|[+\-×÷*/])\s*{operand})+)"
+    # Raw TeX is structural mathematics even when the Provider omitted
+    # explicit $...$ / \( ... \) delimiters.  We recognize complete
+    # operator-connected atom chains rather than isolated commands, so the
+    # presentation engine receives one coherent formula span.
+    frac_atom = r"\\(?:frac|dfrac|tfrac)\s*\{[^{}\n]{1,120}\}\s*\{[^{}\n]{1,120}\}"
+    sqrt_atom = r"\\(?:sqrt)\s*\{[^{}\n]{1,120}\}"
+    command_atom = r"\\(?:operatorname|mathrm|text)\s*\{[^{}\n]{1,80}\}"
+    raw_tex_atom = rf"(?:[-+]?\d+(?:[.,]\d+)?|[A-Za-zΑ-Ωα-ω]\w*|{frac_atom}|{sqrt_atom}|{command_atom})"
+    raw_tex_operator = r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq)|[+\-*/=<>×÷≈≤≥≠±])"
+    raw_tex_chain = re.compile(
+        rf"(?P<expr>{raw_tex_atom}(?:\s*{raw_tex_operator}\s*{raw_tex_atom})+)"
     )
-    for match in relation_chain.finditer(source):
-        start, end = match.span("expr")
-        candidate = source[start:end].strip()
-        operator_count = len(re.findall(r"[=≈≃≅≤≥±+\-×÷*/]", candidate))
-        numeric_or_radical = bool(re.search(r"\d|[√∛∜]", candidate))
-        if operator_count >= 1 and numeric_or_radical:
-            add_range(start, end, "structural_relation")
+    for match in raw_tex_chain.finditer(source):
+        add_range(*match.span("expr"), "raw_tex_structure")
 
-    # Standalone radical/notation spans are measured only when no larger
-    # structural relation already owns their range.
-    radical_patterns = (
-        (r"(?<!\w)(?:√\s*\([^()\n]{1,96}\))", "radical"),
-        (r"(?<!\w)(?:∛\s*\([^()\n]{1,96}\))", "radical"),
-        (r"(?<!\w)(?:∜\s*\([^()\n]{1,96}\))", "radical"),
-        (r"(?<!\w)(?:√|∛|∜)\s*[A-Za-zΑ-Ωα-ω0-9_.]+", "radical"),
+    # Standalone TeX fraction/radical structures are also renderable when they
+    # are not part of a longer operator chain.
+    standalone_raw_tex = re.compile(
+        rf"(?:{frac_atom}|{sqrt_atom})(?:\s*{raw_tex_operator}\s*(?:{frac_atom}|{sqrt_atom}|[-+]?\d+(?:[.,]\d+)?|[A-Za-zΑ-Ωα-ω]\w*))*"
     )
-    for pattern, label in radical_patterns:
-        for match in re.finditer(pattern, source):
-            add_range(*match.span(), label)
-
-    # Polynomial/exponential notation such as x^2 or a_1=... is measured by
-    # operators + numeric structure, never by subject keywords.
-    notation_expr = re.compile(
-        r"(?<!\w)(?:[A-Za-zΑ-Ωα-ω]\s*(?:\^|_)\s*\{?[-+]?[A-Za-zΑ-Ωα-ω0-9.,]+\}?\s*(?:=|≈|≃|≅|≤|≥)\s*[-+]?\d+(?:[.,]\d+)?)(?!\w)"
-    )
-    for match in notation_expr.finditer(source):
-        add_range(*match.span(), "structural_notation")
+    for match in standalone_raw_tex.finditer(source):
+        add_range(*match.span(), "raw_tex_structure")
 
     ranges.sort(key=lambda item: (item["start"], item["end"]))
     merged: list[dict] = []
@@ -1573,6 +1585,12 @@ def _presentation_latex(fragment: str) -> str:
         return text[1:-1].strip()
 
     value = text
+    # Raw Provider TeX may arrive without explicit delimiters.  Preserve the
+    # commands exactly; only normalize presentation whitespace/HTML-dangerous
+    # line breaks are avoided here.  This value belongs to the Web presentation
+    # contract, never to the human answer itself.
+    value = re.sub(r"\\begin\{(?:equation|align|gather)\*?\}", "", value)
+    value = re.sub(r"\\end\{(?:equation|align|gather)\*?\}", "", value)
     # Structural symbol normalization only; no lexical/domain mapping.
     value = value.replace("≈", r"\approx")
     value = value.replace("≃", r"\simeq")
@@ -1841,6 +1859,21 @@ def _attach_presentation_signals(blocks: Any) -> list[dict]:
         enriched.append(clean)
     return enriched
 
+def _ensure_presentation_signals(blocks: Any) -> list[dict]:
+    """Attach presentation exactly once while preserving already-built signals."""
+    result: list[dict] = []
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        clean = dict(block)
+        existing = clean.get("presentation")
+        if isinstance(existing, dict) and existing.get("version") == "presentation_signal_v3":
+            result.append(clean)
+        else:
+            clean["presentation"] = _presentation_signal_for_block(clean)
+            result.append(clean)
+    return result
+
 def _response(value: Any, request: MachineRequest | None = None) -> MachineResponse:
     """Single in-place Provider response analysis and canonical separation."""
     payload = _decode_provider_payload(value)
@@ -1974,7 +2007,7 @@ def _canonicalize(
     # the visible answer.
     response.summary = _clean_text_value(response.summary)
 
-    response.render_blocks = _attach_presentation_signals(
+    response.render_blocks = _ensure_presentation_signals(
         _clean_render_blocks(list(getattr(response, "render_blocks", []) or []))
     )
 
@@ -2308,86 +2341,28 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         visual_reference=visual,
     ) or {}
 
-    # Publish the current-turn semantic relation into the existing memory
-    # engine. This reuses the canonical interpretation contract already
-    # produced for this turn; it does not add a trigger or a parallel route.
-    interpretation_evidence = _as_dict(semantic.get("quantum_interpretation_evidence"))
-    dialogue_contract = _as_dict(interpretation_evidence.get("dialogue_contract"))
-    if not dialogue_contract:
-        dialogue_contract = _as_dict(semantic.get("dialogue_context_field"))
-
-    # Keep one canonical dialogue relation in this execution scope.
-    mode = _s(
-        dialogue_contract.get("context_mode")
-        or dialogue_contract.get("dialogue_state")
-        or semantic.get("dialogue_state")
-        or decision.get("dialogue_state")
-    ).upper()
-    if mode not in {
-        "INDEPENDENT",
-        "NEW_TOPIC",
-        "SAME_TOPIC",
-        "CONTINUATION",
-        "ARTIFACT_REFERENCE",
-        "MEMORY_QUERY",
-    }:
-        mode = "CONTINUATION" if bool(dialogue_contract.get("continuation")) else "INDEPENDENT"
-
-    continuation = bool(dialogue_contract.get("continuation"))
-    reference_to_previous = bool(dialogue_contract.get("reference_to_previous"))
-    context_dependency = _s(dialogue_contract.get("context_dependency"))
-
-    resolved_for_turn = _as_dict(dialogue_contract.get("resolved_scene"))
-    relation = _s(resolved_for_turn.get("relation"))
-    if not relation:
-        relation = (
-            "current_scene"
-            if continuation or reference_to_previous
-            else "new_topic"
-            if mode == "NEW_TOPIC"
-            else "independent"
-        )
-
+    # One authoritative control plane for dialogue, representation, memory relation,
+    # capability delegation, and single-route ownership. Individual engines remain
+    # evidence sources; downstream code consumes this collapsed state.
+    control_plane = _build_processor_control_plane(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        decision=decision,
+        state=state,
+        dynamic_memory=dynamic_memory,
+    )
     state["_turn_dialogue_relation"] = {
-        "relation": relation,
-        "scene_id": _s(resolved_for_turn.get("scene_id")),
-        "continuation": continuation,
-        "reference_to_previous": reference_to_previous,
+        "relation": _s(control_plane.get("relation")),
+        "scene_id": _s(_as_dict(control_plane.get("resolved_scene")).get("scene_id")),
+        "continuation": bool(control_plane.get("continuation")),
+        "reference_to_previous": bool(control_plane.get("reference_to_previous")),
         "same_scene": bool(
-            relation == "current_scene"
-            and resolved_for_turn.get("scene_id")
+            control_plane.get("relation") == "current_scene"
+            and _as_dict(control_plane.get("resolved_scene")).get("scene_id")
         ),
-        "context_dependency": context_dependency,
+        "context_dependency": bool(control_plane.get("context_dependency")),
     }
-
-    # Archived A-E/7D memory is queried as evidence only after the semantic
-    # interpretation pass has run. No archived item is copied into the current
-    # scene automatically.
-    retrieval_mode = (
-        "memory_query"
-        if _s(interpretation.get("dialog_act")).lower() == "memory_query"
-        else "semantic"
-    )
-    dynamic_memory = query_dynamic_memory(
-        user_id, text, limit=8, retrieval_mode=retrieval_mode
-    )
-    if not isinstance(dynamic_memory, dict):
-        dynamic_memory = {}
-    semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
-    semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
-
-    semantic["quantum_experience_evidence"] = _quantum_snapshot(experience)
-    semantic["quantum_goal_evidence"] = _quantum_snapshot(goal_evidence)
-    semantic["quantum_visual_reference_evidence"] = _quantum_snapshot(visual)
-    semantic["quantum_experience_manager_evidence"] = _quantum_snapshot(
-        experience_manager_evidence
-    )
-
-    # Reuse interpretation-layer measurement; no second heavy NLP pass.
-    if not isinstance(semantic.get("quantum_dialogue_measurement"), dict):
-        semantic["quantum_dialogue_measurement"] = _quantum_snapshot(
-            interpretation.get("quantum_dialogue_measurement", {})
-        )
 
     processor_context = build_processor_execution_context({
         "state": state,
@@ -2406,6 +2381,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "goal": goal_evidence,
         "visual_reference": visual,
         "dynamic_memory": dynamic_memory,
+        "control_plane": control_plane,
     })
 
     quantum_field = _build_quantum_field(
@@ -2439,7 +2415,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_processor_version"] = PROCESSOR_VERSION
     semantic["semantic_decision_owner"] = "QUANTUM_PROCESSOR"
 
-    request = _make_request(text, semantic, cognition, decision, state, visual)
+    request = _make_request(text, semantic, cognition, decision, state, visual, control=control_plane)
     request.quantum_state["evidence_channels"] = 14
     request.quantum_state["evidence_field"] = quantum_field
     request_meta = _request_metadata(request)
@@ -2531,6 +2507,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "experience_manager": True,
         "goal_engine": True,
         "visual_reference_system": True,
+        "control_plane_version": control_plane.get("version"),
+        "control_plane_single_route": bool(control_plane.get("single_route")),
     }
 
     provider_result = await generate_text(
