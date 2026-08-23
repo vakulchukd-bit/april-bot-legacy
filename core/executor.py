@@ -1652,12 +1652,13 @@ def _decode_provider_payload(value: Any) -> dict:
 
 
 
-def _math_structure_profile(value: Any) -> dict:
-    """Measure mathematical notation structurally for the McDowell presentation engine.
 
-    Important invariant: ordinary numbers in prose are NOT formulas. A math span
-    is emitted only when notation is explicitly delimited or structurally connected
-    by mathematical operators/radicals/relations.
+def _math_structure_profile(value: Any) -> dict:
+    """Measure mathematical notation structurally for the unified presentation engine.
+
+    Ordinary prose numbers are not promoted to math. Ordered-list markers,
+    dates, counters and other plain numeric prose remain text unless they are
+    part of an explicit/structural mathematical expression.
     """
     source = _s(value)
     if not source:
@@ -1698,7 +1699,7 @@ def _math_structure_profile(value: Any) -> dict:
         })
         notation.append(source_name)
 
-    # Explicit delimiters are authoritative and may span multiple lines.
+    # Explicit delimiters are authoritative.
     delimiter_patterns = (
         (r"\\\((.+?)\\\)", "inline_latex", False),
         (r"\\\[(.+?)\\\]", "display_latex", True),
@@ -1709,57 +1710,71 @@ def _math_structure_profile(value: Any) -> dict:
         for match in re.finditer(pattern, source, flags=re.DOTALL):
             add_range(*match.span(), label, display=display)
 
-    # Structural raw-notation engine. It recognizes coherent mathematical
-    # expressions, not isolated digits. This keeps prose visually natural.
+    # Structural atoms.
     frac_atom = r"\\(?:frac|dfrac|tfrac)\s*\{[^{}\n]{1,120}\}\s*\{[^{}\n]{1,120}\}"
     sqrt_atom = r"\\sqrt\s*(?:\[[^\]\n]{1,24}\])?\s*\{[^{}\n]{1,120}\}"
     command_atom = r"\\(?:operatorname|mathrm|text)\s*\{[^{}\n]{1,80}\}"
-    radical_atom_value = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.,]\d+)?"
-    unicode_sqrt_atom = rf"√\s*(?:\([^()\n]{{1,120}}\)|{radical_atom_value})"
-    unicode_cbrt_atom = rf"∛\s*(?:\([^()\n]{{1,120}}\)|{radical_atom_value})"
-    unicode_qrtrt_atom = rf"∜\s*(?:\([^()\n]{{1,120}}\)|{radical_atom_value})"
+    radical_value = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.,]\d+)?"
+    unicode_sqrt_atom = rf"√\s*(?:\([^()\n]{{1,120}}\)|{radical_value})"
+    unicode_cbrt_atom = rf"∛\s*(?:\([^()\n]{{1,120}}\)|{radical_value})"
+    unicode_qrtrt_atom = rf"∜\s*(?:\([^()\n]{{1,120}}\)|{radical_value})"
     numeric_atom = r"[-+−]?\d+(?:[.,]\d+)?(?:[eE][-+−]?\d+)?"
     symbol_atom = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω]\w*"
     paren_atom = r"\([^()\n]{1,120}\)"
-    raw_tex_atom = (
+    atom = (
         rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|"
         rf"{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|"
         rf"{command_atom}|{paren_atom})"
     )
-    raw_tex_operator = (
+    operator = (
         r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq|"
         r"equiv|to)|[+\-−*/=<>×÷≈≤≥≠±·])"
     )
 
-    raw_tex_chain = re.compile(
-        rf"(?P<expr>{raw_tex_atom}(?:\s*{raw_tex_operator}\s*{raw_tex_atom})+)"
-    )
-    for match in raw_tex_chain.finditer(source):
-        add_range(*match.span("expr"), "raw_tex_structure", display=False)
+    # Operator-connected chains.
+    chain_re = re.compile(rf"(?P<expr>{atom}(?:\s*{operator}\s*{atom})+)")
+    for match in chain_re.finditer(source):
+        add_range(*match.span("expr"), "raw_math_structure", display=False)
 
-    standalone_structures = re.compile(
+    # Standalone radicals/fractions are formulas even without an operator.
+    standalone_re = re.compile(
         rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
-        rf"{unicode_qrtrt_atom})(?:\s*{raw_tex_operator}\s*"
+        rf"{unicode_qrtrt_atom})(?:\s*{operator}\s*"
         rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
         rf"{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}|{paren_atom}))*"
     )
-    for match in standalone_structures.finditer(source):
-        add_range(*match.span(), "raw_tex_structure", display=False)
+    for match in standalone_re.finditer(source):
+        add_range(*match.span(), "radical_structure", display=False)
 
-    # A relation with surrounding operands is also a formula even when the
-    # Provider used Unicode operators rather than TeX.
-    relation_pattern = re.compile(
-        rf"(?P<expr>{raw_tex_atom}\s*(?:=|≈|≃|≅|≤|≥|≠)\s*{raw_tex_atom}"
-        rf"(?:\s*{raw_tex_operator}\s*{raw_tex_atom})*)"
+    # Relations need full operands; this also captures Provider output that
+    # uses Unicode operators rather than TeX.
+    relation_re = re.compile(
+        rf"(?P<expr>{atom}\s*(?:=|≈|≃|≅|≤|≥|≠)\s*{atom}"
+        rf"(?:\s*{operator}\s*{atom})*)"
     )
-    for match in relation_pattern.finditer(source):
+    for match in relation_re.finditer(source):
         add_range(*match.span("expr"), "relation_structure", display=False)
+
+    # NEVER classify list numbering itself as math:
+    # "1. ..." / "2) ..." are layout structure, not formulas.
+    list_prefixes: list[tuple[int, int]] = []
+    offset = 0
+    for raw_line in source.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        m = re.match(r"^\s*\d+[.)]\s+", line)
+        if m:
+            list_prefixes.append((offset + m.start(), offset + m.end()))
+        offset += len(raw_line)
+
+    # A number already inside an occupied structural expression is part of it.
+    # Standalone numeric values are intentionally not promoted by themselves.
+    # This preserves clean prose and list numbering while formulas stay unified.
 
     ranges.sort(key=lambda item: (item["start"], item["end"]))
     merged: list[dict] = []
     for item in ranges:
         if not merged or item["start"] >= merged[-1]["end"]:
-            merged.append(item)
+            merged.append(dict(item))
         elif item["end"] > merged[-1]["end"]:
             merged[-1]["end"] = item["end"]
             merged[-1]["display"] = bool(
@@ -1787,8 +1802,9 @@ def _math_structure_profile(value: Any) -> dict:
         "operator_density": round(density, 6),
         "measurement_mode": "structural_notation_matrix",
         "lexical_triggers": False,
+        "numeric_policy": "structural_only",
+        "list_numbering_protected": True,
     }
-
 
 def _presentation_latex(fragment: str) -> str:
     """Convert recognized notation to KaTeX source without changing payload text."""
@@ -2081,8 +2097,47 @@ def _mcdowell_block_contract(source: dict, segmented: dict) -> dict:
     }
 
 
+
+def _presentation_payload_contract(source: dict, kind: str) -> dict:
+    """Normalize structured presentation metadata without changing payloads."""
+    payload = {}
+    for key in (
+        "title", "label", "caption", "description", "url", "href",
+        "x", "y", "x_axis", "y_axis", "axes", "series", "data",
+        "columns", "headers", "rows", "cells", "values",
+        "nodes", "edges", "elements", "items", "target",
+        "alt", "alt_text", "language", "source", "file",
+    ):
+        if key in source and source.get(key) not in (None, "", [], {}):
+            payload[key] = _quantum_snapshot(source.get(key))
+
+    nested = source.get("payload")
+    if isinstance(nested, dict):
+        for key in (
+            "title", "label", "caption", "description", "url", "href",
+            "x", "y", "x_axis", "y_axis", "axes", "series", "data",
+            "columns", "headers", "rows", "cells", "values",
+            "nodes", "edges", "elements", "items", "target",
+            "alt", "alt_text", "language", "source", "file",
+        ):
+            if key not in payload and nested.get(key) not in (None, "", [], {}):
+                payload[key] = _quantum_snapshot(nested.get(key))
+
+    return {
+        "kind": kind,
+        "payload": payload,
+        "payload_preserved": True,
+    }
+
+
 def _presentation_signal_for_block(block: dict) -> dict:
-    """Build the one canonical presentation signal consumed by RenderMessage."""
+    """Build ONE canonical presentation signal for every Web-supported block type.
+
+    The signal is emitted by the Quantum Processor once on the existing route.
+    McDowell owns textual/layout presentation, specialized Web renderers own
+    their artifact geometry, and KaTeX is the math sub-engine wherever math
+    exists. No parallel presentation route is created.
+    """
     source = dict(block or {})
     btype = _s(
         source.get("type")
@@ -2100,14 +2155,18 @@ def _presentation_signal_for_block(block: dict) -> dict:
         "kind": kind,
         "renderer": "",
         "engine": "",
+        "producer": "QUANTUM_PROCESSOR",
+        "route": "canonical",
         "preserve_payload": True,
         "payload_unchanged": True,
+        "payload_contract": _presentation_payload_contract(source, kind),
     }
 
-    # Existing scene/flow identity is passed to McDowell when present. These
-    # fields are optional presentation context, not a second state or route.
     block_meta = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
-    for field_name in ("continuation", "topic_group", "flow_id", "render_id", "block_id"):
+    for field_name in (
+        "continuation", "topic_group", "flow_id", "render_id", "block_id",
+        "scene_id", "turn_id",
+    ):
         value = source.get(field_name)
         if value in (None, ""):
             value = block_meta.get(field_name)
@@ -2135,16 +2194,20 @@ def _presentation_signal_for_block(block: dict) -> dict:
             "blocks": segmented.get("blocks", []),
             "analysis": segmented.get("analysis", {}),
             "layout": segmented.get("layout", "mcdowell_document"),
-            "delegated_segments": bool(segmented.get("spans")),
+            "delegated_segments": bool(segmented.get("spans") or segmented.get("blocks")),
             "payload_preserved": True,
         })
+
     elif kind == "formula":
-        formula_value = source.get("content") or source.get("text") or source.get("value") or ""
+        value = source.get("content") or source.get("text") or source.get("value") or ""
+        latex = _presentation_latex(value)
         signal.update({
             "kind": "formula",
             "renderer": "mcdowell",
             "engine": "katex",
-            "math_mode": "display",
+            "text_engine": "mcdowell",
+            "formula_engine": "katex",
+            "layout": "mcdowell_document",
             "presentation": {
                 "enabled": True,
                 "mode": "formula",
@@ -2152,80 +2215,169 @@ def _presentation_signal_for_block(block: dict) -> dict:
                 "math_engine": "katex",
                 "layout": "mcdowell_document",
                 "formulas": [{
-                    "value": formula_value,
-                    "latex": _presentation_latex(formula_value),
+                    "value": value,
+                    "latex": latex,
                     "display": True,
                 }],
+                "payload_preserved": True,
             },
+            "spans": [{
+                "start": 0,
+                "end": len(_s(value)),
+                "role": "formula",
+                "renderer": "mcdowell",
+                "engine": "katex",
+                "latex": latex,
+                "value": value,
+                "display": True,
+            }],
         })
-    elif kind == "table":
+
+    elif kind in {"table"}:
         signal.update({
             "kind": "table",
             "renderer": "table",
             "engine": "table",
+            "layout": "table_document",
             "cell_text_engine": "mcdowell",
             "cell_math_engine": "katex",
+            "caption_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, "table"),
         })
+
     elif kind in {"graph", "plot", "chart"}:
         signal.update({
             "kind": "graph",
             "renderer": "graph",
             "engine": "graph",
+            "layout": "graph_document",
             "label_text_engine": "mcdowell",
             "label_math_engine": "katex",
-        })
-    elif kind == "code":
-        signal.update({
-            "kind": "code",
-            "renderer": "code",
-            "engine": "syntax",
             "caption_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "axis_text_engine": "mcdowell",
+            "axis_math_engine": "katex",
+            "artifact_payload": _presentation_payload_contract(source, "graph"),
         })
-    elif kind == "link":
-        signal.update({
-            "kind": "link",
-            "renderer": "link",
-            "engine": "link_card",
-            "description_engine": "mcdowell",
-        })
-    elif kind in {"gallery", "image", "media"}:
-        signal.update({
-            "kind": "gallery",
-            "renderer": "gallery",
-            "engine": "media",
-            "caption_engine": "mcdowell",
-        })
+
     elif kind in {"diagram", "scene", "layout", "visual"}:
         signal.update({
             "kind": "diagram",
             "renderer": "graph",
             "engine": "diagram",
+            "layout": "diagram_document",
             "label_text_engine": "mcdowell",
             "label_math_engine": "katex",
+            "caption_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, "diagram"),
         })
+
+    elif kind == "link":
+        signal.update({
+            "kind": "link",
+            "renderer": "link",
+            "engine": "link_card",
+            "layout": "link_card_document",
+            "title_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "inline_math_engine": "katex",
+            "href_preserved": True,
+            "artifact_payload": _presentation_payload_contract(source, "link"),
+        })
+
+    elif kind == "code":
+        signal.update({
+            "kind": "code",
+            "renderer": "code",
+            "engine": "syntax",
+            "layout": "code_document",
+            "caption_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "language": _s(source.get("language")),
+        })
+
+    elif kind in {"gallery", "image", "media"}:
+        signal.update({
+            "kind": "gallery",
+            "renderer": "gallery",
+            "engine": "media",
+            "layout": "gallery_document",
+            "caption_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, "gallery"),
+        })
+
+    elif kind in {"audio", "video"}:
+        signal.update({
+            "kind": kind,
+            "renderer": kind,
+            "engine": "media",
+            "layout": f"{kind}_document",
+            "caption_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, kind),
+        })
+
+    elif kind == "file":
+        signal.update({
+            "kind": "file",
+            "renderer": "file",
+            "engine": "file_card",
+            "layout": "file_card_document",
+            "title_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, "file"),
+        })
+
+    elif kind == "action":
+        signal.update({
+            "kind": "action",
+            "renderer": "action",
+            "engine": "action",
+            "layout": "action_document",
+            "label_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, "action"),
+        })
+
+    elif kind == "memory":
+        signal.update({
+            "kind": "memory",
+            "renderer": "memory",
+            "engine": "memory",
+            "layout": "memory_document",
+            "label_text_engine": "mcdowell",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, "memory"),
+        })
+
     else:
         signal.update({
             "kind": kind,
             "renderer": "mcdowell",
             "engine": "markdown",
+            "layout": "mcdowell_document",
             "inline_math_engine": "katex",
+            "description_text_engine": "mcdowell",
+            "artifact_payload": _presentation_payload_contract(source, kind),
         })
 
-    # Provider-supplied presentation metadata may contain useful annotations,
-    # but the current McDowell/KaTeX measurement is authoritative. Never allow
-    # an older serialized signal to overwrite the freshly computed segments.
+    # Provider metadata may annotate the artifact, but can never replace the
+    # freshly computed canonical presentation matrix.
     explicit_signal = source.get("presentation")
     if isinstance(explicit_signal, dict):
         extras = _quantum_snapshot(explicit_signal)
         if isinstance(extras, dict):
+            protected = {
+                "version", "kind", "renderer", "engine", "producer", "route",
+                "presentation", "spans", "segments", "blocks", "analysis",
+                "layout", "text_engine", "formula_engine", "math_engine",
+                "payload_unchanged", "payload_preserved", "delegated_segments",
+            }
             for key, value in extras.items():
-                if key not in {
-                    "version", "kind", "renderer", "engine", "presentation",
-                    "spans", "segments", "blocks", "analysis", "layout",
-                    "text_engine", "formula_engine", "math_engine",
-                    "payload_unchanged", "payload_preserved", "delegated_segments",
-                    "continuation", "topic_group", "flow_id", "render_id", "block_id",
-                }:
+                if key not in protected and key not in signal:
                     signal[key] = value
 
     return signal
@@ -2241,19 +2393,21 @@ def _attach_presentation_signals(blocks: Any) -> list[dict]:
         enriched.append(clean)
     return enriched
 
+
 def _ensure_presentation_signals(blocks: Any) -> list[dict]:
-    """Attach presentation exactly once while preserving already-built signals."""
+    """Recompute the canonical signal from the current block payload.
+
+    An existing presentation_signal_v3 is metadata, not an authority. Rebuilding
+    it here prevents stale/partial Provider or persisted signals from bypassing
+    the Quantum Processor's current McDowell/KaTeX and artifact render contract.
+    """
     result: list[dict] = []
     for block in blocks if isinstance(blocks, list) else []:
         if not isinstance(block, dict):
             continue
         clean = dict(block)
-        existing = clean.get("presentation")
-        if isinstance(existing, dict) and existing.get("version") == "presentation_signal_v3":
-            result.append(clean)
-        else:
-            clean["presentation"] = _presentation_signal_for_block(clean)
-            result.append(clean)
+        clean["presentation"] = _presentation_signal_for_block(clean)
+        result.append(clean)
     return result
 
 def _response(value: Any, request: MachineRequest | None = None) -> MachineResponse:
