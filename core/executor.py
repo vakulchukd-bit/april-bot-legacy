@@ -40,7 +40,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v26_user_scoped_scene_presentation_matrix"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v27_scene_continuity_formula_engine"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -301,6 +301,132 @@ def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
     return ""
 
 
+
+def _scene_continuity_engine(
+    *,
+    text: str,
+    state: dict,
+    history: list,
+) -> dict:
+    """
+    Canonical immediate-scene interpretation engine.
+
+    It does not inspect words or maintain a trigger list. It feeds the existing
+    QUANTUM_DIALOGUE_ENGINE with the most recent canonical USER↔APRIL scene
+    when the hot dialog list is empty or incomplete. The engine's own semantic
+    dialogue label remains the sole authority for continuation/reference state.
+
+    This repairs the exact failure where current_visual_scene existed, but the
+    Executor discarded it because state["dialog"] was empty.
+    """
+    current_scene = {}
+    if isinstance(state, dict):
+        candidate = (
+            state.get("current_visual_scene")
+            or state.get("active_visual_scene")
+            or state.get("active_scene_contract")
+        )
+        if isinstance(candidate, dict):
+            current_scene = candidate
+
+    previous_user = ""
+    previous_april = ""
+    active_topic = ""
+    active_goal = ""
+    scene_id = ""
+
+    if current_scene:
+        previous_user = _s(
+            current_scene.get("user_request")
+            or current_scene.get("current_request")
+            or current_scene.get("user")
+        )
+        previous_april = _s(
+            current_scene.get("april_answer")
+            or current_scene.get("answer")
+            or current_scene.get("content")
+            or current_scene.get("summary")
+        )
+        active_topic = _s(
+            current_scene.get("topic")
+            or current_scene.get("active_topic")
+            or previous_user
+        )
+        active_goal = _s(
+            current_scene.get("active_goal")
+            or current_scene.get("goal")
+            or current_scene.get("resolved_request")
+        )
+        scene_id = _s(current_scene.get("scene_id") or current_scene.get("id"))
+
+    # Prefer the existing hot dialogue when it contains an assistant turn.
+    if isinstance(history, list):
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            role = _s(item.get("role")).lower()
+            if not previous_april and role in {"assistant", "april"}:
+                previous_april = _s(item.get("content") or item.get("answer") or item.get("summary"))
+            if not previous_user and role == "user":
+                previous_user = _s(item.get("content"))
+            if previous_user and previous_april:
+                break
+
+    measured: dict[str, Any] = {}
+    if previous_april:
+        try:
+            measured = QUANTUM_DIALOGUE_ENGINE.dialogue(
+                text,
+                previous_assistant=previous_april,
+                previous_user=previous_user,
+                active_goal=active_goal,
+                active_topic=active_topic,
+            ) or {}
+        except Exception:
+            measured = {}
+
+    dialogue = _as_dict(measured.get("dialogue"))
+    label = _s(dialogue.get("label")).lower()
+
+    # Only the existing dialogue engine label is interpreted here.
+    # No lexical triggers, local thresholds, or word maps are introduced.
+    label_to_state = {
+        "continuation": ("CONTINUATION", True, True),
+        "reformulation": ("CONTINUATION", True, True),
+        "correction": ("CONTINUATION", True, True),
+        "reference": ("ARTIFACT_REFERENCE", True, True),
+        "affirmation": ("SAME_TOPIC", True, False),
+        "rejection": ("SAME_TOPIC", True, False),
+        "memory_query": ("MEMORY_QUERY", True, False),
+        "new_topic": ("NEW_TOPIC", False, False),
+        "independent": ("INDEPENDENT", False, False),
+    }
+    mode, continuation, reference = label_to_state.get(
+        label, ("INDEPENDENT", False, False)
+    )
+
+    return {
+        "engine": "quantum_scene_continuity_engine",
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "canonical": True,
+        "scene_id": scene_id,
+        "previous_user": previous_user,
+        "previous_april": previous_april,
+        "active_topic": active_topic,
+        "active_goal": active_goal,
+        "dialogue_measurement": _quantum_snapshot(measured),
+        "dialogue_label": label,
+        "mode": mode,
+        "continuation": continuation,
+        "reference_to_previous": reference,
+        "history_available": bool(history),
+        "hot_scene_available": bool(current_scene),
+        "source": "QUANTUM_DIALOGUE_ENGINE",
+        "lexical_triggers": False,
+        "score_routing": False,
+    }
+
+
 def _dialogue_evidence(
     text: str,
     semantic: dict,
@@ -308,10 +434,11 @@ def _dialogue_evidence(
     decision: dict,
     state: dict,
 ) -> dict:
-    """Read the already-measured dialogue contract without local trigger rules or score thresholds.
+    """Collapse dialogue evidence to one state using the existing dialogue engine.
 
-    The Executor does not score the dialog itself. It accepts the semantic engines'
-    structured interpretation and only materializes one canonical state.
+    The Executor does not use lexical triggers or local thresholds. The canonical
+    immediate-scene continuity measurement is produced by QUANTUM_DIALOGUE_ENGINE
+    and merged with the Interpretation dialogue contract.
     """
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     previous_user = ""
@@ -324,10 +451,7 @@ def _dialogue_evidence(
         role = _s(item.get("role")).lower()
         if not previous_april:
             if role in {"assistant", "april"}:
-                previous_april = _s(
-                    item.get("content")
-                    or item.get("answer")
-                )
+                previous_april = _s(item.get("content") or item.get("answer"))
                 last_turn_id = item.get("turn_id")
             elif isinstance(item.get("april"), dict):
                 previous_april = _s(
@@ -343,31 +467,30 @@ def _dialogue_evidence(
         if previous_user and previous_april:
             break
 
-    # Web-only canonical route may not have a hot dialog list yet. The current
-    # USER↔APRIL scene is therefore the authoritative immediate history fallback.
-    current_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
-    if isinstance(current_scene, dict):
-        if not previous_user:
-            previous_user = _s(
-                current_scene.get("user_request")
-                or current_scene.get("current_request")
-            )
-        if not previous_april:
-            previous_april = _s(
-                current_scene.get("april_answer")
-                or current_scene.get("answer")
-                or current_scene.get("summary")
-            )
-        if not last_turn_id:
-            last_turn_id = current_scene.get("turn_id")
+    scene_continuity = _as_dict(
+        semantic.get("quantum_scene_continuity")
+    )
+    if not scene_continuity:
+        scene_continuity = _scene_continuity_engine(
+            text=text,
+            state=state,
+            history=dialog,
+        )
+
+    if not previous_user:
+        previous_user = _s(scene_continuity.get("previous_user"))
+    if not previous_april:
+        previous_april = _s(scene_continuity.get("previous_april"))
+    if not last_turn_id:
+        last_turn_id = _as_dict(state.get("current_visual_scene")).get("turn_id")
 
     interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
     dialogue_contract = _as_dict(interpretation_packet.get("dialogue_contract"))
     if not dialogue_contract:
-        dialogue_contract = _as_dict(
-            semantic.get("dialogue_context_field")
-        )
+        dialogue_contract = _as_dict(semantic.get("dialogue_context_field"))
 
+    # Continuity engine is an evidence source. If Interpretation already emitted
+    # an explicit dialogue state, that explicit structured state remains primary.
     mode = _s(
         dialogue_contract.get("context_mode")
         or dialogue_contract.get("dialogue_state")
@@ -383,49 +506,74 @@ def _dialogue_evidence(
         "ARTIFACT_REFERENCE",
         "MEMORY_QUERY",
     }:
-        mode = (
-            "MEMORY_QUERY" if dialogue_contract.get("dialog_act") == "memory_query"
-            else "CONTINUATION" if bool(dialogue_contract.get("continuation"))
-            else "INDEPENDENT"
-        )
+        mode = ""
+
+    if not mode:
+        mode = _s(scene_continuity.get("mode")).upper() or "INDEPENDENT"
 
     active_topic = _s(
         dialogue_contract.get("active_topic")
         or semantic.get("active_topic")
         or decision.get("active_topic")
+        or scene_continuity.get("active_topic")
         or state.get("active_topic")
         or state.get("topic")
+        or previous_user
     )
     active_goal = _s(
         dialogue_contract.get("active_goal")
         or semantic.get("active_goal")
         or cognition.get("active_goal")
         or decision.get("active_goal")
+        or scene_continuity.get("active_goal")
         or state.get("active_goal")
     )
 
-    context_dependency = bool(
-        dialogue_contract.get("context_dependency")
-        and _s(dialogue_contract.get("context_dependency")).lower() not in {"independent", "none", "false", "0"}
+    explicit_dependency = _s(dialogue_contract.get("context_dependency")).lower()
+    context_dependency = explicit_dependency not in {"", "independent", "none", "false", "0"}
+    continuation = bool(
+        dialogue_contract.get("continuation")
+        if dialogue_contract.get("continuation") is not None
+        else scene_continuity.get("continuation")
     )
-    continuation = bool(dialogue_contract.get("continuation"))
-    reference_to_previous = bool(dialogue_contract.get("reference_to_previous"))
+    reference_to_previous = bool(
+        dialogue_contract.get("reference_to_previous")
+        if dialogue_contract.get("reference_to_previous") is not None
+        else scene_continuity.get("reference_to_previous")
+    )
 
-    if context_dependency:
-        if _s(dialogue_contract.get("dialog_act")).lower() == "memory_query":
-            mode = "MEMORY_QUERY"
-        elif reference_to_previous:
-            mode = "ARTIFACT_REFERENCE" if mode == "ARTIFACT_REFERENCE" else "CONTINUATION"
-        elif continuation:
-            mode = "CONTINUATION"
-        elif mode == "INDEPENDENT":
-            mode = "SAME_TOPIC"
+    # Structured continuity evidence can promote the state when the canonical
+    # Interpretation packet did not emit a full contract.
+    if not explicit_dependency:
+        context_dependency = bool(
+            continuation
+            or reference_to_previous
+            or mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"}
+        )
 
-    if not dialog and mode not in {"INDEPENDENT", "MEMORY_QUERY"}:
-        mode = "INDEPENDENT"
-        context_dependency = False
-        continuation = False
-        reference_to_previous = False
+    resolved_scene = _as_dict(dialogue_contract.get("resolved_scene"))
+    if not resolved_scene and scene_continuity.get("scene_id"):
+        resolved_scene = {
+            "scene_id": _s(scene_continuity.get("scene_id")),
+            "relation": (
+                "current_scene"
+                if continuation or reference_to_previous
+                else "same_topic"
+                if mode == "SAME_TOPIC"
+                else "new_topic"
+                if mode == "NEW_TOPIC"
+                else "independent"
+            ),
+            "source": "quantum_scene_continuity_engine",
+        }
+
+    dialog_act = _s(
+        dialogue_contract.get("dialog_act")
+        or scene_continuity.get("dialogue_label")
+        or semantic.get("dialog_act")
+        or decision.get("dialog_act")
+        or "statement"
+    )
 
     return {
         "mode": mode,
@@ -437,16 +585,13 @@ def _dialogue_evidence(
         "context_dependency": context_dependency,
         "continuation": continuation,
         "reference_to_previous": reference_to_previous,
-        "dialog_act": _s(
-            dialogue_contract.get("dialog_act")
-            or semantic.get("dialog_act")
-            or decision.get("dialog_act")
-            or "statement"
-        ),
+        "dialog_act": dialog_act,
         "reply_to": _s(
             dialogue_contract.get("reply_to")
             or dialogue_contract.get("previous_turn_id")
         ),
+        "scene_continuity": scene_continuity,
+        "source": "QUANTUM_DIALOGUE_ENGINE",
     }
 
 
@@ -1026,6 +1171,14 @@ def _make_request(
         "reply_to": _s(
             _field((dialogue_contract_source, semantic, decision), ("reply_to", "previous_turn_id"))
         ),
+        "previous_user_turn": _s(
+            dialogue_contract_source.get("previous_user_turn")
+            or dialogue_evidence.get("previous_user")
+        ),
+        "previous_april_turn": _s(
+            dialogue_contract_source.get("previous_april_turn")
+            or dialogue_evidence.get("previous_april")
+        ),
         "active_goal": _s(dialogue_contract_source.get("active_goal"))
             or _s(control.get("active_goal")),
         "active_topic": _s(dialogue_contract_source.get("active_topic"))
@@ -1041,6 +1194,22 @@ def _make_request(
         _s(control.get("active_topic")),
         _s(control.get("active_goal")),
     )
+
+    # The immediate canonical scene is part of the same dialogue state. When
+    # hot history is absent, carry the measured previous scene through the
+    # existing conversation contract instead of creating a second memory path.
+    dialogue_evidence = _as_dict(control.get("dialogue_evidence"))
+    previous_scene_user = _s(dialogue_evidence.get("previous_user"))
+    previous_scene_april = _s(dialogue_evidence.get("previous_april"))
+    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+        recent = list(context.get("recent_dialogue", []) or [])
+        if previous_scene_user or previous_scene_april:
+            recent.insert(0, {
+                "user": _clip(previous_scene_user, 700),
+                "april": _clip(previous_scene_april, 1000),
+                "source": "current_visual_scene",
+            })
+        context["recent_dialogue"] = recent[-8:]
 
     dynamic_memory_evidence = _as_dict(control.get("dynamic_memory"))
     complexity = _complexity(semantic, cognition, decision, text)
@@ -1095,8 +1264,14 @@ def _make_request(
             "resolved_request": _s(
                 dialogue_contract_source.get("resolved_request") or text
             ),
-            "previous_user_turn": _s(dialogue_contract_source.get("previous_user_turn")),
-            "previous_april_turn": _s(dialogue_contract_source.get("previous_april_turn")),
+            "previous_user_turn": _s(
+                dialogue_contract_source.get("previous_user_turn")
+                or dialogue_evidence.get("previous_user")
+            ),
+            "previous_april_turn": _s(
+                dialogue_contract_source.get("previous_april_turn")
+                or dialogue_evidence.get("previous_april")
+            ),
             "resolved_scene": _as_dict(dialogue_contract_source.get("resolved_scene")),
             **(
                 {
@@ -1121,6 +1296,10 @@ def _make_request(
             {
                 "active_topic": _clip(_s(control.get("active_topic")), 300),
                 "active_goal": _clip(_s(control.get("active_goal")), 500),
+                "active_scene_id": _s(
+                    _as_dict(dialogue_evidence.get("scene_continuity")).get("scene_id")
+                    or _as_dict(state.get("current_visual_scene")).get("scene_id")
+                ),
                 "retrieval_mode": "memory_query" if mode == "MEMORY_QUERY" else "semantic",
                 "dynamic_memory": (
                     dynamic_memory_evidence
@@ -1189,6 +1368,9 @@ def _make_request(
         "context_dependency": bool(control.get("context_dependency")),
         "reference_to_previous": bool(control.get("reference_to_previous")),
         "continuation": bool(control.get("continuation")),
+        "scene_continuity": _quantum_snapshot(
+            control.get("dialogue_evidence", {}).get("scene_continuity", {})
+        ),
         "evidence_channels": len(evidence),
         "coherence": round(coherence, 4),
         "response_budget": response_budget,
@@ -1520,8 +1702,13 @@ def _math_structure_profile(value: Any) -> dict:
     frac_atom = r"\\(?:frac|dfrac|tfrac)\s*\{[^{}\n]{1,120}\}\s*\{[^{}\n]{1,120}\}"
     sqrt_atom = r"\\(?:sqrt)\s*\{[^{}\n]{1,120}\}"
     command_atom = r"\\(?:operatorname|mathrm|text)\s*\{[^{}\n]{1,80}\}"
-    raw_tex_atom = rf"(?:[-+]?\d+(?:[.,]\d+)?|[A-Za-zΑ-Ωα-ω]\w*|{frac_atom}|{sqrt_atom}|{command_atom})"
-    raw_tex_operator = r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq)|[+\-*/=<>×÷≈≤≥≠±])"
+    unicode_sqrt_atom = r"√\s*(?:\([^()\n]{1,120}\)|[A-Za-zΑ-Ωα-ω0-9_.,]+)"
+    unicode_cbrt_atom = r"∛\s*(?:\([^()\n]{1,120}\)|[A-Za-zΑ-Ωα-ω0-9_.,]+)"
+    unicode_qrtrt_atom = r"∜\s*(?:\([^()\n]{1,120}\)|[A-Za-zΑ-Ωα-ω0-9_.,]+)"
+    numeric_atom = r"[-+−]?\d+(?:[.,]\d+)?(?:[eE][-+−]?\d+)?"
+    symbol_atom = r"[A-Za-zΑ-Ωα-ω]\w*"
+    raw_tex_atom = rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{command_atom})"
+    raw_tex_operator = r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq)|[+\-−*/=<>×÷≈≤≥≠±])"
     raw_tex_chain = re.compile(
         rf"(?P<expr>{raw_tex_atom}(?:\s*{raw_tex_operator}\s*{raw_tex_atom})+)"
     )
@@ -1531,10 +1718,19 @@ def _math_structure_profile(value: Any) -> dict:
     # Standalone TeX fraction/radical structures are also renderable when they
     # are not part of a longer operator chain.
     standalone_raw_tex = re.compile(
-        rf"(?:{frac_atom}|{sqrt_atom})(?:\s*{raw_tex_operator}\s*(?:{frac_atom}|{sqrt_atom}|[-+]?\d+(?:[.,]\d+)?|[A-Za-zΑ-Ωα-ω]\w*))*"
+        rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom})(?:\s*{raw_tex_operator}\s*(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}))*"
     )
     for match in standalone_raw_tex.finditer(source):
         add_range(*match.span(), "raw_tex_structure")
+
+    # Numeric presentation engine: every standalone numeric value is a
+    # mathematical value for Web presentation. Existing occupied formula
+    # ranges remain intact, so a compound expression is still one formula.
+    numeric_token = re.compile(
+        r"(?<![A-Za-zА-Яа-яЁё_])[-+]?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?(?![A-Za-zА-Яа-яЁё_])"
+    )
+    for match in numeric_token.finditer(source):
+        add_range(*match.span(), "numeric_value")
 
     ranges.sort(key=lambda item: (item["start"], item["end"]))
     merged: list[dict] = []
@@ -1600,6 +1796,7 @@ def _presentation_latex(fragment: str) -> str:
     value = value.replace("±", r"\pm")
     value = value.replace("×", r"\times")
     value = value.replace("÷", r"\div")
+    value = value.replace("−", "-")
 
     # Convert simple Unicode radicals structurally, including radicals on
     # both sides of a relation. Examples: √35, 2√7, √(x+1).
@@ -2210,6 +2407,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         state=state,
     ) or {}
+
+    # Canonical immediate-scene continuity measurement. This uses the existing
+    # QUANTUM_DIALOGUE_ENGINE and feeds its structured evidence into Semantic
+    # Core and the processor control plane. No local word triggers are used.
+    scene_continuity = _scene_continuity_engine(
+        text=text,
+        state=state,
+        history=history,
+    )
+    interpretation["quantum_scene_continuity"] = _quantum_snapshot(scene_continuity)
 
     # Freeze canonical interpretation measurements for downstream engines.
     field = interpretation.get("quantum_interpretation_field", {})
