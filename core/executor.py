@@ -1219,8 +1219,30 @@ def _request_metadata(request: MachineRequest) -> dict:
     return metadata
 
 
+def _repair_machine_json_escapes(text: str) -> str:
+    """Repair only invalid JSON backslashes while preserving real JSON escapes.
+
+    Provider responses sometimes contain JSON-shaped envelopes with LaTeX such
+    as ``\\( ... \\sqrt{...} \\)``. Those backslashes are valid payload text but
+    are not valid JSON escapes unless doubled for the JSON parser. This engine
+    normalizes the transport encoding only; it does not alter the decoded human
+    answer.
+    """
+    # JSON permits only these one-character escapes plus \\uXXXX. Any other
+    # backslash is payload text and must be escaped before json.loads().
+    return re.sub(r'\\\\(?!["\\\\/bfnrtu])', r'\\\\\\\\', text)
+
+
 def _decode_json_envelope(value: Any, *, max_depth: int = 5) -> Any:
-    """Recursively unwrap serialized machine envelopes without creating a route."""
+    """Recursively unwrap serialized machine envelopes without creating a route.
+
+    The decoder accepts:
+      * normal JSON,
+      * JSON-shaped Provider payloads containing LaTeX backslashes,
+      * Python-literal style dicts using single quotes.
+
+    The repair is transport-level only. It never rewrites the decoded answer.
+    """
     current = value
     for _ in range(max_depth):
         if isinstance(current, MachineResponse):
@@ -1231,21 +1253,45 @@ def _decode_json_envelope(value: Any, *, max_depth: int = 5) -> Any:
             continue
         if not isinstance(current, str):
             break
+
         text = current.strip()
         if not (text.startswith("{") and text.endswith("}")):
             break
+
         parsed = None
-        for parser in (json.loads, ast.literal_eval):
-            try:
-                candidate = parser(text)
-            except Exception:
-                continue
+
+        # 1. Canonical JSON first.
+        try:
+            candidate = json.loads(text)
             if isinstance(candidate, dict):
                 parsed = candidate
-                break
+        except Exception:
+            pass
+
+        # 2. Relaxed transport JSON: preserve LaTeX backslashes as payload.
+        if parsed is None:
+            repaired = _repair_machine_json_escapes(text)
+            try:
+                candidate = json.loads(repaired)
+                if isinstance(candidate, dict):
+                    parsed = candidate
+            except Exception:
+                pass
+
+            # 3. Legacy Python-literal envelopes. Parse the repaired form so
+            # invalid LaTeX escapes cannot emit SyntaxWarning during eval.
+            if parsed is None:
+                try:
+                    candidate = ast.literal_eval(repaired)
+                    if isinstance(candidate, dict):
+                        parsed = candidate
+                except Exception:
+                    pass
+
         if parsed is None:
             break
         current = parsed
+
     return current
 
 
