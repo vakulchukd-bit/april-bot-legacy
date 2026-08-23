@@ -1653,16 +1653,29 @@ def _decode_provider_payload(value: Any) -> dict:
 
 
 def _math_structure_profile(value: Any) -> dict:
-    """Measure mathematical structure using notation/relations, not words."""
+    """Measure mathematical notation structurally for the McDowell presentation engine.
+
+    Important invariant: ordinary numbers in prose are NOT formulas. A math span
+    is emitted only when notation is explicitly delimited or structurally connected
+    by mathematical operators/radicals/relations.
+    """
     source = _s(value)
     if not source:
-        return {"present": False, "confidence": 0.0, "ranges": [], "notation": [], "operator_density": 0.0}
+        return {
+            "present": False,
+            "confidence": 0.0,
+            "ranges": [],
+            "notation": [],
+            "operator_density": 0.0,
+            "measurement_mode": "structural_notation_matrix",
+            "lexical_triggers": False,
+        }
 
     ranges: list[dict] = []
     notation: list[str] = []
     occupied: list[tuple[int, int]] = []
 
-    def add_range(start: int, end: int, source_name: str, *, kind: str = "formula") -> None:
+    def add_range(start: int, end: int, source_name: str, *, display: bool = False) -> None:
         start = max(0, int(start))
         end = min(len(source), int(end))
         while end > start and source[end - 1].isspace():
@@ -1677,60 +1690,70 @@ def _math_structure_profile(value: Any) -> dict:
         ranges.append({
             "start": start,
             "end": end,
-            "kind": kind,
+            "kind": "formula",
             "renderer": "mcdowell",
             "engine": "katex",
             "source": source_name,
+            "display": bool(display),
         })
         notation.append(source_name)
 
-    # Explicit math delimiters are structural and authoritative.
+    # Explicit delimiters are authoritative and may span multiple lines.
     delimiter_patterns = (
-        (r"\\\((.+?)\\\)", "inline_latex"),
-        (r"\\\[(.+?)\\\]", "display_latex"),
-        (r"\$\$(.+?)\$\$", "display_dollar"),
-        (r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", "inline_dollar"),
+        (r"\\\((.+?)\\\)", "inline_latex", False),
+        (r"\\\[(.+?)\\\]", "display_latex", True),
+        (r"\$\$(.+?)\$\$", "display_dollar", True),
+        (r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", "inline_dollar", False),
     )
-    for pattern, label in delimiter_patterns:
+    for pattern, label, display in delimiter_patterns:
         for match in re.finditer(pattern, source, flags=re.DOTALL):
-            add_range(*match.span(), label)
+            add_range(*match.span(), label, display=display)
 
-    # Raw TeX is structural mathematics even when the Provider omitted
-    # explicit $...$ / \( ... \) delimiters.  We recognize complete
-    # operator-connected atom chains rather than isolated commands, so the
-    # presentation engine receives one coherent formula span.
+    # Structural raw-notation engine. It recognizes coherent mathematical
+    # expressions, not isolated digits. This keeps prose visually natural.
     frac_atom = r"\\(?:frac|dfrac|tfrac)\s*\{[^{}\n]{1,120}\}\s*\{[^{}\n]{1,120}\}"
-    sqrt_atom = r"\\(?:sqrt)\s*\{[^{}\n]{1,120}\}"
+    sqrt_atom = r"\\sqrt\s*(?:\[[^\]\n]{1,24}\])?\s*\{[^{}\n]{1,120}\}"
     command_atom = r"\\(?:operatorname|mathrm|text)\s*\{[^{}\n]{1,80}\}"
-    unicode_sqrt_atom = r"√\s*(?:\([^()\n]{1,120}\)|[A-Za-zΑ-Ωα-ω0-9_.,]+)"
-    unicode_cbrt_atom = r"∛\s*(?:\([^()\n]{1,120}\)|[A-Za-zΑ-Ωα-ω0-9_.,]+)"
-    unicode_qrtrt_atom = r"∜\s*(?:\([^()\n]{1,120}\)|[A-Za-zΑ-Ωα-ω0-9_.,]+)"
+    radical_atom_value = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.,]\d+)?"
+    unicode_sqrt_atom = rf"√\s*(?:\([^()\n]{{1,120}}\)|{radical_atom_value})"
+    unicode_cbrt_atom = rf"∛\s*(?:\([^()\n]{{1,120}}\)|{radical_atom_value})"
+    unicode_qrtrt_atom = rf"∜\s*(?:\([^()\n]{{1,120}}\)|{radical_atom_value})"
     numeric_atom = r"[-+−]?\d+(?:[.,]\d+)?(?:[eE][-+−]?\d+)?"
-    symbol_atom = r"[A-Za-zΑ-Ωα-ω]\w*"
-    raw_tex_atom = rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{command_atom})"
-    raw_tex_operator = r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq)|[+\-−*/=<>×÷≈≤≥≠±])"
+    symbol_atom = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω]\w*"
+    paren_atom = r"\([^()\n]{1,120}\)"
+    raw_tex_atom = (
+        rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|"
+        rf"{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|"
+        rf"{command_atom}|{paren_atom})"
+    )
+    raw_tex_operator = (
+        r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq|"
+        r"equiv|to)|[+\-−*/=<>×÷≈≤≥≠±·])"
+    )
+
     raw_tex_chain = re.compile(
         rf"(?P<expr>{raw_tex_atom}(?:\s*{raw_tex_operator}\s*{raw_tex_atom})+)"
     )
     for match in raw_tex_chain.finditer(source):
-        add_range(*match.span("expr"), "raw_tex_structure")
+        add_range(*match.span("expr"), "raw_tex_structure", display=False)
 
-    # Standalone TeX fraction/radical structures are also renderable when they
-    # are not part of a longer operator chain.
-    standalone_raw_tex = re.compile(
-        rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom})(?:\s*{raw_tex_operator}\s*(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}))*"
+    standalone_structures = re.compile(
+        rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
+        rf"{unicode_qrtrt_atom})(?:\s*{raw_tex_operator}\s*"
+        rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
+        rf"{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}|{paren_atom}))*"
     )
-    for match in standalone_raw_tex.finditer(source):
-        add_range(*match.span(), "raw_tex_structure")
+    for match in standalone_structures.finditer(source):
+        add_range(*match.span(), "raw_tex_structure", display=False)
 
-    # Numeric presentation engine: every standalone numeric value is a
-    # mathematical value for Web presentation. Existing occupied formula
-    # ranges remain intact, so a compound expression is still one formula.
-    numeric_token = re.compile(
-        r"(?<![A-Za-zА-Яа-яЁё_])[-+]?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?(?![A-Za-zА-Яа-яЁё_])"
+    # A relation with surrounding operands is also a formula even when the
+    # Provider used Unicode operators rather than TeX.
+    relation_pattern = re.compile(
+        rf"(?P<expr>{raw_tex_atom}\s*(?:=|≈|≃|≅|≤|≥|≠)\s*{raw_tex_atom}"
+        rf"(?:\s*{raw_tex_operator}\s*{raw_tex_atom})*)"
     )
-    for match in numeric_token.finditer(source):
-        add_range(*match.span(), "numeric_value")
+    for match in relation_pattern.finditer(source):
+        add_range(*match.span("expr"), "relation_structure", display=False)
 
     ranges.sort(key=lambda item: (item["start"], item["end"]))
     merged: list[dict] = []
@@ -1739,15 +1762,22 @@ def _math_structure_profile(value: Any) -> dict:
             merged.append(item)
         elif item["end"] > merged[-1]["end"]:
             merged[-1]["end"] = item["end"]
+            merged[-1]["display"] = bool(
+                merged[-1].get("display") or item.get("display")
+            )
             if item.get("source") not in notation:
                 notation.append(item.get("source", "structural"))
 
     operator_count = len(re.findall(r"[=≈≃≅≤≥±·×÷/*^_√∛∜]", source))
     numeric_count = len(re.findall(r"\d", source))
     density = (operator_count + min(numeric_count, 12)) / max(len(source), 1)
+
     structural_strength = 0.0
     if merged:
-        structural_strength = min(1.0, 0.50 + 0.12 * min(len(merged), 3) + min(0.22, density * 7.0))
+        structural_strength = min(
+            1.0,
+            0.55 + 0.12 * min(len(merged), 3) + min(0.20, density * 6.0),
+        )
 
     return {
         "present": bool(merged),
@@ -1761,19 +1791,14 @@ def _math_structure_profile(value: Any) -> dict:
 
 
 def _presentation_latex(fragment: str) -> str:
-    """Convert structurally recognized notation to KaTeX-compatible source.
-
-    The original payload is never changed. This value belongs only to the
-    presentation contract consumed by the Web renderer.
-    """
+    """Convert recognized notation to KaTeX source without changing payload text."""
     text = _s(fragment)
     if not text:
         return ""
 
-    # Existing TeX delimiters are already renderer-ready.
-    if text.startswith("\\(") and text.endswith("\\)"):
+    if text.startswith(r"\(") and text.endswith(r"\)"):
         return text[2:-2].strip()
-    if text.startswith("\\[") and text.endswith("\\]"):
+    if text.startswith(r"\[") and text.endswith(r"\]"):
         return text[2:-2].strip()
     if text.startswith("$$") and text.endswith("$$"):
         return text[2:-2].strip()
@@ -1781,13 +1806,9 @@ def _presentation_latex(fragment: str) -> str:
         return text[1:-1].strip()
 
     value = text
-    # Raw Provider TeX may arrive without explicit delimiters.  Preserve the
-    # commands exactly; only normalize presentation whitespace/HTML-dangerous
-    # line breaks are avoided here.  This value belongs to the Web presentation
-    # contract, never to the human answer itself.
     value = re.sub(r"\\begin\{(?:equation|align|gather)\*?\}", "", value)
     value = re.sub(r"\\end\{(?:equation|align|gather)\*?\}", "", value)
-    # Structural symbol normalization only; no lexical/domain mapping.
+
     value = value.replace("≈", r"\approx")
     value = value.replace("≃", r"\simeq")
     value = value.replace("≅", r"\cong")
@@ -1798,140 +1819,270 @@ def _presentation_latex(fragment: str) -> str:
     value = value.replace("÷", r"\div")
     value = value.replace("−", "-")
 
-    # Convert simple Unicode radicals structurally, including radicals on
-    # both sides of a relation. Examples: √35, 2√7, √(x+1).
-    import re as _re
-    value = _re.sub(
+    value = re.sub(
         r"√\s*\(([^()]{1,96})\)",
         lambda m: r"\sqrt{" + m.group(1).strip() + "}",
         value,
     )
-    value = _re.sub(
-        r"√\s*([A-Za-zΑ-Ωα-ω0-9_.]+)",
+    value = re.sub(
+        r"√\s*([A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.]\d+)?)",
         lambda m: r"\sqrt{" + m.group(1).strip() + "}",
         value,
     )
-    value = _re.sub(
+    value = re.sub(
         r"∛\s*\(([^()]{1,96})\)",
         lambda m: r"\sqrt[3]{" + m.group(1).strip() + "}",
         value,
     )
-    value = _re.sub(
-        r"∛\s*([A-Za-zΑ-Ωα-ω0-9_.]+)",
+    value = re.sub(
+        r"∛\s*([A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.]\d+)?)",
         lambda m: r"\sqrt[3]{" + m.group(1).strip() + "}",
         value,
     )
-    value = _re.sub(
+    value = re.sub(
         r"∜\s*\(([^()]{1,96})\)",
         lambda m: r"\sqrt[4]{" + m.group(1).strip() + "}",
         value,
     )
-    value = _re.sub(
-        r"∜\s*([A-Za-zΑ-Ωα-ω0-9_.]+)",
+    value = re.sub(
+        r"∜\s*([A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.]\d+)?)",
         lambda m: r"\sqrt[4]{" + m.group(1).strip() + "}",
         value,
     )
     return value
 
 
-def _presentation_segments(content: Any) -> dict:
-    """Create one canonical presentation contract from the original payload.
+def _markdown_line_kind(line: str) -> tuple[str, str]:
+    """Classify existing Markdown structure only; never infer from words."""
+    stripped = line.strip()
+    if not stripped:
+        return "blank", ""
+    if re.match(r"^#{1,6}\s+", stripped):
+        return "heading", stripped
+    if re.match(r"^(?:[-*+])\s+", stripped):
+        return "list_item", stripped
+    if re.match(r"^\d+[.)]\s+", stripped):
+        return "list_item", stripped
+    if stripped.startswith(">"):
+        return "quote", stripped[1:].lstrip()
+    if re.match(r"^(?:---+|\*\*\*+|___+)\s*$", stripped):
+        return "divider", stripped
+    return "paragraph", line
 
-    The processor never rewrites the payload. It only measures source ranges
-    and emits renderer metadata for the same content. No lexical trigger list
-    participates in this contract.
+
+def _presentation_segments(content: Any) -> dict:
+    """Build the canonical McDowell layout while preserving the exact payload.
+
+    McDowell owns text layout. KaTeX owns mathematical spans inside that layout.
+    The function exposes paragraphs/headings/lists/quotes as structural segments
+    and formulas as delegated spans. No second route or rewritten answer is made.
     """
     source = _s(content)
     profile = _math_structure_profile(source)
-    ranges = profile.get("ranges", []) if isinstance(profile, dict) else []
+    ranges = list(profile.get("ranges", []) if isinstance(profile, dict) else [])
 
     if not source:
-        return {"mode": "text", "spans": [], "segments": [], "analysis": profile}
-
-    if not ranges:
         return {
             "mode": "text",
+            "layout": "mcdowell_document",
             "spans": [],
-            "segments": [{
-                "kind": "text",
-                "start": 0,
-                "end": len(source),
-                "role": "text",
-                "renderer": "mcdowell",
-                "engine": "markdown",
-            }],
+            "segments": [],
+            "blocks": [],
             "analysis": profile,
+            "renderer": "mcdowell",
+            "text_engine": "mcdowell",
+            "math_engine": "katex",
+            "payload_preserved": True,
         }
+
+    # First create structural line blocks from the existing Markdown surface.
+    line_blocks: list[dict] = []
+    offset = 0
+    for raw_line in source.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        start = offset
+        end = start + len(line)
+        offset += len(raw_line)
+        kind, value = _markdown_line_kind(line)
+        line_blocks.append({
+            "kind": kind,
+            "start": start,
+            "end": end,
+            "value": value,
+        })
+
+    if not line_blocks:
+        line_blocks = [{"kind": "paragraph", "start": 0, "end": len(source), "value": source}]
 
     spans: list[dict] = []
     segments: list[dict] = []
-    cursor = 0
-    for item in sorted(ranges, key=lambda x: (x["start"], x["end"])):
-        start = max(0, int(item["start"]))
-        end = min(len(source), int(item["end"]))
+    layout_blocks: list[dict] = []
+
+    def append_text(start: int, end: int, *, kind: str = "text", role: str = "text") -> None:
         if end <= start:
-            continue
-
-        if start > cursor:
-            segments.append({
-                "kind": "text",
-                "start": cursor,
-                "end": start,
-                "role": "text",
-                "renderer": "mcdowell",
-                "engine": "markdown",
-            })
-
-        original = source[start:end]
-        latex = _presentation_latex(original)
-        span = {
+            return
+        segments.append({
+            "kind": kind,
             "start": start,
             "end": end,
-            "role": "formula",
-            "renderer": "mcdowell",
-            "engine": "katex",
-            "latex": latex,
-            "value": original,
-            "display": False,
-        }
-        spans.append(span)
-        segments.append({
-            "kind": "formula",
-            "start": start,
-            "end": end,
-            "role": "formula",
-            "renderer": "mcdowell",
-            "engine": "katex",
-            "latex": latex,
-            "value": original,
-            "display": False,
-            "preserve_payload": True,
-        })
-        cursor = end
-
-    if cursor < len(source):
-        segments.append({
-            "kind": "text",
-            "start": cursor,
-            "end": len(source),
-            "role": "text",
+            "role": role,
             "renderer": "mcdowell",
             "engine": "markdown",
+            "value": source[start:end],
+            "preserve_payload": True,
         })
 
+    # Math ranges are nested into the structural text blocks.
+    for block in line_blocks:
+        kind = block["kind"]
+        start = block["start"]
+        end = block["end"]
+
+        if kind == "blank":
+            layout_blocks.append({
+                "kind": "spacer",
+                "start": start,
+                "end": end,
+                "renderer": "mcdowell",
+                "engine": "layout",
+            })
+            continue
+
+        if kind in {"heading", "list_item", "quote", "divider"}:
+            layout_blocks.append({
+                "kind": kind,
+                "start": start,
+                "end": end,
+                "renderer": "mcdowell",
+                "engine": "markdown",
+                "value": source[start:end],
+                "preserve_payload": True,
+            })
+        else:
+            layout_blocks.append({
+                "kind": "paragraph",
+                "start": start,
+                "end": end,
+                "renderer": "mcdowell",
+                "engine": "markdown",
+                "value": source[start:end],
+                "preserve_payload": True,
+            })
+
+        local_ranges = [
+            item for item in ranges
+            if int(item["start"]) < end and int(item["end"]) > start
+        ]
+
+        cursor = start
+        for item in sorted(local_ranges, key=lambda x: (x["start"], x["end"])):
+            item_start = max(start, int(item["start"]))
+            item_end = min(end, int(item["end"]))
+            if item_end <= item_start:
+                continue
+            if item_start > cursor:
+                append_text(
+                    cursor,
+                    item_start,
+                    kind="text",
+                    role=kind,
+                )
+
+            original = source[item_start:item_end]
+            latex = _presentation_latex(original)
+            display = bool(item.get("display"))
+            # A formula occupying the meaningful body of a line is visually
+            # stronger as display math; inline formulas remain inline.
+            line_body = source[start:end].strip()
+            formula_body = original.strip()
+            if line_body == formula_body and kind in {"paragraph", "list_item"}:
+                display = True
+
+            span = {
+                "start": item_start,
+                "end": item_end,
+                "role": "formula",
+                "renderer": "mcdowell",
+                "engine": "katex",
+                "latex": latex,
+                "value": original,
+                "display": display,
+                "preserve_payload": True,
+            }
+            spans.append(span)
+            segments.append({
+                "kind": "formula",
+                "start": item_start,
+                "end": item_end,
+                "role": "formula",
+                "renderer": "mcdowell",
+                "engine": "katex",
+                "latex": latex,
+                "value": original,
+                "display": display,
+                "preserve_payload": True,
+            })
+            cursor = max(cursor, item_end)
+
+        if cursor < end:
+            append_text(
+                cursor,
+                end,
+                kind="text",
+                role=kind,
+            )
+
+    # A provider may return content without line endings. Ensure the whole
+    # payload is represented exactly once.
+    if not segments:
+        append_text(0, len(source))
+
+    # Do not allow overlapping ranges to duplicate payload positions.
+    segments.sort(key=lambda x: (int(x.get("start", 0)), int(x.get("end", 0)), x.get("kind", "")))
+
+    has_formula = bool(spans)
+    has_structured_layout = any(
+        block.get("kind") in {"heading", "list_item", "quote", "divider", "spacer"}
+        for block in layout_blocks
+    )
+
     return {
-        "mode": "mixed",
+        "mode": "mixed" if has_formula else "structured" if has_structured_layout else "text",
+        "layout": "mcdowell_document",
         "spans": spans,
         "segments": segments,
+        "blocks": layout_blocks,
         "analysis": profile,
         "renderer": "mcdowell",
+        "text_engine": "mcdowell",
         "math_engine": "katex",
         "payload_preserved": True,
     }
 
 
+def _mcdowell_block_contract(source: dict, segmented: dict) -> dict:
+    """Expose stable presentation metadata for McDowell without a new route."""
+    return {
+        "renderer": "mcdowell",
+        "engine": "presentation_matrix",
+        "layout": segmented.get("layout", "mcdowell_document"),
+        "text_engine": "mcdowell",
+        "math_engine": "katex",
+        "payload_preserved": True,
+        "segments": segmented.get("segments", []),
+        "spans": segmented.get("spans", []),
+        "blocks": segmented.get("blocks", []),
+        "source_type": _s(
+            source.get("type")
+            or source.get("artifact_type")
+            or source.get("representation")
+            or "text"
+        ).lower(),
+    }
+
+
 def _presentation_signal_for_block(block: dict) -> dict:
-    """Build the single canonical presentation signal consumed by RenderMessage."""
+    """Build the one canonical presentation signal consumed by RenderMessage."""
     source = dict(block or {})
     btype = _s(
         source.get("type")
@@ -1953,22 +2104,42 @@ def _presentation_signal_for_block(block: dict) -> dict:
         "payload_unchanged": True,
     }
 
+    # Existing scene/flow identity is passed to McDowell when present. These
+    # fields are optional presentation context, not a second state or route.
+    block_meta = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    for field_name in ("continuation", "topic_group", "flow_id", "render_id", "block_id"):
+        value = source.get(field_name)
+        if value in (None, ""):
+            value = block_meta.get(field_name)
+        if value not in (None, ""):
+            signal[field_name] = _quantum_snapshot(value)
+
     if kind in {"text", "markdown"}:
         content = source.get("content") or source.get("text") or source.get("value") or ""
         segmented = _presentation_segments(content)
         signal.update({
-            "kind": "mixed" if segmented.get("mode") == "mixed" else "text",
+            "kind": (
+                "mixed"
+                if segmented.get("mode") == "mixed"
+                else "structured"
+                if segmented.get("mode") == "structured"
+                else "text"
+            ),
             "renderer": "mcdowell",
             "engine": "presentation_matrix",
             "text_engine": "mcdowell",
             "formula_engine": "katex",
-            "presentation": segmented,
+            "presentation": _mcdowell_block_contract(source, segmented),
             "spans": segmented.get("spans", []),
             "segments": segmented.get("segments", []),
+            "blocks": segmented.get("blocks", []),
             "analysis": segmented.get("analysis", {}),
-            "delegated_segments": bool(segmented.get("mode") == "mixed"),
+            "layout": segmented.get("layout", "mcdowell_document"),
+            "delegated_segments": bool(segmented.get("spans")),
+            "payload_preserved": True,
         })
     elif kind == "formula":
+        formula_value = source.get("content") or source.get("text") or source.get("value") or ""
         signal.update({
             "kind": "formula",
             "renderer": "mcdowell",
@@ -1979,9 +2150,10 @@ def _presentation_signal_for_block(block: dict) -> dict:
                 "mode": "formula",
                 "renderer": "mcdowell",
                 "math_engine": "katex",
+                "layout": "mcdowell_document",
                 "formulas": [{
-                    "value": source.get("content") or source.get("text") or source.get("value") or "",
-                    "latex": _presentation_latex(source.get("content") or source.get("text") or source.get("value") or ""),
+                    "value": formula_value,
+                    "latex": _presentation_latex(formula_value),
                     "display": True,
                 }],
             },
@@ -2003,7 +2175,12 @@ def _presentation_signal_for_block(block: dict) -> dict:
             "label_math_engine": "katex",
         })
     elif kind == "code":
-        signal.update({"kind": "code", "renderer": "code", "engine": "syntax"})
+        signal.update({
+            "kind": "code",
+            "renderer": "code",
+            "engine": "syntax",
+            "caption_text_engine": "mcdowell",
+        })
     elif kind == "link":
         signal.update({
             "kind": "link",
@@ -2034,16 +2211,24 @@ def _presentation_signal_for_block(block: dict) -> dict:
             "inline_math_engine": "katex",
         })
 
-    # The existing canonical route consumes this field directly in RenderMessage.
-    # Do not create a second parallel signal field.
+    # Provider-supplied presentation metadata may contain useful annotations,
+    # but the current McDowell/KaTeX measurement is authoritative. Never allow
+    # an older serialized signal to overwrite the freshly computed segments.
     explicit_signal = source.get("presentation")
     if isinstance(explicit_signal, dict):
-        preserved = dict(signal.get("presentation") or {})
-        preserved.update(_quantum_snapshot(explicit_signal))
-        signal["presentation"] = preserved
+        extras = _quantum_snapshot(explicit_signal)
+        if isinstance(extras, dict):
+            for key, value in extras.items():
+                if key not in {
+                    "version", "kind", "renderer", "engine", "presentation",
+                    "spans", "segments", "blocks", "analysis", "layout",
+                    "text_engine", "formula_engine", "math_engine",
+                    "payload_unchanged", "payload_preserved", "delegated_segments",
+                    "continuation", "topic_group", "flow_id", "render_id", "block_id",
+                }:
+                    signal[key] = value
 
     return signal
-
 
 def _attach_presentation_signals(blocks: Any) -> list[dict]:
     enriched: list[dict] = []
@@ -2124,6 +2309,11 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
             "scene_contract": True,
             "source": "quantum_processor",
         })
+
+    # The fallback text block is created after the first presentation pass.
+    # Re-run the same canonical presentation engine so McDowell never receives
+    # a block without its current signal.
+    blocks = _ensure_presentation_signals(blocks)
     allowed["render_blocks"] = blocks
 
     metadata = dict(allowed.get("metadata") or {}) if isinstance(allowed.get("metadata"), dict) else {}
@@ -2252,8 +2442,8 @@ def _canonicalize(
             "viewer": "TextBlock",
             "scene_contract": True,
             "source": "quantum_processor",
-            "signal": _presentation_signal_for_block({"type": "text"}),
         })
+        response.render_blocks = _ensure_presentation_signals(response.render_blocks)
 
     scene = build_machine_scene(response)
     provider_blocks = list(getattr(response, "render_blocks", []) or [])
