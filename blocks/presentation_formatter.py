@@ -1,1487 +1,400 @@
 # =====================================================
-# 🧠 APRIL WEB PRESENTATION ORCHESTRATOR
+# APRIL WEB PRESENTATION ORCHESTRATOR — UNIFIED SIGNAL ENGINE
 # =====================================================
 
 """
-APRIL_FILE_ID: APRIL_WEB_PRESENTATION_ORCHESTRATOR
+April presentation coordinator.
 
-ROLE:
-final_presentation_coordinator
+This module is a LOSSLESS consumer of the canonical presentation signals
+emitted by the Quantum Processor / Executor.
 
-PURPOSE:
-- calm response formatting
-- semantic pacing
-- renderer-safe presentation
-- behavioral stabilization
-- dialogue density control
-- anti-robotic cleanup
-- continuity-safe output
-- web-space presentation adaptation
+Contract:
+    Provider
+      -> Quantum Processor Executor
+      -> presentation_signal_v4
+      -> SceneContract
+      -> this module
+      -> April Web renderer
 
-INPUT:
-- executor_response
-- semantic
-- cognition
-- response_decision
-- renderer_payloads
-- machine_payloads
+The formatter does NOT create a second presentation protocol, infer renderer
+types from prose, mutate structured renderer payloads, or build SceneContract.
+It only:
+  1. extracts the Executor's canonical presentation_signal_v4;
+  2. verifies signal/payload alignment;
+  3. preserves the exact render_blocks/artifacts;
+  4. applies human-text cleanup ONLY to plain text strings;
+  5. returns the same machine route and payload shape.
 
-OUTPUT:
-- machine_scene_passthrough
-- human_visible_response
-- renderer_safe_output
-- web_ui_ready_payload
+Canonical signal owner:
+    QUANTUM_PROCESSOR
 
-DEPENDENCIES:
-- executor
-- excrouter
-- cognition
-- semantic_core
-- personality_core
-- web_ui
-- botru
-
-GOLDEN RULE:
-Presentation layer NEVER mutates:
-- machine_scene
-- renderer payloads
-- machine payloads
-- execution routing
-- orchestration state
+Canonical signal version:
+    presentation_signal_v4
 """
 
-print("🧠 APRIL PRESENTATION ORCHESTRATOR LOADED")
+from __future__ import annotations
 
-# =====================================================
-# 🔥 IMPORTS
-# =====================================================
-
-import re
+from copy import deepcopy
 import json
+import re
+from typing import Any
 
-# =====================================================
-# 🔥 SAFE PATCH MODE
-# =====================================================
-
-FORMAT_PATCH_LOG = []
+print("APRIL PRESENTATION ORCHESTRATOR: UNIFIED SIGNAL ENGINE LOADED")
 
 
-def safe_format_log(msg):
+PRESENTATION_ENGINE_VERSION = "APRIL-QUANTUM-PRESENTATION-V2"
+PRESENTATION_SIGNAL_VERSION = "presentation_signal_v4"
+PRESENTATION_ROUTE_VERSION = "fiber_scene_v2"
 
+SUPPORTED_SIGNAL_KINDS = {
+    "text",
+    "mixed",
+    "structured",
+    "formula",
+    "table",
+    "graph",
+    "diagram",
+    "link",
+    "code",
+    "gallery",
+    "audio",
+    "video",
+    "file",
+    "action",
+    "memory",
+}
+
+SIGNAL_TO_WEB_RENDERER = {
+    "text": ("mcdowell", "presentation_matrix"),
+    "mixed": ("mcdowell", "presentation_matrix"),
+    "structured": ("mcdowell", "presentation_matrix"),
+    "formula": ("mcdowell", "katex"),
+    "table": ("table", "table"),
+    "graph": ("graph", "graph"),
+    "diagram": ("graph", "diagram"),
+    "link": ("link", "link_card"),
+    "code": ("code", "syntax"),
+    "gallery": ("gallery", "media"),
+    "audio": ("audio", "media"),
+    "video": ("video", "media"),
+    "file": ("file", "file_card"),
+    "action": ("action", "action"),
+    "memory": ("memory", "memory"),
+}
+
+FORMAT_LOG = []
+
+
+def _s(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def safe_format_log(message: str) -> None:
     try:
-
-        print(
-            "APRIL PRESENTATION:",
-            msg
-        )
-
-        FORMAT_PATCH_LOG.append(
-            str(msg)
-        )
-
+        print("APRIL PRESENTATION:", message)
+        FORMAT_LOG.append(str(message))
     except Exception:
         pass
 
 
-# =====================================================
-# 🔥 ENTRY / EXIT LOGGING
-# =====================================================
-
-def presentation_enter(
-    response,
-    semantic=None
-):
-
-    semantic = semantic or {}
-
-    safe_format_log(
-
-        f"ENTER PRESENTATION: "
-        f"{str(response)[:80]}"
-    )
-
+def presentation_enter(response: Any, semantic: dict | None = None) -> dict:
+    safe_format_log(f"ENTER PRESENTATION: {_s(response)[:80]}")
     return {
-
         "presentation_active": True,
-
-        "renderer_safe":
-
-            semantic.get(
-                "prefer_renderer",
-                False
-            ),
-
-        "machine_isolation": True
+        "machine_isolation": True,
+        "signal_version": PRESENTATION_SIGNAL_VERSION,
     }
 
 
-def presentation_exit(
-    final_response
-):
-
-    safe_format_log(
-
-        f"EXIT PRESENTATION: "
-        f"{str(final_response)[:80]}"
-    )
-
+def presentation_exit(final_response: Any) -> dict:
+    safe_format_log(f"EXIT PRESENTATION: {_s(final_response)[:80]}")
     return {
-
         "presentation_complete": True,
-
         "human_output_ready": True,
-
-        "continuity_preserved": True
+        "continuity_preserved": True,
+        "signal_version": PRESENTATION_SIGNAL_VERSION,
     }
 
 
-# =====================================================
-# 🔥 FUTURE PLACEHOLDER
-# =====================================================
-
-def presentation_future(
-    *args,
-    **kwargs
-):
-
-    return None
+def is_machine_payload(value: Any) -> bool:
+    return isinstance(value, dict) and bool(value.get("machine_only"))
 
 
-# =====================================================
-# 🔥 MACHINE CHANNELS
-# =====================================================
-
-INPUT_MACHINE_CHANNEL = {
-
-    "source": "executor",
-
-    "type": "presentation_machine_input",
-
-    "isolated": True
-}
-
-OUTPUT_HUMAN_CHANNEL = {
-
-    "target": "botru_web_output",
-
-    "type": "human_response_output",
-
-    "isolated": True
-}
-
-# =====================================================
-# 🔥 SAFE HELPERS
-# =====================================================
-
-def clamp(
-
-    value,
-    minimum=0.0,
-    maximum=1.0
-
-):
-
-    if value < minimum:
-        return minimum
-
-    if value > maximum:
-        return maximum
-
-    return value
-
-
-# =====================================================
-# 🔥 RENDERER TYPES
-# =====================================================
-
-RENDERER_TYPES = [
-
-    "graph",
-    "formula",
-    "code",
-    "table",
-    "diagram",
-    "layout",
-    "renderer",
-    "scene",
-    "visual",
-    "artifact",
-    "message_block",
-    "canvas",
-    "svg"
-]
-
-# =====================================================
-# 🔥 PAYLOAD DETECTION
-# =====================================================
-
-def is_renderer_payload(value):
-
-    if not isinstance(
-        value,
-        (dict, list)
-    ):
-
-        return False
-
-    # =================================================
-    # 🔥 DICT
-    # =====================================================
-
-    if isinstance(value, dict):
-
-        payload_type = value.get(
-            "type"
-        )
-
-        if payload_type in RENDERER_TYPES:
-
-            return True
-
-        if value.get(
-            "machine_only"
-        ):
-
-            return True
-
-    # =================================================
-    # 🔥 LIST
-    # =====================================================
-
-    if isinstance(value, list):
-
-        for item in value:
-
-            if isinstance(item, dict):
-
-                item_type = item.get(
-                    "type"
-                )
-
-                if item_type in RENDERER_TYPES:
-
-                    return True
-
-    return False
-
-
-# =====================================================
-# 🔥 MACHINE PAYLOAD DETECTION
-# =====================================================
-
-def is_machine_payload(value):
-
-    if not isinstance(
-        value,
-        dict
-    ):
-
-        return False
-
-    return value.get(
-        "machine_only",
-        False
-    )
-
-
-
-# =====================================================
-# 🔥 MACHINE RESPONSE DETECTION
-# =====================================================
-
-def is_machine_response(value):
+def is_scene_contract(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
-    machine_keys = {
-        "summary",
-        "scene_plan",
-        "artifacts",
-        "render_priority",
-        "confidence",
-        "metadata",
-    }
-    return (value.get("transport_contract")=="scene_first") or (len(machine_keys.intersection(value.keys())) >= 2)
-
-
-
-# =====================================================
-# STAGE 1 - SCENE CONTRACT DETECTION
-# =====================================================
-
-def is_scene_contract(value):
     return (
-        isinstance(value, dict)
-        and value.get("type")=="scene_contract"
+        value.get("type") == "scene_contract"
+        or isinstance(value.get("render_blocks"), list)
+        and (
+            value.get("transport_contract") == "scene_first"
+            or value.get("scene_version")
+            or value.get("supported_payloads")
+        )
     )
 
 
-# =====================================================
-# 🔥 NORMALIZATION
-# =====================================================
+def _decode_json_object(value: Any) -> Any:
+    """Decode JSON-shaped wrappers without turning structured payloads into text."""
+    current = value
+    for _ in range(4):
+        if not isinstance(current, str):
+            break
+        text = current.strip()
+        if not text or text[0] not in "[{":
+            break
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            break
+        if not isinstance(parsed, (dict, list)):
+            break
+        current = parsed
+    return current
 
-def normalize_text_payload(value):
 
-    # =================================================
-    # 🔥 RENDERER SAFE
-    # =====================================================
+def _signal_from_block(block: dict) -> dict:
+    signal = block.get("presentation")
+    if isinstance(signal, dict):
+        return signal
 
-    if is_renderer_payload(value):
+    # The Executor may expose the signal under explicit machine metadata.
+    for key in ("presentation_signal", "presentation_contract"):
+        candidate = block.get(key)
+        if isinstance(candidate, dict):
+            return candidate
 
-        safe_format_log(
-            "RENDERER PAYLOAD PRESERVED"
+    return {}
+
+
+def _canonical_payload(block: dict) -> dict:
+    payload = block.get("payload")
+    if isinstance(payload, dict):
+        return payload
+
+    artifact = block.get("artifact")
+    if isinstance(artifact, dict):
+        nested = artifact.get("payload")
+        if isinstance(nested, dict):
+            return nested
+        return artifact
+
+    return {}
+
+
+def _payload_keys_for_alignment(kind: str) -> set[str]:
+    return {
+        "formula": {"steps", "formula", "equation", "expression", "math", "content"},
+        "table": {"columns", "headers", "rows", "cells", "values"},
+        "graph": {"series", "data", "x", "y", "axes"},
+        "diagram": {"nodes", "edges", "elements", "items"},
+        "link": {"url", "href", "title", "description", "domain", "icon"},
+        "code": {"language", "source", "content", "code"},
+        "gallery": {"items", "images", "src", "url", "caption", "alt"},
+        "audio": {"url", "src", "path", "mime", "duration", "title"},
+        "video": {"url", "src", "path", "mime", "duration", "thumbnail", "title"},
+        "file": {"url", "path", "file", "mime", "size", "name", "title"},
+        "action": {"actions", "target", "parameters", "label", "description"},
+        "memory": {"items", "content", "title", "description"},
+    }.get(kind, set())
+
+
+def validate_executor_signal(block: dict) -> dict:
+    """
+    Validate the signal emitted by Executor without rewriting it.
+
+    A warning is diagnostic only. The function never substitutes another
+    renderer, never invents payload and never changes the block.
+    """
+    signal = _signal_from_block(block)
+    payload = _canonical_payload(block)
+
+    if not signal:
+        return {
+            "valid": False,
+            "reason": "missing_presentation_signal_v4",
+            "version": "",
+        }
+
+    version = _s(signal.get("version"))
+    kind = _s(signal.get("kind") or block.get("type")).lower()
+    renderer = _s(signal.get("renderer")).lower()
+    engine = _s(signal.get("engine")).lower()
+
+    expected = SIGNAL_TO_WEB_RENDERER.get(kind)
+    expected_renderer, expected_engine = expected if expected else ("", "")
+
+    warnings = []
+    if version != PRESENTATION_SIGNAL_VERSION:
+        warnings.append(f"unsupported_signal_version:{version or 'missing'}")
+    if expected and (renderer != expected_renderer or engine != expected_engine):
+        warnings.append(
+            f"engine_mismatch:{renderer}/{engine}!={expected_renderer}/{expected_engine}"
         )
 
-        return value
+    contract = signal.get("payload_contract")
+    contract_payload = contract.get("payload") if isinstance(contract, dict) else None
 
-    # =================================================
-    # 🔥 MACHINE SAFE
-    # =====================================================
+    if kind in _payload_keys_for_alignment(kind):
+        # executor v4 should preserve the full payload. Empty contract with a
+        # non-empty source payload is a diagnostic signal, not a reason to drop it.
+        if payload and isinstance(contract_payload, dict) and not contract_payload:
+            warnings.append("empty_payload_contract")
 
-    if is_machine_payload(value):
-
-        safe_format_log(
-            "MACHINE PAYLOAD PRESERVED"
-        )
-
-        return value
-
-    # =================================================
-    # 🔥 NONE
-    # =====================================================
-
-    if value is None:
-        return ""
-
-    # =================================================
-    # 🔥 STRING
-    # =====================================================
-
-    if isinstance(value, str):
-        return value
-
-    # =================================================
-    # 🔥 OBJECT SAFE
-    # =====================================================
-
-    if isinstance(
-        value,
-        (dict, list)
-    ):
-
-        if is_scene_contract(value):
-            return value
-        safe_format_log("OBJECT PAYLOAD PRESERVED")
-        return value
-
-    try:
-
-        return str(value)
-
-    except Exception:
-
-        return ""
-
-
-# =====================================================
-# 🔥 JSON DETECTION
-# =====================================================
-
-def looks_like_json(text):
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return False
-
-    text = text.strip()
-
-    if not text:
-        return False
-
-    if not (
-
-        text.startswith("{")
-        or text.startswith("[")
-
-    ):
-
-        return False
-
-    try:
-
-        json.loads(text)
-
-        return True
-
-    except Exception:
-
-        return False
-
-
-# =====================================================
-# 🔥 CODE DETECTION
-# =====================================================
-
-def is_code_payload(text):
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return False
-
-    if not text:
-        return False
-
-    checks = [
-
-        "```",
-
-        "import ",
-        "from ",
-
-        "const ",
-        "let ",
-        "var ",
-
-        "function ",
-        "async function",
-
-        "export default",
-
-        "return (",
-
-        "def ",
-        "async def",
-
-        "console.log(",
-
-        "<div",
-        "</div>"
-    ]
-
-    return any(
-        x in text
-        for x in checks
-    )
-
-
-# =====================================================
-# 🔥 BEHAVIOR EXTRACTION
-# =====================================================
-
-def extract_behavior_field(
-    cognition=None
-):
-
-    cognition = cognition or {}
-
-    behavior = cognition.get(
-        "behavior_state",
-        {}
-    )
+    if signal.get("payload_unchanged") is not True:
+        warnings.append("payload_unchanged_invariant_missing")
 
     return {
-
-        "response_density":
-
-            behavior.get(
-                "response_density",
-                0.5
-            ),
-
-        "initiative_level":
-
-            behavior.get(
-                "initiative_level",
-                0.35
-            ),
-
-        "latent_guidance":
-
-            behavior.get(
-                "latent_guidance",
-                0.6
-            ),
-
-        "robotic_suppression":
-
-            behavior.get(
-                "robotic_suppression",
-                0.9
-            ),
-
-        "humanization":
-
-            behavior.get(
-                "humanization",
-                0.6
-            )
+        "valid": not warnings,
+        "version": version,
+        "kind": kind,
+        "renderer": renderer,
+        "engine": engine,
+        "warnings": warnings,
+        "payload_present": bool(payload),
     }
 
 
-# =====================================================
-# 🧠 ASSISTANT PRESENTATION FILTERS
-# =====================================================
+def canonicalize_signal_metadata(block: dict) -> dict:
+    """
+    Preserve Executor v4 exactly while exposing compact Web diagnostics.
 
-def suppress_internal_reasoning(text):
-
-    if not isinstance(text, str):
-        return text
-
-    blocked = [
-        "возможно",
-        "предположительно",
-        "скорее всего",
-        "я думаю",
-        "мне кажется",
-        "вероятно"
-    ]
-
-    result = text
-
-    for item in blocked:
-        result = result.replace(item, "")
-
-    return result.strip()
-
-
-def inject_guidance_context(
-    text,
-    cognition=None,
-    response_decision=None
-):
-
-    cognition = cognition or {}
-
-    if not isinstance(text, str):
-        return text
-
-    next_step = cognition.get(
-        "assistant_next_step",
-        "ready_to_help"
-    )
-
-    if next_step == "request_image":
-        return text
-
-    if next_step == "request_formula":
-        return text
-
-    if next_step == "request_error_details":
-        return text
-
-    return text
-
-
-# =====================================================
-# 🔥 CLEANUP
-# =====================================================
-
-def cleanup_markdown(text):
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    if not text:
-        return ""
-
-    text = text.replace(
-        "**",
-        ""
-    )
-
-    text = text.replace(
-        "__",
-        ""
-    )
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
-
-    text = re.sub(
-        r"[ ]{2,}",
-        " ",
-        text
-    )
-
-    return text.strip()
-
-
-# =====================================================
-# 🔥 SECTION SPLITTER
-# =====================================================
-
-def split_into_sections(text):
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return [text]
-
-    if not text:
-        return []
-
-    blocks = re.split(
-        r"\n{2,}",
-        text
-    )
-
-    result = []
-
-    for block in blocks:
-
-        cleaned = block.strip()
-
-        if cleaned:
-
-            result.append(
-                cleaned
-            )
-
+    The original signal object remains untouched. Only `presentation_audit` is
+    added to the containing block.
+    """
+    result = dict(block)
+    audit = validate_executor_signal(result)
+    result["presentation_audit"] = audit
+    if not audit["valid"]:
+        safe_format_log(
+            f"SIGNAL DIAGNOSTIC: {audit.get('kind','')} -> "
+            + ", ".join(audit.get("warnings", []))
+        )
     return result
 
 
-# =====================================================
-# 🔥 DIALOG BLOAT SUPPRESSION
-# =====================================================
+def canonicalize_render_blocks(blocks: Any) -> list[dict]:
+    """
+    Consume Executor's single canonical stream.
 
-def suppress_dialog_bloat(
-
-    text,
-    behavior=None
-
-):
-
-    behavior = behavior or {}
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    density = behavior.get(
-        "response_density",
-        0.5
-    )
-
-    if density >= 0.55:
-
-        return text
-
-    replacements = {
-
-        "Я думаю, что": "",
-        "Мне кажется, что": "",
-        "Стоит отметить, что": "",
-        "Можно сказать, что": "",
-        "Важно понимать, что": "",
-        "Следует отметить, что": ""
-    }
-
-    for old, new in replacements.items():
-
-        text = text.replace(
-            old,
-            new
-        )
-
-    return text.strip()
-
-
-# =====================================================
-# 🔥 ROBOTIC SUPPRESSION
-# =====================================================
-
-def suppress_robotic_phrasing(
-
-    text,
-    behavior=None
-
-):
-
-    behavior = behavior or {}
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    suppression = behavior.get(
-        "robotic_suppression",
-        0.9
-    )
-
-    if suppression < 0.5:
-
-        return text
-
-    robotic_phrases = [
-
-        "Конечно!",
-        "Отличный вопрос!",
-        "Давай разберемся.",
-        "Я готов помочь.",
-        "Чем еще помочь?",
-        "Буду рад помочь.",
-        "С удовольствием."
-    ]
-
-    for phrase in robotic_phrases:
-
-        text = text.replace(
-            phrase,
-            ""
-        )
-
-    return text.strip()
-
-
-# =====================================================
-# 🔥 LATENT GUIDANCE
-# =====================================================
-
-def stabilize_latent_guidance(
-
-    text,
-    behavior=None
-
-):
-
-    behavior = behavior or {}
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    guidance = behavior.get(
-        "latent_guidance",
-        0.6
-    )
-
-    if guidance < 0.65:
-
-        return text
-
-    sections = split_into_sections(
-        text
-    )
-
-    if not sections:
-
-        return text
-
-    final = []
-
-    for section in sections:
-
-        cleaned = section.strip()
-
-        if not cleaned:
+    No deduplication by semantic text, no payload merging, no renderer
+    inference. Executor v30 owns block composition and identity.
+    """
+    result = []
+    for raw in _list(blocks):
+        if not isinstance(raw, dict):
             continue
-
-        cleaned = re.sub(
-            r"\?$",
-            ".",
-            cleaned
-        )
-
-        final.append(
-            cleaned
-        )
-
-    return "\n\n".join(final)
-
-
-# =====================================================
-# 🔥 SEMANTIC PACING
-# =====================================================
-
-def stabilize_semantic_flow(
-
-    text,
-    behavior=None
-
-):
-
-    behavior = behavior or {}
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    if not text:
-        return ""
-
-    sections = split_into_sections(
-        text
-    )
-
-    stabilized = []
-
-    for section in sections:
-
-        cleaned = section.strip()
-
-        if not cleaned:
-            continue
-
-        cleaned = re.sub(
-            r"\n{2,}",
-            "\n",
-            cleaned
-        )
-
-        stabilized.append(
-            cleaned
-        )
-
-    return "\n\n".join(
-        stabilized
-    ).strip()
-
-
-# =====================================================
-# 🔥 VISUAL ENRICHMENT
-# =====================================================
-
-def detect_primary_emoji(text):
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return None
-
-    t = text.lower()
-
-    checks = [
-
-        (
-            ["код", "python", "react"],
-            "💻"
-        ),
-
-        (
-            ["идея", "концепция"],
-            "💡"
-        ),
-
-        (
-            ["ошибка", "warning"],
-            "⚠️"
-        ),
-
-        (
-            ["обновление", "новость"],
-            "📰"
-        )
-    ]
-
-    for words, emoji in checks:
-
-        for word in words:
-
-            if word in t:
-
-                return emoji
-
-    return None
-
-
-def apply_visual_enrichment(
-
-    text,
-    behavior=None
-
-):
-
-    behavior = behavior or {}
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    if not text:
-        return ""
-
-    if is_code_payload(text):
-
-        return text
-
-    initiative = behavior.get(
-        "initiative_level",
-        0.35
-    )
-
-    if initiative <= 0.25:
-
-        return text
-
-    emoji = detect_primary_emoji(
-        text
-    )
-
-    if not emoji:
-
-        return text
-
-    if text.startswith(emoji):
-
-        return text
-
-    return f"{emoji} {text}"
-
-
-# =====================================================
-# 🔥 BYPASS RULES
-# =====================================================
-
-def should_skip_formatting(
-
-    text,
-    semantic=None,
-    response_decision=None
-
-):
-
-    semantic = semantic or {}
-
-    response_decision = (
-        response_decision or {}
-    )
-
-    # =================================================
-    # 🔥 MACHINE SAFE
-    # =====================================================
-
-    if is_machine_payload(text):
-
-        safe_format_log(
-            "MACHINE BYPASS"
-        )
-
-        return True
-
-    # =================================================
-    # 🔥 RENDERER SAFE
-    # =====================================================
-
-    if is_renderer_payload(text):
-
-        safe_format_log(
-            "RENDERER BYPASS"
-        )
-
-        return True
-
-    # =================================================
-    # 🔥 OBJECT SAFE
-    # =====================================================
-
-    if isinstance(
-        text,
-        (dict, list)
-    ):
-
-        safe_format_log(
-            "OBJECT BYPASS"
-        )
-
-        return True
-
-    # =================================================
-    # 🔥 STRING SAFE
-    # =====================================================
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return True
-
-    if not text:
-
-        return True
-
-    # =================================================
-    # 🔥 JSON SAFE
-    # =====================================================
-
-    # Legacy JSON route retired.
-    # JSON strings continue through the normal formatter.
-
-
-    # =================================================
-    # 🔥 CODE SAFE
-    # =====================================================
-
-    if is_code_payload(text):
-        # Do not bypass renderer candidates such as markdown tables.
-        if "|" in text and "\n|" in text:
-            safe_format_log("TABLE CANDIDATE")
-        else:
-            safe_format_log(
-                "CODE BYPASS"
-            )
-            return True
-
-    return False
-
-
-
-# =====================================================
-# 🔥 MATH NORMALIZATION
-# =====================================================
-
-def normalize_math_explanations(text):
-
-    if not isinstance(text, str):
-        return text
-
-    normalized = []
-
-    for line in text.splitlines():
-
-        line = re.sub(r"`([^`]+)`", r"\1", line)
-        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
-
-        line = re.sub(
-            r"^\s*[-•]\s*([A-Za-zА-Яа-яα-ωΑ-Ω0-9_ρλωθπΩΣμν]+)\s*[:–-]\s*",
-            r"\1 — ",
-            line
-        )
-
-        line = re.sub(
-            r"^\s*([A-Za-zА-Яа-яα-ωΑ-Ω0-9_ρλωθπΩΣμν]+)\s*[:–-]\s*",
-            r"\1 — ",
-            line
-        )
-
-        normalized.append(line)
-
-    return "\n".join(normalized)
-
-
-# =====================================================
-# 🔥 FINAL VOICE STABILIZATION
-# =====================================================
-
-def apply_april_final_voice(
-
-    text,
-    behavior=None
-
-):
-
-    behavior = behavior or {}
-
-    if not isinstance(
-        text,
-        str
-    ):
-
-        return text
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
-
-    text = re.sub(
-        r"[ ]{2,}",
-        " ",
-        text
-    )
-
-    return text.strip()
-
-
-# =====================================================
-# 🔥 BEAUTIFY RESPONSE
-# =====================================================
-
-def beautify_response(
-
-    text,
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    user_text=""
-
-):
-
-    semantic = semantic or {}
-
-    cognition = cognition or {}
-
-    response_decision = (
-        response_decision or {}
-    )
-
-    behavior = extract_behavior_field(
-        cognition
-    )
-
-    if should_skip_formatting(
-
-        text,
-        semantic,
-        response_decision
-
-    ):
-
-        return text
-
-    text = cleanup_markdown(
-        text
-    )
-
-    text = suppress_internal_reasoning(
-        text
-    )
-
-    text = inject_guidance_context(
-        text,
-        cognition,
-        response_decision
-    )
-
-    text = suppress_robotic_phrasing(
-        text,
-        behavior
-    )
-
-    text = suppress_dialog_bloat(
-        text,
-        behavior
-    )
-
-    text = stabilize_latent_guidance(
-        text,
-        behavior
-    )
-
-    text = stabilize_semantic_flow(
-        text,
-        behavior
-    )
-
-    text = normalize_math_explanations(
-        text
-    )
-
-    text = apply_visual_enrichment(
-        text,
-        behavior
-    )
-
-    text = apply_april_final_voice(
-        text,
-        behavior
-    )
-
-    return text
-
-
-
-# =====================================================
-# 🧠 QUANTUM PRESENTATION ENGINE
-# =====================================================
-# Presentation is a machine-readable semantic contract, not a renderer.
-#
-# The engine NEVER infers presentation from words, punctuation, or
-# user-text triggers. It preserves presentation decisions/signals already
-# produced by the semantic/processor layers and normalizes them into one
-# canonical contract for every downstream renderer.
-#
-# Web presentation libraries consume this contract:
-#   - react-markdown + remark-gfm
-#   - remark-math + rehype-katex
-#
-# The backend does not render HTML; it carries the presentation signal
-# through the same Scene/Artifact route.
-
-PRESENTATION_ENGINE_VERSION = "APRIL-QUANTUM-PRESENTATION-V1"
-PRESENTATION_SIGNAL_VERSION = "1.0"
-
-PRESENTATION_LIBRARY_CONTRACT = {
-    "markdown": "react-markdown",
-    "markdown_extensions": ["remark-gfm"],
-    "math_parse": "remark-math",
-    "math_render": "rehype-katex",
-    "math_css": "katex/dist/katex.min.css",
-    "single_route": True,
-    "decision_owner": "QUANTUM_PROCESSOR",
-    "semantic_owner": "PRESENTATION_ENGINE",
-    "renderer_owner": "APRIL_WEB_RENDERER",
-}
-
-PRESENTATION_ROLES = (
-    "normal",
-    "key_point",
-    "definition",
-    "formula",
-    "code",
-    "value",
-    "caption",
-    "label",
-    "warning",
-    "example",
-)
-
-def _presentation_dict(value):
-    return value if isinstance(value, dict) else {}
-
-
-def _presentation_candidates(
-    response=None,
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    renderer_payloads=None,
-):
-    candidates = []
-
-    sources = [
-        response,
-        renderer_payloads,
-        response_decision,
-        semantic,
-        cognition,
-    ]
-
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-
-        for key in ("presentation", "presentation_signal", "presentation_contract"):
-            value = source.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-
-        metadata = source.get("metadata")
-        if isinstance(metadata, dict):
-            for key in ("presentation", "presentation_signal", "presentation_contract"):
-                value = metadata.get(key)
-                if isinstance(value, dict):
-                    candidates.append(value)
-
-        signal = source.get("signal")
-        if isinstance(signal, dict) and isinstance(signal.get("presentation"), dict):
-            candidates.append(signal["presentation"])
-
-    return candidates
+        result.append(canonicalize_signal_metadata(raw))
+    return result
 
 
 def normalize_presentation_signal(
-    response=None,
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    renderer_payloads=None,
-):
+    response: Any = None,
+    semantic: dict | None = None,
+    cognition: dict | None = None,
+    response_decision: dict | None = None,
+    renderer_payloads: Any = None,
+) -> dict:
     """
-    Normalize an existing presentation decision into one lossless contract.
+    Return the exact Executor presentation_signal_v4.
 
-    IMPORTANT:
-    This function does not discover formulas/key points from plain text.
-    Any span/role is accepted only when supplied structurally by the upstream
-    semantic/processor layer.
+    This function is intentionally NOT a presentation signal generator.
     """
-    existing = _presentation_candidates(
-        response=response,
-        semantic=semantic,
-        cognition=cognition,
-        response_decision=response_decision,
-        renderer_payloads=renderer_payloads,
-    )
+    candidates = []
 
-    merged = {}
-    for item in existing:
-        merged.update(item)
+    def collect(source: Any) -> None:
+        if not isinstance(source, dict):
+            return
+        for key in ("presentation", "presentation_signal", "presentation_contract"):
+            candidate = source.get(key)
+            if isinstance(candidate, dict):
+                candidates.append(candidate)
+        meta = source.get("metadata")
+        if isinstance(meta, dict):
+            for key in ("presentation", "presentation_signal", "presentation_contract"):
+                candidate = meta.get(key)
+                if isinstance(candidate, dict):
+                    candidates.append(candidate)
 
-    spans = merged.get("spans")
-    if not isinstance(spans, list):
-        spans = []
+    collect(response)
+    collect(renderer_payloads)
+    collect(response_decision)
+    collect(semantic)
+    collect(cognition)
 
-    formulas = merged.get("formulas")
-    if not isinstance(formulas, list):
-        formulas = []
+    # Prefer the first canonical v4 signal in source order.
+    for candidate in candidates:
+        if _s(candidate.get("version")) == PRESENTATION_SIGNAL_VERSION:
+            return candidate
 
-    key_points = merged.get("key_points")
-    if not isinstance(key_points, list):
-        key_points = []
+    if candidates:
+        return candidates[0]
 
-    by_block = merged.get("by_block")
-    if not isinstance(by_block, dict):
-        by_block = {}
-
-    normalized_spans = []
-    for raw in spans:
-        if not isinstance(raw, dict):
-            continue
-
-        role = str(raw.get("role") or "normal").strip().lower()
-        if role not in PRESENTATION_ROLES:
-            role = "normal"
-
-        start = raw.get("start")
-        end = raw.get("end")
-        start_ok = isinstance(start, int) and start >= 0
-        end_ok = isinstance(end, int) and end >= 0 and (not start_ok or end >= start)
-
-        item = {
-            "role": role,
-            "start": start if start_ok else None,
-            "end": end if end_ok else None,
-            "value": raw.get("value", ""),
-            "latex": raw.get("latex", raw.get("tex", "")),
-            "display": bool(raw.get("display", role == "formula")),
-            "emphasis": raw.get("emphasis", "normal"),
-            "style": raw.get("style", "default"),
-        }
-
-        # Do not invent a range. A semantic span can still carry a value/latex
-        # token for renderer-specific handling.
-        normalized_spans.append(item)
-
-    normalized = {
-        "version": str(merged.get("version") or PRESENTATION_SIGNAL_VERSION),
-        "engine": PRESENTATION_ENGINE_VERSION,
-        "enabled": bool(merged.get("enabled", True)),
-        "decision_owner": str(merged.get("decision_owner") or "QUANTUM_PROCESSOR"),
-        "single_route": True,
-        "mode": str(merged.get("mode") or "semantic_presentation"),
-        "primary_role": str(merged.get("primary_role") or "normal"),
-        "spans": normalized_spans,
-        "formulas": formulas,
-        "key_points": key_points,
-        "by_block": by_block,
-        "typography": dict(merged.get("typography") or {}),
-        "math": {
-            **PRESENTATION_LIBRARY_CONTRACT,
-            **dict(merged.get("math") or {}),
-            "structural_only": True,
-        },
-        "renderer_policy": {
-            "text": True,
-            "markdown": True,
-            "table": True,
-            "graph": True,
-            "diagram": True,
-            "gallery": True,
-            "code": True,
-            "link": True,
-            **dict(merged.get("renderer_policy") or {}),
-        },
-    }
-
-    # Preserve additional machine-controlled presentation fields without
-    # rewriting their contents.
-    for key in (
-        "title_role",
-        "description_role",
-        "legend_role",
-        "labels",
-        "units",
-        "primary_message",
-        "importance",
-        "density",
-        "layout",
-    ):
-        if key in merged:
-            normalized[key] = merged[key]
-
-    return normalized
+    return {}
 
 
 def attach_presentation_signal(
-    payload,
+    payload: Any,
     *,
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    renderer_payloads=None,
+    semantic: dict | None = None,
+    cognition: dict | None = None,
+    response_decision: dict | None = None,
+    renderer_payloads: Any = None,
 ):
-    """Attach one presentation contract to a machine/scene payload in-place."""
+    """
+    Pass through Executor signals.
+
+    Scene and block payloads remain authoritative. No signal synthesis occurs
+    here.
+    """
     if not isinstance(payload, dict):
         return payload
 
-    presentation = normalize_presentation_signal(
+    result = payload
+
+    scene_signal = normalize_presentation_signal(
         response=payload,
         semantic=semantic,
         cognition=cognition,
         response_decision=response_decision,
         renderer_payloads=renderer_payloads,
     )
+    if scene_signal:
+        result["presentation"] = scene_signal
 
-    payload["presentation"] = presentation
-
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict):
-        metadata["presentation"] = presentation
-
-    # MachineResponse-style containers frequently expose their render blocks
-    # directly. Keep the same signal available to individual blocks only when
-    # a block already carries a local presentation contract; otherwise the
-    # scene-level signal remains the single canonical source.
-    blocks = payload.get("render_blocks")
+    blocks = result.get("render_blocks")
     if isinstance(blocks, list):
-        for block in blocks:
-            if isinstance(block, dict) and isinstance(block.get("presentation"), dict):
-                block["presentation"] = normalize_presentation_signal(response=block)
+        result["render_blocks"] = canonicalize_render_blocks(blocks)
+        # The block-local signal is the actual renderer instruction.
+        # The scene-level signal is retained only as a reference.
+        result.setdefault(
+            "presentation_stream_version",
+            "quantum_presentation_stream_v2",
+        )
 
-    scene = payload.get("scene")
-    if isinstance(scene, dict):
-        scene["presentation"] = presentation
-        scene_metadata = scene.get("metadata")
-        if isinstance(scene_metadata, dict):
-            scene_metadata["presentation"] = presentation
-
-    return payload
+    return result
 
 
 def finalize_quantum_presentation_payload(
-    payload,
+    payload: Any,
     *,
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    renderer_payloads=None,
+    semantic: dict | None = None,
+    cognition: dict | None = None,
+    response_decision: dict | None = None,
+    renderer_payloads: Any = None,
 ):
-    if not isinstance(payload, dict):
-        return payload
-
-    # Scene/machine/renderer payloads all remain on the same canonical route.
     return attach_presentation_signal(
         payload,
         semantic=semantic,
@@ -1491,276 +404,304 @@ def finalize_quantum_presentation_payload(
     )
 
 
-# =====================================================
-# 🔥 FINAL PRESENTATION ENTRY
-# =====================================================
 
-def format_response_presentation(
+def presentation_future(*args, **kwargs):
+    return None
 
-    text="",
-    response="",
-    semantic=None,
-    cognition=None,
-    response_decision=None,
-    user_text="",
-    visual_reference=None
 
-):
+RENDERER_TYPES = set(SUPPORTED_SIGNAL_KINDS) | {
+    "artifact",
+    "canvas",
+    "svg",
+    "message_block",
+    "renderer",
+    "layout",
+    "scene",
+    "visual",
+}
 
-    presentation_enter(
-        response or text,
-        semantic
-    )
 
-    semantic = semantic or {}
+def is_renderer_payload(value: Any) -> bool:
+    if isinstance(value, dict):
+        kind = _s(value.get("type") or value.get("artifact_type") or value.get("representation")).lower()
+        return kind in RENDERER_TYPES or isinstance(value.get("presentation"), dict)
+    if isinstance(value, list):
+        return any(is_renderer_payload(item) for item in value)
+    return False
 
-    cognition = cognition or {}
 
-    response_decision = (
-        response_decision or {}
-    )
+def looks_like_json(text: Any) -> bool:
+    if not isinstance(text, str):
+        return False
+    try:
+        json.loads(text.strip())
+        return True
+    except Exception:
+        return False
 
-    final_text = response or text
 
-    # =================================================
-    # 🔥 MACHINE SAFE
-    # =====================================================
-
-    if is_machine_response(final_text):
-        safe_format_log("MACHINE RESPONSE -> SCENE CONTRACT")
-        machine_payload = finalize_presentation_payload({
-            "presentation_mode": "scene_pipeline",
-            "machine_response": final_text
-        })
-        if isinstance(machine_payload, dict):
-            attach_presentation_signal(
-                machine_payload,
-                semantic=semantic,
-                cognition=cognition,
-                response_decision=response_decision,
-            )
-            if isinstance(machine_payload.get("machine_response"), dict):
-                attach_presentation_signal(
-                    machine_payload["machine_response"],
-                    semantic=semantic,
-                    cognition=cognition,
-                    response_decision=response_decision,
-                )
-        return machine_payload
-
-    if isinstance(final_text, dict) and final_text.get("type")=="provider_response":
-        mr = final_text.get("machine_response")
-        if is_machine_response(mr):
-            safe_format_log("PROVIDER -> SCENE CONTRACT")
-            provider_payload = finalize_presentation_payload({
-                "presentation_mode":"scene_pipeline",
-                "machine_response": mr
-            })
-            if isinstance(provider_payload, dict):
-                attach_presentation_signal(
-                    provider_payload,
-                    semantic=semantic,
-                    cognition=cognition,
-                    response_decision=response_decision,
-                )
-                if isinstance(provider_payload.get("machine_response"), dict):
-                    attach_presentation_signal(
-                        provider_payload["machine_response"],
-                        semantic=semantic,
-                        cognition=cognition,
-                        response_decision=response_decision,
-                    )
-            return provider_payload
-        safe_format_log("PROVIDER CONTRACT PRESERVED")
-        return final_text
-
-    if is_machine_payload(final_text):
-
-        safe_format_log(
-            "FINAL MACHINE PAYLOAD PRESERVED"
+def is_code_payload(text: Any) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    return "```" in text or any(
+        marker in text
+        for marker in (
+            "import ", "from ", "const ", "let ", "var ",
+            "function ", "async function", "export default",
+            "def ", "async def", "console.log(", "<div", "</div>",
         )
-
-        return final_text
-
-    # =================================================
-    # 🔥 RENDERER SAFE
-    # =====================================================
-
-    if is_scene_contract(final_text):
-        safe_format_log("SCENE CONTRACT PRESERVED")
-        return final_text
-
-    if isinstance(final_text, dict) and final_text.get("type")=="scene":
-        safe_format_log("MACHINE SCENE PRESERVED")
-        return final_text
-
-    if is_renderer_payload(final_text):
-
-        safe_format_log(
-            "FINAL RENDERER PAYLOAD PRESERVED"
-        )
-
-        return final_text
-
-    # =================================================
-    # 🔥 NORMALIZATION
-    # =====================================================
-
-    final_text = normalize_text_payload(
-        final_text
     )
 
-    # =================================================
-    # 🔥 OBJECT SAFE
-    # =====================================================
 
-    if is_scene_contract(final_text):
-        safe_format_log("FINAL SCENE CONTRACT")
-        return final_text
-
-    if not isinstance(
-        final_text,
-        str
-    ):
-        safe_format_log("FINAL OBJECT PRESERVED")
-        return final_text
-
-    if not final_text:
-
-        return ""
-
-    # =================================================
-    # 🔥 FINAL BYPASS
-    # =====================================================
-
-    if should_skip_formatting(
-
-        final_text,
-        semantic,
-        response_decision
-
-    ):
-
-        safe_format_log(
-            "FINAL BYPASS"
-        )
-
-        return final_text
-
-    # =================================================
-    # 🔥 FINAL HUMAN PRESENTATION
-    # =====================================================
-
-    result = beautify_response(
-
-        final_text,
-
-        semantic,
-        cognition,
-        response_decision,
-
-        user_text
-    )
-
-    presentation_exit(
-        result
-    )
-
-    return result
-
-# APRIL PATCH
-def suppress_internal_status(text):
+def normalize_math_explanations(text: Any):
     if not isinstance(text, str):
         return text
-    blocked = [
-        "Следующий шаг:",
-        "ready_to_help",
-        "request_formula",
-        "request_image",
-        "request_error_details"
-    ]
-    for b in blocked:
-        text = text.replace(b, "")
     return text
 
 
-# =====================================================
-# STAGE 3 - Preserve scene pipeline contract
-# =====================================================
-
-def preserve_scene_pipeline(payload):
-    if isinstance(payload, dict) and payload.get("presentation_mode") == "scene_pipeline":
-        safe_format_log("SCENE PIPELINE PRESERVED")
-        return payload
-    return payload
+def detect_primary_emoji(text: Any):
+    return None
 
 
-# =====================================================
-# STAGE 4 - MachineResponse -> Scene Contract
-# =====================================================
+def apply_visual_enrichment(text: Any, behavior: dict | None = None):
+    # Presentation v2 never invents visual semantics from prose.
+    return text
 
-def build_scene_contract_legacy(machine_response):
-    if not isinstance(machine_response, dict):
-        return machine_response
 
+def suppress_internal_status(text: Any):
+    return text
+
+
+def clamp(value, minimum=0.0, maximum=1.0):
+    try:
+        value = float(value)
+    except Exception:
+        return minimum
+    return max(minimum, min(maximum, value))
+
+# ---------------------------------------------------------------------
+# Human-text cleanup.
+# These functions are used ONLY when the value being formatted is plain
+# human text, never when a scene/block/payload/signal object is present.
+# ---------------------------------------------------------------------
+
+def extract_behavior_field(cognition: dict | None = None) -> dict:
+    behavior = _dict(_dict(cognition).get("behavior_state"))
     return {
-        "type": "scene_contract",
-        "scene_present": True,
-        "scene": machine_response.get("scene", {}),
-        "artifacts": machine_response.get("artifacts", []),
-        "scene_plan": machine_response.get("scene_plan", ""),
-        "summary": machine_response.get("summary", {}),
-        # Preserve user-facing response fields
-        "content": machine_response.get("content", ""),
-        "answer": machine_response.get("answer", ""),
-        "render_priority": machine_response.get("render_priority", 0),
-        "confidence": machine_response.get("confidence", 0),
-        "metadata": machine_response.get("metadata", {}),
-
-        # Preserve renderer payloads for AprilWeb
-        "render_blocks": machine_response.get("render_blocks", []),
-        "blocks": machine_response.get("blocks", machine_response.get("render_blocks", [])),
-        "renderer_state": machine_response.get("renderer_state", {}),
-        "visual_blocks": machine_response.get("visual_blocks", []),
-        "space": machine_response.get("space", {}),
+        "response_density": behavior.get("response_density", 0.5),
+        "initiative_level": behavior.get("initiative_level", 0.35),
+        "latent_guidance": behavior.get("latent_guidance", 0.6),
+        "robotic_suppression": behavior.get("robotic_suppression", 0.9),
+        "humanization": behavior.get("humanization", 0.6),
     }
 
 
-# =====================================================
-# STAGE 5 - Unified Presentation Route
-# =====================================================
+def suppress_internal_reasoning(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    for item in ("возможно", "предположительно", "скорее всего", "я думаю",
+                 "мне кажется", "вероятно"):
+        text = text.replace(item, "")
+    return text.strip()
 
-def finalize_presentation_payload(payload):
-    if not isinstance(payload, dict):
-        return payload
 
-    if is_scene_contract(payload):
-        safe_format_log("SCENE CONTRACT PASSTHROUGH")
-        return payload
-
-    if (
-        payload.get("presentation_mode") == "scene_pipeline"
-        and "machine_response" in payload
+def suppress_dialog_bloat(text: str, behavior: dict | None = None) -> str:
+    if not isinstance(text, str):
+        return text
+    behavior = behavior or {}
+    if behavior.get("response_density", 0.5) >= 0.55:
+        return text
+    for old in (
+        "Я думаю, что",
+        "Мне кажется, что",
+        "Стоит отметить, что",
+        "Можно сказать, что",
+        "Важно понимать, что",
+        "Следует отметить, что",
     ):
-        mr = payload["machine_response"]
-        if is_scene_contract(mr):
-            safe_format_log("READY SCENE CONTRACT")
-            return mr
-
-        safe_format_log("CANONICAL CONTRACT REQUIRED")
-        # Presentation layer must not build SceneContract.
-        # Pass MachineResponse forward unchanged so the canonical
-        # transport layer (C_ARTIFACT_CONTRACT / Executor) remains
-        # the single owner of SceneContract construction.
-        return mr
-
-    return preserve_scene_pipeline(payload)
+        text = text.replace(old, "")
+    return text.strip()
 
 
-# =====================================================
-# FINAL ROUTE MARKER
-# =====================================================
+def suppress_robotic_phrasing(text: str, behavior: dict | None = None) -> str:
+    if not isinstance(text, str):
+        return text
+    behavior = behavior or {}
+    if behavior.get("robotic_suppression", 0.9) < 0.5:
+        return text
+    for phrase in (
+        "Конечно!",
+        "Отличный вопрос!",
+        "Давай разберемся.",
+        "Я готов помочь.",
+        "Чем еще помочь?",
+        "Буду рад помочь.",
+        "С удовольствием.",
+    ):
+        text = text.replace(phrase, "")
+    return text.strip()
 
-PRESENTATION_ROUTE_VERSION = "fiber_scene_v1"
+
+def stabilize_semantic_flow(text: str, behavior: dict | None = None) -> str:
+    if not isinstance(text, str):
+        return text
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n{2,}", "\n\n", text)
+    return text.strip()
+
+
+def apply_april_final_voice(text: str, behavior: dict | None = None) -> str:
+    if not isinstance(text, str):
+        return text
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return re.sub(r"[ ]{2,}", " ", text).strip()
+
+
+def beautify_response(
+    text: Any,
+    semantic: dict | None = None,
+    cognition: dict | None = None,
+    response_decision: dict | None = None,
+    user_text: str = "",
+):
+    if not isinstance(text, str):
+        return text
+
+    behavior = extract_behavior_field(cognition)
+
+    text = suppress_internal_reasoning(text)
+    text = suppress_robotic_phrasing(text, behavior)
+    text = suppress_dialog_bloat(text, behavior)
+    text = stabilize_semantic_flow(text, behavior)
+    text = apply_april_final_voice(text, behavior)
+    return text
+
+
+def should_skip_formatting(
+    text: Any,
+    semantic: dict | None = None,
+    response_decision: dict | None = None,
+) -> bool:
+    if isinstance(text, (dict, list)):
+        return True
+    if is_machine_payload(text):
+        return True
+    if is_scene_contract(text):
+        return True
+    return not isinstance(text, str) or not text
+
+
+def normalize_text_payload(value: Any):
+    if isinstance(value, (dict, list)):
+        return value
+    if value is None:
+        return ""
+    return str(value)
+
+
+def format_response_presentation(
+    text: Any = "",
+    response: Any = "",
+    semantic: dict | None = None,
+    cognition: dict | None = None,
+    response_decision: dict | None = None,
+    user_text: str = "",
+    visual_reference: Any = None,
+):
+    """
+    Final presentation boundary.
+
+    Machine/SceneContract values stay machine values. Plain text alone is
+    formatted for human readability.
+    """
+    final_value = response if response not in ("", None) else text
+    presentation_enter(final_value, semantic)
+
+    if isinstance(final_value, dict):
+        if "render_blocks" in final_value:
+            result = attach_presentation_signal(
+                final_value,
+                semantic=semantic,
+                cognition=cognition,
+                response_decision=response_decision,
+                renderer_payloads=visual_reference,
+            )
+            presentation_exit(result)
+            return result
+
+        if final_value.get("presentation_mode") == "scene_pipeline":
+            machine = final_value.get("machine_response")
+            if isinstance(machine, dict):
+                result = attach_presentation_signal(
+                    machine,
+                    semantic=semantic,
+                    cognition=cognition,
+                    response_decision=response_decision,
+                    renderer_payloads=visual_reference,
+                )
+                presentation_exit(result)
+                return result
+
+        presentation_exit(final_value)
+        return final_value
+
+    if should_skip_formatting(final_value, semantic, response_decision):
+        presentation_exit(final_value)
+        return final_value
+
+    result = beautify_response(
+        normalize_text_payload(final_value),
+        semantic=semantic,
+        cognition=cognition,
+        response_decision=response_decision,
+        user_text=user_text,
+    )
+    presentation_exit(result)
+    return result
+
+
+def preserve_scene_pipeline(payload: Any):
+    return payload
+
+
+def build_scene_contract_legacy(machine_response: Any):
+    """
+    Compatibility read-only view.
+
+    Canonical SceneContract construction remains in Executor/C_ARTIFACT_CONTRACT.
+    This helper never claims ownership of that contract.
+    """
+    return machine_response
+
+
+def finalize_presentation_payload(payload: Any):
+    """
+    Compatibility entry point.
+
+    SceneContract ownership remains with Executor. This function only ensures
+    block-local Executor signals are preserved.
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("render_blocks"), list):
+        return attach_presentation_signal(payload)
+    if (
+        isinstance(payload, dict)
+        and payload.get("presentation_mode") == "scene_pipeline"
+        and isinstance(payload.get("machine_response"), dict)
+    ):
+        return attach_presentation_signal(payload["machine_response"])
+    return payload
+
+
+# Explicit aliases expected by older callers.
+presentation_engine = PRESENTATION_ENGINE_VERSION
 PRESENTATION_ENGINE = PRESENTATION_ENGINE_VERSION
-
+INPUT_MACHINE_CHANNEL = {
+    "source": "executor",
+    "type": "presentation_machine_input",
+    "isolated": True,
+}
+OUTPUT_HUMAN_CHANNEL = {
+    "target": "botru_web_output",
+    "type": "human_response_output",
+    "isolated": True,
+}
