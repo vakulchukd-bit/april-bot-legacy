@@ -2130,6 +2130,117 @@ def _presentation_payload_contract(source: dict, kind: str) -> dict:
     }
 
 
+
+def _canonical_block_payload(block: dict) -> dict:
+    """Return the block's canonical structured payload without changing it."""
+    source = _as_dict(block)
+    payload = source.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    artifact = source.get("artifact")
+    if isinstance(artifact, dict):
+        nested = artifact.get("payload")
+        if isinstance(nested, dict):
+            return nested
+        return artifact
+    return {}
+
+
+def _canonical_block_id(block: dict, index: int) -> str:
+    """Stable identity for one logical renderer block in the single stream."""
+    source = _as_dict(block)
+    payload = _canonical_block_payload(source)
+    explicit = _s(source.get("block_id") or source.get("render_id") or payload.get("block_id"))
+    if explicit:
+        return explicit
+    btype = _s(source.get("type") or source.get("artifact_type") or source.get("representation") or "text").lower()
+    # Structured fallback identity is deterministic for this turn's stream.
+    return f"quantum-{btype}-{index}"
+
+
+def _payload_fingerprint(block: dict) -> str:
+    """Fingerprint logical payload to prevent artifact/block double rendering."""
+    source = _as_dict(block)
+    payload = _canonical_block_payload(source)
+    btype = _s(source.get("type") or source.get("artifact_type") or source.get("representation") or "text").lower()
+    normalized = {"type": btype, "payload": payload}
+    try:
+        return hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    except Exception:
+        return hashlib.sha256(repr(normalized).encode("utf-8")).hexdigest()
+
+
+def _canonicalize_render_stream(blocks: Any) -> list[dict]:
+    """Collapse duplicate transport wrappers into ONE logical render stream.
+
+    A provider may expose the same artifact as render_block + artifact. Those are
+    representations of one logical result, not two UI answers. We preserve the
+    first semantic block, enrich it with missing payload metadata, and emit a
+    stable relation graph for downstream renderers.
+    """
+    if not isinstance(blocks, list):
+        return []
+
+    result: list[dict] = []
+    by_id: dict[str, dict] = {}
+    by_fp: dict[str, dict] = {}
+
+    for index, raw in enumerate(blocks):
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        block_id = _canonical_block_id(block, index)
+        block["block_id"] = block_id
+        block["sequence_index"] = index
+        fp = _payload_fingerprint(block)
+
+        # Artifact mirrors with the same explicit id or exact payload belong to
+        # one logical presentation node. Keep one visible node and merge useful
+        # metadata instead of rendering it twice.
+        existing = by_id.get(block_id) or by_fp.get(fp)
+        if existing is not None:
+            if not isinstance(existing.get("payload"), dict) and isinstance(block.get("payload"), dict):
+                existing["payload"] = block["payload"]
+            if not existing.get("title") and block.get("title"):
+                existing["title"] = block["title"]
+            if not existing.get("description") and block.get("description"):
+                existing["description"] = block["description"]
+            existing.setdefault("relations", [])
+            for relation in block.get("relations", []) if isinstance(block.get("relations"), list) else []:
+                if relation not in existing["relations"]:
+                    existing["relations"].append(relation)
+            continue
+
+        block.setdefault("relations", [])
+        result.append(block)
+        by_id[block_id] = block
+        by_fp[fp] = block
+
+    # Every visible block belongs to one canonical presentation stream.
+    stream_ids = [b.get("block_id") for b in result]
+    for pos, block in enumerate(result):
+        related = list(block.get("related_block_ids") or [])
+        # Sequential adjacency is only a structural relation, not semantic text
+        # generation. Specialized renderers may use it to complement one another.
+        if pos > 0:
+            prev_id = result[pos - 1].get("block_id")
+            if prev_id and prev_id not in related:
+                related.append(prev_id)
+        if pos + 1 < len(result):
+            next_id = result[pos + 1].get("block_id")
+            if next_id and next_id not in related:
+                related.append(next_id)
+        block["related_block_ids"] = related
+        block["presentation_stream"] = {
+            "version": "quantum_presentation_stream_v1",
+            "stream_ids": stream_ids,
+            "source_block_id": block.get("block_id"),
+            "sequence_index": pos,
+            "single_visible_stream": True,
+        }
+
+    return result
+
 def _presentation_signal_for_block(block: dict) -> dict:
     """Build ONE canonical presentation signal for every Web-supported block type.
 
@@ -2139,6 +2250,7 @@ def _presentation_signal_for_block(block: dict) -> dict:
     exists. No parallel presentation route is created.
     """
     source = dict(block or {})
+    payload = _canonical_block_payload(source)
     btype = _s(
         source.get("type")
         or source.get("artifact_type")
@@ -2163,6 +2275,10 @@ def _presentation_signal_for_block(block: dict) -> dict:
     }
 
     block_meta = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    signal["block_id"] = _canonical_block_id(source, int(source.get("sequence_index") or 0))
+    signal["sequence_index"] = int(source.get("sequence_index") or 0)
+    signal["related_block_ids"] = list(source.get("related_block_ids") or [])
+    signal["presentation_stream"] = _quantum_snapshot(source.get("presentation_stream") or {})
     for field_name in (
         "continuation", "topic_group", "flow_id", "render_id", "block_id",
         "scene_id", "turn_id",
@@ -2199,7 +2315,17 @@ def _presentation_signal_for_block(block: dict) -> dict:
         })
 
     elif kind == "formula":
-        value = source.get("content") or source.get("text") or source.get("value") or ""
+        value = (
+            source.get("content")
+            or source.get("text")
+            or source.get("value")
+            or payload.get("formula")
+            or payload.get("equation")
+            or payload.get("expression")
+            or payload.get("math")
+            or payload.get("content")
+            or ""
+        )
         latex = _presentation_latex(value)
         signal.update({
             "kind": "formula",
@@ -2384,7 +2510,8 @@ def _presentation_signal_for_block(block: dict) -> dict:
 
 def _attach_presentation_signals(blocks: Any) -> list[dict]:
     enriched: list[dict] = []
-    for block in blocks if isinstance(blocks, list) else []:
+    canonical_blocks = _canonicalize_render_stream(blocks)
+    for block in canonical_blocks if isinstance(canonical_blocks, list) else []:
         if not isinstance(block, dict):
             continue
         clean = dict(block)
@@ -2402,7 +2529,8 @@ def _ensure_presentation_signals(blocks: Any) -> list[dict]:
     the Quantum Processor's current McDowell/KaTeX and artifact render contract.
     """
     result: list[dict] = []
-    for block in blocks if isinstance(blocks, list) else []:
+    canonical_blocks = _canonicalize_render_stream(blocks)
+    for block in canonical_blocks if isinstance(canonical_blocks, list) else []:
         if not isinstance(block, dict):
             continue
         clean = dict(block)
@@ -2662,6 +2790,28 @@ def _canonicalize(
         answer=answer,
     )
     request_meta = _request_metadata(request)
+
+    # One canonical visible presentation stream is released to Web.
+    stream = [
+        {
+            "block_id": _s(block.get("block_id")),
+            "type": _s(block.get("type") or block.get("artifact_type") or "text").lower(),
+            "sequence_index": int(block.get("sequence_index") or i),
+            "related_block_ids": list(block.get("related_block_ids") or []),
+        }
+        for i, block in enumerate(render_blocks)
+        if isinstance(block, dict)
+    ]
+    try:
+        contract.metadata = dict(contract.metadata or {})
+        contract.metadata["presentation_stream"] = {
+            "version": "quantum_presentation_stream_v1",
+            "nodes": stream,
+            "single_visible_stream": True,
+            "answer_is_fallback": True,
+        }
+    except Exception:
+        pass
 
     return {
         "transport_contract": "scene_first",
