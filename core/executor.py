@@ -40,7 +40,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v29_canonical_composer_math_engine_v2"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v30_unified_signal_engine_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -666,67 +666,66 @@ def _representation_audit(
     }
 
 
-def _requested_outputs(
-    text: str,
-    semantic: dict,
-    cognition: dict,
-    decision: dict,
-    *,
-    independent_turn: bool = False,
-) -> list[str]:
-    """Preserve the processor's measured representation plan; no trigger/score routing."""
+def _structural_request_signals(text: str) -> dict:
+    """Measure syntax-level representation evidence; no lexical trigger map."""
+    source = _s(text)
+    urls = re.findall(r"https?://[^\s)\]}>,]+", source, flags=re.I)
+    markdown_links = re.findall(r"\[[^\]]+\]\(https?://[^)]+\)", source, flags=re.I)
+    code_fences = bool(re.search(r"```[\s\S]*?```", source))
+    table_rows = len(re.findall(r"(?m)^\s*\|.+\|\s*$", source))
+    return {
+        "url_count": len(urls),
+        "markdown_link_count": len(markdown_links),
+        "code_fence": code_fences,
+        "table_row_count": table_rows,
+        "link_signal": bool(urls or markdown_links),
+        "code_signal": code_fences,
+        "table_signal": table_rows >= 2,
+    }
+
+def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dict, *, independent_turn: bool = False) -> list[str]:
+    """Collapse explicit semantic and structural evidence into one output plan."""
     constraints = _representation_constraints(semantic, cognition, decision)
     blocked = set(constraints["negative"])
     names: list[str] = []
+    aliases = {"markdown": "text", "renderer_scene": "diagram", "visual": "graph", "image_generate": "image", "plot": "graph", "chart": "graph"}
 
     def add(value: Any) -> None:
         values = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple, set)) else []
         for raw in values:
-            name = _s(raw).lower()
-            aliases = {
-                "markdown": "text",
-                "renderer_scene": "diagram",
-                "visual": "graph",
-                "image_generate": "image",
-            }
-            name = aliases.get(name, name)
+            name = aliases.get(_s(raw).lower(), _s(raw).lower())
             if name and name not in blocked and name not in names:
                 names.append(name)
 
-    # Explicit current-turn outputs are authoritative.
     for src in (decision, semantic):
-        if not isinstance(src, dict):
-            continue
-        add(src.get("requested_outputs"))
-        add(src.get("required_outputs"))
-
-    # Explicit structured constraints come next.
+        if isinstance(src, dict):
+            add(src.get("requested_outputs"))
+            add(src.get("required_outputs"))
     add(constraints["positive"])
-
-    # For independent turns, stale inherited output plans are deliberately not
-    # reused; current semantic/decision output evidence remains authoritative.
     if not names:
         for src in (semantic, cognition, decision):
             if not isinstance(src, dict):
                 continue
-            for key in (
-                "required_representations",
-                "requested_representations",
-                "candidate_representations",
-                "artifact_types",
-                "render_types",
-                "representations",
-            ):
+            for key in ("required_representations", "requested_representations", "candidate_representations", "artifact_types", "render_types", "representations", "renderer_subtype"):
                 add(src.get(key))
-        add(src.get("preferred_representation") if isinstance(src, dict) else "")
+            add(src.get("preferred_representation"))
 
-    if "text" not in names:
-        names.insert(0, "text")
-
-    # Preserve the current plan as a full multi-output set; never collapse it to
-    # one representation.
+    structural = _structural_request_signals(text)
+    if structural["link_signal"] and "link" not in blocked and "link" not in names:
+        names.append("link")
+    if structural["code_signal"] and "code" not in blocked and "code" not in names:
+        names.append("code")
+    if structural["table_signal"] and "table" not in blocked and "table" not in names:
+        names.append("table")
     return names or ["text"]
 
+
+def _representation_consensus(outputs: list[str], semantic: dict, decision: dict) -> tuple[str, dict[str, Any]]:
+    plan = list(dict.fromkeys(outputs or ["text"]))
+    preferred = _s(decision.get("preferred_representation") or semantic.get("preferred_representation") or (plan[0] if plan else "text")).lower()
+    if preferred not in plan:
+        preferred = plan[0] if plan else "text"
+    return preferred, {"outputs": plan, "preferred": preferred, "selection_method": "declared_plus_structural_measurement", "scoring": False, "triggers": False}
 
 def _representation_consensus(
     outputs: list[str],
@@ -895,64 +894,52 @@ def _quantum_64_field(
     }
 
 
-def _quantum_budget_from_64(
-    field: dict,
-    *,
-    minimum: int = OUTPUT_MIN_TOKENS,
-    maximum: int = OUTPUT_MAX_TOKENS,
-) -> int:
-    """Estimate output capacity from explicit structural workload, not scores."""
+def _representation_budget_profile(kind: str) -> dict:
+    """Canonical output-shape budget for every Web-facing representation."""
+    profiles = {
+        "text": {"base": 420, "block": 320, "payload": 0},
+        "formula": {"base": 980, "block": 620, "payload": 900},
+        "table": {"base": 900, "block": 760, "payload": 1100},
+        "graph": {"base": 1200, "block": 900, "payload": 1500},
+        "diagram": {"base": 1500, "block": 980, "payload": 1900},
+        "link": {"base": 700, "block": 520, "payload": 700},
+        "code": {"base": 1100, "block": 700, "payload": 1300},
+        "gallery": {"base": 1200, "block": 720, "payload": 1600},
+        "image": {"base": 1200, "block": 720, "payload": 1600},
+        "audio": {"base": 900, "block": 620, "payload": 1100},
+        "video": {"base": 1100, "block": 700, "payload": 1300},
+        "file": {"base": 900, "block": 620, "payload": 1100},
+        "action": {"base": 900, "block": 620, "payload": 1100},
+        "memory": {"base": 800, "block": 540, "payload": 900},
+        "scene": {"base": 1500, "block": 980, "payload": 1900},
+    }
+    return profiles.get(kind, profiles["text"])
+
+
+def _quantum_budget_from_64(field: dict, *, minimum: int = OUTPUT_MIN_TOKENS, maximum: int = OUTPUT_MAX_TOKENS) -> int:
+    """Representation-aware Provider capacity. Never budgets structured output as plain text."""
     cores = field.get("cores", {}) if isinstance(field, dict) else {}
     economy = cores.get("economy", {}) if isinstance(cores, dict) else {}
     structure = cores.get("structure", {}) if isinstance(cores, dict) else {}
-    completion = cores.get("completion", {}) if isinstance(cores, dict) else {}
-
     word_count = max(1, int(economy.get("word_count", field.get("request_word_count", 1)) or 1))
-    output_count = max(1, int(
-        economy.get("requested_output_count", field.get("requested_output_count", 1)) or 1
-    ))
-    artifact_count = max(0, int(
-        economy.get("artifact_count", field.get("artifact_count", 0)) or 0
-    ))
-    domain_count = max(0, int(
-        economy.get("domain_count", field.get("domain_count", 0)) or 0
-    ))
-    parts = max(1, int(
-        structure.get("task_parts", field.get("task_parts", 1)) or 1
-    ))
-
-    # Capacity is a direct structural measurement:
-    # text length + number of requested outputs + artifacts + domains + task parts.
-    # There are no tiers, triggers, weights, probabilities, or score cutoffs.
-    budget = (
-        96
-        + (word_count * 3)
-        + (output_count * 640)
-        + (artifact_count * 480)
-        + (domain_count * 160)
-        + (parts * 320)
-    )
-
-    # Extra representation reserve is proportional to actual declared
-    # structured outputs, not to a score.
-    structured_outputs = sum(
-        1 for item in _as_list(structure.get("requested_outputs"))
-        if _s(item).lower() not in {"", "text", "markdown"}
-    )
-    budget += structured_outputs * 720
-
-    return int(max(minimum, min(maximum, budget)))
+    output_count = max(1, int(economy.get("requested_output_count", field.get("requested_output_count", 1)) or 1))
+    artifact_count = max(0, int(economy.get("artifact_count", field.get("artifact_count", 0)) or 0))
+    domain_count = max(0, int(economy.get("domain_count", field.get("domain_count", 0)) or 0))
+    parts = max(1, int(structure.get("task_parts", field.get("task_parts", 1)) or 1))
+    outputs = [_s(x).lower() for x in _as_list(structure.get("requested_outputs")) if _s(x)] or ["text"]
+    answer_capacity = 160 + min(1500, word_count * 8) + min(1600, parts * 220)
+    structural_capacity = 0
+    for kind in dict.fromkeys(outputs):
+        profile = _representation_budget_profile(kind)
+        structural_capacity += profile["base"] + profile["block"] + profile["payload"]
+    envelope = 950 + output_count * 180 + artifact_count * 260 + domain_count * 90
+    reserve = 420
+    return int(max(minimum, min(maximum, answer_capacity + structural_capacity + envelope + reserve)))
 
 
-def _adaptive_output_budget(
-    text: str,
-    semantic: dict,
-    cognition: dict,
-    decision: dict,
-) -> int:
-    """Continuous structural capacity calculation with no trigger/scoring logic."""
-    field = _quantum_64_field(text, semantic, cognition, decision)
-    return _quantum_budget_from_64(field)
+def _adaptive_output_budget(text: str, semantic: dict, cognition: dict, decision: dict) -> int:
+    """Continuous structural capacity with representation-specific envelopes."""
+    return _quantum_budget_from_64(_quantum_64_field(text, semantic, cognition, decision))
 
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
@@ -1545,51 +1532,86 @@ def _clean_text_value(value: Any) -> str:
 
 
 def _clean_render_blocks(blocks: Any) -> list[dict]:
-    """Preserve all structured blocks while unwrapping accidental JSON text blocks."""
+    """Decode nested machine envelopes and retain every embedded artifact block."""
     result: list[dict] = []
     queue = list(blocks or []) if isinstance(blocks, (list, tuple)) else []
     while queue:
         block = queue.pop(0)
         if not isinstance(block, dict):
             continue
-
-        btype = _s(
-            block.get("type")
-            or block.get("artifact_type")
-            or block.get("representation")
-        ).lower()
-
+        btype = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
         content = block.get("content")
         decoded_content = _decode_json_envelope(content)
-        if isinstance(decoded_content, dict) and any(
-            key in decoded_content
-            for key in ("answer", "content", "summary", "render_blocks", "artifacts")
-        ):
+        if isinstance(decoded_content, dict) and any(k in decoded_content for k in ("answer", "content", "summary", "render_blocks", "blocks", "artifacts", "artifacts_payload")):
             nested_answer = _clean_text_value(decoded_content.get("answer") or decoded_content.get("content"))
             if nested_answer:
                 clean_block = dict(block)
                 clean_block["content"] = nested_answer
                 clean_block["text"] = nested_answer
+                clean_block.setdefault("type", "text")
                 result.append(clean_block)
-            nested_blocks = decoded_content.get("render_blocks")
-            if isinstance(nested_blocks, list):
-                queue = list(nested_blocks) + queue
+            nested = []
+            nested.extend(_as_list(decoded_content.get("render_blocks")))
+            nested.extend(_as_list(decoded_content.get("blocks")))
+            nested.extend(_as_list(decoded_content.get("artifacts")))
+            nested.extend(_as_list(decoded_content.get("artifacts_payload")))
+            if nested:
+                queue = nested + queue
             continue
-
         clean_block = dict(block)
         if btype in {"text", "markdown"}:
-            clean_text = _clean_text_value(
-                block.get("content")
-                or block.get("text")
-                or block.get("value")
-            )
+            clean_text = _clean_text_value(block.get("content") or block.get("text") or block.get("value"))
             if clean_text:
                 clean_block["content"] = clean_text
                 clean_block["text"] = clean_text
         result.append(clean_block)
-
     return result
 
+
+def _promote_embedded_structured_blocks(blocks: list[dict]) -> list[dict]:
+    """Turn structurally explicit URLs into link blocks without keyword routing."""
+    result: list[dict] = []
+    url_re = re.compile(r"https?://[^\s)\]}>,]+", flags=re.I)
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+        if kind not in {"text", "markdown"}:
+            result.append(block)
+            continue
+        text = _s(block.get("content") or block.get("text") or block.get("value"))
+        urls = url_re.findall(text)
+        if not urls:
+            result.append(block)
+            continue
+        remaining = text
+        first = True
+        for url in urls:
+            before, sep, after = remaining.partition(url)
+            if before.strip():
+                tb = dict(block)
+                tb["content"] = before.strip()
+                tb["text"] = tb["content"]
+                if not first:
+                    tb.pop("block_id", None)
+                result.append(tb)
+            lb = {
+                "type": "link",
+                "renderer": "link",
+                "viewer": "link_card",
+                "payload": {"url": url, "href": url},
+                "scene_contract": True,
+            }
+            result.append(lb)
+            remaining = after
+            first = False
+        if remaining.strip():
+            tb = dict(block)
+            tb["content"] = remaining.strip()
+            tb["text"] = tb["content"]
+            tb.pop("block_id", None)
+            result.append(tb)
+    return result
 
 def _decode_provider_payload(value: Any) -> dict:
     """Fully decode the Provider envelope while preserving every structured field.
@@ -2501,37 +2523,36 @@ def _mcdowell_block_contract(source: dict, segmented: dict) -> dict:
 
 
 def _presentation_payload_contract(source: dict, kind: str) -> dict:
-    """Normalize structured presentation metadata without changing payloads."""
-    payload = {}
-    for key in (
-        "title", "label", "caption", "description", "url", "href",
-        "x", "y", "x_axis", "y_axis", "axes", "series", "data",
-        "columns", "headers", "rows", "cells", "values",
-        "nodes", "edges", "elements", "items", "target",
-        "alt", "alt_text", "language", "source", "file",
-    ):
-        if key in source and source.get(key) not in (None, "", [], {}):
-            payload[key] = _quantum_snapshot(source.get(key))
-
-    nested = source.get("payload")
-    if isinstance(nested, dict):
-        for key in (
-            "title", "label", "caption", "description", "url", "href",
-            "x", "y", "x_axis", "y_axis", "axes", "series", "data",
-            "columns", "headers", "rows", "cells", "values",
-            "nodes", "edges", "elements", "items", "target",
-            "alt", "alt_text", "language", "source", "file",
-        ):
-            if key not in payload and nested.get(key) not in (None, "", [], {}):
-                payload[key] = _quantum_snapshot(nested.get(key))
-
-    return {
-        "kind": kind,
-        "payload": payload,
-        "payload_preserved": True,
+    """Expose the complete structured payload; never whitelist away renderer data."""
+    raw = _canonical_block_payload(source)
+    payload = _quantum_snapshot(raw) if isinstance(raw, dict) else {}
+    passthrough = {
+        "title", "label", "caption", "description", "url", "href", "x", "y", "x_axis", "y_axis", "axes",
+        "series", "data", "columns", "headers", "rows", "cells", "values", "nodes", "edges", "elements", "items",
+        "target", "alt", "alt_text", "language", "source", "file", "steps", "expression", "equation", "formula",
+        "math", "content", "text", "mime", "duration", "thumbnail", "actions", "parameters", "path", "size", "domain", "icon",
     }
+    for key, value in source.items():
+        if key in {"payload", "presentation", "metadata"} or value in (None, "", [], {}):
+            continue
+        if key in passthrough and key not in payload:
+            payload[key] = _quantum_snapshot(value)
+    return {"kind": kind, "payload": payload, "payload_preserved": True}
 
 
+def _canonical_block_payload(block: dict) -> dict:
+    """Return the full canonical structured payload."""
+    source = _as_dict(block)
+    payload = source.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    artifact = source.get("artifact")
+    if isinstance(artifact, dict):
+        nested = artifact.get("payload")
+        if isinstance(nested, dict):
+            return nested
+        return artifact
+    return {}
 
 def _canonical_block_payload(block: dict) -> dict:
     """Return the block's canonical structured payload without changing it."""
@@ -2572,21 +2593,30 @@ def _payload_fingerprint(block: dict) -> str:
         return hashlib.sha256(repr(normalized).encode("utf-8")).hexdigest()
 
 
-def _canonicalize_render_stream(blocks: Any) -> list[dict]:
-    """Collapse duplicate transport wrappers into ONE logical render stream.
+def _materialize_provider_blocks(payload: dict) -> list[dict]:
+    """Merge Provider render_blocks and artifact collections into one block stream."""
+    candidates: list[dict] = []
+    for block in _as_list(payload.get("render_blocks") or payload.get("blocks")):
+        if isinstance(block, dict):
+            candidates.append(dict(block))
+    for key in ("artifacts", "artifacts_payload"):
+        for artifact in _as_list(payload.get(key)):
+            if not isinstance(artifact, dict):
+                continue
+            item = dict(artifact)
+            if not item.get("type"):
+                item["type"] = item.get("artifact_type") or item.get("representation") or "text"
+            candidates.append(item)
+    return candidates
 
-    A provider may expose the same artifact as render_block + artifact. Those are
-    representations of one logical result, not two UI answers. We preserve the
-    first semantic block, enrich it with missing payload metadata, and emit a
-    stable relation graph for downstream renderers.
-    """
+
+def _canonicalize_render_stream(blocks: Any) -> list[dict]:
+    """Create one canonical visible stream while preserving structured payloads."""
     if not isinstance(blocks, list):
         return []
-
     result: list[dict] = []
     by_id: dict[str, dict] = {}
     by_fp: dict[str, dict] = {}
-
     for index, raw in enumerate(blocks):
         if not isinstance(raw, dict):
             continue
@@ -2595,323 +2625,98 @@ def _canonicalize_render_stream(blocks: Any) -> list[dict]:
         block["block_id"] = block_id
         block["sequence_index"] = index
         fp = _payload_fingerprint(block)
-
-        # Artifact mirrors with the same explicit id or exact payload belong to
-        # one logical presentation node. Keep one visible node and merge useful
-        # metadata instead of rendering it twice.
         existing = by_id.get(block_id) or by_fp.get(fp)
         if existing is not None:
-            if not isinstance(existing.get("payload"), dict) and isinstance(block.get("payload"), dict):
-                existing["payload"] = block["payload"]
-            if not existing.get("title") and block.get("title"):
-                existing["title"] = block["title"]
-            if not existing.get("description") and block.get("description"):
-                existing["description"] = block["description"]
-            existing.setdefault("relations", [])
-            for relation in block.get("relations", []) if isinstance(block.get("relations"), list) else []:
-                if relation not in existing["relations"]:
-                    existing["relations"].append(relation)
+            if not _canonical_block_payload(existing) and _canonical_block_payload(block):
+                existing["payload"] = deepcopy(_canonical_block_payload(block))
+            for key in ("title", "description", "caption", "renderer", "viewer", "language"):
+                if not existing.get(key) and block.get(key):
+                    existing[key] = block[key]
             continue
-
-        block.setdefault("relations", [])
         result.append(block)
         by_id[block_id] = block
         by_fp[fp] = block
-
-    # Every visible block belongs to one canonical presentation stream.
     stream_ids = [b.get("block_id") for b in result]
     for pos, block in enumerate(result):
         related = list(block.get("related_block_ids") or [])
-        # Sequential adjacency is only a structural relation, not semantic text
-        # generation. Specialized renderers may use it to complement one another.
-        if pos > 0:
-            prev_id = result[pos - 1].get("block_id")
-            if prev_id and prev_id not in related:
-                related.append(prev_id)
-        if pos + 1 < len(result):
-            next_id = result[pos + 1].get("block_id")
-            if next_id and next_id not in related:
-                related.append(next_id)
+        for idx in (pos - 1, pos + 1):
+            if 0 <= idx < len(result):
+                rid = result[idx].get("block_id")
+                if rid and rid not in related:
+                    related.append(rid)
         block["related_block_ids"] = related
-        block["presentation_stream"] = {
-            "version": "quantum_presentation_stream_v1",
-            "stream_ids": stream_ids,
-            "source_block_id": block.get("block_id"),
-            "sequence_index": pos,
-            "single_visible_stream": True,
-        }
-
+        block["presentation_stream"] = {"version": "quantum_presentation_stream_v2", "stream_ids": stream_ids, "source_block_id": block.get("block_id"), "sequence_index": pos, "single_visible_stream": True}
     return result
 
-def _presentation_signal_for_block(block: dict, request: MachineRequest | None = None) -> dict:
-    """Build ONE canonical presentation signal for every Web-supported block type.
+def _formula_values_from_payload(payload: dict) -> list[dict]:
+    """Build KaTeX formula entries from a formula payload, including step arrays."""
+    values: list[dict] = []
+    steps = payload.get("steps") if isinstance(payload, dict) else None
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            expression = _s(step.get("expression") or step.get("latex") or step.get("formula") or step.get("value"))
+            if expression:
+                values.append({"label": _s(step.get("label") or step.get("title")), "value": expression, "latex": _math_normalize_provider_fragment(expression), "display": True})
+    else:
+        expression = _s(payload.get("formula") or payload.get("equation") or payload.get("expression") or payload.get("math") or payload.get("content")) if isinstance(payload, dict) else ""
+        if expression:
+            values.append({"label": "", "value": expression, "latex": _math_normalize_provider_fragment(expression), "display": True})
+    return values
 
-    The signal is emitted by the Quantum Processor once on the existing route.
-    McDowell owns textual/layout presentation, specialized Web renderers own
-    their artifact geometry, and KaTeX is the math sub-engine wherever math
-    exists. No parallel presentation route is created.
-    """
+
+def _presentation_signal_for_block(block: dict, request: MachineRequest | None = None) -> dict:
+    """Build one canonical signal that tells April Web exactly which engine to use."""
     source = dict(block or {})
     payload = _canonical_block_payload(source)
-    btype = _s(
-        source.get("type")
-        or source.get("artifact_type")
-        or source.get("representation")
-    ).lower()
-    representation = _s(
-        source.get("representation")
-        or source.get("presentation")
-    ).lower()
-
-    kind = btype or representation or "text"
+    kind = _s(source.get("type") or source.get("artifact_type") or source.get("representation") or "text").lower()
+    kind = {"markdown": "text", "plot": "graph", "chart": "graph", "scene": "diagram", "layout": "diagram", "visual": "diagram", "image": "gallery", "media": "gallery"}.get(kind, kind)
     math_policy = _math_presentation_policy(request)
-    signal: dict[str, Any] = {
-        "version": "presentation_signal_v3",
-        "kind": kind,
-        "renderer": "",
-        "engine": "",
-        "producer": "QUANTUM_PROCESSOR",
-        "route": "canonical",
-        "preserve_payload": True,
-        "payload_unchanged": True,
-        "payload_contract": _presentation_payload_contract(source, kind),
+    signal = {
+        "version": "presentation_signal_v4", "kind": kind, "renderer": "", "engine": "", "producer": "QUANTUM_PROCESSOR", "route": "canonical",
+        "preserve_payload": True, "payload_unchanged": True, "payload_contract": _presentation_payload_contract(source, kind),
+        "block_id": _canonical_block_id(source, int(source.get("sequence_index") or 0)), "sequence_index": int(source.get("sequence_index") or 0),
+        "related_block_ids": list(source.get("related_block_ids") or []), "presentation_stream": _quantum_snapshot(source.get("presentation_stream") or {}),
     }
-
-    block_meta = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
-    signal["block_id"] = _canonical_block_id(source, int(source.get("sequence_index") or 0))
-    signal["sequence_index"] = int(source.get("sequence_index") or 0)
-    signal["related_block_ids"] = list(source.get("related_block_ids") or [])
-    signal["presentation_stream"] = _quantum_snapshot(source.get("presentation_stream") or {})
-    for field_name in (
-        "continuation", "topic_group", "flow_id", "render_id", "block_id",
-        "scene_id", "turn_id",
-    ):
-        value = source.get(field_name)
-        if value in (None, ""):
-            value = block_meta.get(field_name)
+    meta = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    for name in ("continuation", "topic_group", "flow_id", "render_id", "scene_id", "turn_id"):
+        value = source.get(name) or meta.get(name)
         if value not in (None, ""):
-            signal[field_name] = _quantum_snapshot(value)
-
-    if kind in {"text", "markdown"}:
+            signal[name] = _quantum_snapshot(value)
+    if kind == "text":
         content = source.get("content") or source.get("text") or source.get("value") or ""
         segmented = _presentation_segments(content, math_policy=math_policy)
-        signal.update({
-            "kind": (
-                "mixed"
-                if segmented.get("mode") == "mixed"
-                else "structured"
-                if segmented.get("mode") == "structured"
-                else "text"
-            ),
-            "renderer": "mcdowell",
-            "engine": "presentation_matrix",
-            "text_engine": "mcdowell",
-            "formula_engine": "katex",
-            "presentation": _mcdowell_block_contract(source, segmented),
-            "spans": segmented.get("spans", []),
-            "segments": segmented.get("segments", []),
-            "blocks": segmented.get("blocks", []),
-            "analysis": segmented.get("analysis", {}),
-            "layout": segmented.get("layout", "mcdowell_document"),
-            "delegated_segments": bool(segmented.get("spans") or segmented.get("blocks")),
-            "payload_preserved": True,
-            "math_policy": _quantum_snapshot(math_policy),
-        })
-
+        signal.update({"kind": "mixed" if segmented.get("mode") == "mixed" else "structured" if segmented.get("mode") == "structured" else "text", "renderer": "mcdowell", "engine": "presentation_matrix", "text_engine": "mcdowell", "formula_engine": "katex", "presentation": _mcdowell_block_contract(source, segmented), "spans": segmented.get("spans", []), "segments": segmented.get("segments", []), "blocks": segmented.get("blocks", []), "analysis": segmented.get("analysis", {}), "layout": segmented.get("layout", "mcdowell_document"), "delegated_segments": bool(segmented.get("spans") or segmented.get("blocks")), "math_policy": _quantum_snapshot(math_policy)})
     elif kind == "formula":
-        value = (
-            source.get("content")
-            or source.get("text")
-            or source.get("value")
-            or payload.get("formula")
-            or payload.get("equation")
-            or payload.get("expression")
-            or payload.get("math")
-            or payload.get("content")
-            or ""
-        )
-        latex = _math_normalize_provider_fragment(value)
-        signal.update({
-            "kind": "formula",
-            "renderer": "mcdowell",
-            "engine": "katex",
-            "text_engine": "mcdowell",
-            "formula_engine": "katex",
-            "layout": "mcdowell_document",
-            "presentation": {
-                "enabled": True,
-                "mode": "formula",
-                "renderer": "mcdowell",
-                "math_engine": "katex",
-                "layout": "mcdowell_document",
-                "formulas": [{
-                    "value": value,
-                    "latex": latex,
-                    "display": True,
-                }],
-                "payload_preserved": True,
-            },
-            "spans": [{
-                "start": 0,
-                "end": len(_s(value)),
-                "role": "formula",
-                "renderer": "mcdowell",
-                "engine": "katex",
-                "latex": latex,
-                "value": value,
-                "display": True,
-            }],
-        })
-
-    elif kind in {"table"}:
-        signal.update({
-            "kind": "table",
-            "renderer": "table",
-            "engine": "table",
-            "layout": "table_document",
-            "cell_text_engine": "mcdowell",
-            "cell_math_engine": "katex",
-            "caption_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, "table"),
-        })
-
-    elif kind in {"graph", "plot", "chart"}:
-        signal.update({
-            "kind": "graph",
-            "renderer": "graph",
-            "engine": "graph",
-            "layout": "graph_document",
-            "label_text_engine": "mcdowell",
-            "label_math_engine": "katex",
-            "caption_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "axis_text_engine": "mcdowell",
-            "axis_math_engine": "katex",
-            "artifact_payload": _presentation_payload_contract(source, "graph"),
-        })
-
-    elif kind in {"diagram", "scene", "layout", "visual"}:
-        signal.update({
-            "kind": "diagram",
-            "renderer": "graph",
-            "engine": "diagram",
-            "layout": "diagram_document",
-            "label_text_engine": "mcdowell",
-            "label_math_engine": "katex",
-            "caption_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, "diagram"),
-        })
-
+        formulas = _formula_values_from_payload(payload)
+        value = _s(source.get("content") or source.get("text") or source.get("value"))
+        if not formulas and value:
+            formulas = [{"label": "", "value": value, "latex": _math_normalize_provider_fragment(value), "display": True}]
+        signal.update({"kind": "formula", "renderer": "mcdowell", "engine": "katex", "text_engine": "mcdowell", "formula_engine": "katex", "layout": "mcdowell_document", "presentation": {"enabled": bool(formulas), "mode": "formula", "renderer": "mcdowell", "math_engine": "katex", "layout": "mcdowell_document", "formulas": formulas, "payload_preserved": True}, "spans": [{"start": 0, "end": len(f["value"]), "role": "formula", "renderer": "mcdowell", "engine": "katex", "latex": f["latex"], "value": f["value"], "display": bool(f.get("display"))} for f in formulas]})
+    elif kind == "table":
+        signal.update({"kind": "table", "renderer": "table", "engine": "table", "layout": "table_document", "cell_text_engine": "mcdowell", "cell_math_engine": "katex", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "table")})
+    elif kind == "graph":
+        signal.update({"kind": "graph", "renderer": "graph", "engine": "graph", "layout": "graph_document", "label_text_engine": "mcdowell", "label_math_engine": "katex", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "axis_text_engine": "mcdowell", "axis_math_engine": "katex", "artifact_payload": _presentation_payload_contract(source, "graph")})
+    elif kind == "diagram":
+        signal.update({"kind": "diagram", "renderer": "graph", "engine": "diagram", "layout": "diagram_document", "label_text_engine": "mcdowell", "label_math_engine": "katex", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "diagram")})
     elif kind == "link":
-        signal.update({
-            "kind": "link",
-            "renderer": "link",
-            "engine": "link_card",
-            "layout": "link_card_document",
-            "title_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "inline_math_engine": "katex",
-            "href_preserved": True,
-            "artifact_payload": _presentation_payload_contract(source, "link"),
-        })
-
+        signal.update({"kind": "link", "renderer": "link", "engine": "link_card", "layout": "link_card_document", "title_text_engine": "mcdowell", "description_text_engine": "mcdowell", "inline_math_engine": "katex", "href_preserved": True, "artifact_payload": _presentation_payload_contract(source, "link")})
     elif kind == "code":
-        signal.update({
-            "kind": "code",
-            "renderer": "code",
-            "engine": "syntax",
-            "layout": "code_document",
-            "caption_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "language": _s(source.get("language")),
-        })
-
-    elif kind in {"gallery", "image", "media"}:
-        signal.update({
-            "kind": "gallery",
-            "renderer": "gallery",
-            "engine": "media",
-            "layout": "gallery_document",
-            "caption_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, "gallery"),
-        })
-
+        signal.update({"kind": "code", "renderer": "code", "engine": "syntax", "layout": "code_document", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "language": _s(source.get("language") or payload.get("language"))})
+    elif kind == "gallery":
+        signal.update({"kind": "gallery", "renderer": "gallery", "engine": "media", "layout": "gallery_document", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "gallery")})
     elif kind in {"audio", "video"}:
-        signal.update({
-            "kind": kind,
-            "renderer": kind,
-            "engine": "media",
-            "layout": f"{kind}_document",
-            "caption_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, kind),
-        })
-
+        signal.update({"kind": kind, "renderer": kind, "engine": "media", "layout": f"{kind}_document", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, kind)})
     elif kind == "file":
-        signal.update({
-            "kind": "file",
-            "renderer": "file",
-            "engine": "file_card",
-            "layout": "file_card_document",
-            "title_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, "file"),
-        })
-
+        signal.update({"kind": "file", "renderer": "file", "engine": "file_card", "layout": "file_card_document", "title_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "file")})
     elif kind == "action":
-        signal.update({
-            "kind": "action",
-            "renderer": "action",
-            "engine": "action",
-            "layout": "action_document",
-            "label_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, "action"),
-        })
-
+        signal.update({"kind": "action", "renderer": "action", "engine": "action", "layout": "action_document", "label_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "action")})
     elif kind == "memory":
-        signal.update({
-            "kind": "memory",
-            "renderer": "memory",
-            "engine": "memory",
-            "layout": "memory_document",
-            "label_text_engine": "mcdowell",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, "memory"),
-        })
-
+        signal.update({"kind": "memory", "renderer": "memory", "engine": "memory", "layout": "memory_document", "label_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "memory")})
     else:
-        signal.update({
-            "kind": kind,
-            "renderer": "mcdowell",
-            "engine": "markdown",
-            "layout": "mcdowell_document",
-            "inline_math_engine": "katex",
-            "description_text_engine": "mcdowell",
-            "artifact_payload": _presentation_payload_contract(source, kind),
-        })
-
+        signal.update({"kind": kind, "renderer": "mcdowell", "engine": "markdown", "layout": "mcdowell_document", "inline_math_engine": "katex", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, kind)})
     signal["math_policy"] = _quantum_snapshot(math_policy)
-
-    # Provider metadata may annotate the artifact, but can never replace the
-    # freshly computed canonical presentation matrix.
-    explicit_signal = source.get("presentation")
-    if isinstance(explicit_signal, dict):
-        extras = _quantum_snapshot(explicit_signal)
-        if isinstance(extras, dict):
-            protected = {
-                "version", "kind", "renderer", "engine", "producer", "route",
-                "presentation", "spans", "segments", "blocks", "analysis",
-                "layout", "text_engine", "formula_engine", "math_engine",
-                "payload_unchanged", "payload_preserved", "delegated_segments",
-            }
-            for key, value in extras.items():
-                if key not in protected and key not in signal:
-                    signal[key] = value
-
     return signal
 
 def _attach_presentation_signals(blocks: Any, request: MachineRequest | None = None) -> list[dict]:
@@ -2945,107 +2750,25 @@ def _ensure_presentation_signals(blocks: Any, request: MachineRequest | None = N
     return result
 
 def _response(value: Any, request: MachineRequest | None = None) -> MachineResponse:
-    """Single in-place Provider response analysis and canonical separation."""
+    """Decode Provider output and materialize all structured artifacts into one stream."""
     payload = _decode_provider_payload(value)
     fields = MachineResponse.__dataclass_fields__
     allowed = {k: v for k, v in payload.items() if k in fields}
-
-    answer = (
-        _clean_text_value(payload.get("answer"))
-        or _clean_text_value(payload.get("content"))
-        or _clean_text_value(payload.get("response"))
-    )
-
-    blocks = _clean_render_blocks(payload.get("render_blocks") or [])
-    if not answer:
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            btype = _s(block.get("type") or block.get("artifact_type")).lower()
-            if btype in {"text", "markdown"}:
-                answer = _clean_text_value(
-                    block.get("content")
-                    or block.get("text")
-                    or block.get("value")
-                )
-                if answer:
-                    break
-
+    answer = _clean_text_value(payload.get("answer") or payload.get("content") or payload.get("response"))
+    blocks = _materialize_provider_blocks(payload)
+    blocks = _promote_embedded_structured_blocks(blocks)
+    if answer and not any(isinstance(b, dict) and _s(b.get("type") or b.get("artifact_type")).lower() in {"text", "markdown"} for b in blocks):
+        blocks.insert(0, {"type": "text", "content": answer, "text": answer, "renderer": "TextBlock", "viewer": "TextBlock", "scene_contract": True})
+    blocks = _canonical_answer_composer(_clean_render_blocks(blocks), answer=answer)
+    blocks = _ensure_presentation_signals(blocks, request=request)
+    allowed["render_blocks"] = blocks
     if answer:
         allowed["answer"] = answer
         allowed["content"] = answer
-
-    artifacts = list(allowed.get("artifacts") or [])
-    artifacts_payload = list(allowed.get("artifacts_payload") or [])
-
-    visible_text = any(
-        isinstance(block, dict)
-        and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
-        and bool(_clean_text_value(
-            block.get("content") or block.get("text") or block.get("value")
-        ))
-        for block in blocks
-    )
-    if answer and not visible_text:
-        blocks.insert(0, {
-            "type": "text",
-            "artifact_type": "text",
-            "content": answer,
-            "text": answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "scene_contract": True,
-            "source": "quantum_processor",
-        })
-
-    # The fallback text block is created after the first presentation pass.
-    # Re-run the same canonical presentation engine so McDowell never receives
-    # a block without its current signal.
-    blocks = _canonical_answer_composer(blocks, answer=answer)
-    blocks = _ensure_presentation_signals(blocks, request=request)
-    allowed["render_blocks"] = blocks
-
     metadata = dict(allowed.get("metadata") or {}) if isinstance(allowed.get("metadata"), dict) else {}
-    extras = {
-        k: v for k, v in payload.items()
-        if k not in fields and k not in {"processor_input", "provider_source_request"}
-    }
-    if extras:
-        metadata["provider_extras"] = _quantum_snapshot(extras)
-
-    block_types = []
-    for block in blocks:
-        if isinstance(block, dict):
-            btype = _s(
-                block.get("type")
-                or block.get("artifact_type")
-                or block.get("representation")
-            ).lower()
-            if btype and btype not in block_types:
-                block_types.append(btype)
-
-    metadata["quantum_matrix"] = {
-        "owner": "QUANTUM_PROCESSOR",
-        "version": PROCESSOR_VERSION,
-        "answer_present": bool(answer),
-        "summary_present": bool(_clean_text_value(payload.get("summary"))),
-        "requested_outputs": list(getattr(request, "requested_outputs", []) or []) if request else [],
-        "block_types": block_types,
-        "render_block_count": len(blocks),
-        "composer_engine": "quantum_canonical_answer_composer_v1",
-        "artifact_count": len(artifacts) + len(artifacts_payload),
-        "information_preserved": True,
-        "machine_fields_transport_only": True,
-        "scoring": False,
-        "triggers": False,
-    }
-    metadata["visible_answer_guaranteed"] = bool(answer)
-    metadata["artifact_preservation"] = True
-    metadata["single_route"] = True
+    metadata["quantum_matrix"] = {"owner": "QUANTUM_PROCESSOR", "version": PROCESSOR_VERSION, "block_types": [_s(b.get("type") or b.get("artifact_type")).lower() for b in blocks if isinstance(b, dict)], "render_block_count": len(blocks), "composer_engine": "quantum_canonical_answer_composer_v2", "information_preserved": True, "machine_fields_transport_only": True, "scoring": False, "triggers": False}
     allowed["metadata"] = metadata
-
     return MachineResponse(**allowed)
-
 
 def _canonicalize(
     user_id: str,
