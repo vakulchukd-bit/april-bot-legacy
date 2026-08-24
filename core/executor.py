@@ -40,7 +40,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v27_scene_continuity_formula_engine"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v29_canonical_composer_math_engine_v2"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1226,6 +1226,29 @@ def _make_request(
         constraints=representation_constraints,
     )
 
+    # Explicit mathematical turns get a structured presentation policy. This is
+    # not a routing trigger; it is a downstream rendering contract for the
+    # Quantum Math Engine.
+    presentation_plan = {
+        "version": "quantum_presentation_plan_v2",
+        "math_mode": (
+            "explicit_math"
+            if measured_output in {"formula", "math"} or "formula" in requested_outputs or "math" in requested_outputs
+            else "structural"
+        ),
+        "promote_math_numbers": bool(
+            measured_output in {"formula", "math"}
+            or "formula" in requested_outputs
+            or "math" in requested_outputs
+        ),
+        "promote_variable_labels": bool(
+            measured_output in {"formula", "math"}
+            or "formula" in requested_outputs
+            or "math" in requested_outputs
+        ),
+        "source": "QUANTUM_PROCESSOR",
+    }
+
     request_metadata = {
         "processor_version": PROCESSOR_VERSION,
         "assistant_identity": deepcopy(APRIL_IDENTITY),
@@ -1347,6 +1370,7 @@ def _make_request(
             "provider_context_strategy": "provider_router_semantic_field_selection",
             "current_request_must_remain_intact": True,
             "identity_scope": deepcopy(scope),
+            "presentation_plan": presentation_plan,
             "representation_plan": {
                 "requested_outputs": requested_outputs,
                 "preferred_representation": measured_output,
@@ -1407,6 +1431,7 @@ def _make_request(
         "requested_outputs": requested_outputs,
         "identity_scope": deepcopy(scope),
         "control_plane": _quantum_snapshot(control),
+        "presentation_plan": _quantum_snapshot(request.constraints.get("presentation_plan", {})),
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
         ),
@@ -1806,6 +1831,383 @@ def _math_structure_profile(value: Any) -> dict:
         "list_numbering_protected": True,
     }
 
+
+def _math_presentation_policy(request: MachineRequest | None = None) -> dict:
+    """Return one canonical math-display policy for the current turn.
+
+    The policy is derived from the already-collapsed request contract. It never
+    performs lexical routing. In explicit mathematical turns, numbers/units
+    that belong to mathematical expressions are promoted to KaTeX, while
+    ordinary prose remains Markdown.
+    """
+    if request is None:
+        return {
+            "version": "math_presentation_policy_v2",
+            "mode": "structural",
+            "promote_math_numbers": False,
+            "promote_variable_labels": False,
+            "source": "QUANTUM_PROCESSOR",
+        }
+
+    qstate = getattr(request, "quantum_state", {}) or {}
+    rep = qstate.get("representation", {}) if isinstance(qstate, dict) else {}
+    measured = _s(qstate.get("measured_output")) if isinstance(qstate, dict) else ""
+    outputs = list(getattr(request, "requested_outputs", []) or [])
+
+    explicit_formula = (
+        measured in {"formula", "math"}
+        or "formula" in outputs
+        or "math" in outputs
+    )
+    plan = getattr(request, "constraints", {}) or {}
+    presentation_plan = plan.get("presentation_plan", {}) if isinstance(plan, dict) else {}
+    explicit_numbers = bool(
+        presentation_plan.get("promote_math_numbers")
+        or presentation_plan.get("all_math_numbers")
+    )
+
+    mode = "explicit_math" if explicit_formula or explicit_numbers else "structural"
+
+    return {
+        "version": "math_presentation_policy_v2",
+        "mode": mode,
+        "promote_math_numbers": bool(explicit_numbers or explicit_formula),
+        "promote_variable_labels": bool(explicit_numbers or explicit_formula),
+        "source": "QUANTUM_PROCESSOR",
+    }
+
+
+def _math_structure_profile_v2(value: Any, *, policy: dict | None = None) -> dict:
+    """Extended structural math parser for Provider output.
+
+    This is intentionally structure-driven:
+      * explicit TeX delimiters remain authoritative;
+      * relation/assignment/operator chains form one expression;
+      * units attached to numeric expressions remain part of that expression;
+      * explicit math turns can additionally promote standalone numbers and
+        variable labels that are clearly part of assignment/list notation;
+      * ordinary prose is never globally converted to math.
+    """
+    source = _s(value)
+    policy = policy if isinstance(policy, dict) else {}
+    promote_numbers = bool(policy.get("promote_math_numbers"))
+    promote_variables = bool(policy.get("promote_variable_labels"))
+
+    if not source:
+        return {
+            "present": False,
+            "confidence": 0.0,
+            "ranges": [],
+            "notation": [],
+            "operator_density": 0.0,
+            "measurement_mode": "structural_notation_matrix_v2",
+            "lexical_triggers": False,
+            "numeric_policy": "explicit_math_only",
+            "math_policy": policy,
+        }
+
+    ranges: list[dict] = []
+    occupied: list[tuple[int, int]] = []
+    notation: list[str] = []
+
+    def overlaps(start: int, end: int) -> bool:
+        return any(start < b and end > a for a, b in occupied)
+
+    def add_range(start: int, end: int, source_name: str, *, display: bool = False) -> None:
+        start = max(0, int(start))
+        end = min(len(source), int(end))
+        while end > start and source[end - 1].isspace():
+            end -= 1
+        while start < end and source[start].isspace():
+            start += 1
+        if end <= start or overlaps(start, end):
+            return
+        occupied.append((start, end))
+        ranges.append({
+            "start": start,
+            "end": end,
+            "kind": "formula",
+            "renderer": "mcdowell",
+            "engine": "katex",
+            "source": source_name,
+            "display": bool(display),
+        })
+        notation.append(source_name)
+
+    # 1. Explicit TeX delimiters.
+    delimiter_patterns = (
+        (r"\\\((.+?)\\\)", "inline_latex", False),
+        (r"\\\[(.+?)\\\]", "display_latex", True),
+        (r"\$\$(.+?)\$\$", "display_dollar", True),
+        (r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", "inline_dollar", False),
+    )
+    for pattern, label, display in delimiter_patterns:
+        for match in re.finditer(pattern, source, flags=re.DOTALL):
+            add_range(*match.span(), label, display=display)
+
+    # 2. Canonical TeX/Unicode atoms.
+    frac_atom = r"\\(?:frac|dfrac|tfrac)\s*\{[^{}\n]{1,160}\}\s*\{[^{}\n]{1,160}\}"
+    sqrt_atom = r"\\sqrt\s*(?:\[[^\]\n]{1,24}\])?\s*\{[^{}\n]{1,160}\}"
+    command_atom = r"\\(?:operatorname|mathrm|text)\s*\{[^{}\n]{1,100}\}"
+    radical_value = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.,]\d+)?"
+    unicode_sqrt_atom = rf"√\s*(?:\([^()\n]{{1,160}}\)|{radical_value})"
+    unicode_cbrt_atom = rf"∛\s*(?:\([^()\n]{{1,160}}\)|{radical_value})"
+    unicode_qrtrt_atom = rf"∜\s*(?:\([^()\n]{{1,160}}\)|{radical_value})"
+    numeric_atom = r"[-+−]?\d+(?:[.,]\d+)?(?:[eE][-+−]?\d+)?(?:\s*(?:[A-Za-zА-Яа-яЁё]{1,6}|%|°))?"
+    symbol_atom = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω]\w*(?:\^[-+]?\d+|[²³⁴⁵⁶⁷⁸⁹])?"
+    paren_atom = r"\([^()\n]{1,160}\)"
+    atom = (
+        rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|"
+        rf"{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|"
+        rf"{command_atom}|{paren_atom})"
+    )
+    operator = (
+        r"(?:\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq|"
+        r"equiv|to)|[+\-−*/=<>×÷≈≤≥≠±·])"
+    )
+
+    # 3. Operator-connected chains and relations.
+    chain_re = re.compile(rf"(?P<expr>{atom}(?:\s*{operator}\s*{atom})+)")
+    for match in chain_re.finditer(source):
+        add_range(*match.span("expr"), "raw_math_structure", display=False)
+
+    relation_re = re.compile(
+        rf"(?P<expr>{atom}\s*(?:=|≈|≃|≅|≤|≥|≠)\s*{atom}"
+        rf"(?:\s*{operator}\s*{atom})*)"
+    )
+    for match in relation_re.finditer(source):
+        add_range(*match.span("expr"), "relation_structure", display=False)
+
+    # 4. Standalone radical/fraction structures.
+    standalone_re = re.compile(
+        rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
+        rf"{unicode_qrtrt_atom})(?:\s*{operator}\s*"
+        rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
+        rf"{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}|{paren_atom}))*"
+    )
+    for match in standalone_re.finditer(source):
+        add_range(*match.span(), "radical_structure", display=False)
+
+    # 5. Explicit math mode: promote numbers/units and variable labels only
+    # when the local line itself has mathematical structure.
+    if promote_numbers or promote_variables:
+        line_offset = 0
+        for raw_line in source.splitlines(keepends=True):
+            line = raw_line.rstrip("\r\n")
+            stripped = line.strip()
+            line_start = line_offset
+            line_end = line_start + len(line)
+            line_offset += len(raw_line)
+
+            if not stripped:
+                continue
+
+            line_math = bool(
+                re.search(r"(?:=|≈|≃|≅|≤|≥|≠|×|÷|\*|/|\^|²|³|√|∛|∜|\\(?:frac|sqrt|cdot|times|div))", line)
+                or re.match(r"^\s*(?:[A-Za-zΑ-Ωα-ω]\w*|[A-Za-zА-Яа-яЁё]\w*)\s*=", line)
+            )
+            if not line_math:
+                # Still support explanatory list labels like "- **E** — энергия".
+                line_math = bool(
+                    promote_variables
+                    and re.match(r"^\s*[-*+]\s+\*\*[A-Za-zΑ-Ωα-ωА-Яа-яЁё]\w*(?:\^[-+]?\d+|[²³⁴⁵⁶⁷⁸⁹])?\*\*\s*[—-]", line)
+                )
+            if not line_math:
+                continue
+
+            # Bold variable labels: **E**, **m**, **c²**
+            if promote_variables:
+                for match in re.finditer(
+                    r"\*\*(?P<var>[A-Za-zΑ-Ωα-ωА-Яа-яЁё]\w*(?:\^[-+]?\d+|[²³⁴⁵⁶⁷⁸⁹])?)\*\*",
+                    line,
+                ):
+                    start = line_start + match.start("var")
+                    end = line_start + match.end("var")
+                    add_range(start, end, "math_variable_label", display=False)
+
+            # Standalone numeric values in an explicitly mathematical line.
+            if promote_numbers:
+                for match in re.finditer(
+                    r"(?<![\wА-Яа-яЁё])[-+]?\d+(?:[.,]\d+)?(?:\s*(?:[A-Za-zА-Яа-яЁё]{1,8}|%|°))?(?![\wА-Яа-яЁё])",
+                    line,
+                ):
+                    start = line_start + match.start()
+                    end = line_start + match.end()
+                    # Do not split numbers that are already inside a larger
+                    # expression span; the full expression is the better unit.
+                    if not overlaps(start, end):
+                        add_range(start, end, "explicit_math_number", display=False)
+
+    # 6. Protect Markdown list numbering from accidental math promotion.
+    list_prefixes: list[tuple[int, int]] = []
+    offset = 0
+    for raw_line in source.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        m = re.match(r"^\s*\d+[.)]\s+", line)
+        if m:
+            list_prefixes.append((offset + m.start(), offset + m.end()))
+        offset += len(raw_line)
+
+    # 7. Merge only truly overlapping ranges.
+    ranges.sort(key=lambda item: (item["start"], item["end"]))
+    merged: list[dict] = []
+    for item in ranges:
+        if any(
+            item["start"] >= a and item["end"] <= b
+            for a, b in list_prefixes
+        ):
+            continue
+        if not merged or item["start"] >= merged[-1]["end"]:
+            merged.append(dict(item))
+        elif item["end"] > merged[-1]["end"]:
+            merged[-1]["end"] = item["end"]
+            merged[-1]["display"] = bool(
+                merged[-1].get("display") or item.get("display")
+            )
+            if item.get("source") not in notation:
+                notation.append(item.get("source", "structural"))
+
+    operator_count = len(re.findall(r"[=≈≃≅≤≥±·×÷/*^_√∛∜]", source))
+    numeric_count = len(re.findall(r"\d", source))
+    density = (operator_count + min(numeric_count, 16)) / max(len(source), 1)
+
+    structural_strength = 0.0
+    if merged:
+        structural_strength = min(
+            1.0,
+            0.55 + 0.11 * min(len(merged), 4) + min(0.24, density * 6.0),
+        )
+
+    return {
+        "present": bool(merged),
+        "confidence": round(structural_strength, 6),
+        "ranges": merged,
+        "notation": sorted(set(x for x in notation if x)),
+        "operator_density": round(density, 6),
+        "measurement_mode": "structural_notation_matrix_v2",
+        "lexical_triggers": False,
+        "numeric_policy": "explicit_math_and_structural",
+        "math_policy": policy,
+        "list_numbering_protected": True,
+    }
+
+
+def _math_normalize_provider_fragment(fragment: str) -> str:
+    """Normalize common Provider TeX fragments into stable KaTeX source."""
+    value = _presentation_latex(fragment)
+    value = value.replace(r"\text{кг}", r"\mathrm{кг}")
+    value = value.replace(r"\text{г}", r"\mathrm{г}")
+    value = value.replace(r"\text{м}", r"\mathrm{м}")
+    value = value.replace(r"\text{с}", r"\mathrm{с}")
+    value = re.sub(r"\\text\{([^{}]{1,40})\}", r"\\mathrm{\1}", value)
+    value = value.replace(r"\cdot", r"\times")
+    return value
+
+
+def _canonical_semantic_block_key(block: dict) -> str:
+    """Semantic identity used only to collapse true transport duplicates."""
+    source = _as_dict(block)
+    btype = _s(
+        source.get("type")
+        or source.get("artifact_type")
+        or source.get("representation")
+        or "text"
+    ).lower()
+
+    parts = []
+    for key in ("content", "text", "value", "title", "description"):
+        val = source.get(key)
+        if isinstance(val, (str, int, float)):
+            normalized = re.sub(r"\s+", " ", _s(val)).strip().lower()
+            if normalized:
+                parts.append(f"{key}:{normalized}")
+
+    payload = _canonical_block_payload(source)
+    if payload:
+        try:
+            parts.append(
+                "payload:"
+                + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        except Exception:
+            parts.append("payload:" + repr(payload))
+
+    return hashlib.sha256(
+        (btype + "|" + "|".join(parts)).encode("utf-8")
+    ).hexdigest()
+
+
+def _canonical_answer_composer(blocks: Any, answer: str = "") -> list[dict]:
+    """Compose one logical visible stream from Provider's heterogeneous blocks.
+
+    The composer removes only true duplicates. Distinct blocks are preserved in
+    Provider order and linked under one answer stream.
+    """
+    canonical = _canonicalize_render_stream(blocks)
+    if not canonical and answer:
+        canonical = [{
+            "type": "text",
+            "artifact_type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "source": "quantum_processor",
+        }]
+
+    result: list[dict] = []
+    seen: dict[str, dict] = {}
+    stream_id = hashlib.sha256(
+        _s(answer).encode("utf-8")
+    ).hexdigest()[:20] if answer else "stream"
+
+    for raw in canonical:
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        semantic_key = _canonical_semantic_block_key(block)
+
+        # Same logical text/content appearing twice is a transport duplicate.
+        # Do not collapse distinct renderer types with different structured payloads.
+        existing = seen.get(semantic_key)
+        if existing is not None:
+            existing.setdefault("duplicate_block_ids", [])
+            if block.get("block_id") not in existing["duplicate_block_ids"]:
+                existing["duplicate_block_ids"].append(block.get("block_id"))
+            continue
+
+        seen[semantic_key] = block
+        result.append(block)
+
+    stream_ids = []
+    for idx, block in enumerate(result):
+        old_id = _s(block.get("block_id"))
+        if not old_id:
+            old_id = f"quantum-block-{idx}"
+        block["block_id"] = old_id
+        block["sequence_index"] = idx
+        stream_ids.append(old_id)
+
+    for idx, block in enumerate(result):
+        related = list(block.get("related_block_ids") or [])
+        prev_id = stream_ids[idx - 1] if idx > 0 else ""
+        next_id = stream_ids[idx + 1] if idx + 1 < len(stream_ids) else ""
+        for rid in (prev_id, next_id):
+            if rid and rid not in related:
+                related.append(rid)
+        block["related_block_ids"] = related
+        block["presentation_stream"] = {
+            "version": "quantum_presentation_stream_v2",
+            "answer_stream_id": stream_id,
+            "stream_ids": stream_ids,
+            "source_block_id": block.get("block_id"),
+            "sequence_index": idx,
+            "single_visible_stream": True,
+            "duplicate_blocks_collapsed": bool(block.get("duplicate_block_ids")),
+        }
+
+    return result
+
 def _presentation_latex(fragment: str) -> str:
     """Convert recognized notation to KaTeX source without changing payload text."""
     text = _s(fragment)
@@ -1886,7 +2288,7 @@ def _markdown_line_kind(line: str) -> tuple[str, str]:
     return "paragraph", line
 
 
-def _presentation_segments(content: Any) -> dict:
+def _presentation_segments(content: Any, *, math_policy: dict | None = None) -> dict:
     """Build the canonical McDowell layout while preserving the exact payload.
 
     McDowell owns text layout. KaTeX owns mathematical spans inside that layout.
@@ -1894,7 +2296,7 @@ def _presentation_segments(content: Any) -> dict:
     and formulas as delegated spans. No second route or rewritten answer is made.
     """
     source = _s(content)
-    profile = _math_structure_profile(source)
+    profile = _math_structure_profile_v2(source, policy=math_policy)
     ranges = list(profile.get("ranges", []) if isinstance(profile, dict) else [])
 
     if not source:
@@ -2005,7 +2407,7 @@ def _presentation_segments(content: Any) -> dict:
                 )
 
             original = source[item_start:item_end]
-            latex = _presentation_latex(original)
+            latex = _math_normalize_provider_fragment(original)
             display = bool(item.get("display"))
             # A formula occupying the meaningful body of a line is visually
             # stronger as display math; inline formulas remain inline.
@@ -2241,7 +2643,7 @@ def _canonicalize_render_stream(blocks: Any) -> list[dict]:
 
     return result
 
-def _presentation_signal_for_block(block: dict) -> dict:
+def _presentation_signal_for_block(block: dict, request: MachineRequest | None = None) -> dict:
     """Build ONE canonical presentation signal for every Web-supported block type.
 
     The signal is emitted by the Quantum Processor once on the existing route.
@@ -2262,6 +2664,7 @@ def _presentation_signal_for_block(block: dict) -> dict:
     ).lower()
 
     kind = btype or representation or "text"
+    math_policy = _math_presentation_policy(request)
     signal: dict[str, Any] = {
         "version": "presentation_signal_v3",
         "kind": kind,
@@ -2291,7 +2694,7 @@ def _presentation_signal_for_block(block: dict) -> dict:
 
     if kind in {"text", "markdown"}:
         content = source.get("content") or source.get("text") or source.get("value") or ""
-        segmented = _presentation_segments(content)
+        segmented = _presentation_segments(content, math_policy=math_policy)
         signal.update({
             "kind": (
                 "mixed"
@@ -2312,6 +2715,7 @@ def _presentation_signal_for_block(block: dict) -> dict:
             "layout": segmented.get("layout", "mcdowell_document"),
             "delegated_segments": bool(segmented.get("spans") or segmented.get("blocks")),
             "payload_preserved": True,
+            "math_policy": _quantum_snapshot(math_policy),
         })
 
     elif kind == "formula":
@@ -2326,7 +2730,7 @@ def _presentation_signal_for_block(block: dict) -> dict:
             or payload.get("content")
             or ""
         )
-        latex = _presentation_latex(value)
+        latex = _math_normalize_provider_fragment(value)
         signal.update({
             "kind": "formula",
             "renderer": "mcdowell",
@@ -2490,6 +2894,8 @@ def _presentation_signal_for_block(block: dict) -> dict:
             "artifact_payload": _presentation_payload_contract(source, kind),
         })
 
+    signal["math_policy"] = _quantum_snapshot(math_policy)
+
     # Provider metadata may annotate the artifact, but can never replace the
     # freshly computed canonical presentation matrix.
     explicit_signal = source.get("presentation")
@@ -2508,20 +2914,20 @@ def _presentation_signal_for_block(block: dict) -> dict:
 
     return signal
 
-def _attach_presentation_signals(blocks: Any) -> list[dict]:
+def _attach_presentation_signals(blocks: Any, request: MachineRequest | None = None) -> list[dict]:
     enriched: list[dict] = []
     canonical_blocks = _canonicalize_render_stream(blocks)
     for block in canonical_blocks if isinstance(canonical_blocks, list) else []:
         if not isinstance(block, dict):
             continue
         clean = dict(block)
-        presentation = _presentation_signal_for_block(clean)
+        presentation = _presentation_signal_for_block(clean, request=request)
         clean["presentation"] = presentation
         enriched.append(clean)
     return enriched
 
 
-def _ensure_presentation_signals(blocks: Any) -> list[dict]:
+def _ensure_presentation_signals(blocks: Any, request: MachineRequest | None = None) -> list[dict]:
     """Recompute the canonical signal from the current block payload.
 
     An existing presentation_signal_v3 is metadata, not an authority. Rebuilding
@@ -2534,7 +2940,7 @@ def _ensure_presentation_signals(blocks: Any) -> list[dict]:
         if not isinstance(block, dict):
             continue
         clean = dict(block)
-        clean["presentation"] = _presentation_signal_for_block(clean)
+        clean["presentation"] = _presentation_signal_for_block(clean, request=request)
         result.append(clean)
     return result
 
@@ -2550,7 +2956,7 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
         or _clean_text_value(payload.get("response"))
     )
 
-    blocks = _attach_presentation_signals(_clean_render_blocks(payload.get("render_blocks") or []))
+    blocks = _clean_render_blocks(payload.get("render_blocks") or [])
     if not answer:
         for block in blocks:
             if not isinstance(block, dict):
@@ -2595,7 +3001,8 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     # The fallback text block is created after the first presentation pass.
     # Re-run the same canonical presentation engine so McDowell never receives
     # a block without its current signal.
-    blocks = _ensure_presentation_signals(blocks)
+    blocks = _canonical_answer_composer(blocks, answer=answer)
+    blocks = _ensure_presentation_signals(blocks, request=request)
     allowed["render_blocks"] = blocks
 
     metadata = dict(allowed.get("metadata") or {}) if isinstance(allowed.get("metadata"), dict) else {}
@@ -2625,6 +3032,7 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
         "requested_outputs": list(getattr(request, "requested_outputs", []) or []) if request else [],
         "block_types": block_types,
         "render_block_count": len(blocks),
+        "composer_engine": "quantum_canonical_answer_composer_v1",
         "artifact_count": len(artifacts) + len(artifacts_payload),
         "information_preserved": True,
         "machine_fields_transport_only": True,
@@ -2676,8 +3084,12 @@ def _canonicalize(
     # the visible answer.
     response.summary = _clean_text_value(response.summary)
 
+    response.render_blocks = _canonical_answer_composer(
+        _clean_render_blocks(list(getattr(response, "render_blocks", []) or [])),
+        answer=answer,
+    )
     response.render_blocks = _ensure_presentation_signals(
-        _clean_render_blocks(list(getattr(response, "render_blocks", []) or []))
+        response.render_blocks, request=request
     )
 
     scope = _user_scope(state, user_id)
@@ -2725,7 +3137,8 @@ def _canonicalize(
             "scene_contract": True,
             "source": "quantum_processor",
         })
-        response.render_blocks = _ensure_presentation_signals(response.render_blocks)
+        response.render_blocks = _canonical_answer_composer(response.render_blocks, answer=answer)
+        response.render_blocks = _ensure_presentation_signals(response.render_blocks, request=request)
 
     scene = build_machine_scene(response)
     provider_blocks = list(getattr(response, "render_blocks", []) or [])
@@ -3266,6 +3679,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     request.constraints.setdefault("metadata", {})["presentation_matrix_audit"] = {
         "version": "presentation_signal_v3",
         "decision_owner": "QUANTUM_PROCESSOR",
+        "math_engine_version": "quantum_math_structure_engine_v2",
+        "composer_engine_version": "quantum_canonical_answer_composer_v1",
         "blocks": presentation_blocks,
         "signal_count": len(presentation_blocks),
         "payload_preserved": True,
