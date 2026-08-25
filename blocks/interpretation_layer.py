@@ -123,8 +123,8 @@ SEMANTIC_TURN_PROTOTYPES = {
 
 REPRESENTATION_HYPOTHESES = {
     "text": "обычный текстовый ответ объяснение рассказ описание; the user wants a normal textual answer",
-    "table": "таблица таблицу структурированные строки колонки сравнение параметров; information represented as a table",
-    "graph": "график графика диаграмма данных визуализация числовых значений; information represented as a graph or chart",
+    "table": "таблица таблицу табличный формат строки столбцы колонки; information represented as a table",
+    "graph": "график графика chart plot graph кривая кривые функция; information represented as a graph or chart",
     "diagram": "схема соединение элементов блоки связи последовательность процесса чертёж структурная диаграмма подключение проводов источник питания выключатель лампочка электрическая цепь; a schematic, wiring diagram, connected structure, electrical circuit, or process diagram",
     "formula": "формула уравнение математическое выражение математическая запись равенство обозначение величин степени корни E mc2; a mathematical formula, equation, notation, or quantitative relationship",
     "image": "изображение картинка рисунок иллюстрация создать изображение фотография; an image or generated picture",
@@ -313,6 +313,41 @@ class QuantumInterpretationEngine:
             except Exception:
                 self._semantic_encoder = None
 
+    @staticmethod
+    def _semantic_focus_text(text: str) -> str:
+        lines = []
+        for line in str(text or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            nums = re.findall(r"[-+]?\\d+(?:[.,]\\d+)?", s)
+            if len(nums) >= 2 and re.search(r"(?:—|–|-|:)", s):
+                continue
+            lines.append(s)
+        return " ".join(lines)
+
+    def _negated_representation_labels(self, text: str) -> set[str]:
+        source = self.normalize(text).lower()
+        negated = set()
+        matches = re.findall(r"(?:не|not)\s+(?:как|as)\s+([^.;!?]+)", source)
+        if not matches:
+            return negated
+        negated_text = " ".join(matches)
+        negated_tokens = {
+            token for token in self._tokens(negated_text)
+            if len(token) >= 4
+        }
+        if not negated_tokens:
+            return negated
+        for label, hypothesis in REPRESENTATION_HYPOTHESES.items():
+            hypothesis_tokens = {
+                token for token in self._tokens(hypothesis)
+                if len(token) >= 4 and not token.isascii()
+            }
+            if hypothesis_tokens & negated_tokens:
+                negated.add(label)
+        return negated
+
     def _family_scores(self, text, family, vocab):
         text = self.normalize(text)
         if not text:
@@ -334,8 +369,12 @@ class QuantumInterpretationEngine:
             result = {}
             for label in vocab:
                 idx = self._prototype_index[f"{family}:{label}"]
-                result[label] = max(
-                    0.0, min(1.0, float(cosine_similarity(q,self._prototype_matrix[idx]))))
+                similarity_value = cosine_similarity(q, self._prototype_matrix[idx])
+                # cosine_similarity returns a 2-D array for sparse row/row input.
+                # Extract the single scalar explicitly instead of coercing the
+                # whole ndarray to float.
+                score = float(similarity_value[0, 0])
+                result[label] = max(0.0, min(1.0, score))
             return result
 
         # Evidence-only degraded measurement. It can rank hypotheses but it
@@ -417,15 +456,21 @@ class QuantumInterpretationEngine:
              tuple(sorted((modalities or {}).keys())))
         with self._lock:
             if key in self._cache: return self._cache[key]
+        focus_text = self._semantic_focus_text(text)
         scores={
             "dialogue":self._family_scores(text,"dialogue",SEMANTIC_TURN_PROTOTYPES),
-            "representation":self._family_scores(text,"representation",REPRESENTATION_HYPOTHESES),
+            "representation":self._family_scores(focus_text or text,"representation",REPRESENTATION_HYPOTHESES),
             "domain":self._family_scores(text,"domain",DOMAIN_HYPOTHESES),
             "capability":self._family_scores(text,"capability",CAPABILITY_HYPOTHESES),
             "operation":self._family_scores(text,"operation",OPERATION_HYPOTHESES),
-            "object":self._family_scores(text,"object",OBJECT_HYPOTHESES),
+            "object":self._family_scores(focus_text or text,"object",OBJECT_HYPOTHESES),
             "goal":self._family_scores(text,"goal",GOAL_HYPOTHESES),
         }
+        for label in self._negated_representation_labels(text):
+            if label in scores["representation"]:
+                scores["representation"][label] *= 0.05
+            if label in scores["object"]:
+                scores["object"][label] *= 0.05
         ctx=self._context_scores(text,previous_assistant,previous_user,active_topic,active_goal)
         def rank(d):
             return sorted(d.items(),key=lambda x:x[1],reverse=True)
@@ -455,47 +500,84 @@ class QuantumInterpretationEngine:
         return profile
 
     def _resolve_production(self,text,profile,explicit):
-        # Upstream canonical request has highest authority.
-        ex=[_clean_representation(x) for x in (explicit or [])]
-        ex=[x for x in ex if x]
-        if len(ex)==1:
-            return ex[0],"explicit_current_request",True
+        # Canonical upstream interpretation may lock one representation.
+        explicit_values=[_clean_representation(x) for x in (explicit or [])]
+        explicit_values=[x for x in explicit_values if x]
+        if len(explicit_values)==1:
+            return explicit_values[0],"explicit_current_request",True
 
-        rep=profile["representation_scores"]; obj=profile["object_scores"]
-        op=profile["operation_scores"]; goal=profile["goal_scores"]
-        candidates=[]
-        for name in STRUCTURED_REPRESENTATIONS:
-            r=float(rep.get(name,0.0)); o=float(obj.get(name,0.0))
-            if name=="text": continue
-            compatible_ops={
-                "graph":{"build","modify","present","calculate","analyze"},
-                "diagram":{"build","modify","present","explain"},
-                "table":{"build","modify","present","compare","list"},
-                "formula":{"build","modify","present","calculate","explain","answer"},
-                "link":{"retrieve","present","answer"},
-                "code":{"build","modify","present","explain"},
-                "image":{"build","modify","present"},
-                "gallery":{"build","present"},
-                "file":{"retrieve","present"},
-                "audio":{"build","present"},
-                "video":{"build","present"},
-                "action":{"build","modify","present"},
-                "scene":{"build","modify","present"},
-            }.get(name,set())
-            best_op=max(op,key=op.get) if op else "answer"
-            aligned = best_op in compatible_ops
-            value=0.50*r + 0.35*o + 0.15*max(goal.values(),default=0.0)
-            if aligned: value += 0.18
-            candidates.append((name,value,r,o,aligned,best_op))
-        candidates.sort(key=lambda x:x[1],reverse=True)
-        if candidates:
-            best=candidates[0]
-            second=candidates[1][1] if len(candidates)>1 else 0.0
-            # Semantic convergence, not hard keyword/domain gating.
-            if best[1]>=0.42 and best[1]-second>=0.03 and max(best[2],best[3])>=0.26:
-                return best[0],"task_object_goal_resolution",True
-            if best[2]>=0.62 or best[3]>=0.62:
-                return best[0],"strong_semantic_object_evidence",True
+        rep=dict(profile.get("representation_scores") or {})
+        obj=dict(profile.get("object_scores") or {})
+        op=dict(profile.get("operation_scores") or {})
+        goal=dict(profile.get("goal_scores") or {})
+
+        def rank(items):
+            return sorted(items.items(), key=lambda x: float(x[1]), reverse=True)
+
+        rep_rank=rank(rep)
+        obj_rank=rank(obj)
+        op_rank=rank(op)
+        goal_rank=rank(goal)
+
+        best_rep=rep_rank[0][0] if rep_rank else "text"
+        best_rep_score=float(rep.get(best_rep,0.0))
+        second_rep_score=float(rep_rank[1][1]) if len(rep_rank)>1 else 0.0
+        best_obj=obj_rank[0][0] if obj_rank else "text"
+        best_obj_score=float(obj.get(best_obj,0.0))
+        best_op=op_rank[0][0] if op_rank else "answer"
+        best_op_score=float(op.get(best_op,0.0))
+        best_goal=goal_rank[0][0] if goal_rank else "understand"
+        best_goal_score=float(goal.get(best_goal,0.0))
+
+        compatible_ops={
+            "graph":{"build","modify","present","calculate","analyze"},
+            "diagram":{"build","modify","present","explain"},
+            "table":{"build","modify","present","compare","list"},
+            "formula":{"build","modify","present","calculate","explain","answer"},
+            "link":{"retrieve","present","answer"},
+            "code":{"build","modify","present","explain"},
+            "image":{"build","modify","present"},
+            "gallery":{"build","present"},
+            "file":{"retrieve","present"},
+            "audio":{"build","present"},
+            "video":{"build","present"},
+            "action":{"build","modify","present"},
+            "scene":{"build","modify","present"},
+            "memory":{"retrieve","answer","present"},
+            "visual_context":{"answer","analyze","explain"},
+        }
+
+        aligned = best_op in compatible_ops.get(best_rep,set())
+
+        # Relative matrix resolution: representation evidence selects the output
+        # family; operation and object/goal evidence validate the intended use.
+        # This never consults domain/capability gates or hardcoded renderer words.
+        if best_rep != "text" and aligned:
+            rep_margin = best_rep_score - second_rep_score
+
+            # Strong object agreement.
+            object_agreement = (
+                best_obj == best_rep and best_obj_score >= 0.05
+            )
+
+            # Data-heavy requests often dilute object scores with table/image
+            # evidence. In that case, a clear representation ranking plus an
+            # aligned task operation is sufficient.
+            representation_clear = (
+                best_rep_score >= 0.10 and
+                (rep_margin >= 0.015 or best_rep_score >= 0.22)
+            )
+
+            # Explicit negation is represented as negative evidence and should
+            # never itself become a positive representation.
+            if representation_clear and (object_agreement or best_rep_score >= 0.16):
+                return best_rep,"task_object_goal_resolution",True
+
+            if aligned and best_rep_score >= 0.10 and best_op_score >= 0.08:
+                return best_rep,"operation_representation_resolution",True
+
+        # A pure explanatory question about a representation stays text.
+        # Mentioning "graph", "table", etc. is not enough without a production action.
         return "text","unresolved",False
 
     def dialogue(self,text,previous_assistant="",previous_user="",active_goal="",active_topic=""):
@@ -591,7 +673,8 @@ class QuantumInterpretationEngine:
         d=self.dialogue(text,previous_assistant=last_a,previous_user=last_u,active_goal=active_goal,active_topic=active_topic)["dialogue"]
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
-        continuation=d["continuation"]; reference=d["reference_to_previous"]
+        continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
+        reference=bool(d.get("reference_to_previous", d.get("reference_score", 0.0) >= 0.42))
         memory=p["dialogue_best"]=="memory_query" and p["dialogue_scores"].get("memory_query",0.0)>=0.18
         resolved_scene=self._resolve_scene_context(text,state,continuation,reference,active_topic)
         evidence=[{"label":k,"score":float(v),"source":"quantum_matrix","positive":True,"details":{}}
