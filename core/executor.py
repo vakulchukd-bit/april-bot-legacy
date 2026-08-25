@@ -40,7 +40,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v30_unified_signal_engine_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v31_unified_visible_stream"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -2230,6 +2230,175 @@ def _canonical_answer_composer(blocks: Any, answer: str = "") -> list[dict]:
 
     return result
 
+
+def _quantum_visible_render_policy(
+    blocks: Any,
+    answer: str = "",
+    request: MachineRequest | None = None,
+) -> list[dict]:
+    """Collapse provider output into one semantic visible stream.
+
+    The processor is the release authority. It does not invent renderers and it
+    does not classify natural language here. It only uses the canonical request
+    output plan plus the typed provider payload already present in render_blocks.
+
+    Invariants:
+      * one human answer text block at most;
+      * internal production/transport signals never become visible renderers;
+      * one logical block per structured renderer kind;
+      * multiple different structured renderers are preserved only when the
+        canonical request explicitly asked for them;
+      * duplicate payload wrappers are merged without changing payload content.
+    """
+    source = _canonicalize_render_stream(blocks)
+    if not source:
+        if answer:
+            source = [{
+                "type": "text",
+                "artifact_type": "text",
+                "content": answer,
+                "text": answer,
+                "renderer": "TextBlock",
+                "viewer": "TextBlock",
+                "source": "quantum_processor",
+            }]
+        else:
+            return []
+
+    requested: list[str] = []
+    if request is not None:
+        requested.extend(
+            _s(value).lower()
+            for value in list(getattr(request, "requested_outputs", []) or [])
+            if _s(value)
+        )
+        constraints = _as_dict(getattr(request, "constraints", {}) or {})
+        plan = _as_dict(constraints.get("representation_plan"))
+        requested.extend(
+            _s(value).lower()
+            for value in list(plan.get("requested_outputs", []) or [])
+            if _s(value)
+        )
+        for key in ("preferred_representation", "measured_output", "production_representation"):
+            value = _s(plan.get(key)).lower()
+            if value:
+                requested.append(value)
+
+    aliases = {
+        "markdown": "text",
+        "line_chart": "graph",
+        "function_plot": "graph",
+        "function": "graph",
+        "chart": "graph",
+        "data_table": "table",
+        "galleryblock": "gallery",
+        "imageblock": "image",
+    }
+    requested_set = {aliases.get(item, item) for item in requested if item}
+    internal_kinds = {"production_signal", "signal", "quantum_signal", "transport"}
+
+    def kind_of(block: dict) -> str:
+        presentation = _as_dict(block.get("presentation"))
+        raw = _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+            or presentation.get("kind")
+            or "text"
+        ).lower()
+        return aliases.get(raw, raw)
+
+    visible: list[dict] = []
+    internal: list[dict] = []
+    for raw in source:
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        kind = kind_of(block)
+        block["type"] = kind or "text"
+        if kind in internal_kinds:
+            internal.append(block)
+        else:
+            visible.append(block)
+
+    # Keep the actual processor answer as the sole authoritative human text.
+    final: list[dict] = []
+    answer_norm = re.sub(r"\s+", " ", _clean_text_value(answer)).strip()
+    seen_text: set[str] = set()
+    for block in visible:
+        if kind_of(block) not in {"text", "markdown"}:
+            continue
+        text = re.sub(r"\s+", " ", _clean_text_value(
+            block.get("content") or block.get("text") or block.get("value")
+        )).strip()
+        if not text or text in seen_text:
+            continue
+        if answer_norm and text != answer_norm:
+            # Provider text fragments are evidence/supporting prose. The
+            # canonical answer remains the only top-level human text block.
+            continue
+        seen_text.add(text)
+        final.append(block)
+
+    if answer_norm and answer_norm not in seen_text:
+        final.insert(0, {
+            "type": "text",
+            "artifact_type": "text",
+            "content": answer,
+            "text": answer,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+            "scene_contract": True,
+            "source": "quantum_processor",
+        })
+
+    structured = [b for b in visible if kind_of(b) not in {"text", "markdown"}]
+    requested_structured = {
+        item for item in requested_set
+        if item not in {"text", "production_signal", "signal"}
+    }
+
+    # If the request explicitly names structured outputs, those are the only
+    # structured renderers allowed onto the visible stream. Otherwise preserve
+    # the single canonical structured representation already emitted by the
+    # provider/processor.
+    authorized = requested_structured or ({kind_of(structured[0])} if structured else set())
+
+    chosen: dict[str, dict] = {}
+    order: list[str] = []
+    for block in structured:
+        kind = kind_of(block)
+        if kind not in authorized:
+            continue
+        if kind not in chosen:
+            chosen[kind] = block
+            order.append(kind)
+            continue
+        existing = chosen[kind]
+        for key, value in block.items():
+            if key in {"presentation", "presentation_stream", "related_block_ids", "sequence_index"}:
+                continue
+            if key not in existing or existing.get(key) in (None, "", [], {}):
+                existing[key] = value
+        existing.setdefault("duplicate_block_ids", [])
+        block_id = _s(block.get("block_id"))
+        if block_id and block_id not in existing["duplicate_block_ids"]:
+            existing["duplicate_block_ids"].append(block_id)
+
+    final.extend(chosen[kind] for kind in order)
+
+    return _canonical_answer_composer(final, answer="")
+
+
+def _finalize_quantum_visible_stream(
+    blocks: Any,
+    answer: str = "",
+    request: MachineRequest | None = None,
+) -> list[dict]:
+    """Final canonical visible stream before SceneContract/Web."""
+    collapsed = _quantum_visible_render_policy(blocks, answer=answer, request=request)
+    return _ensure_presentation_signals(collapsed, request=request)
+
 def _presentation_latex(fragment: str) -> str:
     """Convert recognized notation to KaTeX source without changing payload text."""
     text = _s(fragment)
@@ -2759,8 +2928,11 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     blocks = _promote_embedded_structured_blocks(blocks)
     if answer and not any(isinstance(b, dict) and _s(b.get("type") or b.get("artifact_type")).lower() in {"text", "markdown"} for b in blocks):
         blocks.insert(0, {"type": "text", "content": answer, "text": answer, "renderer": "TextBlock", "viewer": "TextBlock", "scene_contract": True})
-    blocks = _canonical_answer_composer(_clean_render_blocks(blocks), answer=answer)
-    blocks = _ensure_presentation_signals(blocks, request=request)
+    blocks = _finalize_quantum_visible_stream(
+        _clean_render_blocks(blocks),
+        answer=answer,
+        request=request,
+    )
     allowed["render_blocks"] = blocks
     if answer:
         allowed["answer"] = answer
@@ -2807,12 +2979,10 @@ def _canonicalize(
     # the visible answer.
     response.summary = _clean_text_value(response.summary)
 
-    response.render_blocks = _canonical_answer_composer(
+    response.render_blocks = _finalize_quantum_visible_stream(
         _clean_render_blocks(list(getattr(response, "render_blocks", []) or [])),
         answer=answer,
-    )
-    response.render_blocks = _ensure_presentation_signals(
-        response.render_blocks, request=request
+        request=request,
     )
 
     scope = _user_scope(state, user_id)
@@ -2860,11 +3030,19 @@ def _canonicalize(
             "scene_contract": True,
             "source": "quantum_processor",
         })
-        response.render_blocks = _canonical_answer_composer(response.render_blocks, answer=answer)
-        response.render_blocks = _ensure_presentation_signals(response.render_blocks, request=request)
+        response.render_blocks = _finalize_quantum_visible_stream(
+            response.render_blocks,
+            answer=answer,
+            request=request,
+        )
 
     scene = build_machine_scene(response)
-    provider_blocks = list(getattr(response, "render_blocks", []) or [])
+    provider_blocks = _finalize_quantum_visible_stream(
+        list(getattr(response, "render_blocks", []) or []),
+        answer=answer,
+        request=request,
+    )
+    response.render_blocks = provider_blocks
 
     try:
         scene.blocks = provider_blocks
@@ -2945,6 +3123,23 @@ def _canonicalize(
             "nodes": stream,
             "single_visible_stream": True,
             "answer_is_fallback": True,
+        }
+    except Exception:
+        pass
+
+    try:
+        contract.metadata = dict(contract.metadata or {})
+        contract.metadata["quantum_visible_stream_policy"] = {
+            "version": "quantum_visible_stream_v3",
+            "single_logical_answer": True,
+            "visible_block_count": len(render_blocks),
+            "visible_block_types": [
+                _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+                for block in render_blocks if isinstance(block, dict)
+            ],
+            "internal_signals_hidden": True,
+            "structured_outputs_authorized_by_request": True,
+            "duplicate_renderer_instances_collapsed": True,
         }
     except Exception:
         pass
