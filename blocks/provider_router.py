@@ -1331,6 +1331,56 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     }
 
 
+
+def _filter_render_outputs_to_plan(blocks: list[dict], artifacts: list[dict], requested_outputs: list[str]):
+    """Enforce the processor-owned output plan after model decoding.
+
+    The model may provide helpful prose, but it cannot introduce a second
+    renderer that the current semantic plan did not authorize.
+    """
+    allowed = {str(x).strip().lower() for x in (requested_outputs or ["text"])}
+    if "markdown" in allowed:
+        allowed.add("text")
+    if "visual" in allowed:
+        allowed.add("graph")
+    if "plot" in allowed:
+        allowed.add("graph")
+    structured_allowed = {x for x in allowed if x not in {"text", "markdown"}}
+
+    def kind(item):
+        if not isinstance(item, dict):
+            return ""
+        return str(item.get("type") or item.get("artifact_type") or item.get("representation") or "").strip().lower()
+
+    clean_blocks = []
+    for block in blocks or []:
+        k = kind(block)
+        if k in {"text", "markdown"} or k in structured_allowed:
+            clean_blocks.append(block)
+
+    clean_artifacts = []
+    for artifact in artifacts or []:
+        k = kind(artifact)
+        if k in structured_allowed:
+            clean_artifacts.append(artifact)
+    return clean_blocks, clean_artifacts
+
+
+def _strip_unrequested_code_fences(answer: str, requested_outputs: list[str]) -> str:
+    if "code" in {str(x).strip().lower() for x in (requested_outputs or [])}:
+        return answer
+    if not answer or "```" not in answer:
+        return answer
+    lines = answer.splitlines()
+    out, inside = [], False
+    for line in lines:
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
+        if not inside:
+            out.append(line)
+    return "\n".join(out).strip()
+
 def provider_finalize_for_executor(contract: dict) -> dict:
     if not isinstance(contract, dict):
         raise RuntimeError("Provider contract must be a dict.")
@@ -1350,6 +1400,7 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
+    answer = _strip_unrequested_code_fences(answer, requested_outputs)
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
@@ -1388,6 +1439,9 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     original_blocks = _materialize_artifacts_as_render_blocks(
         mr["artifacts"],
         original_blocks,
+    )
+    original_blocks, mr["artifacts"] = _filter_render_outputs_to_plan(
+        original_blocks, mr["artifacts"], requested_outputs
     )
     mr["render_blocks"] = _dedupe_render_blocks(
         original_blocks,
