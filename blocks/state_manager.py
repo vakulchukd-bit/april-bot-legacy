@@ -1555,6 +1555,19 @@ def is_dialogue_visible_scene(scene):
     return True
 
 
+
+
+def _is_human_dialog_item(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    content = str(item.get("content") or item.get("text") or item.get("answer") or "").strip()
+    if (metadata.get("internal_context") or metadata.get("internal_turn")
+            or metadata.get("source") in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}
+            or content.startswith("VISUAL_ANALYSIS:")):
+        return False
+    return str(item.get("role") or "").lower() in {"user", "human", "assistant", "april", "bot"}
+
 def add_dialog(user_id, role, content, metadata=None):
     state_obj = get_state(user_id)
     # Internal visual/tool turns are not human dialogue and must never become
@@ -1613,8 +1626,9 @@ def add_dialog(user_id, role, content, metadata=None):
         day0["topics"] = day0["topics"][-HOT_DIALOG_LIMIT:]
 
     state_obj["dialog"] = dialog
+    human_dialog = [item for item in dialog if _is_human_dialog_item(item)]
     state_obj["dialog_state"] = {
-        "timeline": deepcopy(dialog),
+        "timeline": deepcopy(human_dialog),
         "hot_limit": HOT_DIALOG_LIMIT,
         "hot_user_target": HOT_DIALOG_LIMIT // 2,
         "hot_april_target": HOT_DIALOG_LIMIT // 2,
