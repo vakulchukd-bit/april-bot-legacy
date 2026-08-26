@@ -498,9 +498,36 @@ class QuantumInterpretationEngine:
         if low_information and has_context:
             independent_score *= 0.35
 
+        # Elliptical follow-up questions are a structural discourse pattern:
+        # a very short question without a newly introduced named entity normally
+        # depends on the immediately preceding human exchange. This rule does
+        # not inspect topics or renderer names.
+        current_named = {
+            token for token in re.findall(r"\b[А-ЯЁA-Z][A-Za-zА-ЯЁёІіЇїЄєҐґ-]{2,}\b", current)
+            if token.lower() not in {
+                "так", "когда", "куда", "почему", "зачем", "что", "кто",
+                "как", "можно", "теперь", "дальше", "ещё", "еще"
+            }
+        }
+        prev_named = {
+            token.lower() for token in re.findall(r"\b[А-ЯЁA-Z][A-Za-zА-ЯЁёІіЇїЄєҐґ-]{2,}\b", prev_a + " " + prev_u)
+        }
+        novel_named = {t.lower() for t in current_named if t.lower() not in prev_named}
+        elliptical_followup = bool(
+            has_context
+            and len([t for t in self._tokens(current) if len(t) >= 2]) <= 4
+            and (current.endswith("?") or current.endswith("？"))
+            and not novel_named
+        )
+
         if not has_context:
             relation = "NEW_TOPIC"
-        elif low_information:
+        elif novel_named and relation_strength < 0.48:
+            # A short request that introduces a new named entity is structurally
+            # a fresh topic unless the surrounding semantic evidence is strong
+            # enough to tie it to the current thread.
+            relation = "NEW_TOPIC"
+        elif low_information or elliptical_followup:
             relation = "CONTINUE_TOPIC"
         elif continuity_score >= 0.34 or relation_strength >= 0.48:
             relation = "CONTINUE_TOPIC"
@@ -600,6 +627,12 @@ class QuantumInterpretationEngine:
         last_a=last_u=""; reply_to=None
         for item in reversed(history if isinstance(history,list) else []):
             if not isinstance(item,dict): continue
+            metadata=item.get("metadata") if isinstance(item.get("metadata"),dict) else {}
+            content=self.normalize(item.get("content") or item.get("text") or item.get("answer") or "")
+            if (metadata.get("internal_context") or metadata.get("internal_turn")
+                    or metadata.get("source") in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}
+                    or content.startswith("VISUAL_ANALYSIS:")):
+                continue
             role=str(item.get("role") or "").lower()
             if not last_a:
                 obj=item.get("april") if isinstance(item.get("april"),dict) else item
@@ -836,7 +869,10 @@ class QuantumInterpretationEngine:
             r'\b(он|она|они|его|её|их|ему|ей|им|этот|эта|это|этом|этим|ит|he|she|they|him|her|them)\b',
             current, flags=re.I,
         ))
-        short_followup = len(cls._tokens(current)) <= 8
+        short_followup = (
+            len(cls._tokens(current)) <= 4
+            and (current.endswith("?") or current.endswith("？"))
+        )
         # Generic candidate extraction from prose: capitalized multi-word spans and
         # single capitalized names. This is an entity-shape heuristic, not a topic trigger.
         candidates = []
@@ -931,6 +967,25 @@ class QuantumInterpretationEngine:
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
         continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
+        # A short continuation question does not acquire a structured renderer
+        # merely because the representation matrix found a weak candidate.
+        # Structured output must be supported by the current turn's operation,
+        # object and goal evidence (or an explicit upstream representation).
+        if production != "text" and not explicit:
+            op = str(p.get("best_operation") or "").lower()
+            obj = str(p.get("best_object") or "").lower()
+            goal = str(p.get("best_goal") or "").lower()
+            obj_score = float(p.get("object_scores", {}).get(production, 0.0) or 0.0)
+            current_visual_intent = (
+                op in {"build", "modify", "present", "explain"}
+                and obj == production
+                and obj_score >= 0.18
+                and goal in {"visualize", "transform", "present", "organize"}
+            )
+            if not current_visual_intent:
+                production = "text"
+                source = "current_turn_representation_not_established"
+                locked = False
         # A continuation may deliberately address the existing visual object
         # without naming its representation again. Reuse that canonical renderer
         # only when the user is still operating in the active visual goal.
