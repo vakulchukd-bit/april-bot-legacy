@@ -1154,16 +1154,6 @@ async def process_april_request(
 
     machine_request = human_to_machine(text, user_id)
 
-    # Canonical dialog write: the Executor must see the user's real turn
-    # before semantic/cognitive analysis. No parallel history is created.
-    if text:
-        add_dialog(
-            user_id,
-            "user",
-            text,
-            metadata={"source": "april_web", "modality": "text"},
-        )
-
     async def run_with_activity(chat_id, coro):
         return await coro
 
@@ -1181,6 +1171,14 @@ async def process_april_request(
     scene_contract = result.get("scene_contract")
     if not isinstance(scene_contract, dict):
         raise RuntimeError("Canonical CPU SceneContract is required.")
+
+    # Commit the completed human pair only after successful execution so the
+    # next turn always sees the previous USER -> APRIL exchange.
+    visible_answer = (scene_contract.get("answer") or scene_contract.get("content") or "").strip()
+    if text:
+        add_dialog(user_id, "user", text, metadata={"source": "april_legacy", "modality": "text", "human_turn": True})
+    if visible_answer:
+        add_dialog(user_id, "assistant", visible_answer, metadata={"source": "april_legacy", "modality": "text", "human_turn": True})
 
     # Canonical route: Bot.ru does not reinterpret or rebuild the answer.
     # Executor owns the human answer and the renderer scene. Bot.ru only
