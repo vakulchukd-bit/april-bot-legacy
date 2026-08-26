@@ -433,6 +433,12 @@ def _state_signals(state, active_flow, dialog_state, history):
     for item in reversed(history if isinstance(history, list) else []):
         if not isinstance(item, dict):
             continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        content = str(item.get("content") or item.get("text") or item.get("answer") or "").strip()
+        if (metadata.get("internal_context") or metadata.get("internal_turn")
+                or metadata.get("source") in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}
+                or content.startswith("VISUAL_ANALYSIS:")):
+            continue
         role = str(item.get("role") or "").lower()
         if not last_april:
             obj = item.get("april") if isinstance(item.get("april"), dict) else item
@@ -872,6 +878,26 @@ def analyze(text: str, state: dict=None, history: list=None,
 
     fusion=_signal_fusion(text, signals, interpreted)
     dialogue_context = _dialogue_context_matrix(text, signals, interpreted)
+    # Do not manufacture a table/graph/etc. for a context-only short follow-up.
+    # If the current semantic turn did not explicitly establish a structured
+    # representation, keep the response textual and let the provider use context.
+    vector = interpreted.get("dialogue_vector") if isinstance(interpreted, dict) else {}
+    vector = vector if isinstance(vector, dict) else {}
+    current_locked = bool(interpreted.get("production_representation_locked"))
+    short_followup = len(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9]+", text)) <= 8
+    relation = str(vector.get("relation") or interpreted.get("dialogue_relation") or "").upper()
+    current_rep = str(interpreted.get("production_representation") or "text").lower()
+    if short_followup and relation == "CONTINUE_TOPIC" and current_rep != "text" and not current_locked:
+        fusion = dict(fusion)
+        fusion["requested_representation"] = "text"
+        fusion["requested_representations"] = ["text"]
+        fusion["required_representations"] = ["text"]
+        fusion["production_representation"] = "text"
+        fusion["production_representation_source"] = "context_followup_text_safe"
+        fusion["production_representation_confident"] = False
+        fusion["evidence_representations"] = [x for x in fusion.get("evidence_representations", []) if x == "text"] or ["text"]
+        fusion["renderer"] = 0.0
+    
     current_representation = detect_representation_constraints(text, interpreted)
     result=_base_result(text, signals)
 
@@ -907,6 +933,12 @@ def analyze(text: str, state: dict=None, history: list=None,
 
     dc = result.get("dialogue_contract")
     dc = dc if isinstance(dc, dict) else {}
+    rr = result.get("dialogue_reference")
+    if not isinstance(rr, dict) or not rr:
+        rr = interpreted.get("dialogue_reference") if isinstance(interpreted, dict) else {}
+    if not isinstance(rr, dict):
+        rr = {}
+    rr_resolved = bool(rr.get("resolved"))
     dc.update({
         "dialog_act": dialogue_context["dialog_act"],
         "continuation": dialogue_context["continuation"],
@@ -920,15 +952,17 @@ def analyze(text: str, state: dict=None, history: list=None,
         "canonical": True,
         "version": "quantum_dialogue_field_v2",
     })
-    if str(dc.get("dialog_act") or "").lower() == "memory_query" and not rr_resolved:
+    if str(dc.get("dialog_act") or "").lower() == "memory_query" and rr_resolved:
+        # A resolved reference is a continuation of the current dialogue, not
+        # a request to recall an unrelated historical topic.
         dc.update({
-            "dialog_act": "memory_query",
-            "continuation": False,
+            "dialog_act": "reference",
+            "continuation": True,
             "reference_to_previous": True,
-            "context_dependency": "memory_query",
-            "context_dependency_score": 1.0,
-            "continuation_score": 0.0,
-            "reference_score": 1.0,
+            "context_dependency": "continuation",
+            "context_dependency_score": max(0.70, float(dc.get("context_dependency_score", 0.0) or 0.0)),
+            "continuation_score": max(0.70, float(dc.get("continuation_score", 0.0) or 0.0)),
+            "reference_score": max(0.70, float(dc.get("reference_score", 0.0) or 0.0)),
         })
     result["dialogue_contract"] = dc
     result["dialogue_context_field"] = dialogue_context
