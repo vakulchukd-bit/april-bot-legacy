@@ -21,7 +21,7 @@ import math
 import re
 
 APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
-SEMANTIC_ENGINE_VERSION = "quantum_evidence_v2_unified_production_signal"
+SEMANTIC_ENGINE_VERSION = "quantum_evidence_v4_dialogue_vector_unified_production_signal"
 SEMANTIC_MACHINE_CHANNEL = {
     "type": "semantic_core",
     "mode": "quantum_evidence_unified",
@@ -926,6 +926,12 @@ def analyze(text: str, state: dict=None, history: list=None,
         if isinstance(interpreted.get("dialogue_relation"), dict)
         else result.get("dialogue_relation", {})
     )
+    result["dialogue_vector"] = interpreted.get("dialogue_vector", {})
+    result["dialogue_delta"] = interpreted.get("dialogue_delta", {})
+    result["render_continuity"] = interpreted.get("render_continuity", {})
+    result["visual_schema"] = interpreted.get("visual_schema", "")
+    result["visual_schema_confidence"] = interpreted.get("visual_schema_confidence", 0.0)
+    result["visual_schema_scores"] = interpreted.get("visual_schema_scores", {})
 
     # Production representation is a single canonical signal. Evidence
     # candidates are preserved separately and never become renderer commands.
