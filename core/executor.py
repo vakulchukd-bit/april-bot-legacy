@@ -34,7 +34,7 @@ from blocks.intent_ai import detect_intent_ai
 from blocks.intent_resolver import resolve_input, build_focus_intent_state
 from blocks.router import route_request
 from blocks.router_system import decide_action
-from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory
+from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
@@ -326,7 +326,7 @@ def _scene_continuity_engine(
             or state.get("active_visual_scene")
             or state.get("active_scene_contract")
         )
-        if isinstance(candidate, dict):
+        if isinstance(candidate, dict) and is_dialogue_visible_scene(candidate):
             current_scene = candidate
 
     previous_user = ""
@@ -335,31 +335,8 @@ def _scene_continuity_engine(
     active_goal = ""
     scene_id = ""
 
-    if current_scene:
-        previous_user = _s(
-            current_scene.get("user_request")
-            or current_scene.get("current_request")
-            or current_scene.get("user")
-        )
-        previous_april = _s(
-            current_scene.get("april_answer")
-            or current_scene.get("answer")
-            or current_scene.get("content")
-            or current_scene.get("summary")
-        )
-        active_topic = _s(
-            current_scene.get("topic")
-            or current_scene.get("active_topic")
-            or previous_user
-        )
-        active_goal = _s(
-            current_scene.get("active_goal")
-            or current_scene.get("goal")
-            or current_scene.get("resolved_request")
-        )
-        scene_id = _s(current_scene.get("scene_id") or current_scene.get("id"))
-
-    # Prefer the existing hot dialogue when it contains an assistant turn.
+    # Human dialogue is the primary continuity anchor. Visual scene state is
+    # evidence, not a replacement for the last human USER↔APRIL pair.
     if isinstance(history, list):
         for item in reversed(history):
             if not isinstance(item, dict):
@@ -371,6 +348,32 @@ def _scene_continuity_engine(
                 previous_user = _s(item.get("content"))
             if previous_user and previous_april:
                 break
+
+    if current_scene:
+        if not previous_user:
+            previous_user = _s(
+                current_scene.get("user_request")
+                or current_scene.get("current_request")
+                or current_scene.get("user")
+            )
+        if not previous_april:
+            previous_april = _s(
+                current_scene.get("april_answer")
+                or current_scene.get("answer")
+                or current_scene.get("content")
+                or current_scene.get("summary")
+            )
+        active_topic = _s(
+            current_scene.get("topic")
+            or current_scene.get("active_topic")
+            or previous_user
+        )
+        active_goal = _s(
+            current_scene.get("active_goal")
+            or current_scene.get("goal")
+            or current_scene.get("resolved_request")
+        )
+        scene_id = _s(current_scene.get("scene_id") or current_scene.get("id"))
 
     measured: dict[str, Any] = {}
     if previous_april:
@@ -3106,12 +3109,14 @@ def _canonicalize(
         except Exception:
             pass
 
-    update_dialog_context(user_id, semantic)
+    if not internal_context:
+        update_dialog_context(user_id, semantic)
     update_scene_context(
         user_id,
         contract,
         current_request=_s(request.conversation.get("current_request")),
         answer=answer,
+        internal_context=internal_context,
     )
     request_meta = _request_metadata(request)
 
@@ -3215,6 +3220,12 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     state = get_state(user_id)
     state = state if isinstance(state, dict) else {}
     state["user_id"] = _s(user_id)
+    internal_context = bool(
+        kwargs.get("internal_context")
+        or kwargs.get("internal_turn")
+        or str(kwargs.get("request_source") or "").strip().lower()
+        in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}
+    )
     scope = _user_scope(state, user_id)
     state["_request_user_id"] = _s(user_id)
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
