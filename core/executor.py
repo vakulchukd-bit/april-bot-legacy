@@ -1269,6 +1269,11 @@ def _make_request(
         conversation={
             "current_request": _s(text),
             "dialogue_contract": dialogue_contract,
+            "dialogue_vector": deepcopy(semantic.get("dialogue_vector") or {}),
+            "dialogue_delta": deepcopy(semantic.get("dialogue_delta") or {}),
+            "render_continuity": deepcopy(semantic.get("render_continuity") or {}),
+            "visual_schema": _s(semantic.get("visual_schema")),
+            "visual_schema_confidence": float(semantic.get("visual_schema_confidence") or 0.0),
             "context_mode": mode,
             "context_dependency": bool(control.get("context_dependency")),
             "resolved_request": _s(
@@ -1361,6 +1366,11 @@ def _make_request(
             "representation_plan": {
                 "requested_outputs": requested_outputs,
                 "preferred_representation": measured_output,
+                "visual_schema": _s(semantic.get("visual_schema")),
+                "visual_schema_confidence": float(semantic.get("visual_schema_confidence") or 0.0),
+                "dialogue_relation": _s(semantic.get("dialogue_relation")) or "NEW_TOPIC",
+                "dialogue_subtype": _s(semantic.get("dialogue_subtype")) or "NEW_TOPIC",
+                "avoid_repeat": True,
                 "constraints": representation_constraints,
                 "audit": representation_audit,
                 "current_request_authoritative": True,
@@ -3242,6 +3252,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
     )
     interpretation["quantum_scene_continuity"] = _quantum_snapshot(scene_continuity)
+    # Canonical dialogue-vector bridge: relation is resolved before routing.
+    # Downstream engines receive the same decision; no second topic router exists.
+    if isinstance(interpretation.get("dialogue_vector"), dict):
+        interpretation["quantum_dialogue_vector"] = _quantum_snapshot(
+            interpretation["dialogue_vector"]
+        )
+        state["_quantum_dialogue_vector"] = _quantum_snapshot(
+            interpretation["dialogue_vector"]
+        )
 
     # Freeze canonical interpretation measurements for downstream engines.
     field = interpretation.get("quantum_interpretation_field", {})
@@ -3487,6 +3506,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "provider_calls_per_request": 1,
         "single_route": True,
         "requested_outputs": list(request.requested_outputs),
+        "dialogue_vector": _quantum_snapshot(
+            interpretation.get("dialogue_vector", {})
+        ),
+        "dialogue_delta": _quantum_snapshot(
+            interpretation.get("dialogue_delta", {})
+        ),
+        "render_continuity": _quantum_snapshot(
+            interpretation.get("render_continuity", {})
+        ),
         "representation_plan": _quantum_snapshot(
             request.constraints.get("representation_plan", {})
         ),
