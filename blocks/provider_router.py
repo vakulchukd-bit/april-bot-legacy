@@ -754,6 +754,58 @@ def _compact_summary(answer: str, blocks: list[dict]) -> str:
     return f"{first} | scene: {', '.join(kinds[:5])}" if kinds else first
 
 
+def _extract_resolved_artifact_context(resolved_scene: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract only canonical structured artifact payloads from a resolved scene.
+
+    The provider must receive the existing artifact data when a turn continues or
+    edits a visual scene. Presentation metadata is intentionally excluded here so
+    a compact graph/table/formula payload survives the 900-token input envelope.
+    """
+    if not isinstance(resolved_scene, dict):
+        return []
+
+    blocks = resolved_scene.get("render_blocks") or []
+    if not isinstance(blocks, list):
+        blocks = []
+
+    artifacts: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _safe_text(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).strip().lower()
+        if not kind or kind in {"text", "markdown"}:
+            continue
+
+        payload = block.get("payload")
+        if not isinstance(payload, dict):
+            artifact = block.get("artifact")
+            if isinstance(artifact, dict):
+                payload = artifact.get("payload")
+        if not isinstance(payload, dict):
+            artifact_payload = block.get("artifact_payload")
+            if isinstance(artifact_payload, dict):
+                payload = artifact_payload.get("payload") or artifact_payload
+        if not isinstance(payload, dict):
+            payload = block.get(kind) if isinstance(block.get(kind), dict) else None
+        if not isinstance(payload, dict):
+            continue
+
+        artifacts.append({
+            "type": kind,
+            "renderer": _safe_text(block.get("renderer")),
+            "viewer": _safe_text(block.get("viewer")),
+            "block_id": _safe_text(block.get("block_id")),
+            "sequence_index": block.get("sequence_index"),
+            "payload": _compact_value(payload, max_items=16, max_keys=18),
+        })
+
+    return artifacts[:4]
+
+
 def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     """
     Semantic context selection. It does not key off magic words.
@@ -766,18 +818,6 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
 
     fields: list[tuple[str, Any]] = []
     fields.append(("CURRENT_REQUEST", current))
-
-    reference_resolution = dialogue.get("reference_resolution")
-    if isinstance(reference_resolution, dict) and reference_resolution.get("resolved"):
-        fields.append(("REFERENCE_RESOLUTION", _compact_value({
-            "resolved": True,
-            "target": reference_resolution.get("target"),
-            "confidence": reference_resolution.get("confidence"),
-            "source": reference_resolution.get("source"),
-        }, max_items=6, max_keys=8)))
-        resolved_request = dialogue.get("resolved_request") or payload.get("resolved_request")
-        if resolved_request:
-            fields.append(("RESOLVED_REQUEST", _safe_text(resolved_request)))
 
     dialog_act = _safe_text(dialogue.get("dialog_act")).lower()
     continuation = bool(dialogue.get("continuation"))
@@ -805,12 +845,6 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
             "previous_user_turn": dialogue.get("previous_user_turn"),
             "avoid_repeat": True,
         }
-        if isinstance(reference_resolution, dict) and reference_resolution.get("resolved"):
-            vector["reference_resolution"] = {
-                "target": reference_resolution.get("target"),
-                "confidence": reference_resolution.get("confidence"),
-            }
-            vector["resolved_request"] = dialogue.get("resolved_request") or payload.get("resolved_request")
         if isinstance(vector_payload, dict):
             vector["semantic_relation"] = vector_payload.get("relation")
             vector["delta_mode"] = vector_payload.get("delta_mode")
@@ -833,8 +867,26 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     resolved_scene = dialogue.get("resolved_scene")
     if isinstance(resolved_scene, dict) and resolved_scene.get("scene_id"):
         # The interpretation layer has already resolved which scene is relevant.
-        # Pass its semantic result and presentation evidence without creating a
-        # second memory path or imposing a renderer trigger.
+        # First send a compact canonical artifact payload. This is the actual data
+        # required to continue/edit the previous renderer without asking the model
+        # to reconstruct it from verbose presentation metadata.
+        artifact_context = _extract_resolved_artifact_context(resolved_scene)
+        if artifact_context:
+            fields.append((
+                "RESOLVED_ARTIFACT_CONTEXT",
+                _compact_value(
+                    {
+                        "scene_id": resolved_scene.get("scene_id"),
+                        "relation": resolved_scene.get("relation"),
+                        "artifacts": artifact_context,
+                    },
+                    max_items=6,
+                    max_keys=8,
+                ),
+            ))
+
+        # Keep the scene envelope semantic and compact. The canonical artifact
+        # data above replaces the previous verbose render/presentation dump.
         fields.append(("RESOLVED_SCENE_CONTEXT", _compact_value(
             {
                 "relation": resolved_scene.get("relation"),
@@ -846,9 +898,6 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
                 "summary": resolved_scene.get("summary"),
                 "render_block_types": resolved_scene.get("render_block_types"),
                 "presentation_types": resolved_scene.get("presentation_types"),
-                "render_blocks": resolved_scene.get("render_blocks") or [],
-                "presentation_signals": resolved_scene.get("presentation_signals") or [],
-                "semantic_state": resolved_scene.get("semantic_state") or {},
                 "confidence": resolved_scene.get("confidence"),
             },
             max_items=10, max_keys=12,
@@ -1236,6 +1285,12 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             block for block in blocks
             if str(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
         ]
+        # A text-only request cannot acquire a structured artifact as a side
+        # effect of model output. This blocks accidental/random tables, graphs,
+        # formulas or links from becoming renderer input downstream.
+        artifacts = []
+        scene_plan = ["text"]
+        render_priority = []
     metadata.update({
         "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
