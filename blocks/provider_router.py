@@ -819,6 +819,18 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     fields: list[tuple[str, Any]] = []
     fields.append(("CURRENT_REQUEST", current))
 
+    reference_resolution = dialogue.get("reference_resolution")
+    if isinstance(reference_resolution, dict) and reference_resolution.get("resolved"):
+        fields.append(("REFERENCE_RESOLUTION", _compact_value({
+            "resolved": True,
+            "target": reference_resolution.get("target"),
+            "confidence": reference_resolution.get("confidence"),
+            "source": reference_resolution.get("source"),
+        }, max_items=6, max_keys=8)))
+        resolved_request = dialogue.get("resolved_request") or payload.get("resolved_request")
+        if resolved_request:
+            fields.append(("RESOLVED_REQUEST", _safe_text(resolved_request)))
+
     dialog_act = _safe_text(dialogue.get("dialog_act")).lower()
     continuation = bool(dialogue.get("continuation"))
     reference = dialog_act == "reference" or bool(dialogue.get("reply_to"))
@@ -845,6 +857,13 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
             "previous_user_turn": dialogue.get("previous_user_turn"),
             "avoid_repeat": True,
         }
+        if isinstance(reference_resolution, dict) and reference_resolution.get("resolved"):
+            vector["reference_resolution"] = {
+                "target": reference_resolution.get("target"),
+                "confidence": reference_resolution.get("confidence"),
+                "source": reference_resolution.get("source"),
+            }
+            vector["resolved_request"] = dialogue.get("resolved_request") or payload.get("resolved_request")
         if isinstance(vector_payload, dict):
             vector["semantic_relation"] = vector_payload.get("relation")
             vector["delta_mode"] = vector_payload.get("delta_mode")
