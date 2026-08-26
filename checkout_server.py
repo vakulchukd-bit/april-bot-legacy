@@ -860,14 +860,14 @@ CPU_OWNS_SCENE_CONTRACT = True
 # Future CPU diagnostics can be attached here without
 # changing Flask routes.
 
-async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_context=False):
+async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_context=False, request_source="april_web"):
     return await execute(
         user_id=user_id,
         text=text,
         chat_id=user_id,
         run_with_activity=run_with_activity,
         internal_context=internal_context,
-        request_source="internal_visual" if internal_context else "april_web",
+        request_source=request_source,
     )
 
 
@@ -876,12 +876,13 @@ async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_c
 # =========================================================
 # Single CPU bridge used by all web entrypoints.
 
-async def gateway_cpu_execute(user_id, text, run_with_activity, *, internal_context=False):
+async def gateway_cpu_execute(user_id, text, run_with_activity, *, internal_context=False, request_source="april_web"):
     result = await gateway_forward_to_cpu(
         user_id=user_id,
         text=text,
         run_with_activity=run_with_activity,
         internal_context=internal_context,
+        request_source=request_source,
     )
     return gateway_return_cpu_result(result)
 
@@ -889,7 +890,8 @@ async def process_web_message(
     user_id,
     text,
     *,
-    internal_context=False
+    internal_context=False,
+    request_source="april_web"
 ):
 
     async def run_with_activity(chat_id, coro):
@@ -911,6 +913,7 @@ async def process_web_message(
             text=text,
             run_with_activity=run_with_activity,
             internal_context=internal_context,
+            request_source=request_source,
         )
 
         result = executor_contract_passthrough(result)
