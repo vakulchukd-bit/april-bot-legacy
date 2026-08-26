@@ -1523,8 +1523,52 @@ def trim_visual_history(state_obj):
     state_obj["visual_scene_history"] = history[-VISUAL_HISTORY_LIMIT:]
 
 
+def _is_internal_dialog_metadata(metadata):
+    """Return True only for protocol-level internal turns, never user topics."""
+    if not isinstance(metadata, dict):
+        return False
+    return bool(
+        metadata.get("internal_context")
+        or metadata.get("internal_turn")
+        or str(metadata.get("source") or "").strip().lower() in {
+            "internal_visual", "internal_visual_analysis", "passive_visual_helper"
+        }
+    )
+
+
+def is_dialogue_visible_scene(scene):
+    """Structural visibility check for scenes entering human dialogue continuity."""
+    if not isinstance(scene, dict) or not scene:
+        return False
+    if scene.get("internal_context") is True or scene.get("internal_turn") is True:
+        return False
+    metadata = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    if _is_internal_dialog_metadata(metadata):
+        return False
+    source = str(scene.get("source") or "").strip().lower()
+    if source in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}:
+        return False
+    # Migration guard for already-persisted protocol scenes from older builds.
+    topic = str(scene.get("topic") or scene.get("user_request") or "").strip()
+    if topic.startswith("VISUAL_ANALYSIS:"):
+        return False
+    return True
+
+
 def add_dialog(user_id, role, content, metadata=None):
     state_obj = get_state(user_id)
+    # Internal visual/tool turns are not human dialogue and must never become
+    # previous_user/previous_april evidence for the dialogue vector.
+    if _is_internal_dialog_metadata(metadata):
+        state_obj.setdefault("internal_dialog_events", []).append({
+            "role": str(role or ""),
+            "content": safe_trim_text(content, 1200),
+            "metadata": deepcopy(metadata),
+            "created_at": time.time(),
+        })
+        state_obj["internal_dialog_events"] = state_obj["internal_dialog_events"][-VISUAL_HISTORY_LIMIT:]
+        persist_state(user_id)
+        return
     dialog = safe_list(state_obj.get("dialog"))
     message = compact_dialog_message(role, content)
     if isinstance(metadata, dict) and metadata:
@@ -2196,7 +2240,7 @@ def _archive_current_visual_scene_to_dynamic(state_obj, user_id):
     state_obj["visual_topic_history"] = state_obj["visual_topic_history"][-VISUAL_HISTORY_LIMIT:]
 
 
-def update_scene_context(user_id, scene_contract, current_request="", answer=""):
+def update_scene_context(user_id, scene_contract, current_request="", answer="", *, internal_context=False):
     """
     One canonical dialogue-scene update.
 
@@ -2213,6 +2257,19 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
     conversation_id = _ensure_conversation_scope(state_obj, user_id)
 
     contract = scene_contract if isinstance(scene_contract, dict) else {}
+    if internal_context:
+        # Internal multimodal helper turns may inform the current response, but
+        # they are never allowed to replace the human dialogue anchor.
+        state_obj["last_internal_visual_context"] = {
+            "user_id": str(user_id),
+            "conversation_id": conversation_id,
+            "current_request": safe_trim_text(current_request, 1200),
+            "answer": safe_trim_text(answer, 2200),
+            "created_at": time.time(),
+            "internal_context": True,
+        }
+        persist_state(user_id)
+        return state_obj.get("active_scene_contract")
     if not contract and hasattr(scene_contract, "__dict__"):
         contract = dict(scene_contract.__dict__)
 
@@ -2367,6 +2424,8 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
         "turn_id": state_obj.get("visual_scene_version"),
         "timestamp": time.time(),
         "memory_kind": "current_visual_dialogue",
+        "dialogue_visible": True,
+        "internal_context": False,
     }
 
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
