@@ -1015,6 +1015,15 @@ class QuantumInterpretationEngine:
                 dialogue_vector["subtype"] = "REFERENCE_OR_DEVELOPMENT"
                 dialogue_vector["delta_mode"] = "extend"
         resolved_scene=self._resolve_scene_context(text,state,continuation,reference,active_topic)
+        resolved_reference = reference_resolution.get("target") or ""
+        resolved_request = text
+        if resolved_reference and (continuation or reference):
+            # Structural discourse resolution: make the provider-facing request
+            # explicit without hard-coded topic/entity rules.
+            resolved_request = (
+                f"{text}\n\nContextual referent resolved from the immediately previous human exchange: "
+                f"{resolved_reference}. Answer the current request about that referent without asking the user to repeat it."
+            )
         if reference_resolution.get("resolved") and reference_resolution.get("target"):
             resolved_scene = dict(resolved_scene or {})
             resolved_scene["reference_target"] = reference_resolution.get("target")
@@ -1065,7 +1074,12 @@ class QuantumInterpretationEngine:
             "reference_resolution":reference_resolution,
             "presentation_transport":presentation,"presentation_signal":presentation,
             "presentation_signals":presentation["signals"],
-            "dialogue_vector": dialogue_vector,
+            "dialogue_vector": {
+                **dict(dialogue_vector or {}),
+                "reference_resolution": reference_resolution,
+                "resolved_reference": resolved_reference,
+                "resolved_request": resolved_request,
+            },
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
                 "shared_tokens": dialogue_vector.get("shared_tokens", []),
@@ -1086,7 +1100,8 @@ class QuantumInterpretationEngine:
                 "previous_user_turn":last_u,"reply_to":reply_to,"active_goal":active_goal,
                 "active_topic":active_topic,
                 "reference_resolution":reference_resolution,
-                "resolved_reference":reference_resolution.get("target") or "",
+                "resolved_reference":resolved_reference,
+                "resolved_request":resolved_request,
                 "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
                 "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
                 "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
