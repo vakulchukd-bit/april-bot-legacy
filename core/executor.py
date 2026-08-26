@@ -1779,7 +1779,7 @@ def _math_structure_profile(value: Any) -> dict:
     unicode_cbrt_atom = rf"∛\s*(?:\([^()\n]{{1,120}}\)|{radical_value})"
     unicode_qrtrt_atom = rf"∜\s*(?:\([^()\n]{{1,120}}\)|{radical_value})"
     numeric_atom = r"[-+−]?\d+(?:[.,]\d+)?(?:[eE][-+−]?\d+)?"
-    symbol_atom = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω]\w*"
+    symbol_atom = r"[A-Za-zΑ-Ωα-ω]\w*(?:\^[-+]?\d+|[²³⁴⁵⁶⁷⁸⁹])?"
     paren_atom = r"\([^()\n]{1,120}\)"
     atom = (
         rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|"
@@ -1989,7 +1989,7 @@ def _math_structure_profile_v2(value: Any, *, policy: dict | None = None) -> dic
     unicode_cbrt_atom = rf"∛\s*(?:\([^()\n]{{1,160}}\)|{radical_value})"
     unicode_qrtrt_atom = rf"∜\s*(?:\([^()\n]{{1,160}}\)|{radical_value})"
     numeric_atom = r"[-+−]?\d+(?:[.,]\d+)?(?:[eE][-+−]?\d+)?(?:\s*(?:[A-Za-zА-Яа-яЁё]{1,6}|%|°))?"
-    symbol_atom = r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω]\w*(?:\^[-+]?\d+|[²³⁴⁵⁶⁷⁸⁹])?"
+    symbol_atom = r"[A-Za-zΑ-Ωα-ω]\w*(?:\^[-+]?\d+|[²³⁴⁵⁶⁷⁸⁹])?"
     paren_atom = r"\([^()\n]{1,160}\)"
     atom = (
         rf"(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|"
