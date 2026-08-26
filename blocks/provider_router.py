@@ -238,6 +238,26 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "dialog_act": intent.get("dialog_act") or dialogue.get("dialog_act"),
         },
         "dialogue_contract": dialogue,
+        "dialogue_vector": (
+            raw.get("conversation", {}).get("dialogue_vector", {})
+            if isinstance(raw.get("conversation"), dict) else {}
+        ),
+        "dialogue_delta": (
+            raw.get("conversation", {}).get("dialogue_delta", {})
+            if isinstance(raw.get("conversation"), dict) else {}
+        ),
+        "render_continuity": (
+            raw.get("conversation", {}).get("render_continuity", {})
+            if isinstance(raw.get("conversation"), dict) else {}
+        ),
+        "visual_schema": (
+            raw.get("conversation", {}).get("visual_schema", "")
+            if isinstance(raw.get("conversation"), dict) else ""
+        ),
+        "visual_schema_confidence": (
+            raw.get("conversation", {}).get("visual_schema_confidence", 0.0)
+            if isinstance(raw.get("conversation"), dict) else 0.0
+        ),
         "memory": raw.get("memory") or {},
         "requested_outputs": raw.get("requested_outputs") or [],
         "required_competencies": raw.get("required_competencies") or [],
@@ -755,21 +775,42 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
         continuation or reference or same_goal
     )
 
-    # A small self-contained dialogue vector is nearly always useful when the
-    # processor has already resolved a continuation/reference relation.
-    if continuation or reference or topic_relation:
-        resolved_scene = dialogue.get("resolved_scene")
+    # The compact dialogue vector is a first-class semantic context field.
+    # It explains what has already been established and what is being developed,
+    # without replaying the whole conversation.
+    vector_payload = payload.get("dialogue_vector") or dialogue.get("dialogue_vector")
+    dialogue_delta = payload.get("dialogue_delta") or dialogue.get("delta")
+    render_continuity = payload.get("render_continuity") or {}
+    if continuation or reference or topic_relation or vector_payload:
         vector = {
             "dialog_act": dialogue.get("dialog_act"),
+            "relation": dialogue.get("relation"),
+            "subtype": dialogue.get("subtype"),
             "continuation": continuation,
             "reply_to": dialogue.get("reply_to"),
             "active_goal": dialogue.get("active_goal"),
             "active_topic": dialogue.get("active_topic"),
             "previous_user_turn": dialogue.get("previous_user_turn"),
+            "avoid_repeat": True,
         }
+        if isinstance(vector_payload, dict):
+            vector["semantic_relation"] = vector_payload.get("relation")
+            vector["delta_mode"] = vector_payload.get("delta_mode")
+            vector["shared_tokens"] = vector_payload.get("shared_tokens", [])[:20]
+            vector["new_tokens"] = vector_payload.get("new_tokens", [])[:20]
+        if isinstance(dialogue_delta, dict):
+            vector["delta"] = dialogue_delta
+        if isinstance(render_continuity, dict):
+            vector["render_continuity"] = {
+                "mode": render_continuity.get("mode"),
+                "reuse_existing_scene": bool(render_continuity.get("reuse_existing_scene")),
+                "previous_render_types": render_continuity.get("previous_render_types", [])[:10],
+                "avoid_repeat": True,
+            }
+        resolved_scene = dialogue.get("resolved_scene")
         if not (isinstance(resolved_scene, dict) and resolved_scene.get("scene_id")):
             vector["previous_april_turn"] = dialogue.get("previous_april_turn")
-        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=8)))
+        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=12, max_keys=16)))
 
     resolved_scene = dialogue.get("resolved_scene")
     if isinstance(resolved_scene, dict) and resolved_scene.get("scene_id"):
@@ -810,6 +851,23 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
         fields.append(("REQUIRED_ARTIFACTS", required_artifacts))
     if competencies:
         fields.append(("COMPETENCIES", competencies))
+
+    # Visual schema is semantic planning evidence (function/timeline/series/etc.),
+    # not a renderer trigger. Send it whenever a structured output was authorized.
+    schema = (
+        payload.get("visual_schema")
+        or (payload.get("semantic") or {}).get("visual_schema")
+        or (payload.get("interpretation") or {}).get("visual_schema")
+    )
+    if schema and requested_outputs:
+        fields.append(("VISUAL_SCHEMA", {
+            "schema": schema,
+            "confidence": (
+                payload.get("visual_schema_confidence")
+                or (payload.get("semantic") or {}).get("visual_schema_confidence")
+                or 0.0
+            ),
+        }))
 
     memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
     memory_mode = _safe_text(memory.get("retrieval_mode") or "").lower()
