@@ -461,15 +461,12 @@ class QuantumInterpretationEngine:
 
         relation_strength = max(topic_affinity, answer_affinity, request_affinity, goal_affinity)
 
-        # Generic discourse structure, independent of topic/renderer:
-        # anaphoric references usually mean "continue working with what was just said";
-        # sequence markers alone are weaker because they can also introduce a new topic.
-        anaphora = bool(re.search(
-            r"\b(это|этот|эта|эти|этом|этим|нем|ней|них|там|здесь|оно|он|она|него|ней|"
-            r"it|this|that|these|those|there|here|them|itself)\b",
-            current,
-            flags=re.I,
-        ))
+        # Generic discourse structure, independent of topic/renderer.
+        # Linguistic references are measured here only as discourse evidence.
+        reference_probe = self._reference_resolution(
+            text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic
+        )
+        anaphora = bool(reference_probe.get("anaphoric"))
         sequence_marker = bool(re.search(
             r"^\s*(а\s+)?(теперь|дальше|далее|затем|также|ещ[её]|потом|now|next|then|also)\b",
             current,
@@ -477,8 +474,10 @@ class QuantumInterpretationEngine:
         ))
         structural_followup = 0.0
         if has_context := bool(prev_a or prev_u or topic or scene_topic):
-            if anaphora:
-                structural_followup = 0.78
+            if reference_probe.get("resolved"):
+                structural_followup = min(0.94, float(reference_probe.get("confidence") or 0.0) * 0.86)
+            elif anaphora:
+                structural_followup = 0.70
             elif sequence_marker and relation_strength >= 0.14:
                 structural_followup = 0.36
 
@@ -595,6 +594,116 @@ class QuantumInterpretationEngine:
 
     def prewarm_static(self,candidates):
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
+
+    @staticmethod
+    def _anaphoric_form(text: str) -> bool:
+        """Detect discourse-reference forms structurally, without topic keywords."""
+        value = str(text or "")
+        return bool(re.search(
+            r"\b(это|этот|эта|эти|этом|этим|нем|ней|них|там|здесь|оно|он|она|его|ее|её|"
+            r"него|неё|ней|ними|им|ему|ей|их|"
+            r"it|this|that|these|those|there|here|them|his|her|their|he|she)\b",
+            value,
+            flags=re.I,
+        ))
+
+    @staticmethod
+    def _salient_named_referents(text: str) -> list[str]:
+        """Extract generic salient named entities from prior text without a topic list.
+
+        This is only a referent candidate extractor. It never chooses a domain or
+        renderer. Multi-token capitalized spans are preferred; single capitalized
+        tokens are used only when they are not common sentence/function words.
+        """
+        source = str(text or "")
+        candidates: list[str] = []
+
+        # Common multi-token proper-name shape: Person/org/place names in many
+        # European scripts. It intentionally does not encode specific names.
+        for match in re.finditer(
+            r"\b[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,}(?:\s+[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,}){1,3}\b",
+            source,
+        ):
+            value = re.sub(r"\s+", " ", match.group(0)).strip()
+            if value not in candidates:
+                candidates.append(value)
+
+        # Single-token named referent fallback. Exclude only generic function
+        # words/pronouns; no domain or person-name vocabulary is used.
+        generic = {
+            "Он", "Она", "Оно", "Они", "Этот", "Эта", "Это", "Эти", "Там", "Здесь",
+            "Он", "Их", "Его", "Её", "Ее", "Ему", "Ей", "Им", "Мы", "Вы", "Я", "Ты",
+            "The", "This", "That", "These", "Those", "He", "She", "It", "They", "His", "Her",
+            "And", "But", "For", "With", "From", "When", "Where", "Why", "How",
+        }
+        for token in re.findall(r"\b[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,}\b", source):
+            if token in generic:
+                continue
+            # Prefer tokens occurring away from an obvious sentence-initial position.
+            idx = source.find(token)
+            prefix = source[:idx].rstrip() if idx >= 0 else ""
+            if not prefix or prefix.endswith((".", "!", "?", ":", "\n")):
+                # Sentence-initial capitalisation is ambiguous; do not promote it
+                # unless a multi-token candidate already contains it.
+                if not any(token in c.split() for c in candidates):
+                    continue
+            if token not in candidates:
+                candidates.append(token)
+        return candidates[:8]
+
+    def _reference_resolution(
+        self,
+        current_text: str,
+        previous_assistant: str = "",
+        previous_user: str = "",
+        active_topic: str = "",
+    ) -> dict[str, Any]:
+        """Resolve a generic discourse reference against the immediate dialogue state.
+
+        The resolver works from linguistic reference shape plus salient referents from
+        the immediately preceding answer/user turn. It does not contain topic names,
+        domain names, renderer triggers, or fixed answer rules.
+        """
+        current = self.normalize(current_text)
+        previous_answer = self.normalize(previous_assistant)
+        previous_request = self.normalize(previous_user)
+        candidates = self._salient_named_referents(previous_answer)
+        candidates += [x for x in self._salient_named_referents(previous_request) if x not in candidates]
+        anaphora = self._anaphoric_form(current)
+        short_followup = len([t for t in self._tokens(current) if len(t) >= 3]) <= 8
+        has_previous = bool(previous_answer or previous_request or active_topic)
+        target = (self.normalize(active_topic) or (candidates[0] if candidates else ""))
+
+        # A reference is strong when the user uses an anaphoric form and the
+        # conversation has a concrete referent. Without an anaphoric form, require
+        # a stronger semantic relation instead of assuming continuity.
+        if anaphora and has_previous and target:
+            confidence = 0.92 if previous_answer and target else 0.78
+            source = "linguistic_reference_plus_previous_answer" if previous_answer else "linguistic_reference_plus_previous_turn"
+            return {
+                "present": True,
+                "target": target,
+                "candidates": candidates,
+                "confidence": confidence,
+                "source": source,
+                "anaphoric": True,
+                "short_followup": short_followup,
+                "resolved": True,
+            }
+
+        # Very short follow-ups with no explicit referent can still be context-bound
+        # when the semantic similarity engine strongly connects them to the prior answer.
+        # This branch only exposes evidence; the caller decides the final relation.
+        return {
+            "present": False,
+            "target": target if active_topic else "",
+            "candidates": candidates,
+            "confidence": 0.0,
+            "source": "unresolved_semantic_reference",
+            "anaphoric": anaphora,
+            "short_followup": short_followup,
+            "resolved": False,
+        }
 
     def _history(self,history):
         last_a=last_u=""; reply_to=None
@@ -757,31 +866,56 @@ class QuantumInterpretationEngine:
             active_topic=active_topic,
             previous_scene=previous_scene,
         )
+        reference_resolution = self._reference_resolution(
+            text,
+            previous_assistant=previous_assistant,
+            previous_user=previous_user,
+            active_topic=active_topic,
+        )
+        if reference_resolution.get("resolved"):
+            vector = {
+                **vector,
+                "relation": "CONTINUE_TOPIC",
+                "subtype": "REFERENCE_OR_DEVELOPMENT",
+                "delta_mode": "extend",
+                "reuse_existing_scene": bool(vector.get("previous_scene_id")),
+                "reference_resolution": reference_resolution,
+            }
         d=p["dialogue_scores"]
+        label=p["dialogue_best"]
+        continuation_score=float(vector["continuation_score"])
+        reference_score=max(
+            float(vector["scores"].get("previous_assistant",0.0) or 0.0),
+            float(vector["scores"].get("previous_scene_topic",0.0) or 0.0),
+            p["dialogue_scores"].get("reference",0.0),
+        )
+        if reference_resolution.get("resolved"):
+            reference_score=max(reference_score, float(reference_resolution.get("confidence") or 0.0))
+            continuation_score=max(continuation_score, min(1.0, float(reference_resolution.get("confidence") or 0.0) * 0.84))
+            label="reference"
+
         return {
             "dialogue":{
-                "label":p["dialogue_best"],
+                "label":label,
                 "confidence":p["dialogue_confidence"],
-                "continuation_score":vector["continuation_score"],
-                "reference_score":max(
-                    vector["scores"].get("previous_assistant",0.0),
-                    vector["scores"].get("previous_scene_topic",0.0),
-                ),
+                "continuation_score":continuation_score,
+                "reference_score":reference_score,
                 "topic_score":max(
                     vector["scores"].get("active_topic",0.0),
                     vector["scores"].get("previous_scene_topic",0.0),
                 ),
                 "goal_score":vector["scores"].get("active_goal",0.0),
             },
-            "linguistic":self._linguistic(text),
-            "continuation":vector["relation"]=="CONTINUE_TOPIC",
-            "reference_to_previous":vector["subtype"]=="REFERENCE_OR_DEVELOPMENT",
-            "dialogue_relation":vector,
+            "linguistic":self._linguistic(self.normalize(text)),
+            "continuation":bool(reference_resolution.get("resolved") or vector["relation"]=="CONTINUE_TOPIC"),
+            "reference_to_previous":bool(reference_resolution.get("resolved") or vector["subtype"]=="REFERENCE_OR_DEVELOPMENT"),
+            "reference_resolution":reference_resolution,
             "identity_request":p["identity_request"],
             "nli":{"labels":list(d),"scores":list(d.values()),"source":"quantum_matrix"},
             "decision_owner":DECISION_OWNER,"evidence_only":True,
-            "engine":"quantum_dialogue_vector_engine_v4",
+            "engine":"quantum_dialogue_vector_engine_v5",
         }
+
 
     def representations(self,text,context=""):
         p=self.measure(text,active_topic=context)
@@ -861,9 +995,22 @@ class QuantumInterpretationEngine:
         )
         d=dialogue_packet["dialogue"]
         dialogue_vector=dialogue_packet.get("dialogue_relation", {})
+        reference_resolution=dialogue_packet.get("reference_resolution") if isinstance(dialogue_packet.get("reference_resolution"),dict) else {}
+        resolved_reference_target=self.normalize(reference_resolution.get("target"))
+        if resolved_reference_target and not active_topic:
+            active_topic=resolved_reference_target
+        if reference_resolution.get("resolved"):
+            d = {**d, "label": "reference", "continuation": True, "reference_to_previous": True}
+            dialogue_vector = {
+                **dialogue_vector,
+                "relation": "CONTINUE_TOPIC",
+                "subtype": "REFERENCE_OR_DEVELOPMENT",
+                "delta_mode": "extend",
+                "reference_resolution": reference_resolution,
+            }
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
-        continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
+        continuation=bool(d.get("continuation") or dialogue_vector.get("relation") == "CONTINUE_TOPIC" or reference_resolution.get("resolved"))
         # A continuation may deliberately address the existing visual object
         # without naming its representation again. Reuse that canonical renderer
         # only when the user is still operating in the active visual goal.
@@ -882,8 +1029,12 @@ class QuantumInterpretationEngine:
                 production = prior_structured[0]
                 source = "continuity_reuse_existing_representation"
                 locked = True
-        reference=bool(d.get("reference_to_previous", d.get("reference_score", 0.0) >= 0.42))
-        memory=p["dialogue_best"]=="memory_query" and p["dialogue_scores"].get("memory_query",0.0)>=0.18
+        reference=bool(d.get("reference_to_previous") or reference_resolution.get("resolved") or d.get("reference_score", 0.0) >= 0.42)
+        memory=(
+            p["dialogue_best"]=="memory_query"
+            and p["dialogue_scores"].get("memory_query",0.0)>=0.18
+            and not reference_resolution.get("resolved")
+        )
         resolved_scene=self._resolve_scene_context(text,state,continuation,reference,active_topic)
         evidence=[{"label":k,"score":float(v),"source":"quantum_matrix","positive":True,"details":{}}
                   for k,v in sorted(p["representation_scores"].items(),key=lambda x:x[1],reverse=True) if float(v)>=0.20]
@@ -910,8 +1061,8 @@ class QuantumInterpretationEngine:
         }
         result=build_result(text)
         result.update({
-            "type":p["dialogue_best"],"subtype":production,"scene_type":production,
-            "normalized":text,"required_domains":domains,"candidate_domains":domains,
+            "type":"reference" if reference_resolution.get("resolved") else p["dialogue_best"],"subtype":production,"scene_type":production,
+            "normalized":text,"active_topic":active_topic,"current_topic":active_topic,"required_domains":domains,"candidate_domains":domains,
             "required_representations":[production],"candidate_representations":[production],
             "requested_representations":[production],"requested_representation":production,
             "production_representation":production,"production_representation_locked":locked,
@@ -930,7 +1081,17 @@ class QuantumInterpretationEngine:
             "resolved_scene":resolved_scene,
             "presentation_transport":presentation,"presentation_signal":presentation,
             "presentation_signals":presentation["signals"],
-            "dialogue_vector": dialogue_vector,
+            "dialogue_vector": {
+                **dialogue_vector,
+                "reference_resolution": reference_resolution,
+                "active_topic": active_topic,
+            },
+            "dialogue_reference": reference_resolution,
+            "resolved_request": (
+                f"{text} [resolved reference: {resolved_reference_target}]"
+                if reference_resolution.get("resolved") and resolved_reference_target else text
+            ),
+            "current_topic": active_topic,
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
                 "shared_tokens": dialogue_vector.get("shared_tokens", []),
@@ -946,15 +1107,20 @@ class QuantumInterpretationEngine:
                 "previous_block_ids": dialogue_vector.get("previous_block_ids", []),
             },
             "dialogue_contract":{
-                "dialog_act":d["label"],"current_request":text,"continuation":continuation,
+                "dialog_act":"reference" if reference_resolution.get("resolved") else d["label"],"current_request":text,"continuation":continuation,
                 "reference_to_previous":reference,"previous_april_turn":last_a,
                 "previous_user_turn":last_u,"reply_to":reply_to,"active_goal":active_goal,
                 "active_topic":active_topic,
-                "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
+                "reference_resolution":reference_resolution,
+                "resolved_request": (
+                    f"{text} [resolved reference: {resolved_reference_target}]"
+                    if reference_resolution.get("resolved") and resolved_reference_target else text
+                ),
+                "context_dependency":"reference" if reference_resolution.get("resolved") else ("memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent"),
                 "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
                 "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
                 "avoid_repeat": True,
-                "canonical":True,"version":"quantum_dialogue_field_v4"
+                "canonical":True,"version":"quantum_dialogue_field_v5"
             },
             "context_resolution":{
                 "depends_on_previous_dialogue":bool(continuation or reference or memory),
@@ -962,7 +1128,7 @@ class QuantumInterpretationEngine:
             },
             "semantic_profile":{
                 "active_topic":active_topic,"active_goal":active_goal,
-                "previous_april_turn":last_a,"representation_scores":p["representation_scores"],
+                "previous_april_turn":last_a,"reference_resolution":reference_resolution,"representation_scores":p["representation_scores"],
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
                 "goal_scores":p["goal_scores"],"context_scores":p["context_scores"],
@@ -987,7 +1153,7 @@ class QuantumInterpretationEngine:
             "possible_capability":"renderer" if production!="text" else None,"possible_output":production,
             "possible_scene_type":production,"current_representation":production,
             "unresolved_intent":not locked,"memory_query":memory,
-            "continuation":d["continuation_score"],"continuation_target":last_a or active_topic,
+            "continuation":d["continuation_score"],"continuation_target":resolved_reference_target or last_a or active_topic,
             "dialogue_relation": dialogue_vector.get("relation", "NEW_TOPIC"),
             "dialogue_subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
             "visual_schema": visual_schema,
