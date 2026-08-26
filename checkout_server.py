@@ -860,14 +860,15 @@ CPU_OWNS_SCENE_CONTRACT = True
 # Future CPU diagnostics can be attached here without
 # changing Flask routes.
 
-async def gateway_forward_to_cpu(user_id, text, run_with_activity):
+async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_context=False):
     return await execute(
         user_id=user_id,
         text=text,
         chat_id=user_id,
         run_with_activity=run_with_activity,
+        internal_context=internal_context,
+        request_source="internal_visual" if internal_context else "april_web",
     )
-
 
 
 # =========================================================
@@ -875,17 +876,20 @@ async def gateway_forward_to_cpu(user_id, text, run_with_activity):
 # =========================================================
 # Single CPU bridge used by all web entrypoints.
 
-async def gateway_cpu_execute(user_id, text, run_with_activity):
+async def gateway_cpu_execute(user_id, text, run_with_activity, *, internal_context=False):
     result = await gateway_forward_to_cpu(
         user_id=user_id,
         text=text,
         run_with_activity=run_with_activity,
+        internal_context=internal_context,
     )
     return gateway_return_cpu_result(result)
 
 async def process_web_message(
     user_id,
-    text
+    text,
+    *,
+    internal_context=False
 ):
 
     async def run_with_activity(chat_id, coro):
@@ -898,11 +902,21 @@ async def process_web_message(
 
     visual_turn = prepare_visual_context_for_turn(user_id, text)
     print("🧠 VISUAL TURN GATE:", visual_turn)
+    human_turn_recorded = False
+    if not internal_context and text:
+        add_dialog(
+            user_id,
+            "user",
+            text,
+            metadata={"source": "april_web", "modality": "text", "human_turn": True},
+        )
+        human_turn_recorded = True
     try:
         result = await gateway_cpu_execute(
             user_id=user_id,
             text=text,
-            run_with_activity=run_with_activity
+            run_with_activity=run_with_activity,
+            internal_context=internal_context,
         )
 
         result = executor_contract_passthrough(result)
@@ -940,53 +954,19 @@ async def process_web_message(
         except Exception as audit_error:
             print("SCENE CONTRACT AUDIT ERROR:", audit_error)
 
+        if not internal_context:
+            visible_answer = normalized.get("answer") or normalized.get("content") or ""
+            if visible_answer:
+                add_dialog(
+                    user_id,
+                    "assistant",
+                    visible_answer,
+                    metadata={"source": "april_web", "modality": "text", "human_turn": True},
+                )
         normalized["user_id"] = str(user_id)
         normalized["canonical_route"] = "/api/v1/chat"
         normalized["single_route"] = True
         normalized["space_continuity"] = build_space_continuity(normalized)
-
-        # Commit the completed USER↔APRIL turn to the same user-scoped dialogue
-        # store consumed by the next Interpretation pass. The current user turn
-        # is written only after the assistant response exists, so the interpreter
-        # never sees the in-flight request as its own previous turn.
-        scene_contract = normalized.get("scene_contract")
-        scene_id = ""
-        conversation_id = ""
-        state_now = get_state(user_id)
-        active_visual = state_now.get("active_visual_scene") if isinstance(state_now, dict) and isinstance(state_now.get("active_visual_scene"), dict) else {}
-        if isinstance(scene_contract, dict):
-            metadata = scene_contract.get("metadata") if isinstance(scene_contract.get("metadata"), dict) else {}
-            active_scene = scene_contract.get("active_scene") if isinstance(scene_contract.get("active_scene"), dict) else {}
-            scene_id = str(scene_contract.get("scene_id") or active_scene.get("scene_id") or active_visual.get("scene_id") or "")
-            conversation_id = str(
-                metadata.get("conversation_id")
-                or active_scene.get("conversation_id")
-                or active_visual.get("conversation_id")
-                or state_now.get("conversation_id")
-                or ""
-            )
-        dialog_meta = {
-            "source":"april_web",
-            "modality":"text",
-            "user_id":str(user_id),
-            "conversation_id":conversation_id,
-            "scene_id":scene_id,
-            "canonical_web_route":True,
-        }
-        if text:
-            add_dialog(user_id,"user",text,metadata=dialog_meta)
-        answer_text = str(normalized.get("answer") or normalized.get("content") or "").strip()
-        if answer_text:
-            add_dialog(user_id,"assistant",answer_text,metadata=dialog_meta)
-        persist_state(user_id)
-        print("🧠 DIALOGUE TURN COMMITTED:", {
-            "user_id":str(user_id),
-            "conversation_id":conversation_id,
-            "scene_id":scene_id,
-            "has_user_turn":bool(text),
-            "has_assistant_turn":bool(answer_text),
-            "dialog_length":len((get_state(user_id) or {}).get("dialog", [])),
-        }, flush=True)
 
         # The Executor's update_scene_context() is the sole scene commit point.
         # Every completed USER↔APRIL turn becomes the current scene, including
@@ -1262,7 +1242,8 @@ VISUAL_ANALYSIS:
 
             process_web_message(
                 user_id=user_id,
-                text=visual_context
+                text=visual_context,
+                internal_context=True,
             )
         )
 
