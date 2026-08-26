@@ -902,15 +902,9 @@ async def process_web_message(
 
     visual_turn = prepare_visual_context_for_turn(user_id, text)
     print("🧠 VISUAL TURN GATE:", visual_turn)
-    human_turn_recorded = False
-    if not internal_context and text:
-        add_dialog(
-            user_id,
-            "user",
-            text,
-            metadata={"source": "april_web", "modality": "text", "human_turn": True},
-        )
-        human_turn_recorded = True
+    # The current human turn MUST NOT enter state.dialog before interpretation.
+    # Interpretation needs the previous completed USER↔APRIL pair as its anchor.
+    # Commit the current pair only after a successful canonical response.
     try:
         result = await gateway_cpu_execute(
             user_id=user_id,
@@ -956,6 +950,15 @@ async def process_web_message(
 
         if not internal_context:
             visible_answer = normalized.get("answer") or normalized.get("content") or ""
+            # Commit the completed USER↔APRIL pair only after successful execution.
+            # This preserves strict turn ordering for the next interpretation pass.
+            if text:
+                add_dialog(
+                    user_id,
+                    "user",
+                    text,
+                    metadata={"source": "april_web", "modality": "text", "human_turn": True},
+                )
             if visible_answer:
                 add_dialog(
                     user_id,
