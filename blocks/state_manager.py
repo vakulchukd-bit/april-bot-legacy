@@ -1225,6 +1225,32 @@ state = {}
 image_storage = {}
 
 
+
+def _sanitize_persisted_dialog(state_obj):
+    """Keep only genuine USER/APRIL dialogue in the semantic hot history.
+
+    Internal visual/tool protocol messages are retained separately so legacy
+    state cannot poison previous_user/previous_april or the dialogue vector.
+    """
+    dialog = safe_list(state_obj.get("dialog"))
+    clean = []
+    internal = safe_list(state_obj.get("internal_dialog_events"))
+    for item in dialog:
+        if _is_human_dialog_item(item):
+            clean.append(item)
+        else:
+            internal.append({
+                "role": str(item.get("role") or "") if isinstance(item, dict) else "",
+                "content": safe_trim_text(
+                    item.get("content", "") if isinstance(item, dict) else item,
+                    1200,
+                ),
+                "metadata": deepcopy(item.get("metadata", {})) if isinstance(item, dict) else {},
+                "created_at": time.time(),
+            })
+    state_obj["dialog"] = clean[-HOT_DIALOG_LIMIT:]
+    state_obj["internal_dialog_events"] = internal[-VISUAL_HISTORY_LIMIT:]
+
 def get_state(user_id):
     key = str(user_id)
 
@@ -1255,6 +1281,7 @@ def get_state(user_id):
             "scope_version": "USER_SCOPED_SCENE_V2",
         }
         QUANTUM_MEMORY_ENGINE.ensure(state[key])
+        _sanitize_persisted_dialog(state[key])
         return state[key]
 
 
@@ -1573,7 +1600,8 @@ def add_dialog(user_id, role, content, metadata=None):
     state_obj = get_state(user_id)
     # Internal visual/tool turns are not human dialogue and must never become
     # previous_user/previous_april evidence for the dialogue vector.
-    if _is_internal_dialog_metadata(metadata):
+    role_name = str(role or "").strip().lower()
+    if _is_internal_dialog_metadata(metadata) or role_name not in {"user", "human", "assistant", "april", "bot"}:
         state_obj.setdefault("internal_dialog_events", []).append({
             "role": str(role or ""),
             "content": safe_trim_text(content, 1200),
