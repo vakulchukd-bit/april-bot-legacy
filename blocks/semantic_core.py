@@ -1015,6 +1015,13 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["required_representations"] = [production]
     result["candidate_representations"] = evidence_candidates or [production]
     result["requested_representations"] = [production]
+    # Current-turn authority: continuity/reference must not manufacture a new
+    # structured representation. A renderer survives only when this turn itself
+    # established the production representation or an explicit semantic request.
+    if continuation and production != "text" and not locked and not explicit:
+        production = "text"
+        result["production_representation"] = "text"
+        result["production_representation_locked"] = False
     result["requested_outputs"] = [production]
     result["required_outputs"] = [production]
     result["requested_representation"] = production
