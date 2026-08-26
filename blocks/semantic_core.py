@@ -750,6 +750,24 @@ def _dialogue_context_matrix(text, signals, interpreted):
         if isinstance(interpreted.get("dialogue_relation"), dict)
         else {}
     )
+    reference_resolution = interpreted.get("dialogue_reference") if isinstance(interpreted.get("dialogue_reference"), dict) else {}
+    if reference_resolution.get("resolved"):
+        confidence = clamp(reference_resolution.get("confidence", 0.0))
+        return {
+            "context_dependency": True,
+            "context_dependency_score": round(confidence, 4),
+            "continuation": True,
+            "continuation_score": round(confidence, 4),
+            "reference_to_previous": True,
+            "reference_score": round(confidence, 4),
+            "dialog_act": "reference",
+            "previous_user_turn": prev_u,
+            "previous_april_turn": prev_a,
+            "reference_resolution": reference_resolution,
+            "active_topic": interpreted.get("active_topic") or reference_resolution.get("target"),
+            "structured_continuity": True,
+            "history_available": bool(prev_u or prev_a),
+        }
     if scene_relation.get("same_scene"):
         confidence = clamp(scene_relation.get("confidence", 0.0))
         return {
