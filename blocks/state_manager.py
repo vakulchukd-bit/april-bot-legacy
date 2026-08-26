@@ -1578,6 +1578,8 @@ def add_dialog(user_id, role, content, metadata=None):
         "last_april_turn": state_obj.get("last_april_turn", ""),
         "active_topic": state_obj.get("current_topic"),
         "focus": deepcopy(state_obj.get("focus_state", {})),
+        "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
+        "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
     }
 
     trim_image_memory(state_obj)
@@ -1672,6 +1674,8 @@ def build_active_scene(user_id):
         "focus_snapshot": state_obj.get("focus_snapshot", {}),
         "goal_hierarchy": state_obj.get("goal_hierarchy", {}),
         "dynamic_focus": state_obj.get("dynamic_focus", {}),
+        "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
+        "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
     }
 
 
@@ -2349,6 +2353,15 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="")
             if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
         ],
         "semantic_state": deepcopy(semantic_scene_state),
+        "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
+        "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
+        "render_continuity": {
+            "relation": "CONTINUE_TOPIC" if is_continuation else "NEW_TOPIC",
+            "reuse_existing_scene": bool(is_continuation and previous_scene_id),
+            "previous_scene_id": previous_scene_id,
+            "previous_render_types": list(current_scene.get("render_block_types") or []) if is_continuation and isinstance(current_scene, dict) else [],
+            "avoid_repeat": True,
+        },
         "user_id": str(user_id),
         "conversation_id": conversation_id,
         "turn_id": state_obj.get("visual_scene_version"),
@@ -2451,7 +2464,21 @@ def update_dialog_context(user_id, semantic_result):
         "active_topic": topic or semantic_result.get("active_topic"),
         "active_goal": semantic_result.get("active_goal"),
         "dialog_act": contract.get("dialog_act") or semantic_result.get("dialog_act"),
+        "relation": contract.get("relation") or semantic_result.get("dialogue_relation") or "NEW_TOPIC",
+        "subtype": contract.get("subtype") or semantic_result.get("dialogue_subtype") or "NEW_TOPIC",
+        "avoid_repeat": True,
+        "delta": deepcopy(semantic_result.get("dialogue_delta") or {}),
     })
+    state_obj["dialogue_vector"] = deepcopy(semantic_result.get("dialogue_vector") or {})
+    state_obj["turn_progression"] = {
+        "relation": dialogue_state.get("relation"),
+        "subtype": dialogue_state.get("subtype"),
+        "active_topic": dialogue_state.get("active_topic"),
+        "active_goal": dialogue_state.get("active_goal"),
+        "delta": deepcopy(dialogue_state.get("delta") or {}),
+        "avoid_repeat": True,
+        "updated_at": time.time(),
+    }
     state_obj["dialog_state"] = dialogue_state
 
     # Semantic result is evidence entering the same memory field; it is not a
