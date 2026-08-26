@@ -945,73 +945,53 @@ async def process_web_message(
         normalized["single_route"] = True
         normalized["space_continuity"] = build_space_continuity(normalized)
 
-        # Canonical Web dialogue commit. The /api/v1/chat route must leave the
-        # same USER↔APRIL pair in the user-scoped hot dialogue that the semantic
-        # dialogue-vector engine reads on the next turn. The current turn is
-        # written only after the canonical Executor response exists, so the
-        # interpreter never mistakes the in-flight user message for a previous
-        # turn. This preserves the active scene/artifact while giving the next
-        # request an authentic previous user + previous assistant pair.
+        # Commit the completed USER↔APRIL turn to the same user-scoped dialogue
+        # store consumed by the next Interpretation pass. The current user turn
+        # is written only after the assistant response exists, so the interpreter
+        # never sees the in-flight request as its own previous turn.
         scene_contract = normalized.get("scene_contract")
         scene_id = ""
         conversation_id = ""
+        state_now = get_state(user_id)
+        active_visual = state_now.get("active_visual_scene") if isinstance(state_now, dict) and isinstance(state_now.get("active_visual_scene"), dict) else {}
         if isinstance(scene_contract, dict):
             metadata = scene_contract.get("metadata") if isinstance(scene_contract.get("metadata"), dict) else {}
-            scene_id = str(
-                scene_contract.get("scene_id")
-                or normalized.get("active_visual_scene", {}).get("scene_id")
-                or ""
-            )
+            active_scene = scene_contract.get("active_scene") if isinstance(scene_contract.get("active_scene"), dict) else {}
+            scene_id = str(scene_contract.get("scene_id") or active_scene.get("scene_id") or active_visual.get("scene_id") or "")
             conversation_id = str(
                 metadata.get("conversation_id")
-                or normalized.get("active_visual_scene", {}).get("conversation_id")
+                or active_scene.get("conversation_id")
+                or active_visual.get("conversation_id")
+                or state_now.get("conversation_id")
                 or ""
             )
-
         dialog_meta = {
-            "source": "april_web",
-            "modality": "text",
-            "user_id": str(user_id),
-            "conversation_id": conversation_id,
-            "scene_id": scene_id,
-            "canonical_web_route": True,
+            "source":"april_web",
+            "modality":"text",
+            "user_id":str(user_id),
+            "conversation_id":conversation_id,
+            "scene_id":scene_id,
+            "canonical_web_route":True,
         }
-
-        # Keep the persistent dialogue strictly user-scoped and append the
-        # completed turn as one ordered pair: USER → APRIL.
         if text:
-            add_dialog(
-                user_id,
-                "user",
-                text,
-                metadata=dialog_meta,
-            )
+            add_dialog(user_id,"user",text,metadata=dialog_meta)
         answer_text = str(normalized.get("answer") or normalized.get("content") or "").strip()
         if answer_text:
-            add_dialog(
-                user_id,
-                "assistant",
-                answer_text,
-                metadata=dialog_meta,
-            )
+            add_dialog(user_id,"assistant",answer_text,metadata=dialog_meta)
         persist_state(user_id)
+        print("🧠 DIALOGUE TURN COMMITTED:", {
+            "user_id":str(user_id),
+            "conversation_id":conversation_id,
+            "scene_id":scene_id,
+            "has_user_turn":bool(text),
+            "has_assistant_turn":bool(answer_text),
+            "dialog_length":len((get_state(user_id) or {}).get("dialog", [])),
+        }, flush=True)
 
-        print(
-            "🧠 DIALOGUE TURN COMMITTED:",
-            {
-                "user_id": str(user_id),
-                "conversation_id": conversation_id,
-                "scene_id": scene_id,
-                "has_user_turn": bool(text),
-                "has_assistant_turn": bool(answer_text),
-                "dialog_length": len((get_state(user_id) or {}).get("dialog", [])),
-            },
-            flush=True,
-        )
-
-        # The Executor's update_scene_context() is still the sole scene commit
-        # point. The dialog pair above is only the semantic continuity ledger;
-        # it does not create a second scene or renderer route.
+        # The Executor's update_scene_context() is the sole scene commit point.
+        # Every completed USER↔APRIL turn becomes the current scene, including
+        # text-only turns. Visual renderer types describe presentation; they do
+        # not decide whether memory is a scene.
         return normalized
     finally:
         # If the turn did not produce a new visual scene, restore the stored scene
