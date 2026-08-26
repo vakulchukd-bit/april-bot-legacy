@@ -2963,6 +2963,7 @@ def _canonicalize(
     cognition: dict,
     decision: dict,
     request: MachineRequest,
+    internal_context: bool = False,
 ) -> dict:
     answer = _clean_text_value(
         response.answer
@@ -3654,4 +3655,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         ),
     }
 
-    return _canonicalize(user_id, response, state, semantic, cognition, decision, request)
+    return _canonicalize(
+        user_id, response, state, semantic, cognition, decision, request,
+        internal_context=internal_context,
+    )
