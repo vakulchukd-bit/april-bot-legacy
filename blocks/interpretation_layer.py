@@ -109,10 +109,10 @@ SEMANTIC_TURN_PROTOTYPES = {
     "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
     "question": "пользователь задаёт вопрос просит ответ или разъяснение сколько равен вычисли посчитай значение; the user asks a question requiring an answer or calculation",
     "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
-    "continuation": "пользователь продолжает текущую мысль, просит развить, объяснить, проверить, вычислить дальше или изменить уже полученный результат; the user continues the current reasoning thread, asks to explain, verify, calculate further, or modify an existing result",
-    "reformulation": "пользователь просит переработать, развернуть, уточнить, переписать или представить заново уже полученный результат; the user asks to expand, clarify, rewrite, or re-present an existing result",
-    "correction": "пользователь уточняет, исправляет, дополняет или меняет предыдущую инструкцию, ответ или вывод; the user clarifies, corrects, extends, or changes the preceding instruction, answer, or conclusion",
-    "reference": "пользователь обращается к предыдущему ответу, выводу, результату, объекту, сцене или уже созданному материалу и хочет продолжить работу с ним; the user refers to a previous answer, result, object, scene, or produced material and wants to continue working with it",
+    "continuation": "пользователь продолжает текущую мысль, задаёт следующий уточняющий вопрос, говорит теперь, а теперь, дальше, на этом, по нему, по ней, просит развить, объяснить дальше, проверить вывод, добавить деталь, продолжить уже начатый результат; the user continues the current reasoning thread with a follow-up, clarification, extension, or refinement",
+    "reformulation": "пользователь переформулирует предыдущий запрос, просит показать это иначе, уточняет формулировку, просит переделать или дополнить уже полученный результат; the user reformulates or refines an existing result",
+    "correction": "пользователь исправляет предыдущий результат, добавляет условие, меняет параметр или уточняет деталь уже обсуждаемой задачи; the user corrects, extends, or changes a detail of the preceding task",
+    "reference": "пользователь ссылается на уже показанное, созданное, сказанное или обсуждаемое, использует указание на него, это, этот, эту, эти, там, здесь, просит добавить, отметить, изменить или объяснить это; the user refers to something already shown or discussed and continues work on it",
     "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
@@ -250,6 +250,19 @@ GOAL_HYPOTHESES = {
     "transform": "изменить преобразовать результат",
     "decide": "выбрать сопоставить варианты",
 }
+
+# Visual schema is a semantic subtype of an already-resolved representation.
+# It is evidence only: it never routes by keyword and never owns renderer choice.
+VISUAL_SCHEMA_HYPOTHESES = {
+    "function": "mathematical function equation dependency f(x) y of x curve coordinate plot; mathematical function against an axis",
+    "series": "ряд данных последовательность измерений значения изменение динамика тренд временной ряд развитие по оси; ordered measurements or changing values",
+    "timeline": "временная шкала хронология история периоды эпохи эры события даты раньше позже начало конец продолжительность последовательность во времени развитие существование вымирание; temporal history chronology eras periods dates and events",
+    "scatter": "paired observations numeric variables relationship correlation distribution individual points; relationship between two numeric variables",
+    "network": "entities connected by relationships nodes edges topology dependencies connections; network of related entities",
+    "matrix": "rows columns cells heatmap two dimensional array intensities crossing dimensions; matrix or heatmap",
+    "categorical": "категории группы сравнение ранжирование дискретные значения подписи количество по категориям; categorical comparison",
+}
+
 REPRESENTATION_ALIASES = {
     "chart":"graph","plot":"graph","schematic":"diagram","flowchart":"diagram",
     "math":"formula","equation":"formula","url":"link","link_card":"link","media":"gallery",
@@ -294,6 +307,7 @@ class QuantumInterpretationEngine:
             ("operation", OPERATION_HYPOTHESES),
             ("object", OBJECT_HYPOTHESES),
             ("goal", GOAL_HYPOTHESES),
+            ("visual_schema", VISUAL_SCHEMA_HYPOTHESES),
         )
         docs = []
         for family, vocab in families:
@@ -398,6 +412,156 @@ class QuantumInterpretationEngine:
             for k,v in vals.items()
         }
 
+    def _dialogue_relation_engine(
+        self,
+        text: str,
+        *,
+        previous_assistant: str = "",
+        previous_user: str = "",
+        active_topic: str = "",
+        active_goal: str = "",
+        previous_scene: dict | None = None,
+    ) -> dict:
+        """Resolve whether the current turn develops the active vector or starts a new one.
+
+        This is semantic evidence, not routing. It compares the current turn against
+        the immediately previous user/assistant turns, active topic/goal and active
+        visual scene. No topic-specific trigger list is used.
+        """
+        current = self.normalize(text)
+        prev_a = self.normalize(previous_assistant)
+        prev_u = self.normalize(previous_user)
+        topic = self.normalize(active_topic)
+        goal = self.normalize(active_goal)
+        scene = previous_scene if isinstance(previous_scene, dict) else {}
+        scene_topic = self.normalize(scene.get("topic"))
+
+        sims = {
+            "previous_assistant": self.similarity(current, prev_a)["score"] if prev_a else 0.0,
+            "previous_user": self.similarity(current, prev_u)["score"] if prev_u else 0.0,
+            "active_topic": self.similarity(current, topic)["score"] if topic else 0.0,
+            "active_goal": self.similarity(current, goal)["score"] if goal else 0.0,
+            "previous_scene_topic": self.similarity(current, scene_topic)["score"] if scene_topic else 0.0,
+        }
+
+        # Dialogue prototypes provide semantic evidence about the *role* of the
+        # turn; they do not decide on their own and never route a renderer.
+        dialogue_scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
+        dialogue_followup = max(
+            dialogue_scores.get("continuation", 0.0),
+            dialogue_scores.get("reformulation", 0.0),
+            dialogue_scores.get("correction", 0.0),
+            dialogue_scores.get("reference", 0.0),
+        )
+
+        topic_affinity = max(sims["active_topic"], sims["previous_scene_topic"])
+        answer_affinity = sims["previous_assistant"]
+        request_affinity = sims["previous_user"]
+        goal_affinity = sims["active_goal"]
+
+        relation_strength = max(topic_affinity, answer_affinity, request_affinity, goal_affinity)
+
+        # Generic discourse structure, independent of topic/renderer:
+        # anaphoric references usually mean "continue working with what was just said";
+        # sequence markers alone are weaker because they can also introduce a new topic.
+        anaphora = bool(re.search(
+            r"\b(это|этот|эта|эти|этом|этим|нем|ней|них|там|здесь|оно|он|она|него|ней|"
+            r"it|this|that|these|those|there|here|them|itself)\b",
+            current,
+            flags=re.I,
+        ))
+        sequence_marker = bool(re.search(
+            r"^\s*(а\s+)?(теперь|дальше|далее|затем|также|ещ[её]|потом|now|next|then|also)\b",
+            current,
+            flags=re.I,
+        ))
+        structural_followup = 0.0
+        if has_context := bool(prev_a or prev_u or topic or scene_topic):
+            if anaphora:
+                structural_followup = 0.78
+            elif sequence_marker and relation_strength >= 0.14:
+                structural_followup = 0.36
+
+
+        continuity_score = max(
+            0.42 * topic_affinity + 0.30 * answer_affinity + 0.18 * request_affinity + 0.10 * goal_affinity,
+            0.55 * answer_affinity + 0.25 * topic_affinity + 0.20 * request_affinity,
+            0.60 * dialogue_followup + 0.20 * answer_affinity + 0.20 * topic_affinity,
+            structural_followup,
+        )
+
+        tokens = [t for t in self._tokens(current) if len(t) >= 3]
+        low_information = len(set(tokens)) <= 1
+        has_context = bool(prev_a or prev_u or topic or scene_topic)
+
+        independent_score = max(0.0, 1.0 - continuity_score) if has_context else 1.0
+        if low_information and has_context:
+            independent_score *= 0.35
+
+        if not has_context:
+            relation = "NEW_TOPIC"
+        elif low_information:
+            relation = "CONTINUE_TOPIC"
+        elif continuity_score >= 0.34 or relation_strength >= 0.48:
+            relation = "CONTINUE_TOPIC"
+        else:
+            relation = "NEW_TOPIC"
+
+        if relation == "CONTINUE_TOPIC":
+            if max(topic_affinity, answer_affinity) >= 0.55 and request_affinity < 0.45:
+                subtype = "REFERENCE_OR_DEVELOPMENT"
+            elif request_affinity >= 0.45:
+                subtype = "DEVELOPMENT"
+            else:
+                subtype = "REFINEMENT"
+        else:
+            subtype = "NEW_TOPIC"
+
+        previous_text = " ".join(x for x in (prev_a, prev_u, topic) if x)
+        previous_tokens = {t for t in self._tokens(previous_text) if len(t) >= 3}
+        current_tokens = [t for t in self._tokens(current) if len(t) >= 3]
+        shared_tokens, new_tokens = [], []
+        for token in current_tokens:
+            target = shared_tokens if token in previous_tokens else new_tokens
+            if token not in target:
+                target.append(token)
+
+        previous_render_types = list(scene.get("render_block_types") or [])
+        previous_block_ids = [
+            str(x.get("block_id"))
+            for x in (scene.get("render_blocks") or [])
+            if isinstance(x, dict) and x.get("block_id")
+        ]
+
+        return {
+            "relation": relation,
+            "continuation_score": float(max(0.0, min(1.0, continuity_score))),
+            "independent_score": float(max(0.0, min(1.0, independent_score))),
+            "relation_strength": float(max(0.0, min(1.0, relation_strength))),
+            "subtype": subtype,
+            "scores": {
+                **sims,
+                "dialogue_followup": dialogue_followup,
+                "structural_followup": structural_followup,
+            },
+            "active_topic": topic,
+            "active_goal": goal,
+            "previous_user_turn": prev_u,
+            "previous_april_turn": prev_a,
+            "shared_tokens": shared_tokens[:40],
+            "new_tokens": new_tokens[:40],
+            "delta_mode": "extend" if relation == "CONTINUE_TOPIC" else "start",
+            "avoid_repeat": True,
+            "reuse_existing_scene": relation == "CONTINUE_TOPIC" and bool(scene.get("scene_id")),
+            "previous_scene_id": scene.get("scene_id") if relation == "CONTINUE_TOPIC" else "",
+            "previous_render_types": previous_render_types,
+            "previous_block_ids": previous_block_ids,
+            "source": "quantum_dialogue_vector_v4",
+            "decision_owner": DECISION_OWNER,
+            "trigger_independent": True,
+        }
+
+
     def _linguistic(self,text):
         tokens=self._tokens(text)
         return {
@@ -465,6 +629,7 @@ class QuantumInterpretationEngine:
             "operation":self._family_scores(text,"operation",OPERATION_HYPOTHESES),
             "object":self._family_scores(focus_text or text,"object",OBJECT_HYPOTHESES),
             "goal":self._family_scores(text,"goal",GOAL_HYPOTHESES),
+            "visual_schema":self._family_scores(text,"visual_schema",VISUAL_SCHEMA_HYPOTHESES),
         }
         for label in self._negated_representation_labels(text):
             if label in scores["representation"]:
@@ -483,6 +648,7 @@ class QuantumInterpretationEngine:
             "representation_scores":scores["representation"],
             "domain_scores":scores["domain"],"capability_scores":scores["capability"],
             "operation_scores":scores["operation"],"object_scores":scores["object"],"goal_scores":scores["goal"],
+            "visual_schema_scores":scores["visual_schema"],
             "context_scores":ctx,
             "best_representation":rep[0][0] if rep else "text",
             "best_representation_score":float(rep[0][1]) if rep else 0.0,
@@ -530,9 +696,9 @@ class QuantumInterpretationEngine:
         best_goal_score=float(goal.get(best_goal,0.0))
 
         compatible_ops={
-            "graph":{"build","modify","present","calculate","analyze"},
+            "graph":{"build","modify","present","calculate","analyze","list","explain"},
             "diagram":{"build","modify","present","explain"},
-            "table":{"build","modify","present","compare","list"},
+            "table":{"build","modify","present","compare","list","explain"},
             "formula":{"build","modify","present","calculate","explain","answer"},
             "link":{"retrieve","present","answer"},
             "code":{"build","modify","present","explain"},
@@ -580,29 +746,41 @@ class QuantumInterpretationEngine:
         # Mentioning "graph", "table", etc. is not enough without a production action.
         return "text","unresolved",False
 
-    def dialogue(self,text,previous_assistant="",previous_user="",active_goal="",active_topic=""):
+    def dialogue(self,text,previous_assistant="",previous_user="",active_goal="",active_topic="",previous_scene=None):
         p=self.measure(text,previous_assistant=previous_assistant,previous_user=previous_user,
                        active_goal=active_goal,active_topic=active_topic)
+        vector=self._dialogue_relation_engine(
+            text,
+            previous_assistant=previous_assistant,
+            previous_user=previous_user,
+            active_goal=active_goal,
+            active_topic=active_topic,
+            previous_scene=previous_scene,
+        )
         d=p["dialogue_scores"]
-        relation=max(d.get("continuation",0.0),d.get("reference",0.0),
-                     0.65*p["context_scores"].get("previous_assistant",0.0),
-                     0.55*p["context_scores"].get("active_topic",0.0))
-        memory=p["dialogue_best"]=="memory_query" and d.get("memory_query",0.0)>=0.18
-        continuation=bool(previous_assistant and not memory and relation>=0.35)
-        reference=bool(previous_assistant and not memory and relation>=0.42)
         return {
             "dialogue":{
-                "label":p["dialogue_best"],"confidence":p["dialogue_confidence"],
-                "continuation_score":relation,
-                "reference_score":relation if reference else d.get("reference",0.0),
-                "topic_score":p["context_scores"].get("active_topic",0.0),
-                "goal_score":p["context_scores"].get("active_goal",0.0),
+                "label":p["dialogue_best"],
+                "confidence":p["dialogue_confidence"],
+                "continuation_score":vector["continuation_score"],
+                "reference_score":max(
+                    vector["scores"].get("previous_assistant",0.0),
+                    vector["scores"].get("previous_scene_topic",0.0),
+                ),
+                "topic_score":max(
+                    vector["scores"].get("active_topic",0.0),
+                    vector["scores"].get("previous_scene_topic",0.0),
+                ),
+                "goal_score":vector["scores"].get("active_goal",0.0),
             },
-            "linguistic":self._linguistic(text),"continuation":continuation,
-            "reference_to_previous":reference,"identity_request":p["identity_request"],
+            "linguistic":self._linguistic(text),
+            "continuation":vector["relation"]=="CONTINUE_TOPIC",
+            "reference_to_previous":vector["subtype"]=="REFERENCE_OR_DEVELOPMENT",
+            "dialogue_relation":vector,
+            "identity_request":p["identity_request"],
             "nli":{"labels":list(d),"scores":list(d.values()),"source":"quantum_matrix"},
             "decision_owner":DECISION_OWNER,"evidence_only":True,
-            "engine":"quantum_dialogue_matrix_view_v3",
+            "engine":"quantum_dialogue_vector_engine_v4",
         }
 
     def representations(self,text,context=""):
@@ -670,10 +848,40 @@ class QuantumInterpretationEngine:
         active_topic=self.normalize(state.get("active_topic") or state.get("current_topic") or semantic.get("active_topic") or cognition.get("active_topic"))
         active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
-        d=self.dialogue(text,previous_assistant=last_a,previous_user=last_u,active_goal=active_goal,active_topic=active_topic)["dialogue"]
+        previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+        if not isinstance(previous_scene, dict):
+            previous_scene = {}
+        dialogue_packet = self.dialogue(
+            text,
+            previous_assistant=last_a,
+            previous_user=last_u,
+            active_goal=active_goal,
+            active_topic=active_topic,
+            previous_scene=previous_scene,
+        )
+        d=dialogue_packet["dialogue"]
+        dialogue_vector=dialogue_packet.get("dialogue_relation", {})
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
         continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
+        # A continuation may deliberately address the existing visual object
+        # without naming its representation again. Reuse that canonical renderer
+        # only when the user is still operating in the active visual goal.
+        if continuation and production == "text" and isinstance(previous_scene, dict):
+            prior_types = [
+                _clean_representation(x)
+                for x in (previous_scene.get("render_block_types") or [])
+            ]
+            prior_structured = [x for x in prior_types if x in STRUCTURED_REPRESENTATIONS]
+            visual_goal = (
+                active_goal.lower() == "visualize"
+                or float(p.get("goal_scores", {}).get("visualize", 0.0) or 0.0) >= 0.18
+            )
+            operation = p.get("best_operation")
+            if visual_goal and operation in {"modify", "build", "present", "list", "analyze"} and prior_structured:
+                production = prior_structured[0]
+                source = "continuity_reuse_existing_representation"
+                locked = True
         reference=bool(d.get("reference_to_previous", d.get("reference_score", 0.0) >= 0.42))
         memory=p["dialogue_best"]=="memory_query" and p["dialogue_scores"].get("memory_query",0.0)>=0.18
         resolved_scene=self._resolve_scene_context(text,state,continuation,reference,active_topic)
@@ -681,9 +889,15 @@ class QuantumInterpretationEngine:
                   for k,v in sorted(p["representation_scores"].items(),key=lambda x:x[1],reverse=True) if float(v)>=0.20]
         domains=[k for k,v in p["domain_scores"].items() if float(v)>=0.20]
         matrix=self._scene_matrix(p)
+        visual_schema_scores = dict(p.get("visual_schema_scores") or {})
+        visual_schema_rank = sorted(visual_schema_scores.items(), key=lambda item: float(item[1]), reverse=True)
+        visual_schema = visual_schema_rank[0][0] if visual_schema_rank else ""
+        visual_schema_confidence = float(visual_schema_rank[0][1]) if visual_schema_rank else 0.0
         semantic_task={
             "operation":p["best_operation"],"object":p["best_object"],"goal":p["best_goal"],
             "representation":production,
+            "visual_schema":visual_schema,
+            "visual_schema_confidence":visual_schema_confidence,
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
         presentation={
@@ -716,13 +930,31 @@ class QuantumInterpretationEngine:
             "resolved_scene":resolved_scene,
             "presentation_transport":presentation,"presentation_signal":presentation,
             "presentation_signals":presentation["signals"],
+            "dialogue_vector": dialogue_vector,
+            "dialogue_delta": {
+                "mode": dialogue_vector.get("delta_mode"),
+                "shared_tokens": dialogue_vector.get("shared_tokens", []),
+                "new_tokens": dialogue_vector.get("new_tokens", []),
+                "avoid_repeat": True,
+            },
+            "render_continuity": {
+                "mode": "extend" if continuation else "start",
+                "avoid_repeat": True,
+                "reuse_existing_scene": bool(dialogue_vector.get("reuse_existing_scene")),
+                "previous_scene_id": dialogue_vector.get("previous_scene_id", ""),
+                "previous_render_types": dialogue_vector.get("previous_render_types", []),
+                "previous_block_ids": dialogue_vector.get("previous_block_ids", []),
+            },
             "dialogue_contract":{
                 "dialog_act":d["label"],"current_request":text,"continuation":continuation,
                 "reference_to_previous":reference,"previous_april_turn":last_a,
                 "previous_user_turn":last_u,"reply_to":reply_to,"active_goal":active_goal,
                 "active_topic":active_topic,
                 "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
-                "canonical":True,"version":"quantum_dialogue_field_v3"
+                "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
+                "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
+                "avoid_repeat": True,
+                "canonical":True,"version":"quantum_dialogue_field_v4"
             },
             "context_resolution":{
                 "depends_on_previous_dialogue":bool(continuation or reference or memory),
@@ -756,6 +988,10 @@ class QuantumInterpretationEngine:
             "possible_scene_type":production,"current_representation":production,
             "unresolved_intent":not locked,"memory_query":memory,
             "continuation":d["continuation_score"],"continuation_target":last_a or active_topic,
+            "dialogue_relation": dialogue_vector.get("relation", "NEW_TOPIC"),
+            "dialogue_subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
+            "visual_schema": visual_schema,
+            "visual_schema_confidence": visual_schema_confidence,
             "required_capabilities":["semantic_interpretation","dialogue_context"],
             "required_outputs":[production],"requested_outputs":[production],
             "response_mode":"structured" if production!="text" else "talk","renderer_first":production!="text",
@@ -773,7 +1009,7 @@ class QuantumInterpretationEngine:
             "artifact_contract":{"contract":"scene_artifact","transport":TRANSPORT_NAME,
                                 "scene_type":production,"representation":[production],"decision_owner":DECISION_OWNER},
             "semantic_engine_diagnostics":{
-                "engine":"quantum_interpretation_engine_v3","domain_representation_gates":False,
+                "engine":"quantum_interpretation_engine_v4","domain_representation_gates":False,
                 "capability_representation_gates":False,"lexical_routing":False,
                 "token_overlap_context":False,"production_resolution":"task_object_goal",
                 "single_route":True,"decision_owner":DECISION_OWNER
