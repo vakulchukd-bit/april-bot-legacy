@@ -750,24 +750,6 @@ def _dialogue_context_matrix(text, signals, interpreted):
         if isinstance(interpreted.get("dialogue_relation"), dict)
         else {}
     )
-    reference_resolution = interpreted.get("dialogue_reference") if isinstance(interpreted.get("dialogue_reference"), dict) else {}
-    if reference_resolution.get("resolved"):
-        confidence = clamp(reference_resolution.get("confidence", 0.0))
-        return {
-            "context_dependency": True,
-            "context_dependency_score": round(confidence, 4),
-            "continuation": True,
-            "continuation_score": round(confidence, 4),
-            "reference_to_previous": True,
-            "reference_score": round(confidence, 4),
-            "dialog_act": "reference",
-            "previous_user_turn": prev_u,
-            "previous_april_turn": prev_a,
-            "reference_resolution": reference_resolution,
-            "active_topic": interpreted.get("active_topic") or reference_resolution.get("target"),
-            "structured_continuity": True,
-            "history_available": bool(prev_u or prev_a),
-        }
     if scene_relation.get("same_scene"):
         confidence = clamp(scene_relation.get("confidence", 0.0))
         return {
@@ -825,8 +807,16 @@ def _dialogue_context_matrix(text, signals, interpreted):
     capitalized = len(re.findall(r"\b[А-ЯA-ZЁ][а-яa-zё-]{2,}\b", prev_a))
     entity_context = 1.0 if prev_a and incomplete >= 0.30 and capitalized >= 2 else 0.0
     dc = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
-    semantic_rel = max(float(dc.get("continuation_score", 0.0) or 0.0),
-                       float(dc.get("reference_score", 0.0) or 0.0))
+    rr = interpreted.get("dialogue_reference") if isinstance(interpreted.get("dialogue_reference"), dict) else {}
+    if not rr:
+        rr = dc.get("reference_resolution") if isinstance(dc.get("reference_resolution"), dict) else {}
+    rr_resolved = bool(rr.get("resolved"))
+    rr_confidence = float(rr.get("confidence", 0.0) or 0.0)
+    semantic_rel = max(
+        float(dc.get("continuation_score", 0.0) or 0.0),
+        float(dc.get("reference_score", 0.0) or 0.0),
+        rr_confidence if rr_resolved else 0.0,
+    )
     score = clamp(
         0.22*incomplete + 0.12*history + 0.18*structured +
         0.16*affinity + 0.16*evidence + 0.52*entity_context + 0.10*semantic_rel
@@ -834,13 +824,21 @@ def _dialogue_context_matrix(text, signals, interpreted):
     if len(tokens) >= 2 and affinity < 0.05 and not structured and incomplete < 0.55:
         score = clamp(score - 0.14)
     depends = bool(history and score >= 0.53)
-    reference = bool(depends and (structured or entity_context or float(dc.get("reference_score", 0.0) or 0.0) >= 0.5))
-    continuation = bool(depends and not reference)
+    if rr_resolved and history:
+        depends = True
+        reference = True
+        continuation = True
+        score = max(score, rr_confidence)
+    else:
+        reference = bool(depends and (structured or entity_context or float(dc.get("reference_score", 0.0) or 0.0) >= 0.5))
+        continuation = bool(depends and not reference)
     return {
         "context_dependency": depends, "context_dependency_score": round(score, 4),
         "continuation": continuation, "continuation_score": round(score if continuation else 0.0, 4),
         "reference_to_previous": reference, "reference_score": round(score if reference else 0.0, 4),
         "dialog_act": "reference" if reference else "continuation" if continuation else dc.get("dialog_act", "request"),
+        "reference_resolution": rr if rr_resolved else {},
+        "resolved_request": interpreted.get("resolved_request") or dc.get("resolved_request") or text,
         "previous_user_turn": prev_u, "previous_april_turn": prev_a,
         "structured_continuity": bool(structured), "history_available": bool(history),
     }
@@ -922,7 +920,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         "canonical": True,
         "version": "quantum_dialogue_field_v2",
     })
-    if str(dc.get("dialog_act") or "").lower() == "memory_query":
+    if str(dc.get("dialog_act") or "").lower() == "memory_query" and not rr_resolved:
         dc.update({
             "dialog_act": "memory_query",
             "continuation": False,
@@ -945,6 +943,8 @@ def analyze(text: str, state: dict=None, history: list=None,
         else result.get("dialogue_relation", {})
     )
     result["dialogue_vector"] = interpreted.get("dialogue_vector", {})
+    result["dialogue_reference"] = interpreted.get("dialogue_reference", {})
+    result["resolved_request"] = interpreted.get("resolved_request") or result.get("resolved_request") or text
     result["dialogue_delta"] = interpreted.get("dialogue_delta", {})
     result["render_continuity"] = interpreted.get("render_continuity", {})
     result["visual_schema"] = interpreted.get("visual_schema", "")
