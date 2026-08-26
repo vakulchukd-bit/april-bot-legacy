@@ -1018,6 +1018,10 @@ def analyze(text: str, state: dict=None, history: list=None,
     # Current-turn authority: continuity/reference must not manufacture a new
     # structured representation. A renderer survives only when this turn itself
     # established the production representation or an explicit semantic request.
+    # These values must be derived locally; they are not globals.
+    continuation = bool(dialogue_context.get("continuation"))
+    locked = bool(interpreted.get("production_representation_locked"))
+    explicit = bool(current_representation and str(current_representation).lower() != "text")
     if continuation and production != "text" and not locked and not explicit:
         production = "text"
         result["production_representation"] = "text"
