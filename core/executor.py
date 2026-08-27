@@ -516,6 +516,152 @@ class QuantumMemoryUnderstandingEngine:
         ranked.sort(key=lambda x: x["score"], reverse=True)
         return ranked
 
+    @staticmethod
+    def _entity_candidates(*texts: str) -> list[str]:
+        """Extract generic name-like spans without topic-specific vocabulary."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for source in texts:
+            source = str(source or "")
+            patterns = (
+                r"\b(?:[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4})\b",
+                r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
+            )
+            for pattern in patterns:
+                for match in re.finditer(pattern, source):
+                    value = re.sub(r"\s+", " ", match.group(0)).strip()
+                    if not value:
+                        continue
+                    # Sentence starts are weak entity candidates; retain them only
+                    # when they look like a multi-token proper name.
+                    if len(value.split()) == 1 and match.start() > 0:
+                        prefix = source[max(0, match.start() - 2):match.start()]
+                        if prefix not in {"", ". ", "! ", "? ", "\n ", "\r "}:
+                            continue
+                    key = value.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(value)
+        return out[:24]
+
+    @staticmethod
+    def _pair_quality(user_text: str, assistant_text: str) -> float:
+        """Score whether a prior USER↔APRIL pair is substantive enough to anchor reference resolution."""
+        user = str(user_text or "").strip()
+        answer = str(assistant_text or "").strip()
+        if not user or not answer:
+            return 0.0
+        tokens = _tokens(answer)
+        paragraphs = max(1, len(re.split(r"\n\s*\n", answer)))
+        sentences = max(1, len(re.findall(r"[^.!?]+[.!?]", answer)))
+        questions = len(re.findall(r"[?!]", answer))
+        numbered = len(re.findall(r"(?:^|\s)\d{1,3}\s*[.)]\s+", answer))
+        entities = len(QuantumMemoryUnderstandingEngine._entity_candidates(user, answer))
+        length_score = min(1.0, len(answer) / 900.0)
+        lexical_richness = min(1.0, len(tokens) / 140.0)
+        structure = min(1.0, numbered / 3.0 + max(0, paragraphs - 1) * 0.10)
+        declarative = 1.0 - min(1.0, questions / max(1, sentences))
+        entity_score = min(1.0, entities / 3.0)
+        score = (
+            0.40 * length_score
+            + 0.20 * lexical_richness
+            + 0.15 * structure
+            + 0.15 * declarative
+            + 0.10 * entity_score
+        )
+        # Very short one-line clarifications should not outrank a substantive
+        # answer simply because they are the immediately preceding turn.
+        if len(answer) < 320 and numbered == 0 and paragraphs == 1 and questions:
+            score *= 0.45
+        return max(0.0, min(1.0, score))
+
+    @classmethod
+    def _historical_pairs(cls, dialog_history: list[dict[str, Any]] | None,
+                          memory_timeline: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        pairs: list[dict[str, Any]] = []
+        history = dialog_history if isinstance(dialog_history, list) else []
+        for index in range(len(history) - 1):
+            left = history[index]
+            right = history[index + 1]
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                continue
+            left_role = str(left.get("role") or "").lower()
+            right_role = str(right.get("role") or "").lower()
+            if left_role in {"user", "human"} and right_role in {"assistant", "april", "bot"}:
+                pairs.append({
+                    "user": str(left.get("content") or left.get("text") or ""),
+                    "assistant": str(right.get("content") or right.get("text") or right.get("answer") or ""),
+                    "source": "dialog_history",
+                })
+        timeline = memory_timeline if isinstance(memory_timeline, dict) else {}
+        for day in timeline.values():
+            if not isinstance(day, dict):
+                continue
+            for item in day.get("dialog_pairs", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                user = str(item.get("user_meaning") or item.get("user") or "")
+                assistant = str(item.get("april_meaning") or item.get("answer_summary") or item.get("assistant") or "")
+                if user and assistant:
+                    pairs.append({"user": user, "assistant": assistant, "source": "dialog_pair_memory"})
+        # De-duplicate by exact USER/ASSISTANT content while keeping original order.
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for pair in reversed(pairs):
+            key = (pair["user"].strip(), pair["assistant"].strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(pair)
+        return list(reversed(result))
+
+    @classmethod
+    def _select_reference_pair(cls, current: str, previous_user: str, previous_assistant: str,
+                               dialog_history: list[dict[str, Any]] | None,
+                               memory_timeline: dict[str, Any] | None = None) -> tuple[str, str, str, float]:
+        """Choose the best substantive prior pair for a short contextual reference."""
+        pairs = cls._historical_pairs(dialog_history, memory_timeline)
+        if previous_user and previous_assistant:
+            pairs.append({
+                "user": previous_user,
+                "assistant": previous_assistant,
+                "source": "state_previous_pair",
+            })
+        if not pairs:
+            return previous_user, previous_assistant, "none", 0.0
+
+        current_tokens = _tokens(current)
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        total = len(pairs)
+        for pos, pair in enumerate(pairs):
+            user = pair["user"]
+            assistant = pair["assistant"]
+            quality = cls._pair_quality(user, assistant)
+            overlap = cls._lexical_score(current, f"{user} {assistant}")
+            recency = (pos + 1) / max(1, total)
+            # For pronoun/deictic follow-ups, a substantive recent pair is the
+            # strongest anchor; lexical overlap is secondary because "он/это"
+            # deliberately shares few tokens with its antecedent.
+            score = 0.62 * quality + 0.23 * recency + 0.15 * overlap
+            ranked.append((score, pair))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        score, best = ranked[-1] if False else ranked[0]
+        return best["user"], best["assistant"], str(best.get("source") or "history"), float(score)
+
+    @staticmethod
+    def _active_scene_from_history(memory_timeline: dict[str, Any] | None, state_scene: dict[str, Any] | None) -> dict[str, Any]:
+        if isinstance(state_scene, dict) and state_scene:
+            return deepcopy(state_scene)
+        timeline = memory_timeline if isinstance(memory_timeline, dict) else {}
+        candidates: list[dict[str, Any]] = []
+        for day in timeline.values():
+            if not isinstance(day, dict):
+                continue
+            for scene in day.get("visual_scenes", []) or []:
+                if isinstance(scene, dict):
+                    candidates.append(scene)
+        return deepcopy(candidates[-1]) if candidates else {}
+
     def analyze(
         self,
         current_request: str,
@@ -532,6 +678,20 @@ class QuantumMemoryUnderstandingEngine:
         previous_user = _text(previous_user, 1800)
         previous_assistant = _text(previous_assistant, 5000)
         scene = deepcopy(visual_scene) if isinstance(visual_scene, dict) else {}
+
+        # The immediate previous turn may be a clarification/error response.
+        # For a contextual follow-up, prefer the latest substantive USER↔APRIL
+        # pair from the same canonical dialogue/memory window.
+        selected_user, selected_assistant, selected_source, pair_score = self._select_reference_pair(
+            current,
+            previous_user,
+            previous_assistant,
+            dialog_history,
+            (dynamic_memory or {}).get("memory_timeline") if isinstance(dynamic_memory, dict) else None,
+        )
+        if selected_user and selected_assistant:
+            previous_user, previous_assistant = selected_user, selected_assistant
+
         gate = self._need_memory(current, previous_user, previous_assistant, scene)
 
         base = {
@@ -555,6 +715,8 @@ class QuantumMemoryUnderstandingEngine:
                 "visual_scene": bool(scene),
                 "dynamic_memory": bool(dynamic_memory and dynamic_memory.get("matches")),
                 "history": bool(dialog_history),
+                "selected_pair_source": selected_source,
+                "selected_pair_score": round(pair_score, 6),
             },
             "evidence": [],
             "provider_hint": {},
@@ -569,6 +731,20 @@ class QuantumMemoryUnderstandingEngine:
         structural_items = self._structural_items(previous_assistant)
         visual_blocks = self._visual_blocks(scene)
         all_candidates = structural_items + visual_blocks
+
+        # Pronoun/deictic references need a semantic antecedent even when the
+        # previous answer contains no numbered/list structure. The candidate is
+        # built from the same substantive pair, not from hard-coded topic names.
+        antecedents = self._entity_candidates(previous_user, previous_assistant)
+        if antecedents and (gate["structural_reference"] or gate["short_followup"]):
+            for idx, name in enumerate(antecedents[:8], start=1):
+                all_candidates.append({
+                    "kind": "entity_reference",
+                    "index": idx,
+                    "title": name,
+                    "content": _clip(f"{previous_user} {previous_assistant}", 1800),
+                    "source": "substantive_dialogue_pair",
+                })
         ordinal_targets = gate["ordinal_targets"]
         ordinal = ordinal_targets[0] if ordinal_targets else None
         relative = gate["relative_target"]
@@ -591,13 +767,33 @@ class QuantumMemoryUnderstandingEngine:
         structural_target = None
         if ordinal is not None:
             structural_target = next(
-                (c for c in all_candidates if int(c.get("index") or -999) == int(ordinal)),
+                (c for c in structural_items if int(c.get("index") or -999) == int(ordinal)),
                 None,
             )
-        if structural_target is None and relative is not None and all_candidates:
-            target_index = relative if relative > 0 else len(all_candidates) + relative + 1
+        if structural_target is None and relative is not None and structural_items:
+            target_index = relative if relative > 0 else len(structural_items) + relative + 1
             structural_target = next(
-                (c for c in all_candidates if int(c.get("index") or -999) == int(target_index)),
+                (c for c in structural_items if int(c.get("index") or -999) == int(target_index)),
+                None,
+            )
+
+        # Explicit pronoun/deictic references ("он", "это", "этот", etc.) are
+        # structural discourse links. When there is no ordinal/list target, the
+        # most salient name-like entity in the selected substantive pair is the
+        # antecedent; no topic-specific vocabulary is needed.
+        pronoun_reference = bool(re.search(
+            r"\b(?:он|она|они|его|её|ее|их|ему|ей|им|этот|эта|это|этим|этом|тот|та|то|them|he|she|they|him|her|this|that)\b",
+            current,
+            flags=re.I,
+        ))
+        if structural_target is None and pronoun_reference and antecedents:
+            salient = sorted(
+                antecedents,
+                key=lambda value: (len(value.split()), len(value)),
+                reverse=True,
+            )[0]
+            structural_target = next(
+                (c for c in all_candidates if c.get("kind") == "entity_reference" and c.get("title") == salient),
                 None,
             )
         target = deepcopy(structural_target or (best["candidate"] if best and best_score >= 0.55 else {}))
@@ -1521,6 +1717,18 @@ def _build_processor_control_plane(
     """
     evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
     interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
+
+    # Quantum memory-understanding is the authoritative post-interpretation
+    # reference layer. It may override a stale legacy dialogue classification,
+    # but it never changes the representation/rendering route.
+    memory_packet = _as_dict(memory_understanding)
+    memory_reference = _as_dict(memory_packet.get("reference"))
+    memory_dialogue = _as_dict(memory_packet.get("dialogue_context"))
+    memory_scene = _as_dict(memory_packet.get("visual_context"))
+    memory_resolved_request = _s(memory_packet.get("resolved_request"))
+    memory_active = bool(memory_packet.get("active"))
+    memory_continuation = bool(memory_packet.get("continuation"))
+    memory_resolved = bool(memory_reference.get("resolved"))
     canonical_dialogue = _as_dict(
         interpretation_packet.get("dialogue_contract")
         or semantic.get("dialogue_context_field")
@@ -1531,7 +1739,29 @@ def _build_processor_control_plane(
     reference_to_previous = bool(evidence.get("reference_to_previous"))
     context_dependency = bool(evidence.get("context_dependency"))
 
+    if memory_active and (memory_continuation or memory_resolved):
+        continuation = True
+        reference_to_previous = bool(memory_resolved)
+        context_dependency = True
+        mode = "ARTIFACT_REFERENCE" if str(memory_reference.get("target_kind") or "") == "render_block" else "CONTINUATION"
+        evidence = {
+            **evidence,
+            "mode": mode,
+            "continuation": True,
+            "reference_to_previous": reference_to_previous,
+            "context_dependency": True,
+            "previous_user": _s(memory_dialogue.get("previous_user")) or _s(evidence.get("previous_user")),
+            "previous_april": _s(memory_dialogue.get("previous_assistant")) or _s(evidence.get("previous_april")),
+        }
+
     resolved_scene = _as_dict(canonical_dialogue.get("resolved_scene"))
+    if memory_active and memory_scene.get("scene_id"):
+        resolved_scene = {
+            **resolved_scene,
+            "scene_id": _s(memory_scene.get("scene_id")),
+            "relation": "current_scene" if continuation else "independent",
+            "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+        }
     relation = _s(resolved_scene.get("relation"))
     if not relation:
         relation = (
@@ -1555,11 +1785,15 @@ def _build_processor_control_plane(
     constraints = _representation_constraints(semantic, cognition, decision)
 
     topic = _s(
-        canonical_dialogue.get("active_topic")
+        memory_reference.get("target")
+        or memory_dialogue.get("active_topic")
+        or canonical_dialogue.get("active_topic")
         or _field((semantic, decision, state), ("active_topic", "topic", "current_topic"))
     )
     goal = _s(
-        canonical_dialogue.get("active_goal")
+        memory_resolved_request
+        or memory_dialogue.get("active_goal")
+        or canonical_dialogue.get("active_goal")
         or _field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))
     ) or text
 
@@ -1599,6 +1833,8 @@ def _build_processor_control_plane(
         "capabilities": capabilities[:12],
         "dynamic_memory": dynamic_memory if isinstance(dynamic_memory, dict) else {},
         "memory_understanding": _quantum_snapshot(memory_understanding or {}),
+        "resolved_request": memory_resolved_request,
+        "resolved_reference": _quantum_snapshot(memory_reference),
         "single_route": True,
         "provider_calls": 1,
         "triggers": False,
@@ -1680,6 +1916,22 @@ def _make_request(
         "resolved_scene": _as_dict(dialogue_contract_source.get("resolved_scene")),
         "current_request": _s(text),
     }
+
+    memory_packet = _as_dict(control.get("memory_understanding"))
+    memory_reference = _as_dict(memory_packet.get("reference"))
+    memory_dialogue = _as_dict(memory_packet.get("dialogue_context"))
+    memory_resolved_request = _s(control.get("resolved_request") or memory_packet.get("resolved_request"))
+    if bool(memory_packet.get("active")) and (bool(memory_packet.get("continuation")) or bool(memory_reference.get("resolved"))):
+        dialogue_contract.update({
+            "continuation": True,
+            "reference_to_previous": bool(memory_reference.get("resolved")),
+            "context_dependency": "continuation" if not memory_reference.get("resolved") else "reference",
+            "previous_user_turn": _s(memory_dialogue.get("previous_user")) or _s(dialogue_contract.get("previous_user_turn")),
+            "previous_april_turn": _s(memory_dialogue.get("previous_assistant")) or _s(dialogue_contract.get("previous_april_turn")),
+            "active_topic": _s(memory_reference.get("target")) or _s(dialogue_contract.get("active_topic")),
+            "resolved_request": memory_resolved_request or _s(dialogue_contract.get("current_request")),
+            "resolved_scene": _as_dict(control.get("resolved_scene")) or _as_dict(dialogue_contract.get("resolved_scene")),
+        })
 
     context = _compact_context(
         text,
@@ -1784,7 +2036,9 @@ def _make_request(
             "context_mode": mode,
             "context_dependency": bool(control.get("context_dependency")),
             "resolved_request": _s(
-                dialogue_contract_source.get("resolved_request") or text
+                dialogue_contract.get("resolved_request")
+                or dialogue_contract_source.get("resolved_request")
+                or text
             ),
             "previous_user_turn": _s(
                 dialogue_contract_source.get("previous_user_turn")
@@ -1794,7 +2048,11 @@ def _make_request(
                 dialogue_contract_source.get("previous_april_turn")
                 or dialogue_evidence.get("previous_april")
             ),
-            "resolved_scene": _as_dict(dialogue_contract_source.get("resolved_scene")),
+            "resolved_scene": _as_dict(
+                dialogue_contract.get("resolved_scene")
+                or dialogue_contract_source.get("resolved_scene")
+                or control.get("resolved_scene")
+            ),
             **(
                 {
                     "active_topic": _clip(_s(control.get("active_topic")), 300),
@@ -3929,22 +4187,89 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
     semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
 
-    # The auxiliary quantum memory engine is sequentially attached to the same
-    # processor chain. Interpretation normally produced it already; if absent,
-    # the executor performs one safe no-op/measurement pass from the same state.
-    memory_understanding = semantic.get("memory_understanding")
-    if not isinstance(memory_understanding, dict):
-        memory_understanding = QUANTUM_MEMORY_UNDERSTANDING_ENGINE.analyze(
-            text,
-            previous_user=_s(state.get("previous_user")),
-            previous_assistant=_s(state.get("previous_april")),
-            active_topic=_s(state.get("active_topic")),
-            active_goal=_s(state.get("active_goal")),
-            visual_scene=_as_dict(state.get("active_visual_scene") or state.get("current_visual_scene")),
-            dialog_history=state.get("dialog", []) if isinstance(state.get("dialog"), list) else [],
-            dynamic_memory=dynamic_memory,
-        ) or {}
+    # ONE authoritative memory-understanding pass lives inside the Quantum
+    # Processor. Never accept a stale/legacy memory packet from Interpretation
+    # as the final result: that was the source of the context-loss regression.
+    previous_pair_evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
+    previous_user = _s(previous_pair_evidence.get("previous_user") or state.get("last_user_turn"))
+    previous_april = _s(previous_pair_evidence.get("previous_april") or state.get("last_april_turn"))
+    visual_scene = _as_dict(
+        state.get("current_visual_scene")
+        or state.get("active_visual_scene")
+        or state.get("active_scene_contract")
+    )
+    memory_understanding = QUANTUM_MEMORY_UNDERSTANDING_ENGINE.analyze(
+        text,
+        previous_user=previous_user,
+        previous_assistant=previous_april,
+        active_topic=_s(state.get("active_topic") or state.get("current_topic")),
+        active_goal=_s(state.get("active_goal")),
+        visual_scene=visual_scene,
+        dialog_history=history,
+        dynamic_memory={
+            **dynamic_memory,
+            "memory_timeline": state.get("memory_timeline", {}),
+        },
+    ) or {}
+    semantic["memory_understanding"] = _quantum_snapshot(memory_understanding)
     semantic["quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
+    state["_quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
+
+    # Promote the memory engine's resolved discourse back into the canonical
+    # Interpretation contract so the existing provider/router/render pipeline
+    # receives the same context without creating a second route.
+    if isinstance(memory_understanding, dict) and memory_understanding.get("active"):
+        resolved_request = _s(memory_understanding.get("resolved_request"))
+        memory_ref = _as_dict(memory_understanding.get("reference"))
+        memory_ctx = _as_dict(memory_understanding.get("dialogue_context"))
+        memory_vctx = _as_dict(memory_understanding.get("visual_context"))
+        packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
+        contract = _as_dict(packet.get("dialogue_contract"))
+        vector = _as_dict(interpretation.get("dialogue_vector"))
+        if memory_understanding.get("continuation") or memory_ref.get("resolved"):
+            vector.update({
+                "relation": "CONTINUE_TOPIC",
+                "subtype": "REFERENCE_OR_DEVELOPMENT" if memory_ref.get("resolved") else "MEMORY_CONTEXT_DEVELOPMENT",
+                "continuation": True,
+                "delta_mode": "extend",
+                "avoid_repeat": True,
+                "reference_resolution": {
+                    "resolved": bool(memory_ref.get("resolved")),
+                    "target": _s(memory_ref.get("target")),
+                    "confidence": float(memory_ref.get("confidence", 0.0) or 0.0),
+                    "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+                },
+                "resolved_request": resolved_request,
+                "previous_user_turn": _s(memory_ctx.get("previous_user")),
+                "previous_april_turn": _s(memory_ctx.get("previous_assistant")),
+            })
+            interpretation["dialogue_vector"] = _quantum_snapshot(vector)
+            interpretation["resolved_request"] = resolved_request
+            contract.update({
+                "continuation": True,
+                "reference_to_previous": bool(memory_ref.get("resolved")),
+                "context_dependency": "reference" if memory_ref.get("resolved") else "continuation",
+                "previous_user_turn": _s(memory_ctx.get("previous_user")),
+                "previous_april_turn": _s(memory_ctx.get("previous_assistant")),
+                "active_topic": _s(memory_ref.get("target") or memory_ctx.get("active_topic")),
+                "resolved_request": resolved_request,
+            })
+            if memory_vctx.get("scene_id"):
+                contract["resolved_scene"] = {
+                    "scene_id": _s(memory_vctx.get("scene_id")),
+                    "relation": "current_scene",
+                    "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+                }
+            packet["dialogue_contract"] = contract
+            packet["dialogue_vector"] = vector
+            semantic["quantum_interpretation_evidence"] = _quantum_snapshot(packet)
+        print("🧠 QUANTUM MEMORY UNDERSTANDING:", {
+            "active": bool(memory_understanding.get("active")),
+            "relation": _s(memory_understanding.get("relation")),
+            "target": _s(_as_dict(memory_understanding.get("reference")).get("target")),
+            "confidence": float(_as_dict(memory_understanding.get("reference")).get("confidence", 0.0) or 0.0),
+            "scene_id": _s(_as_dict(memory_understanding.get("visual_context")).get("scene_id")),
+        })
 
     # One authoritative control plane for dialogue, representation, memory relation,
     # capability delegation, and single-route ownership. Individual engines remain
@@ -4058,6 +4383,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             request.constraints.get("representation_plan", {}).get("audit", {})
         ),
         "processor_context": processor_context,
+        "memory_understanding": _quantum_snapshot(memory_understanding),
     })
     request.constraints["metadata"] = request_meta
 
