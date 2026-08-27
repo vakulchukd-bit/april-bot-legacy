@@ -1509,6 +1509,202 @@ QuantumDialogueEngine = QuantumInterpretationEngine
 QuantumSceneInterpretationMatrix = QuantumInterpretationEngine
 
 
+# ---------------------------------------------------------------------------
+# Visual + Dialogue Memory Understanding Engine
+# ---------------------------------------------------------------------------
+class QuantumMemoryUnderstandingEngine:
+    """Parallel analysis of dialogue memory and visual-response memory.
+
+    Evidence-only: it never routes, selects, rewrites, or creates renderer
+    signals. It reconstructs relevant prior visual context for the existing
+    Quantum Processor so the next response can be a new artifact carrying the
+    meaning/schema of the previous visual response.
+    """
+
+    VERSION = "QUANTUM-MEMORY-UNDERSTANDING-V1"
+    MAX_DIALOG_TURNS = 6
+    MAX_VISUAL_BLOCKS = 4
+    MAX_VISUAL_HISTORY = 4
+
+    @staticmethod
+    def _text(value):
+        return str(value or "").strip()
+
+    @staticmethod
+    def _compact(value, depth=0):
+        if depth > 3 or value in (None, "", [], {}):
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            out = {}
+            for key, item in list(value.items())[:24]:
+                compacted = QuantumMemoryUnderstandingEngine._compact(item, depth + 1)
+                if compacted not in (None, "", [], {}):
+                    out[str(key)] = compacted
+            return out
+        if isinstance(value, (list, tuple)):
+            out = []
+            for item in list(value)[:24]:
+                compacted = QuantumMemoryUnderstandingEngine._compact(item, depth + 1)
+                if compacted not in (None, "", [], {}):
+                    out.append(compacted)
+            return out
+        return str(value)
+
+    @classmethod
+    def _dialogue_text(cls, history):
+        result = []
+        if not isinstance(history, list):
+            return result
+        for item in history[-cls.MAX_DIALOG_TURNS:]:
+            if not isinstance(item, dict):
+                continue
+            role = cls._text(item.get("role")).lower()
+            content = cls._text(item.get("content") or item.get("text") or item.get("answer"))
+            if role and content:
+                result.append(f"{role}: {content}")
+        return result
+
+    @classmethod
+    def _visual_candidates(cls, visual_context):
+        if not isinstance(visual_context, dict):
+            return []
+        candidates = []
+        active = visual_context.get("active_visual_scene")
+        if isinstance(active, dict):
+            candidates.append(active)
+        history = visual_context.get("visual_scene_history") or []
+        if isinstance(history, list):
+            candidates.extend(x for x in history[-cls.MAX_VISUAL_HISTORY:] if isinstance(x, dict))
+        result, seen = [], set()
+        for scene in candidates:
+            sid = cls._text(scene.get("scene_id") or scene.get("id"))
+            key = sid or str(sorted((str(k), str(v)) for k, v in list(scene.items())[:8]))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(scene)
+        return result
+
+    @classmethod
+    def _extract_visual_schema(cls, scene):
+        blocks = scene.get("render_blocks") or scene.get("blocks") or []
+        structured = []
+        if isinstance(blocks, list):
+            for block in blocks[:cls.MAX_VISUAL_BLOCKS]:
+                if not isinstance(block, dict):
+                    continue
+                kind = cls._text(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+                if not kind or kind in {"text", "markdown"}:
+                    continue
+                payload = block.get("payload")
+                if not isinstance(payload, dict):
+                    artifact = block.get("artifact")
+                    payload = artifact.get("payload") if isinstance(artifact, dict) else None
+                if not isinstance(payload, dict):
+                    candidate = block.get(kind)
+                    payload = candidate if isinstance(candidate, dict) else {}
+                structured.append({
+                    "type": kind,
+                    "renderer": cls._text(block.get("renderer")),
+                    "viewer": cls._text(block.get("viewer")),
+                    "block_id": cls._text(block.get("block_id")),
+                    "payload": cls._compact(payload),
+                })
+        return {
+            "scene_id": cls._text(scene.get("scene_id") or scene.get("id")),
+            "topic": cls._text(scene.get("topic") or scene.get("user_request") or scene.get("current_request")),
+            "user_request": cls._text(scene.get("user_request") or scene.get("current_request")),
+            "answer": cls._text(scene.get("april_answer") or scene.get("answer") or scene.get("content")),
+            "summary": cls._text(scene.get("summary")),
+            "render_block_types": [cls._text(x).lower() for x in (scene.get("render_block_types") or []) if cls._text(x)],
+            "presentation_types": [cls._text(x).lower() for x in (scene.get("presentation_types") or []) if cls._text(x)],
+            "render_blocks": structured,
+            "semantic_state": cls._compact(scene.get("semantic_state") or {}),
+        }
+
+    def analyze(self, current_request, *, dialogue_memory=None, visual_memory=None,
+                interpretation=None, dynamic_memory=None):
+        current_request = self._text(current_request)
+        dialogue_memory = dialogue_memory if isinstance(dialogue_memory, dict) else {}
+        visual_memory = visual_memory if isinstance(visual_memory, dict) else {}
+        interpretation = interpretation if isinstance(interpretation, dict) else {}
+        dynamic_memory = dynamic_memory if isinstance(dynamic_memory, dict) else {}
+
+        dialogue_vector = interpretation.get("dialogue_vector") if isinstance(interpretation.get("dialogue_vector"), dict) else {}
+        dialogue_contract = interpretation.get("dialogue_contract") if isinstance(interpretation.get("dialogue_contract"), dict) else {}
+        relation = self._text(dialogue_vector.get("relation") or dialogue_contract.get("relation")).upper()
+        continuation = bool(dialogue_vector.get("continuation") or dialogue_contract.get("continuation") or relation in {"CONTINUE_TOPIC", "CONTINUATION"})
+        reference = bool(dialogue_vector.get("reference_to_previous") or dialogue_contract.get("reference_to_previous") or relation == "ARTIFACT_REFERENCE")
+
+        candidates = self._visual_candidates(visual_memory)
+        schemas = [self._extract_visual_schema(scene) for scene in candidates]
+        active_schema = schemas[0] if schemas else {}
+        current_rep = self._text(interpretation.get("production_representation") or interpretation.get("requested_representation") or interpretation.get("scene_type")).lower()
+        prior_types = set(active_schema.get("render_block_types") or [])
+
+        compare = [active_schema[k] for k in ("topic", "user_request", "answer") if active_schema.get(k)]
+        similarity = QUANTUM_EMBEDDING_ENGINE.similarities(current_request, compare) if compare else {}
+        relevance = max((float(similarity.get(value, 0.0)) for value in compare), default=0.0)
+        related_visual = bool(active_schema and (continuation or reference or current_rep in prior_types or relevance >= 0.35))
+        selected = active_schema if related_visual else {}
+
+        prior_data = []
+        for block in (selected.get("render_blocks") or [])[:self.MAX_VISUAL_BLOCKS]:
+            if isinstance(block, dict) and isinstance(block.get("payload"), dict):
+                prior_data.append({
+                    "type": block.get("type"),
+                    "renderer": block.get("renderer"),
+                    "block_id": block.get("block_id"),
+                    "payload": block.get("payload"),
+                })
+
+        return {
+            "engine": self.VERSION,
+            "version": self.VERSION,
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+            "lexical_triggers": False,
+            "score_routing": False,
+            "parallel_memory_channels": True,
+            "dialogue_memory": {
+                "history_present": bool(self._dialogue_text(dialogue_memory.get("history"))),
+                "recent_turns": self._dialogue_text(dialogue_memory.get("history")),
+                "active_topic": self._text(dialogue_contract.get("active_topic") or interpretation.get("active_topic")),
+                "active_goal": self._text(dialogue_contract.get("active_goal") or interpretation.get("active_goal")),
+                "relation": relation,
+                "continuation": continuation,
+                "reference_to_previous": reference,
+            },
+            "visual_memory": {
+                "available": bool(active_schema),
+                "related": related_visual,
+                "relevance": round(relevance, 6),
+                "selected_scene_id": selected.get("scene_id") if selected else "",
+                "schema": selected,
+                "prior_render_types": sorted(prior_types),
+                "prior_structured_blocks": prior_data,
+            },
+            "memory_reconstruction": {
+                "current_request": current_request,
+                "dialogue_meaning": self._text(dialogue_contract.get("resolved_request") or dialogue_contract.get("current_request") or current_request),
+                "visual_reference": "previous_visual_response" if related_visual else "none",
+                "semantic_link": "continuation" if continuation else "reference" if reference else "independent",
+                "context_available": bool(dialogue_memory.get("history") or active_schema or dynamic_memory.get("matches")),
+                "relevant_dynamic_memory_count": len(dynamic_memory.get("matches") or []),
+            },
+            "generation_intent": {
+                "requested_representation": current_rep or None,
+                "create_new_visual_artifact": bool(related_visual and current_rep in STRUCTURED_REPRESENTATIONS),
+                "preserve_meaning_from_previous_visual": bool(related_visual),
+            },
+        }
+
+
+QUANTUM_MEMORY_UNDERSTANDING_ENGINE = QuantumMemoryUnderstandingEngine()
+
+
 def normalize_text(text: Any) -> str:
     return QUANTUM_INTERPRETATION_ENGINE.normalize(text)
 
