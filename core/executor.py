@@ -20,6 +20,7 @@ from blocks.interpretation_layer import (
     build_processor_execution_context,
     QUANTUM_EVIDENCE_FUSION,
     QUANTUM_DIALOGUE_ENGINE,
+    QUANTUM_MEMORY_UNDERSTANDING_ENGINE,
 )
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.reasoning_state import build_reasoning_state
@@ -34,7 +35,7 @@ from blocks.intent_ai import detect_intent_ai
 from blocks.intent_resolver import resolve_input, build_focus_intent_state
 from blocks.router import route_request
 from blocks.router_system import decide_action
-from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene
+from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene, build_visual_memory_context
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
@@ -245,6 +246,7 @@ def _build_quantum_field(
             "router": _quantum_snapshot(_as_dict(router)),
             "router_system": _quantum_snapshot(_as_dict(router_system)),
             "response_decision": _quantum_snapshot(_as_dict(decision)),
+            "memory_understanding": _quantum_snapshot(_as_dict(memory_understanding)),
             "experience": _quantum_snapshot(_as_dict(experience)),
             "experience_manager": _quantum_snapshot(_as_dict(experience_manager)),
             "goal_engine": _quantum_snapshot(_as_dict(goal)),
@@ -1001,6 +1003,7 @@ def _build_processor_control_plane(
     decision: dict,
     state: dict,
     dynamic_memory: dict | None = None,
+    memory_understanding: dict | None = None,
 ) -> dict:
     """
     Build ONE authoritative post-interpretation control plane.
@@ -1095,6 +1098,7 @@ def _build_processor_control_plane(
         "representation_constraints": constraints,
         "capabilities": capabilities[:12],
         "dynamic_memory": dynamic_memory if isinstance(dynamic_memory, dict) else {},
+        "memory_understanding": memory_understanding if isinstance(memory_understanding, dict) else {},
         "single_route": True,
         "provider_calls": 1,
         "triggers": False,
@@ -1150,6 +1154,7 @@ def _make_request(
             or _field((semantic, decision, cognition), ("dialog_act", "dialogue_act"))
         ) or "statement",
         "continuation": bool(control.get("continuation")),
+        "memory_understanding": _quantum_snapshot(control.get("memory_understanding", {})),
         "reference_to_previous": bool(control.get("reference_to_previous")),
         "context_dependency": (
             _s(dialogue_contract_source.get("context_dependency"))
@@ -1291,6 +1296,7 @@ def _make_request(
                 or dialogue_evidence.get("previous_april")
             ),
             "resolved_scene": _as_dict(dialogue_contract_source.get("resolved_scene")),
+            "memory_understanding": _quantum_snapshot(control.get("memory_understanding", {})),
             **(
                 {
                     "active_topic": _clip(_s(control.get("active_topic")), 300),
@@ -1338,8 +1344,10 @@ def _make_request(
             }
         ),
         visual_context=(
-            visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict)
-            else {}
+            _as_dict((control.get("memory_understanding") or {}).get("visual_memory"))
+            if isinstance(control.get("memory_understanding"), dict)
+            and bool((control.get("memory_understanding") or {}).get("visual_memory", {}).get("related"))
+            else (visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict) else {})
         ),
         available_tools=list(control.get("capabilities") or []),
         requested_outputs=requested_outputs,
@@ -3425,6 +3433,19 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
     semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
 
+    # Parallel dialogue+visual memory understanding. This is auxiliary evidence
+    # only; existing render/graph signals and their contracts remain untouched.
+    visual_memory_context = build_visual_memory_context(user_id, text)
+    memory_understanding = QUANTUM_MEMORY_UNDERSTANDING_ENGINE.analyze(
+        text,
+        dialogue_memory={"history": history, "dialog_state": dialog_state},
+        visual_memory=visual_memory_context,
+        interpretation=interpretation,
+        dynamic_memory=dynamic_memory,
+    )
+    semantic["quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
+    semantic["visual_memory_context"] = _quantum_snapshot(visual_memory_context)
+
     # One authoritative control plane for dialogue, representation, memory relation,
     # capability delegation, and single-route ownership. Individual engines remain
     # evidence sources; downstream code consumes this collapsed state.
@@ -3435,6 +3456,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         decision=decision,
         state=state,
         dynamic_memory=dynamic_memory,
+        memory_understanding=memory_understanding,
     )
     print("🧠 QUANTUM MEMORY MATRIX:", {
         "window": dynamic_memory.get("window_days"),
@@ -3513,6 +3535,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     request_meta.update({
         "dynamic_memory_available": bool(dynamic_memory.get("matches")),
         "dynamic_memory_match_count": len(dynamic_memory.get("matches") or []),
+        "visual_memory_related": bool((memory_understanding.get("visual_memory") or {}).get("related")),
+        "visual_memory_relevance": float((memory_understanding.get("visual_memory") or {}).get("relevance") or 0.0),
         "quantum_evidence_channels": 14,
         "quantum_evidence_field_version": PROCESSOR_VERSION,
         "provider_calls_per_request": 1,
