@@ -223,6 +223,7 @@ def _build_quantum_field(
     experience_manager: dict,
     goal: dict,
     visual_reference: dict,
+    memory_understanding: dict | None = None,
 ) -> dict:
     """Build the one canonical evidence field for Quantum collapse."""
     return {
@@ -252,7 +253,7 @@ def _build_quantum_field(
             "goal_engine": _quantum_snapshot(_as_dict(goal)),
             "visual_reference_system": _quantum_snapshot(_as_dict(visual_reference)),
         },
-        "evidence_channels": 14,
+        "evidence_channels": 15,
         "representations": _unique_strings(
             _as_list(semantic.get("required_representations"))
             + _as_list(interpretation.get("required_representations"))
