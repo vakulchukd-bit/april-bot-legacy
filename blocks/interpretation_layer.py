@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+from copy import deepcopy
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -624,27 +625,63 @@ class QuantumInterpretationEngine:
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
 
     def _history(self,history):
-        last_a=last_u=""; reply_to=None
-        for item in reversed(history if isinstance(history,list) else []):
-            if not isinstance(item,dict): continue
-            metadata=item.get("metadata") if isinstance(item.get("metadata"),dict) else {}
-            content=self.normalize(item.get("content") or item.get("text") or item.get("answer") or "")
-            if (metadata.get("internal_context") or metadata.get("internal_turn")
-                    or metadata.get("source") in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}
-                    or content.startswith("VISUAL_ANALYSIS:")):
+        """Return the newest structurally valid USER→APRIL pair."""
+        items = []
+        for item in reversed(history if isinstance(history, list) else []):
+            if not isinstance(item, dict):
                 continue
-            role=str(item.get("role") or "").lower()
-            if not last_a:
-                obj=item.get("april") if isinstance(item.get("april"),dict) else item
-                if role in {"assistant","april","bot"} or isinstance(item.get("april"),dict):
-                    last_a=self.normalize(obj.get("answer") or obj.get("content") or obj.get("summary"))
-                    reply_to=item.get("turn_id")
-            if not last_u:
-                obj=item.get("user") if isinstance(item.get("user"),dict) else item
-                if role in {"user","human"} or isinstance(item.get("user"),dict):
-                    last_u=self.normalize(obj.get("text") or obj.get("content") or obj.get("answer"))
-            if last_a and last_u: break
-        return last_a,last_u,reply_to
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            content = self.normalize(
+                item.get("content") or item.get("text") or item.get("answer") or ""
+            )
+            if (
+                metadata.get("internal_context")
+                or metadata.get("internal_turn")
+                or metadata.get("source") in {
+                    "internal_visual", "internal_visual_analysis",
+                    "passive_visual_helper",
+                }
+                or content.startswith("VISUAL_ANALYSIS:")
+            ):
+                continue
+            items.append(item)
+
+        # items are newest-first. An adjacent assistant/user pair is the only
+        # authoritative hot-dialog anchor.
+        for idx in range(len(items) - 1):
+            assistant_item = items[idx]
+            user_item = items[idx + 1]
+            assistant_role = self.normalize(assistant_item.get("role")).lower()
+            user_role = self.normalize(user_item.get("role")).lower()
+            if assistant_role in {"assistant", "april", "bot"} and user_role in {"user", "human"}:
+                assistant_obj = assistant_item.get("april") if isinstance(assistant_item.get("april"), dict) else assistant_item
+                user_obj = user_item.get("user") if isinstance(user_item.get("user"), dict) else user_item
+                last_a = self.normalize(
+                    assistant_obj.get("answer")
+                    or assistant_obj.get("content")
+                    or assistant_obj.get("summary")
+                )
+                last_u = self.normalize(
+                    user_obj.get("text")
+                    or user_obj.get("content")
+                    or user_obj.get("answer")
+                )
+                if last_a and last_u:
+                    return last_a, last_u, assistant_item.get("turn_id") or user_item.get("turn_id")
+
+        # Compact pair records used by archived memory.
+        for item in items:
+            if isinstance(item.get("user"), str) and (item.get("april") or item.get("assistant")):
+                assistant_obj = item.get("april") if isinstance(item.get("april"), dict) else {
+                    "content": item.get("april") or item.get("assistant")
+                }
+                return (
+                    self.normalize(assistant_obj.get("answer") or assistant_obj.get("content")),
+                    self.normalize(item.get("user")),
+                    item.get("turn_id"),
+                )
+
+        return "", "", None
 
     def measure(self,text,*,previous_assistant="",previous_user="",active_topic="",active_goal="",modalities=None):
         text=self.normalize(text)
@@ -965,6 +1002,68 @@ class QuantumInterpretationEngine:
             "resolved":False,
         }
 
+    @classmethod
+    def _resolve_structured_visual_target(cls, text: str, visual_scene: dict | None, semantic_profile: dict | None = None):
+        """Choose a previous structured visual by semantic evidence and payload shape."""
+        scene = visual_scene if isinstance(visual_scene, dict) else {}
+        raw_blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else []
+        candidates = []
+        for idx, block in enumerate(raw_blocks):
+            if not isinstance(block, dict):
+                continue
+            rep = cls.normalize(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            )
+            if rep in {"", "text", "markdown"}:
+                continue
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            has_data = any(
+                payload.get(key) not in (None, [], {}, "")
+                for key in (
+                    "categories", "labels", "x", "x_values", "points",
+                    "series", "data", "rows", "items", "nodes", "edges"
+                )
+            )
+            candidates.append({
+                "kind": "visual_data_reference",
+                "index": idx + 1,
+                "title": cls.normalize(block.get("title") or payload.get("title") or rep),
+                "content": cls.normalize(block.get("content") or block.get("text")),
+                "block_id": cls.normalize(block.get("block_id") or block.get("id")),
+                "representation": rep,
+                "payload": deepcopy(payload),
+                "has_structured_data": bool(has_data),
+                "source": "last_successful_visual_scene",
+            })
+        if not candidates:
+            return None
+
+        profile = semantic_profile if isinstance(semantic_profile, dict) else {}
+        rep_scores = profile.get("representation_scores") if isinstance(profile.get("representation_scores"), dict) else {}
+        obj_scores = profile.get("object_scores") if isinstance(profile.get("object_scores"), dict) else {}
+        best_rep = cls.normalize(profile.get("best_representation") or "").lower()
+        best_obj = cls.normalize(profile.get("best_object") or "").lower()
+
+        ranked = []
+        current = cls.normalize(text)
+        for candidate in candidates:
+            rep = cls.normalize(candidate.get("representation")).lower()
+            sem = max(
+                float(rep_scores.get(rep, 0.0) or 0.0),
+                float(obj_scores.get(rep, 0.0) or 0.0),
+            )
+            align = 1.0 if rep and rep in {best_rep, best_obj} else 0.0
+            data = 1.0 if candidate.get("has_structured_data") else 0.0
+            candidate_tokens = set(cls._tokens(f"{candidate.get('title','')} {candidate.get('content','')}"))
+            current_tokens = set(cls._tokens(current))
+            lexical = (len(current_tokens & candidate_tokens) / max(1, len(current_tokens | candidate_tokens))) if current_tokens and candidate_tokens else 0.0
+            score = 0.60 * sem + 0.25 * align + 0.10 * data + 0.05 * lexical
+            ranked.append((score, candidate))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return deepcopy(ranked[0][1]) if ranked else None
+
     def _resolve_scene_context(self,text,state,continuation,reference,active_topic=""):
         if not isinstance(state,dict) or not (continuation or reference): return {}
         scene=state.get("current_visual_scene") or state.get("active_visual_scene")
@@ -996,7 +1095,11 @@ class QuantumInterpretationEngine:
         active_topic=self.normalize(state.get("active_topic") or state.get("current_topic") or semantic.get("active_topic") or cognition.get("active_topic"))
         active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
-        previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+        previous_scene = (
+            state.get("last_successful_visual_scene")
+            or state.get("active_visual_scene")
+            or state.get("current_visual_scene")
+        )
         if not isinstance(previous_scene, dict):
             previous_scene = {}
         # Internal visual/tool scenes are not dialog anchors.
@@ -1100,6 +1203,23 @@ class QuantumInterpretationEngine:
             last_u,
             previous_scene=previous_scene,
         )
+        structured_visual_target = self._resolve_structured_visual_target(
+            text,
+            previous_scene,
+            semantic_profile=p,
+        )
+        if structured_visual_target is not None:
+            reference_resolution["visual_target"] = structured_visual_target
+            if continuation and not reference_resolution.get("resolved"):
+                reference_resolution.update({
+                    "resolved": True,
+                    "target": structured_visual_target.get("title") or structured_visual_target.get("representation"),
+                    "confidence": max(
+                        float(reference_resolution.get("confidence", 0.0) or 0.0),
+                        0.86,
+                    ),
+                    "source": "quantum_structured_visual_resolution",
+                })
         if reference_resolution.get("resolved") and reference_resolution.get("target"):
             reference = True
             continuation = True
@@ -1121,6 +1241,23 @@ class QuantumInterpretationEngine:
             resolved_scene = dict(resolved_scene or {})
             resolved_scene["reference_target"] = reference_resolution.get("target")
             resolved_scene["reference_resolution"] = dict(reference_resolution)
+
+        if continuation and reference_resolution.get("visual_target") is not None:
+            operation_for_turn = self.normalize(p.get("best_operation")).lower()
+            if operation_for_turn in {"explain", "analyze", "answer", "compare"}:
+                production = "text"
+                source = "visual_artifact_data_explanation"
+                locked = True
+
+        # A request can refer to a previous visual artifact while asking only
+        # for explanation/data extraction. In that case the visual object is
+        # context evidence, not the requested output itself.
+        operation_for_turn = self.normalize(p.get("best_operation")).lower()
+        if continuation and reference_resolution.get("visual_target") is not None:
+            if operation_for_turn in {"explain", "analyze", "answer", "compare"}:
+                production = "text"
+                source = "visual_artifact_explanation_from_context"
+                locked = True
         evidence=[{"label":k,"score":float(v),"source":"quantum_matrix","positive":True,"details":{}}
                   for k,v in sorted(p["representation_scores"].items(),key=lambda x:x[1],reverse=True) if float(v)>=0.20]
         domains=[k for k,v in p["domain_scores"].items() if float(v)>=0.20]
