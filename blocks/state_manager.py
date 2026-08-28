@@ -238,6 +238,13 @@ def build_default_state():
         "current_scene_request": "",
         "visual_summary": {},
         "semantic_scene_state": {},
+        "last_successful_visual_scene": None,
+        "last_successful_visual_scene_id": None,
+        "last_successful_visual_scene_turn": None,
+        "visual_memory_integrity": {
+            "active_artifact_source": "last_successful_visual_scene",
+            "preserve_on_nonvisual_turn": True,
+        },
     }
 
 
@@ -2283,6 +2290,48 @@ def _archive_current_visual_scene_to_dynamic(state_obj, user_id):
     state_obj["visual_topic_history"] = state_obj["visual_topic_history"][-VISUAL_HISTORY_LIMIT:]
 
 
+
+def _visual_block_has_payload(block):
+    """Return True when a structured visual block contains usable canonical data."""
+    if not isinstance(block, dict):
+        return False
+    btype = str(
+        block.get("type")
+        or block.get("artifact_type")
+        or block.get("representation")
+        or ""
+    ).strip().lower()
+    if btype in {"", "text", "markdown"}:
+        return False
+    payload = block.get("payload")
+    if not isinstance(payload, dict):
+        artifact = block.get("artifact")
+        payload = artifact.get("payload") if isinstance(artifact, dict) else None
+    if not isinstance(payload, dict):
+        return False
+
+    status = str(payload.get("status") or block.get("status") or "").strip().lower()
+    if status in {"unavailable", "pending_data", "incomplete", "error"}:
+        return False
+
+    # Generic structural payload integrity: any of these establishes that the
+    # renderer has actual data rather than only a placeholder card.
+    structural_keys = (
+        "categories", "labels", "x", "x_values", "points", "data",
+        "series", "rows", "items", "nodes", "edges", "url", "src",
+    )
+    return any(payload.get(key) not in (None, [], {}, "") for key in structural_keys)
+
+
+def _scene_has_successful_visual(scene):
+    if not isinstance(scene, dict):
+        return False
+    blocks = scene.get("render_blocks")
+    if not isinstance(blocks, list):
+        return False
+    return any(_visual_block_has_payload(block) for block in blocks)
+
+
 def update_scene_context(user_id, scene_contract, current_request="", answer="", *, internal_context=False):
     """
     One canonical dialogue-scene update.
@@ -2473,15 +2522,49 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
 
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
     state_obj["current_visual_scene"] = deepcopy(scene_record)
-    state_obj["active_visual_scene"] = deepcopy(scene_record)
+
+    # Separate the latest dialogue turn from the latest successful visual
+    # artifact. A clarification/error turn must never erase the last usable
+    # graph/table/formula from the active visual memory.
+    successful_visual = _scene_has_successful_visual(scene_record)
+    previous_successful_visual = state_obj.get("last_successful_visual_scene")
+    if successful_visual:
+        state_obj["last_successful_visual_scene"] = deepcopy(scene_record)
+        state_obj["last_successful_visual_scene_id"] = scene_id
+        state_obj["last_successful_visual_scene_turn"] = scene_record.get("turn_id")
+        state_obj["active_visual_scene"] = deepcopy(scene_record)
+        active_visual_source = "current_dialogue_successful_visual"
+    elif isinstance(previous_successful_visual, dict) and previous_successful_visual:
+        state_obj["active_visual_scene"] = deepcopy(previous_successful_visual)
+        active_visual_source = "last_successful_visual_preserved"
+    else:
+        state_obj["active_visual_scene"] = deepcopy(scene_record)
+        active_visual_source = "current_dialogue_no_visual"
+
+    active_visual = state_obj.get("active_visual_scene") or scene_record
     state_obj["active_visual_topic"] = {
-        "topic": scene_record["topic"],
-        "scene_id": scene_id,
+        "topic": active_visual.get("topic") or scene_record["topic"],
+        "scene_id": active_visual.get("scene_id") or scene_id,
         "conversation_id": conversation_id,
-        "turn_id": scene_record["turn_id"],
+        "turn_id": active_visual.get("turn_id") or scene_record["turn_id"],
         "user_id": str(user_id),
-        "source": "current_dialogue_scene",
+        "source": active_visual_source,
     }
+    state_obj["visual_memory_integrity"] = {
+        "active_artifact_source": active_visual_source,
+        "last_successful_scene_id": state_obj.get("last_successful_visual_scene_id"),
+        "current_turn_scene_id": scene_id,
+        "current_turn_has_successful_visual": bool(successful_visual),
+        "preserve_on_nonvisual_turn": True,
+        "updated_at": time.time(),
+    }
+    safe_state_log(
+        "VISUAL MEMORY INTEGRITY: "
+        f"active={active_visual_source} "
+        f"last_successful={state_obj.get('last_successful_visual_scene_id')} "
+        f"current={scene_id} "
+        f"usable={bool(successful_visual)}"
+    )
 
     # Preserve every turn in the existing seven-day dialogue archive as one
     # compact USER↔APRIL unit. This is the durable fallback for semantic recall.
