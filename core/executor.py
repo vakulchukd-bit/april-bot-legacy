@@ -21,7 +21,6 @@ from blocks.interpretation_layer import (
     build_processor_execution_context,
     QUANTUM_EVIDENCE_FUSION,
     QUANTUM_DIALOGUE_ENGINE,
-    QUANTUM_INTERPRETATION_ENGINE,
 )
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.reasoning_state import build_reasoning_state
@@ -471,108 +470,54 @@ class QuantumMemoryUnderstandingEngine:
         except Exception:
             return {c: self._lexical_score(query, c) for c in candidates}, "lexical_fallback"
 
-    def _need_memory(
-        self,
-        current: str,
-        previous_user: str,
-        previous_assistant: str,
-        scene: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Fuse discourse + visual evidence before the memory collapse.
+    def _need_memory(self, current: str, previous_user: str, previous_assistant: str, scene: dict[str, Any]) -> dict[str, Any]:
+        """Measure whether memory is semantically required for this turn.
 
-        Memory activation is evidence-based: no topic-specific renderer words,
-        no trigger lists, and no single lexical score owns the decision.
+        No lexical trigger list, topic vocabulary, ordinal regex, or local
+        routing threshold is used. The shared QUANTUM_DIALOGUE_ENGINE owns the
+        discourse relation; the visual scene is structured evidence.
         """
-        current = _text(current, 2200)
-        structural = bool(REFERENCE_RE.search(current))
-        ordinals = self._extract_ordinals(current)
-        last_ref = self._extract_last_reference(current)
-        short = len(_tokens(current)) <= 12
         active = bool(previous_user or previous_assistant or scene)
+        dialogue_label = ""
+        dialogue_relation = ""
+        measured = {}
+        if active and previous_assistant:
+            try:
+                measured = QUANTUM_DIALOGUE_ENGINE.dialogue(
+                    current,
+                    previous_assistant=previous_assistant,
+                    previous_user=previous_user,
+                    active_goal="",
+                    active_topic="",
+                ) or {}
+                md = measured.get("dialogue") if isinstance(measured, dict) else {}
+                if isinstance(md, dict):
+                    dialogue_label = _s(md.get("label")).lower()
+                    dialogue_relation = _s(md.get("relation") or md.get("state")).upper()
+            except Exception:
+                measured = {}
 
-        lexical_prev = self._lexical_score(current, previous_assistant)
-        lexical_scene = self._lexical_score(current, self._scene_text(scene)) if scene else 0.0
+        dialogue_anchor = dialogue_label in {
+            "continuation", "reformulation", "correction", "reference",
+            "affirmation", "rejection", "memory_query",
+        } or dialogue_relation in {
+            "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY",
+        }
 
-        sem_scores, _ = self._semantic_score(
-            current,
-            [x for x in (
-                previous_assistant,
-                self._scene_text(scene) if scene else "",
-                previous_user,
-            ) if x],
-        )
-        sem_vals = list(sem_scores.values())
-        semantic_prev = float(sem_vals[0]) if len(sem_vals) > 0 else 0.0
-        semantic_scene = float(sem_vals[1]) if len(sem_vals) > 1 else 0.0
-        semantic_user = float(sem_vals[2]) if len(sem_vals) > 2 else 0.0
-
-        dialogue_anchor=False
-        dialogue_label=""
-        dialogue_relation=""
-        try:
-            from blocks.interpretation_layer import QUANTUM_DIALOGUE_ENGINE
-            measured=QUANTUM_DIALOGUE_ENGINE.dialogue(
-                current,
-                previous_assistant=previous_assistant,
-                previous_user=previous_user,
-            ) or {}
-            d=measured.get("dialogue") if isinstance(measured,dict) else {}
-            if isinstance(d,dict):
-                dialogue_label=_s(d.get("label")).lower()
-                dialogue_relation=_s(d.get("relation")).upper()
-                dialogue_anchor=(
-                    dialogue_label in {
-                        "continuation","reformulation","correction","reference",
-                        "affirmation","rejection","memory_query"
-                    }
-                    or dialogue_relation in {
-                        "CONTINUATION","SAME_TOPIC","ARTIFACT_REFERENCE","MEMORY_QUERY"
-                    }
-                )
-        except Exception:
-            pass
-
-        structured_scene=bool(
-            isinstance(scene,dict)
-            and any(
-                _s(x).lower() not in {"","text","markdown"}
-                for x in (scene.get("render_block_types") or [])
-            )
-        )
-        reference_anchor=bool(structural or ordinals or last_ref is not None)
-        semantic_anchor=bool(
-            lexical_prev >= 0.10
-            or lexical_scene >= 0.10
-            or semantic_prev >= 0.12
-            or semantic_scene >= 0.12
-            or semantic_user >= 0.12
-        )
-        visual_question=bool(
-            structured_scene
-            and (dialogue_anchor or semantic_scene >= 0.12 or semantic_prev >= 0.12)
-            and (current.endswith(("?","？")) or short)
-        )
-        needed=active and (
-            reference_anchor or semantic_anchor or dialogue_anchor or visual_question
-        )
         return {
-            "needed": bool(needed),
-            "structural_reference": structural,
-            "ordinal_targets": ordinals,
-            "relative_target": last_ref,
-            "short_followup": short,
-            "reference_anchor": reference_anchor,
-            "semantic_anchor": semantic_anchor,
-            "dialogue_anchor": dialogue_anchor,
+            "needed": bool(active and dialogue_anchor),
+            "structural_reference": dialogue_label == "reference" or dialogue_relation == "ARTIFACT_REFERENCE",
+            "ordinal_targets": [],
+            "relative_target": None,
+            "short_followup": False,
+            "semantic_anchor": bool(dialogue_anchor),
+            "reference_anchor": dialogue_label == "reference" or dialogue_relation == "ARTIFACT_REFERENCE",
+            "dialogue_anchor": bool(dialogue_anchor),
             "dialogue_label": dialogue_label,
             "dialogue_relation": dialogue_relation,
-            "visual_question": visual_question,
-            "structured_scene": structured_scene,
-            "lexical_previous_assistant": round(lexical_prev,6),
-            "lexical_visual_scene": round(lexical_scene,6),
-            "semantic_previous_assistant": round(semantic_prev,6),
-            "semantic_visual_scene": round(semantic_scene,6),
-            "semantic_previous_user": round(semantic_user,6),
+            "lexical_previous_assistant": 0.0,
+            "lexical_visual_scene": 0.0,
+            "dialogue_measurement": _quantum_snapshot(measured),
         }
 
     def _candidate_scores(self, current: str, candidates: list[dict[str, Any]], ordinal: int | None, relative: int | None) -> list[dict[str, Any]]:
@@ -726,60 +671,30 @@ class QuantumMemoryUnderstandingEngine:
         dialog_history: list[dict[str, Any]] | None,
         memory_timeline: dict[str, Any] | None = None,
     ) -> tuple[str, str, str, float]:
-        """Resolve the discourse anchor with recency-first explicit references."""
-        pairs = cls._historical_pairs(dialog_history, memory_timeline)
-        if previous_user and previous_assistant:
-            pairs.append({
-                "user": previous_user,
-                "assistant": previous_assistant,
-                "source": "state_previous_pair",
-            })
+        """Select the immediate canonical USER↔APRIL pair first.
 
-        # De-duplicate, preserving the newest occurrence.
-        unique = []
-        seen = set()
-        for pair in reversed(pairs):
-            key = (str(pair.get("user") or "").strip(), str(pair.get("assistant") or "").strip())
-            if not key[0] or not key[1] or key in seen:
-                continue
-            seen.add(key)
-            unique.append(pair)
-        pairs = list(reversed(unique))
+        Historical memory is evidence only. It must never replace the current
+        conversation anchor merely because an old answer has lexical overlap.
+        The semantic dialogue engine decides whether the current request is
+        related; this selector only supplies the nearest authoritative pair.
+        """
+        if previous_user and previous_assistant:
+            return previous_user, previous_assistant, "immediate_scene", 1.0
+
+        pairs = cls._historical_pairs(dialog_history, memory_timeline)
         if not pairs:
             return previous_user, previous_assistant, "none", 0.0
 
-        explicit_reference = bool(
-            REFERENCE_RE.search(str(current or ""))
-            or cls._extract_ordinals(current)
-            or cls._extract_last_reference(current) is not None
+        # Only use history when there is no immediate pair. Preserve recency;
+        # semantic interpretation happens after the pair is selected.
+        pair = pairs[-1]
+        quality = cls._pair_quality(pair.get("user", ""), pair.get("assistant", ""))
+        return (
+            str(pair.get("user") or ""),
+            str(pair.get("assistant") or ""),
+            str(pair.get("source") or "history"),
+            float(quality),
         )
-
-        if explicit_reference:
-            # Immediate substantive pair wins. Only skip it when it is clearly
-            # a clarification/non-answer; then walk backward to the last real answer.
-            for pair in reversed(pairs):
-                quality = cls._pair_quality(pair["user"], pair["assistant"])
-                clarification = bool(re.search(
-                    r"(?i)\b(?:уточн|пришлите|пришли|не могу|нужен сам|не указано|укажите)\b",
-                    pair["assistant"],
-                ))
-                if quality >= 0.20 and not clarification:
-                    return pair["user"], pair["assistant"], str(pair.get("source") or "history"), float(min(1.0, 0.72 + 0.28 * quality))
-            pair = pairs[-1]
-            return pair["user"], pair["assistant"], str(pair.get("source") or "history"), cls._pair_quality(pair["user"], pair["assistant"])
-
-        # Non-explicit continuation: combine recency with semantic/lexical support.
-        ranked = []
-        total = len(pairs)
-        for pos, pair in enumerate(pairs):
-            quality = cls._pair_quality(pair["user"], pair["assistant"])
-            overlap = cls._lexical_score(current, f"{pair['user']} {pair['assistant']}")
-            recency = (pos + 1) / max(1, total)
-            score = 0.45 * overlap + 0.35 * recency + 0.20 * quality
-            ranked.append((score, pair))
-        ranked.sort(key=lambda x: x[0], reverse=True)
-        score, best = ranked[0]
-        return best["user"], best["assistant"], str(best.get("source") or "history"), float(score)
 
     @staticmethod
     def _active_scene_from_history(memory_timeline: dict[str, Any] | None, state_scene: dict[str, Any] | None) -> dict[str, Any]:
@@ -865,23 +780,6 @@ class QuantumMemoryUnderstandingEngine:
         visual_blocks = self._visual_blocks(scene)
         all_candidates = structural_items + visual_blocks
 
-        visual_data_scores: list[tuple[dict[str, Any], float]] = []
-        if visual_blocks and gate.get("visual_question"):
-            visual_texts = [
-                _text(
-                    f"{b.get('title','')} {b.get('content','')} "
-                    f"{b.get('renderer','')} {b.get('type','')}",
-                    2600,
-                )
-                for b in visual_blocks
-            ]
-            scores, _ = self._semantic_score(current, visual_texts)
-            for i, block in enumerate(visual_blocks):
-                visual_data_scores.append(
-                    (block, float(scores.get(visual_texts[i], 0.0) or 0.0))
-                )
-            visual_data_scores.sort(key=lambda item:item[1], reverse=True)
-
         # Pronoun/deictic references need a semantic antecedent even when the
         # previous answer contains no numbered/list structure. The candidate is
         # built from the same substantive pair, not from hard-coded topic names.
@@ -906,9 +804,8 @@ class QuantumMemoryUnderstandingEngine:
                     "content": _clip(f"{previous_user} {previous_assistant}", 1800),
                     "source": "substantive_dialogue_pair",
                 })
-        ordinal_targets = gate["ordinal_targets"]
-        ordinal = ordinal_targets[0] if ordinal_targets else None
-        relative = gate["relative_target"]
+        ordinal = None
+        relative = None
 
         ranked = self._candidate_scores(current, all_candidates, ordinal, relative) if all_candidates else []
         best = ranked[0] if ranked else None
@@ -921,63 +818,18 @@ class QuantumMemoryUnderstandingEngine:
         scene_similarity = float(next(iter(semantic_scene.values()), 0.0)) if semantic_scene else 0.0
         topic_similarity = self._lexical_score(current, active_topic)
 
-        # A structurally explicit ordinal/relative reference is stronger than
-        # semantic similarity. If the previous answer contains the requested
-        # ordinal item, that exact structural match is the target even when the
-        # surrounding prose has many semantically similar candidates.
+        # For an artifact reference, prefer the active rendered object as the
+        # canonical target. If several objects exist, semantic similarity ranks
+        # them; no topic-specific vocabulary or trigger words are used.
         structural_target = None
-        if ordinal is not None:
-            structural_target = next(
-                (c for c in structural_items if int(c.get("index") or -999) == int(ordinal)),
-                None,
-            )
-        if structural_target is None and relative is not None and structural_items:
-            target_index = relative if relative > 0 else len(structural_items) + relative + 1
-            structural_target = next(
-                (c for c in structural_items if int(c.get("index") or -999) == int(target_index)),
-                None,
-            )
+        if gate.get("reference_anchor") and visual_blocks:
+            visual_ranked = [item for item in ranked if item.get("candidate", {}).get("kind") == "render_block"]
+            if visual_ranked:
+                structural_target = deepcopy(visual_ranked[0]["candidate"])
+            elif len(visual_blocks) == 1:
+                structural_target = deepcopy(visual_blocks[0])
 
-        # Explicit pronoun/deictic references ("он", "это", "этот", etc.) are
-        # structural discourse links. When there is no ordinal/list target, the
-        # most salient name-like entity in the selected substantive pair is the
-        # antecedent; no topic-specific vocabulary is needed.
-        pronoun_reference = bool(re.search(
-            r"\b(?:он|она|они|его|её|ее|их|ему|ей|им|этот|эта|это|этим|этом|тот|та|то|them|he|she|they|him|her|this|that)\b",
-            current,
-            flags=re.I,
-        ))
-        if structural_target is None and pronoun_reference and antecedents:
-            shared_terms = self._shared_content_terms(previous_user, previous_assistant)
-            salient = (
-                shared_terms[0]
-                if shared_terms
-                else sorted(
-                    antecedents,
-                    key=lambda value: (len(value.split()), len(value)),
-                    reverse=True,
-                )[0]
-            )
-            salient_norm = _s(salient).casefold()
-            structural_target = next(
-                (
-                    c for c in all_candidates
-                    if c.get("kind") == "entity_reference"
-                    and _s(c.get("title")).casefold() == salient_norm
-                ),
-                None,
-            )
-        visual_target = None
-        visual_target_score = 0.0
-        if visual_data_scores:
-            visual_target, visual_target_score = visual_data_scores[0]
-
-        target = deepcopy(
-            visual_target
-            if visual_target is not None and visual_target_score >= 0.12
-            else structural_target
-            or (best["candidate"] if best and best_score >= 0.55 else {})
-        )
+        target = deepcopy(structural_target or (best["candidate"] if best and best_score >= 0.55 else {}))
         target_kind = str(target.get("kind") or "")
         if not target and gate.get("dialogue_anchor"):
             target = {
@@ -988,13 +840,12 @@ class QuantumMemoryUnderstandingEngine:
                 "source": "dialogue_measurement",
             }
             target_kind = "dialogue_context"
-        explicit_reference = bool(gate["structural_reference"] or ordinal is not None or relative is not None)
+        explicit_reference = bool(gate.get("reference_anchor"))
         reference_resolved = bool(
             target
             and target_kind != "dialogue_context"
             and (
                 structural_target is not None
-                or visual_target is not None
                 or (explicit_reference and best_score >= 0.68)
                 or best_score >= 0.68
             )
@@ -1034,28 +885,17 @@ class QuantumMemoryUnderstandingEngine:
 
         resolved_request = current
         if reference_resolved:
-            target_title = _text(
-                target.get("title") or target.get("type") or target.get("block_id"),
-                300,
-            )
-            target_content = _clip(target.get("content") or "", 2200)
-            payload = target.get("payload") if isinstance(target.get("payload"), dict) else {}
-            payload_text = ""
-            if payload:
-                try:
-                    payload_text = _clip(
-                        json.dumps(payload, ensure_ascii=False, default=str),
-                        2600,
-                    )
-                except Exception:
-                    payload_text = _clip(payload, 2600)
+            target_title = _text(target.get("title") or target.get("type") or target.get("block_id"), 300)
+            target_content = _clip(target.get("content") or "", 1800)
+            target_payload = target.get("payload") if isinstance(target.get("payload"), dict) else {}
+            payload_text = _clip(json.dumps(target_payload, ensure_ascii=False), 5000) if target_payload else "{}"
             resolved_request = (
                 f"{current}\n\n"
-                f"Memory understanding resolved the reference to the previous response object.\n"
+                f"The canonical memory engine resolved the current request to the active previous response object.\n"
                 f"Target kind: {target_kind}. Target index: {target.get('index')}. Target title: {target_title}.\n"
                 f"Target content: {target_content}\n"
-                + (f"Canonical visual payload: {payload_text}\n" if payload_text else "")
-                + "Use this context to answer the current request directly; do not ask the user to repeat it."
+                f"Target payload: {payload_text}\n"
+                f"Answer the current request from this resolved context. Do not ask the user to repeat data already present in the target."
             )
 
         base.update({
@@ -1068,6 +908,7 @@ class QuantumMemoryUnderstandingEngine:
                 "target_kind": target_kind if reference_resolved else "",
                 "target_index": target.get("index") if reference_resolved else None,
                 "target_id": target.get("block_id") if reference_resolved else "",
+                "target_payload": deepcopy(target.get("payload") if reference_resolved and isinstance(target.get("payload"), dict) else {}),
                 "confidence": round(confidence, 6),
                 "candidate_count": len(all_candidates),
             },
@@ -1080,9 +921,7 @@ class QuantumMemoryUnderstandingEngine:
             "selected_evidence": ranked[:5],
             "resolved_request": resolved_request,
             "generation_strategy": (
-                "explain_previous_visual_data"
-                if target_kind == "visual_data_reference"
-                else "create_new_artifact_with_continued_meaning"
+                "create_new_artifact_with_continued_meaning"
                 if relation in {"CONTINUE_TOPIC", "ARTIFACT_REFERENCE"}
                 else "independent_request"
             ),
@@ -1091,6 +930,7 @@ class QuantumMemoryUnderstandingEngine:
                 "resolved_scene_id": previous_scene_id if relation != "INDEPENDENT" else "",
                 "reference_target": target_title if reference_resolved else "",
                 "reference_content": _clip(target.get("content") if reference_resolved else "", 1600),
+                "reference_payload": deepcopy(target.get("payload") if reference_resolved and isinstance(target.get("payload"), dict) else {}),
                 "resolved_request": resolved_request,
             },
             "evidence": [
@@ -1600,148 +1440,11 @@ def _structural_request_signals(text: str) -> dict:
         "table_signal": table_rows >= 2,
     }
 
-
-def _quantum_output_adjudication(
-    text: str,
-    semantic: dict,
-    cognition: dict,
-    decision: dict,
-    memory_understanding: dict | None = None,
-) -> dict:
-    """
-    Resolve the requested representation from the processor's existing semantic
-    measurements without lexical trigger routing.
-
-    The previous regression was caused by an arbitrary object-score cutoff that
-    demoted a mathematically/semantically coherent graph decision to text even
-    when representation=graph, object=graph, goal=visualize and operation was
-    compatible. This function uses rank agreement across the existing semantic
-    matrix instead of a topic-word trigger.
-    """
-    semantic = _as_dict(semantic)
-    field = _as_dict(semantic.get("quantum_interpretation_field"))
-    profile = _as_dict(field.get("profile"))
-    if not profile:
-        profile = _as_dict(semantic.get("semantic_profile"))
-    task_fusion = _as_dict(
-        _as_dict(semantic.get("semantic_profile")).get("task_fusion")
-        or _as_dict(semantic.get("quantum_interpretation_evidence")).get("task_fusion")
-    )
-
-    rep_scores = _as_dict(profile.get("representation_scores"))
-    obj_scores = _as_dict(profile.get("object_scores"))
-    goal_scores = _as_dict(profile.get("goal_scores"))
-    op_scores = _as_dict(profile.get("operation_scores"))
-
-    def top(scores: dict) -> tuple[str, float]:
-        ranked = sorted(
-            ((str(k).lower(), float(v or 0.0)) for k, v in scores.items()),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        return ranked[0] if ranked else ("", 0.0)
-
-    best_rep, rep_score = top(rep_scores)
-    best_obj, obj_score = top(obj_scores)
-    best_goal, goal_score = top(goal_scores)
-    best_op, op_score = top(op_scores)
-
-    if not best_rep and task_fusion.get("representation"):
-        best_rep = _s(task_fusion.get("representation")).lower()
-        rep_score = float(task_fusion.get("representation_score",0.0) or 0.0)
-    if not best_obj and task_fusion.get("object"):
-        best_obj = _s(task_fusion.get("object")).lower()
-        obj_score = float(task_fusion.get("object_score",0.0) or 0.0)
-    if not best_goal and task_fusion.get("goal"):
-        best_goal = _s(task_fusion.get("goal")).lower()
-        goal_score = float(task_fusion.get("goal_score",0.0) or 0.0)
-    if not best_op and task_fusion.get("operation"):
-        best_op = _s(task_fusion.get("operation")).lower()
-        op_score = float(task_fusion.get("operation_score",0.0) or 0.0)
-
-    compatible = {
-        "graph": {"build", "modify", "present", "calculate", "analyze", "list", "explain"},
-        "diagram": {"build", "modify", "present", "explain"},
-        "table": {"build", "modify", "present", "compare", "list", "explain"},
-        "formula": {"build", "modify", "present", "calculate", "explain", "answer"},
-        "link": {"retrieve", "present", "answer"},
-        "code": {"build", "modify", "present", "explain"},
-        "image": {"build", "modify", "present"},
-        "gallery": {"build", "present"},
-        "file": {"retrieve", "present"},
-        "audio": {"build", "present"},
-        "video": {"build", "present"},
-        "action": {"build", "modify", "present"},
-        "scene": {"build", "modify", "present"},
-        "memory": {"retrieve", "answer", "present"},
-    }
-
-    goal_allows_visual = best_goal in {
-        "visualize", "present", "transform", "organize"
-    }
-    operation_allows_visual = best_op in compatible.get(best_rep, set())
-    rank_agreement = (
-        bool(best_rep)
-        and best_rep != "text"
-        and best_rep == best_obj
-        and goal_allows_visual
-        and operation_allows_visual
-    )
-
-    previous_visual_types: list[str] = []
-    mu_scene = _as_dict(_as_dict(memory_understanding).get("visual_context"))
-    previous_visual_types.extend(
-        _s(x).lower()
-        for x in _as_list(mu_scene.get("render_block_types"))
-        if _s(x)
-    )
-    mu_generation = _s(_as_dict(memory_understanding).get("generation_strategy")).lower()
-
-    # Existing visual memory is supporting evidence only. It can reinforce an
-    # already measured structured representation, but it cannot create one.
-    visual_support = best_rep in {
-        _s(x).lower() for x in previous_visual_types
-    } if previous_visual_types else False
-
-    return {
-        "representation": best_rep if rank_agreement else "",
-        "representation_score": round(rep_score, 6),
-        "object": best_obj,
-        "object_score": round(obj_score, 6),
-        "goal": best_goal,
-        "goal_score": round(goal_score, 6),
-        "operation": best_op,
-        "operation_score": round(op_score, 6),
-        "rank_agreement": bool(rank_agreement),
-        "visual_memory_support": bool(visual_support),
-        "memory_generation_strategy": mu_generation,
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "source": "existing_quantum_interpretation_matrix",
-        "lexical_triggers": False,
-        "score_routing": False,
-    }
-
-
-def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dict, *, independent_turn: bool = False, memory_understanding: dict | None = None) -> list[str]:
+def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dict, *, independent_turn: bool = False) -> list[str]:
     """Collapse explicit semantic and structural evidence into one output plan."""
     constraints = _representation_constraints(semantic, cognition, decision)
     blocked = set(constraints["negative"])
     names: list[str] = []
-
-    adjudication = _quantum_output_adjudication(
-        text,
-        semantic,
-        cognition,
-        decision,
-        memory_understanding=memory_understanding,
-    )
-    measured_representation = _s(adjudication.get("representation")).lower()
-    if measured_representation and measured_representation not in blocked:
-        names.append(measured_representation)
-
-    # Preserve the adjudication as machine evidence for diagnostics and for the
-    # canonical request; it remains outside the render signal itself.
-    semantic["quantum_output_adjudication"] = _quantum_snapshot(adjudication)
     aliases = {"markdown": "text", "renderer_scene": "diagram", "visual": "graph", "image_generate": "image", "plot": "graph", "chart": "graph"}
 
     def add(value: Any) -> None:
@@ -1771,8 +1474,6 @@ def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dic
         names.append("code")
     if structural["table_signal"] and "table" not in blocked and "table" not in names:
         names.append("table")
-    if any(name != "text" for name in names) and "text" not in names:
-        names.insert(0, "text")
     return names or ["text"]
 
 
@@ -2098,12 +1799,7 @@ def _build_processor_control_plane(
         continuation = True
         reference_to_previous = bool(memory_resolved)
         context_dependency = True
-        mode = (
-            "ARTIFACT_REFERENCE"
-            if str(memory_reference.get("target_kind") or "")
-            in {"render_block", "visual_data_reference"}
-            else "CONTINUATION"
-        )
+        mode = "ARTIFACT_REFERENCE" if str(memory_reference.get("target_kind") or "") == "render_block" else "CONTINUATION"
         evidence = {
             **evidence,
             "mode": mode,
@@ -2138,7 +1834,6 @@ def _build_processor_control_plane(
         cognition,
         decision,
         independent_turn=(mode == "INDEPENDENT"),
-        memory_understanding=memory_understanding,
     )
     preferred, representation_state = _representation_consensus(
         outputs, semantic, decision
@@ -4283,62 +3978,6 @@ def _canonicalize(
     except Exception:
         pass
 
-
-    # Final typed-render preservation invariant. The Web must receive the same
-    # structured block that Provider/canonicalization produced; do not synthesize
-    # or reinterpret the payload at this boundary.
-    try:
-        requested_structured = [
-            _s(x).lower()
-            for x in list(getattr(request, "requested_outputs", []) or [])
-            if _s(x).lower() not in {"", "text", "markdown"}
-        ]
-        final_blocks = list(render_blocks or [])
-        final_types = {
-            _s(
-                b.get("type")
-                or b.get("artifact_type")
-                or b.get("representation")
-            ).lower()
-            for b in final_blocks
-            if isinstance(b, dict)
-        }
-        missing_structured = [
-            kind for kind in requested_structured if kind not in final_types
-        ]
-        if missing_structured:
-            source_blocks = [
-                b for b in provider_blocks
-                if isinstance(b, dict)
-                and _s(
-                    b.get("type")
-                    or b.get("artifact_type")
-                    or b.get("representation")
-                ).lower() in requested_structured
-            ]
-            for block in source_blocks:
-                block_type = _s(
-                    block.get("type")
-                    or block.get("artifact_type")
-                    or block.get("representation")
-                ).lower()
-                if block_type not in final_types:
-                    render_blocks.append(deepcopy(block))
-                    final_types.add(block_type)
-            contract.render_blocks = list(render_blocks)
-            contract.blocks = list(render_blocks)
-        request.constraints.setdefault("metadata", {})["render_transport_postflight"] = {
-            "requested_structured": requested_structured,
-            "final_block_types": sorted(final_types),
-            "missing_after_repair": [
-                kind for kind in requested_structured if kind not in final_types
-            ],
-            "payload_preserved": True,
-            "repair_generated_payload": False,
-        }
-    except Exception as transport_audit_error:
-        request.constraints.setdefault("metadata", {})["render_transport_postflight_error"] = _s(transport_audit_error)
-
     return {
         "transport_contract": "scene_first",
         "provider_contract": "fiber_v3_quantum",
@@ -4831,21 +4470,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     if any(output in blocked_outputs for output in requested_outputs):
         raise RuntimeError("Quantum release blocked: contradictory representation plan")
 
-    output_adjudication = _quantum_snapshot(
-        semantic.get("quantum_output_adjudication", {})
-    )
-    request.constraints.setdefault("metadata", {})["quantum_output_adjudication"] = output_adjudication
-    request.constraints.setdefault("metadata", {})["render_transport_preflight"] = {
-        "requested_outputs": list(requested_outputs),
-        "structured_requested": [x for x in requested_outputs if x != "text"],
-        "decision_owner": "QUANTUM_PROCESSOR",
-        "canonical_route": True,
-        "payload_mutation": False,
-    }
-    print("🧠 QUANTUM OUTPUT ADJUDICATION:", output_adjudication)
-    print("🧭 RENDER TRANSPORT PREFLIGHT:", request.constraints["metadata"]["render_transport_preflight"])
-
-    # Final quantum release audit: 15 evidence lenses, one request, one provider.
+    # Final quantum release audit: 14 evidence lenses, one request, one provider.
     #
     # IMPORTANT:
     # The 64-signal budget field is owned by the MachineRequest created by
@@ -4862,7 +4487,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
 
     # Final quantum release audit: 14 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
-        "evidence_channels": 15,
+        "evidence_channels": 14,
         "decision_owner": "QUANTUM_PROCESSOR",
         "single_route": True,
         "provider_calls": 1,
