@@ -2600,28 +2600,6 @@ def update_dialog_context(user_id, semantic_result):
 # DIRECT QUANTUM MEMORY QUERY API
 # =====================================================
 
-def build_visual_memory_context(user_id, query=""):
-    """Expose user-scoped visual-response memory as processor evidence only."""
-    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
-    history = state_obj.get("visual_scene_history", [])
-    if not isinstance(history, list):
-        history = []
-    return {
-        "engine": "STATE_MANAGER_VISUAL_MEMORY_BRIDGE_V1",
-        "user_id": str(user_id),
-        "conversation_id": str(state_obj.get("conversation_id") or ""),
-        "active_visual_scene": deepcopy(state_obj.get("active_visual_scene")) if isinstance(state_obj.get("active_visual_scene"), dict) else None,
-        "visual_scene_history": deepcopy(history[-VISUAL_HISTORY_LIMIT:]),
-        "visual_topic": deepcopy(state_obj.get("active_visual_topic")),
-        "visual_summary": deepcopy(state_obj.get("visual_summary", {})),
-        "current_scene_request": str(state_obj.get("current_scene_request") or ""),
-        "visual_scene_version": int(state_obj.get("visual_scene_version") or 0),
-        "memory_window_days": MEMORY_DAYS,
-        "evidence_only": True,
-        "decision_owner": "QUANTUM_PROCESSOR",
-    }
-
-
 def query_dynamic_memory(user_id, query, limit=8, retrieval_mode="semantic"):
     """
     Return semantic memory evidence for the existing Quantum Processor.
