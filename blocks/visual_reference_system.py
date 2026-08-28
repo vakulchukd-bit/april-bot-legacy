@@ -60,6 +60,14 @@ def build_scene_snapshot(active_visual_scene: Any, active_scene_contract: Any = 
         "atmosphere": _text(source.get("atmosphere")),
         "continuity_weight": _clamp(source.get("continuity_weight", 0.65)),
         "render_block_types": list(source.get("render_block_types") or [])[:8],
+        "render_blocks": [
+            dict(x) for x in list(source.get("render_blocks") or [])[:8]
+            if isinstance(x, dict)
+        ],
+        "presentation_signals": [
+            dict(x) for x in list(source.get("presentation_signals") or [])[:8]
+            if isinstance(x, dict)
+        ],
         "scene_id": _text(source.get("scene_id")),
         "semantic_state": dict(source.get("semantic_state") or {}) if isinstance(source.get("semantic_state"), dict) else {},
         "renderer_state": dict(source.get("renderer_state") or {}) if isinstance(source.get("renderer_state"), dict) else {},
@@ -78,6 +86,23 @@ def build_scene_references(scene_snapshot: Dict[str, Any]) -> list[Dict[str, Any
         refs.append({"type": "atmosphere", "title": atmosphere, "weight": 0.60})
     for obj in scene_snapshot.get("objects", [])[:4]:
         refs.append({"type": "object", "title": _text(obj), "weight": 0.40})
+
+    for block in scene_snapshot.get("render_blocks", [])[:6]:
+        btype = _low(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        )
+        if btype and btype not in {"text", "markdown"}:
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            refs.append({
+                "type": "structured_visual",
+                "title": _text(block.get("title") or payload.get("title") or btype),
+                "representation": btype,
+                "block_id": _text(block.get("block_id")),
+                "payload": dict(payload),
+                "weight": 0.75,
+            })
     return refs
 
 
