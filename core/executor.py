@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v31_unified_visible_stream_memory_v3"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v32_canonical_dialogue_visual_integrity_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -518,7 +518,11 @@ class QuantumMemoryUnderstandingEngine:
         canonical_relation = _s(measured_vector.get("relation") or measured_vector.get("dialogue_relation")).upper()
         canonical_continuation = bool(measured_vector.get("continuation"))
         canonical_reference = bool(measured_vector.get("reference_to_previous"))
-        if canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"}:
+        if canonical_relation in {"INDEPENDENT", "NEW_TOPIC"} and not canonical_continuation and not canonical_reference:
+            dialogue_anchor = False
+            dialogue_relation = canonical_relation
+            dialogue_label = canonical_relation.lower()
+        elif canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"}:
             dialogue_anchor = True
             dialogue_relation = canonical_relation
             dialogue_label = canonical_relation.lower()
@@ -1304,25 +1308,8 @@ def _quantum_context_diagnostic(
     qref = _as_dict(qmu.get("reference"))
     qvisual = _as_dict(qmu.get("visual_context"))
     render_types = [str(x).lower() for x in _as_list(qvisual.get("render_block_types"))]
-    raw_mode = _s(dialogue_evidence.get("mode")).upper()
+    mode = _s(dialogue_evidence.get("mode")).upper()
     memory_relation = _s(qmu.get("relation")).upper()
-
-    # Reconcile the diagnostic around the same canonical state that the
-    # processor will execute. A resolved artifact reference is not a second
-    # route competing with INDEPENDENT; it is the post-memory relation for this
-    # turn. Keep raw_mode for observability, but use one canonical mode for
-    # contradiction checks and downstream readiness.
-    if bool(qref.get("resolved")) and memory_relation == "ARTIFACT_REFERENCE":
-        mode = "ARTIFACT_REFERENCE"
-    elif memory_relation in {
-        "CONTINUE_TOPIC",
-        "CONTINUATION",
-        "SAME_TOPIC",
-        "MEMORY_QUERY",
-    }:
-        mode = memory_relation
-    else:
-        mode = raw_mode or "INDEPENDENT"
     semantic_rep = _s(
         semantic.get("production_representation")
         or semantic.get("requested_representation")
@@ -1360,8 +1347,6 @@ def _quantum_context_diagnostic(
         "preflight": True,
         "request": _clip(text, 500),
         "mode": mode,
-        "raw_mode": raw_mode,
-        "canonical_mode": mode,
         "memory_relation": memory_relation,
         "memory_reference_resolved": bool(qref.get("resolved")),
         "memory_target": _s(qref.get("target")),
@@ -3931,6 +3916,182 @@ def _ensure_presentation_signals(blocks: Any, request: MachineRequest | None = N
     return result
 
 
+
+def _extract_visual_point_signature(scene: dict[str, Any]) -> list[tuple[str, float]]:
+    """Read structured points from an existing visual graph without semantic guessing."""
+    result: list[tuple[str, float]] = []
+    if not isinstance(scene, dict):
+        return result
+    blocks = scene.get("render_blocks")
+    if not isinstance(blocks, list):
+        return result
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+        if kind != "graph":
+            continue
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        series = payload.get("series") if isinstance(payload.get("series"), list) else []
+        x_values = _as_list(_as_dict(payload.get("x_axis")).get("values"))
+        for series_item in series:
+            if not isinstance(series_item, dict):
+                continue
+            points = series_item.get("points")
+            if isinstance(points, list):
+                for point in points:
+                    if isinstance(point, dict):
+                        x = point.get("x")
+                        y = as_f = point.get("y")
+                        try:
+                            y_num = float(y)
+                        except Exception:
+                            continue
+                        if x not in (None, ""):
+                            result.append((_s(x), y_num))
+            values = series_item.get("values")
+            if isinstance(values, list) and x_values:
+                for idx, value in enumerate(values):
+                    if idx >= len(x_values):
+                        break
+                    try:
+                        result.append((_s(x_values[idx]), float(value)))
+                    except Exception:
+                        continue
+    return result
+
+
+def _structured_payload_relation(current_text: str, previous_scene: dict[str, Any]) -> dict[str, Any]:
+    """Measure whether the current turn contains a materially different explicit data set.
+
+    This is structural evidence, not a lexical trigger. A full new set of explicit
+    label/value pairs outranks an older visual scene when the two data signatures do
+    not substantially overlap. A short update (for example one new point) is left
+    eligible for continuation/reference handling.
+    """
+    current_pairs = _extract_label_value_pairs(current_text)
+    prior_pairs = _extract_visual_point_signature(previous_scene)
+    if len(current_pairs) < 3 or len(prior_pairs) < 3:
+        return {
+            "new_dataset": False,
+            "current_pair_count": len(current_pairs),
+            "prior_point_count": len(prior_pairs),
+            "label_overlap": 0.0,
+            "value_overlap": 0.0,
+            "reason": "insufficient_structured_evidence",
+        }
+
+    current_map = {str(label).casefold().strip(): float(value) for label, value, _ in current_pairs}
+    prior_map = {str(label).casefold().strip(): float(value) for label, value in prior_pairs}
+    shared = set(current_map) & set(prior_map)
+    label_overlap = len(shared) / max(1, min(len(current_map), len(prior_map)))
+    exact_pairs = sum(
+        1 for key in shared
+        if abs(current_map[key] - prior_map[key]) <= max(1e-9, abs(prior_map[key]) * 1e-9)
+    )
+    value_overlap = exact_pairs / max(1, len(shared)) if shared else 0.0
+
+    # A materially different full data signature is a new artifact request.
+    new_dataset = bool(
+        len(current_pairs) >= 3
+        and (
+            label_overlap < 0.60
+            or (label_overlap >= 0.60 and value_overlap < 0.60)
+        )
+    )
+    return {
+        "new_dataset": new_dataset,
+        "current_pair_count": len(current_pairs),
+        "prior_point_count": len(prior_pairs),
+        "label_overlap": round(label_overlap, 6),
+        "value_overlap": round(value_overlap, 6),
+        "reason": "material_structured_difference" if new_dataset else "compatible_structured_signature",
+    }
+
+
+def _apply_new_dataset_dialogue_boundary(
+    interpretation: dict[str, Any],
+    current_text: str,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Make a materially new explicit data set an authoritative new turn.
+
+    Existing continuation/reference machinery remains untouched for compatible or
+    short incremental updates. The override only collapses a demonstrably new
+    structured payload, preventing an older visual scene from contaminating it.
+    """
+    scene = _as_dict(
+        state.get("last_successful_visual_scene")
+        or state.get("active_visual_scene")
+        or state.get("current_visual_scene")
+        or state.get("active_scene_contract")
+    )
+    relation = _structured_payload_relation(current_text, scene)
+    if not relation.get("new_dataset"):
+        return {"applied": False, "measurement": relation}
+
+    vector = _as_dict(interpretation.get("dialogue_vector"))
+    vector.update({
+        "relation": "INDEPENDENT",
+        "subtype": "NEW_STRUCTURED_DATASET",
+        "continuation_score": 0.0,
+        "independent_score": 1.0,
+        "relation_strength": 1.0,
+        "continuation": False,
+        "reference_to_previous": False,
+        "delta_mode": "start",
+        "avoid_repeat": False,
+        "reuse_existing_scene": False,
+        "previous_scene_id": "",
+        "previous_render_types": [],
+        "previous_block_ids": [],
+        "reference_resolution": {
+            "resolved": False,
+            "target": "",
+            "confidence": 1.0,
+            "source": "QUANTUM_STRUCTURED_PAYLOAD_BOUNDARY",
+        },
+        "resolved_reference": "",
+        "resolved_request": current_text,
+        "source": "quantum_structured_payload_boundary_v1",
+        "decision_owner": "QUANTUM_PROCESSOR",
+    })
+    interpretation["dialogue_vector"] = vector
+    interpretation["render_continuity"] = {
+        "relation": "NEW_TOPIC",
+        "reuse_existing_scene": False,
+        "previous_scene_id": "",
+        "previous_render_types": [],
+        "avoid_repeat": False,
+    }
+    interpretation["dialogue_contract"] = {
+        **_as_dict(interpretation.get("dialogue_contract")),
+        "context_mode": "INDEPENDENT",
+        "dialogue_state": "INDEPENDENT",
+        "continuation": False,
+        "reference_to_previous": False,
+        "context_dependency": "independent",
+        "current_request": current_text,
+        "resolved_request": current_text,
+        "active_topic": "",
+        "active_goal": current_text,
+        "resolved_scene": {},
+    }
+    interpretation["quantum_scene_continuity"] = {
+        **_as_dict(interpretation.get("quantum_scene_continuity")),
+        "canonical": True,
+        "mode": "INDEPENDENT",
+        "continuation": False,
+        "reference_to_previous": False,
+        "dialogue_label": "independent",
+        "scene_id": "",
+        "previous_user": "",
+        "previous_april": "",
+        "source": "QUANTUM_STRUCTURED_PAYLOAD_BOUNDARY",
+        "structured_payload_relation": relation,
+    }
+    return {"applied": True, "measurement": relation}
+
 def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
     """Extract explicit label/value pairs from user/provider text structurally."""
     source = _s(text)
@@ -3963,7 +4124,9 @@ def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
         pairs.append((label, value, unit))
 
     # Generic label/value rows such as "Q1 — 42" or "Alpha: 17".
-    generic_pattern = r"(?<!\w)([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    # Require a line-oriented structural row so prose such as
+    # "Используй значения: 1950" cannot be mistaken for a data point.
+    generic_pattern = r"(?m)^\s*(?:[-*•]\s*)?([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?\s*$"
     for match in re.finditer(generic_pattern, source):
         label = _s(match.group(1)).strip(" .,;")
         if not label:
@@ -4090,8 +4253,46 @@ def _ensure_quantum_structured_outputs(
          and _s(b.get("type") or b.get("artifact_type") or b.get("representation")).lower() == "graph"),
         None,
     )
-    if graph_block is not None:
+
+    def _usable_graph_payload(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        series = payload.get("series")
+        if isinstance(series, list):
+            x_values = payload.get("x_axis", {}).get("values") if isinstance(payload.get("x_axis"), dict) else []
+            for item in series:
+                if not isinstance(item, dict):
+                    continue
+                points = item.get("points")
+                if isinstance(points, list) and any(
+                    isinstance(p, dict) and p.get("x") not in (None, "") and p.get("y") not in (None, "")
+                    for p in points
+                ):
+                    return True
+                values = item.get("values")
+                if isinstance(values, list) and isinstance(x_values, list) and min(len(values), len(x_values)) >= 2:
+                    return True
+        table = payload.get("data_table")
+        if isinstance(table, list) and len(table) >= 2:
+            return any(isinstance(row, dict) and len(row) >= 2 for row in table)
+        return False
+
+    existing_valid = False
+    if isinstance(graph_block, dict):
+        existing_payload = graph_block.get("payload") if isinstance(graph_block.get("payload"), dict) else {}
+        existing_valid = _usable_graph_payload(existing_payload)
+    if graph_block is not None and existing_valid:
         return response
+
+    # Remove only malformed graph blocks. Valid text/other artifacts remain untouched.
+    if graph_block is not None and not existing_valid:
+        blocks = [
+            block for block in blocks
+            if not (
+                isinstance(block, dict)
+                and _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower() == "graph"
+            )
+        ]
 
     current_text = _s(
         request.conversation.get("current_request")
@@ -4104,7 +4305,9 @@ def _ensure_quantum_structured_outputs(
 
     existing_payload = {}
     visual = getattr(request, "visual_context", {})
-    if isinstance(visual, dict):
+    contextual_mode = _s((getattr(request, "dialogue_contract", {}) or {}).get("context_dependency")).lower()
+    allow_previous_visual = bool(contextual_mode not in {"", "independent", "none", "false", "0"})
+    if allow_previous_visual and isinstance(visual, dict):
         candidate_blocks = visual.get("render_blocks")
         if isinstance(candidate_blocks, list):
             for block in candidate_blocks:
@@ -4482,6 +4685,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         state=state,
     ) or {}
 
+    structured_boundary = _apply_new_dataset_dialogue_boundary(interpretation, text, state)
+    interpretation["quantum_structured_payload_boundary"] = _quantum_snapshot(structured_boundary)
+
     # Canonical immediate-scene continuity measurement. This uses the existing
     # QUANTUM_DIALOGUE_ENGINE and feeds its structured evidence into Semantic
     # Core and the processor control plane. No local word triggers are used.
@@ -4490,6 +4696,17 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         state=state,
         history=history,
     )
+    if structured_boundary.get("applied"):
+        scene_continuity = {
+            **scene_continuity,
+            "mode": "INDEPENDENT",
+            "continuation": False,
+            "reference_to_previous": False,
+            "dialogue_label": "independent",
+            "scene_id": "",
+            "source": "QUANTUM_STRUCTURED_PAYLOAD_BOUNDARY",
+            "structured_payload_relation": structured_boundary.get("measurement", {}),
+        }
     interpretation["quantum_scene_continuity"] = _quantum_snapshot(scene_continuity)
     # Canonical dialogue-vector bridge: relation is resolved before routing.
     # Downstream engines receive the same decision; no second topic router exists.
@@ -4762,31 +4979,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dynamic_memory=dynamic_memory,
         memory_understanding=memory_understanding,
     )
-    # Refresh the preflight diagnostic from the single canonical control plane.
-    # This prevents a stale legacy INDEPENDENT value from surviving after memory
-    # resolution has selected CONTINUATION/ARTIFACT_REFERENCE.
-    diagnostic_state = _as_dict(semantic.get("quantum_context_diagnostic"))
-    if diagnostic_state:
-        canonical_mode = _s(control_plane.get("mode")).upper() or "INDEPENDENT"
-        canonical_relation = _s(memory_understanding.get("relation")).upper()
-        contradictions = [
-            item for item in _as_list(diagnostic_state.get("contradictions"))
-            if item != "memory_vs_dialogue_mode"
-        ]
-        if canonical_relation in {
-            "CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE",
-            "SAME_TOPIC", "MEMORY_QUERY",
-        } and canonical_mode in {"INDEPENDENT", "NEW_TOPIC"}:
-            contradictions.append("memory_vs_dialogue_mode")
-        diagnostic_state.update({
-            "mode": canonical_mode,
-            "canonical_mode": canonical_mode,
-            "canonical_relation": canonical_relation,
-            "contradictions": list(dict.fromkeys(contradictions)),
-            "ready_for_provider": not contradictions,
-            "canonical_control_plane": True,
-        })
-        semantic["quantum_context_diagnostic"] = _quantum_snapshot(diagnostic_state)
     print("🧠 QUANTUM MEMORY MATRIX:", {
         "window": dynamic_memory.get("window_days"),
         "matches": len(dynamic_memory.get("matches", []) or []),
