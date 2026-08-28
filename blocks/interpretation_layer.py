@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import re
 import threading
-from copy import deepcopy
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,7 +216,8 @@ STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "t
 
 OPERATION_HYPOTHESES = {
     "answer": "ответить объяснить рассказать сообщить дать информацию",
-    "build": "создать построить сформировать нарисовать показать результат",
+    "build": "создать построить сформировать нарисовать результат",
+    "present": "показать отобразить продемонстрировать вывести представить результат",
     "compare": "сравнить сопоставить различия сходства",
     "modify": "изменить исправить обновить переделать дополнить",
     "retrieve": "найти получить ресурс источник ссылку документ",
@@ -625,63 +625,27 @@ class QuantumInterpretationEngine:
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
 
     def _history(self,history):
-        """Return the newest structurally valid USER→APRIL pair."""
-        items = []
-        for item in reversed(history if isinstance(history, list) else []):
-            if not isinstance(item, dict):
+        last_a=last_u=""; reply_to=None
+        for item in reversed(history if isinstance(history,list) else []):
+            if not isinstance(item,dict): continue
+            metadata=item.get("metadata") if isinstance(item.get("metadata"),dict) else {}
+            content=self.normalize(item.get("content") or item.get("text") or item.get("answer") or "")
+            if (metadata.get("internal_context") or metadata.get("internal_turn")
+                    or metadata.get("source") in {"internal_visual", "internal_visual_analysis", "passive_visual_helper"}
+                    or content.startswith("VISUAL_ANALYSIS:")):
                 continue
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            content = self.normalize(
-                item.get("content") or item.get("text") or item.get("answer") or ""
-            )
-            if (
-                metadata.get("internal_context")
-                or metadata.get("internal_turn")
-                or metadata.get("source") in {
-                    "internal_visual", "internal_visual_analysis",
-                    "passive_visual_helper",
-                }
-                or content.startswith("VISUAL_ANALYSIS:")
-            ):
-                continue
-            items.append(item)
-
-        # items are newest-first. An adjacent assistant/user pair is the only
-        # authoritative hot-dialog anchor.
-        for idx in range(len(items) - 1):
-            assistant_item = items[idx]
-            user_item = items[idx + 1]
-            assistant_role = self.normalize(assistant_item.get("role")).lower()
-            user_role = self.normalize(user_item.get("role")).lower()
-            if assistant_role in {"assistant", "april", "bot"} and user_role in {"user", "human"}:
-                assistant_obj = assistant_item.get("april") if isinstance(assistant_item.get("april"), dict) else assistant_item
-                user_obj = user_item.get("user") if isinstance(user_item.get("user"), dict) else user_item
-                last_a = self.normalize(
-                    assistant_obj.get("answer")
-                    or assistant_obj.get("content")
-                    or assistant_obj.get("summary")
-                )
-                last_u = self.normalize(
-                    user_obj.get("text")
-                    or user_obj.get("content")
-                    or user_obj.get("answer")
-                )
-                if last_a and last_u:
-                    return last_a, last_u, assistant_item.get("turn_id") or user_item.get("turn_id")
-
-        # Compact pair records used by archived memory.
-        for item in items:
-            if isinstance(item.get("user"), str) and (item.get("april") or item.get("assistant")):
-                assistant_obj = item.get("april") if isinstance(item.get("april"), dict) else {
-                    "content": item.get("april") or item.get("assistant")
-                }
-                return (
-                    self.normalize(assistant_obj.get("answer") or assistant_obj.get("content")),
-                    self.normalize(item.get("user")),
-                    item.get("turn_id"),
-                )
-
-        return "", "", None
+            role=str(item.get("role") or "").lower()
+            if not last_a:
+                obj=item.get("april") if isinstance(item.get("april"),dict) else item
+                if role in {"assistant","april","bot"} or isinstance(item.get("april"),dict):
+                    last_a=self.normalize(obj.get("answer") or obj.get("content") or obj.get("summary"))
+                    reply_to=item.get("turn_id")
+            if not last_u:
+                obj=item.get("user") if isinstance(item.get("user"),dict) else item
+                if role in {"user","human"} or isinstance(item.get("user"),dict):
+                    last_u=self.normalize(obj.get("text") or obj.get("content") or obj.get("answer"))
+            if last_a and last_u: break
+        return last_a,last_u,reply_to
 
     def measure(self,text,*,previous_assistant="",previous_user="",active_topic="",active_goal="",modalities=None):
         text=self.normalize(text)
@@ -809,6 +773,39 @@ class QuantumInterpretationEngine:
             if representation_clear and (object_agreement or best_rep_score >= 0.16):
                 return best_rep,"task_object_goal_resolution",True
 
+            # A production request can contain explanatory language as part of
+            # the requested result (for example: "build the chart and explain
+            # the trend").  In that case the top operation may be `explain`
+            # even though the semantic object is a graph and the build signal is
+            # materially present.  Resolve from the complete task vector rather
+            # than allowing one family to suppress the representation.  This is
+            # structural semantic evidence, not a word-trigger or renderer rule.
+            production_ops = {"build", "modify", "present"}
+            production_signal = max(
+                float(op.get(name, 0.0) or 0.0) for name in production_ops
+            )
+            production_goal = max(
+                float(goal.get(name, 0.0) or 0.0)
+                for name in {"visualize", "transform", "present", "organize"}
+            )
+            object_alignment = best_obj == best_rep and best_obj_score >= 0.10
+            representation_dominance = best_rep_score >= max(0.09, float(rep.get("text", 0.0) or 0.0) + 0.025)
+            structured_task = (
+                best_rep != "text"
+                and object_alignment
+                and representation_dominance
+                and (
+                    production_signal >= 0.055
+                    or (best_op in compatible_ops.get(best_rep, set()) and best_op_score >= 0.08)
+                )
+                and (
+                    production_goal >= 0.035
+                    or best_rep_score >= 0.14
+                )
+            )
+            if structured_task:
+                return best_rep,"semantic_task_vector_resolution",True
+
             if aligned and best_rep_score >= 0.10 and best_op_score >= 0.08:
                 return best_rep,"operation_representation_resolution",True
 
@@ -888,181 +885,60 @@ class QuantumInterpretationEngine:
         }
 
     @classmethod
-    def _reference_resolution(
-        cls,
-        text: str,
-        previous_assistant: str,
-        previous_user: str = "",
-        previous_scene: dict | None = None,
-    ) -> dict:
-        """Build a generic discourse/visual reference inventory.
+    def _reference_resolution(cls, text: str, previous_assistant: str, previous_user: str = "") -> dict:
+        """Resolve a short contextual reference from the immediately prior human exchange.
 
-        This method measures structure and semantic evidence only. It never
-        routes by a topic/renderer keyword.
+        This is structural discourse resolution only: no topic names, renderer names,
+        or domain keyword maps are used. It returns evidence for the processor.
         """
         current = cls.normalize(text)
         prev = cls.normalize(previous_assistant)
-        scene = previous_scene if isinstance(previous_scene, dict) else {}
-        if not current:
+        if not current or not prev:
             return {
                 "present": False, "target": "", "candidates": [],
                 "confidence": 0.0, "source": "unresolved_semantic_reference",
                 "anaphoric": False, "short_followup": False, "resolved": False,
             }
-
         anaphoric = bool(re.search(
-            r"\b(он|она|они|его|её|ее|их|ему|ей|им|этот|эта|это|этим|этом|тот|та|то|"
-            r"it|this|that|these|those|them|he|she|they|him|her)\b",
-            current, flags=re.I,
-        ))
-        ordinal_reference = bool(re.search(
-            r"\b(перв(ый|ая|ое)|втор(ой|ая|ое)|трет(ий|ья|ье)|четверт(ый|ая|ое)|"
-            r"пят(ый|ая|ое)|последн(ий|яя|ее)|first|second|third|last)\b",
+            r'\b(он|она|они|его|её|их|ему|ей|им|этот|эта|это|этом|этим|ит|he|she|they|him|her|them)\b',
             current, flags=re.I,
         ))
         short_followup = (
-            len(cls._tokens(current)) <= 6
-            and current.endswith(("?", "？"))
+            len(cls._tokens(current)) <= 4
+            and (current.endswith("?") or current.endswith("？"))
         )
-
-        candidates=[]
-        seen=set()
-
-        for pattern in (
+        # Generic candidate extraction from prose: capitalized multi-word spans and
+        # single capitalized names. This is an entity-shape heuristic, not a topic trigger.
+        candidates = []
+        patterns = [
             r"\b(?:[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4})\b",
             r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
-        ):
+        ]
+        for pattern in patterns:
             for match in re.findall(pattern, prev):
-                value=cls.normalize(match).strip(".,:;()[]{}<>—-\"")
-                if not value or value in {"Это","Он","Она","Они","Когда","Куда","Главные","Важные","Например","Конечно"}:
-                    continue
-                key=value.casefold()
-                if key in seen: continue
-                seen.add(key)
-                candidates.append({
-                    "kind":"entity_reference",
-                    "index":None,
-                    "title":value,
-                    "content":prev[:1800],
-                    "source":"previous_assistant_text",
-                })
-                if len(candidates)>=16: break
-            if len(candidates)>=16: break
-
-        # Generic numbered items from the assistant answer.
-        numbered=[]
-        item=None
-        for raw in str(prev or "").splitlines():
-            line=raw.strip()
-            m=re.match(r"^(\d{1,3})[.)]\s+(.+)$",line)
-            if m:
-                if item: numbered.append(item)
-                item={"kind":"numbered_item","index":int(m.group(1)),"title":"","content":m.group(2)}
-            elif item and line:
-                item["content"]=f'{item["content"]} {line}'.strip()
-        if item: numbered.append(item)
-
-        raw_blocks=scene.get("render_blocks") if isinstance(scene,dict) else None
-        visual_blocks=[]
-        if isinstance(raw_blocks,list):
-            for idx, raw in enumerate(raw_blocks):
-                if not isinstance(raw,dict): continue
-                payload=raw.get("payload") if isinstance(raw.get("payload"),dict) else {}
-                btype=cls.normalize(
-                    raw.get("type") or raw.get("artifact_type")
-                    or raw.get("representation") or payload.get("type")
-                )
-                if not btype or btype in {"text","markdown"}:
-                    continue
-                payload_text=""
-                if payload:
-                    try: payload_text=json.dumps(payload, ensure_ascii=False, default=str)
-                    except Exception: payload_text=str(payload)
-                visual_blocks.append({
-                    "kind":"visual_data_reference",
-                    "index":idx+1,
-                    "title":cls.normalize(raw.get("title") or payload.get("title") or btype),
-                    "content":payload_text[:2600] or cls.normalize(raw.get("content") or raw.get("text"))[:1800],
-                    "block_id":cls.normalize(raw.get("block_id")),
-                    "representation":btype,
-                    "payload":payload,
-                    "source":"active_visual_scene",
-                })
-
+                value = cls.normalize(match).strip(".,:;()[]{}<>—-\"")
+                if value and value not in candidates and len(value.split()) <= 5:
+                    candidates.append(value)
+                if len(candidates) >= 12:
+                    break
+            if len(candidates) >= 12:
+                break
+        # Prefer the longest proper-name-shaped candidate; exclude common sentence-leading words.
+        stop = {"Это", "Он", "Она", "Они", "Когда", "Куда", "Главные", "Важные", "Например"}
+        candidates = [c for c in candidates if c not in stop]
+        target = max(candidates, key=lambda x: (len(x.split()), len(x)), default="")
+        resolved = bool(target and (anaphoric or short_followup))
+        confidence = 0.82 if target and anaphoric else 0.68 if target and short_followup else 0.0
         return {
-            "present": bool(anaphoric or ordinal_reference or short_followup or visual_blocks),
-            "target": "",
-            "candidates": numbered + candidates + visual_blocks,
-            "confidence": 0.0,
-            "source":"semantic_reference_inventory",
-            "anaphoric":anaphoric,
-            "ordinal_reference":ordinal_reference,
-            "short_followup":short_followup,
-            "visual_block_count":len(visual_blocks),
-            "resolved":False,
+            "present": bool(target),
+            "target": target,
+            "candidates": candidates,
+            "confidence": confidence,
+            "source": "semantic_entity_reference",
+            "anaphoric": anaphoric,
+            "short_followup": short_followup,
+            "resolved": resolved,
         }
-
-    @classmethod
-    def _resolve_structured_visual_target(cls, text: str, visual_scene: dict | None, semantic_profile: dict | None = None):
-        """Choose a previous structured visual by semantic evidence and payload shape."""
-        scene = visual_scene if isinstance(visual_scene, dict) else {}
-        raw_blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else []
-        candidates = []
-        for idx, block in enumerate(raw_blocks):
-            if not isinstance(block, dict):
-                continue
-            rep = cls.normalize(
-                block.get("type")
-                or block.get("artifact_type")
-                or block.get("representation")
-            )
-            if rep in {"", "text", "markdown"}:
-                continue
-            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-            has_data = any(
-                payload.get(key) not in (None, [], {}, "")
-                for key in (
-                    "categories", "labels", "x", "x_values", "points",
-                    "series", "data", "rows", "items", "nodes", "edges"
-                )
-            )
-            candidates.append({
-                "kind": "visual_data_reference",
-                "index": idx + 1,
-                "title": cls.normalize(block.get("title") or payload.get("title") or rep),
-                "content": cls.normalize(block.get("content") or block.get("text")),
-                "block_id": cls.normalize(block.get("block_id") or block.get("id")),
-                "representation": rep,
-                "payload": deepcopy(payload),
-                "has_structured_data": bool(has_data),
-                "source": "last_successful_visual_scene",
-            })
-        if not candidates:
-            return None
-
-        profile = semantic_profile if isinstance(semantic_profile, dict) else {}
-        rep_scores = profile.get("representation_scores") if isinstance(profile.get("representation_scores"), dict) else {}
-        obj_scores = profile.get("object_scores") if isinstance(profile.get("object_scores"), dict) else {}
-        best_rep = cls.normalize(profile.get("best_representation") or "").lower()
-        best_obj = cls.normalize(profile.get("best_object") or "").lower()
-
-        ranked = []
-        current = cls.normalize(text)
-        for candidate in candidates:
-            rep = cls.normalize(candidate.get("representation")).lower()
-            sem = max(
-                float(rep_scores.get(rep, 0.0) or 0.0),
-                float(obj_scores.get(rep, 0.0) or 0.0),
-            )
-            align = 1.0 if rep and rep in {best_rep, best_obj} else 0.0
-            data = 1.0 if candidate.get("has_structured_data") else 0.0
-            candidate_tokens = set(cls._tokens(f"{candidate.get('title','')} {candidate.get('content','')}"))
-            current_tokens = set(cls._tokens(current))
-            lexical = (len(current_tokens & candidate_tokens) / max(1, len(current_tokens | candidate_tokens))) if current_tokens and candidate_tokens else 0.0
-            score = 0.60 * sem + 0.25 * align + 0.10 * data + 0.05 * lexical
-            ranked.append((score, candidate))
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        return deepcopy(ranked[0][1]) if ranked else None
 
     def _resolve_scene_context(self,text,state,continuation,reference,active_topic=""):
         if not isinstance(state,dict) or not (continuation or reference): return {}
@@ -1095,11 +971,7 @@ class QuantumInterpretationEngine:
         active_topic=self.normalize(state.get("active_topic") or state.get("current_topic") or semantic.get("active_topic") or cognition.get("active_topic"))
         active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
-        previous_scene = (
-            state.get("last_successful_visual_scene")
-            or state.get("active_visual_scene")
-            or state.get("current_visual_scene")
-        )
+        previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
         if not isinstance(previous_scene, dict):
             previous_scene = {}
         # Internal visual/tool scenes are not dialog anchors.
@@ -1129,54 +1001,32 @@ class QuantumInterpretationEngine:
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
         continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
-        # Semantic task-object-operation fusion.
-        # A representation is promoted when independent semantic lanes agree on
-        # the task, object and executable operation. No topic/renderer keywords
-        # are used as routing triggers.
-        task_fusion = {
-            "representation": production,
-            "operation": p.get("best_operation"),
-            "object": p.get("best_object"),
-            "goal": p.get("best_goal"),
-            "representation_score": float(p.get("representation_scores", {}).get(production, 0.0) or 0.0),
-            "object_score": float(p.get("object_scores", {}).get(production, 0.0) or 0.0),
-            "operation_score": float(
-                p.get("operation_scores", {}).get(p.get("best_operation"), 0.0) or 0.0
-            ),
-            "goal_score": float(
-                p.get("goal_scores", {}).get(p.get("best_goal"), 0.0) or 0.0
-            ),
-        }
+        # A short continuation question does not acquire a structured renderer
+        # merely because the representation matrix found a weak candidate.
+        # Structured output must be supported by the current turn's operation,
+        # object and goal evidence (or an explicit upstream representation).
         if production != "text" and not explicit:
             op = str(p.get("best_operation") or "").lower()
             obj = str(p.get("best_object") or "").lower()
-            rep_score = float(p.get("representation_scores", {}).get(production, 0.0) or 0.0)
+            goal = str(p.get("best_goal") or "").lower()
             obj_score = float(p.get("object_scores", {}).get(production, 0.0) or 0.0)
-            op_score = float(p.get("operation_scores", {}).get(op, 0.0) or 0.0)
-
-            # Object/representation/operation agreement is the semantic basis.
-            # Goal classification remains evidence, not a hard renderer gate.
-            semantic_alignment = (
-                obj == production
-                and op in {
-                    "build", "modify", "present", "calculate",
-                    "analyze", "list", "explain"
-                }
-                and rep_score >= 0.10
-                and obj_score >= 0.05
-                and op_score >= 0.08
+            current_visual_intent = (
+                locked
+                or (
+                    op in {"build", "modify", "present", "explain"}
+                    and obj == production
+                    and obj_score >= 0.10
+                    and goal in {"visualize", "transform", "present", "organize"}
+                )
             )
-            if semantic_alignment:
-                source = "semantic_task_object_operation_fusion"
-                locked = True
-            else:
+            # `locked` means the representation was already resolved from the
+            # complete semantic task vector. Never demote such a decision merely
+            # because another semantic family (for example explanation) ranked
+            # slightly higher. This is a semantic contract, not a word trigger.
+            if not current_visual_intent:
                 production = "text"
-                source = "current_turn_representation_not_semantically_established"
+                source = "current_turn_representation_not_established"
                 locked = False
-
-        task_fusion["representation"] = production
-        task_fusion["source"] = source
-        task_fusion["locked"] = bool(locked)
         # A continuation may deliberately address the existing visual object
         # without naming its representation again. Reuse that canonical renderer
         # only when the user is still operating in the active visual goal.
@@ -1197,29 +1047,7 @@ class QuantumInterpretationEngine:
                 locked = True
         reference=bool(d.get("reference_to_previous", d.get("reference_score", 0.0) >= 0.42))
         memory=p["dialogue_best"]=="memory_query" and p["dialogue_scores"].get("memory_query",0.0)>=0.18
-        reference_resolution = self._reference_resolution(
-            text,
-            last_a,
-            last_u,
-            previous_scene=previous_scene,
-        )
-        structured_visual_target = self._resolve_structured_visual_target(
-            text,
-            previous_scene,
-            semantic_profile=p,
-        )
-        if structured_visual_target is not None:
-            reference_resolution["visual_target"] = structured_visual_target
-            if continuation and not reference_resolution.get("resolved"):
-                reference_resolution.update({
-                    "resolved": True,
-                    "target": structured_visual_target.get("title") or structured_visual_target.get("representation"),
-                    "confidence": max(
-                        float(reference_resolution.get("confidence", 0.0) or 0.0),
-                        0.86,
-                    ),
-                    "source": "quantum_structured_visual_resolution",
-                })
+        reference_resolution = self._reference_resolution(text, last_a, last_u)
         if reference_resolution.get("resolved") and reference_resolution.get("target"):
             reference = True
             continuation = True
@@ -1241,23 +1069,6 @@ class QuantumInterpretationEngine:
             resolved_scene = dict(resolved_scene or {})
             resolved_scene["reference_target"] = reference_resolution.get("target")
             resolved_scene["reference_resolution"] = dict(reference_resolution)
-
-        if continuation and reference_resolution.get("visual_target") is not None:
-            operation_for_turn = self.normalize(p.get("best_operation")).lower()
-            if operation_for_turn in {"explain", "analyze", "answer", "compare"}:
-                production = "text"
-                source = "visual_artifact_data_explanation"
-                locked = True
-
-        # A request can refer to a previous visual artifact while asking only
-        # for explanation/data extraction. In that case the visual object is
-        # context evidence, not the requested output itself.
-        operation_for_turn = self.normalize(p.get("best_operation")).lower()
-        if continuation and reference_resolution.get("visual_target") is not None:
-            if operation_for_turn in {"explain", "analyze", "answer", "compare"}:
-                production = "text"
-                source = "visual_artifact_explanation_from_context"
-                locked = True
         evidence=[{"label":k,"score":float(v),"source":"quantum_matrix","positive":True,"details":{}}
                   for k,v in sorted(p["representation_scores"].items(),key=lambda x:x[1],reverse=True) if float(v)>=0.20]
         domains=[k for k,v in p["domain_scores"].items() if float(v)>=0.20]
@@ -1273,10 +1084,6 @@ class QuantumInterpretationEngine:
             "visual_schema_confidence":visual_schema_confidence,
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
-        semantic_task["fusion"] = task_fusion
-        semantic_task["previous_visual_types"] = list(
-            previous_scene.get("render_block_types") or []
-        ) if isinstance(previous_scene, dict) else []
         presentation={
             "version":"quantum_interpretation_transport_v3","decision_owner":DECISION_OWNER,
             "single_route":True,"production_representation":production,
@@ -1352,12 +1159,12 @@ class QuantumInterpretationEngine:
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
                 "goal_scores":p["goal_scores"],"context_scores":p["context_scores"],
-                "semantic_task":semantic_task,"task_fusion":task_fusion,"engine":"quantum_interpretation_engine_v3"
+                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v3"
             },
             "quantum_interpretation_field":{
                 "linguistic":self._linguistic(text),"dialogue":d,"representation":evidence,
                 "domain":[{"domain":k,"score":float(v)} for k,v in p["domain_scores"].items()],
-                "context_vectors":p["context_scores"],"semantic_task":semantic_task,"task_fusion":task_fusion,
+                "context_vectors":p["context_scores"],"semantic_task":semantic_task,
                 "production":presentation,"profile":p,"scene_matrix":matrix,
                 "decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"quantum_interpretation_engine_v3"
             },
