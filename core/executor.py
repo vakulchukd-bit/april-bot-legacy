@@ -470,7 +470,14 @@ class QuantumMemoryUnderstandingEngine:
         except Exception:
             return {c: self._lexical_score(query, c) for c in candidates}, "lexical_fallback"
 
-    def _need_memory(self, current: str, previous_user: str, previous_assistant: str, scene: dict[str, Any]) -> dict[str, Any]:
+    def _need_memory(
+        self,
+        current: str,
+        previous_user: str,
+        previous_assistant: str,
+        scene: dict[str, Any],
+        dialogue_measurement: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Measure whether memory is semantically required for this turn.
 
         No lexical trigger list, topic vocabulary, ordinal regex, or local
@@ -503,6 +510,20 @@ class QuantumMemoryUnderstandingEngine:
         } or dialogue_relation in {
             "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY",
         }
+
+        # QUANTUM PROCESSOR pre-measured dialogue relation is canonical for this
+        # turn. QMU must consume it instead of independently re-classifying the
+        # same pair and producing a contradictory result.
+        measured_vector = dialogue_measurement if isinstance(dialogue_measurement, dict) else {}
+        canonical_relation = _s(measured_vector.get("relation") or measured_vector.get("dialogue_relation")).upper()
+        canonical_continuation = bool(measured_vector.get("continuation"))
+        canonical_reference = bool(measured_vector.get("reference_to_previous"))
+        if canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"}:
+            dialogue_anchor = True
+            dialogue_relation = canonical_relation
+            dialogue_label = canonical_relation.lower()
+        if canonical_continuation or canonical_reference:
+            dialogue_anchor = True
 
         return {
             "needed": bool(active and dialogue_anchor),
@@ -721,6 +742,9 @@ class QuantumMemoryUnderstandingEngine:
         visual_scene: dict[str, Any] | None = None,
         dialog_history: list[dict[str, Any]] | None = None,
         dynamic_memory: dict[str, Any] | None = None,
+        dialogue_measurement: dict[str, Any] | None = None,
+        semantic_profile: dict[str, Any] | None = None,
+        visual_reference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current = _text(current_request, 2200)
         previous_user = _text(previous_user, 1800)
@@ -740,7 +764,13 @@ class QuantumMemoryUnderstandingEngine:
         if selected_user and selected_assistant:
             previous_user, previous_assistant = selected_user, selected_assistant
 
-        gate = self._need_memory(current, previous_user, previous_assistant, scene)
+        gate = self._need_memory(
+            current,
+            previous_user,
+            previous_assistant,
+            scene,
+            dialogue_measurement=dialogue_measurement,
+        )
 
         base = {
             "version": self.VERSION,
@@ -765,6 +795,7 @@ class QuantumMemoryUnderstandingEngine:
                 "history": bool(dialog_history),
                 "selected_pair_source": selected_source,
                 "selected_pair_score": round(pair_score, 6),
+                "canonical_dialogue_source": "processor_dialogue_measurement",
             },
             "evidence": [],
             "provider_hint": {},
@@ -822,12 +853,30 @@ class QuantumMemoryUnderstandingEngine:
         # canonical target. If several objects exist, semantic similarity ranks
         # them; no topic-specific vocabulary or trigger words are used.
         structural_target = None
-        if gate.get("reference_anchor") and visual_blocks:
-            visual_ranked = [item for item in ranked if item.get("candidate", {}).get("kind") == "render_block"]
-            if visual_ranked:
-                structural_target = deepcopy(visual_ranked[0]["candidate"])
-            elif len(visual_blocks) == 1:
-                structural_target = deepcopy(visual_blocks[0])
+        if (gate.get("reference_anchor") or gate.get("dialogue_anchor")) and visual_blocks:
+            # Prefer a structured visual object over a text block when the current
+            # semantic representation already says that the user is operating on
+            # the previous visual result.
+            semantic_profile = semantic_profile if isinstance(semantic_profile, dict) else {}
+            rep_scores = semantic_profile.get("representation_scores") if isinstance(semantic_profile.get("representation_scores"), dict) else {}
+            obj_scores = semantic_profile.get("object_scores") if isinstance(semantic_profile.get("object_scores"), dict) else {}
+            best_rep = _s(semantic_profile.get("best_representation")).lower()
+            best_obj = _s(semantic_profile.get("best_object")).lower()
+            ranked_visuals = []
+            for candidate in visual_blocks:
+                rep = _s(candidate.get("representation")).lower()
+                payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
+                has_data = bool(candidate.get("has_structured_data")) or any(
+                    payload.get(key) not in (None, [], {}, "")
+                    for key in ("categories", "labels", "x", "x_values", "points", "series", "data", "rows", "items")
+                )
+                semantic_support = max(float(rep_scores.get(rep, 0.0) or 0.0), float(obj_scores.get(rep, 0.0) or 0.0))
+                alignment = 1.0 if rep in {best_rep, best_obj} and rep else 0.0
+                score = 0.55 * semantic_support + 0.30 * alignment + 0.15 * (1.0 if has_data else 0.0)
+                ranked_visuals.append((score, candidate))
+            ranked_visuals.sort(key=lambda item: item[0], reverse=True)
+            if ranked_visuals:
+                structural_target = deepcopy(ranked_visuals[0][1])
 
         target = deepcopy(structural_target or (best["candidate"] if best and best_score >= 0.55 else {}))
         target_kind = str(target.get("kind") or "")
@@ -875,6 +924,7 @@ class QuantumMemoryUnderstandingEngine:
         previous_scene_id = str(scene.get("scene_id") or "")
         visual_context = {
             "scene_id": previous_scene_id,
+            "visual_source": _s(scene.get("memory_source") or scene.get("source") or "visual_scene"),
             "topic": _text(scene.get("topic") or active_topic, 500),
             "summary": _clip(scene.get("summary") or scene.get("april_answer") or scene.get("answer"), 1000),
             "render_block_types": list(scene.get("render_block_types") or []),
@@ -1184,6 +1234,132 @@ def _scene_continuity_engine(
     }
 
 
+
+def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
+    """Return the newest adjacent USER→APRIL pair in the current conversation.
+
+    The pair is resolved structurally from the hot dialog. Historical memory can
+    support recall but can never replace this immediate dialogue anchor.
+    """
+    if not isinstance(state, dict):
+        return "", "", None, "none"
+
+    current_scene = state.get("current_visual_scene")
+    if isinstance(current_scene, dict):
+        user = _s(current_scene.get("user_request") or current_scene.get("current_request"))
+        assistant = _s(current_scene.get("april_answer") or current_scene.get("answer"))
+        if user and assistant:
+            return user, assistant, current_scene.get("turn_id"), "current_visual_scene"
+
+    dialog = state.get("dialog", [])
+    if isinstance(dialog, list):
+        for idx in range(len(dialog) - 2, -1, -1):
+            left = dialog[idx] if isinstance(dialog[idx], dict) else {}
+            right = dialog[idx + 1] if idx + 1 < len(dialog) and isinstance(dialog[idx + 1], dict) else {}
+            left_role = _s(left.get("role")).lower()
+            right_role = _s(right.get("role")).lower()
+            if left_role in {"user", "human"} and right_role in {"assistant", "april", "bot"}:
+                user = _s(left.get("content") or left.get("text"))
+                assistant = _s(right.get("content") or right.get("answer") or right.get("text"))
+                if user and assistant:
+                    return user, assistant, right.get("turn_id") or left.get("turn_id"), "dialog_adjacent_pair"
+
+    return (
+        _s(state.get("last_user_turn")),
+        _s(state.get("last_april_turn")),
+        None,
+        "state_last_turn_fallback",
+    )
+
+
+def _usable_visual_scene(state: dict) -> dict:
+    """Return the latest successful visual artifact without erasing dialogue state."""
+    if not isinstance(state, dict):
+        return {}
+    for key in ("last_successful_visual_scene", "active_visual_scene"):
+        candidate = state.get(key)
+        if isinstance(candidate, dict) and candidate.get("render_blocks"):
+            for block in candidate.get("render_blocks", []):
+                if not isinstance(block, dict):
+                    continue
+                btype = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+                payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+                status = _s(payload.get("status") or block.get("status")).lower()
+                if btype not in {"", "text", "markdown"} and status not in {"unavailable", "pending_data", "incomplete", "error"}:
+                    return deepcopy(candidate)
+    return {}
+
+
+def _quantum_context_diagnostic(
+    *,
+    text: str,
+    semantic: dict,
+    decision: dict,
+    dialogue_evidence: dict,
+    memory_understanding: dict,
+    state: dict,
+) -> dict:
+    """Pre-provider invariant check. It diagnoses contradictions before release."""
+    qmu = _as_dict(memory_understanding)
+    qref = _as_dict(qmu.get("reference"))
+    qvisual = _as_dict(qmu.get("visual_context"))
+    render_types = [str(x).lower() for x in _as_list(qvisual.get("render_block_types"))]
+    mode = _s(dialogue_evidence.get("mode")).upper()
+    memory_relation = _s(qmu.get("relation")).upper()
+    semantic_rep = _s(
+        semantic.get("production_representation")
+        or semantic.get("requested_representation")
+        or semantic.get("possible_output")
+    ).lower()
+    decision_action = _s(decision.get("action")).lower()
+    requested = [
+        _s(x).lower()
+        for x in _as_list(decision.get("requested_outputs") or semantic.get("requested_outputs"))
+        if _s(x)
+    ]
+
+    contradictions = []
+    if memory_relation in {"CONTINUE_TOPIC", "ARTIFACT_REFERENCE"} and mode in {"INDEPENDENT", "NEW_TOPIC"}:
+        contradictions.append("memory_vs_dialogue_mode")
+    if "graph" in requested and decision_action in {"talk", "clarify"}:
+        contradictions.append("graph_request_vs_action")
+    if qref.get("resolved") and not qvisual.get("scene_id"):
+        contradictions.append("resolved_reference_without_visual_scene")
+    if "graph" in render_types and "graph" not in requested and semantic_rep not in {"graph", ""}:
+        contradictions.append("visual_payload_without_graph_request")
+
+    # The current turn is the only candidate for the fresh semantic anchor.
+    # Older memory matches are reported but never allowed to replace it.
+    stale_history_detected = False
+    old_dialogue = _as_dict(state.get("_quantum_context_anchor"))
+    current_user = _s(old_dialogue.get("previous_user"))
+    selected_user = _s(dialogue_evidence.get("previous_user"))
+    if current_user and selected_user and current_user != selected_user:
+        stale_history_detected = True
+        contradictions.append("dialogue_anchor_mismatch")
+
+    return {
+        "version": "QUANTUM_CONTEXT_DIAGNOSTIC_V1",
+        "preflight": True,
+        "request": _clip(text, 500),
+        "mode": mode,
+        "memory_relation": memory_relation,
+        "memory_reference_resolved": bool(qref.get("resolved")),
+        "memory_target": _s(qref.get("target")),
+        "visual_scene_id": _s(qvisual.get("scene_id")),
+        "visual_block_types": render_types,
+        "semantic_representation": semantic_rep,
+        "decision_action": decision_action,
+        "requested_outputs": requested,
+        "contradictions": contradictions,
+        "stale_history_detected": stale_history_detected,
+        "ready_for_provider": not contradictions,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "triggering": False,
+        "score_routing": False,
+    }
+
+
 def _dialogue_evidence(
     text: str,
     semantic: dict,
@@ -1191,38 +1367,9 @@ def _dialogue_evidence(
     decision: dict,
     state: dict,
 ) -> dict:
-    """Collapse dialogue evidence to one state using the existing dialogue engine.
-
-    The Executor does not use lexical triggers or local thresholds. The canonical
-    immediate-scene continuity measurement is produced by QUANTUM_DIALOGUE_ENGINE
-    and merged with the Interpretation dialogue contract.
-    """
+    """Collapse dialogue evidence around one immediate canonical pair."""
+    previous_user, previous_april, last_turn_id, pair_source = _latest_canonical_dialogue_pair(state)
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
-    previous_user = ""
-    previous_april = ""
-    last_turn_id = None
-
-    for item in reversed(dialog):
-        if not isinstance(item, dict):
-            continue
-        role = _s(item.get("role")).lower()
-        if not previous_april:
-            if role in {"assistant", "april"}:
-                previous_april = _s(item.get("content") or item.get("answer"))
-                last_turn_id = item.get("turn_id")
-            elif isinstance(item.get("april"), dict):
-                previous_april = _s(
-                    item["april"].get("answer")
-                    or item["april"].get("content")
-                )
-                last_turn_id = item.get("turn_id")
-        if not previous_user:
-            if role == "user":
-                previous_user = _s(item.get("content"))
-            elif item.get("user"):
-                previous_user = _s(item.get("user"))
-        if previous_user and previous_april:
-            break
 
     scene_continuity = _as_dict(
         semantic.get("quantum_scene_continuity")
@@ -1267,6 +1414,15 @@ def _dialogue_evidence(
 
     if not mode:
         mode = _s(scene_continuity.get("mode")).upper() or "INDEPENDENT"
+
+    # Persist the selected immediate anchor for diagnostics; historical memory
+    # remains evidence only.
+    state["_quantum_context_anchor"] = {
+        "previous_user": previous_user,
+        "previous_april": previous_april,
+        "source": pair_source,
+        "last_turn_id": last_turn_id,
+    }
 
     active_topic = _s(
         dialogue_contract.get("active_topic")
@@ -1842,6 +1998,7 @@ def _build_processor_control_plane(
 
     topic = _s(
         memory_reference.get("target")
+        or _as_dict(memory_reference.get("visual_target")).get("title")
         or memory_dialogue.get("active_topic")
         or canonical_dialogue.get("active_topic")
         or _field((semantic, decision, state), ("active_topic", "topic", "current_topic"))
@@ -2156,7 +2313,9 @@ def _make_request(
             }
         ),
         visual_context=(
-            visual if mode == "ARTIFACT_REFERENCE" and isinstance(visual, dict)
+            visual
+            if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+            and isinstance(visual, dict)
             else {}
         ),
         available_tools=list(control.get("capabilities") or []),
@@ -2184,6 +2343,9 @@ def _make_request(
             "current_request_must_remain_intact": True,
             "identity_scope": deepcopy(scope),
             "presentation_plan": presentation_plan,
+            "quantum_context_diagnostic": _quantum_snapshot(
+                semantic.get("quantum_context_diagnostic") or {}
+            ),
             "representation_plan": {
                 "requested_outputs": requested_outputs,
                 "preferred_representation": measured_output,
@@ -3749,6 +3911,232 @@ def _ensure_presentation_signals(blocks: Any, request: MachineRequest | None = N
         result.append(clean)
     return result
 
+
+def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
+    """Extract explicit label/value pairs from user/provider text structurally."""
+    source = _s(text)
+    if not source:
+        return []
+    pairs: list[tuple[str, float, str]] = []
+    # Month names are a structural calendar axis, not a topic trigger.
+    month_names = (
+        "январь", "февраль", "март", "апрель", "май", "июнь",
+        "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+    )
+    month_pattern = r"(?i)\b(" + "|".join(month_names) + r")\b\s*(?:[—–:-]\s*)?\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    for match in re.finditer(month_pattern, source):
+        label = match.group(1)
+        try:
+            value = float(match.group(2).replace(",", "."))
+        except Exception:
+            continue
+        unit = _s(match.group(3))
+        pairs.append((label, value, unit))
+
+    year_pattern = r"\b((?:19|20)\d{2})\b\s*(?:[—–:-]\s*)?[$€£]?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    for match in re.finditer(year_pattern, source):
+        label = match.group(1)
+        try:
+            value = float(match.group(2).replace(",", "."))
+        except Exception:
+            continue
+        unit = _s(match.group(3))
+        pairs.append((label, value, unit))
+
+    # Generic label/value rows such as "Q1 — 42" or "Alpha: 17".
+    generic_pattern = r"(?<!\w)([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    for match in re.finditer(generic_pattern, source):
+        label = _s(match.group(1)).strip(" .,;")
+        if not label:
+            continue
+        # Exclude labels that are plainly prose; structure is retained only when
+        # a numeric value is explicitly attached to the label.
+        try:
+            value = float(match.group(2).replace(",", "."))
+        except Exception:
+            continue
+        unit = _s(match.group(3))
+        candidate = (label, value, unit)
+        if candidate not in pairs:
+            pairs.append(candidate)
+
+    # Deduplicate while preserving order.
+    seen = set()
+    result = []
+    for item in pairs:
+        key = (item[0].casefold(), item[1], item[2].casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result[:60]
+
+
+def _graph_payload_from_pairs(
+    pairs: list[tuple[str, float, str]],
+    *,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a canonical graph payload from explicit structured points."""
+    base = deepcopy(existing) if isinstance(existing, dict) else {}
+    if not pairs and not base:
+        return {}
+    categories = list(base.get("categories") or [])
+    values: list[float] = []
+    series = base.get("series") if isinstance(base.get("series"), list) else []
+
+    if series and isinstance(series[0], dict):
+        values = [
+            float(v) for v in (series[0].get("values") or [])
+            if isinstance(v, (int, float)) or str(v).replace(".", "", 1).replace("-", "", 1).isdigit()
+        ]
+
+    # If the existing payload has x/y points instead, normalize them.
+    if not categories and isinstance(base.get("points"), list):
+        for point in base["points"]:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                categories.append(str(point[0]))
+                try:
+                    values.append(float(point[1]))
+                except Exception:
+                    pass
+
+    unit = ""
+    for label, value, parsed_unit in pairs:
+        if parsed_unit:
+            unit = parsed_unit
+        if label in categories:
+            idx = categories.index(label)
+            if idx < len(values):
+                values[idx] = value
+            else:
+                while len(values) < idx:
+                    values.append(0.0)
+                values.append(value)
+        else:
+            categories.append(label)
+            values.append(value)
+
+    if len(categories) != len(values):
+        n = min(len(categories), len(values))
+        categories = categories[:n]
+        values = values[:n]
+
+    if not categories or not values:
+        return base
+
+    series_name = "Значение"
+    if series and isinstance(series[0], dict):
+        series_name = _s(series[0].get("name") or series[0].get("label")) or series_name
+    y_label = _s(base.get("y_label")) or ("Стоимость" if any("$" in u for _, _, u in pairs) else ("Значение" if not unit else unit))
+    x_label = _s(base.get("x_label")) or ("Год" if all(re.fullmatch(r"(?:19|20)\d{2}", c) for c in categories) else "Категория")
+
+    result = {
+        **base,
+        "categories": categories,
+        "series": [{
+            **(series[0] if series and isinstance(series[0], dict) else {}),
+            "name": series_name,
+            "values": values,
+        }],
+        "x_label": x_label,
+        "y_label": y_label,
+        "markers": bool(base.get("markers", True)),
+    }
+    if not result.get("title"):
+        result["title"] = "Линейный график"
+    return result
+
+
+def _ensure_quantum_structured_outputs(
+    response: MachineResponse,
+    request: MachineRequest | None,
+) -> MachineResponse:
+    """Enforce typed output consistency before SceneContract release.
+
+    This is a processor invariant, not a topic/word trigger. A declared graph
+    request must result in a graph block when explicit structured data exists
+    in the current request/answer or a valid previous visual artifact.
+    """
+    if request is None:
+        return response
+    requested = {_s(x).lower() for x in list(getattr(request, "requested_outputs", []) or []) if _s(x)}
+    if "graph" not in requested:
+        return response
+
+    blocks = list(getattr(response, "render_blocks", []) or [])
+    graph_block = next(
+        (b for b in blocks
+         if isinstance(b, dict)
+         and _s(b.get("type") or b.get("artifact_type") or b.get("representation")).lower() == "graph"),
+        None,
+    )
+    if graph_block is not None:
+        return response
+
+    current_text = _s(
+        request.conversation.get("current_request")
+        if isinstance(request.conversation, dict) else ""
+    )
+    answer_text = _s(getattr(response, "answer", "") or getattr(response, "content", ""))
+    pairs = _extract_label_value_pairs(current_text)
+    if not pairs:
+        pairs = _extract_label_value_pairs(answer_text)
+
+    existing_payload = {}
+    visual = getattr(request, "visual_context", {})
+    if isinstance(visual, dict):
+        candidate_blocks = visual.get("render_blocks")
+        if isinstance(candidate_blocks, list):
+            for block in candidate_blocks:
+                if not isinstance(block, dict):
+                    continue
+                if _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower() != "graph":
+                    continue
+                payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+                status = _s(payload.get("status")).lower()
+                if status not in {"unavailable", "pending_data", "error", "incomplete"}:
+                    existing_payload = deepcopy(payload)
+                    break
+
+    payload = _graph_payload_from_pairs(pairs, existing=existing_payload)
+    if not payload:
+        return response
+
+    graph = {
+        "type": "graph",
+        "artifact_type": "graph",
+        "renderer": "line_chart",
+        "viewer": "line_chart",
+        "content": "",
+        "text": "",
+        "payload": payload,
+        "artifact": {
+            "type": "graph",
+            "renderer": "line_chart",
+            "viewer": "chart",
+            "scene_contract": True,
+            "payload": deepcopy(payload),
+        },
+        "scene_contract": True,
+        "provider_payload": True,
+        "canonical_provider_payload": True,
+        "source": "QUANTUM_STRUCTURED_OUTPUT_ENGINE",
+    }
+    blocks.append(graph)
+    response.render_blocks = blocks
+    meta = dict(getattr(response, "metadata", {}) or {})
+    meta["quantum_structured_output_engine"] = {
+        "version": "V1",
+        "materialized": ["graph"],
+        "source": "explicit_structured_data_and_visual_context",
+        "natural_language_triggering": False,
+        "payload_preserved": True,
+    }
+    response.metadata = meta
+    return response
+
+
 def _response(value: Any, request: MachineRequest | None = None) -> MachineResponse:
     """Decode Provider output and materialize all structured artifacts into one stream."""
     payload = _decode_provider_payload(value)
@@ -3771,7 +4159,9 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     metadata = dict(allowed.get("metadata") or {}) if isinstance(allowed.get("metadata"), dict) else {}
     metadata["quantum_matrix"] = {"owner": "QUANTUM_PROCESSOR", "version": PROCESSOR_VERSION, "block_types": [_s(b.get("type") or b.get("artifact_type")).lower() for b in blocks if isinstance(b, dict)], "render_block_count": len(blocks), "composer_engine": "quantum_canonical_answer_composer_v2", "information_preserved": True, "machine_fields_transport_only": True, "scoring": False, "triggers": False}
     allowed["metadata"] = metadata
-    return MachineResponse(**allowed)
+    response = MachineResponse(**allowed)
+    response = _ensure_quantum_structured_outputs(response, request)
+    return response
 
 def _canonicalize(
     user_id: str,
@@ -4250,7 +4640,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     previous_user = _s(previous_pair_evidence.get("previous_user") or state.get("last_user_turn"))
     previous_april = _s(previous_pair_evidence.get("previous_april") or state.get("last_april_turn"))
     visual_scene = _as_dict(
-        state.get("current_visual_scene")
+        _usable_visual_scene(state)
+        or state.get("current_visual_scene")
         or state.get("active_visual_scene")
         or state.get("active_scene_contract")
     )
@@ -4266,6 +4657,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             **dynamic_memory,
             "memory_timeline": state.get("memory_timeline", {}),
         },
+        dialogue_measurement=_as_dict(interpretation.get("dialogue_vector")),
+        semantic_profile=_as_dict(semantic.get("semantic_profile") or {}),
+        visual_reference=_as_dict(visual),
     ) or {}
     semantic["memory_understanding"] = _quantum_snapshot(memory_understanding)
     semantic["quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
@@ -4326,6 +4720,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             "confidence": float(_as_dict(memory_understanding.get("reference")).get("confidence", 0.0) or 0.0),
             "scene_id": _s(_as_dict(memory_understanding.get("visual_context")).get("scene_id")),
         })
+        memory_diag = _quantum_context_diagnostic(
+            text=text,
+            semantic=semantic,
+            decision=decision,
+            dialogue_evidence=previous_pair_evidence,
+            memory_understanding=memory_understanding,
+            state=state,
+        )
+        semantic["quantum_context_diagnostic"] = memory_diag
+        print("🧭 QUANTUM CONTEXT DIAGNOSTIC:", memory_diag)
 
     # One authoritative control plane for dialogue, representation, memory relation,
     # capability delegation, and single-route ownership. Individual engines remain
@@ -4440,6 +4844,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         ),
         "processor_context": processor_context,
         "memory_understanding": _quantum_snapshot(memory_understanding),
+        "quantum_context_diagnostic": _quantum_snapshot(
+            semantic.get("quantum_context_diagnostic") or {}
+        ),
     })
     request.constraints["metadata"] = request_meta
 
@@ -4522,6 +4929,33 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         max_output_tokens=request.response_output_tokens,
     )
     response = _response(provider_result, request)
+
+    requested_structured = [
+        _s(x).lower()
+        for x in list(getattr(request, "requested_outputs", []) or [])
+        if _s(x).lower() not in {"", "text", "markdown", "production_signal"}
+    ]
+    delivered_types = [
+        _s(
+            b.get("type")
+            or b.get("artifact_type")
+            or b.get("representation")
+        ).lower()
+        for b in list(getattr(response, "render_blocks", []) or [])
+        if isinstance(b, dict)
+    ]
+    print(
+        "🧭 QUANTUM OUTPUT PREFLIGHT:",
+        {
+            "requested_structured": requested_structured,
+            "delivered_types": delivered_types,
+            "missing": [x for x in requested_structured if x not in delivered_types],
+            "processor_repair": bool(
+                requested_structured and
+                any(x not in delivered_types for x in requested_structured)
+            ),
+        },
+    )
 
     # Canonical presentation audit: proves the processor actually emitted
     # renderer signals before the SceneContract release boundary.
