@@ -851,59 +851,118 @@ class QuantumInterpretationEngine:
         }
 
     @classmethod
-    def _reference_resolution(cls, text: str, previous_assistant: str, previous_user: str = "") -> dict:
-        """Resolve a short contextual reference from the immediately prior human exchange.
+    def _reference_resolution(
+        cls,
+        text: str,
+        previous_assistant: str,
+        previous_user: str = "",
+        previous_scene: dict | None = None,
+    ) -> dict:
+        """Build a generic discourse/visual reference inventory.
 
-        This is structural discourse resolution only: no topic names, renderer names,
-        or domain keyword maps are used. It returns evidence for the processor.
+        This method measures structure and semantic evidence only. It never
+        routes by a topic/renderer keyword.
         """
         current = cls.normalize(text)
         prev = cls.normalize(previous_assistant)
-        if not current or not prev:
+        scene = previous_scene if isinstance(previous_scene, dict) else {}
+        if not current:
             return {
                 "present": False, "target": "", "candidates": [],
                 "confidence": 0.0, "source": "unresolved_semantic_reference",
                 "anaphoric": False, "short_followup": False, "resolved": False,
             }
+
         anaphoric = bool(re.search(
-            r'\b(он|она|они|его|её|их|ему|ей|им|этот|эта|это|этом|этим|ит|he|she|they|him|her|them)\b',
+            r"\b(он|она|они|его|её|ее|их|ему|ей|им|этот|эта|это|этим|этом|тот|та|то|"
+            r"it|this|that|these|those|them|he|she|they|him|her)\b",
+            current, flags=re.I,
+        ))
+        ordinal_reference = bool(re.search(
+            r"\b(перв(ый|ая|ое)|втор(ой|ая|ое)|трет(ий|ья|ье)|четверт(ый|ая|ое)|"
+            r"пят(ый|ая|ое)|последн(ий|яя|ее)|first|second|third|last)\b",
             current, flags=re.I,
         ))
         short_followup = (
-            len(cls._tokens(current)) <= 4
-            and (current.endswith("?") or current.endswith("？"))
+            len(cls._tokens(current)) <= 6
+            and current.endswith(("?", "？"))
         )
-        # Generic candidate extraction from prose: capitalized multi-word spans and
-        # single capitalized names. This is an entity-shape heuristic, not a topic trigger.
-        candidates = []
-        patterns = [
+
+        candidates=[]
+        seen=set()
+
+        for pattern in (
             r"\b(?:[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4})\b",
             r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
-        ]
-        for pattern in patterns:
+        ):
             for match in re.findall(pattern, prev):
-                value = cls.normalize(match).strip(".,:;()[]{}<>—-\"")
-                if value and value not in candidates and len(value.split()) <= 5:
-                    candidates.append(value)
-                if len(candidates) >= 12:
-                    break
-            if len(candidates) >= 12:
-                break
-        # Prefer the longest proper-name-shaped candidate; exclude common sentence-leading words.
-        stop = {"Это", "Он", "Она", "Они", "Когда", "Куда", "Главные", "Важные", "Например"}
-        candidates = [c for c in candidates if c not in stop]
-        target = max(candidates, key=lambda x: (len(x.split()), len(x)), default="")
-        resolved = bool(target and (anaphoric or short_followup))
-        confidence = 0.82 if target and anaphoric else 0.68 if target and short_followup else 0.0
+                value=cls.normalize(match).strip(".,:;()[]{}<>—-\"")
+                if not value or value in {"Это","Он","Она","Они","Когда","Куда","Главные","Важные","Например","Конечно"}:
+                    continue
+                key=value.casefold()
+                if key in seen: continue
+                seen.add(key)
+                candidates.append({
+                    "kind":"entity_reference",
+                    "index":None,
+                    "title":value,
+                    "content":prev[:1800],
+                    "source":"previous_assistant_text",
+                })
+                if len(candidates)>=16: break
+            if len(candidates)>=16: break
+
+        # Generic numbered items from the assistant answer.
+        numbered=[]
+        item=None
+        for raw in str(prev or "").splitlines():
+            line=raw.strip()
+            m=re.match(r"^(\d{1,3})[.)]\s+(.+)$",line)
+            if m:
+                if item: numbered.append(item)
+                item={"kind":"numbered_item","index":int(m.group(1)),"title":"","content":m.group(2)}
+            elif item and line:
+                item["content"]=f'{item["content"]} {line}'.strip()
+        if item: numbered.append(item)
+
+        raw_blocks=scene.get("render_blocks") if isinstance(scene,dict) else None
+        visual_blocks=[]
+        if isinstance(raw_blocks,list):
+            for idx, raw in enumerate(raw_blocks):
+                if not isinstance(raw,dict): continue
+                payload=raw.get("payload") if isinstance(raw.get("payload"),dict) else {}
+                btype=cls.normalize(
+                    raw.get("type") or raw.get("artifact_type")
+                    or raw.get("representation") or payload.get("type")
+                )
+                if not btype or btype in {"text","markdown"}:
+                    continue
+                payload_text=""
+                if payload:
+                    try: payload_text=json.dumps(payload, ensure_ascii=False, default=str)
+                    except Exception: payload_text=str(payload)
+                visual_blocks.append({
+                    "kind":"visual_data_reference",
+                    "index":idx+1,
+                    "title":cls.normalize(raw.get("title") or payload.get("title") or btype),
+                    "content":payload_text[:2600] or cls.normalize(raw.get("content") or raw.get("text"))[:1800],
+                    "block_id":cls.normalize(raw.get("block_id")),
+                    "representation":btype,
+                    "payload":payload,
+                    "source":"active_visual_scene",
+                })
+
         return {
-            "present": bool(target),
-            "target": target,
-            "candidates": candidates,
-            "confidence": confidence,
-            "source": "semantic_entity_reference",
-            "anaphoric": anaphoric,
-            "short_followup": short_followup,
-            "resolved": resolved,
+            "present": bool(anaphoric or ordinal_reference or short_followup or visual_blocks),
+            "target": "",
+            "candidates": numbered + candidates + visual_blocks,
+            "confidence": 0.0,
+            "source":"semantic_reference_inventory",
+            "anaphoric":anaphoric,
+            "ordinal_reference":ordinal_reference,
+            "short_followup":short_followup,
+            "visual_block_count":len(visual_blocks),
+            "resolved":False,
         }
 
     def _resolve_scene_context(self,text,state,continuation,reference,active_topic=""):
@@ -967,25 +1026,54 @@ class QuantumInterpretationEngine:
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
         continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
-        # A short continuation question does not acquire a structured renderer
-        # merely because the representation matrix found a weak candidate.
-        # Structured output must be supported by the current turn's operation,
-        # object and goal evidence (or an explicit upstream representation).
+        # Semantic task-object-operation fusion.
+        # A representation is promoted when independent semantic lanes agree on
+        # the task, object and executable operation. No topic/renderer keywords
+        # are used as routing triggers.
+        task_fusion = {
+            "representation": production,
+            "operation": p.get("best_operation"),
+            "object": p.get("best_object"),
+            "goal": p.get("best_goal"),
+            "representation_score": float(p.get("representation_scores", {}).get(production, 0.0) or 0.0),
+            "object_score": float(p.get("object_scores", {}).get(production, 0.0) or 0.0),
+            "operation_score": float(
+                p.get("operation_scores", {}).get(p.get("best_operation"), 0.0) or 0.0
+            ),
+            "goal_score": float(
+                p.get("goal_scores", {}).get(p.get("best_goal"), 0.0) or 0.0
+            ),
+        }
         if production != "text" and not explicit:
             op = str(p.get("best_operation") or "").lower()
             obj = str(p.get("best_object") or "").lower()
-            goal = str(p.get("best_goal") or "").lower()
+            rep_score = float(p.get("representation_scores", {}).get(production, 0.0) or 0.0)
             obj_score = float(p.get("object_scores", {}).get(production, 0.0) or 0.0)
-            current_visual_intent = (
-                op in {"build", "modify", "present", "explain"}
-                and obj == production
-                and obj_score >= 0.18
-                and goal in {"visualize", "transform", "present", "organize"}
+            op_score = float(p.get("operation_scores", {}).get(op, 0.0) or 0.0)
+
+            # Object/representation/operation agreement is the semantic basis.
+            # Goal classification remains evidence, not a hard renderer gate.
+            semantic_alignment = (
+                obj == production
+                and op in {
+                    "build", "modify", "present", "calculate",
+                    "analyze", "list", "explain"
+                }
+                and rep_score >= 0.10
+                and obj_score >= 0.05
+                and op_score >= 0.08
             )
-            if not current_visual_intent:
+            if semantic_alignment:
+                source = "semantic_task_object_operation_fusion"
+                locked = True
+            else:
                 production = "text"
-                source = "current_turn_representation_not_established"
+                source = "current_turn_representation_not_semantically_established"
                 locked = False
+
+        task_fusion["representation"] = production
+        task_fusion["source"] = source
+        task_fusion["locked"] = bool(locked)
         # A continuation may deliberately address the existing visual object
         # without naming its representation again. Reuse that canonical renderer
         # only when the user is still operating in the active visual goal.
@@ -1006,7 +1094,12 @@ class QuantumInterpretationEngine:
                 locked = True
         reference=bool(d.get("reference_to_previous", d.get("reference_score", 0.0) >= 0.42))
         memory=p["dialogue_best"]=="memory_query" and p["dialogue_scores"].get("memory_query",0.0)>=0.18
-        reference_resolution = self._reference_resolution(text, last_a, last_u)
+        reference_resolution = self._reference_resolution(
+            text,
+            last_a,
+            last_u,
+            previous_scene=previous_scene,
+        )
         if reference_resolution.get("resolved") and reference_resolution.get("target"):
             reference = True
             continuation = True
@@ -1043,6 +1136,10 @@ class QuantumInterpretationEngine:
             "visual_schema_confidence":visual_schema_confidence,
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
+        semantic_task["fusion"] = task_fusion
+        semantic_task["previous_visual_types"] = list(
+            previous_scene.get("render_block_types") or []
+        ) if isinstance(previous_scene, dict) else []
         presentation={
             "version":"quantum_interpretation_transport_v3","decision_owner":DECISION_OWNER,
             "single_route":True,"production_representation":production,
@@ -1118,12 +1215,12 @@ class QuantumInterpretationEngine:
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
                 "goal_scores":p["goal_scores"],"context_scores":p["context_scores"],
-                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v3"
+                "semantic_task":semantic_task,"task_fusion":task_fusion,"engine":"quantum_interpretation_engine_v3"
             },
             "quantum_interpretation_field":{
                 "linguistic":self._linguistic(text),"dialogue":d,"representation":evidence,
                 "domain":[{"domain":k,"score":float(v)} for k,v in p["domain_scores"].items()],
-                "context_vectors":p["context_scores"],"semantic_task":semantic_task,
+                "context_vectors":p["context_scores"],"semantic_task":semantic_task,"task_fusion":task_fusion,
                 "production":presentation,"profile":p,"scene_matrix":matrix,
                 "decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"quantum_interpretation_engine_v3"
             },
