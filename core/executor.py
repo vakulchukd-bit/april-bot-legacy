@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v31_unified_visible_stream_memory_v2"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v31_unified_visible_stream_memory_v3"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1304,8 +1304,25 @@ def _quantum_context_diagnostic(
     qref = _as_dict(qmu.get("reference"))
     qvisual = _as_dict(qmu.get("visual_context"))
     render_types = [str(x).lower() for x in _as_list(qvisual.get("render_block_types"))]
-    mode = _s(dialogue_evidence.get("mode")).upper()
+    raw_mode = _s(dialogue_evidence.get("mode")).upper()
     memory_relation = _s(qmu.get("relation")).upper()
+
+    # Reconcile the diagnostic around the same canonical state that the
+    # processor will execute. A resolved artifact reference is not a second
+    # route competing with INDEPENDENT; it is the post-memory relation for this
+    # turn. Keep raw_mode for observability, but use one canonical mode for
+    # contradiction checks and downstream readiness.
+    if bool(qref.get("resolved")) and memory_relation == "ARTIFACT_REFERENCE":
+        mode = "ARTIFACT_REFERENCE"
+    elif memory_relation in {
+        "CONTINUE_TOPIC",
+        "CONTINUATION",
+        "SAME_TOPIC",
+        "MEMORY_QUERY",
+    }:
+        mode = memory_relation
+    else:
+        mode = raw_mode or "INDEPENDENT"
     semantic_rep = _s(
         semantic.get("production_representation")
         or semantic.get("requested_representation")
@@ -1343,6 +1360,8 @@ def _quantum_context_diagnostic(
         "preflight": True,
         "request": _clip(text, 500),
         "mode": mode,
+        "raw_mode": raw_mode,
+        "canonical_mode": mode,
         "memory_relation": memory_relation,
         "memory_reference_resolved": bool(qref.get("resolved")),
         "memory_target": _s(qref.get("target")),
@@ -4743,6 +4762,31 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dynamic_memory=dynamic_memory,
         memory_understanding=memory_understanding,
     )
+    # Refresh the preflight diagnostic from the single canonical control plane.
+    # This prevents a stale legacy INDEPENDENT value from surviving after memory
+    # resolution has selected CONTINUATION/ARTIFACT_REFERENCE.
+    diagnostic_state = _as_dict(semantic.get("quantum_context_diagnostic"))
+    if diagnostic_state:
+        canonical_mode = _s(control_plane.get("mode")).upper() or "INDEPENDENT"
+        canonical_relation = _s(memory_understanding.get("relation")).upper()
+        contradictions = [
+            item for item in _as_list(diagnostic_state.get("contradictions"))
+            if item != "memory_vs_dialogue_mode"
+        ]
+        if canonical_relation in {
+            "CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE",
+            "SAME_TOPIC", "MEMORY_QUERY",
+        } and canonical_mode in {"INDEPENDENT", "NEW_TOPIC"}:
+            contradictions.append("memory_vs_dialogue_mode")
+        diagnostic_state.update({
+            "mode": canonical_mode,
+            "canonical_mode": canonical_mode,
+            "canonical_relation": canonical_relation,
+            "contradictions": list(dict.fromkeys(contradictions)),
+            "ready_for_provider": not contradictions,
+            "canonical_control_plane": True,
+        })
+        semantic["quantum_context_diagnostic"] = _quantum_snapshot(diagnostic_state)
     print("🧠 QUANTUM MEMORY MATRIX:", {
         "window": dynamic_memory.get("window_days"),
         "matches": len(dynamic_memory.get("matches", []) or []),
