@@ -235,7 +235,7 @@ LAST_WORDS = {
 
 REFERENCE_RE = re.compile(
     r"(?:\b(?:этот|эта|это|этим|этого|эту|тот|та|то|тем|того|ту|он|она|они|его|её|ее|их|ему|ей|им|про него|про неё|про нее|по нему|по ней|по ним|выше|ниже|предыдущий|предыдущая|предыдущее|previous|this|that|above|below)\b)"
-    r"|(?:\b(?:пункт|пункта|элемент|элемента|позиция|позицию|item|point|element|entry|block|блок|график|таблица|table|graph|chart)\b)"
+    r"|(?:\b(?:пункт|пункта|элемент|элемента|позиция|позицию|item|point|element|entry|block|блок)\b)"
     r"|(?:\b(?:первый|второй|третий|четвертый|четвёртый|пятый|шестой|седьмой|восьмой|девятый|десятый|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b)"
     r"|(?:\b\d{1,3}\s*[.)]\b)",
     re.I,
@@ -514,10 +514,9 @@ class QuantumMemoryUnderstandingEngine:
             "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"
         }
 
-        # Length alone never activates memory. A short independent request
-        # must remain independent unless semantic/discourse evidence supports
-        # a relation to the preceding turn.
-        needed = active and (reference_anchor or semantic_anchor or dialogue_anchor)
+        # Memory is an auxiliary understanding engine, not a topic classifier.
+        # Lexical overlap is evidence only; it cannot activate continuation.
+        needed = active and (reference_anchor or dialogue_anchor)
         return {
             "needed": bool(needed),
             "structural_reference": structural,
@@ -1077,8 +1076,11 @@ def _build_quantum_field(
             "goal_engine": _quantum_snapshot(_as_dict(goal)),
             "visual_reference_system": _quantum_snapshot(_as_dict(visual_reference)),
             "quantum_memory_understanding": _quantum_snapshot(_as_dict(memory_understanding)),
+            "quantum_representation_understanding": _quantum_snapshot(
+                _as_dict(semantic.get("quantum_representation_understanding"))
+            ),
         },
-        "evidence_channels": 15,
+        "evidence_channels": 16,
         "representations": _unique_strings(
             _as_list(semantic.get("required_representations"))
             + _as_list(interpretation.get("required_representations"))
@@ -1514,7 +1516,134 @@ def _structural_request_signals(text: str) -> dict:
         "table_signal": table_rows >= 2,
     }
 
-def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dict, *, independent_turn: bool = False) -> list[str]:
+
+REPRESENTATION_PROTOTYPES = {
+    "graph": (
+        "построй график",
+        "покажи данные на графике",
+        "создай линейный график",
+        "покажи линейный график",
+        "изобрази зависимость на графике",
+    ),
+    "table": (
+        "создай таблицу",
+        "покажи данные в таблице",
+        "представь данные таблицей",
+    ),
+    "formula": (
+        "запиши формулой",
+        "покажи математическую формулу",
+        "выведи выражение",
+    ),
+    "diagram": (
+        "построй схему",
+        "создай структурную схему",
+    ),
+    "gallery": (
+        "покажи галерею изображений",
+        "сделай подборку изображений",
+    ),
+    "image": (
+        "создай изображение",
+        "сгенерируй изображение",
+    ),
+    "link": (
+        "дай ссылку",
+        "покажи ссылку",
+    ),
+    "code": (
+        "напиши код",
+        "покажи код",
+    ),
+}
+
+def _quantum_representation_understanding(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    visual: dict | None = None,
+) -> dict:
+    """Semantic representation measurement using the existing shared encoder."""
+    declared: list[str] = []
+    aliases = {
+        "markdown": "text", "visual": "graph", "plot": "graph", "chart": "graph",
+        "line_chart": "graph", "function_plot": "graph", "data_table": "table",
+        "renderer_scene": "diagram", "image_generate": "image",
+    }
+    for source in (semantic, decision):
+        if not isinstance(source, dict):
+            continue
+        for key in (
+            "requested_outputs", "required_outputs", "required_representations",
+            "requested_representations", "candidate_representations",
+            "artifact_types", "render_types", "representations", "renderer_subtype",
+        ):
+            for value in _as_list(source.get(key)):
+                name = aliases.get(_s(value).lower(), _s(value).lower())
+                if name and name not in declared:
+                    declared.append(name)
+
+    scores: dict[str,float] = {}
+    source_name = "declared_semantic_evidence"
+    try:
+        from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
+        phrases=[]; kinds=[]
+        for kind, examples in REPRESENTATION_PROTOTYPES.items():
+            for phrase in examples:
+                phrases.append(phrase); kinds.append(kind)
+        sims=QUANTUM_EMBEDDING_ENGINE.similarities(text, phrases) or {}
+        for phrase, kind in zip(phrases, kinds):
+            scores[kind]=max(scores.get(kind,0.0), float(sims.get(phrase,0.0) or 0.0))
+        source_name="shared_quantum_embedding_prototypes"
+    except Exception:
+        pass
+
+    selected=list(declared)
+    if not selected and scores:
+        ranked=sorted(scores.items(), key=lambda x:x[1], reverse=True)
+        if ranked:
+            top_kind, top_score=ranked[0]
+            second_score=ranked[1][1] if len(ranked)>1 else 0.0
+            if top_score >= 0.45 and (top_score-second_score)>=0.025:
+                selected.append(top_kind)
+
+    visual_kinds=[]
+    if isinstance(visual,dict):
+        for key in ("requested_outputs","render_types","artifact_types","representations"):
+            for value in _as_list(visual.get(key)):
+                value=aliases.get(_s(value).lower(), _s(value).lower())
+                if value: visual_kinds.append(value)
+        r=_s(visual.get("renderer") or visual.get("renderer_subtype")).lower()
+        if r in {"graph","line_chart","chart","plot"}:
+            visual_kinds.append("graph")
+
+    return {
+        "version":"quantum_representation_understanding_v1",
+        "decision_owner":"QUANTUM_PROCESSOR",
+        "selected":list(dict.fromkeys(selected)),
+        "declared":list(dict.fromkeys(declared)),
+        "semantic_candidates":[
+            {"representation":k,"confidence":round(v,6)}
+            for k,v in sorted(scores.items(), key=lambda x:x[1], reverse=True)[:8]
+        ],
+        "scores":{k:round(v,6) for k,v in scores.items()},
+        "visual_evidence":list(dict.fromkeys(visual_kinds)),
+        "source":source_name,
+        "classification_mode":"semantic_prototype_embedding",
+        "lexical_triggers":False,
+        "provider_calls":0,
+    }
+
+def _requested_outputs(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    *,
+    memory_understanding: dict | None = None,
+    independent_turn: bool = False,
+) -> list[str]:
     """Collapse explicit semantic and structural evidence into one output plan."""
     constraints = _representation_constraints(semantic, cognition, decision)
     blocked = set(constraints["negative"])
@@ -1533,6 +1662,19 @@ def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dic
             add(src.get("requested_outputs"))
             add(src.get("required_outputs"))
     add(constraints["positive"])
+
+    rep = _as_dict(semantic.get("quantum_representation_understanding"))
+    for value in _as_list(rep.get("selected")):
+        add(value)
+    for value in _as_list(rep.get("visual_evidence")):
+        add(value)
+
+    mem = _as_dict(memory_understanding)
+    ref = _as_dict(mem.get("reference"))
+    if bool(ref.get("resolved")) and _s(ref.get("target_kind")).lower() == "render_block":
+        title = _s(ref.get("target")).lower()
+        if any(word in title for word in ("graph", "chart", "plot", "граф")):
+            add("graph")
     if not names:
         for src in (semantic, cognition, decision):
             if not isinstance(src, dict):
@@ -1907,6 +2049,7 @@ def _build_processor_control_plane(
         semantic,
         cognition,
         decision,
+        memory_understanding=memory_understanding,
         independent_turn=(mode == "INDEPENDENT"),
     )
     preferred, representation_state = _representation_consensus(
@@ -4255,6 +4398,20 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         semantic=semantic, cognition=cognition, text=text, state=state
     ) or {}
 
+    representation_understanding = _quantum_representation_understanding(
+        text=text,
+        semantic=semantic,
+        cognition=cognition,
+        decision={},
+        visual=visual,
+    )
+    semantic["quantum_representation_understanding"] = _quantum_snapshot(
+        representation_understanding
+    )
+    for rep in _as_list(representation_understanding.get("selected")):
+        if rep and rep not in _as_list(semantic.get("required_representations")):
+            semantic.setdefault("required_representations", []).append(rep)
+
     # -------------------------------------------------------------
     # FOUR NEW QUANTUM EVIDENCE LENSES
     # These do not own routing or memory. They only contribute compact,
@@ -4401,9 +4558,104 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             "scene_id": _s(_as_dict(memory_understanding.get("visual_context")).get("scene_id")),
         })
 
+
+    # Canonical synchronization: one context state feeds both dialogue and render
+    # metadata. The memory engine does not get vetoed by a stale legacy surface.
+    mu = _as_dict(memory_understanding)
+    mu_active = bool(mu.get("active"))
+    mu_cont = bool(mu.get("continuation"))
+    mu_ref = _as_dict(mu.get("reference"))
+    mu_resolved = bool(mu_ref.get("resolved"))
+    packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
+    vector = _as_dict(interpretation.get("dialogue_vector"))
+
+    if mu_active and (mu_cont or mu_resolved):
+        mu_ctx = _as_dict(mu.get("dialogue_context"))
+        mu_visual = _as_dict(mu.get("visual_context"))
+        scene_id = _s(mu_visual.get("scene_id"))
+        canonical_request = _s(mu.get("resolved_request")) or text
+        vector.update({
+            "relation": "CONTINUE_TOPIC",
+            "continuation": True,
+            "delta_mode": "extend",
+            "reference_resolution": {
+                "resolved": mu_resolved,
+                "target": _s(mu_ref.get("target")),
+                "confidence": float(mu_ref.get("confidence", 0.0) or 0.0),
+                "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+            },
+            "resolved_reference": _s(mu_ref.get("target")) if mu_resolved else "",
+            "resolved_request": canonical_request,
+            "previous_user_turn": _s(mu_ctx.get("previous_user")),
+            "previous_april_turn": _s(mu_ctx.get("previous_assistant")),
+        })
+        canonical_render = {
+            "relation": "CONTINUE_TOPIC",
+            "reuse_existing_scene": False,
+            "previous_scene_id": scene_id,
+            "previous_render_types": list(mu_visual.get("render_block_types") or []),
+            "avoid_repeat": True,
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+        }
+        interpretation["dialogue_vector"] = _quantum_snapshot(vector)
+        interpretation["resolved_reference"] = _s(mu_ref.get("target")) if mu_resolved else ""
+        interpretation["resolved_request"] = canonical_request
+        interpretation["render_continuity"] = _quantum_snapshot(canonical_render)
+        packet["dialogue_vector"] = _quantum_snapshot(vector)
+        packet["dialogue_contract"] = {
+            **_as_dict(packet.get("dialogue_contract")),
+            "continuation": True,
+            "reference_to_previous": mu_resolved,
+            "context_dependency": "reference" if mu_resolved else "continuation",
+            "previous_user_turn": _s(mu_ctx.get("previous_user")),
+            "previous_april_turn": _s(mu_ctx.get("previous_assistant")),
+            "active_topic": _s(mu_ref.get("target") or mu_ctx.get("active_topic")),
+            "resolved_request": canonical_request,
+            "resolved_scene": {"scene_id": scene_id, "relation": "current_scene"} if scene_id else {},
+        }
+        semantic["quantum_interpretation_evidence"] = _quantum_snapshot(packet)
+    else:
+        # Stale resolver output from an older failed answer must never contaminate
+        # a genuinely new topic. Keep the current request authoritative.
+        vector.update({
+            "relation": "NEW_TOPIC",
+            "continuation": False,
+            "delta_mode": "start",
+            "reference_resolution": {
+                "resolved": False,
+                "target": "",
+                "confidence": 0.0,
+                "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+            },
+            "resolved_reference": "",
+            "resolved_request": text,
+        })
+        interpretation["dialogue_vector"] = _quantum_snapshot(vector)
+        interpretation["resolved_reference"] = ""
+        interpretation["resolved_request"] = text
+        interpretation["render_continuity"] = _quantum_snapshot({
+            "relation": "NEW_TOPIC",
+            "reuse_existing_scene": False,
+            "previous_scene_id": "",
+            "previous_render_types": [],
+            "avoid_repeat": True,
+            "decision_owner": "QUANTUM_PROCESSOR",
+            "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
+        })
+        packet["dialogue_vector"] = _quantum_snapshot(vector)
+        packet["dialogue_contract"] = {
+            **_as_dict(packet.get("dialogue_contract")),
+            "continuation": False,
+            "reference_to_previous": False,
+            "context_dependency": "new_topic",
+            "resolved_request": text,
+            "resolved_scene": {},
+        }
+        semantic["quantum_interpretation_evidence"] = _quantum_snapshot(packet)
+
     # One authoritative control plane for dialogue, representation, memory relation,
-    # capability delegation, and single-route ownership. Individual engines remain
-    # evidence sources; downstream code consumes this collapsed state.
+    # capability delegation, and single-route ownership.
     control_plane = _build_processor_control_plane(
         text=text,
         semantic=semantic,
@@ -4413,6 +4665,31 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dynamic_memory=dynamic_memory,
         memory_understanding=memory_understanding,
     )
+
+    cp_scene = _as_dict(control_plane.get("resolved_scene"))
+    cp_mode = _s(control_plane.get("mode")).upper() or "INDEPENDENT"
+    cp_cont = bool(control_plane.get("continuation"))
+    cp_ref = bool(control_plane.get("reference_to_previous"))
+    cp_scene_id = _s(cp_scene.get("scene_id"))
+    canonical_render = {
+        "relation": (
+            "ARTIFACT_REFERENCE" if cp_ref and cp_mode == "ARTIFACT_REFERENCE"
+            else "CONTINUE_TOPIC" if cp_cont
+            else "NEW_TOPIC" if cp_mode == "NEW_TOPIC"
+            else "INDEPENDENT"
+        ),
+        "reuse_existing_scene": False,
+        "previous_scene_id": cp_scene_id if (cp_cont or cp_ref) else "",
+        "previous_render_types": list(
+            _as_dict(_as_dict(memory_understanding).get("visual_context")).get("render_block_types") or []
+        ) if (cp_cont or cp_ref) else [],
+        "avoid_repeat": True,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "source": "QUANTUM_CONTROL_PLANE",
+    }
+    semantic["render_continuity"] = _quantum_snapshot(canonical_render)
+    interpretation["render_continuity"] = _quantum_snapshot(canonical_render)
+    semantic["quantum_render_continuity"] = _quantum_snapshot(canonical_render)
     print("🧠 QUANTUM MEMORY MATRIX:", {
         "window": dynamic_memory.get("window_days"),
         "matches": len(dynamic_memory.get("matches", []) or []),
@@ -4486,13 +4763,13 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["semantic_decision_owner"] = "QUANTUM_PROCESSOR"
 
     request = _make_request(text, semantic, cognition, decision, state, visual, control=control_plane)
-    request.quantum_state["evidence_channels"] = 15
+    request.quantum_state["evidence_channels"] = 16
     request.quantum_state["evidence_field"] = quantum_field
     request_meta = _request_metadata(request)
     request_meta.update({
         "dynamic_memory_available": bool(dynamic_memory.get("matches")),
         "dynamic_memory_match_count": len(dynamic_memory.get("matches") or []),
-        "quantum_evidence_channels": 15,
+        "quantum_evidence_channels": 16,
         "quantum_evidence_field_version": PROCESSOR_VERSION,
         "provider_calls_per_request": 1,
         "single_route": True,
@@ -4514,6 +4791,29 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         ),
         "processor_context": processor_context,
         "memory_understanding": _quantum_snapshot(memory_understanding),
+        "representation_understanding": _quantum_snapshot(
+            semantic.get("quantum_representation_understanding", {})
+        ),
+        "context_sync": {
+            "mode": _s(control_plane.get("mode")),
+            "relation": _s(control_plane.get("relation")),
+            "continuation": bool(control_plane.get("continuation")),
+            "reference_to_previous": bool(control_plane.get("reference_to_previous")),
+            "resolved_scene_id": _s(
+                _as_dict(control_plane.get("resolved_scene")).get("scene_id")
+            ),
+            "dialogue_vector_relation": _s(
+                _as_dict(interpretation.get("dialogue_vector")).get("relation")
+            ),
+            "render_continuity_relation": _s(
+                _as_dict(semantic.get("render_continuity")).get("relation")
+            ),
+            "mismatch": _s(
+                _as_dict(interpretation.get("dialogue_vector")).get("relation")
+            ) != _s(
+                _as_dict(semantic.get("render_continuity")).get("relation")
+            ),
+        },
     })
     request.constraints["metadata"] = request_meta
 
@@ -4544,7 +4844,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     if any(output in blocked_outputs for output in requested_outputs):
         raise RuntimeError("Quantum release blocked: contradictory representation plan")
 
-    # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    # Final quantum release audit: 16 evidence lenses, one request, one provider.
     #
     # IMPORTANT:
     # The 64-signal budget field is owned by the MachineRequest created by
@@ -4559,9 +4859,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     if not isinstance(quantum_budget_field, dict):
         raise RuntimeError("Quantum release blocked: canonical 64-signal budget field missing")
 
-    # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    # Final quantum release audit: 16 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
-        "evidence_channels": 14,
+        "evidence_channels": 16,
         "decision_owner": "QUANTUM_PROCESSOR",
         "single_route": True,
         "provider_calls": 1,
@@ -4622,6 +4922,27 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "blocks": presentation_blocks,
         "signal_count": len(presentation_blocks),
         "payload_preserved": True,
+    }
+
+    request.constraints.setdefault("metadata", {})["structured_output_audit"] = {
+        "requested_outputs": list(getattr(request, "requested_outputs", []) or []),
+        "response_block_types": [
+            _s(block.get("type") or block.get("artifact_type")).lower()
+            for block in (getattr(response, "render_blocks", []) or [])
+            if isinstance(block, dict)
+        ],
+        "graph_requested": "graph" in list(getattr(request, "requested_outputs", []) or []),
+        "graph_present": any(
+            isinstance(block, dict)
+            and _s(block.get("type") or block.get("artifact_type")).lower() == "graph"
+            for block in (getattr(response, "render_blocks", []) or [])
+        ),
+        "structured_payload_preserved": any(
+            isinstance(block, dict)
+            and _s(block.get("type") or block.get("artifact_type")).lower() == "graph"
+            and bool(_canonical_block_payload(block))
+            for block in (getattr(response, "render_blocks", []) or [])
+        ),
     }
 
     request.constraints.setdefault("metadata", {})["visible_answer_audit"] = {
