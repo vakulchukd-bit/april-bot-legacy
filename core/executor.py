@@ -10,7 +10,7 @@ work to the existing specialized engines.
 
 Architecture
 ------------
-INGEST -> MEASURE -> DELEGATE -> FEEDBACK -> COLLAPSE -> EXECUTE -> RELEASE
+INGEST -> MEASURE -> DELEGATE -> FEEDBACK -> COLLAPSE -> EXECUTE -> WEB RELEASE
 
 Macro matrix
 ------------
@@ -82,7 +82,7 @@ from blocks.energy_manager import (
 from blocks.april_personality import APRIL_IDENTITY
 
 
-PROCESSOR_VERSION = "quant_test1_macro_quantum_matrix_16x16_v1"
+PROCESSOR_VERSION = "quant_test2_macro_quantum_matrix_16x16_web_canonical_v2"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -211,7 +211,7 @@ def _request_id(user_id: str, text: str) -> str:
 def _user_scope(state: dict[str, Any], user_id: str) -> dict[str, Any]:
     uid = _s(user_id)
     if not uid:
-        raise RuntimeError("Quant Test 1: user_id is required")
+        raise RuntimeError("Quant Test 2: user_id is required")
     conversation_id = _s(state.get("conversation_id"))
     if not conversation_id:
         conversation_id = f"april-{hashlib.sha256(uid.encode('utf-8')).hexdigest()[:24]}"
@@ -234,9 +234,9 @@ def _new_signal(
     payload: dict[str, Any],
 ) -> QuantumSignal:
     if domain not in MACRO_DOMAINS:
-        raise RuntimeError(f"Quant Test 1: unknown macro domain: {domain}")
+        raise RuntimeError(f"Quant Test 2: unknown macro domain: {domain}")
     if lane not in PROCESS_LANES:
-        raise RuntimeError(f"Quant Test 1: unknown process lane: {lane}")
+        raise RuntimeError(f"Quant Test 2: unknown process lane: {lane}")
     return QuantumSignal(
         signal_id=f"{request_id}:{domain}:{lane}",
         domain=domain,
@@ -360,11 +360,140 @@ def _continuity_measurement(
     }
 
 
+def _canonical_block_payload(block: dict[str, Any]) -> dict[str, Any]:
+    source = _as_dict(block)
+    payload = source.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    artifact = source.get("artifact")
+    if isinstance(artifact, dict):
+        nested = artifact.get("payload")
+        if isinstance(nested, dict):
+            return nested
+        return artifact
+    return {}
+
+def _presentation_signal(block: dict[str, Any]) -> dict[str, Any]:
+    """Attach the Web-facing presentation contract without creating a route."""
+    source = _as_dict(block)
+    raw_kind = _s(
+        source.get("type")
+        or source.get("artifact_type")
+        or source.get("representation")
+        or "text"
+    ).lower()
+    aliases = {
+        "markdown": "text",
+        "plot": "graph",
+        "chart": "graph",
+        "line_chart": "graph",
+        "scene": "diagram",
+    }
+    kind = aliases.get(raw_kind, raw_kind)
+
+    renderer_map = {
+        "text": ("mcdowell", "presentation_matrix"),
+        "formula": ("mcdowell", "katex"),
+        "table": ("table", "table"),
+        "graph": ("graph", "graph"),
+        "diagram": ("graph", "diagram"),
+        "link": ("link", "link_card"),
+        "code": ("code", "syntax"),
+        "gallery": ("gallery", "media"),
+        "image": ("gallery", "media"),
+        "audio": ("audio", "media"),
+        "video": ("video", "media"),
+        "file": ("file", "file_card"),
+        "action": ("action", "action"),
+        "memory": ("memory", "memory"),
+    }
+    renderer, engine = renderer_map.get(kind, ("mcdowell", "markdown"))
+
+    payload = _snapshot(_canonical_block_payload(source))
+    signal = {
+        "version": "presentation_signal_v5",
+        "kind": kind,
+        "renderer": renderer,
+        "engine": engine,
+        "producer": "QUANTUM_PROCESSOR",
+        "route": "canonical",
+        "preserve_payload": True,
+        "payload_unchanged": True,
+        "payload_contract": {
+            "kind": kind,
+            "payload": payload,
+            "payload_preserved": True,
+        },
+        "block_id": _s(source.get("block_id")),
+        "sequence_index": int(source.get("sequence_index") or 0),
+        "related_block_ids": list(source.get("related_block_ids") or []),
+    }
+    meta = source.get("metadata")
+    if isinstance(meta, dict):
+        for key in ("continuation", "topic_group", "flow_id", "render_id", "scene_id", "turn_id"):
+            value = source.get(key) or meta.get(key)
+            if value not in (None, ""):
+                signal[key] = _snapshot(value)
+
+    if kind == "text":
+        signal.update({
+            "text_engine": "mcdowell",
+            "formula_engine": "katex",
+            "layout": "mcdowell_document",
+        })
+    elif kind == "graph":
+        signal.update({
+            "label_text_engine": "mcdowell",
+            "label_math_engine": "katex",
+            "axis_text_engine": "mcdowell",
+            "axis_math_engine": "katex",
+            "layout": "graph_document",
+        })
+    elif kind == "table":
+        signal.update({
+            "cell_text_engine": "mcdowell",
+            "cell_math_engine": "katex",
+            "layout": "table_document",
+        })
+    return signal
+
+def _attach_web_presentation(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make the existing render blocks directly consumable by April Web."""
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(blocks):
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"Quant Test 2: non-object render block at index {index}"
+            )
+        block = deepcopy(raw)
+        block.setdefault("sequence_index", index)
+        if not _s(block.get("block_id")):
+            block["block_id"] = f"quant2-block-{index}"
+        block["presentation"] = _presentation_signal(block)
+        result.append(block)
+
+    ids = [block["block_id"] for block in result]
+    for index, block in enumerate(result):
+        related = list(block.get("related_block_ids") or [])
+        for neighbor in (index - 1, index + 1):
+            if 0 <= neighbor < len(ids) and ids[neighbor] not in related:
+                related.append(ids[neighbor])
+        block["related_block_ids"] = related
+        block["presentation"]["related_block_ids"] = related
+        block["presentation"]["stream"] = {
+            "version": "quantum_presentation_stream_v3",
+            "stream_ids": ids,
+            "source_block_id": block["block_id"],
+            "sequence_index": index,
+            "single_visible_stream": True,
+        }
+    return result
+
 def _materialize_response(value: Any) -> MachineResponse:
     if isinstance(value, MachineResponse):
         return value
     if not isinstance(value, dict):
-        raise RuntimeError("Quant Test 1: Provider returned a non-object response")
+        raise RuntimeError("Quant Test 2: Provider returned a non-object response")
 
     payload = dict(value)
     answer = _s(
@@ -374,7 +503,7 @@ def _materialize_response(value: Any) -> MachineResponse:
         or payload.get("text")
     )
     if not answer:
-        raise RuntimeError("Quant Test 1: Provider response has no answer")
+        raise RuntimeError("Quant Test 2: Provider response has no answer")
 
     render_blocks = []
     raw_blocks = _as_list(payload.get("render_blocks") or payload.get("blocks"))
@@ -383,7 +512,9 @@ def _materialize_response(value: Any) -> MachineResponse:
             render_blocks.append(deepcopy(block))
 
     if not render_blocks:
-        raise RuntimeError("Quant Test 1: Provider response has no canonical render_blocks")
+        raise RuntimeError("Quant Test 2: Provider response has no canonical render_blocks")
+
+    render_blocks = _attach_web_presentation(render_blocks)
 
     fields = MachineResponse.__dataclass_fields__
     allowed = {k: v for k, v in payload.items() if k in fields}
@@ -477,13 +608,13 @@ async def execute(
     uid = _s(user_id)
     request_text = _s(text)
     if not uid:
-        raise RuntimeError("Quant Test 1: user_id missing")
+        raise RuntimeError("Quant Test 2: user_id missing")
     if not request_text:
-        raise RuntimeError("Quant Test 1: empty request")
+        raise RuntimeError("Quant Test 2: empty request")
 
     state = get_state(uid)
     if not isinstance(state, dict):
-        raise RuntimeError("Quant Test 1: state manager returned invalid state")
+        raise RuntimeError("Quant Test 2: state manager returned invalid state")
     state["user_id"] = uid
     state["_request_user_id"] = uid
     scope = _user_scope(state, uid)
@@ -544,7 +675,7 @@ async def execute(
         state=state,
     )
     if not isinstance(interpretation, dict):
-        raise RuntimeError("Quant Test 1: interpretation engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: interpretation engine returned invalid packet")
 
     reasoning = build_reasoning_state(
         text=request_text,
@@ -561,7 +692,7 @@ async def execute(
         interpreted=interpretation,
     )
     if not isinstance(semantic, dict):
-        raise RuntimeError("Quant Test 1: semantic engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: semantic engine returned invalid packet")
 
     cognition = analyze_cognition(
         text=request_text,
@@ -570,21 +701,21 @@ async def execute(
         state=state,
     )
     if not isinstance(cognition, dict):
-        raise RuntimeError("Quant Test 1: cognition engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: cognition engine returned invalid packet")
 
     intent = detect_intent(request_text, state)
     if not isinstance(intent, dict):
-        raise RuntimeError("Quant Test 1: intent engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: intent engine returned invalid packet")
     intent_ai = await detect_intent_ai(request_text, state)
     if not isinstance(intent_ai, dict):
-        raise RuntimeError("Quant Test 1: intent_ai must return an object")
+        raise RuntimeError("Quant Test 2: intent_ai must return an object")
 
     resolver = resolve_input(history, state)
     if not isinstance(resolver, dict):
-        raise RuntimeError("Quant Test 1: resolver returned invalid packet")
+        raise RuntimeError("Quant Test 2: resolver returned invalid packet")
     focus_intent = build_focus_intent_state(request_text, state)
     if not isinstance(focus_intent, dict):
-        raise RuntimeError("Quant Test 1: focus intent engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: focus intent engine returned invalid packet")
 
     router_context = {
         "semantic": semantic,
@@ -601,12 +732,36 @@ async def execute(
             "resolver": resolver,
         },
     }
+    # route_request() is an evidence producer in April, not a second routing
+    # authority. In the established executor contract it may return a transport
+    # compatibility hint while the canonical router evidence is written into
+    # semantic["quantum_router_evidence"]. Requiring its direct return value to
+    # be a dict caused Quant Test 1 to abort before reaching the Provider.
     router_hint = await route_request(request_text, router_context)
-    if not isinstance(router_hint, dict):
-        raise RuntimeError("Quant Test 1: router engine returned invalid packet")
+    router_evidence = semantic.get("quantum_router_evidence")
+    if not isinstance(router_evidence, dict):
+        router_evidence = {}
+
+    if not isinstance(router_hint, dict) and not router_evidence:
+        raise RuntimeError(
+            "Quant Test 2: router produced neither a compatibility hint nor "
+            "canonical semantic router evidence"
+        )
+
+    router_packet = {
+        "engine": "router",
+        "packet_state": "CANONICAL_SEMANTIC_FIELD"
+        if router_evidence
+        else "COMPATIBILITY_HINT",
+        "compatibility_hint": _snapshot(router_hint) if router_hint is not None else None,
+        "evidence": _snapshot(router_evidence),
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "single_route": True,
+    }
+
     router_system = decide_action(request_text, history)
     if not isinstance(router_system, dict):
-        raise RuntimeError("Quant Test 1: router_system returned invalid packet")
+        raise RuntimeError("Quant Test 2: router_system returned invalid packet")
 
     visual = build_visual_reference(
         semantic=semantic,
@@ -615,18 +770,18 @@ async def execute(
         state=state,
     )
     if not isinstance(visual, dict):
-        raise RuntimeError("Quant Test 1: visual reference engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: visual reference engine returned invalid packet")
 
     experience = build_experience_evidence(
         text=request_text,
         state=state,
     )
     if not isinstance(experience, dict):
-        raise RuntimeError("Quant Test 1: experience engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: experience engine returned invalid packet")
 
     experience_state = get_experience(uid)
     if not isinstance(experience_state, dict):
-        raise RuntimeError("Quant Test 1: experience manager returned invalid packet")
+        raise RuntimeError("Quant Test 2: experience manager returned invalid packet")
     experience_manager = {
         "user_id": _s(experience_state.get("user_id") or uid),
         "latest": _snapshot(experience_state.get("latest", {})),
@@ -641,7 +796,7 @@ async def execute(
         semantic=semantic,
     )
     if not isinstance(goal, dict):
-        raise RuntimeError("Quant Test 1: goal engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: goal engine returned invalid packet")
 
     decision = build_response_decision(
         semantic=semantic,
@@ -650,7 +805,7 @@ async def execute(
         visual_reference=visual,
     )
     if not isinstance(decision, dict):
-        raise RuntimeError("Quant Test 1: response decision engine returned invalid packet")
+        raise RuntimeError("Quant Test 2: response decision engine returned invalid packet")
 
     dynamic_memory = query_dynamic_memory(
         uid,
@@ -663,7 +818,7 @@ async def execute(
         ),
     )
     if not isinstance(dynamic_memory, dict):
-        raise RuntimeError("Quant Test 1: dynamic memory returned invalid packet")
+        raise RuntimeError("Quant Test 2: dynamic memory returned invalid packet")
 
     continuity = _continuity_measurement(
         request_text,
@@ -679,7 +834,10 @@ async def execute(
         "intent": intent,
         "intent_ai": intent_ai,
         "resolver": {**resolver, "focus": focus_intent},
-        "routing": {"router": router_hint, "router_system": router_system},
+        "routing": {
+            "router": router_packet,
+            "router_system": router_system,
+        },
         "visual": visual,
         "memory": dynamic_memory,
         "experience": experience,
@@ -765,7 +923,7 @@ async def execute(
     missing = sorted(domain for domain in required_domains if domain not in engine_outputs)
     if missing:
         raise RuntimeError(
-            "Quant Test 1: feedback incomplete; missing evidence domains: "
+            "Quant Test 2: feedback incomplete; missing evidence domains: "
             + ", ".join(missing)
         )
 
@@ -775,7 +933,7 @@ async def execute(
     if continuity["mode"] == "ARTIFACT_REFERENCE" and not continuity["reference_to_previous"]:
         contradiction_count += 1
     if contradiction_count:
-        raise RuntimeError("Quant Test 1: dialogue feedback contradiction")
+        raise RuntimeError("Quant Test 2: dialogue feedback contradiction")
 
     feedback = {
         "evidence_domains": sorted(engine_outputs),
@@ -1065,7 +1223,7 @@ async def execute(
     request = apply_quantum_acceleration(request, energy_profile)
     acceleration_check = validate_quantum_acceleration(request, energy_profile)
     if not acceleration_check.get("ok"):
-        raise RuntimeError("Quant Test 1: energy acceleration invariant failed")
+        raise RuntimeError("Quant Test 2: energy acceleration invariant failed")
 
     _validate_request(request)
 
@@ -1081,7 +1239,7 @@ async def execute(
     response = _materialize_response(provider_result)
 
     if not response.answer and not response.content:
-        raise RuntimeError("Quant Test 1: empty Provider response")
+        raise RuntimeError("Quant Test 2: empty Provider response")
 
     trace.stages.append("ARTIFACT_CONTRACT")
 
@@ -1106,7 +1264,7 @@ async def execute(
 
     answer = _s(response.answer or response.content)
     if not answer:
-        raise RuntimeError("Quant Test 1: canonical answer release failed")
+        raise RuntimeError("Quant Test 2: canonical answer release failed")
 
     try:
         contract.answer = answer
@@ -1116,7 +1274,7 @@ async def execute(
         contract.blocks = list(getattr(response, "render_blocks", []) or [])
     except Exception as exc:
         raise RuntimeError(
-            "Quant Test 1: SceneContract canonical field assignment failed"
+            "Quant Test 2: SceneContract canonical field assignment failed"
         ) from exc
 
     trace.release = {
@@ -1172,31 +1330,38 @@ async def execute(
         "quantum_trace": _snapshot(asdict(trace)),
         "quantum_macro_matrix": _snapshot(matrix),
         "processor_version": PROCESSOR_VERSION,
+        "canonical_route": "/api/v1/chat",
+        "web_release": {
+            "scene_contract": True,
+            "render_blocks_canonical": True,
+            "presentation_signals_attached": True,
+            "decision_owner": "QUANTUM_PROCESSOR",
+        },
     }
 
 
 def _validate_request(request: MachineRequest) -> None:
     constraints = _as_dict(getattr(request, "constraints", {}))
     if constraints.get("one_provider_call") is not True:
-        raise RuntimeError("Quant Test 1: one_provider_call invariant failed")
+        raise RuntimeError("Quant Test 2: one_provider_call invariant failed")
     if constraints.get("provider_input_token_budget") != 900:
-        raise RuntimeError("Quant Test 1: provider input budget invariant failed")
+        raise RuntimeError("Quant Test 2: provider input budget invariant failed")
     if getattr(request, "provider_calls_allowed", 1) != 1:
-        raise RuntimeError("Quant Test 1: provider call count invariant failed")
+        raise RuntimeError("Quant Test 2: provider call count invariant failed")
     if getattr(request, "single_route", True) is not True:
-        raise RuntimeError("Quant Test 1: single route invariant failed")
+        raise RuntimeError("Quant Test 2: single route invariant failed")
     budget = getattr(request, "response_output_tokens", 0)
     if not isinstance(budget, int):
-        raise RuntimeError("Quant Test 1: response budget is not integer")
+        raise RuntimeError("Quant Test 2: response budget is not integer")
     if not OUTPUT_MIN_TOKENS <= budget <= OUTPUT_MAX_TOKENS:
-        raise RuntimeError("Quant Test 1: response budget range invariant failed")
+        raise RuntimeError("Quant Test 2: response budget range invariant failed")
     matrix = _as_dict(constraints.get("macro_matrix"))
     if matrix.get("signal_cells") != MACRO_SIGNAL_COUNT:
-        raise RuntimeError("Quant Test 1: macro matrix invariant failed")
+        raise RuntimeError("Quant Test 2: macro matrix invariant failed")
     metadata = _as_dict(constraints.get("metadata"))
     identity_scope = _as_dict(metadata.get("identity_scope"))
     if not identity_scope.get("user_id"):
-        raise RuntimeError("Quant Test 1: identity scope invariant failed")
+        raise RuntimeError("Quant Test 2: identity scope invariant failed")
 
 
 __all__ = [
