@@ -82,10 +82,11 @@ from blocks.energy_manager import (
 from blocks.april_personality import APRIL_IDENTITY
 
 
-PROCESSOR_VERSION = "quant_test2_macro_quantum_matrix_16x16_web_canonical_v2"
+PROCESSOR_VERSION = "eureka_macro_quantum_matrix_16x16_web_canonical_v3"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
-OUTPUT_MIN_TOKENS = 1
+OUTPUT_MIN_TOKENS = 16
+PROVIDER_API_MIN_OUTPUT_TOKENS = 16
 OUTPUT_MAX_TOKENS = 8000
 
 MACRO_DOMAINS = (
@@ -211,7 +212,7 @@ def _request_id(user_id: str, text: str) -> str:
 def _user_scope(state: dict[str, Any], user_id: str) -> dict[str, Any]:
     uid = _s(user_id)
     if not uid:
-        raise RuntimeError("Quant Test 2: user_id is required")
+        raise RuntimeError("EUREKA: user_id is required")
     conversation_id = _s(state.get("conversation_id"))
     if not conversation_id:
         conversation_id = f"april-{hashlib.sha256(uid.encode('utf-8')).hexdigest()[:24]}"
@@ -234,9 +235,9 @@ def _new_signal(
     payload: dict[str, Any],
 ) -> QuantumSignal:
     if domain not in MACRO_DOMAINS:
-        raise RuntimeError(f"Quant Test 2: unknown macro domain: {domain}")
+        raise RuntimeError(f"EUREKA: unknown macro domain: {domain}")
     if lane not in PROCESS_LANES:
-        raise RuntimeError(f"Quant Test 2: unknown process lane: {lane}")
+        raise RuntimeError(f"EUREKA: unknown process lane: {lane}")
     return QuantumSignal(
         signal_id=f"{request_id}:{domain}:{lane}",
         domain=domain,
@@ -463,7 +464,7 @@ def _attach_web_presentation(blocks: list[dict[str, Any]]) -> list[dict[str, Any
     for index, raw in enumerate(blocks):
         if not isinstance(raw, dict):
             raise RuntimeError(
-                f"Quant Test 2: non-object render block at index {index}"
+                f"EUREKA: non-object render block at index {index}"
             )
         block = deepcopy(raw)
         block.setdefault("sequence_index", index)
@@ -493,7 +494,7 @@ def _materialize_response(value: Any) -> MachineResponse:
     if isinstance(value, MachineResponse):
         return value
     if not isinstance(value, dict):
-        raise RuntimeError("Quant Test 2: Provider returned a non-object response")
+        raise RuntimeError("EUREKA: Provider returned a non-object response")
 
     payload = dict(value)
     answer = _s(
@@ -503,7 +504,7 @@ def _materialize_response(value: Any) -> MachineResponse:
         or payload.get("text")
     )
     if not answer:
-        raise RuntimeError("Quant Test 2: Provider response has no answer")
+        raise RuntimeError("EUREKA: Provider response has no answer")
 
     render_blocks = []
     raw_blocks = _as_list(payload.get("render_blocks") or payload.get("blocks"))
@@ -512,7 +513,7 @@ def _materialize_response(value: Any) -> MachineResponse:
             render_blocks.append(deepcopy(block))
 
     if not render_blocks:
-        raise RuntimeError("Quant Test 2: Provider response has no canonical render_blocks")
+        raise RuntimeError("EUREKA: Provider response has no canonical render_blocks")
 
     render_blocks = _attach_web_presentation(render_blocks)
 
@@ -600,6 +601,7 @@ async def execute(
 ):
     """
     Single public route.
+    WEB_ROUTE = /api/v1/chat -> this processor -> one Provider -> SceneContract.
 
     The processor itself owns the macro-matrix lifecycle. Existing April engines
     are invoked as specialized evidence producers. The final Provider and
@@ -608,13 +610,13 @@ async def execute(
     uid = _s(user_id)
     request_text = _s(text)
     if not uid:
-        raise RuntimeError("Quant Test 2: user_id missing")
+        raise RuntimeError("EUREKA: user_id missing")
     if not request_text:
-        raise RuntimeError("Quant Test 2: empty request")
+        raise RuntimeError("EUREKA: empty request")
 
     state = get_state(uid)
     if not isinstance(state, dict):
-        raise RuntimeError("Quant Test 2: state manager returned invalid state")
+        raise RuntimeError("EUREKA: state manager returned invalid state")
     state["user_id"] = uid
     state["_request_user_id"] = uid
     scope = _user_scope(state, uid)
@@ -675,7 +677,7 @@ async def execute(
         state=state,
     )
     if not isinstance(interpretation, dict):
-        raise RuntimeError("Quant Test 2: interpretation engine returned invalid packet")
+        raise RuntimeError("EUREKA: interpretation engine returned invalid packet")
 
     reasoning = build_reasoning_state(
         text=request_text,
@@ -692,7 +694,7 @@ async def execute(
         interpreted=interpretation,
     )
     if not isinstance(semantic, dict):
-        raise RuntimeError("Quant Test 2: semantic engine returned invalid packet")
+        raise RuntimeError("EUREKA: semantic engine returned invalid packet")
 
     cognition = analyze_cognition(
         text=request_text,
@@ -701,21 +703,21 @@ async def execute(
         state=state,
     )
     if not isinstance(cognition, dict):
-        raise RuntimeError("Quant Test 2: cognition engine returned invalid packet")
+        raise RuntimeError("EUREKA: cognition engine returned invalid packet")
 
     intent = detect_intent(request_text, state)
     if not isinstance(intent, dict):
-        raise RuntimeError("Quant Test 2: intent engine returned invalid packet")
+        raise RuntimeError("EUREKA: intent engine returned invalid packet")
     intent_ai = await detect_intent_ai(request_text, state)
     if not isinstance(intent_ai, dict):
-        raise RuntimeError("Quant Test 2: intent_ai must return an object")
+        raise RuntimeError("EUREKA: intent_ai must return an object")
 
     resolver = resolve_input(history, state)
     if not isinstance(resolver, dict):
-        raise RuntimeError("Quant Test 2: resolver returned invalid packet")
+        raise RuntimeError("EUREKA: resolver returned invalid packet")
     focus_intent = build_focus_intent_state(request_text, state)
     if not isinstance(focus_intent, dict):
-        raise RuntimeError("Quant Test 2: focus intent engine returned invalid packet")
+        raise RuntimeError("EUREKA: focus intent engine returned invalid packet")
 
     router_context = {
         "semantic": semantic,
@@ -744,7 +746,7 @@ async def execute(
 
     if not isinstance(router_hint, dict) and not router_evidence:
         raise RuntimeError(
-            "Quant Test 2: router produced neither a compatibility hint nor "
+            "EUREKA: router produced neither a compatibility hint nor "
             "canonical semantic router evidence"
         )
 
@@ -761,7 +763,7 @@ async def execute(
 
     router_system = decide_action(request_text, history)
     if not isinstance(router_system, dict):
-        raise RuntimeError("Quant Test 2: router_system returned invalid packet")
+        raise RuntimeError("EUREKA: router_system returned invalid packet")
 
     visual = build_visual_reference(
         semantic=semantic,
@@ -770,18 +772,18 @@ async def execute(
         state=state,
     )
     if not isinstance(visual, dict):
-        raise RuntimeError("Quant Test 2: visual reference engine returned invalid packet")
+        raise RuntimeError("EUREKA: visual reference engine returned invalid packet")
 
     experience = build_experience_evidence(
         text=request_text,
         state=state,
     )
     if not isinstance(experience, dict):
-        raise RuntimeError("Quant Test 2: experience engine returned invalid packet")
+        raise RuntimeError("EUREKA: experience engine returned invalid packet")
 
     experience_state = get_experience(uid)
     if not isinstance(experience_state, dict):
-        raise RuntimeError("Quant Test 2: experience manager returned invalid packet")
+        raise RuntimeError("EUREKA: experience manager returned invalid packet")
     experience_manager = {
         "user_id": _s(experience_state.get("user_id") or uid),
         "latest": _snapshot(experience_state.get("latest", {})),
@@ -796,7 +798,7 @@ async def execute(
         semantic=semantic,
     )
     if not isinstance(goal, dict):
-        raise RuntimeError("Quant Test 2: goal engine returned invalid packet")
+        raise RuntimeError("EUREKA: goal engine returned invalid packet")
 
     decision = build_response_decision(
         semantic=semantic,
@@ -805,7 +807,7 @@ async def execute(
         visual_reference=visual,
     )
     if not isinstance(decision, dict):
-        raise RuntimeError("Quant Test 2: response decision engine returned invalid packet")
+        raise RuntimeError("EUREKA: response decision engine returned invalid packet")
 
     dynamic_memory = query_dynamic_memory(
         uid,
@@ -818,7 +820,7 @@ async def execute(
         ),
     )
     if not isinstance(dynamic_memory, dict):
-        raise RuntimeError("Quant Test 2: dynamic memory returned invalid packet")
+        raise RuntimeError("EUREKA: dynamic memory returned invalid packet")
 
     continuity = _continuity_measurement(
         request_text,
@@ -923,7 +925,7 @@ async def execute(
     missing = sorted(domain for domain in required_domains if domain not in engine_outputs)
     if missing:
         raise RuntimeError(
-            "Quant Test 2: feedback incomplete; missing evidence domains: "
+            "EUREKA: feedback incomplete; missing evidence domains: "
             + ", ".join(missing)
         )
 
@@ -933,7 +935,7 @@ async def execute(
     if continuity["mode"] == "ARTIFACT_REFERENCE" and not continuity["reference_to_previous"]:
         contradiction_count += 1
     if contradiction_count:
-        raise RuntimeError("Quant Test 2: dialogue feedback contradiction")
+        raise RuntimeError("EUREKA: dialogue feedback contradiction")
 
     feedback = {
         "evidence_domains": sorted(engine_outputs),
@@ -1223,8 +1225,11 @@ async def execute(
     request = apply_quantum_acceleration(request, energy_profile)
     acceleration_check = validate_quantum_acceleration(request, energy_profile)
     if not acceleration_check.get("ok"):
-        raise RuntimeError("Quant Test 2: energy acceleration invariant failed")
+        raise RuntimeError("EUREKA: energy acceleration invariant failed")
 
+    # Provider/API transport has a hard minimum. Seal the processor's final
+    # adaptive budget here, after all internal acceleration mutations.
+    _seal_provider_budget(request)
     _validate_request(request)
 
     trace.stages.append("PROVIDER")
@@ -1239,7 +1244,7 @@ async def execute(
     response = _materialize_response(provider_result)
 
     if not response.answer and not response.content:
-        raise RuntimeError("Quant Test 2: empty Provider response")
+        raise RuntimeError("EUREKA: empty Provider response")
 
     trace.stages.append("ARTIFACT_CONTRACT")
 
@@ -1264,7 +1269,7 @@ async def execute(
 
     answer = _s(response.answer or response.content)
     if not answer:
-        raise RuntimeError("Quant Test 2: canonical answer release failed")
+        raise RuntimeError("EUREKA: canonical answer release failed")
 
     try:
         contract.answer = answer
@@ -1274,7 +1279,7 @@ async def execute(
         contract.blocks = list(getattr(response, "render_blocks", []) or [])
     except Exception as exc:
         raise RuntimeError(
-            "Quant Test 2: SceneContract canonical field assignment failed"
+            "EUREKA: SceneContract canonical field assignment failed"
         ) from exc
 
     trace.release = {
@@ -1340,28 +1345,75 @@ async def execute(
     }
 
 
+def _seal_provider_budget(request: MachineRequest) -> int:
+    """
+    Seal the final Provider output budget to the actual Responses API contract.
+
+    This is not a fallback and does not create a second route. It is a hard
+    transport invariant: a request below the Provider API minimum is invalid.
+    The Quantum Processor therefore emits at least the contractual minimum
+    before the single canonical Provider call.
+    """
+    raw = getattr(request, "response_output_tokens", None)
+    if not isinstance(raw, int):
+        raise RuntimeError("EUREKA: processor produced a non-integer Provider budget")
+    sealed = max(PROVIDER_API_MIN_OUTPUT_TOKENS, min(int(raw), OUTPUT_MAX_TOKENS))
+    request.response_output_tokens = sealed
+    request.max_output_tokens = sealed
+
+    constraints = _as_dict(getattr(request, "constraints", {}))
+    metadata = _as_dict(constraints.get("metadata"))
+    metadata["response_budget"] = sealed
+    metadata["provider_api_min_output_tokens"] = PROVIDER_API_MIN_OUTPUT_TOKENS
+    metadata["budget_sealed_by"] = "QUANTUM_PROCESSOR"
+    constraints["metadata"] = metadata
+
+    qstate = _as_dict(getattr(request, "quantum_state", {}))
+    qstate["response_budget"] = sealed
+    qstate["response_budget_min"] = PROVIDER_API_MIN_OUTPUT_TOKENS
+    qstate["response_budget_sealed"] = True
+    qstate["provider_api_min_output_tokens"] = PROVIDER_API_MIN_OUTPUT_TOKENS
+
+    constraints["provider_budget_contract"] = {
+        "minimum": PROVIDER_API_MIN_OUTPUT_TOKENS,
+        "maximum": OUTPUT_MAX_TOKENS,
+        "effective": sealed,
+        "owner": "QUANTUM_PROCESSOR",
+        "canonical": True,
+    }
+
+    request.constraints = constraints
+    request.quantum_state = qstate
+    return sealed
+
+
 def _validate_request(request: MachineRequest) -> None:
     constraints = _as_dict(getattr(request, "constraints", {}))
     if constraints.get("one_provider_call") is not True:
-        raise RuntimeError("Quant Test 2: one_provider_call invariant failed")
+        raise RuntimeError("EUREKA: one_provider_call invariant failed")
     if constraints.get("provider_input_token_budget") != 900:
-        raise RuntimeError("Quant Test 2: provider input budget invariant failed")
+        raise RuntimeError("EUREKA: provider input budget invariant failed")
     if getattr(request, "provider_calls_allowed", 1) != 1:
-        raise RuntimeError("Quant Test 2: provider call count invariant failed")
+        raise RuntimeError("EUREKA: provider call count invariant failed")
     if getattr(request, "single_route", True) is not True:
-        raise RuntimeError("Quant Test 2: single route invariant failed")
+        raise RuntimeError("EUREKA: single route invariant failed")
     budget = getattr(request, "response_output_tokens", 0)
     if not isinstance(budget, int):
-        raise RuntimeError("Quant Test 2: response budget is not integer")
-    if not OUTPUT_MIN_TOKENS <= budget <= OUTPUT_MAX_TOKENS:
-        raise RuntimeError("Quant Test 2: response budget range invariant failed")
+        raise RuntimeError("EUREKA: response budget is not integer")
+    if not PROVIDER_API_MIN_OUTPUT_TOKENS <= budget <= OUTPUT_MAX_TOKENS:
+        raise RuntimeError("EUREKA: response budget range invariant failed")
+    if getattr(request, "max_output_tokens", None) != budget:
+        raise RuntimeError("EUREKA: max_output_tokens diverges from sealed budget")
+    metadata = _as_dict(constraints.get("metadata"))
+    if metadata.get("response_budget") != budget:
+        raise RuntimeError("EUREKA: metadata response budget diverges from sealed budget")
     matrix = _as_dict(constraints.get("macro_matrix"))
     if matrix.get("signal_cells") != MACRO_SIGNAL_COUNT:
-        raise RuntimeError("Quant Test 2: macro matrix invariant failed")
+        raise RuntimeError("EUREKA: macro matrix invariant failed")
     metadata = _as_dict(constraints.get("metadata"))
     identity_scope = _as_dict(metadata.get("identity_scope"))
     if not identity_scope.get("user_id"):
-        raise RuntimeError("Quant Test 2: identity scope invariant failed")
+        raise RuntimeError("EUREKA: identity scope invariant failed")
 
 
 __all__ = [
@@ -1369,6 +1421,7 @@ __all__ = [
     "MACRO_DOMAINS",
     "PROCESS_LANES",
     "MACRO_SIGNAL_COUNT",
+    "PROVIDER_API_MIN_OUTPUT_TOKENS",
     "QuantumSignal",
     "QuantumTask",
     "QuantumTrace",
