@@ -1046,8 +1046,7 @@ def voice_chat():
 
         print("=" * 80)
         print("🎤 VOICE REQUEST RECEIVED")
-        print("VOICE FILE:", voice_file.filename or "voice.webm")
-        print("VOICE SAVED:", temp_path)
+        print("VOICE INPUT RECEIVED", flush=True)
 
         language = str(
             request.form.get("language") or "en"
@@ -1081,7 +1080,7 @@ def voice_chat():
                 "language": language,
             }), 422
 
-        print("TRANSCRIPT:", transcript)
+        print("🎤 VOICE TRANSCRIPTION COMPLETE", flush=True)
         print("🎤 VOICE ROUTE: transcript_only -> /api/v1/chat", flush=True)
 
         flow_id = None
@@ -1182,7 +1181,7 @@ def image_chat():
         )
 
         temp_path = (
-            f"image_{user_id}_{int(time.time()*1000)}.jpg"
+            f"image_{hashlib.sha256(user_id.encode('utf-8')).hexdigest()[:16]}_{int(time.time()*1000)}.jpg"
         )
 
         image_file.save(
@@ -1206,13 +1205,18 @@ def image_chat():
             user_id
         )
 
-        result = asyncio.run(
-
-            analyze_image(
-                temp_path,
-                state=user_state
+        try:
+            result = asyncio.run(
+                analyze_image(
+                    temp_path,
+                    state=user_state
+                )
             )
-        )
+        finally:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
         print(
             "🧠 IMAGE ANALYSIS COMPLETE"
@@ -1732,9 +1736,16 @@ def frontend_log():
     try:
         data = request.json or {}
 
+        safe_debug = {
+            "room": data.get("room"),
+            "stage": data.get("stage"),
+            "status": data.get("status"),
+            "error_code": data.get("error_code"),
+            "canonical_route": data.get("canonical_route"),
+        }
         print("=" * 80)
         print("🌐 APRIL WEB DEBUG")
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print(json.dumps(safe_debug, indent=2, ensure_ascii=False))
         print("=" * 80)
 
         return jsonify({
