@@ -49,6 +49,7 @@ ADMIN_ID = 2016592532
 # Live window: day_0..day_6. day_7 is a deletion boundary, not a memory day.
 MEMORY_DAYS = 7
 MEMORY_TTL_SECONDS = MEMORY_DAYS * 24 * 60 * 60
+USER_CONTENT_RETENTION_SECONDS = MEMORY_TTL_SECONDS
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
 
 SESSION_MEMORY_LIMIT = 1600
@@ -109,9 +110,12 @@ def safe_list(value):
 
 
 def compact_dialog_message(role, content):
+    now = time.time()
     return {
         "role": role,
         "content": safe_trim_text(content, 320),
+        "created_at": now,
+        "expires_at": now + USER_CONTENT_RETENTION_SECONDS,
     }
 
 
@@ -205,7 +209,9 @@ def build_default_state():
         "image_analysis_path": None,
         "meta": {
             "last_user_message": None,
+            "last_user_message_at": None,
             "last_bot_message": None,
+            "last_bot_message_at": None,
             "last_entity": None,
             "last_intent": None,
         },
@@ -217,7 +223,9 @@ def build_default_state():
         "continuity_alive": True,
         "web_safe": True,
         "last_user_turn": "",
+        "last_user_turn_at": None,
         "last_april_turn": "",
+        "last_april_turn_at": None,
         "dialog_state": {},
         "focus_snapshot": {},
         "focus_state": {
@@ -1289,7 +1297,145 @@ def get_state(user_id):
         }
         QUANTUM_MEMORY_ENGINE.ensure(state[key])
         _sanitize_persisted_dialog(state[key])
+        removed_hot = _cleanup_hot_content(state[key])
+        if removed_hot:
+            QUANTUM_MEMORY_ENGINE.refresh_scene(state[key])
+            try:
+                if callable(save_memory):
+                    save_memory(key, _persistable_snapshot(state[key]))
+            except Exception as exc:
+                safe_state_log(f"MEMORY TTL PERSIST FAILED: {exc}")
         return state[key]
+
+
+def _cleanup_hot_content(state_obj, now=None):
+    """Enforce the same seven-day TTL on all conversational/visual hot content."""
+    now = float(now if now is not None else time.time())
+    removed = 0
+
+    dialog = safe_list(state_obj.get("dialog"))
+    kept_dialog = []
+    for item in dialog:
+        if isinstance(item, dict):
+            created = item.get("created_at") or item.get("timestamp") or 0.0
+            expires = item.get("expires_at")
+            try:
+                expired = (
+                    not created
+                    or bool(expires and float(expires) <= now)
+                    or (now - float(created)) >= USER_CONTENT_RETENTION_SECONDS
+                )
+            except Exception:
+                expired = True
+            if expired:
+                removed += 1
+                continue
+        else:
+            removed += 1
+            continue
+        kept_dialog.append(item)
+    state_obj["dialog"] = kept_dialog[-HOT_DIALOG_LIMIT:]
+
+    internal_events = safe_list(state_obj.get("internal_dialog_events"))
+    kept_internal = []
+    for item in internal_events:
+        created = item.get("created_at") if isinstance(item, dict) else 0.0
+        try:
+            expired = not created or (now - float(created)) >= USER_CONTENT_RETENTION_SECONDS
+        except Exception:
+            expired = True
+        if expired:
+            removed += 1
+            continue
+        kept_internal.append(item)
+    state_obj["internal_dialog_events"] = kept_internal[-VISUAL_HISTORY_LIMIT:]
+
+    for content_key, timestamp_key in (("last_user_turn", "last_user_turn_at"), ("last_april_turn", "last_april_turn_at"), ("current_scene_request", "current_scene_request_at")):
+        value = state_obj.get(content_key)
+        stamp = state_obj.get(timestamp_key)
+        try:
+            expired = bool(value) and (not stamp or (now - float(stamp)) >= USER_CONTENT_RETENTION_SECONDS)
+        except Exception:
+            expired = bool(value)
+        if expired:
+            state_obj[content_key] = ""
+            state_obj[timestamp_key] = None
+            removed += 1
+
+    meta = state_obj.get("meta") if isinstance(state_obj.get("meta"), dict) else {}
+    for key, stamp_key in (("last_user_message", "last_user_message_at"), ("last_bot_message", "last_bot_message_at")):
+        value = meta.get(key)
+        stamp = meta.get(stamp_key)
+        try:
+            expired = bool(value) and (not stamp or (now - float(stamp)) >= USER_CONTENT_RETENTION_SECONDS)
+        except Exception:
+            expired = bool(value)
+        if expired:
+            meta[key] = ""
+            meta[stamp_key] = None
+            removed += 1
+    state_obj["meta"] = meta
+
+    # Generated/uploaded image bytes and temporary paths are not persistent user memory.
+    image_context = state_obj.get("image_context")
+    if isinstance(image_context, dict):
+        created = image_context.get("created_at")
+        try:
+            if not created or (now - float(created)) >= USER_CONTENT_RETENTION_SECONDS:
+                state_obj["image_context"] = None
+                removed += 1
+        except Exception:
+            state_obj["image_context"] = None
+            removed += 1
+
+    memory = safe_list(state_obj.get("image_memory"))
+    kept_memory = []
+    for item in memory:
+        if isinstance(item, dict):
+            created = item.get("created_at") or item.get("timestamp") or 0.0
+            try:
+                if not created or (now - float(created)) >= USER_CONTENT_RETENTION_SECONDS:
+                    removed += 1
+                    continue
+            except Exception:
+                removed += 1
+                continue
+        kept_memory.append(item)
+    state_obj["image_memory"] = kept_memory[-IMAGE_MEMORY_LIMIT:]
+
+    prompt = state_obj.get("last_prompt")
+    prompt_stamp = state_obj.get("last_prompt_at")
+    try:
+        prompt_expired = bool(prompt) and (not prompt_stamp or (now - float(prompt_stamp)) >= USER_CONTENT_RETENTION_SECONDS)
+    except Exception:
+        prompt_expired = bool(prompt)
+    if prompt_expired:
+        state_obj["last_prompt"] = None
+        state_obj["last_prompt_at"] = None
+        state_obj["last_prompt_expires_at"] = None
+        removed += 1
+
+    meta = state_obj.get("meta") if isinstance(state_obj.get("meta"), dict) else {}
+    entity = meta.get("last_entity")
+    entity_stamp = meta.get("last_entity_at")
+    try:
+        entity_expired = bool(entity) and (not entity_stamp or (now - float(entity_stamp)) >= USER_CONTENT_RETENTION_SECONDS)
+    except Exception:
+        entity_expired = bool(entity)
+    if entity_expired:
+        meta["last_entity"] = None
+        meta["last_entity_at"] = None
+        meta["last_entity_expires_at"] = None
+        removed += 1
+    state_obj["meta"] = meta
+
+    state_obj["user_content_retention"] = {
+        "window_days": MEMORY_DAYS,
+        "ttl_seconds": USER_CONTENT_RETENTION_SECONDS,
+        "policy": "all_user_content_rolling_ttl",
+        "last_cleanup_at": now,
+    }
+    return removed
 
 
 def _persistable_snapshot(value, _active=None):
@@ -1299,6 +1445,19 @@ def _persistable_snapshot(value, _active=None):
         "_quantum_evidence_field",
         "_quantum_processor_context",
         "_semantic_encoder",
+        "image_current",
+        "image_context",
+        "image_storage",
+        "last_prompt",
+        "last_prompt_at",
+        "last_prompt_expires_at",
+        "last_entity",
+        "last_entity_at",
+        "last_entity_expires_at",
+        "last_user_message",
+        "last_user_message_at",
+        "last_bot_message",
+        "last_bot_message_at",
     }
     active = _active if _active is not None else set()
 
@@ -1391,6 +1550,11 @@ def clear_scene_state(user_id):
 # =====================================================
 
 def set_image_context(user_id, ctx):
+    now = time.time()
+    if isinstance(ctx, dict):
+        ctx = deepcopy(ctx)
+        ctx.setdefault("created_at", now)
+        ctx.setdefault("expires_at", now + USER_CONTENT_RETENTION_SECONDS)
     image_storage[str(user_id)] = ctx
     state_obj = get_state(user_id)
     state_obj["image_context"] = ctx
@@ -1421,7 +1585,11 @@ def get_awaiting(user_id):
 
 
 def set_last_prompt(user_id, prompt):
-    get_state(user_id)["last_prompt"] = prompt
+    state_obj = get_state(user_id)
+    now = time.time()
+    state_obj["last_prompt"] = safe_trim_text(prompt, 1200)
+    state_obj["last_prompt_at"] = now
+    state_obj["last_prompt_expires_at"] = now + USER_CONTENT_RETENTION_SECONDS
 
 
 def get_last_prompt(user_id):
@@ -1625,11 +1793,17 @@ def add_dialog(user_id, role, content, metadata=None):
     dialog.append(message)
 
     if role == "user":
+        now = time.time()
         state_obj["last_user_turn"] = safe_trim_text(content, 320)
+        state_obj["last_user_turn_at"] = now
         state_obj["meta"]["last_user_message"] = safe_trim_text(content, 320)
+        state_obj["meta"]["last_user_message_at"] = now
     else:
+        now = time.time()
         state_obj["last_april_turn"] = safe_trim_text(content, 320)
+        state_obj["last_april_turn_at"] = now
         state_obj["meta"]["last_bot_message"] = safe_trim_text(content, 320)
+        state_obj["meta"]["last_bot_message_at"] = now
 
     # Canonical Free hot window: exactly 30 messages. Completed pairs leave the
     # hot window only as one semantic memory record and continue through day_0..day_6.
@@ -1745,7 +1919,11 @@ def clear_active_flow(user_id):
 
 
 def set_last_entity(user_id, entity):
-    get_state(user_id)["meta"]["last_entity"] = entity
+    state_obj = get_state(user_id)
+    now = time.time()
+    state_obj["meta"]["last_entity"] = deepcopy(entity)
+    state_obj["meta"]["last_entity_at"] = now
+    state_obj["meta"]["last_entity_expires_at"] = now + USER_CONTENT_RETENTION_SECONDS
 
 
 def get_last_entity(user_id):
@@ -2418,8 +2596,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "user_id": str(user_id),
         "conversation_id": conversation_id,
     }
+    now = time.time()
     state_obj["current_scene_request"] = current_request_text
+    state_obj["current_scene_request_at"] = now
     state_obj["last_april_turn"] = answer_text
+    state_obj["last_april_turn_at"] = now
 
     continuity = QUANTUM_MEMORY_ENGINE._continuity_context(
         state_obj, state_obj["active_scene_contract"]
