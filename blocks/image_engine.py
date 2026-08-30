@@ -2,6 +2,8 @@
 
 import asyncio
 import tempfile
+import time
+from pathlib import Path
 
 # берём существующие функции, НИЧЕГО не удаляем
 from blocks.image_module import (
@@ -59,19 +61,29 @@ def is_complex_prompt(text: str) -> bool:
 
 
 # ===== СОХРАНЕНИЕ ФАЙЛА =====
+def _cleanup_expired_image_files():
+    now = time.time()
+    root = Path(tempfile.gettempdir())
+    for path in root.glob("april_image_*.png"):
+        try:
+            if now - path.stat().st_mtime >= 7 * 24 * 60 * 60:
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def save_temp_image(image_bytes):
 
     try:
-
+        _cleanup_expired_image_files()
         tmp = tempfile.NamedTemporaryFile(
+            prefix="april_image_",
             delete=False,
             suffix=".png"
         )
-
         tmp.write(image_bytes)
-
         tmp.flush()
-
+        tmp.close()
         return tmp.name
 
     except Exception as e:
@@ -171,14 +183,13 @@ async def generate(
         path = save_temp_image(img)
 
         if path:
-
+            now = time.time()
             state["image_context"] = {
-
                 "type": "generated",
-
                 "path": path,
-
-                "hint": prompt
+                "hint": prompt,
+                "created_at": now,
+                "expires_at": now + 7 * 24 * 60 * 60,
             }
 
             print(
@@ -374,14 +385,13 @@ async def edit(
         path = save_temp_image(img)
 
         if path:
-
+            now = time.time()
             state["image_context"] = {
-
                 "type": "edited",
-
                 "path": path,
-
-                "hint": prompt
+                "hint": prompt,
+                "created_at": now,
+                "expires_at": now + 7 * 24 * 60 * 60,
             }
 
             print(
