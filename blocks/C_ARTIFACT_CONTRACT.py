@@ -195,6 +195,112 @@ def _extract_text_candidate(value: Any, *, allow_topic: bool = False) -> str:
         return ""
 
 
+def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize table cells without selecting a route or changing semantics."""
+    payload = dict(payload or {})
+    columns = payload.get("columns") or payload.get("headers") or []
+    if isinstance(columns, str):
+        columns = [x.strip() for x in columns.split("|")] if "|" in columns else [columns.strip()]
+    columns = [x for x in columns if x is not None]
+
+    rows = payload.get("rows") or []
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    elif not isinstance(rows, (list, tuple)):
+        rows = [rows]
+
+    normalized_rows = []
+    for row in rows:
+        if isinstance(row, dict):
+            values = [row.get(column, "") for column in columns] if columns else list(row.values())
+        elif isinstance(row, (list, tuple)):
+            values = list(row)
+        elif isinstance(row, str):
+            if "|" in row:
+                values = [part.strip() for part in row.split("|")]
+            elif "\t" in row:
+                values = [part.strip() for part in row.split("\t")]
+            else:
+                values = [row.strip()]
+        else:
+            values = [row]
+        normalized_rows.append(values)
+
+    width = len(columns) or max((len(row) for row in normalized_rows), default=0)
+    if not columns and width:
+        columns = [f"Column {i + 1}" for i in range(width)]
+    for row in normalized_rows:
+        if len(row) < width:
+            row.extend([""] * (width - len(row)))
+        elif len(row) > width:
+            del row[width:]
+
+    payload["columns"] = columns
+    payload["rows"] = normalized_rows
+    payload["table_schema"] = "april.table.canonical.v2"
+    payload["presentation"] = {
+        **dict(payload.get("presentation") or {}),
+        "renderer": "TableBlock",
+        "engine": "McDowell",
+        "math_engine": "KaTeX",
+        "payload_unchanged": True,
+    }
+    return payload
+
+
+def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep diagram semantics structural: nodes/edges/layout, never keyword routing."""
+    payload = dict(payload or {})
+    nodes = payload.get("nodes") or []
+    edges = payload.get("edges") or []
+    relations = payload.get("relations") or []
+
+    if not isinstance(nodes, list):
+        nodes = list(nodes.values()) if isinstance(nodes, dict) else [nodes]
+    if not isinstance(edges, list):
+        edges = list(edges.values()) if isinstance(edges, dict) else [edges]
+    if not isinstance(relations, list):
+        relations = list(relations.values()) if isinstance(relations, dict) else [relations]
+
+    canonical_nodes = []
+    for i, node in enumerate(nodes):
+        if isinstance(node, dict):
+            item = dict(node)
+            item.setdefault("id", str(item.get("name") or item.get("label") or f"node_{i + 1}"))
+            item.setdefault("label", str(item.get("name") or item.get("id") or ""))
+            canonical_nodes.append(item)
+        else:
+            label = str(node).strip()
+            if label:
+                canonical_nodes.append({"id": f"node_{i + 1}", "label": label, "type": "node"})
+
+    canonical_edges = []
+    for edge in edges + relations:
+        if not isinstance(edge, dict):
+            continue
+        source = edge.get("from") or edge.get("source") or edge.get("start")
+        target = edge.get("to") or edge.get("target") or edge.get("end")
+        if source and target:
+            canonical_edges.append({
+                "from": str(source),
+                "to": str(target),
+                **({"label": str(edge["label"])} if edge.get("label") is not None else {}),
+            })
+
+    payload["nodes"] = canonical_nodes
+    payload["edges"] = canonical_edges
+    payload["layout"] = payload.get("layout") or {"direction": "LR"}
+    payload["diagram_schema"] = "april.diagram.canonical.v2"
+    payload["representation"] = "schematic"
+    payload["presentation"] = {
+        **dict(payload.get("presentation") or {}),
+        "renderer": "MessageTextBlock",
+        "engine": "McDowell",
+        "payload_unchanged": True,
+    }
+    return payload
+
+
 def _canonicalize_artifact_data(
     data: Dict[str, Any],
     *,
@@ -218,6 +324,13 @@ def _canonicalize_artifact_data(
         canonical_text = _extract_text_candidate(payload.get(key))
         if canonical_text:
             break
+
+    if not isinstance(structured_payload, dict):
+        structured_payload = {}
+    if artifact_type == "table":
+        structured_payload = _normalize_table_payload(structured_payload)
+    elif artifact_type == "diagram":
+        structured_payload = _normalize_diagram_payload(structured_payload)
 
     machine_only = bool(payload.get("machine_only", False))
     human_visible = payload.get("human_visible")
@@ -356,7 +469,7 @@ ARTIFACT_BLOCK_MAP = {
 
     "table": "TableBlock",
 
-    "diagram": "DiagramBlock",
+    "diagram": "MessageTextBlock",
 
     "code": "CodeBlock",
 
@@ -437,8 +550,8 @@ FACTORY_ROOM_PROFILES = {
     "diagram": {
         "room": "C_DIAGRAM_ROOM",
         "artifact_type": "diagram",
-        "renderer": "DiagramBlock",
-        "viewer": "DiagramBlock",
+        "renderer": "MessageTextBlock",
+        "viewer": "MessageTextBlock",
         "semantic_service": "APRIL_DIAGRAM_SYSTEM_CORE",
         "capabilities": [
             "spatial_semantics",
@@ -594,6 +707,7 @@ def create_artifact(
     priority = normalized_data.get("priority", 100)
     complexity = normalized_data.get("complexity", "balanced")
     layout = normalized_data.get("layout", "single")
+    presentation = dict(normalized_data.get("presentation") or {})
     canonical_text = _extract_text_candidate(normalized_data)
 
     structured_payload = normalized_data.get("payload")
