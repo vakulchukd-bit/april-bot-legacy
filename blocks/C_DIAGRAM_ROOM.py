@@ -56,12 +56,24 @@ DIAGRAM_TYPES = {
 }
 
 def detect_diagram_type(task: Dict[str, Any]) -> str:
-    text = str(task.get("diagram","")).lower()
-    for dtype, terms in DIAGRAM_TYPES.items():
-        if any(t in text for t in terms):
-            return dtype
-    return "flowchart"
-
+    """Resolve diagram kind from explicit processor semantics, never keywords."""
+    task = task or {}
+    semantic = task.get("semantic") or task.get("diagram_semantics") or {}
+    declared = (
+        semantic.get("diagram_type")
+        or semantic.get("representation_subtype")
+        or task.get("diagram_type")
+        or "flowchart"
+    )
+    declared = str(declared).strip().lower()
+    aliases = {
+        "schematic": "flowchart",
+        "blueprint": "architecture",
+        "flow": "flowchart",
+        "erd": "erd",
+        "bpmn": "bpmn",
+    }
+    return aliases.get(declared, declared if declared in DIAGRAM_TYPES else "flowchart")
 
 
 DIAGRAM_LIBRARIES = {
@@ -116,25 +128,78 @@ DIAGRAM_CONTEXT = {
 
 
 def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Stage 4:
-    Builds the internal machine representation of the future diagram.
-    Rendering is intentionally NOT performed here.
-    """
-    work_order = {
-        "diagram_type": detect_diagram_type(task),
-        "description": task.get("diagram",""),
-        "nodes": [],
-        "edges": [],
-        "layout": "auto",
-        "hierarchy": {},
-        "flow": {},
-        "mindmap": {},
-        "architecture": {},
-        "library": select_diagram_library(task),
-    }
-    return work_order
+    """Build a structural diagram model from processor-provided relations."""
+    task = dict(task or {})
+    semantic = task.get("semantic") or task.get("diagram_semantics") or {}
+    raw_nodes = task.get("nodes") or semantic.get("nodes") or semantic.get("entities") or []
+    raw_edges = task.get("edges") or semantic.get("edges") or semantic.get("relations") or []
+    sequence = task.get("sequence") or semantic.get("sequence") or []
 
+    nodes = []
+    for i, node in enumerate(raw_nodes if isinstance(raw_nodes, list) else []):
+        if isinstance(node, dict):
+            item = dict(node)
+            item.setdefault("id", str(item.get("name") or item.get("label") or f"node_{i + 1}"))
+            item.setdefault("label", str(item.get("name") or item.get("id") or ""))
+            nodes.append(item)
+        else:
+            label = str(node).strip()
+            if label:
+                nodes.append({"id": f"node_{i + 1}", "label": label, "type": "node"})
+
+    edges = []
+    for edge in raw_edges if isinstance(raw_edges, list) else []:
+        if isinstance(edge, dict):
+            source = edge.get("from") or edge.get("source") or edge.get("start")
+            target = edge.get("to") or edge.get("target") or edge.get("end")
+            if source and target:
+                edges.append({"from": str(source), "to": str(target), **({"label": str(edge["label"])} if edge.get("label") is not None else {})})
+
+    # A processor may provide an ordered sequence explicitly. This is structural
+    # information, not a word trigger, and creates missing nodes/edges only from
+    # the declared sequence.
+    if isinstance(sequence, (list, tuple)) and sequence:
+        ids = []
+        existing = {str(n.get("id")): n for n in nodes if isinstance(n, dict)}
+        for i, value in enumerate(sequence):
+            if isinstance(value, dict):
+                node_id = str(value.get("id") or value.get("name") or value.get("label") or f"node_{i + 1}")
+                label = str(value.get("label") or value.get("name") or node_id)
+                existing.setdefault(node_id, {"id": node_id, "label": label, "type": value.get("type", "node")})
+            else:
+                label = str(value).strip()
+                if not label:
+                    continue
+                node_id = f"node_{i + 1}"
+                existing.setdefault(node_id, {"id": node_id, "label": label, "type": "node"})
+            ids.append(node_id)
+        nodes = list(existing.values())
+        edges.extend({"from": a, "to": b} for a, b in zip(ids, ids[1:]))
+
+    # Deduplicate edges while preserving order.
+    seen_edges = set()
+    unique_edges = []
+    for edge in edges:
+        key = (edge.get("from"), edge.get("to"), edge.get("label", ""))
+        if key not in seen_edges:
+            seen_edges.add(key)
+            unique_edges.append(edge)
+
+    return {
+        "diagram_type": detect_diagram_type(task),
+        "description": task.get("diagram", ""),
+        "nodes": nodes,
+        "edges": unique_edges,
+        "layout": task.get("layout") or semantic.get("layout") or {"direction": "LR"},
+        "hierarchy": task.get("hierarchy") or semantic.get("hierarchy") or {},
+        "flow": task.get("flow") or semantic.get("flow") or {},
+        "mindmap": task.get("mindmap") or semantic.get("mindmap") or {},
+        "architecture": task.get("architecture") or semantic.get("architecture") or {},
+        "library": select_diagram_library(task),
+        "diagram_schema": "april.diagram.canonical.v2",
+        "representation": "schematic",
+        "renderer": "MessageTextBlock",
+    }
 
 
 def prepare_diagram_artifact(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -247,41 +312,66 @@ class DiagramRoom(Room):
                 task.get("active_scene"),
 
             "diagram":
-                task.get("diagram", "")
+                task.get("diagram", ""),
+
+            "semantic":
+                task.get("semantic") or task.get("diagram_semantics") or {},
+
+            "nodes":
+                task.get("nodes") or [],
+
+            "edges":
+                task.get("edges") or [],
+
+            "relations":
+                task.get("relations") or [],
+
+            "sequence":
+                task.get("sequence") or [],
+
+            "layout":
+                task.get("layout") or {},
+
+            "hierarchy":
+                task.get("hierarchy") or {},
+
+            "flow":
+                task.get("flow") or {},
+
+            "mindmap":
+                task.get("mindmap") or {},
+
+            "architecture":
+                task.get("architecture") or {},
         }
 
     # =================================================
     # NODE ENGINE
     # =================================================
 
-    def build_nodes(
-        self,
-        description: str
-    ) -> List[Dict]:
-
-        return [{"id":"root","label":description[:80] or "Diagram","type":"node"}]
+    def build_nodes(self, description: str) -> List[Dict]:
+        model = build_machine_model({"diagram": description})
+        return model["nodes"]
 
     # =================================================
     # EDGE ENGINE
     # =================================================
 
-    def build_edges(
-        self,
-        description: str
-    ) -> List[Dict]:
-
-        return []
+    def build_edges(self, description: str) -> List[Dict]:
+        model = build_machine_model({"diagram": description})
+        return model["edges"]
 
     # =================================================
     # FLOW ENGINE
     # =================================================
 
-    def build_flow(
-        self,
-        description: str
-    ) -> Dict:
-
-        return {"start":"root","end":"root"}
+    def build_flow(self, description: str) -> Dict:
+        model = build_machine_model({"diagram": description})
+        return {
+            "start": model["nodes"][0]["id"] if model["nodes"] else None,
+            "end": model["nodes"][-1]["id"] if model["nodes"] else None,
+            "edges": model["edges"],
+        }
 
     # =================================================
     # HIERARCHY ENGINE
@@ -365,15 +455,25 @@ class DiagramRoom(Room):
 
     def build_artifact(
         self,
-        description: str
+        description: str,
+        task: Dict[str, Any] | None = None
     ):
-        task = {"diagram": description}
+        task = dict(task or {})
+        task.setdefault("diagram", description)
         contribution = self.build_machine_contribution(task)
         return create_artifact(
             artifact_type=self.ARTIFACT_TYPE,
             room_source=self.ROOM_ID,
             data=contribution["artifact"]["machine_model"] | {
                 "description": description,
+                "representation": "schematic",
+                "renderer": "MessageTextBlock",
+                "viewer": "MessageTextBlock",
+                "presentation": {
+                    "renderer": "MessageTextBlock",
+                    "engine": "McDowell",
+                    "payload_unchanged": True,
+                },
                 "domain":"diagram",
                 "room_identity":{
                     "specialization":"visual_structure_engine",
@@ -417,7 +517,8 @@ class DiagramRoom(Room):
             return None
 
         return self.build_artifact(
-            description
+            description,
+            task=work_order
         )
 
 
