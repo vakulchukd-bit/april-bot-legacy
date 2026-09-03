@@ -336,244 +336,6 @@ def _unique_preserve(items: List[Any]) -> List[Any]:
     return result
 
 
-def _numeric_pair(value: Any) -> Optional[List[float]]:
-    """Normalize an explicit [x, y] pair without inventing coordinates."""
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
-        try:
-            x = float(value[0])
-            y = float(value[1])
-            return [x, y]
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _explicit_xy(value: Any) -> Optional[List[float]]:
-    if isinstance(value, dict):
-        try:
-            if value.get("x") is not None and value.get("y") is not None:
-                return [float(value["x"]), float(value["y"])]
-        except (TypeError, ValueError):
-            return None
-    return _numeric_pair(value)
-
-
-def _extract_geometry_points(value: Any) -> List[List[float]]:
-    """
-    Read explicit points/coordinates from already structured geometry.
-
-    This helper never derives geometry from labels or descriptions.
-    """
-    points: List[List[float]] = []
-
-    if isinstance(value, dict):
-        for key in ("position", "coordinates", "center", "origin", "start", "end"):
-            pair = _explicit_xy(value.get(key))
-            if pair:
-                points.append(pair)
-
-        for key in ("points", "vertices", "waypoints"):
-            raw = value.get(key)
-            if isinstance(raw, (list, tuple)):
-                for item in raw:
-                    pair = _explicit_xy(item)
-                    if pair:
-                        points.append(pair)
-
-        # Some geometry payloads contain x/y directly.
-        pair = _explicit_xy(value)
-        if pair:
-            points.append(pair)
-
-        # Nested SVG-like path fragments.
-        for key in ("geometry", "shape"):
-            nested = value.get(key)
-            if isinstance(nested, (dict, list, tuple)):
-                points.extend(_extract_geometry_points(nested))
-
-    elif isinstance(value, (list, tuple)):
-        pair = _numeric_pair(value)
-        if pair:
-            points.append(pair)
-        else:
-            for item in value:
-                points.extend(_extract_geometry_points(item))
-
-    return points
-
-
-def _scene_bounds(
-    nodes: List[Dict[str, Any]],
-    edges: List[Dict[str, Any]],
-    elements: Any = None,
-    width: Any = None,
-    height: Any = None,
-) -> Dict[str, Any]:
-    """
-    Calculate bounds only from explicit coordinates/geometry already present.
-
-    A renderer may fit a scene into the viewport later. This metadata must not
-    be interpreted as semantic geometry when the processor did not provide it.
-    """
-    points: List[List[float]] = []
-
-    for node in nodes:
-        points.extend(_extract_geometry_points(node))
-
-    for edge in edges:
-        points.extend(_extract_geometry_points(edge.get("geometry")))
-        points.extend(_extract_geometry_points(edge.get("waypoints")))
-        points.extend(_extract_geometry_points(edge.get("points")))
-
-    points.extend(_extract_geometry_points(elements))
-
-    if not points:
-        explicit_width = None
-        explicit_height = None
-        try:
-            if width is not None:
-                explicit_width = float(width)
-            if height is not None:
-                explicit_height = float(height)
-        except (TypeError, ValueError):
-            explicit_width = explicit_height = None
-
-        return {
-            "source": "declared_canvas" if explicit_width and explicit_height else "none",
-            "x": 0,
-            "y": 0,
-            "width": explicit_width,
-            "height": explicit_height,
-            "has_explicit_geometry": False,
-        }
-
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-
-    return {
-        "source": "explicit_geometry",
-        "x": min_x,
-        "y": min_y,
-        "width": max_x - min_x,
-        "height": max_y - min_y,
-        "has_explicit_geometry": True,
-    }
-
-
-def _build_scene_canvas(
-    diagram_type: str,
-    *,
-    orientation: Any,
-    units: Any,
-    view_box: Any,
-    width: Any,
-    height: Any,
-    nodes: List[Dict[str, Any]],
-    edges: List[Dict[str, Any]],
-    elements: Any,
-    title: Any,
-    scale: Any,
-    date: Any,
-) -> Dict[str, Any]:
-    """
-    Common canvas contract for drawings and schematics.
-
-    This is presentation metadata plus explicit geometry. It does not fabricate
-    measurements or object positions that were not supplied by the processor.
-    """
-    bounds = _scene_bounds(nodes, edges, elements=elements, width=width, height=height)
-
-    if isinstance(view_box, str):
-        vb = view_box.strip()
-    elif isinstance(view_box, (list, tuple)):
-        vb = " ".join(str(item) for item in view_box)
-    else:
-        vb = None
-
-    is_drawing = diagram_type in {"technical_drawing", "mechanical_drawing"}
-
-    return {
-        "version": "april.scene_canvas.v1",
-        "mode": "blueprint" if is_drawing else "schematic",
-        "coordinate_system": {
-            "space": "explicit_payload",
-            "units": units or "logical",
-            "viewBox": vb,
-            "width": width,
-            "height": height,
-            "source": "processor_payload",
-        },
-        "bounds": bounds,
-        "viewport": {
-            "fit": "contain",
-            "center": True,
-            "preserve_aspect_ratio": True,
-            "mobile_adapt": True,
-            "overflow": "hidden",
-        },
-        "grid": {
-            "enabled": True,
-            "mode": "adaptive",
-            "logical_size": [100, 100],
-            "major_divisions": 10,
-            "minor_divisions": 5,
-            "do_not_treat_as_measurement": True,
-        },
-        "objects": {
-            "source": "components_or_nodes_and_elements",
-            "count": len(nodes) + (len(elements) if isinstance(elements, list) else 0),
-            "preserve_ids": True,
-            "preserve_positions": True,
-            "preserve_geometry": True,
-            "preserve_terminals": diagram_type in {
-                "electrical_schematic", "circuit_diagram", "wiring_diagram",
-            },
-        },
-        "drawing_frame": {
-            "enabled": is_drawing,
-            "title": title,
-            "scale": scale,
-            "date": date,
-            "editable_fields": [
-                "title",
-                "subtitle",
-                "scale",
-                "date",
-                "author",
-                "project",
-                "revision",
-                "notes",
-            ] if is_drawing else [],
-        },
-        "schematic_frame": {
-            "enabled": not is_drawing and diagram_type in {
-                "electrical_schematic", "circuit_diagram", "wiring_diagram",
-                "block_diagram", "process_instrumentation",
-            },
-            "wire_style": "orthogonal",
-            "symbol_style": "technical",
-            "terminal_labels": True,
-            "component_labels": True,
-            "connection_labels": True,
-            "center_scene": True,
-        },
-        "interaction": {
-            "copyable": True,
-            "preserve_scene_id": True,
-            "preserve_object_ids": True,
-            "preserve_connections": True,
-        },
-        "display_policy": {
-            "render_from_payload_only": True,
-            "do_not_reconstruct_from_description": True,
-            "do_not_replace_geometry_with_cards": True,
-            "do_not_strip_terminal_qualifiers": True,
-        },
-    }
-
-
 def _build_signal_integrity(
     nodes: List[Dict[str, Any]],
     edges: List[Dict[str, Any]],
@@ -813,26 +575,6 @@ def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
 
     signal_integrity = _build_signal_integrity(nodes, unique_edges)
 
-    # Preserve explicit scale/date/title data for drawings without inventing values.
-    scale_value = first_structured_value("scale")
-    date_value = first_structured_value("date", "created_at", "creation_date")
-    title_value = first_structured_value("title")
-
-    scene_canvas = _build_scene_canvas(
-        diagram_type,
-        orientation=first_structured_value("orientation"),
-        units=first_structured_value("units"),
-        view_box=first_structured_value("viewBox", "viewbox"),
-        width=first_structured_value("width"),
-        height=first_structured_value("height"),
-        nodes=nodes,
-        edges=unique_edges,
-        elements=optional.get("elements"),
-        title=title_value,
-        scale=scale_value,
-        date=date_value,
-    )
-
     canonical_format = source_format or diagram_type
     if canonical_format == "graph" and diagram_type in {
         "electrical_schematic", "circuit_diagram", "wiring_diagram",
@@ -926,7 +668,6 @@ def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
         "edges": unique_edges,
         "connections": unique_edges,
         "layout": first_structured_value("layout") or {"direction": "LR"},
-        "scene_canvas": scene_canvas,
         "hierarchy": first_structured_value("hierarchy") or {},
         "flow": first_structured_value("flow") or {},
         "mindmap": first_structured_value("mindmap") or {},
@@ -1149,11 +890,8 @@ class DiagramRoom(Room):
             "layout": "auto",
             "position_source": "payload_when_present",
             "positioned_nodes": positioned,
-            "missing_position_policy": "display_fit_only",
+            "missing_position_policy": "compute_from_topology",
             "preserve_payload_geometry": True,
-            "center_scene": True,
-            "fit_mode": "contain",
-            "mobile_adapt": True,
         }
 
     # =================================================
@@ -1206,13 +944,6 @@ class DiagramRoom(Room):
                 "preserve_operational_states",
                 "validate_topology",
                 "preserve_endpoint_metadata",
-                "scene_canvas",
-                "coordinate_system",
-                "adaptive_grid",
-                "drawing_frame",
-                "schematic_frame",
-                "mobile_scene_fit",
-                "scene_copy_contract",
             ],
             "artifact_outputs": ["diagram"],
             "required_competencies": ["diagram", "layout", "structure"],
