@@ -225,17 +225,28 @@ def _normalize_endpoint(value: Any) -> Optional[str]:
 
 
 def _normalize_connection(raw: Any) -> Optional[Dict[str, Any]]:
+    """
+    Normalize a processor connection without destroying terminal/port identity.
+
+    Supported real input forms include:
+      {"from": "B1.positive", "to": "F1.input"}
+      {"source": "...", "target": "..."}
+      {"source_port": "...", "target_port": "..."}
+      {"from": {"component": "B1", "terminal": "positive"}, ...}
+
+    No endpoint is inferred from the user's prose.
+    """
     if not isinstance(raw, dict):
         return None
 
-    source = (
+    source_raw = (
         raw.get("from")
         or raw.get("source")
         or raw.get("start")
         or raw.get("source_port")
         or raw.get("from_port")
     )
-    target = (
+    target_raw = (
         raw.get("to")
         or raw.get("target")
         or raw.get("end")
@@ -243,15 +254,21 @@ def _normalize_connection(raw: Any) -> Optional[Dict[str, Any]]:
         or raw.get("to_port")
     )
 
-    source = _normalize_endpoint(source)
-    target = _normalize_endpoint(target)
+    source = _normalize_endpoint(source_raw)
+    target = _normalize_endpoint(target_raw)
     if not source or not target:
         return None
 
-    result = {
+    result: Dict[str, Any] = {
         "from": source,
         "to": target,
     }
+
+    # Preserve source/target endpoint metadata when supplied structurally.
+    if isinstance(source_raw, dict):
+        result["from_endpoint"] = dict(source_raw)
+    if isinstance(target_raw, dict):
+        result["to_endpoint"] = dict(target_raw)
 
     for key in (
         "label",
@@ -287,6 +304,87 @@ def _merge_unique_dicts(primary: List[Dict[str, Any]], secondary: List[Dict[str,
 
 def _node_base_id(endpoint: str) -> str:
     return str(endpoint).split(".", 1)[0]
+
+
+def _endpoint_terminal(endpoint: Any) -> Optional[str]:
+    """Return the terminal/port portion of a qualified endpoint when present."""
+    if not isinstance(endpoint, str):
+        return None
+    if "." not in endpoint:
+        return None
+    return endpoint.split(".", 1)[1] or None
+
+
+def _collect_structured_field(task: Dict[str, Any], semantic: Dict[str, Any], field: str):
+    """Read a field from task first, then semantic, without inventing content."""
+    if field in task and task[field] not in (None, "", [], {}):
+        return task[field]
+    if field in semantic and semantic[field] not in (None, "", [], {}):
+        return semantic[field]
+    return None
+
+
+def _unique_preserve(items: List[Any]) -> List[Any]:
+    result: List[Any] = []
+    seen = set()
+    for item in items:
+        marker = repr(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(item)
+    return result
+
+
+def _build_signal_integrity(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Report what structural information actually arrived.
+
+    This is diagnostic metadata for downstream consumers; it does not synthesize
+    missing diagram content.
+    """
+    node_ids = {
+        str(node.get("id"))
+        for node in nodes
+        if isinstance(node, dict) and node.get("id") is not None
+    }
+
+    endpoint_pairs = []
+    terminals = []
+    unresolved_endpoints = []
+
+    for edge in edges:
+        for side in ("from", "to"):
+            endpoint = edge.get(side)
+            if not endpoint:
+                continue
+
+            endpoint_pairs.append(str(endpoint))
+            terminal = _endpoint_terminal(endpoint)
+            if terminal:
+                terminals.append(terminal)
+
+            base_id = _node_base_id(str(endpoint))
+            if base_id not in node_ids:
+                unresolved_endpoints.append(base_id)
+
+    return {
+        "node_count": len(node_ids),
+        "connection_count": len(edges),
+        "terminal_qualified_connection_count": sum(
+            1 for edge in edges
+            if _endpoint_terminal(edge.get("from")) or _endpoint_terminal(edge.get("to"))
+        ),
+        "terminal_names": sorted(set(terminals)),
+        "endpoint_references": _unique_preserve(endpoint_pairs),
+        "unresolved_node_references": sorted(set(unresolved_endpoints)),
+        "has_topology": bool(nodes and edges),
+        "topology_valid": bool(nodes) and not unresolved_endpoints if edges else bool(nodes),
+    }
+
 
 
 # =====================================================
@@ -426,6 +524,25 @@ def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(endpoint, str) and "." in endpoint
     })
 
+    # Preserve fields already produced by the processor for real technical schematics.
+    # These fields are never fabricated from the user's text.
+    operational_fields = {}
+    for field in (
+        "cross_connections",
+        "operation",
+        "safety",
+        "switch_states",
+        "states",
+        "notes",
+        "caption",
+        "metadata",
+    ):
+        value = _collect_structured_field(task, semantic, field)
+        if value is not None:
+            operational_fields[field] = value
+
+    signal_integrity = _build_signal_integrity(nodes, unique_edges)
+
     canonical_format = (
         str(task.get("format") or semantic.get("format") or "").strip().lower()
         or diagram_type
@@ -470,6 +587,34 @@ def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
             "no_text_keyword_inference": True,
             "no_ascii_fallback": True,
             "no_generated_missing_components": True,
+            "preserve_connections_unchanged": True,
+            "preserve_processor_geometry": True,
+            "render_from_payload_only": True,
+        },
+        "text_block_contract": {
+            "consume": [
+                "diagram_type",
+                "format",
+                "title",
+                "orientation",
+                "nodes",
+                "components",
+                "edges",
+                "connections",
+                "terminals",
+                "position",
+                "geometry",
+                "views",
+                "dimensions",
+                "annotations",
+                "legend",
+                "constraints",
+                "ascii",
+            ],
+            "primary_visual": "structured_scene",
+            "secondary_textual": "ascii" if "ascii" in optional else None,
+            "do_not_reconstruct_from_description": True,
+            "do_not_replace_missing_structure_with_text": True,
         },
     }
 
@@ -506,12 +651,14 @@ def build_machine_model(task: Dict[str, Any]) -> Dict[str, Any]:
             "position_count": position_count,
             "terminal_endpoint_count": len(terminal_endpoints),
             "symbol_kinds": symbol_kinds,
+            **_build_signal_integrity(nodes, unique_edges),
         },
         "technical_symbols_catalog": {
             kind: TECHNICAL_SYMBOLS.get(kind)
             for kind in symbol_kinds
             if kind in TECHNICAL_SYMBOLS
         },
+        **operational_fields,
     }
 
     model.update(optional)
@@ -624,6 +771,14 @@ class DiagramRoom(Room):
             "legend": task.get("legend") or semantic.get("legend") or {},
             "constraints": task.get("constraints") or semantic.get("constraints") or [],
             "ascii": task.get("ascii") if "ascii" in task else semantic.get("ascii"),
+            "cross_connections": task.get("cross_connections") or semantic.get("cross_connections") or [],
+            "operation": task.get("operation") or semantic.get("operation") or [],
+            "safety": task.get("safety") or semantic.get("safety") or [],
+            "switch_states": task.get("switch_states") or semantic.get("switch_states") or [],
+            "states": task.get("states") or semantic.get("states") or [],
+            "notes": task.get("notes") or semantic.get("notes") or [],
+            "caption": task.get("caption") or semantic.get("caption"),
+            "metadata": task.get("metadata") or semantic.get("metadata") or {},
         }
 
     # =================================================
@@ -680,10 +835,18 @@ class DiagramRoom(Room):
     # =================================================
 
     def build_layout(self, nodes: List[Dict]) -> Dict:
+        positioned = sum(
+            1
+            for node in nodes
+            if isinstance(node, dict)
+            and (node.get("position") is not None or node.get("coordinates") is not None)
+        )
         return {
             "layout": "auto",
             "position_source": "payload_when_present",
+            "positioned_nodes": positioned,
             "missing_position_policy": "compute_from_topology",
+            "preserve_payload_geometry": True,
         }
 
     # =================================================
@@ -733,6 +896,9 @@ class DiagramRoom(Room):
                 "preserve_terminals",
                 "preserve_geometry",
                 "preserve_drawing_metadata",
+                "preserve_operational_states",
+                "validate_topology",
+                "preserve_endpoint_metadata",
             ],
             "artifact_outputs": ["diagram"],
             "required_competencies": ["diagram", "layout", "structure"],
@@ -830,6 +996,14 @@ class DiagramRoom(Room):
             "geometry": request.get("geometry") or [],
             "dimensions": request.get("dimensions") or [],
             "annotations": request.get("annotations") or [],
+            "cross_connections": request.get("cross_connections") or [],
+            "operation": request.get("operation") or [],
+            "safety": request.get("safety") or [],
+            "switch_states": request.get("switch_states") or [],
+            "states": request.get("states") or [],
+            "notes": request.get("notes") or [],
+            "caption": request.get("caption"),
+            "metadata": request.get("metadata") or {},
         })
 
 
