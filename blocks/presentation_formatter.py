@@ -71,7 +71,11 @@ SIGNAL_TO_WEB_RENDERER = {
     "formula": ("mcdowell", "katex"),
     "table": ("table", "table"),
     "graph": ("graph", "graph"),
-    "diagram": ("graph", "diagram"),
+    # A diagram stays a diagram on the canonical route.  The concrete
+    # renderer semantics are carried by the block/payload (wiring,
+    # electrical_graph, svg, technical_drawing, etc.); Web receives the
+    # structured diagram through its existing diagram branch.
+    "diagram": ("diagram", "diagram"),
     "link": ("link", "link_card"),
     "code": ("code", "syntax"),
     "gallery": ("gallery", "media"),
@@ -199,7 +203,10 @@ def _payload_keys_for_alignment(kind: str) -> set[str]:
         "formula": {"steps", "formula", "equation", "expression", "math", "content"},
         "table": {"columns", "headers", "rows", "cells", "values"},
         "graph": {"series", "data", "x", "y", "axes"},
-        "diagram": {"nodes", "edges", "elements", "items"},
+        "diagram": {
+            "nodes", "components", "edges", "connections", "elements",
+            "ports", "terminals", "geometry", "position", "viewBox",
+        },
         "link": {"url", "href", "title", "description", "domain", "icon"},
         "code": {"language", "source", "content", "code"},
         "gallery": {"items", "images", "src", "url", "caption", "alt"},
@@ -237,6 +244,22 @@ def validate_executor_signal(block: dict) -> dict:
     expected_renderer, expected_engine = expected if expected else ("", "")
 
     warnings = []
+
+    # Diagrams use one canonical Web renderer identity while carrying a
+    # specialized engine name that reflects the structured payload.
+    if kind == "diagram":
+        supported_diagram_engines = {"diagram", "schematic", "technical_drawing", "structured_svg"}
+        expected_renderer = "diagram"
+        if renderer != "diagram":
+            warnings.append(f"renderer_mismatch:{renderer or 'missing'}!=diagram")
+        if engine not in supported_diagram_engines:
+            warnings.append(f"engine_mismatch:{engine or 'missing'} not in diagram engines")
+        expected_renderer, expected_engine = "diagram", engine or "diagram"
+
+    if kind != "diagram" and expected and (renderer != expected_renderer or engine != expected_engine):
+        warnings.append(
+            f"engine_mismatch:{renderer}/{engine}!={expected_renderer}/{expected_engine}"
+        )
     if version != PRESENTATION_SIGNAL_VERSION:
         warnings.append(f"unsupported_signal_version:{version or 'missing'}")
     if expected and (renderer != expected_renderer or engine != expected_engine):
@@ -269,12 +292,49 @@ def validate_executor_signal(block: dict) -> dict:
 
 def canonicalize_signal_metadata(block: dict) -> dict:
     """
-    Preserve Executor v4 exactly while exposing compact Web diagnostics.
+    Keep the canonical payload untouched while normalizing only the Web
+    presentation metadata for structured diagram blocks.
 
-    The original signal object remains untouched. Only `presentation_audit` is
-    added to the containing block.
+    The transport remains one channel: render_blocks stay authoritative, the
+    diagram payload is never reconstructed, and no prose/keyword trigger is
+    introduced.
     """
     result = dict(block)
+    kind = _s(result.get("type") or result.get("representation")).lower()
+    payload = _canonical_payload(result)
+    original_signal = _signal_from_block(result)
+
+    if kind == "diagram" and original_signal:
+        normalized_signal = dict(original_signal)
+        normalized_signal["kind"] = "diagram"
+        normalized_signal["renderer"] = "diagram"
+
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("elements"), list)
+            and payload.get("elements")
+            and (payload.get("viewBox") or payload.get("width") or payload.get("height"))
+        ):
+            normalized_signal["engine"] = "technical_drawing"
+            normalized_signal["mode"] = "structured_svg"
+        elif isinstance(payload, dict) and (
+            isinstance(payload.get("nodes"), list)
+            or isinstance(payload.get("components"), list)
+        ) and (
+            isinstance(payload.get("connections"), list)
+            or isinstance(payload.get("edges"), list)
+        ):
+            normalized_signal["engine"] = "schematic"
+            normalized_signal["mode"] = "structured"
+        else:
+            normalized_signal["engine"] = "diagram"
+            normalized_signal["mode"] = "structured"
+
+        # Keep provenance for observability without changing the payload.
+        normalized_signal["source_renderer"] = _s(original_signal.get("renderer")) or None
+        normalized_signal["source_engine"] = _s(original_signal.get("engine")) or None
+        result["presentation"] = normalized_signal
+
     audit = validate_executor_signal(result)
     result["presentation_audit"] = audit
     if not audit["valid"]:
