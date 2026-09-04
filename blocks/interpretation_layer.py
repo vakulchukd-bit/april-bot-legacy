@@ -112,7 +112,7 @@ SEMANTIC_TURN_PROTOTYPES = {
     "continuation": "пользователь продолжает текущую мысль, задаёт следующий уточняющий вопрос, говорит теперь, а теперь, дальше, на этом, по нему, по ней, просит развить, объяснить дальше, проверить вывод, добавить деталь, продолжить уже начатый результат; the user continues the current reasoning thread with a follow-up, clarification, extension, or refinement",
     "reformulation": "пользователь переформулирует предыдущий запрос, просит показать это иначе, уточняет формулировку, просит переделать или дополнить уже полученный результат; the user reformulates or refines an existing result",
     "correction": "пользователь исправляет предыдущий результат, добавляет условие, меняет параметр или уточняет деталь уже обсуждаемой задачи; the user corrects, extends, or changes a detail of the preceding task",
-    "reference": "пользователь ссылается на уже показанное, созданное, сказанное или обсуждаемое, использует указание на него, это, этот, эту, эти, там, здесь, просит добавить, отметить, изменить или объяснить это; the user refers to something already shown or discussed and continues work on it",
+    "reference": "пользователь явно ссылается на уже показанное, созданное или сказанное, использует местоимение или указание на объект, этот, эту, это, него, неё, нему, просит изменить добавить отметить в нём или в ней; the user explicitly refers to a previously shown or discussed object",
     "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
@@ -125,7 +125,7 @@ REPRESENTATION_HYPOTHESES = {
     "text": "обычный текстовый ответ объяснение рассказ описание; the user wants a normal textual answer",
     "table": "таблица таблицу табличный формат строки столбцы колонки; information represented as a table",
     "graph": "график графика chart plot graph кривая кривые функция; information represented as a graph or chart",
-    "diagram": "схема соединение элементов блоки связи последовательность процесса чертёж структурная диаграмма подключение проводов источник питания выключатель лампочка электрическая цепь; a schematic, wiring diagram, connected structure, electrical circuit, or process diagram",
+    "diagram": "схема чертёж технический чертёж рисунок построение геометрическая фигура треугольник квадрат круг окружность вершины стороны углы длина сантиметр см соединение элементов блоки связи последовательность процесса подключение проводов источник питания выключатель лампа электрическая цепь; a technical or geometric drawing, construction diagram, schematic, wiring diagram, connected structure, or process diagram",
     "formula": "формула уравнение математическое выражение математическая запись равенство обозначение величин степени корни E mc2; a mathematical formula, equation, notation, or quantitative relationship",
     "image": "изображение картинка рисунок иллюстрация создать изображение фотография; an image or generated picture",
     "gallery": "несколько изображений много картинок подборка галерея набор карточек сравнение изображений; multiple images, a gallery, or an image collection",
@@ -216,25 +216,26 @@ STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "t
 
 OPERATION_HYPOTHESES = {
     "answer": "ответить объяснить рассказать сообщить дать информацию",
-    "build": "создать построить сформировать нарисовать результат",
+    "build": "создать построить сформировать нарисовать начертить изобразить результат",
     "present": "показать отобразить продемонстрировать вывести представить результат",
+
     "compare": "сравнить сопоставить различия сходства",
     "modify": "изменить исправить обновить переделать дополнить",
     "retrieve": "найти получить ресурс источник ссылку документ",
     "calculate": "посчитать вычислить рассчитать решить",
     "analyze": "проанализировать разобрать исследовать проверить",
-    "explain": "объяснить разъяснить показать как работает",
+    "explain": "объяснить разъяснить пояснить растолковать как работает почему смысл принцип",
     "summarize": "суммировать сократить основные пункты",
     "list": "перечислить список варианты",
 }
 OBJECT_HYPOTHESES = {
     "graph": "график plot chart curve series числовая визуализация",
-    "diagram": "схема чертёж блоки связи соединения проводка электрическая цепь процесс",
+    "diagram": "схема чертёж технический чертёж построение геометрическая фигура треугольник квадрат круг окружность вершины стороны углы длина сантиметр см блоки связи соединения проводка электрическая цепь процесс",
     "table": "таблица строки столбцы колонки структурированные данные сравнение",
     "formula": "формула уравнение математическое выражение notation",
     "link": "ссылка URL адрес сайта веб ресурс источник",
     "code": "код программа функция скрипт",
-    "image": "изображение картинка рисунок фотография",
+    "image": "изображение картинка рисунок иллюстрация фотография портрет художественная картинка",
     "gallery": "галерея подборка несколько изображений",
     "file": "файл документ вложение",
     "audio": "аудио звук голос запись",
@@ -401,6 +402,48 @@ class QuantumInterpretationEngine:
             result[label] = min(1.0, len(tokens & words)/max(2.0,len(words)*0.2))
         return result
 
+    @staticmethod
+    def _semantic_request_features(text: str) -> dict[str, float | bool]:
+        """Extract generic structural features from the current request.
+
+        These are interpretation evidence only.  They are combined with the
+        matrix scores below and never directly route a renderer.
+        """
+        source = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        visual_action = bool(re.search(
+            r"\b(покаж[иу]|покажи|изобрази|нарисуй|начерти|начертить|построй|создай|" 
+            r"создать|изображение|рисунок|черт[её]ж|чертеж|схему|схема|draw|show|" 
+            r"illustrate|depict|diagram|sketch)\b", source
+        ))
+        explain_action = bool(re.search(
+            r"\b(объясни|объяснить|разъясни|разъяснить|поясни|пояснить|почему|" 
+            r"как работает|смысл|принцип)\b", source
+        ))
+        geometry_object = bool(re.search(
+            r"\b(треугольник|треугольника|квадрат|квадрата|прямоугольник|" 
+            r"круг|окружность|ромб|параллелограмм|многоугольник|вершина|" 
+            r"вершины|сторона|стороны|угол|углы|отрезок|фигура|геометрич)\b", source
+        ))
+        construction_context = bool(re.search(
+            r"\b(черт[её]ж|чертеж|на чертеже|построй|начерти|" 
+            r"сторона(?:ми|х)?|вершин(?:ами|ы)?|по \d|\d+(?:[.,]\d+)?\s*(?:см|мм|м)\b)\b", source
+        ))
+        # A request that already contains an object/constraint/action is normally
+        # self-contained even when it shares many words with the previous turn.
+        self_contained = bool(
+            (visual_action and (geometry_object or construction_context))
+            or re.search(r"\b(создай|создать|построй|построить|реши|рассчитай|напиши|" 
+                         r"составь|сделай|сравни|найди|объясни|изобрази|нарисуй)\b", source)
+        )
+        return {
+            "visual_action": visual_action,
+            "explain_action": explain_action,
+            "geometry_object": geometry_object,
+            "construction_context": construction_context,
+            "visual_construction": bool(visual_action and (geometry_object or construction_context)),
+            "self_contained": self_contained,
+        }
+
     def _context_scores(self,text,previous_assistant,previous_user,active_topic,active_goal):
         vals = {
             "previous_assistant":previous_assistant,
@@ -423,11 +466,12 @@ class QuantumInterpretationEngine:
         active_goal: str = "",
         previous_scene: dict | None = None,
     ) -> dict:
-        """Resolve whether the current turn develops the active vector or starts a new one.
+        """Resolve topic relation and request dependency independently.
 
-        This is semantic evidence, not routing. It compares the current turn against
-        the immediately previous user/assistant turns, active topic/goal and active
-        visual scene. No topic-specific trigger list is used.
+        Similarity answers "is this about the same topic?".  Structural discourse
+        evidence answers "does the current request depend on the previous turn?".
+        A self-contained new task can therefore be SAME_TOPIC without becoming a
+        continuation or reusing the previous scene.
         """
         current = self.normalize(text)
         prev_a = self.normalize(previous_assistant)
@@ -444,9 +488,6 @@ class QuantumInterpretationEngine:
             "active_goal": self.similarity(current, goal)["score"] if goal else 0.0,
             "previous_scene_topic": self.similarity(current, scene_topic)["score"] if scene_topic else 0.0,
         }
-
-        # Dialogue prototypes provide semantic evidence about the *role* of the
-        # turn; they do not decide on their own and never route a renderer.
         dialogue_scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
         dialogue_followup = max(
             dialogue_scores.get("continuation", 0.0),
@@ -455,95 +496,73 @@ class QuantumInterpretationEngine:
             dialogue_scores.get("reference", 0.0),
         )
 
-        topic_affinity = max(sims["active_topic"], sims["previous_scene_topic"])
+        topic_affinity = max(sims["active_topic"], sims["previous_scene_topic"], sims["previous_user"] * 0.92)
         answer_affinity = sims["previous_assistant"]
         request_affinity = sims["previous_user"]
         goal_affinity = sims["active_goal"]
-
         relation_strength = max(topic_affinity, answer_affinity, request_affinity, goal_affinity)
 
-        # Generic discourse structure, independent of topic/renderer:
-        # anaphoric references usually mean "continue working with what was just said";
-        # sequence markers alone are weaker because they can also introduce a new topic.
         anaphora = bool(re.search(
-            r"\b(это|этот|эта|эти|этом|этим|нем|ней|них|там|здесь|оно|он|она|него|ней|"
-            r"it|this|that|these|those|there|here|them|itself)\b",
-            current,
-            flags=re.I,
+            r"\b(это|этот|эта|эти|этом|этим|нем|ней|них|там|здесь|оно|он|она|него|нее|неё|" 
+            r"ему|ей|им|его|её|их|it|this|that|these|those|there|here|them|itself)\b",
+            current, flags=re.I,
+        ))
+        explicit_reference_phrase = bool(re.search(
+            r"\b(предыдущ|прошл|уже показ|уже создан|этот результат|этот черт[её]ж|" 
+            r"эту схему|эту фигуру|добавь к нему|измени его|исправь его|переделай его)\w*\b",
+            current, flags=re.I,
         ))
         sequence_marker = bool(re.search(
-            r"^\s*(а\s+)?(теперь|дальше|далее|затем|также|ещ[её]|потом|now|next|then|also)\b",
-            current,
-            flags=re.I,
+            r"^\s*(а\s+)?(теперь|дальше|далее|затем|также|потом|now|next|then|also)\b",
+            current, flags=re.I,
         ))
-        structural_followup = 0.0
-        if has_context := bool(prev_a or prev_u or topic or scene_topic):
-            if anaphora:
-                structural_followup = 0.78
-            elif sequence_marker and relation_strength >= 0.14:
-                structural_followup = 0.36
 
-
-        continuity_score = max(
-            0.42 * topic_affinity + 0.30 * answer_affinity + 0.18 * request_affinity + 0.10 * goal_affinity,
-            0.55 * answer_affinity + 0.25 * topic_affinity + 0.20 * request_affinity,
-            0.60 * dialogue_followup + 0.20 * answer_affinity + 0.20 * topic_affinity,
-            structural_followup,
+        features = self._semantic_request_features(current)
+        short_followup = bool(
+            bool(prev_a or prev_u or topic or scene_topic)
+            and len([t for t in self._tokens(current) if len(t) >= 2]) <= 6
+            and not features["self_contained"]
+            and (current.endswith("?") or current.endswith("？") or anaphora)
         )
+        explicit_reference = bool(anaphora or explicit_reference_phrase)
+        dependency_score = max(
+            0.95 if explicit_reference else 0.0,
+            0.90 if short_followup else 0.0,
+            0.62 if sequence_marker and not features["self_contained"] and relation_strength >= 0.16 else 0.0,
+            0.55 * dialogue_followup + 0.25 * answer_affinity + 0.20 * topic_affinity
+            if not features["self_contained"] else 0.15 * dialogue_followup,
+        )
+        dependency_score = float(max(0.0, min(1.0, dependency_score)))
 
-        tokens = [t for t in self._tokens(current) if len(t) >= 3]
-        low_information = len(set(tokens)) <= 1
         has_context = bool(prev_a or prev_u or topic or scene_topic)
-
-        independent_score = max(0.0, 1.0 - continuity_score) if has_context else 1.0
-        if low_information and has_context:
-            independent_score *= 0.35
-
-        # Elliptical follow-up questions are a structural discourse pattern:
-        # a very short question without a newly introduced named entity normally
-        # depends on the immediately preceding human exchange. This rule does
-        # not inspect topics or renderer names.
-        current_named = {
-            token for token in re.findall(r"\b[А-ЯЁA-Z][A-Za-zА-ЯЁёІіЇїЄєҐґ-]{2,}\b", current)
-            if token.lower() not in {
-                "так", "когда", "куда", "почему", "зачем", "что", "кто",
-                "как", "можно", "теперь", "дальше", "ещё", "еще"
-            }
-        }
-        prev_named = {
-            token.lower() for token in re.findall(r"\b[А-ЯЁA-Z][A-Za-zА-ЯЁёІіЇїЄєҐґ-]{2,}\b", prev_a + " " + prev_u)
-        }
-        novel_named = {t.lower() for t in current_named if t.lower() not in prev_named}
-        elliptical_followup = bool(
-            has_context
-            and len([t for t in self._tokens(current) if len(t) >= 2]) <= 4
-            and (current.endswith("?") or current.endswith("？"))
-            and not novel_named
-        )
-
         if not has_context:
             relation = "NEW_TOPIC"
-        elif novel_named and relation_strength < 0.48:
-            # A short request that introduces a new named entity is structurally
-            # a fresh topic unless the surrounding semantic evidence is strong
-            # enough to tie it to the current thread.
-            relation = "NEW_TOPIC"
-        elif low_information or elliptical_followup:
+            topic_relation = "NEW_TOPIC"
+        elif explicit_reference:
             relation = "CONTINUE_TOPIC"
-        elif continuity_score >= 0.34 or relation_strength >= 0.48:
+            topic_relation = "SAME_TOPIC"
+        elif short_followup or (dependency_score >= 0.62 and not features["self_contained"]):
             relation = "CONTINUE_TOPIC"
+            topic_relation = "SAME_TOPIC"
+        elif features["self_contained"]:
+            # The current task is authoritative. Topic similarity does not create
+            # a dependency; at most it means the user is doing another task in the
+            # same subject thread.
+            relation = "SAME_TOPIC" if topic_affinity >= 0.18 or request_affinity >= 0.42 else "INDEPENDENT"
+            topic_relation = relation
+        elif relation_strength >= 0.48:
+            relation = "SAME_TOPIC"
+            topic_relation = "SAME_TOPIC"
         else:
             relation = "NEW_TOPIC"
+            topic_relation = "NEW_TOPIC"
 
         if relation == "CONTINUE_TOPIC":
-            if max(topic_affinity, answer_affinity) >= 0.55 and request_affinity < 0.45:
-                subtype = "REFERENCE_OR_DEVELOPMENT"
-            elif request_affinity >= 0.45:
-                subtype = "DEVELOPMENT"
-            else:
-                subtype = "REFINEMENT"
+            subtype = "REFERENCE_OR_DEVELOPMENT" if explicit_reference else "DEVELOPMENT"
+        elif relation == "SAME_TOPIC":
+            subtype = "NEW_TASK_SAME_TOPIC"
         else:
-            subtype = "NEW_TOPIC"
+            subtype = relation
 
         previous_text = " ".join(x for x in (prev_a, prev_u, topic) if x)
         previous_tokens = {t for t in self._tokens(previous_text) if len(t) >= 3}
@@ -560,17 +579,29 @@ class QuantumInterpretationEngine:
             for x in (scene.get("render_blocks") or [])
             if isinstance(x, dict) and x.get("block_id")
         ]
+        continuation_score = max(
+            dependency_score,
+            0.45 * answer_affinity + 0.25 * topic_affinity + 0.20 * dialogue_followup
+            if not features["self_contained"] else 0.0,
+        )
+        independent_score = 1.0 - dependency_score
+        request_dependency = "reference" if explicit_reference else "continuation" if relation == "CONTINUE_TOPIC" else "same_topic" if relation == "SAME_TOPIC" else "independent"
 
         return {
             "relation": relation,
-            "continuation_score": float(max(0.0, min(1.0, continuity_score))),
+            "topic_relation": topic_relation,
+            "request_relation": "ARTIFACT_REFERENCE" if explicit_reference else relation,
+            "request_dependency": request_dependency,
+            "request_dependency_score": dependency_score,
+            "current_request_complete": bool(features["self_contained"]),
+            "continuation_score": float(max(0.0, min(1.0, continuation_score))),
             "independent_score": float(max(0.0, min(1.0, independent_score))),
             "relation_strength": float(max(0.0, min(1.0, relation_strength))),
             "subtype": subtype,
             "scores": {
                 **sims,
                 "dialogue_followup": dialogue_followup,
-                "structural_followup": structural_followup,
+                "structural_followup": dependency_score,
             },
             "active_topic": topic,
             "active_goal": goal,
@@ -584,11 +615,12 @@ class QuantumInterpretationEngine:
             "previous_scene_id": scene.get("scene_id") if relation == "CONTINUE_TOPIC" else "",
             "previous_render_types": previous_render_types,
             "previous_block_ids": previous_block_ids,
-            "source": "quantum_dialogue_vector_v4",
+            "explicit_reference": explicit_reference,
+            "anaphoric": anaphora,
+            "source": "quantum_dialogue_vector_v5",
             "decision_owner": DECISION_OWNER,
             "trigger_independent": True,
         }
-
 
     def _linguistic(self,text):
         tokens=self._tokens(text)
@@ -670,6 +702,24 @@ class QuantumInterpretationEngine:
                 scores["representation"][label] *= 0.05
             if label in scores["object"]:
                 scores["object"][label] *= 0.05
+
+        # Structural semantic enrichment for visual construction. This keeps the
+        # matrix probabilistic while making equivalent phrasings converge on the
+        # same task vector instead of depending on the exact verb "покажи" versus
+        # "изобрази".
+        request_features = self._semantic_request_features(text)
+        if request_features["visual_construction"]:
+            scores["representation"]["diagram"] = max(
+                scores["representation"].get("diagram", 0.0), 0.42
+            )
+            scores["object"]["diagram"] = max(scores["object"].get("diagram", 0.0), 0.38)
+            scores["operation"]["build"] = max(scores["operation"].get("build", 0.0), 0.32)
+            scores["operation"]["present"] = max(scores["operation"].get("present", 0.0), 0.28)
+            scores["goal"]["visualize"] = max(scores["goal"].get("visualize", 0.0), 0.34)
+        elif request_features["visual_action"]:
+            scores["goal"]["visualize"] = max(scores["goal"].get("visualize", 0.0), 0.22)
+            scores["operation"]["present"] = max(scores["operation"].get("present", 0.0), 0.22)
+
         ctx=self._context_scores(text,previous_assistant,previous_user,active_topic,active_goal)
         def rank(d):
             return sorted(d.items(),key=lambda x:x[1],reverse=True)
@@ -683,6 +733,7 @@ class QuantumInterpretationEngine:
             "domain_scores":scores["domain"],"capability_scores":scores["capability"],
             "operation_scores":scores["operation"],"object_scores":scores["object"],"goal_scores":scores["goal"],
             "visual_schema_scores":scores["visual_schema"],
+            "request_features":request_features,
             "context_scores":ctx,
             "best_representation":rep[0][0] if rep else "text",
             "best_representation_score":float(rep[0][1]) if rep else 0.0,
@@ -710,15 +761,12 @@ class QuantumInterpretationEngine:
         obj=dict(profile.get("object_scores") or {})
         op=dict(profile.get("operation_scores") or {})
         goal=dict(profile.get("goal_scores") or {})
+        features=dict(profile.get("request_features") or {})
 
         def rank(items):
             return sorted(items.items(), key=lambda x: float(x[1]), reverse=True)
 
-        rep_rank=rank(rep)
-        obj_rank=rank(obj)
-        op_rank=rank(op)
-        goal_rank=rank(goal)
-
+        rep_rank=rank(rep); obj_rank=rank(obj); op_rank=rank(op); goal_rank=rank(goal)
         best_rep=rep_rank[0][0] if rep_rank else "text"
         best_rep_score=float(rep.get(best_rep,0.0))
         second_rep_score=float(rep_rank[1][1]) if len(rep_rank)>1 else 0.0
@@ -746,71 +794,41 @@ class QuantumInterpretationEngine:
             "memory":{"retrieve","answer","present"},
             "visual_context":{"answer","analyze","explain"},
         }
-
         aligned = best_op in compatible_ops.get(best_rep,set())
 
-        # Relative matrix resolution: representation evidence selects the output
-        # family; operation and object/goal evidence validate the intended use.
-        # This never consults domain/capability gates or hardcoded renderer words.
+        # Strong structural interpretation for a self-contained visual construction.
+        # This is intentionally a task-vector rule: operation + object/constraint
+        # evidence must agree before a structured representation is locked.
+        if features.get("visual_construction") and not self._negated_representation_labels(text):
+            return "diagram", "semantic_visual_construction", True
+
         if best_rep != "text" and aligned:
             rep_margin = best_rep_score - second_rep_score
-
-            # Strong object agreement.
-            object_agreement = (
-                best_obj == best_rep and best_obj_score >= 0.05
-            )
-
-            # Data-heavy requests often dilute object scores with table/image
-            # evidence. In that case, a clear representation ranking plus an
-            # aligned task operation is sufficient.
+            object_agreement = best_obj == best_rep and best_obj_score >= 0.05
             representation_clear = (
                 best_rep_score >= 0.10 and
                 (rep_margin >= 0.015 or best_rep_score >= 0.22)
             )
-
-            # Explicit negation is represented as negative evidence and should
-            # never itself become a positive representation.
             if representation_clear and (object_agreement or best_rep_score >= 0.16):
                 return best_rep,"task_object_goal_resolution",True
 
-            # A production request can contain explanatory language as part of
-            # the requested result (for example: "build the chart and explain
-            # the trend").  In that case the top operation may be `explain`
-            # even though the semantic object is a graph and the build signal is
-            # materially present.  Resolve from the complete task vector rather
-            # than allowing one family to suppress the representation.  This is
-            # structural semantic evidence, not a word-trigger or renderer rule.
             production_ops = {"build", "modify", "present"}
-            production_signal = max(
-                float(op.get(name, 0.0) or 0.0) for name in production_ops
-            )
-            production_goal = max(
-                float(goal.get(name, 0.0) or 0.0)
-                for name in {"visualize", "transform", "present", "organize"}
-            )
+            production_signal = max(float(op.get(name,0.0) or 0.0) for name in production_ops)
+            production_goal = max(float(goal.get(name,0.0) or 0.0) for name in {"visualize","transform","present","organize"})
             object_alignment = best_obj == best_rep and best_obj_score >= 0.10
-            representation_dominance = best_rep_score >= max(0.09, float(rep.get("text", 0.0) or 0.0) + 0.025)
+            representation_dominance = best_rep_score >= max(0.09, float(rep.get("text",0.0) or 0.0) + 0.025)
             structured_task = (
                 best_rep != "text"
                 and object_alignment
                 and representation_dominance
-                and (
-                    production_signal >= 0.055
-                    or (best_op in compatible_ops.get(best_rep, set()) and best_op_score >= 0.08)
-                )
-                and (
-                    production_goal >= 0.035
-                    or best_rep_score >= 0.14
-                )
+                and (production_signal >= 0.055 or (aligned and best_op_score >= 0.08))
+                and (production_goal >= 0.035 or best_rep_score >= 0.14)
             )
             if structured_task:
                 return best_rep,"semantic_task_vector_resolution",True
-
             if aligned and best_rep_score >= 0.10 and best_op_score >= 0.08:
                 return best_rep,"operation_representation_resolution",True
 
-        # A pure explanatory question about a representation stays text.
-        # Mentioning "graph", "table", etc. is not enough without a production action.
         return "text","unresolved",False
 
     def dialogue(self,text,previous_assistant="",previous_user="",active_goal="",active_topic="",previous_scene=None):
@@ -842,7 +860,7 @@ class QuantumInterpretationEngine:
             },
             "linguistic":self._linguistic(text),
             "continuation":vector["relation"]=="CONTINUE_TOPIC",
-            "reference_to_previous":vector["subtype"]=="REFERENCE_OR_DEVELOPMENT",
+            "reference_to_previous":bool(vector.get("request_relation") == "ARTIFACT_REFERENCE"),
             "dialogue_relation":vector,
             "identity_request":p["identity_request"],
             "nli":{"labels":list(d),"scores":list(d.values()),"source":"quantum_matrix"},
@@ -886,59 +904,71 @@ class QuantumInterpretationEngine:
 
     @classmethod
     def _reference_resolution(cls, text: str, previous_assistant: str, previous_user: str = "") -> dict:
-        """Resolve a short contextual reference from the immediately prior human exchange.
-
-        This is structural discourse resolution only: no topic names, renderer names,
-        or domain keyword maps are used. It returns evidence for the processor.
-        """
+        """Resolve only an explicit discourse reference to the immediately prior turn."""
         current = cls.normalize(text)
         prev = cls.normalize(previous_assistant)
         if not current or not prev:
-            return {
-                "present": False, "target": "", "candidates": [],
-                "confidence": 0.0, "source": "unresolved_semantic_reference",
-                "anaphoric": False, "short_followup": False, "resolved": False,
-            }
+            return {"present": False, "target": "", "candidates": [], "confidence": 0.0,
+                    "source": "unresolved_semantic_reference", "anaphoric": False,
+                    "short_followup": False, "resolved": False}
         anaphoric = bool(re.search(
-            r'\b(он|она|они|его|её|их|ему|ей|им|этот|эта|это|этом|этим|ит|he|she|they|him|her|them)\b',
+            r'\b(он|она|они|его|её|ее|их|ему|ей|им|этот|эта|это|этом|этим|этого|эту|ит|he|she|they|him|her|them|this|that)\b',
+            current, flags=re.I,
+        ))
+        explicit_phrase = bool(re.search(
+            r"\b(предыдущ|прошл|уже показ|уже создан|переделай его|измени его|добавь к нему|" 
+            r"измени её|добавь к ней|в нём|в ней|на нём|на ней)\w*\b",
             current, flags=re.I,
         ))
         short_followup = (
-            len(cls._tokens(current)) <= 4
+            len(cls._tokens(current)) <= 6
+            and not cls._semantic_request_features(current)["self_contained"]
             and (current.endswith("?") or current.endswith("？"))
         )
-        # Generic candidate extraction from prose: capitalized multi-word spans and
-        # single capitalized names. This is an entity-shape heuristic, not a topic trigger.
+        if not (anaphoric or explicit_phrase or short_followup):
+            return {"present": False, "target": "", "candidates": [], "confidence": 0.0,
+                    "source": "semantic_entity_reference", "anaphoric": False,
+                    "short_followup": False, "resolved": False}
         candidates = []
         patterns = [
             r"\b(?:[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4})\b",
-            r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
+            r"\b(?:треугольник|квадрат|круг|окружность|схема|черт[её]ж|диаграмма|график|таблица|формула)\b",
         ]
+        stop = {
+            "Это","Он","Она","Они","Когда","Куда","Главные","Важные","Например",
+            "Построй","Покажи","Создай","Изобрази","Чертёж","Чертеж","готов",
+            "имеет","имеют","стороны","сторон","длина","длины","сантиметр","сантиметры",
+        }
         for pattern in patterns:
             for match in re.findall(pattern, prev):
-                value = cls.normalize(match).strip(".,:;()[]{}<>—-\"")
-                if value and value not in candidates and len(value.split()) <= 5:
+                value = cls.normalize(match).strip('.,:;()[]{}<>—-"')
+                if value and value not in stop and value not in candidates:
                     candidates.append(value)
                 if len(candidates) >= 12:
                     break
             if len(candidates) >= 12:
                 break
-        # Prefer the longest proper-name-shaped candidate; exclude common sentence-leading words.
-        stop = {"Это", "Он", "Она", "Они", "Когда", "Куда", "Главные", "Важные", "Например"}
-        candidates = [c for c in candidates if c not in stop]
+        # Lowercase content in the user's previous request is still a valid
+        # antecedent. Add informative tokens generically; no topic vocabulary is
+        # required, and discourse pronouns can then resolve to the actual object.
+        if len(candidates) < 12:
+            ignored = {
+                "покажи","показать","изобрази","изобразить","создай","создать","построй","построить",
+                "начерти","начертить","нарисуй","нарисовать","со","на","с","и","или","по","см",
+                "это","этот","эта","эти","его","ее","её","их","сторона","сторонами","стороны",
+            }
+            for token in re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", previous_user.lower()):
+                if len(token) >= 4 and token not in ignored and token not in candidates:
+                    candidates.append(token)
+                if len(candidates) >= 12:
+                    break
         target = max(candidates, key=lambda x: (len(x.split()), len(x)), default="")
-        resolved = bool(target and (anaphoric or short_followup))
-        confidence = 0.82 if target and anaphoric else 0.68 if target and short_followup else 0.0
-        return {
-            "present": bool(target),
-            "target": target,
-            "candidates": candidates,
-            "confidence": confidence,
-            "source": "semantic_entity_reference",
-            "anaphoric": anaphoric,
-            "short_followup": short_followup,
-            "resolved": resolved,
-        }
+        resolved = bool(target)
+        confidence = 0.94 if anaphoric or explicit_phrase else 0.78 if short_followup else 0.0
+        return {"present": bool(target), "target": target, "candidates": candidates[:12],
+                "confidence": confidence, "source": "semantic_entity_reference",
+                "anaphoric": anaphoric, "short_followup": short_followup,
+                "resolved": resolved}
 
     def _resolve_scene_context(self,text,state,continuation,reference,active_topic=""):
         if not isinstance(state,dict) or not (continuation or reference): return {}
@@ -1000,7 +1030,7 @@ class QuantumInterpretationEngine:
         dialogue_vector=dialogue_packet.get("dialogue_relation", {})
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
-        continuation=bool(d.get("continuation", d.get("continuation_score", 0.0) >= 0.35))
+        continuation=bool(d.get("continuation"))
         # A short continuation question does not acquire a structured renderer
         # merely because the representation matrix found a weak candidate.
         # Structured output must be supported by the current turn's operation,
@@ -1048,13 +1078,25 @@ class QuantumInterpretationEngine:
         reference=bool(d.get("reference_to_previous", d.get("reference_score", 0.0) >= 0.42))
         memory=p["dialogue_best"]=="memory_query" and p["dialogue_scores"].get("memory_query",0.0)>=0.18
         reference_resolution = self._reference_resolution(text, last_a, last_u)
-        if reference_resolution.get("resolved") and reference_resolution.get("target"):
+        explicit_reference = bool(dialogue_vector.get("request_relation") == "ARTIFACT_REFERENCE")
+        if reference_resolution.get("resolved") and reference_resolution.get("target") and explicit_reference:
             reference = True
             continuation = True
-            if dialogue_vector.get("relation") != "CONTINUE_TOPIC":
-                dialogue_vector["relation"] = "CONTINUE_TOPIC"
-                dialogue_vector["subtype"] = "REFERENCE_OR_DEVELOPMENT"
-                dialogue_vector["delta_mode"] = "extend"
+            dialogue_vector["reference_resolution"] = reference_resolution
+            dialogue_vector["resolved_reference"] = reference_resolution.get("target")
+            # An explicit artifact reference can inherit the previous structured
+            # representation even when the current sentence omits its modality.
+            if production == "text" and isinstance(previous_scene, dict):
+                prior_types = [_clean_representation(x) for x in (previous_scene.get("render_block_types") or [])]
+                if not prior_types:
+                    prior_types = [_clean_representation(
+                        block.get("type") or block.get("artifact_type") or block.get("representation")
+                    ) for block in (previous_scene.get("render_blocks") or []) if isinstance(block, dict)]
+                prior_structured = [x for x in prior_types if x in STRUCTURED_REPRESENTATIONS]
+                if prior_structured:
+                    production = prior_structured[0]
+                    source = "reference_reuse_existing_representation"
+                    locked = True
         resolved_scene=self._resolve_scene_context(text,state,continuation,reference,active_topic)
         resolved_reference = reference_resolution.get("target") or ""
         resolved_request = text
