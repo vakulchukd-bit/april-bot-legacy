@@ -21,7 +21,7 @@ import math
 import re
 
 APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
-SEMANTIC_ENGINE_VERSION = "quantum_evidence_v4_dialogue_vector_unified_production_signal"
+SEMANTIC_ENGINE_VERSION = "quantum_evidence_v5_canonical_interpretation_continuity_safe"
 SEMANTIC_MACHINE_CHANNEL = {
     "type": "semantic_core",
     "mode": "quantum_evidence_unified",
@@ -748,9 +748,227 @@ def _base_result(text, signals):
         "provider_calls": 0,
     }
 
+def _canonical_dialogue_vector(interpreted):
+    """Return the latest Interpretation dialogue vector without re-inferring it."""
+    interpreted = interpreted if isinstance(interpreted, dict) else {}
+    vector = interpreted.get("dialogue_vector")
+    if isinstance(vector, dict) and vector:
+        return dict(vector)
+    contract = interpreted.get("dialogue_contract")
+    if isinstance(contract, dict) and contract:
+        return dict(contract)
+    return {}
+
+
+def _previous_structured_representation(signals, interpreted):
+    """
+    Recover one structured representation from the CURRENT visual scene only.
+
+    This is continuity evidence, not a new representation classifier.
+    """
+    visual = signals.get("active_visual_scene") if isinstance(signals, dict) else {}
+    visual = visual if isinstance(visual, dict) else {}
+    previous = []
+
+    for key in ("render_block_types", "block_types"):
+        values = visual.get(key) or []
+        if isinstance(values, (list, tuple)):
+            for item in values:
+                rep = _clean_representation(item)
+                if rep and rep != "text" and rep not in previous:
+                    previous.append(rep)
+
+    scene_rep = _clean_representation(
+        interpreted.get("scene_type") or interpreted.get("current_representation")
+    )
+    if scene_rep in previous:
+        return scene_rep
+
+    return previous[0] if len(previous) == 1 else ""
+
+
+def _continuity_preservation_candidate(signals, interpreted):
+    """
+    Preserve a previous structured representation only when the canonical
+    dialogue contract explicitly authorizes continuation/reference.
+
+    Only the representation type is preserved. The previous payload/artifact
+    is never copied; executor builds a fresh scene.
+    """
+    interpreted = interpreted if isinstance(interpreted, dict) else {}
+    vector = _canonical_dialogue_vector(interpreted)
+
+    relation = str(
+        vector.get("relation")
+        or vector.get("semantic_dialogue_label")
+        or ""
+    ).upper()
+    request_relation = str(vector.get("request_relation") or "").upper()
+    dependency = str(vector.get("request_dependency") or "").lower()
+
+    continuation = bool(
+        vector.get("continuation")
+        or relation in {"CONTINUE_TOPIC", "CONTINUATION"}
+    )
+    reference = bool(
+        vector.get("reference_to_previous")
+        or request_relation == "ARTIFACT_REFERENCE"
+        or relation == "ARTIFACT_REFERENCE"
+    )
+
+    if not (
+        continuation
+        or reference
+        or dependency in {"continuation", "artifact_reference"}
+    ):
+        return "", "not_authorized"
+
+    if bool(interpreted.get("production_representation_locked")):
+        return "", "production_locked"
+
+    operation = str(
+        interpreted.get("operation")
+        or (
+            interpreted.get("semantic_task", {}).get("operation")
+            if isinstance(interpreted.get("semantic_task"), dict)
+            else ""
+        )
+        or ""
+    ).lower()
+
+    compatible_operations = {
+        "modify", "change", "transform", "update", "annotate",
+        "present", "build", "rebuild", "redraw", "calculate",
+        "add", "remove", "edit", "resize",
+    }
+
+    if not (
+        reference
+        or operation in compatible_operations
+        or dependency == "continuation"
+    ):
+        return "", "operation_not_continuation"
+
+    rep = _previous_structured_representation(signals, interpreted)
+    if not rep:
+        return "", "no_unique_previous_structured_representation"
+
+    return rep, "canonical_dialogue_previous_scene"
+
+
 def _dialogue_context_matrix(text, signals, interpreted):
-    prev_u, prev_a = str(signals.get("last_user_turn") or ""), str(signals.get("last_april_turn") or "")
-    dc = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
+    prev_u = str(signals.get("last_user_turn") or "")
+    prev_a = str(signals.get("last_april_turn") or "")
+    dc = (
+        interpreted.get("dialogue_contract")
+        if isinstance(interpreted.get("dialogue_contract"), dict)
+        else {}
+    )
+    canonical = _canonical_dialogue_vector(interpreted)
+
+    canonical_relation = str(
+        canonical.get("relation")
+        or canonical.get("semantic_dialogue_label")
+        or ""
+    ).upper()
+    canonical_request_relation = str(
+        canonical.get("request_relation") or ""
+    ).upper()
+
+    # The latest Interpretation Engine is the canonical dialogue authority.
+    # Semantic Core transports its resolved relation instead of re-running the
+    # older token-overlap/entity classifier.
+    if (
+        canonical_relation in {
+            "CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE",
+            "MEMORY_QUERY", "SAME_TOPIC", "INDEPENDENT", "NEW_TOPIC",
+        }
+        or canonical_request_relation in {
+            "CONTINUE_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY",
+        }
+    ):
+        relation = canonical_relation or canonical_request_relation
+        confidence = clamp(
+            canonical.get("confidence")
+            or canonical.get("continuation_score")
+            or canonical.get("reference_score")
+            or 0.0
+        )
+        continuation = bool(
+            canonical.get("continuation")
+            or relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE"}
+            or canonical_request_relation == "ARTIFACT_REFERENCE"
+        )
+        reference = bool(
+            canonical.get("reference_to_previous")
+            or relation == "ARTIFACT_REFERENCE"
+            or canonical_request_relation == "ARTIFACT_REFERENCE"
+        )
+        dependency = canonical.get("request_dependency") or (
+            "continuation" if continuation else "independent"
+        )
+
+        return {
+            "context_dependency": bool(
+                continuation
+                or reference
+                or canonical.get("context_dependency")
+            ),
+            "context_dependency_score": round(confidence, 4),
+            "continuation": continuation,
+            "continuation_score": round(
+                max(
+                    confidence if continuation else 0.0,
+                    float(canonical.get("continuation_score", 0.0) or 0.0),
+                ),
+                4,
+            ),
+            "reference_to_previous": reference,
+            "reference_score": round(
+                max(
+                    confidence if reference else 0.0,
+                    float(canonical.get("reference_score", 0.0) or 0.0),
+                ),
+                4,
+            ),
+            "dialog_act": (
+                "memory_query" if relation == "MEMORY_QUERY"
+                else "reference" if reference
+                else "continuation" if continuation
+                else str(
+                    canonical.get("dialog_act")
+                    or dc.get("dialog_act")
+                    or "request"
+                )
+            ),
+            "request_relation": canonical_request_relation,
+            "request_dependency": dependency,
+            "reuse_existing_scene": bool(
+                canonical.get("reuse_existing_scene")
+            ),
+            "previous_scene_id": canonical.get("previous_scene_id", ""),
+            "previous_render_types": list(
+                canonical.get("previous_render_types") or []
+            ),
+            "previous_user_turn": prev_u,
+            "previous_april_turn": prev_a,
+            "reference_resolution": (
+                canonical.get("reference_resolution") or {}
+            ),
+            "resolved_request": (
+                canonical.get("resolved_request")
+                or interpreted.get("resolved_request")
+                or text
+            ),
+            "structured_continuity": bool(
+                canonical.get("reuse_existing_scene")
+                or canonical.get("previous_render_types")
+            ),
+            "history_available": bool(prev_u or prev_a),
+            "canonical_source": "interpretation.dialogue_vector",
+        }
+
+    # Legacy fallback is retained only when the canonical vector is absent.
     scene_relation = (
         interpreted.get("dialogue_relation")
         if isinstance(interpreted.get("dialogue_relation"), dict)
@@ -762,12 +980,22 @@ def _dialogue_context_matrix(text, signals, interpreted):
             "context_dependency": True,
             "context_dependency_score": round(confidence, 4),
             "continuation": bool(scene_relation.get("continuation")),
-            "continuation_score": round(confidence if scene_relation.get("continuation") else 0.0, 4),
-            "reference_to_previous": bool(scene_relation.get("reference_to_previous")),
-            "reference_score": round(confidence if scene_relation.get("reference_to_previous") else 0.0, 4),
+            "continuation_score": round(
+                confidence if scene_relation.get("continuation") else 0.0,
+                4,
+            ),
+            "reference_to_previous": bool(
+                scene_relation.get("reference_to_previous")
+            ),
+            "reference_score": round(
+                confidence if scene_relation.get("reference_to_previous") else 0.0,
+                4,
+            ),
             "dialog_act": (
-                "continuation" if scene_relation.get("continuation")
-                else "reference" if scene_relation.get("reference_to_previous")
+                "continuation"
+                if scene_relation.get("continuation")
+                else "reference"
+                if scene_relation.get("reference_to_previous")
                 else dc.get("dialog_act", "request")
             ),
             "previous_user_turn": prev_u,
@@ -775,6 +1003,7 @@ def _dialogue_context_matrix(text, signals, interpreted):
             "structured_continuity": True,
             "history_available": bool(prev_u or prev_a),
         }
+
     if str(dc.get("dialog_act") or "").lower() == "memory_query":
         return {
             "context_dependency": True,
@@ -789,33 +1018,60 @@ def _dialogue_context_matrix(text, signals, interpreted):
             "structured_continuity": False,
             "history_available": bool(prev_u or prev_a),
         }
+
     total = max(1, len(str(text).split()))
-    tokens = set(re.findall(r"[a-zа-яё0-9]{3,}", str(text).lower()))
+    tokens = set(
+        re.findall(r"[a-zа-яё0-9]{3,}", str(text).lower())
+    )
     incomplete = 1.0 - min(1.0, len(tokens) / total)
     history = 1.0 if prev_u or prev_a else 0.0
+
     def overlap(a, b):
         aa = set(re.findall(r"[a-zа-яё0-9]{3,}", str(a).lower()))
         bb = set(re.findall(r"[a-zа-яё0-9]{3,}", str(b).lower()))
-        return len(aa & bb) / max(1.0, min(len(aa), len(bb))) if aa and bb else 0.0
+        return (
+            len(aa & bb) / max(1.0, min(len(aa), len(bb)))
+            if aa and bb else 0.0
+        )
+
     affinity = max(overlap(text, prev_u), overlap(text, prev_a))
     visual = signals.get("active_visual_scene") if isinstance(signals, dict) else {}
     visual = visual if isinstance(visual, dict) else {}
     rep = str(interpreted.get("scene_type") or "").lower()
-    previous_types = {str(x).lower() for x in (
-        visual.get("render_block_types") or visual.get("block_types") or []
-    )}
-    structured = 1.0 if rep and rep != "text" and rep in previous_types else 0.0
+    previous_types = {
+        str(x).lower()
+        for x in (
+            visual.get("render_block_types")
+            or visual.get("block_types")
+            or []
+        )
+    }
+    structured = (
+        1.0 if rep and rep != "text" and rep in previous_types else 0.0
+    )
     evidence = any(
-        isinstance(x, dict) and str(x.get("label") or "").lower() == rep
+        isinstance(x, dict)
+        and str(x.get("label") or "").lower() == rep
         and float(x.get("score", 0.0) or 0.0) >= 0.24
         for x in (interpreted.get("representation_evidence") or [])
     )
-    capitalized = len(re.findall(r"\b[А-ЯA-ZЁ][а-яa-zё-]{2,}\b", prev_a))
-    entity_context = 1.0 if prev_a and incomplete >= 0.30 and capitalized >= 2 else 0.0
-    dc = interpreted.get("dialogue_contract") if isinstance(interpreted.get("dialogue_contract"), dict) else {}
-    rr = interpreted.get("dialogue_reference") if isinstance(interpreted.get("dialogue_reference"), dict) else {}
+    capitalized = len(
+        re.findall(r"\b[А-ЯA-ZЁ][а-яa-zё-]{2,}\b", prev_a)
+    )
+    entity_context = (
+        1.0 if prev_a and incomplete >= 0.30 and capitalized >= 2 else 0.0
+    )
+    rr = (
+        interpreted.get("dialogue_reference")
+        if isinstance(interpreted.get("dialogue_reference"), dict)
+        else {}
+    )
     if not rr:
-        rr = dc.get("reference_resolution") if isinstance(dc.get("reference_resolution"), dict) else {}
+        rr = (
+            dc.get("reference_resolution")
+            if isinstance(dc.get("reference_resolution"), dict)
+            else {}
+        )
     rr_resolved = bool(rr.get("resolved"))
     rr_confidence = float(rr.get("confidence", 0.0) or 0.0)
     semantic_rel = max(
@@ -824,8 +1080,13 @@ def _dialogue_context_matrix(text, signals, interpreted):
         rr_confidence if rr_resolved else 0.0,
     )
     score = clamp(
-        0.22*incomplete + 0.12*history + 0.18*structured +
-        0.16*affinity + 0.16*evidence + 0.52*entity_context + 0.10*semantic_rel
+        0.22 * incomplete
+        + 0.12 * history
+        + 0.18 * structured
+        + 0.16 * affinity
+        + 0.16 * evidence
+        + 0.52 * entity_context
+        + 0.10 * semantic_rel
     )
     if len(tokens) >= 2 and affinity < 0.05 and not structured and incomplete < 0.55:
         score = clamp(score - 0.14)
@@ -836,18 +1097,42 @@ def _dialogue_context_matrix(text, signals, interpreted):
         continuation = True
         score = max(score, rr_confidence)
     else:
-        reference = bool(depends and (structured or entity_context or float(dc.get("reference_score", 0.0) or 0.0) >= 0.5))
+        reference = bool(
+            depends
+            and (
+                structured
+                or entity_context
+                or float(dc.get("reference_score", 0.0) or 0.0) >= 0.5
+            )
+        )
         continuation = bool(depends and not reference)
+
     return {
-        "context_dependency": depends, "context_dependency_score": round(score, 4),
-        "continuation": continuation, "continuation_score": round(score if continuation else 0.0, 4),
-        "reference_to_previous": reference, "reference_score": round(score if reference else 0.0, 4),
-        "dialog_act": "reference" if reference else "continuation" if continuation else dc.get("dialog_act", "request"),
+        "context_dependency": depends,
+        "context_dependency_score": round(score, 4),
+        "continuation": continuation,
+        "continuation_score": round(score if continuation else 0.0, 4),
+        "reference_to_previous": reference,
+        "reference_score": round(score if reference else 0.0, 4),
+        "dialog_act": (
+            "reference"
+            if reference
+            else "continuation"
+            if continuation
+            else dc.get("dialog_act", "request")
+        ),
         "reference_resolution": rr if rr_resolved else {},
-        "resolved_request": interpreted.get("resolved_request") or dc.get("resolved_request") or text,
-        "previous_user_turn": prev_u, "previous_april_turn": prev_a,
-        "structured_continuity": bool(structured), "history_available": bool(history),
+        "resolved_request": (
+            interpreted.get("resolved_request")
+            or dc.get("resolved_request")
+            or text
+        ),
+        "previous_user_turn": prev_u,
+        "previous_april_turn": prev_a,
+        "structured_continuity": bool(structured),
+        "history_available": bool(history),
     }
+
 
 def analyze(text: str, state: dict=None, history: list=None,
             active_flow: dict=None, dialog_state: dict=None,
@@ -877,27 +1162,51 @@ def analyze(text: str, state: dict=None, history: list=None,
         ) or {}
 
     fusion=_signal_fusion(text, signals, interpreted)
-    dialogue_context = _dialogue_context_matrix(text, signals, interpreted)
-    # Do not manufacture a table/graph/etc. for a context-only short follow-up.
-    # If the current semantic turn did not explicitly establish a structured
-    # representation, keep the response textual and let the provider use context.
-    vector = interpreted.get("dialogue_vector") if isinstance(interpreted, dict) else {}
-    vector = vector if isinstance(vector, dict) else {}
-    current_locked = bool(interpreted.get("production_representation_locked"))
-    short_followup = len(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9]+", text)) <= 8
-    relation = str(vector.get("relation") or interpreted.get("dialogue_relation") or "").upper()
-    current_rep = str(interpreted.get("production_representation") or "text").lower()
-    if short_followup and relation == "CONTINUE_TOPIC" and current_rep != "text" and not current_locked:
+    dialogue_context = _dialogue_context_matrix(
+        text, signals, interpreted
+    )
+
+    # Canonical continuity may preserve the previous structured representation
+    # when the current Interpretation contract says this turn is a
+    # continuation/reference. This only preserves the representation type;
+    # executor creates a fresh artifact.
+    continuity_rep, continuity_source = _continuity_preservation_candidate(
+        signals, interpreted
+    )
+    canonical_locked = bool(
+        interpreted.get("production_representation_locked")
+    )
+    canonical_production = _clean_representation(
+        interpreted.get("production_representation")
+        or interpreted.get("requested_representation")
+        or interpreted.get("resolved_representation")
+    )
+
+    if (
+        continuity_rep
+        and not canonical_locked
+        and canonical_production in {"", "text"}
+        and continuity_rep != "text"
+    ):
         fusion = dict(fusion)
-        fusion["requested_representation"] = "text"
-        fusion["requested_representations"] = ["text"]
-        fusion["required_representations"] = ["text"]
-        fusion["production_representation"] = "text"
-        fusion["production_representation_source"] = "context_followup_text_safe"
-        fusion["production_representation_confident"] = False
-        fusion["evidence_representations"] = [x for x in fusion.get("evidence_representations", []) if x == "text"] or ["text"]
-        fusion["renderer"] = 0.0
-    
+        fusion["requested_representation"] = continuity_rep
+        fusion["requested_representations"] = [continuity_rep]
+        fusion["required_representations"] = [continuity_rep]
+        fusion["production_representation"] = continuity_rep
+        fusion["production_representation_source"] = continuity_source
+        fusion["production_representation_confident"] = True
+        fusion["evidence_representations"] = list(
+            dict.fromkeys(
+                [continuity_rep]
+                + list(fusion.get("evidence_representations", []))
+            )
+        )
+        fusion["renderer"] = 1.0
+
+    current_representation = detect_representation_constraints(
+        text, interpreted
+    )
+
     current_representation = detect_representation_constraints(text, interpreted)
     result=_base_result(text, signals)
 
@@ -1015,25 +1324,43 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["required_representations"] = [production]
     result["candidate_representations"] = evidence_candidates or [production]
     result["requested_representations"] = [production]
-    # Current-turn authority: continuity/reference must not manufacture a new
-    # structured representation. A renderer survives only when this turn itself
-    # established the production representation or an explicit semantic request.
-    # These values must be derived locally; they are not globals.
-    continuation = bool(dialogue_context.get("continuation"))
-    locked = bool(interpreted.get("production_representation_locked"))
-    explicit = bool(current_representation and str(current_representation).lower() != "text")
-    if continuation and production != "text" and not locked and not explicit:
-        production = "text"
-        result["production_representation"] = "text"
-        result["production_representation_locked"] = False
+
+    # Do NOT demote a structured continuation because the utterance is short
+    # or because production_representation_locked is false. The latest
+    # Interpretation Engine owns semantic representation; continuity
+    # preservation above is the only sanctioned scene-derived recovery path.
+    result["production_representation"] = production
+    result["production_representation_preserved"] = bool(
+        continuity_rep
+        and production == continuity_rep
+        and continuity_source != "not_authorized"
+    )
+    result["production_representation_preservation_source"] = (
+        continuity_source
+        if result["production_representation_preserved"]
+        else ""
+    )
+
     result["requested_outputs"] = [production]
     result["required_outputs"] = [production]
     result["requested_representation"] = production
     result["representation_authority"] = (
-        "production_signal"
-        if fusion["production_representation_confident"]
+        "interpretation_canonical"
+        if production != "text"
+        and (
+            fusion["production_representation_confident"]
+            or bool(interpreted.get("production_representation"))
+            or bool(result.get("production_representation_preserved"))
+        )
         else "quantum_processor"
     )
+    result["current_request_authoritative"] = True
+    result["memory_role"] = "evidence_only"
+    result["semantic_conflict"] = {
+        "representation_conflict": False,
+        "canonical_representation": production,
+        "memory_can_override": False,
+    }
     result["representation_constraints"] = fusion["representation_constraints"]
     result["representation_evidence"] = evidence_candidates
 
@@ -1081,6 +1408,14 @@ def analyze(text: str, state: dict=None, history: list=None,
         "interpretation":interpreted,
         "representation_constraints":current_representation,
         "current_request_authoritative":True,
+        "memory_role":"evidence_only",
+        "representation_authority":result["representation_authority"],
+        "production_representation_preserved":result.get(
+            "production_representation_preserved", False
+        ),
+        "production_representation_preservation_source":result.get(
+            "production_representation_preservation_source", ""
+        ),
         "requested_outputs": [requested],
         "evidence_representations": list(evidence_candidates),
         "representation_posteriors": dict(fusion["representation_posteriors"]),
@@ -1124,6 +1459,12 @@ def analyze(text: str, state: dict=None, history: list=None,
         "domains":result["required_domains"],
         "decision_owner":"QUANTUM_PROCESSOR",
         "single_route":True,
+        "current_request_authoritative":True,
+        "memory_role":"evidence_only",
+        "production_representation":result.get("production_representation"),
+        "production_representation_source":result.get(
+            "production_representation_source"
+        ),
     }
 
     safe_semantic_log(
