@@ -868,6 +868,7 @@ def _dialogue_context_matrix(text, signals, interpreted):
 
     canonical_relation = str(
         canonical.get("relation")
+        or canonical.get("request_relation")
         or canonical.get("semantic_dialogue_label")
         or ""
     ).upper()
@@ -963,6 +964,7 @@ def _dialogue_context_matrix(text, signals, interpreted):
             "structured_continuity": bool(
                 canonical.get("reuse_existing_scene")
                 or canonical.get("previous_render_types")
+                or canonical_relation == "ARTIFACT_REFERENCE"
             ),
             "history_available": bool(prev_u or prev_a),
             "canonical_source": "interpretation.dialogue_vector",
