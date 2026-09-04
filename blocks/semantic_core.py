@@ -1346,6 +1346,21 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["requested_outputs"] = [production]
     result["required_outputs"] = [production]
     result["requested_representation"] = production
+
+    # ASCII is advisory-only and scoped to the TEXT block. It never becomes
+    # a representation and is never emitted for structured rooms.
+    ascii_schema_advisory = bool(
+        interpreted.get("ascii_schema_advisory")
+        and production == "text"
+    )
+    result["ascii_schema_advisory"] = ascii_schema_advisory
+    if ascii_schema_advisory:
+        result["format_advisory"] = {
+            "format": "ascii",
+            "scope": "text_block",
+            "mode": "optional",
+            "reason": "semantic_text_schema_request",
+        }
     result["representation_authority"] = (
         "interpretation_canonical"
         if production != "text"
@@ -1419,6 +1434,7 @@ def analyze(text: str, state: dict=None, history: list=None,
             "production_representation_preservation_source", ""
         ),
         "requested_outputs": [requested],
+        "format_advisory": result.get("format_advisory"),
         "evidence_representations": list(evidence_candidates),
         "representation_posteriors": dict(fusion["representation_posteriors"]),
         "multi_output": False,
