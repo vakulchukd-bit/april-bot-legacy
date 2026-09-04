@@ -257,6 +257,7 @@ GOAL_HYPOTHESES = {
 # Visual schema is a semantic subtype of an already-resolved representation.
 # It is evidence only: it never routes by keyword and never owns renderer choice.
 VISUAL_SCHEMA_HYPOTHESES = {
+    "text_schema": "текстовая схема ASCII схема текстовая блок-схема последовательность шагов стрелки пункты обозначения узлы связи в тексте; textual schematic or ASCII-style text schema using characters and arrows",
     "function": "mathematical function equation dependency f(x) y of x curve coordinate plot; mathematical function against an axis",
     "series": "ряд данных последовательность измерений значения изменение динамика тренд временной ряд развитие по оси; ordered measurements or changing values",
     "timeline": "временная шкала хронология история периоды эпохи эры события даты раньше позже начало конец продолжительность последовательность во времени развитие существование вымирание; temporal history chronology eras periods dates and events",
@@ -443,6 +444,13 @@ class QuantumInterpretationEngine:
         visual_operation = best_op in {"build", "modify", "present"}
         visual_goal = best_goal in {"visualize", "transform", "present"}
         memory_query = best_dialogue == "memory_query"
+        visual_schema_scores = measured.get("visual_schema", {}) if isinstance(measured.get("visual_schema"), dict) else {}
+        text_schema_score = float(visual_schema_scores.get("text_schema", 0.0) or 0.0)
+        ascii_schema_advisory = bool(
+            best_rep == "text"
+            and text_schema_score >= 0.10
+            and best_op in {"answer", "build", "present", "explain", "list"}
+        )
 
         followup_dialogue = best_dialogue in {
             "continuation", "reformulation", "correction", "reference",
@@ -478,6 +486,8 @@ class QuantumInterpretationEngine:
                 and (visual_object or best_rep_score >= 0.16)
                 and (visual_goal or best_goal_score >= 0.08)
             ),
+            "ascii_schema_advisory": ascii_schema_advisory,
+            "ascii_schema_score": text_schema_score,
             "self_contained": self_contained,
             "memory_query": memory_query,
             "semantic_best_representation": best_rep,
@@ -975,6 +985,25 @@ class QuantumInterpretationEngine:
         best_goal=goal_rank[0][0] if goal_rank else "understand"
         best_goal_score=float(goal.get(best_goal,0.0))
 
+        # A textual/ASCII schema is an optional format advisory for the TEXT
+        # block. It must win only when the semantic matrix itself identifies a
+        # textual-schema intent and the request has not already been resolved
+        # to a different structured representation.
+        visual_schema_scores = dict(profile.get("visual_schema_scores") or {})
+        text_schema_score = float(visual_schema_scores.get("text_schema", 0.0) or 0.0)
+        diagram_score = float(visual_schema_scores.get("diagram", 0.0) or 0.0)
+        text_schema_format_intent = bool(
+            text_schema_score >= 0.15
+            and text_schema_score >= diagram_score + 0.04
+            and best_op in {"build", "present", "answer", "explain", "list", "modify"}
+        )
+        if (
+            text_schema_format_intent
+            and best_rep in {"text", "diagram"}
+            and best_obj in {"text", "diagram"}
+        ):
+            return "text", "semantic_text_schema_format_advisory", True
+
         compatible_ops={
             "graph":{"build","modify","present","calculate","analyze","list","explain"},
             "diagram":{"build","modify","present","explain"},
@@ -1395,11 +1424,21 @@ class QuantumInterpretationEngine:
         visual_schema_rank = sorted(visual_schema_scores.items(), key=lambda item: float(item[1]), reverse=True)
         visual_schema = visual_schema_rank[0][0] if visual_schema_rank else ""
         visual_schema_confidence = float(visual_schema_rank[0][1]) if visual_schema_rank else 0.0
+        text_schema_score = float(
+            p.get("request_features", {}).get("ascii_schema_score", 0.0) or 0.0
+        )
+        ascii_schema_advisory = bool(
+            production == "text"
+            and text_schema_score >= 0.15
+            and p.get("best_operation") in {"build", "present", "answer", "explain", "list", "modify"}
+        )
         semantic_task={
             "operation":p["best_operation"],"object":p["best_object"],"goal":p["best_goal"],
             "representation":production,
             "visual_schema":visual_schema,
             "visual_schema_confidence":visual_schema_confidence,
+            "ascii_schema_advisory": ascii_schema_advisory,
+            "ascii_schema_score": float(p.get("request_features", {}).get("ascii_schema_score", 0.0) or 0.0),
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
         presentation={
@@ -1410,6 +1449,13 @@ class QuantumInterpretationEngine:
                 "source":"QUANTUM_INTERPRETATION_ENGINE","evidence_only":True
             }]
         }
+        if ascii_schema_advisory:
+            presentation["format_advisory"] = {
+                "format": "ascii",
+                "scope": "text_block",
+                "mode": "optional",
+                "reason": "semantic_text_schema_request",
+            }
         result=build_result(text)
         result.update({
             "type":p["dialogue_best"],"subtype":production,"scene_type":production,
@@ -1429,6 +1475,7 @@ class QuantumInterpretationEngine:
                 "production_representation_locked":locked,"scene_matrix":matrix
             },
             "semantic_task":semantic_task,
+            "ascii_schema_advisory": ascii_schema_advisory,
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
             "presentation_transport":presentation,"presentation_signal":presentation,
