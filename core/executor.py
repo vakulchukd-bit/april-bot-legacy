@@ -1343,6 +1343,18 @@ def _quantum_context_diagnostic(
         contradictions.append("graph_request_vs_action")
     if qref.get("resolved") and not qvisual.get("scene_id"):
         contradictions.append("resolved_reference_without_visual_scene")
+    structured_previous = {
+        value for value in render_types
+        if value not in {"", "text", "markdown"}
+    }
+    if (
+        mode in {"CONTINUATION", "ARTIFACT_REFERENCE"}
+        and structured_previous
+        and requested
+        and not structured_previous.intersection(requested)
+        and semantic_rep not in structured_previous
+    ):
+        contradictions.append("continuation_lost_structured_representation")
     if "graph" in render_types and "graph" not in requested and semantic_rep not in {"graph", ""}:
         contradictions.append("visual_payload_without_graph_request")
 
@@ -1371,7 +1383,10 @@ def _quantum_context_diagnostic(
         "requested_outputs": requested,
         "contradictions": contradictions,
         "stale_history_detected": stale_history_detected,
-        "ready_for_provider": not contradictions,
+        "ready_for_provider": not [
+            item for item in contradictions
+            if item != "continuation_lost_structured_representation"
+        ],
         "decision_owner": "QUANTUM_PROCESSOR",
         "triggering": False,
         "score_routing": False,
@@ -1682,6 +1697,118 @@ def _representation_consensus(
     }
 
 
+def _preserve_semantic_visual_representation(
+    text: str,
+    semantic: dict,
+    control_relation: str,
+    state: dict,
+    requested_outputs: list[str],
+    preferred: str,
+) -> tuple[list[str], str, dict[str, Any]]:
+    """Preserve a current visual representation across semantic continuations.
+
+    The previous scene is consulted only after Interpretation has already
+    resolved the dialogue relation.  The scene supplies structured evidence,
+    never a lexical trigger.  This keeps a modification such as adding
+    dimensions on the same geometric drawing instead of collapsing it to text.
+    """
+    relation = _s(control_relation).upper()
+    if relation not in {"CONTINUE_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+        return list(dict.fromkeys(requested_outputs or ["text"])), preferred, {
+            "preserved": False,
+            "source": "current_turn_only",
+        }
+
+    scene = _as_dict(
+        state.get("current_visual_scene")
+        or state.get("active_visual_scene")
+        or state.get("active_scene_contract")
+    )
+    if not scene:
+        return list(dict.fromkeys(requested_outputs or ["text"])), preferred, {
+            "preserved": False,
+            "source": "no_current_visual_scene",
+        }
+
+    structured: list[str] = []
+    raw_types = list(scene.get("render_block_types") or [])
+    for raw in raw_types:
+        name = _s(raw).lower()
+        if name in {"text", "markdown", ""}:
+            continue
+        if name not in structured:
+            structured.append(name)
+
+    if not structured:
+        for block in scene.get("render_blocks", []) or []:
+            if not isinstance(block, dict):
+                continue
+            name = _s(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            ).lower()
+            if name in {"text", "markdown", ""}:
+                continue
+            if name not in structured:
+                structured.append(name)
+
+    if not structured:
+        return list(dict.fromkeys(requested_outputs or ["text"])), preferred, {
+            "preserved": False,
+            "source": "current_scene_has_no_structured_representation",
+        }
+
+    operation = _s(
+        _as_dict(semantic.get("semantic_task")).get("operation")
+        or semantic.get("best_operation")
+    ).lower()
+
+    # A memory query that explicitly resolves to a structured representation
+    # does not need a modification verb; the current semantic output plan is
+    # already enough to select the preserved artifact.
+    allowed_operations = {
+        "build", "modify", "present", "analyze", "list", "explain", "retrieve",
+    }
+    current_structured = [
+        _s(x).lower() for x in requested_outputs
+        if _s(x).lower() not in {"", "text", "markdown"}
+    ]
+
+    should_preserve = (
+        relation in {"ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+        or operation in allowed_operations
+    )
+    if not should_preserve:
+        return list(dict.fromkeys(requested_outputs or ["text"])), preferred, {
+            "preserved": False,
+            "source": "semantic_operation_does_not_depend_on_visual_scene",
+            "operation": operation,
+        }
+
+    chosen = current_structured[0] if current_structured else structured[0]
+    if chosen not in structured:
+        chosen = structured[0]
+
+    outputs = list(dict.fromkeys(
+        [*list(requested_outputs or []), chosen]
+    ))
+    # Keep text as a companion only when it was explicitly requested or already
+    # declared by the semantic plan.  The structured representation remains the
+    # preferred rendered result for visual continuation.
+    if chosen != preferred:
+        preferred = chosen
+
+    return outputs or [chosen], preferred, {
+        "preserved": True,
+        "source": "current_visual_scene_semantic_continuity",
+        "scene_id": _s(scene.get("scene_id")),
+        "representation": chosen,
+        "operation": operation,
+        "existing_types": structured,
+    }
+
+
 def _complexity(
     semantic: dict,
     cognition: dict,
@@ -1989,7 +2116,7 @@ def _build_processor_control_plane(
     if not relation:
         relation = (
             "current_scene"
-            if continuation or reference_to_previous
+            if continuation or reference_to_previous or mode == "MEMORY_QUERY"
             else "new_topic"
             if mode == "NEW_TOPIC"
             else "independent"
@@ -2005,6 +2132,20 @@ def _build_processor_control_plane(
     preferred, representation_state = _representation_consensus(
         outputs, semantic, decision
     )
+
+    # Canonical semantic continuity: when Interpretation has already declared
+    # continuation/reference/memory-query and a current visual scene exists,
+    # preserve its structured representation for the next output.  No words from
+    # the current request are inspected here.
+    outputs, preferred, continuity_representation = _preserve_semantic_visual_representation(
+        text,
+        semantic,
+        mode if mode != "SAME_TOPIC" else relation,
+        state,
+        outputs,
+        preferred,
+    )
+    representation_state["visual_continuity"] = continuity_representation
     constraints = _representation_constraints(semantic, cognition, decision)
 
     topic = _s(
@@ -2046,6 +2187,7 @@ def _build_processor_control_plane(
         "context_dependency": context_dependency,
         "resolved_scene": resolved_scene,
         "active_topic": topic,
+        "visual_continuity": continuity_representation,
         "active_goal": goal,
         "dialogue_evidence": evidence,
         "requested_outputs": outputs,
@@ -2143,7 +2285,10 @@ def _make_request(
     memory_reference = _as_dict(memory_packet.get("reference"))
     memory_dialogue = _as_dict(memory_packet.get("dialogue_context"))
     memory_resolved_request = _s(control.get("resolved_request") or memory_packet.get("resolved_request"))
-    if bool(memory_packet.get("active")) and (bool(memory_packet.get("continuation")) or bool(memory_reference.get("resolved"))):
+    if bool(memory_packet.get("active")) and (
+        bool(memory_packet.get("continuation"))
+        or bool(memory_reference.get("resolved"))
+    ) and mode != "MEMORY_QUERY":
         dialogue_contract.update({
             "continuation": True,
             "reference_to_previous": bool(memory_reference.get("resolved")),
