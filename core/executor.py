@@ -518,11 +518,13 @@ class QuantumMemoryUnderstandingEngine:
         canonical_relation = _s(measured_vector.get("relation") or measured_vector.get("dialogue_relation")).upper()
         canonical_continuation = bool(measured_vector.get("continuation"))
         canonical_reference = bool(measured_vector.get("reference_to_previous"))
-        if canonical_relation in {"INDEPENDENT", "NEW_TOPIC"} and not canonical_continuation and not canonical_reference:
+        if canonical_relation in {"INDEPENDENT", "NEW_TOPIC", "SAME_TOPIC"} and not canonical_continuation and not canonical_reference:
+            # SAME_TOPIC means topical continuity only. It does not authorize
+            # retrieval of a previous artifact or rewriting the current request.
             dialogue_anchor = False
             dialogue_relation = canonical_relation
             dialogue_label = canonical_relation.lower()
-        elif canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"}:
+        elif canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
             dialogue_anchor = True
             dialogue_relation = canonical_relation
             dialogue_label = canonical_relation.lower()
@@ -775,6 +777,11 @@ class QuantumMemoryUnderstandingEngine:
             scene,
             dialogue_measurement=dialogue_measurement,
         )
+        measured_vector = dialogue_measurement if isinstance(dialogue_measurement, dict) else {}
+        canonical_relation = _s(measured_vector.get("relation") or measured_vector.get("dialogue_relation")).upper()
+        canonical_reference = bool(measured_vector.get("reference_to_previous")) or canonical_relation == "ARTIFACT_REFERENCE"
+        canonical_continuation = bool(measured_vector.get("continuation")) or canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION"}
+        dependency_authorized = bool(canonical_reference or canonical_continuation or canonical_relation == "MEMORY_QUERY")
 
         base = {
             "version": self.VERSION,
@@ -857,7 +864,7 @@ class QuantumMemoryUnderstandingEngine:
         # canonical target. If several objects exist, semantic similarity ranks
         # them; no topic-specific vocabulary or trigger words are used.
         structural_target = None
-        if (gate.get("reference_anchor") or gate.get("dialogue_anchor")) and visual_blocks:
+        if dependency_authorized and (gate.get("reference_anchor") or gate.get("dialogue_anchor")) and visual_blocks:
             # Prefer a structured visual object over a text block when the current
             # semantic representation already says that the user is operating on
             # the previous visual result.
@@ -895,26 +902,24 @@ class QuantumMemoryUnderstandingEngine:
             target_kind = "dialogue_context"
         explicit_reference = bool(gate.get("reference_anchor"))
         reference_resolved = bool(
-            target
+            dependency_authorized
+            and canonical_reference
+            and target
             and target_kind != "dialogue_context"
-            and (
-                structural_target is not None
-                or (explicit_reference and best_score >= 0.68)
-                or best_score >= 0.68
-            )
+            and structural_target is not None
         )
         continuation = bool(
-            reference_resolved
-            or scene_similarity >= 0.48
-            or topic_similarity >= 0.18
-            or gate.get("dialogue_anchor")
+            canonical_continuation
+            or reference_resolved
+            or (not canonical_relation and gate.get("dialogue_anchor") and (scene_similarity >= 0.48 or topic_similarity >= 0.18))
         )
 
-        relation = "CONTINUE_TOPIC" if continuation else "INDEPENDENT"
-        if reference_resolved:
-            relation = "ARTIFACT_REFERENCE" if target_kind == "render_block" else "CONTINUE_TOPIC"
-        elif gate.get("dialogue_anchor") and continuation:
+        if canonical_reference and reference_resolved:
+            relation = "ARTIFACT_REFERENCE"
+        elif canonical_continuation:
             relation = "CONTINUE_TOPIC"
+        else:
+            relation = canonical_relation if canonical_relation in {"SAME_TOPIC", "NEW_TOPIC", "INDEPENDENT"} else "INDEPENDENT"
 
         confidence = min(1.0, max(
             best_score,
@@ -1277,20 +1282,29 @@ def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
 
 
 def _usable_visual_scene(state: dict) -> dict:
-    """Return the latest successful visual artifact without erasing dialogue state."""
+    """Return the nearest valid visual scene, preferring the current turn."""
     if not isinstance(state, dict):
         return {}
-    for key in ("last_successful_visual_scene", "active_visual_scene"):
+
+    candidates = []
+    for key in ("current_visual_scene", "active_visual_scene", "last_successful_visual_scene"):
         candidate = state.get(key)
         if isinstance(candidate, dict) and candidate.get("render_blocks"):
-            for block in candidate.get("render_blocks", []):
-                if not isinstance(block, dict):
-                    continue
-                btype = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
-                payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-                status = _s(payload.get("status") or block.get("status")).lower()
-                if btype not in {"", "text", "markdown"} and status not in {"unavailable", "pending_data", "incomplete", "error"}:
-                    return deepcopy(candidate)
+            candidates.append((key, candidate))
+
+    # Current/active scene is authoritative for an explicit follow-up. Historical
+    # last-successful scenes are fallback evidence only and must never displace it.
+    for key, candidate in candidates:
+        for block in candidate.get("render_blocks", []):
+            if not isinstance(block, dict):
+                continue
+            btype = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            status = _s(payload.get("status") or block.get("status")).lower()
+            if btype not in {"", "text", "markdown"} and status not in {"unavailable", "pending_data", "incomplete", "error"}:
+                result = deepcopy(candidate)
+                result["_selection_source"] = key
+                return result
     return {}
 
 
@@ -1955,29 +1969,22 @@ def _build_processor_control_plane(
     reference_to_previous = bool(evidence.get("reference_to_previous"))
     context_dependency = bool(evidence.get("context_dependency"))
 
-    if memory_active and (memory_continuation or memory_resolved):
-        continuation = True
-        reference_to_previous = bool(memory_resolved)
-        context_dependency = True
-        mode = "ARTIFACT_REFERENCE" if str(memory_reference.get("target_kind") or "") == "render_block" else "CONTINUATION"
-        evidence = {
-            **evidence,
-            "mode": mode,
-            "continuation": True,
-            "reference_to_previous": reference_to_previous,
-            "context_dependency": True,
-            "previous_user": _s(memory_dialogue.get("previous_user")) or _s(evidence.get("previous_user")),
-            "previous_april": _s(memory_dialogue.get("previous_assistant")) or _s(evidence.get("previous_april")),
-        }
-
+    # Canonical Interpretation owns dialogue state. Memory never upgrades
+    # SAME_TOPIC/INDEPENDENT into continuation/reference.
     resolved_scene = _as_dict(canonical_dialogue.get("resolved_scene"))
-    if memory_active and memory_scene.get("scene_id"):
-        resolved_scene = {
-            **resolved_scene,
-            "scene_id": _s(memory_scene.get("scene_id")),
-            "relation": "current_scene" if continuation else "independent",
-            "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
-        }
+    if not (reference_to_previous or continuation):
+        resolved_scene = {}
+    elif reference_to_previous and memory_scene.get("scene_id"):
+        # For an explicit artifact reference the scene may be supplied as evidence,
+        # but only the active/current scene is permitted to be carried forward.
+        current_scene = _as_dict(state.get("current_visual_scene"))
+        if _s(current_scene.get("scene_id")) == _s(memory_scene.get("scene_id")):
+            resolved_scene = {
+                **resolved_scene,
+                "scene_id": _s(memory_scene.get("scene_id")),
+                "relation": "current_scene",
+                "source": "current_visual_scene",
+            }
     relation = _s(resolved_scene.get("relation"))
     if not relation:
         relation = (
@@ -2001,15 +2008,13 @@ def _build_processor_control_plane(
     constraints = _representation_constraints(semantic, cognition, decision)
 
     topic = _s(
-        memory_reference.get("target")
-        or _as_dict(memory_reference.get("visual_target")).get("title")
-        or memory_dialogue.get("active_topic")
+        (memory_reference.get("target") if reference_to_previous else "")
+        or (memory_dialogue.get("active_topic") if reference_to_previous else "")
         or canonical_dialogue.get("active_topic")
         or _field((semantic, decision, state), ("active_topic", "topic", "current_topic"))
     )
     goal = _s(
-        memory_resolved_request
-        or memory_dialogue.get("active_goal")
+        (memory_resolved_request if reference_to_previous else "")
         or canonical_dialogue.get("active_goal")
         or _field((decision, cognition, semantic), ("active_goal", "resolved_request", "goal"))
     ) or text
@@ -2050,8 +2055,8 @@ def _build_processor_control_plane(
         "capabilities": capabilities[:12],
         "dynamic_memory": dynamic_memory if isinstance(dynamic_memory, dict) else {},
         "memory_understanding": _quantum_snapshot(memory_understanding or {}),
-        "resolved_request": memory_resolved_request,
-        "resolved_reference": _quantum_snapshot(memory_reference),
+        "resolved_request": memory_resolved_request if reference_to_previous else _s(text),
+        "resolved_reference": _quantum_snapshot(memory_reference if reference_to_previous else {}),
         "single_route": True,
         "provider_calls": 1,
         "triggers": False,
@@ -4901,71 +4906,39 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
     state["_quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
 
-    # Promote the memory engine's resolved discourse back into the canonical
-    # Interpretation contract so the existing provider/router/render pipeline
-    # receives the same context without creating a second route.
-    if isinstance(memory_understanding, dict) and memory_understanding.get("active"):
-        resolved_request = _s(memory_understanding.get("resolved_request"))
-        memory_ref = _as_dict(memory_understanding.get("reference"))
-        memory_ctx = _as_dict(memory_understanding.get("dialogue_context"))
-        memory_vctx = _as_dict(memory_understanding.get("visual_context"))
-        packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
-        contract = _as_dict(packet.get("dialogue_contract"))
-        vector = _as_dict(interpretation.get("dialogue_vector"))
-        if memory_understanding.get("continuation") or memory_ref.get("resolved"):
-            vector.update({
-                "relation": "CONTINUE_TOPIC",
-                "subtype": "REFERENCE_OR_DEVELOPMENT" if memory_ref.get("resolved") else "MEMORY_CONTEXT_DEVELOPMENT",
-                "continuation": True,
-                "delta_mode": "extend",
-                "avoid_repeat": True,
-                "reference_resolution": {
-                    "resolved": bool(memory_ref.get("resolved")),
-                    "target": _s(memory_ref.get("target")),
-                    "confidence": float(memory_ref.get("confidence", 0.0) or 0.0),
-                    "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
-                },
-                "resolved_request": resolved_request,
-                "previous_user_turn": _s(memory_ctx.get("previous_user")),
-                "previous_april_turn": _s(memory_ctx.get("previous_assistant")),
-            })
-            interpretation["dialogue_vector"] = _quantum_snapshot(vector)
-            interpretation["resolved_request"] = resolved_request
-            contract.update({
-                "continuation": True,
-                "reference_to_previous": bool(memory_ref.get("resolved")),
-                "context_dependency": "reference" if memory_ref.get("resolved") else "continuation",
-                "previous_user_turn": _s(memory_ctx.get("previous_user")),
-                "previous_april_turn": _s(memory_ctx.get("previous_assistant")),
-                "active_topic": _s(memory_ref.get("target") or memory_ctx.get("active_topic")),
-                "resolved_request": resolved_request,
-            })
-            if memory_vctx.get("scene_id"):
-                contract["resolved_scene"] = {
-                    "scene_id": _s(memory_vctx.get("scene_id")),
-                    "relation": "current_scene",
-                    "source": "QUANTUM_MEMORY_UNDERSTANDING_ENGINE",
-                }
-            packet["dialogue_contract"] = contract
-            packet["dialogue_vector"] = vector
-            semantic["quantum_interpretation_evidence"] = _quantum_snapshot(packet)
-        print("🧠 QUANTUM MEMORY UNDERSTANDING:", {
-            "active": bool(memory_understanding.get("active")),
-            "relation": _s(memory_understanding.get("relation")),
-            "target": _s(_as_dict(memory_understanding.get("reference")).get("target")),
-            "confidence": float(_as_dict(memory_understanding.get("reference")).get("confidence", 0.0) or 0.0),
-            "scene_id": _s(_as_dict(memory_understanding.get("visual_context")).get("scene_id")),
-        })
-        memory_diag = _quantum_context_diagnostic(
-            text=text,
-            semantic=semantic,
-            decision=decision,
-            dialogue_evidence=previous_pair_evidence,
-            memory_understanding=memory_understanding,
-            state=state,
-        )
-        semantic["quantum_context_diagnostic"] = memory_diag
-        print("🧭 QUANTUM CONTEXT DIAGNOSTIC:", memory_diag)
+    # Memory-understanding is evidence only.  The current Interpretation dialogue
+    # vector is authoritative and is never rewritten by historical retrieval.
+    # A memory packet may be attached for diagnostics/provider context only when the
+    # canonical dialogue vector explicitly authorized continuation/reference.
+    memory_vector = _as_dict(interpretation.get("dialogue_vector"))
+    canonical_reference = bool(memory_vector.get("reference_to_previous")) or _s(memory_vector.get("request_relation")).upper() == "ARTIFACT_REFERENCE"
+    canonical_continuation = bool(memory_vector.get("continuation")) or _s(memory_vector.get("relation")).upper() in {"CONTINUE_TOPIC", "CONTINUATION"}
+    memory_application = {
+        "applied": bool(memory_understanding.get("active") and (canonical_reference or canonical_continuation)),
+        "mode": "reference" if canonical_reference else "continuation" if canonical_continuation else "evidence_only",
+        "current_interpretation_authoritative": True,
+        "mutated_interpretation": False,
+        "resolved_request_source": "interpretation" if not canonical_reference else "memory_reference",
+        "scene_source": "current_visual_scene_only" if canonical_reference else "none",
+    }
+    semantic["quantum_memory_application"] = _quantum_snapshot(memory_application)
+    print("🧠 QUANTUM MEMORY UNDERSTANDING:", {
+        "active": bool(memory_understanding.get("active")),
+        "relation": _s(memory_understanding.get("relation")),
+        "target": _s(_as_dict(memory_understanding.get("reference")).get("target")),
+        "confidence": float(_as_dict(memory_understanding.get("reference")).get("confidence", 0.0) or 0.0),
+        "scene_id": _s(_as_dict(memory_understanding.get("visual_context")).get("scene_id")),
+    })
+    memory_diag = _quantum_context_diagnostic(
+        text=text,
+        semantic=semantic,
+        decision=decision,
+        dialogue_evidence=previous_pair_evidence,
+        memory_understanding=memory_understanding,
+        state=state,
+    )
+    semantic["quantum_context_diagnostic"] = memory_diag
+    print("🧭 QUANTUM CONTEXT DIAGNOSTIC:", memory_diag)
 
     # One authoritative control plane for dialogue, representation, memory relation,
     # capability delegation, and single-route ownership. Individual engines remain
