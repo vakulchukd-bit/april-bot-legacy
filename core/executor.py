@@ -781,7 +781,47 @@ class QuantumMemoryUnderstandingEngine:
         canonical_relation = _s(measured_vector.get("relation") or measured_vector.get("dialogue_relation")).upper()
         canonical_reference = bool(measured_vector.get("reference_to_previous")) or canonical_relation == "ARTIFACT_REFERENCE"
         canonical_continuation = bool(measured_vector.get("continuation")) or canonical_relation in {"CONTINUE_TOPIC", "CONTINUATION"}
-        dependency_authorized = bool(canonical_reference or canonical_continuation or canonical_relation == "MEMORY_QUERY")
+
+        # The canonical interpretation can be conservative and label a direct
+        # question about the just-created visual artifact as INDEPENDENT. Reuse
+        # the existing shared semantic embedding against the active scene as
+        # evidence. This adds no provider/model call and no lexical trigger list.
+        scene_hint_score = 0.0
+        visual_reference_candidate = False
+        if scene:
+            visual_text_for_gate = self._scene_text(scene)
+            if visual_text_for_gate:
+                similarity_map, _ = self._semantic_score(
+                    current, [visual_text_for_gate]
+                )
+                scene_hint_score = float(
+                    next(iter(similarity_map.values()), 0.0)
+                ) if similarity_map else 0.0
+                visual_reference_candidate = (
+                    bool(self._visual_blocks(scene))
+                    and scene_hint_score >= 0.38
+                    and canonical_relation != "NEW_TOPIC"
+                )
+
+        dependency_authorized = bool(
+            canonical_reference
+            or canonical_continuation
+            or canonical_relation == "MEMORY_QUERY"
+            or visual_reference_candidate
+        )
+
+        gate = {
+            **gate,
+            "needed": bool(gate.get("needed") or visual_reference_candidate),
+            "visual_reference_candidate": visual_reference_candidate,
+            "visual_scene_similarity": round(scene_hint_score, 6),
+            "reference_anchor": bool(
+                gate.get("reference_anchor") or visual_reference_candidate
+            ),
+            "dialogue_anchor": bool(
+                gate.get("dialogue_anchor") or visual_reference_candidate
+            ),
+        }
 
         base = {
             "version": self.VERSION,
@@ -856,8 +896,14 @@ class QuantumMemoryUnderstandingEngine:
         margin = best_score - float(second["score"]) if second else best_score
 
         visual_text = self._scene_text(scene)
-        semantic_scene, scene_source = self._semantic_score(current, [visual_text]) if visual_text else ({}, "none")
-        scene_similarity = float(next(iter(semantic_scene.values()), 0.0)) if semantic_scene else 0.0
+        if visual_text:
+            scene_similarity = float(
+                gate.get("visual_scene_similarity", 0.0) or 0.0
+            )
+            scene_source = "shared_quantum_embedding"
+        else:
+            scene_similarity = 0.0
+            scene_source = "none"
         topic_similarity = self._lexical_score(current, active_topic)
 
         # For an artifact reference, prefer the active rendered object as the
@@ -903,7 +949,7 @@ class QuantumMemoryUnderstandingEngine:
         explicit_reference = bool(gate.get("reference_anchor"))
         reference_resolved = bool(
             dependency_authorized
-            and canonical_reference
+            and (canonical_reference or visual_reference_candidate)
             and target
             and target_kind != "dialogue_context"
             and structural_target is not None
@@ -998,6 +1044,7 @@ class QuantumMemoryUnderstandingEngine:
                 {"channel": "lexical", "score": round(float(best.get("lexical", 0.0)) if best else 0.0, 6)},
                 {"channel": "visual_scene", "score": round(scene_similarity, 6)},
                 {"channel": "topic", "score": round(topic_similarity, 6)},
+                {"channel": "visual_reference_bridge", "score": round(scene_similarity if visual_reference_candidate else 0.0, 6)},
                 {"channel": "reference", "score": round(confidence if reference_resolved else 0.0, 6)},
             ],
             "collapse": {
@@ -1431,6 +1478,8 @@ def _dialogue_evidence(
     mode = _s(
         dialogue_contract.get("context_mode")
         or dialogue_contract.get("dialogue_state")
+        or dialogue_contract.get("relation")
+        or dialogue_contract.get("request_relation")
         or semantic.get("dialogue_state")
         or decision.get("dialogue_state")
     ).upper()
@@ -1775,9 +1824,22 @@ def _preserve_semantic_visual_representation(
         if _s(x).lower() not in {"", "text", "markdown"}
     ]
 
+    dialogue_contract = _as_dict(
+        _as_dict(semantic.get("quantum_interpretation_evidence")).get("dialogue_contract")
+    )
+    artifact_reference_answer = bool(
+        semantic.get("artifact_reference_answer")
+        or dialogue_contract.get("artifact_reference_answer")
+    )
     should_preserve = (
-        relation in {"ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-        or operation in allowed_operations
+        (
+            relation in {"ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+            and not artifact_reference_answer
+        )
+        or (
+            operation in allowed_operations
+            and not artifact_reference_answer
+        )
     )
     if not should_preserve:
         return list(dict.fromkeys(requested_outputs or ["text"])), preferred, {
@@ -1805,6 +1867,7 @@ def _preserve_semantic_visual_representation(
         "scene_id": _s(scene.get("scene_id")),
         "representation": chosen,
         "operation": operation,
+        "artifact_reference_answer": artifact_reference_answer,
         "existing_types": structured,
     }
 
@@ -2230,8 +2293,32 @@ def _build_processor_control_plane(
     reference_to_previous = bool(evidence.get("reference_to_previous"))
     context_dependency = bool(evidence.get("context_dependency"))
 
-    # Canonical Interpretation owns dialogue state. Memory never upgrades
-    # SAME_TOPIC/INDEPENDENT into continuation/reference.
+    # A resolved active-artifact reference is accepted only from the existing
+    # memory-understanding engine and only when its scene id matches the current
+    # visual scene. This repairs false-INDEPENDENT context loss without adding a
+    # route or a provider call.
+    current_visual_scene = _as_dict(
+        state.get("current_visual_scene")
+        or state.get("active_visual_scene")
+        or state.get("active_scene_contract")
+    )
+    memory_scene_id = _s(memory_scene.get("scene_id"))
+    current_scene_id = _s(current_visual_scene.get("scene_id"))
+    resolved_memory_reference = bool(
+        memory_resolved
+        and memory_scene_id
+        and current_scene_id
+        and memory_scene_id == current_scene_id
+        and memory_reference.get("target")
+    )
+    if resolved_memory_reference:
+        mode = "ARTIFACT_REFERENCE"
+        continuation = True
+        reference_to_previous = True
+        context_dependency = True
+
+    # Canonical Interpretation remains authoritative unless the existing memory
+    # engine has already resolved a concrete active-scene reference.
     resolved_scene = _as_dict(canonical_dialogue.get("resolved_scene"))
     if not (reference_to_previous or continuation):
         resolved_scene = {}
