@@ -2036,16 +2036,150 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
         if topic: data["active_topic"] = _clip(topic, 300)
         if goal: data["active_goal"] = _clip(goal, 500)
         data["recent_dialogue"] = recent
-    if mode == "ARTIFACT_REFERENCE":
+    if mode in {"CONTINUATION", "ARTIFACT_REFERENCE"}:
         visual = None
         if isinstance(state.get("active_scene_contract"), dict):
             visual = state.get("active_scene_contract")
         if not visual:
-            visual = state.get("active_visual_scene") or state.get("visual_summary")
+            visual = state.get("current_visual_scene") or state.get("active_visual_scene")
         if visual:
-            data["visual_context"] = _clip(visual, 900)
+            data["visual_context"] = _quantum_snapshot(visual)
     return data
 
+
+
+
+def _canonical_geometry_contract(semantic: dict, text: str) -> dict:
+    """Canonical geometry transport contract for all diagram-capable turns.
+
+    Geometry is structured data. Dimensions are optional attributes, never a
+    condition for rendering. The provider may choose the concrete coordinates,
+    but the transport shape is stable for Web/SceneContract.
+    """
+    semantic = _as_dict(semantic)
+    visual_schema = _as_dict(semantic.get("visual_schema"))
+    scene_state = _as_dict(semantic.get("scene_semantic_state"))
+    object_name = _s(
+        semantic.get("best_object")
+        or visual_schema.get("object")
+        or scene_state.get("object")
+    ).lower()
+    operation = _s(
+        _as_dict(semantic.get("semantic_task")).get("operation")
+        or semantic.get("best_operation")
+        or semantic.get("operation")
+    ).lower()
+
+    return {
+        "version": "geometry_contract_v1",
+        "representation": "diagram",
+        "operation": operation or "create",
+        "object": object_name,
+        "dimensions_optional": True,
+        "dimensions_required_for_rendering": False,
+        "dimension_values_must_be_explicit": True,
+        "do_not_invent_unspecified_measurements": True,
+        "coordinate_system": "svg_viewbox",
+        "payload_modes": ["svg", "elements"],
+        "element_kinds": [
+            "line", "polyline", "polygon", "rect", "circle", "ellipse",
+            "path", "text", "dimension", "dimension_line", "arrow", "label",
+            "angle", "arc", "point",
+        ],
+        "supports": {
+            "open_or_closed_shapes": True,
+            "composite_figures": True,
+            "labels": True,
+            "measurements": True,
+            "angles": True,
+            "construction_lines": True,
+        },
+        "source": "INTERPRETATION_CANONICAL",
+    }
+
+
+def _canonical_requested_outputs(
+    text: str,
+    semantic: dict,
+    decision: dict,
+    mode: str,
+) -> tuple[list[str], str]:
+    """Collapse output transport to the semantic production contract.
+
+    One production representation is emitted unless Interpretation explicitly
+    declares a multi-output request. Internal transport/interpretation kinds are
+    never visible outputs.
+    """
+    semantic = _as_dict(semantic)
+    decision = _as_dict(decision)
+
+    internal = {
+        "interpretation_canonical",
+        "production_signal",
+        "signal",
+        "quantum_signal",
+        "transport",
+    }
+    aliases = {
+        "markdown": "text",
+        "renderer_scene": "diagram",
+        "visual": "diagram",
+        "chart": "graph",
+        "plot": "graph",
+        "scene": "diagram",
+    }
+
+    def clean(values):
+        result=[]
+        for raw in _as_list(values):
+            name=aliases.get(_s(raw).lower(), _s(raw).lower())
+            if name and name not in internal and name not in result:
+                result.append(name)
+        return result
+
+    canonical = _s(
+        semantic.get("production_representation")
+        or semantic.get("resolved_representation")
+        or semantic.get("requested_representation")
+        or semantic.get("preferred_representation")
+        or decision.get("preferred_representation")
+    ).lower()
+    canonical = aliases.get(canonical, canonical)
+
+    declared = clean(
+        semantic.get("requested_outputs")
+        or semantic.get("required_outputs")
+        or semantic.get("requested_representations")
+        or semantic.get("required_representations")
+    )
+    decision_declared = clean(
+        decision.get("requested_outputs")
+        or decision.get("required_outputs")
+    )
+
+    # Explicit semantic multi-output survives only when it does not contain
+    # internal transport kinds. Otherwise the production representation wins.
+    multi = []
+    for name in [*declared, *decision_declared]:
+        if name not in multi:
+            multi.append(name)
+
+    if canonical and canonical not in internal:
+        # Text is a companion only if explicitly present in the canonical
+        # multi-output declaration. Do not manufacture it for diagrams.
+        if canonical in multi and len(multi) > 1:
+            outputs = [canonical] + [x for x in multi if x != canonical]
+        else:
+            outputs = [canonical]
+    elif multi:
+        outputs = multi[:]
+    else:
+        outputs = ["text"]
+
+    # NEW_TOPIC/SAME_TOPIC/INDEPENDENT are all fresh turns unless the canonical
+    # semantic contract itself says otherwise. This function never reuses scene
+    # types to manufacture output.
+    return list(dict.fromkeys(outputs)), (canonical or outputs[0])
 
 
 def _build_processor_control_plane(
@@ -2122,16 +2256,19 @@ def _build_processor_control_plane(
             else "independent"
         )
 
-    outputs = _requested_outputs(
+    outputs, preferred = _canonical_requested_outputs(
         text,
         semantic,
-        cognition,
         decision,
-        independent_turn=(mode == "INDEPENDENT"),
+        mode,
     )
-    preferred, representation_state = _representation_consensus(
-        outputs, semantic, decision
-    )
+    representation_state = {
+        "outputs": list(outputs),
+        "preferred": preferred,
+        "selection_method": "interpretation_canonical_production",
+        "scoring": False,
+        "triggers": False,
+    }
 
     # Canonical semantic continuity: when Interpretation has already declared
     # continuation/reference/memory-query and a current visual scene exists,
@@ -2194,6 +2331,11 @@ def _build_processor_control_plane(
         "preferred_representation": preferred,
         "representation_state": representation_state,
         "representation_constraints": constraints,
+        "geometry_contract": (
+            _canonical_geometry_contract(semantic, text)
+            if preferred == "diagram" or "diagram" in outputs
+            else {}
+        ),
         "capabilities": capabilities[:12],
         "dynamic_memory": dynamic_memory if isinstance(dynamic_memory, dict) else {},
         "memory_understanding": _quantum_snapshot(memory_understanding or {}),
@@ -2284,22 +2426,9 @@ def _make_request(
     memory_packet = _as_dict(control.get("memory_understanding"))
     memory_reference = _as_dict(memory_packet.get("reference"))
     memory_dialogue = _as_dict(memory_packet.get("dialogue_context"))
-    memory_resolved_request = _s(control.get("resolved_request") or memory_packet.get("resolved_request"))
-    if bool(memory_packet.get("active")) and (
-        bool(memory_packet.get("continuation"))
-        or bool(memory_reference.get("resolved"))
-    ) and mode != "MEMORY_QUERY":
-        dialogue_contract.update({
-            "continuation": True,
-            "reference_to_previous": bool(memory_reference.get("resolved")),
-            "context_dependency": "continuation" if not memory_reference.get("resolved") else "reference",
-            "previous_user_turn": _s(memory_dialogue.get("previous_user")) or _s(dialogue_contract.get("previous_user_turn")),
-            "previous_april_turn": _s(memory_dialogue.get("previous_assistant")) or _s(dialogue_contract.get("previous_april_turn")),
-            "active_topic": _s(memory_reference.get("target")) or _s(dialogue_contract.get("active_topic")),
-            "resolved_request": memory_resolved_request or _s(dialogue_contract.get("current_request")),
-            "resolved_scene": _as_dict(control.get("resolved_scene")) or _as_dict(dialogue_contract.get("resolved_scene")),
-        })
-
+    memory_resolved_request = _s(memory_packet.get("resolved_request"))
+    # Memory is evidence only. The canonical Interpretation dialogue contract
+    # above remains authoritative and is never mutated from the memory packet.
     context = _compact_context(
         text,
         state,
@@ -2503,6 +2632,11 @@ def _make_request(
             "representation_plan": {
                 "requested_outputs": requested_outputs,
                 "preferred_representation": measured_output,
+                "geometry_contract": (
+                    control.get("geometry_contract", {})
+                    if measured_output == "diagram" or "diagram" in requested_outputs
+                    else {}
+                ),
                 "visual_schema": _s(semantic.get("visual_schema")),
                 "visual_schema_confidence": float(semantic.get("visual_schema_confidence") or 0.0),
                 "dialogue_relation": _s(semantic.get("dialogue_relation")) or "NEW_TOPIC",
@@ -2523,6 +2657,11 @@ def _make_request(
         "dialogue": dialogue_state,
         "representation": control.get("representation_state", {}),
         "measured_output": measured_output,
+        "geometry_contract": (
+            control.get("geometry_contract", {})
+            if measured_output == "diagram" or "diagram" in requested_outputs
+            else {}
+        ),
         "context_dependency": bool(control.get("context_dependency")),
         "reference_to_previous": bool(control.get("reference_to_previous")),
         "continuation": bool(control.get("continuation")),
@@ -3390,7 +3529,8 @@ def _quantum_visible_render_policy(
     output plan plus the typed provider payload already present in render_blocks.
 
     Invariants:
-      * one human answer text block at most;
+      * one human answer channel (MachineResponse.answer/content);
+      * render_blocks contain no human text block;
       * internal production/transport signals never become visible renderers;
       * one logical block per structured renderer kind;
       * multiple different structured renderers are preserved only when the
@@ -3442,7 +3582,13 @@ def _quantum_visible_render_policy(
         "imageblock": "image",
     }
     requested_set = {aliases.get(item, item) for item in requested if item}
-    internal_kinds = {"production_signal", "signal", "quantum_signal", "transport"}
+    internal_kinds = {
+        "production_signal",
+        "signal",
+        "quantum_signal",
+        "transport",
+        "interpretation_canonical",
+    }
 
     def kind_of(block: dict) -> str:
         presentation = _as_dict(block.get("presentation"))
@@ -3468,41 +3614,49 @@ def _quantum_visible_render_policy(
         else:
             visible.append(block)
 
-    # Keep the actual processor answer as the sole authoritative human text.
+    # Top-level answer/content is the single human text channel.
+    # render_blocks contains only structured visual/artifact blocks. Keeping
+    # the human text out of render_blocks prevents Web from rendering the same
+    # sentence once from `answer` and once from `render_blocks`.
     final: list[dict] = []
     answer_norm = re.sub(r"\s+", " ", _clean_text_value(answer)).strip()
-    seen_text: set[str] = set()
+    text_transport_duplicates = 0
     for block in visible:
-        if kind_of(block) not in {"text", "markdown"}:
+        if kind_of(block) in {"text", "markdown"}:
+            block_text = re.sub(
+                r"\s+", " ",
+                _clean_text_value(
+                    block.get("content") or block.get("text") or block.get("value")
+                ),
+            ).strip()
+            if block_text:
+                # A provider text block is transport metadata for the same
+                # canonical answer, never a second visible text block.
+                if answer_norm and block_text == answer_norm:
+                    text_transport_duplicates += 1
+                # Any other provider prose is also non-canonical here; the
+                # top-level answer field remains the sole human text surface.
+                continue
             continue
-        text = re.sub(r"\s+", " ", _clean_text_value(
-            block.get("content") or block.get("text") or block.get("value")
-        )).strip()
-        if not text or text in seen_text:
-            continue
-        if answer_norm and text != answer_norm:
-            # Provider text fragments are evidence/supporting prose. The
-            # canonical answer remains the only top-level human text block.
-            continue
-        seen_text.add(text)
         final.append(block)
 
-    if answer_norm and answer_norm not in seen_text:
-        final.insert(0, {
-            "type": "text",
-            "artifact_type": "text",
-            "content": answer,
-            "text": answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "scene_contract": True,
-            "source": "quantum_processor",
-        })
+    if text_transport_duplicates:
+        for item in final:
+            if isinstance(item, dict):
+                item.setdefault("transport_diagnostics", {})
+                item["transport_diagnostics"]["duplicate_text_blocks_collapsed"] = text_transport_duplicates
 
     structured = [b for b in visible if kind_of(b) not in {"text", "markdown"}]
     requested_structured = {
         item for item in requested_set
-        if item not in {"text", "production_signal", "signal"}
+        if item not in {
+            "text",
+            "production_signal",
+            "signal",
+            "quantum_signal",
+            "transport",
+            "interpretation_canonical",
+        }
     }
 
     # If the request explicitly names structured outputs, those are the only
@@ -4608,27 +4762,14 @@ def _canonicalize(
     response.executor_cognition = cognition
     response.executor_response_decision = decision
 
-    if not any(
-        isinstance(block, dict)
-        and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
-        and bool(_clean_text_value(block.get("content") or block.get("text") or block.get("value")))
-        for block in response.render_blocks
-    ):
-        response.render_blocks.insert(0, {
-            "type": "text",
-            "artifact_type": "text",
-            "content": answer,
-            "text": answer,
-            "renderer": "TextBlock",
-            "viewer": "TextBlock",
-            "scene_contract": True,
-            "source": "quantum_processor",
-        })
-        response.render_blocks = _finalize_quantum_visible_stream(
-            response.render_blocks,
-            answer=answer,
-            request=request,
-        )
+    # The top-level `answer` is the canonical human text channel. Do not insert
+    # a second text render block; this keeps the SceneContract single-stream
+    # contract deterministic for Web.
+    response.render_blocks = _finalize_quantum_visible_stream(
+        response.render_blocks,
+        answer=answer,
+        request=request,
+    )
 
     scene = build_machine_scene(response)
     provider_blocks = _finalize_quantum_visible_stream(
