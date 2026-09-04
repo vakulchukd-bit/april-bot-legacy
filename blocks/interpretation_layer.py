@@ -113,6 +113,7 @@ SEMANTIC_TURN_PROTOTYPES = {
     "reformulation": "пользователь переформулирует предыдущий запрос, просит показать это иначе, уточняет формулировку, просит переделать или дополнить уже полученный результат; the user reformulates or refines an existing result",
     "correction": "пользователь исправляет предыдущий результат, добавляет условие, меняет параметр или уточняет деталь уже обсуждаемой задачи; the user corrects, extends, or changes a detail of the preceding task",
     "reference": "пользователь явно ссылается на уже показанное, созданное или сказанное, использует местоимение или указание на объект, этот, эту, это, него, неё, нему, просит изменить добавить отметить в нём или в ней; the user explicitly refers to a previously shown or discussed object",
+    "artifact_reference": "пользователь спрашивает о содержимом, свойствах или результате уже созданного или показанного артефакта, что было нарисовано, какие элементы получились, что находится в предыдущем результате, просит перечислить или объяснить уже созданный объект; the user asks about the contents, properties, or result of an artifact that was already created or shown",
     "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
@@ -445,7 +446,7 @@ class QuantumInterpretationEngine:
 
         followup_dialogue = best_dialogue in {
             "continuation", "reformulation", "correction", "reference",
-            "affirmation", "rejection",
+            "artifact_reference", "affirmation", "rejection",
         }
         # A task is self-contained only when the semantic dialogue classifier does
         # not describe it as a follow-up/reference and the current semantic task
@@ -486,6 +487,49 @@ class QuantumInterpretationEngine:
             "semantic_best_dialogue": best_dialogue,
             "semantic_best_dialogue_score": best_dialogue_score,
         }
+
+    @staticmethod
+    def _scene_semantic_text(scene: dict | None) -> str:
+        """Build a compact semantic view of the active rendered scene.
+
+        This is local evidence only. It serializes existing scene metadata and
+        structured render-block payloads; it does not choose a renderer or call
+        a provider.
+        """
+        if not isinstance(scene, dict):
+            return ""
+        parts = [
+            scene.get("topic"),
+            scene.get("summary"),
+            scene.get("user_request"),
+            scene.get("current_request"),
+            scene.get("april_answer"),
+            scene.get("answer"),
+        ]
+        for block in scene.get("render_blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            parts.extend([
+                block.get("type"),
+                block.get("artifact_type"),
+                block.get("representation"),
+                block.get("renderer"),
+                block.get("title"),
+                block.get("label"),
+                block.get("content"),
+                block.get("text"),
+            ])
+            payload = block.get("payload")
+            if isinstance(payload, dict):
+                # Payload is already part of the active scene. Keep only a compact
+                # textual projection so visual facts can participate in semantic
+                # similarity without copying the entire artifact into the prompt.
+                parts.append(
+                    re.sub(r"\\s+", " ", str(payload))[:1800]
+                )
+        return re.sub(r"\\s+", " ", " ".join(
+            str(x) for x in parts if x not in (None, "", [], {})
+        )).strip()[:5000]
 
     def _context_scores(self,text,previous_assistant,previous_user,active_topic,active_goal):
         vals = {
@@ -551,12 +595,18 @@ class QuantumInterpretationEngine:
             },
         )
 
-        followup_labels = {"continuation", "reformulation", "correction", "reference", "affirmation", "rejection"}
+        followup_labels = {"continuation", "reformulation", "correction", "reference", "artifact_reference", "affirmation", "rejection"}
         dialogue_followup = max(
             (float(dialogue_scores.get(label, 0.0) or 0.0) for label in followup_labels),
             default=0.0,
         )
-        reference_evidence = float(dialogue_scores.get("reference", 0.0) or 0.0)
+        reference_evidence = max(
+            float(dialogue_scores.get("reference", 0.0) or 0.0),
+            float(dialogue_scores.get("artifact_reference", 0.0) or 0.0),
+        )
+        artifact_reference_evidence = float(
+            dialogue_scores.get("artifact_reference", 0.0) or 0.0
+        )
         memory_evidence = float(dialogue_scores.get("memory_query", 0.0) or 0.0)
         continuation_evidence = max(
             float(dialogue_scores.get("continuation", 0.0) or 0.0),
@@ -576,7 +626,11 @@ class QuantumInterpretationEngine:
 
         has_context = bool(prev_a or prev_u or topic or scene_topic)
         current_self_contained = bool(features.get("self_contained"))
-        semantic_reference = bool(dialogue_best == "reference" and has_context and not current_self_contained)
+        semantic_reference = bool(
+            dialogue_best == "reference"
+            and has_context
+            and not current_self_contained
+        )
         semantic_memory_query = bool(dialogue_best == "memory_query" and has_context)
 
         # A dialogue classifier is authoritative for discourse act.  Similarity
@@ -610,7 +664,63 @@ class QuantumInterpretationEngine:
             relation = "NEW_TOPIC"
             topic_relation = "NEW_TOPIC"
 
-        if relation == "MEMORY_QUERY":
+        # A direct question about the currently rendered artifact is a semantic
+        # artifact reference even when the dialogue classifier ranks it as a
+        # generic question. The evidence comes from the existing structured
+        # scene + semantic task vector, not from a word/phrase trigger list.
+        scene_reference_similarity = 0.0
+        visual_reference_candidate = False
+        scene_has_rendered_artifact = bool(
+            scene and any(
+                isinstance(block, dict)
+                and _clean_representation(
+                    block.get("type")
+                    or block.get("artifact_type")
+                    or block.get("representation")
+                ) in {
+                    "diagram", "graph", "image", "gallery", "table",
+                    "formula", "code", "link", "audio", "video", "file",
+                }
+                for block in (scene.get("render_blocks") or [])
+            )
+        )
+        if scene_has_rendered_artifact and (
+            not current_self_contained or artifact_reference_evidence >= 0.06
+        ):
+            scene_text = self._scene_semantic_text(scene)
+            if scene_text:
+                scene_similarity_result = self.similarity(current, scene_text)
+                scene_reference_similarity = float(
+                    scene_similarity_result.get("score", 0.0) or 0.0
+                )
+            semantic_best_rep = str(features.get("semantic_best_representation") or "").lower()
+            semantic_best_obj = str(features.get("semantic_best_object") or "").lower()
+            semantic_best_op = str(features.get("semantic_best_operation") or "").lower()
+            visual_task = (
+                semantic_best_rep in {"diagram", "graph", "image", "gallery", "table", "formula"}
+                or semantic_best_obj in {"diagram", "graph", "image", "gallery", "table", "formula"}
+                or features.get("visual_action")
+                or features.get("geometry_object")
+            )
+            artifact_question = (
+                artifact_reference_evidence >= 0.06
+            )
+            answer_about_artifact = semantic_best_op in {
+                "answer", "list", "analyze", "explain", "compare", "present", "build"
+            }
+            visual_reference_candidate = bool(
+                answer_about_artifact
+                and visual_task
+                and artifact_question
+                and scene_reference_similarity >= 0.16
+            )
+
+        if visual_reference_candidate:
+            relation = "ARTIFACT_REFERENCE"
+            topic_relation = "SAME_TOPIC"
+            subtype = "REFERENCE_OR_DEVELOPMENT"
+            semantic_reference = True
+        elif relation == "MEMORY_QUERY":
             subtype = "MEMORY_QUERY"
         elif relation == "CONTINUE_TOPIC":
             subtype = "REFERENCE_OR_DEVELOPMENT" if semantic_reference else "DEVELOPMENT"
@@ -696,6 +806,10 @@ class QuantumInterpretationEngine:
             "trigger_independent": False,
             "semantic_dialogue_label": dialogue_best,
             "semantic_dialogue_confidence": dialogue_best_score,
+            "visual_reference_candidate": bool(visual_reference_candidate),
+            "visual_scene_similarity": float(max(0.0, min(1.0, scene_reference_similarity))),
+            "artifact_reference_evidence": bool(visual_reference_candidate),
+            "artifact_reference_semantic_score": float(max(0.0, min(1.0, artifact_reference_evidence))),
         }
 
     def _linguistic(self,text):
@@ -1235,6 +1349,23 @@ class QuantumInterpretationEngine:
                     production = prior_structured[0]
                     source = "reference_reuse_existing_representation"
                     locked = True
+
+        # A resolved artifact reference is normally an information request about
+        # the existing result, not a request to render that result again. Keep
+        # the provider-facing output textual unless the current semantic task
+        # explicitly requires a new/modified structured artifact.
+        artifact_reference_answer = bool(
+            reference
+            and dialogue_vector.get("artifact_reference_evidence")
+            and str(p.get("best_operation") or "").lower() in {
+                "answer", "list", "analyze", "explain", "retrieve", "build"
+            }
+        )
+        if artifact_reference_answer:
+            production = "text"
+            source = "artifact_reference_answer"
+            locked = True
+            dialogue_vector["artifact_reference_answer"] = True
         resolved_scene=self._resolve_scene_context(
             text,
             state,
@@ -1329,6 +1460,15 @@ class QuantumInterpretationEngine:
                 "active_topic":active_topic,
                 "reference_resolution":reference_resolution,
                 "resolved_reference":resolved_reference,
+                "artifact_reference_evidence": bool(
+                    dialogue_vector.get("artifact_reference_evidence")
+                ),
+                "artifact_reference_answer": bool(
+                    dialogue_vector.get("artifact_reference_answer")
+                ),
+                "visual_scene_similarity": float(
+                    dialogue_vector.get("visual_scene_similarity", 0.0) or 0.0
+                ),
                 "resolved_request":resolved_request,
                 "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
                 "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
