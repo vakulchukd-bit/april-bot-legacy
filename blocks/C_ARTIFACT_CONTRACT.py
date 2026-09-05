@@ -291,12 +291,23 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload["edges"] = canonical_edges
     payload["layout"] = payload.get("layout") or {"direction": "LR"}
     payload["diagram_schema"] = "april.diagram.canonical.v2"
-    payload["representation"] = "schematic"
+    existing_presentation = dict(payload.get("presentation") or {})
+    concrete_renderer = (
+        payload.get("renderer")
+        or existing_presentation.get("renderer")
+        or "MessageTextBlock"
+    )
+    payload["representation"] = payload.get("representation") or (
+        "geometric_figure"
+        if concrete_renderer in {"GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
+        else "schematic"
+    )
     payload["presentation"] = {
-        **dict(payload.get("presentation") or {}),
-        "renderer": "MessageTextBlock",
+        **existing_presentation,
+        "renderer": concrete_renderer,
         "engine": "McDowell",
         "payload_unchanged": True,
+        "text_companion_required": True,
     }
     return payload
 
@@ -461,23 +472,55 @@ class BaseArtifact:
 # BLOCK MAP
 # =====================================================
 
+# Renderer capability map.
+# artifact_type identifies the produced representation; renderer identifies
+# the concrete Web viewer for this particular artifact. One room may therefore
+# produce multiple concrete renderers without creating a second route.
 ARTIFACT_BLOCK_MAP = {
-
+    "text": "MessageTextBlock",
+    "markdown": "MessageTextBlock",
     "graph": "GraphBlock",
-
-    "formula": "FormulaBlock",
-
+    "formula": "MessageTextBlock",
     "table": "TableBlock",
-
-    "diagram": "MessageTextBlock",
-
+    "diagram": "MessageTextBlock",   # default for textual/schematic diagrams
     "code": "CodeBlock",
-
     "link": "LinkCard",
-
     "gallery": "GalleryBlock",
+    "image": "GalleryBlock",
+    "file": "LinkCard",
+    "audio": "MessageTextBlock",
+    "video": "MessageTextBlock",
+    "action": "MessageTextBlock",
+    "scene": "GalleryBlock",
+    "memory": "MessageTextBlock",
+    "visual_context": "GalleryBlock",
+    "function": "FunctionBlock",
+}
 
-    "function": "FunctionBlock"
+# Concrete renderers that are allowed to cross the artifact/Fiber boundary.
+SUPPORTED_RENDERERS = {
+    "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
+    "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock",
+    "SvgBlock", "ArithmeticDiagram",
+}
+
+# Data-driven renderer aliases. They refine a produced representation; they do
+# not perform lexical routing.
+ARTIFACT_RENDERER_ALIASES = {
+    "text": "MessageTextBlock",
+    "markdown": "MessageTextBlock",
+    "message": "MessageTextBlock",
+    "message_text": "MessageTextBlock",
+    "diagram": "MessageTextBlock",
+    "diagramblock": "MessageTextBlock",
+    "schematic": "MessageTextBlock",
+    "gallery": "GalleryBlock",
+    "image": "GalleryBlock",
+    "figure": "GalleryBlock",
+    "geometry": "GalleryBlock",
+    "geometric_figure": "GalleryBlock",
+    "svg": "SvgBlock",
+    "arithmetic_diagram": "ArithmeticDiagram",
 }
 
 # =====================================================
@@ -550,8 +593,12 @@ FACTORY_ROOM_PROFILES = {
     "diagram": {
         "room": "C_DIAGRAM_ROOM",
         "artifact_type": "diagram",
+        # Default only. A concrete artifact can select its own viewer.
         "renderer": "MessageTextBlock",
         "viewer": "MessageTextBlock",
+        "allowed_renderers": [
+            "MessageTextBlock", "GalleryBlock", "SvgBlock", "ArithmeticDiagram"
+        ],
         "semantic_service": "APRIL_DIAGRAM_SYSTEM_CORE",
         "capabilities": [
             "spatial_semantics",
@@ -559,11 +606,14 @@ FACTORY_ROOM_PROFILES = {
             "relations",
             "structure",
             "engineering_layout",
+            "schematic_rendering",
+            "geometric_figure_rendering",
         ],
         "machine_input": "MachineRequest",
         "machine_output": "BaseArtifact",
         "scene_output": "SceneContract",
         "single_route": True,
+        "text_companion_required": True,
     },
 }
 
@@ -587,14 +637,40 @@ def build_diagram_room_payload(
     semantic = dict(semantic or {})
     payload = dict(payload or {})
     profile = get_factory_room_profile("diagram")
+    requested_renderer = (
+        payload.get("renderer")
+        or (payload.get("presentation") or {}).get("renderer")
+        or payload.get("viewer")
+        or profile["renderer"]
+    )
+    requested_renderer = ARTIFACT_RENDERER_ALIASES.get(
+        str(requested_renderer or "").strip().lower(),
+        str(requested_renderer or "").strip(),
+    )
+    if requested_renderer not in profile.get("allowed_renderers", []):
+        requested_renderer = profile["renderer"]
+
+    rendering_mode = str(
+        payload.get("rendering_mode")
+        or (payload.get("presentation") or {}).get("rendering_mode")
+        or (
+            "geometric_figure"
+            if requested_renderer in {"GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
+            else "schematic"
+        )
+    ).strip().lower()
+
     payload.update({
         "artifact_type": profile["artifact_type"],
         "room_source": profile["room"],
-        "renderer": profile["renderer"],
-        "viewer": profile["viewer"],
+        "renderer": requested_renderer,
+        "viewer": payload.get("viewer") or requested_renderer,
+        "rendering_mode": rendering_mode,
+        "allowed_renderers": list(profile.get("allowed_renderers", [])),
         "semantic": semantic,
         "diagram_semantics": semantic,
         "machine_only": bool(payload.get("machine_only", False)),
+        "text_companion_required": True,
     })
     return payload
 
@@ -699,9 +775,19 @@ def create_artifact(
     if not isinstance(room_identity, dict):
         room_identity = {}
 
-    render_block = ARTIFACT_BLOCK_MAP.get(
-        artifact_type,
-        "FunctionBlock"
+    explicit_renderer = (
+        normalized_data.get("renderer")
+        or (normalized_data.get("presentation") or {}).get("renderer")
+        or normalized_data.get("viewer")
+    )
+    explicit_renderer = ARTIFACT_RENDERER_ALIASES.get(
+        str(explicit_renderer or "").strip().lower(),
+        str(explicit_renderer or "").strip(),
+    )
+    render_block = (
+        explicit_renderer
+        if explicit_renderer in SUPPORTED_RENDERERS
+        else ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
     )
 
     priority = normalized_data.get("priority", 100)
@@ -834,8 +920,78 @@ def build_diagnostic_snapshot(diag: DiagnosticContract) -> Dict[str, Any]:
 
 
 
+def _text_companion_blocks(
+    artifact_type: str,
+    content: str,
+    data: Dict[str, Any],
+    presentation: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Create MessageTextBlock companions for specialized renderers.
+
+    Interpretation prescribes a narrative layer around specialized output:
+    introduction -> specialized result -> explanation. The artifact contract
+    carries that narrative explicitly, without mutating the specialized payload.
+    """
+    data = dict(data or {})
+    presentation = dict(presentation or data.get("presentation") or {})
+    if bool(data.get("machine_only", False)) or data.get("human_visible") is False:
+        return []
+
+    intro = str(
+        data.get("introduction")
+        or data.get("intro")
+        or data.get("request_essence")
+        or content
+        or ""
+    ).strip()
+    explanation = str(
+        data.get("explanation")
+        or data.get("result_explanation")
+        or ""
+    ).strip()
+
+    blocks: List[Dict[str, Any]] = []
+    priority = int(data.get("priority", 100))
+    if intro:
+        blocks.append({
+            "type": "text",
+            "artifact_type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": intro,
+            "text": intro,
+            "text_role": "introduction",
+            "parent_representation": artifact_type,
+            "priority": priority - 1,
+            "presentation": presentation,
+            "scene_contract": True,
+            "executor_generated": False,
+        })
+    if explanation and explanation != intro:
+        blocks.append({
+            "type": "text",
+            "artifact_type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": explanation,
+            "text": explanation,
+            "text_role": "explanation",
+            "parent_representation": artifact_type,
+            "priority": priority + 1,
+            "presentation": presentation,
+            "scene_contract": True,
+            "executor_generated": False,
+        })
+    return blocks
+
+
 def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, Any]]:
-    """Project one artifact into the single canonical render-block shape."""
+    """Project one artifact into lossless canonical render blocks.
+
+    Concrete renderer identity is preserved from the artifact/presentation.
+    Every human-visible specialized result gets a MessageTextBlock companion
+    so narrative content is never forced into the specialized renderer.
+    """
     if artifact is None:
         return []
 
@@ -843,7 +999,23 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
     artifact_type = getattr(getattr(artifact, "metadata", None), "artifact_type", "") or data.get("artifact_type", "")
     room_source = getattr(getattr(artifact, "metadata", None), "room_source", "") or data.get("room_source", "")
     render = getattr(artifact, "render", None)
-    renderer = getattr(render, "web_block", "") or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
+
+    explicit_renderer = (
+        data.get("renderer")
+        or (data.get("presentation") or {}).get("renderer")
+        or data.get("viewer")
+    )
+    explicit_renderer = ARTIFACT_RENDERER_ALIASES.get(
+        str(explicit_renderer or "").strip().lower(),
+        str(explicit_renderer or "").strip(),
+    )
+    renderer = (
+        explicit_renderer
+        if explicit_renderer in SUPPORTED_RENDERERS
+        else getattr(render, "web_block", "")
+        or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
+    )
+
     priority = getattr(render, "priority", data.get("priority", 100))
     complexity = getattr(render, "complexity", data.get("complexity", "balanced"))
     layout = getattr(render, "layout", data.get("layout", "single"))
@@ -852,8 +1024,7 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
     structured_payload = data.get("payload")
     if not isinstance(structured_payload, dict):
         structured_payload = {
-            key: value
-            for key, value in data.items()
+            key: value for key, value in data.items()
             if key not in _CANONICAL_TEXT_KEYS
             and key not in {"render_signal", "presentation", "machine_only", "human_visible"}
         }
@@ -861,47 +1032,36 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
     signal = data.get("render_signal")
     if not isinstance(signal, dict):
         signal = _build_artifact_render_signal(
-            artifact_type=artifact_type,
-            room_source=room_source,
-            renderer=renderer,
-            payload=structured_payload,
-            content=content,
-            priority=priority,
-            complexity=complexity,
-            layout=layout,
+            artifact_type=artifact_type, room_source=room_source, renderer=renderer,
+            payload=structured_payload, content=content, priority=priority,
+            complexity=complexity, layout=layout, presentation=dict(data.get("presentation") or {}),
         )
-
     signal = dict(signal)
     presentation = data.get("presentation")
     if not isinstance(presentation, dict):
         presentation = dict(signal.get("presentation") or {})
-    signal.setdefault("presentation", presentation)
-    signal.setdefault("artifact_id", getattr(getattr(artifact, "metadata", None), "artifact_id", ""))
-    signal.setdefault("signal_version", UNIFIED_RENDER_SIGNAL_VERSION)
-    signal.setdefault("type", artifact_type)
-    signal.setdefault("payload_type", artifact_type)
-    signal.setdefault("renderer", renderer)
-    signal.setdefault("viewer", renderer)
-    signal.setdefault("source_room", room_source)
-    signal.setdefault("payload", structured_payload)
 
-    block = {
+    signal.update({
+        "renderer": renderer,
+        "viewer": data.get("viewer") or renderer,
+        "type": artifact_type,
+        "payload_type": artifact_type,
+        "source_room": room_source,
+        "payload": structured_payload,
+        "presentation": presentation,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "artifact_id": signal.get("artifact_id") or getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
+    })
+
+    specialized_block = {
         "type": artifact_type,
         "artifact_type": artifact_type,
         "renderer": renderer,
-        "viewer": renderer,
+        "viewer": data.get("viewer") or renderer,
         "content": content,
         "text": content,
         "payload": structured_payload,
-        "signal": dict(signal.get("signal") or {
-            "type": artifact_type,
-            "payload_type": artifact_type,
-            "renderer": renderer,
-            "viewer": renderer,
-            "source_room": room_source,
-            "version": UNIFIED_RENDER_SIGNAL_VERSION,
-            "scene_contract": True,
-        }),
+        "signal": dict(signal.get("signal") or {}),
         "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
         "source_room": room_source,
         "artifact_id": getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
@@ -913,20 +1073,34 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
         "provider_payload": True,
         "canonical_provider_payload": True,
         "executor_generated": False,
+        "text_companion_required": bool(data.get("text_companion_required", True)),
     }
-    return [block]
 
+    # Text-like representations are themselves the MessageTextBlock.
+    # Specialized representations receive a separate text companion.
+    if renderer == "MessageTextBlock":
+        return _text_companion_blocks(artifact_type, content, data, presentation) or [specialized_block]
+    return _text_companion_blocks(artifact_type, content, data, presentation) + [specialized_block]
 
 def _ensure_artifact_render_signal(artifact: BaseArtifact) -> BaseArtifact:
     """Ensure a room artifact has exactly one lossless render signal."""
     blocks = _artifact_canonical_render_blocks(artifact)
     if blocks:
-        artifact.data["render_signal"] = dict(blocks[0].get("signal") or {})
-        artifact.data["render_signal"]["payload"] = blocks[0].get("payload")
+        specialized = next(
+            (block for block in blocks if str(block.get("renderer") or "") not in {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}),
+            blocks[-1],
+        )
+        artifact.data["render_signal"] = dict(specialized.get("signal") or blocks[-1].get("signal") or {})
+        artifact.data["render_signal"]["payload"] = specialized.get("payload") if specialized.get("payload") is not None else blocks[-1].get("payload")
+        artifact.data["render_signal"]["renderer"] = specialized.get("renderer") or blocks[-1].get("renderer") or "MessageTextBlock"
+        artifact.data["render_signal"]["viewer"] = specialized.get("viewer") or blocks[-1].get("viewer") or "MessageTextBlock"
         artifact.data.setdefault("render_blocks", [])
         artifact.data["render_blocks"] = blocks
         artifact.render.signal_version = UNIFIED_RENDER_SIGNAL_VERSION
-        artifact.render.signal_type = blocks[0].get("type", "")
+        artifact.render.signal_type = specialized.get("type", blocks[-1].get("type", ""))
+        artifact.render.web_block = specialized.get("renderer") or blocks[-1].get("renderer", artifact.render.web_block)
+        artifact.render.viewer = specialized.get("viewer") or artifact.render.web_block
+        artifact.render.renderer = artifact.render.web_block
     return artifact
 
 def build_universal_contract(
@@ -1047,7 +1221,11 @@ def build_universal_contract(
         contract.fiber.metrics.block_count = max(1, len(machine_response.render_blocks or []) or 1)
         contract.fiber.metrics.payload_size = len(str(artifact_payload))
         contract.fiber.trace.room = artifact.metadata.room_source
-        contract.fiber.renderer.supported_blocks = [artifact.render.web_block]
+        contract.fiber.renderer.supported_blocks = list(dict.fromkeys(
+            str(block.get("renderer") or "")
+            for block in canonical_artifact_blocks
+            if isinstance(block, dict) and block.get("renderer")
+        )) or [artifact.render.web_block or "MessageTextBlock"]
         contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
 
     return contract
@@ -1440,7 +1618,9 @@ SCENE_BLOCK_REGISTRY = {
     "table": "TableBlock",
     "formula": "FormulaBlock",
     "graph": "GraphBlock",
-    "diagram": "DiagramBlock",
+    # Default schematic view. Concrete geometry uses the artifact renderer
+    # signal (GalleryBlock/SvgBlock/ArithmeticDiagram) and is not flattened here.
+    "diagram": "MessageTextBlock",
     "image": "ImageBlock",
     "gallery": "GalleryBlock",
     "code": "CodeBlock",
@@ -1607,6 +1787,8 @@ __all__ = [
     "validate_universal_contract",
     "build_machine_scene",
     "build_presentation_hint",
+    "SUPPORTED_RENDERERS",
+    "ARTIFACT_RENDERER_ALIASES",
     "UNIFIED_RENDER_SIGNAL_VERSION",
     "build_scene_contract",
     "FACTORY_ROOM_PROFILES",
@@ -1891,6 +2073,23 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     # SceneContract. Never let an empty renderer list erase an existing answer.
     canonical_blocks = build_canonical_scene_blocks(scene)
     canonical_blocks = _ensure_visible_text_block(scene, canonical_blocks)
+
+    # Interpretation parity: a human-visible specialized renderer is never
+    # allowed to suppress its narrative MessageTextBlock companion.
+    if not _scene_is_internal_only(scene) and canonical_blocks:
+        specialized_present = any(
+            isinstance(block, dict)
+            and str(block.get("renderer") or "") not in {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}
+            for block in canonical_blocks
+        )
+        has_text_companion = any(
+            isinstance(block, dict)
+            and str(block.get("renderer") or "") in {"MessageTextBlock", "TextBlock", "MarkdownBlock"}
+            and str(block.get("content") or block.get("text") or "").strip()
+            for block in canonical_blocks
+        )
+        if specialized_present and not has_text_companion:
+            canonical_blocks = _ensure_visible_text_block(scene, canonical_blocks)
     contract.blocks = canonical_blocks
     contract.render_blocks = list(canonical_blocks)
     contract.metadata.update(scene.metadata or {})
@@ -2271,7 +2470,7 @@ def validate_diagram_factory_artifact(artifact: Optional[BaseArtifact]) -> Dict[
         "ok": (
             artifact_type == "diagram"
             and room == "C_DIAGRAM_ROOM"
-            and renderer == "DiagramBlock"
+            and renderer in {"MessageTextBlock", "GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
         ),
         "artifact_type": artifact_type,
         "room_source": room,
