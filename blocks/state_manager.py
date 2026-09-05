@@ -2232,13 +2232,78 @@ def prepare_visual_context_for_turn(user_id, current_request):
         }
 
     # The persisted scene is durable evidence, not an automatic continuation.
-    # Do not promote it into the turn-local context before the semantic matrix
-    # has established a relation to the current request.
-    state_obj["active_visual_scene_turn"] = None
-    state_obj["stored_visual_scene_turn"] = None
+    # Keep the complete canonical visual evidence available to the next semantic
+    # stage.  Releasing evidence here does not grant continuation authority;
+    # Interpretation/Quantum Processor still decides whether this turn actually
+    # depends on the previous scene.
+    evidence_scene = deepcopy(scene)
+    render_blocks = evidence_scene.get("render_blocks")
+    if not isinstance(render_blocks, list):
+        render_blocks = []
 
-    return {
-        "active": False,
+    block_types = []
+    presentation_types = []
+    for block in render_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+            or ""
+        ).strip().lower()
+        if block_type and block_type not in block_types:
+            block_types.append(block_type)
+
+        presentation = block.get("presentation")
+        if isinstance(presentation, dict):
+            ptype = str(
+                presentation.get("kind")
+                or presentation.get("mode")
+                or presentation.get("renderer")
+                or ""
+            ).strip().lower()
+            if ptype and ptype not in presentation_types:
+                presentation_types.append(ptype)
+
+    # Turn-local signal: this is an evidence packet only.  It deliberately does
+    # not change relation/continuation and therefore cannot override a fresh
+    # representation request.
+    state_obj["active_visual_scene_turn"] = deepcopy(evidence_scene)
+    state_obj["stored_visual_scene_turn"] = deepcopy(evidence_scene)
+
+    visual_context = {
+        "scene_id": str(evidence_scene.get("scene_id") or ""),
+        "scene_type": str(evidence_scene.get("scene_type") or ""),
+        "topic": safe_trim_text(
+            evidence_scene.get("topic")
+            or evidence_scene.get("current_request")
+            or evidence_scene.get("summary"),
+            500,
+        ),
+        "user_request": safe_trim_text(evidence_scene.get("user_request"), 1200),
+        "april_answer": safe_trim_text(evidence_scene.get("april_answer"), 2200),
+        "render_block_types": block_types,
+        "presentation_types": presentation_types,
+        "render_blocks": deepcopy(render_blocks),
+        "presentation_signals": deepcopy(
+            evidence_scene.get("presentation_signals") or []
+        ),
+        "semantic_state": deepcopy(
+            evidence_scene.get("semantic_state") or {}
+        ),
+        "render_continuity": deepcopy(
+            evidence_scene.get("render_continuity") or {}
+        ),
+        "source": "active_visual_scene",
+        "evidence_only": True,
+    }
+
+    # Canonical bridge consumed by runtime adapters.  Keep the old compact keys
+    # for compatibility and expose the structured packet without creating a
+    # second memory system.
+    state_obj["visual_context_bridge"] = {
+        "active": True,
         "released": True,
         "overlap": 0.0,
         "semantic_relevance": 0.0,
@@ -2247,8 +2312,13 @@ def prepare_visual_context_for_turn(user_id, current_request):
         "memory_role": "evidence_only",
         "user_id": str(user_id),
         "current_request": current,
-        "scene_id": str(scene.get("scene_id") or ""),
+        "scene_id": visual_context["scene_id"],
+        "visual_context": deepcopy(visual_context),
+        "active_visual_scene": deepcopy(evidence_scene),
     }
+
+    persist_state(user_id)
+    return deepcopy(state_obj["visual_context_bridge"])
 
 def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
     """Finalize turn-local markers without resurrecting or erasing scene memory.
