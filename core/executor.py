@@ -35,7 +35,7 @@ from blocks.intent_ai import detect_intent_ai
 from blocks.intent_resolver import resolve_input, build_focus_intent_state
 from blocks.router import route_request
 from blocks.router_system import decide_action
-from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene
+from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene, persist_state
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
@@ -4776,6 +4776,136 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     response = _ensure_quantum_structured_outputs(response, request)
     return response
 
+def _persist_structured_scene_payload(
+    user_id: str,
+    state: dict,
+    contract: Any,
+    render_blocks: list[dict],
+) -> None:
+    """Persist the canonical structured render payload after state_manager.
+
+    The existing state-manager scene summary intentionally stores a compact
+    inventory and therefore may omit the actual render_blocks payload. The
+    Web-facing scene, however, needs the structured artifact itself available
+    for the *next* semantic turn. This bridge copies only the already-finalized
+    render stream; it does not classify, route, regenerate, or alter payloads.
+
+    Text-only turns are left untouched. For structured turns, the same payload
+    is mirrored into the immediate active scene and the latest durable visual
+    history entry, then persisted through the existing state_manager.
+    """
+    if not isinstance(state, dict) or not isinstance(render_blocks, list):
+        return
+
+    structured_blocks: list[dict] = []
+    for block in render_blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
+        if kind in {"", "text", "markdown"}:
+            continue
+        structured_blocks.append(deepcopy(block))
+
+    if not structured_blocks:
+        return
+
+    contract_dict = {}
+    if isinstance(contract, dict):
+        contract_dict = contract
+    elif hasattr(contract, "__dict__"):
+        contract_dict = dict(contract.__dict__)
+
+    block_types: list[str] = []
+    presentation_types: list[str] = []
+    for block in structured_blocks:
+        kind = _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
+        if kind and kind not in block_types:
+            block_types.append(kind)
+        presentation = block.get("presentation")
+        if isinstance(presentation, dict):
+            pkind = _s(
+                presentation.get("kind")
+                or presentation.get("renderer")
+                or presentation.get("mode")
+            ).lower()
+            if pkind and pkind not in presentation_types:
+                presentation_types.append(pkind)
+
+    scene_payload = {
+        "render_blocks": deepcopy(structured_blocks),
+        "render_block_types": block_types,
+        "presentation_types": presentation_types,
+        "renderer_state": {
+            "block_types": list(block_types),
+            "presentation_types": list(presentation_types),
+            "structured_payload_preserved": True,
+            "source": "QUANTUM_PROCESSOR",
+        },
+    }
+
+    # Immediate active scenes.
+    for key in ("current_visual_scene", "active_visual_scene", "active_visual_scene_turn"):
+        scene = state.get(key)
+        if isinstance(scene, dict):
+            scene.update(deepcopy(scene_payload))
+
+    # State-manager's compact contract is also upgraded with the same canonical
+    # structured payload so later context builders can consume it directly.
+    active_contract = state.get("active_scene_contract")
+    if isinstance(active_contract, dict):
+        active_contract.update({
+            "render_blocks": deepcopy(structured_blocks),
+            "blocks": deepcopy(structured_blocks),
+            "render_block_types": list(block_types),
+            "presentation_types": list(presentation_types),
+            "renderer_state": deepcopy(scene_payload["renderer_state"]),
+            "scene_id": _s(
+                active_contract.get("scene_id")
+                or contract_dict.get("scene_id")
+            ),
+            "active_scene": _s(
+                active_contract.get("active_scene")
+                or contract_dict.get("active_scene")
+            ),
+        })
+
+    # Preserve the payload in the newest durable visual-history records without
+    # creating another record or changing ordering/retention policy.
+    timeline = state.get("memory_timeline")
+    if isinstance(timeline, dict):
+        day0 = timeline.get("day_0")
+        if isinstance(day0, dict):
+            scenes = day0.get("visual_scenes")
+            if isinstance(scenes, list) and scenes:
+                latest = scenes[-1]
+                if isinstance(latest, dict):
+                    latest.update(deepcopy(scene_payload))
+            state["memory_timeline"] = timeline
+
+    visual_history = state.get("visual_scene_history")
+    if isinstance(visual_history, list) and visual_history:
+        latest = visual_history[-1]
+        if isinstance(latest, dict):
+            latest.update(deepcopy(scene_payload))
+
+    # Re-persist through the existing state manager. No alternate storage path.
+    try:
+        persist_state(user_id)
+    except Exception:
+        # The scene is still retained in the in-memory state object for the
+        # current request; do not turn a persistence enhancement into a route
+        # failure.
+        pass
+
+
 def _canonicalize(
     user_id: str,
     response: MachineResponse,
@@ -4926,6 +5056,17 @@ def _canonicalize(
         current_request=_s(request.conversation.get("current_request")),
         answer=answer,
         internal_context=internal_context,
+    )
+
+    # The existing state manager stores a compact scene inventory and may omit
+    # the actual structured render payload. Mirror the already-finalized blocks
+    # back into the active scene so the next turn can resolve the same artifact
+    # semantically. No new route, renderer, or provider call is introduced.
+    _persist_structured_scene_payload(
+        user_id,
+        state,
+        contract,
+        render_blocks,
     )
     request_meta = _request_metadata(request)
 
