@@ -1,8 +1,8 @@
 """April Quantum Processor — balanced single-route executor.
 
 This is a quantum-inspired processor, not a physical quantum computer.
-It evaluates many independent evidence channels, fuses them multiplicatively,
-then collapses them to ONE dialogue state, ONE request and ONE scene contract.
+It evaluates independent evidence channels, consolidates compatible evidence,
+then collapses it to ONE dialogue state, ONE request and ONE scene contract.
 There is exactly one Provider call per user turn.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v32_canonical_dialogue_visual_integrity_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v34_canonical_visible_stream_visual_context_v2"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -92,12 +92,6 @@ def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
 def _s(v: Any) -> str:
     return str(v or "").strip()
 
-def _clip(v: Any, n: int = 900) -> str:
-    s = _s(v)
-    return s if len(s) <= n else s[-n:]
-
-def _tokens(v: Any) -> set[str]:
-    return set(re.findall(r"[\wА-Яа-яЁё]+", _s(v).lower()))
 
 def _as_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
@@ -706,6 +700,42 @@ class QuantumMemoryUnderstandingEngine:
         related; this selector only supplies the nearest authoritative pair.
         """
         if previous_user and previous_assistant:
+            pairs = cls._historical_pairs(dialog_history, memory_timeline)
+
+            # Keep the immediate pair unless it is a weak/clarification-like
+            # anchor and another recent pair is semantically more substantive.
+            immediate_quality = cls._pair_quality(previous_user, previous_assistant)
+            if pairs and immediate_quality < 0.38:
+                candidates = pairs[-8:]
+                texts = [
+                    f"{pair.get('user', '')} {pair.get('assistant', '')}"
+                    for pair in candidates
+                ]
+                semantic, _ = cls._semantic_score(current, texts)
+                best_idx = -1
+                best_score = 0.0
+                for idx, pair in enumerate(candidates):
+                    score = float(semantic.get(texts[idx], 0.0) or 0.0)
+                    score *= max(0.25, cls._pair_quality(
+                        pair.get("user", ""),
+                        pair.get("assistant", ""),
+                    ))
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+                if best_idx >= 0 and best_score >= 0.12:
+                    pair = candidates[best_idx]
+                    quality = cls._pair_quality(
+                        pair.get("user", ""),
+                        pair.get("assistant", ""),
+                    )
+                    if quality > immediate_quality:
+                        return (
+                            str(pair.get("user") or ""),
+                            str(pair.get("assistant") or ""),
+                            "semantic_history_pair",
+                            float(quality),
+                        )
             return previous_user, previous_assistant, "immediate_scene", 1.0
 
         pairs = cls._historical_pairs(dialog_history, memory_timeline)
@@ -788,6 +818,28 @@ class QuantumMemoryUnderstandingEngine:
         # evidence. This adds no provider/model call and no lexical trigger list.
         scene_hint_score = 0.0
         visual_reference_candidate = False
+        explicit_visual_evidence = False
+
+        if isinstance(visual_reference, dict) and visual_reference:
+            # Consume explicit evidence emitted by the Visual Reference System.
+            # The Processor does not invent a new routing vocabulary; it only
+            # recognizes generic reference/target fields already present.
+            reference_flags = (
+                visual_reference.get("reference"),
+                visual_reference.get("resolved"),
+                visual_reference.get("reference_resolved"),
+                visual_reference.get("artifact_reference"),
+                visual_reference.get("visual_reference"),
+                visual_reference.get("candidate"),
+                visual_reference.get("candidate_present"),
+            )
+            explicit_visual_evidence = any(bool(v) for v in reference_flags)
+            if not explicit_visual_evidence:
+                for key in ("scene_id", "target", "target_id", "active_scene_id", "resolved_scene_id"):
+                    if _s(visual_reference.get(key)):
+                        explicit_visual_evidence = True
+                        break
+
         if scene:
             visual_text_for_gate = self._scene_text(scene)
             if visual_text_for_gate:
@@ -797,10 +849,17 @@ class QuantumMemoryUnderstandingEngine:
                 scene_hint_score = float(
                     next(iter(similarity_map.values()), 0.0)
                 ) if similarity_map else 0.0
-                visual_reference_candidate = (
-                    bool(self._visual_blocks(scene))
-                    and scene_hint_score >= 0.38
-                    and canonical_relation != "NEW_TOPIC"
+
+                # Explicit visual-reference evidence is sufficient to open the
+                # visual context bridge. Otherwise semantic similarity supplies
+                # the evidence. This remains semantic/structural; no word trigger
+                # list is used.
+                visual_reference_candidate = bool(
+                    self._visual_blocks(scene)
+                    and (
+                        explicit_visual_evidence
+                        or scene_hint_score >= 0.34
+                    )
                 )
 
         dependency_authorized = bool(
@@ -814,6 +873,7 @@ class QuantumMemoryUnderstandingEngine:
             **gate,
             "needed": bool(gate.get("needed") or visual_reference_candidate),
             "visual_reference_candidate": visual_reference_candidate,
+            "explicit_visual_reference_evidence": explicit_visual_evidence,
             "visual_scene_similarity": round(scene_hint_score, 6),
             "reference_anchor": bool(
                 gate.get("reference_anchor") or visual_reference_candidate
@@ -960,7 +1020,10 @@ class QuantumMemoryUnderstandingEngine:
             or (not canonical_relation and gate.get("dialogue_anchor") and (scene_similarity >= 0.48 or topic_similarity >= 0.18))
         )
 
-        if canonical_reference and reference_resolved:
+        if reference_resolved:
+            # A successfully resolved structured visual target is stronger than
+            # a conservative top-level dialogue label. Once the target is
+            # concrete, the canonical relation must describe that dependency.
             relation = "ARTIFACT_REFERENCE"
         elif canonical_continuation:
             relation = "CONTINUE_TOPIC"
@@ -1329,29 +1392,92 @@ def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
 
 
 def _usable_visual_scene(state: dict) -> dict:
-    """Return the nearest valid visual scene, preferring the current turn."""
+    """Return the best usable structured visual scene without losing prior art."""
     if not isinstance(state, dict):
         return {}
 
-    candidates = []
-    for key in ("current_visual_scene", "active_visual_scene", "last_successful_visual_scene"):
-        candidate = state.get(key)
-        if isinstance(candidate, dict) and candidate.get("render_blocks"):
-            candidates.append((key, candidate))
+    ranked: list[tuple[int, int, str, dict]] = []
+    order = (
+        ("current_visual_scene", 0),
+        ("active_visual_scene", 1),
+        ("active_scene_contract", 2),
+        ("last_successful_visual_scene", 3),
+    )
 
-    # Current/active scene is authoritative for an explicit follow-up. Historical
-    # last-successful scenes are fallback evidence only and must never displace it.
-    for key, candidate in candidates:
-        for block in candidate.get("render_blocks", []):
+    for key, priority in order:
+        candidate = state.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        blocks = candidate.get("render_blocks")
+        if not isinstance(blocks, list):
+            continue
+        usable_blocks = []
+        for block in blocks:
             if not isinstance(block, dict):
                 continue
-            btype = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+            btype = _s(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            ).lower()
             payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
             status = _s(payload.get("status") or block.get("status")).lower()
-            if btype not in {"", "text", "markdown"} and status not in {"unavailable", "pending_data", "incomplete", "error"}:
-                result = deepcopy(candidate)
-                result["_selection_source"] = key
-                return result
+            if (
+                btype not in {"", "text", "markdown"}
+                and status not in {"unavailable", "pending_data", "incomplete", "error"}
+            ):
+                usable_blocks.append(block)
+
+        if usable_blocks:
+            # Prefer the most recent valid scene, but never replace it with an
+            # empty dialogue scene simply because that scene is newer.
+            turn_id = int(candidate.get("turn_id") or 0)
+            ranked.append((turn_id, -priority, key, candidate))
+
+    if not ranked:
+        return {}
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    _, _, key, candidate = ranked[0]
+    result = deepcopy(candidate)
+    result["_selection_source"] = key
+    result["_visual_scene_usable"] = True
+    return result
+
+
+def _best_visual_context(state: dict) -> dict:
+    """Return structured visual evidence first, without falling back to empty text scenes."""
+    usable = _usable_visual_scene(state)
+    if usable:
+        return usable
+
+    if not isinstance(state, dict):
+        return {}
+
+    # A contract may carry structured blocks under a different field while the
+    # state-manager scene summary is compact. Accept it only when it has a
+    # concrete non-text render block.
+    for key in ("active_scene_contract", "current_visual_scene", "active_visual_scene"):
+        candidate = state.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        blocks = candidate.get("render_blocks") or candidate.get("blocks")
+        if not isinstance(blocks, list):
+            continue
+        if any(
+            isinstance(block, dict)
+            and _s(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            ).lower() not in {"", "text", "markdown"}
+            for block in blocks
+        ):
+            result = deepcopy(candidate)
+            result["render_blocks"] = list(blocks)
+            result["_selection_source"] = key
+            result["_visual_scene_usable"] = True
+            return result
     return {}
 
 
@@ -1715,13 +1841,6 @@ def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dic
     return names or ["text"]
 
 
-def _representation_consensus(outputs: list[str], semantic: dict, decision: dict) -> tuple[str, dict[str, Any]]:
-    plan = list(dict.fromkeys(outputs or ["text"]))
-    preferred = _s(decision.get("preferred_representation") or semantic.get("preferred_representation") or (plan[0] if plan else "text")).lower()
-    if preferred not in plan:
-        preferred = plan[0] if plan else "text"
-    return preferred, {"outputs": plan, "preferred": preferred, "selection_method": "declared_plus_structural_measurement", "scoring": False, "triggers": False}
-
 def _representation_consensus(
     outputs: list[str],
     semantic: dict,
@@ -1768,11 +1887,7 @@ def _preserve_semantic_visual_representation(
             "source": "current_turn_only",
         }
 
-    scene = _as_dict(
-        state.get("current_visual_scene")
-        or state.get("active_visual_scene")
-        or state.get("active_scene_contract")
-    )
+    scene = _as_dict(_best_visual_context(state))
     if not scene:
         return list(dict.fromkeys(requested_outputs or ["text"])), preferred, {
             "preserved": False,
@@ -1855,9 +1970,9 @@ def _preserve_semantic_visual_representation(
     outputs = list(dict.fromkeys(
         [*list(requested_outputs or []), chosen]
     ))
-    # Keep text as a companion only when it was explicitly requested or already
-    # declared by the semantic plan.  The structured representation remains the
-    # preferred rendered result for visual continuation.
+    # Requested outputs stay focused on production representations. The
+    # MessageTextBlock companion is supplied later by the visible-stream contract.
+    # The structured representation remains the preferred rendered result.
     if chosen != preferred:
         preferred = chosen
 
@@ -2100,11 +2215,7 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
         if goal: data["active_goal"] = _clip(goal, 500)
         data["recent_dialogue"] = recent
     if mode in {"CONTINUATION", "ARTIFACT_REFERENCE"}:
-        visual = None
-        if isinstance(state.get("active_scene_contract"), dict):
-            visual = state.get("active_scene_contract")
-        if not visual:
-            visual = state.get("current_visual_scene") or state.get("active_visual_scene")
+        visual = _best_visual_context(state)
         if visual:
             data["visual_context"] = _quantum_snapshot(visual)
     return data
@@ -2228,8 +2339,9 @@ def _canonical_requested_outputs(
             multi.append(name)
 
     if canonical and canonical not in internal:
-        # Text is a companion only if explicitly present in the canonical
-        # multi-output declaration. Do not manufacture it for diagrams.
+        # requested_outputs describe production representations. MessageTextBlock
+        # is a mandatory presentation companion and is added at the visible-stream
+        # release stage, not as a second production route.
         if canonical in multi and len(multi) > 1:
             outputs = [canonical] + [x for x in multi if x != canonical]
         else:
@@ -2297,11 +2409,7 @@ def _build_processor_control_plane(
     # memory-understanding engine and only when its scene id matches the current
     # visual scene. This repairs false-INDEPENDENT context loss without adding a
     # route or a provider call.
-    current_visual_scene = _as_dict(
-        state.get("current_visual_scene")
-        or state.get("active_visual_scene")
-        or state.get("active_scene_contract")
-    )
+    current_visual_scene = _as_dict(_best_visual_context(state))
     memory_scene_id = _s(memory_scene.get("scene_id"))
     current_scene_id = _s(current_visual_scene.get("scene_id"))
     resolved_memory_reference = bool(
@@ -2661,7 +2769,7 @@ def _make_request(
                 "active_goal": _clip(_s(control.get("active_goal")), 500),
                 "active_scene_id": _s(
                     _as_dict(dialogue_evidence.get("scene_continuity")).get("scene_id")
-                    or _as_dict(state.get("current_visual_scene")).get("scene_id")
+                    or _as_dict(_best_visual_context(state)).get("scene_id")
                 ),
                 "retrieval_mode": "memory_query" if mode == "MEMORY_QUERY" else "semantic",
                 "dynamic_memory": (
@@ -2678,14 +2786,17 @@ def _make_request(
             if mode != "INDEPENDENT"
             else {
                 "active_scene_id": _s(
-                    _as_dict(state.get("current_visual_scene")).get("scene_id")
+                    _as_dict(_best_visual_context(state)).get("scene_id")
                 )
             }
         ),
         visual_context=(
             visual
-            if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-            and isinstance(visual, dict)
+            if isinstance(visual, dict)
+            and (
+                mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+                or bool(_best_visual_context(state))
+            )
             else {}
         ),
         available_tools=list(control.get("capabilities") or []),
@@ -2776,6 +2887,7 @@ def _make_request(
 
     request.constraints["metadata"].update({
         "processor_version": PROCESSOR_VERSION,
+        "visual_context_evidence": bool(visual),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -3604,40 +3716,98 @@ def _canonical_answer_composer(blocks: Any, answer: str = "") -> list[dict]:
     return result
 
 
+def _ensure_visible_text_block(
+    blocks: Any,
+    answer: str,
+    *,
+    source: str = "quantum_processor",
+) -> list[dict]:
+    """Guarantee one canonical human-visible MessageTextBlock in the stream.
+
+    The top-level ``answer`` is the semantic text value; this helper mirrors it
+    into exactly one text render block so every Web-facing representation has a
+    visible textual companion.  Structured renderer blocks remain intact.
+    """
+    canonical = _canonicalize_render_stream(blocks)
+    answer_text = _clean_text_value(answer)
+    text_indexes = []
+    for idx, block in enumerate(canonical):
+        if not isinstance(block, dict):
+            continue
+        kind = _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+            or "text"
+        ).lower()
+        if kind in {"text", "markdown"}:
+            content = _clean_text_value(
+                block.get("content") or block.get("text") or block.get("value")
+            )
+            if content:
+                text_indexes.append((idx, content, block))
+
+    if text_indexes:
+        # Keep the first human text block and align it with the canonical answer.
+        first_idx, first_content, first_block = text_indexes[0]
+        if answer_text and first_content != answer_text:
+            first_block["content"] = answer_text
+            first_block["text"] = answer_text
+        first_block["type"] = "text"
+        first_block["artifact_type"] = "text"
+        first_block.setdefault("renderer", "TextBlock")
+        first_block.setdefault("viewer", "TextBlock")
+        # Remove duplicate text transport blocks while retaining every structured block.
+        kept = []
+        seen_text = False
+        for block in canonical:
+            kind = _s(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+                or "text"
+            ).lower()
+            if kind in {"text", "markdown"}:
+                if seen_text:
+                    continue
+                seen_text = True
+            kept.append(block)
+        return kept
+
+    if not answer_text:
+        return canonical
+
+    text_block = {
+        "type": "text",
+        "artifact_type": "text",
+        "content": answer_text,
+        "text": answer_text,
+        "renderer": "TextBlock",
+        "viewer": "TextBlock",
+        "scene_contract": True,
+        "human_visible": True,
+        "presentation_role": "answer",
+        "source": source,
+    }
+
+    # Text must lead the stream so the structured renderer is always accompanied
+    # by a deterministic MessageTextBlock before Web dispatch.
+    return [text_block, *canonical]
+
+
 def _quantum_visible_render_policy(
     blocks: Any,
     answer: str = "",
     request: MachineRequest | None = None,
 ) -> list[dict]:
-    """Collapse provider output into one semantic visible stream.
+    """Collapse Provider output into one canonical human-visible stream.
 
-    The processor is the release authority. It does not invent renderers and it
-    does not classify natural language here. It only uses the canonical request
-    output plan plus the typed provider payload already present in render_blocks.
-
-    Invariants:
-      * one human answer channel (MachineResponse.answer/content);
-      * render_blocks contain no human text block;
-      * internal production/transport signals never become visible renderers;
-      * one logical block per structured renderer kind;
-      * multiple different structured renderers are preserved only when the
-        canonical request explicitly asked for them;
-      * duplicate payload wrappers are merged without changing payload content.
+    ``MessageTextBlock`` is part of the canonical render contract, not a
+    duplicate of ``MachineResponse.answer``.  Specialized renderers are kept
+    alongside the text companion and only internal transport signals are
+    discarded.
     """
     source = _canonicalize_render_stream(blocks)
-    if not source:
-        if answer:
-            source = [{
-                "type": "text",
-                "artifact_type": "text",
-                "content": answer,
-                "text": answer,
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "source": "quantum_processor",
-            }]
-        else:
-            return []
 
     requested: list[str] = []
     if request is not None:
@@ -3653,7 +3823,11 @@ def _quantum_visible_render_policy(
             for value in list(plan.get("requested_outputs", []) or [])
             if _s(value)
         )
-        for key in ("preferred_representation", "measured_output", "production_representation"):
+        for key in (
+            "preferred_representation",
+            "measured_output",
+            "production_representation",
+        ):
             value = _s(plan.get(key)).lower()
             if value:
                 requested.append(value)
@@ -3689,53 +3863,31 @@ def _quantum_visible_render_policy(
         return aliases.get(raw, raw)
 
     visible: list[dict] = []
-    internal: list[dict] = []
     for raw in source:
         if not isinstance(raw, dict):
             continue
         block = dict(raw)
         kind = kind_of(block)
-        block["type"] = kind or "text"
         if kind in internal_kinds:
-            internal.append(block)
-        else:
-            visible.append(block)
-
-    # Top-level answer/content is the single human text channel.
-    # render_blocks contains only structured visual/artifact blocks. Keeping
-    # the human text out of render_blocks prevents Web from rendering the same
-    # sentence once from `answer` and once from `render_blocks`.
-    final: list[dict] = []
-    answer_norm = re.sub(r"\s+", " ", _clean_text_value(answer)).strip()
-    text_transport_duplicates = 0
-    for block in visible:
-        if kind_of(block) in {"text", "markdown"}:
-            block_text = re.sub(
-                r"\s+", " ",
-                _clean_text_value(
-                    block.get("content") or block.get("text") or block.get("value")
-                ),
-            ).strip()
-            if block_text:
-                # A provider text block is transport metadata for the same
-                # canonical answer, never a second visible text block.
-                if answer_norm and block_text == answer_norm:
-                    text_transport_duplicates += 1
-                # Any other provider prose is also non-canonical here; the
-                # top-level answer field remains the sole human text surface.
-                continue
             continue
-        final.append(block)
+        block["type"] = kind or "text"
+        if kind in {"markdown", "text"}:
+            content = _clean_text_value(
+                block.get("content") or block.get("text") or block.get("value")
+            )
+            if content:
+                block["content"] = content
+                block["text"] = content
+            block["human_visible"] = True
+        visible.append(block)
 
-    if text_transport_duplicates:
-        for item in final:
-            if isinstance(item, dict):
-                item.setdefault("transport_diagnostics", {})
-                item["transport_diagnostics"]["duplicate_text_blocks_collapsed"] = text_transport_duplicates
-
-    structured = [b for b in visible if kind_of(b) not in {"text", "markdown"}]
+    structured = [
+        block for block in visible
+        if kind_of(block) not in {"text", "markdown"}
+    ]
     requested_structured = {
-        item for item in requested_set
+        item
+        for item in requested_set
         if item not in {
             "text",
             "production_signal",
@@ -3746,36 +3898,32 @@ def _quantum_visible_render_policy(
         }
     }
 
-    # If the request explicitly names structured outputs, those are the only
-    # structured renderers allowed onto the visible stream. Otherwise preserve
-    # the single canonical structured representation already emitted by the
-    # provider/processor.
-    authorized = requested_structured or ({kind_of(structured[0])} if structured else set())
+    # Explicit structured outputs are authoritative. Without an explicit list,
+    # preserve the Provider's first concrete structured representation.
+    authorized = requested_structured or (
+        {kind_of(structured[0])} if structured else set()
+    )
 
-    chosen: dict[str, dict] = {}
-    order: list[str] = []
+    chosen: list[dict] = []
+    seen_kinds: set[str] = set()
     for block in structured:
         kind = kind_of(block)
-        if kind not in authorized:
+        if kind not in authorized or kind in seen_kinds:
             continue
-        if kind not in chosen:
-            chosen[kind] = block
-            order.append(kind)
-            continue
-        existing = chosen[kind]
-        for key, value in block.items():
-            if key in {"presentation", "presentation_stream", "related_block_ids", "sequence_index"}:
-                continue
-            if key not in existing or existing.get(key) in (None, "", [], {}):
-                existing[key] = value
-        existing.setdefault("duplicate_block_ids", [])
-        block_id = _s(block.get("block_id"))
-        if block_id and block_id not in existing["duplicate_block_ids"]:
-            existing["duplicate_block_ids"].append(block_id)
+        seen_kinds.add(kind)
+        chosen.append(block)
 
-    final.extend(chosen[kind] for kind in order)
+    # Preserve existing text blocks only as the canonical answer companion.
+    existing_text = [
+        block for block in visible
+        if kind_of(block) in {"text", "markdown"}
+    ]
+    combined = existing_text[:1] + chosen
 
-    return _canonical_answer_composer(final, answer="")
+    # The text block is mandatory for every human-visible response, including
+    # pure text turns and all specialized renderers.
+    return _ensure_visible_text_block(combined, answer)
+
 
 
 def _finalize_quantum_visible_stream(
@@ -4096,20 +4244,6 @@ def _presentation_payload_contract(source: dict, kind: str) -> dict:
             payload[key] = _quantum_snapshot(value)
     return {"kind": kind, "payload": payload, "payload_preserved": True}
 
-
-def _canonical_block_payload(block: dict) -> dict:
-    """Return the full canonical structured payload."""
-    source = _as_dict(block)
-    payload = source.get("payload")
-    if isinstance(payload, dict):
-        return payload
-    artifact = source.get("artifact")
-    if isinstance(artifact, dict):
-        nested = artifact.get("payload")
-        if isinstance(nested, dict):
-            return nested
-        return artifact
-    return {}
 
 def _canonical_block_payload(block: dict) -> dict:
     """Return the block's canonical structured payload without changing it."""
@@ -4768,6 +4902,12 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
         answer=answer,
         request=request,
     )
+    if answer and not any(
+        isinstance(block, dict)
+        and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
+        for block in blocks
+    ):
+        blocks = _ensure_visible_text_block(blocks, answer)
     allowed["render_blocks"] = blocks
     if answer:
         allowed["answer"] = answer
@@ -4952,6 +5092,7 @@ def _canonicalize(
         answer=answer,
         request=request,
     )
+    response.render_blocks = _ensure_visible_text_block(response.render_blocks, answer)
 
     scope = _user_scope(state, user_id)
     response.metadata = dict(response.metadata or {})
@@ -4982,20 +5123,21 @@ def _canonicalize(
     response.executor_cognition = cognition
     response.executor_response_decision = decision
 
-    # The top-level `answer` is the canonical human text channel. Do not insert
-    # a second text render block; this keeps the SceneContract single-stream
-    # contract deterministic for Web.
-    response.render_blocks = _finalize_quantum_visible_stream(
+    # The same human answer is carried in answer/content and as one canonical
+    # MessageTextBlock. Structured renderer blocks remain siblings in one stream.
+    response.render_blocks = _ensure_visible_text_block(
         response.render_blocks,
-        answer=answer,
-        request=request,
+        answer,
     )
 
     scene = build_machine_scene(response)
-    provider_blocks = _finalize_quantum_visible_stream(
-        list(getattr(response, "render_blocks", []) or []),
-        answer=answer,
-        request=request,
+    provider_blocks = _ensure_visible_text_block(
+        _finalize_quantum_visible_stream(
+            list(getattr(response, "render_blocks", []) or []),
+            answer=answer,
+            request=request,
+        ),
+        answer,
     )
     response.render_blocks = provider_blocks
 
@@ -5032,24 +5174,30 @@ def _canonicalize(
 
     contract = build_scene_contract(scene)
 
-    # SceneContract is the release boundary: force the canonical human answer
-    # into answer/content, keep summary isolated, and keep every renderer block.
+    # SceneContract is the release boundary. Its render stream is canonical:
+    # one MessageTextBlock plus any authorized specialized renderer blocks.
     try:
         contract.answer = answer
         contract.content = answer
         contract.summary = response.summary
-        contract.render_blocks = list(provider_blocks)
-        contract.blocks = list(provider_blocks)
+        contract.render_blocks = _ensure_visible_text_block(
+            list(getattr(contract, "render_blocks", []) or provider_blocks),
+            answer,
+        )
+        # Never regress to a pre-contract or stripped stream.
+        contract.blocks = list(contract.render_blocks)
     except Exception:
         pass
 
-    render_blocks = list(getattr(contract, "render_blocks", []) or [])
-    if not render_blocks:
-        render_blocks = provider_blocks
-        try:
-            contract.render_blocks = render_blocks
-        except Exception:
-            pass
+    render_blocks = _ensure_visible_text_block(
+        list(getattr(contract, "render_blocks", []) or provider_blocks),
+        answer,
+    )
+    try:
+        contract.render_blocks = list(render_blocks)
+        contract.blocks = list(render_blocks)
+    except Exception:
+        pass
 
     if not internal_context:
         update_dialog_context(user_id, semantic)
@@ -5397,12 +5545,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     previous_pair_evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
     previous_user = _s(previous_pair_evidence.get("previous_user") or state.get("last_user_turn"))
     previous_april = _s(previous_pair_evidence.get("previous_april") or state.get("last_april_turn"))
-    visual_scene = _as_dict(
-        _usable_visual_scene(state)
-        or state.get("current_visual_scene")
-        or state.get("active_visual_scene")
-        or state.get("active_scene_contract")
-    )
+    visual_scene = _as_dict(_best_visual_context(state))
     memory_understanding = QUANTUM_MEMORY_UNDERSTANDING_ENGINE.analyze(
         text,
         previous_user=previous_user,
@@ -5603,7 +5746,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     if any(output in blocked_outputs for output in requested_outputs):
         raise RuntimeError("Quantum release blocked: contradictory representation plan")
 
-    # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    # Final quantum release audit: 15 evidence lenses, one request, one provider.
     #
     # IMPORTANT:
     # The 64-signal budget field is owned by the MachineRequest created by
@@ -5618,9 +5761,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     if not isinstance(quantum_budget_field, dict):
         raise RuntimeError("Quantum release blocked: canonical 64-signal budget field missing")
 
-    # Final quantum release audit: 14 evidence lenses, one request, one provider.
+    # Final quantum release audit: 15 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
-        "evidence_channels": 14,
+        "evidence_channels": 15,
         "decision_owner": "QUANTUM_PROCESSOR",
         "single_route": True,
         "provider_calls": 1,
@@ -5709,6 +5852,17 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "signal_count": len(presentation_blocks),
         "payload_preserved": True,
     }
+
+    response.render_blocks = _ensure_visible_text_block(
+        list(getattr(response, "render_blocks", []) or []),
+        _s(response.answer or response.content or response.response),
+    )
+    if _s(response.answer or response.content or response.response) and not any(
+        isinstance(block, dict)
+        and _s(block.get("type") or block.get("artifact_type")).lower() in {"text", "markdown"}
+        for block in response.render_blocks
+    ):
+        raise RuntimeError("Quantum release blocked: MessageTextBlock invariant failed")
 
     request.constraints.setdefault("metadata", {})["visible_answer_audit"] = {
         "answer_present": bool(_s(response.answer) or _s(response.content) or _s(response.response)),
