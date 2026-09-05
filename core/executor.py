@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v36_canonical_visible_stream_visual_context_v4"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v37_cascaded_signal_stream_visual_context_v5"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1264,22 +1264,23 @@ def _scene_continuity_engine(
     """
     Canonical immediate-scene interpretation engine.
 
-    It does not inspect words or maintain a trigger list. It feeds the existing
-    QUANTUM_DIALOGUE_ENGINE with the most recent canonical USER↔APRIL scene
-    when the hot dialog list is empty or incomplete. The engine's own semantic
-    dialogue label remains the sole authority for continuation/reference state.
-
-    This repairs the exact failure where current_visual_scene existed, but the
-    Executor discarded it because state["dialog"] was empty.
+    The continuity stage consumes the best already-persisted scene, not merely
+    the newest scene slot. An empty dialogue/error scene must never mask a
+    previously successful structured artifact.
     """
     current_scene = {}
     if isinstance(state, dict):
-        candidate = (
-            state.get("current_visual_scene")
-            or state.get("active_visual_scene")
-            or state.get("active_scene_contract")
-        )
-        if isinstance(candidate, dict) and is_dialogue_visible_scene(candidate):
+        candidate = _best_visual_context(state)
+        if not candidate:
+            candidate = (
+                state.get("current_visual_scene")
+                or state.get("active_visual_scene")
+                or state.get("active_scene_contract")
+            )
+        if isinstance(candidate, dict) and (
+            is_dialogue_visible_scene(candidate)
+            or bool(candidate.get("render_blocks") or candidate.get("blocks"))
+        ):
             current_scene = candidate
 
     previous_user = ""
@@ -1422,93 +1423,123 @@ def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
 
 
 def _usable_visual_scene(state: dict) -> dict:
-    """Return the best usable structured visual scene without losing prior art."""
+    """Compatibility wrapper for the canonical visual-context selector."""
+    return _best_visual_context(state)
+
+
+def _best_visual_context(state: dict) -> dict:
+    """Return the newest valid structured visual artifact without scene-slot masking.
+
+    Search order is deterministic but evidence-driven:
+      1. hot scene slots,
+      2. last successful scene,
+      3. durable visual-scene history,
+      4. memory timeline,
+      5. compact active contract.
+
+    Empty dialogue/error scenes can remain the newest state entry, but they are
+    never allowed to hide a concrete structured artifact from an earlier turn.
+    """
     if not isinstance(state, dict):
         return {}
 
-    ranked: list[tuple[int, int, str, dict]] = []
-    order = (
-        ("current_visual_scene", 0),
-        ("active_visual_scene", 1),
-        ("active_scene_contract", 2),
-        ("last_successful_visual_scene", 3),
-    )
+    candidates: list[tuple[int, int, str, dict]] = []
+    seen_ids: set[tuple[str, str]] = set()
 
-    for key, priority in order:
-        candidate = state.get(key)
+    def add_candidate(source: str, candidate: Any, priority: int) -> None:
         if not isinstance(candidate, dict):
-            continue
-        blocks = candidate.get("render_blocks")
+            return
+        blocks = candidate.get("render_blocks") or candidate.get("blocks")
         if not isinstance(blocks, list):
-            continue
-        usable_blocks = []
+            return
+        usable_blocks: list[dict] = []
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            btype = _s(
+            kind = _s(
                 block.get("type")
                 or block.get("artifact_type")
                 or block.get("representation")
             ).lower()
+            if kind in {"", "text", "markdown"}:
+                continue
             payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
             status = _s(payload.get("status") or block.get("status")).lower()
-            if (
-                btype not in {"", "text", "markdown"}
-                and status not in {"unavailable", "pending_data", "incomplete", "error"}
-            ):
-                usable_blocks.append(block)
+            if status in {"unavailable", "pending_data", "incomplete", "error"}:
+                continue
+            usable_blocks.append(block)
+        if not usable_blocks:
+            return
 
-        if usable_blocks:
-            # Prefer the most recent valid scene, but never replace it with an
-            # empty dialogue scene simply because that scene is newer.
-            turn_id = int(candidate.get("turn_id") or 0)
-            ranked.append((turn_id, -priority, key, candidate))
+        scene_id = _s(candidate.get("scene_id") or candidate.get("id"))
+        turn_raw = candidate.get("turn_id") or candidate.get("timestamp") or 0
+        try:
+            turn_id = int(float(turn_raw))
+        except Exception:
+            turn_id = 0
+        key = (source, scene_id or repr(usable_blocks[:1]))
+        if key in seen_ids:
+            return
+        seen_ids.add(key)
 
-    if not ranked:
-        return {}
-
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    _, _, key, candidate = ranked[0]
-    result = deepcopy(candidate)
-    result["_selection_source"] = key
-    result["_visual_scene_usable"] = True
-    return result
-
-
-def _best_visual_context(state: dict) -> dict:
-    """Return structured visual evidence first, without falling back to empty text scenes."""
-    usable = _usable_visual_scene(state)
-    if usable:
-        return usable
-
-    if not isinstance(state, dict):
-        return {}
-
-    # A contract may carry structured blocks under a different field while the
-    # state-manager scene summary is compact. Accept it only when it has a
-    # concrete non-text render block.
-    for key in ("active_scene_contract", "current_visual_scene", "active_visual_scene"):
-        candidate = state.get(key)
-        if not isinstance(candidate, dict):
-            continue
-        blocks = candidate.get("render_blocks") or candidate.get("blocks")
-        if not isinstance(blocks, list):
-            continue
-        if any(
-            isinstance(block, dict)
-            and _s(
+        normalized = deepcopy(candidate)
+        normalized["render_blocks"] = deepcopy(usable_blocks)
+        normalized["render_block_types"] = list(dict.fromkeys(
+            _s(
                 block.get("type")
                 or block.get("artifact_type")
                 or block.get("representation")
-            ).lower() not in {"", "text", "markdown"}
-            for block in blocks
-        ):
-            result = deepcopy(candidate)
-            result["render_blocks"] = list(blocks)
-            result["_selection_source"] = key
-            result["_visual_scene_usable"] = True
-            return result
-    return {}
+            ).lower()
+            for block in usable_blocks
+            if _s(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            )
+        ))
+        normalized["_selection_source"] = source
+        normalized["_visual_scene_usable"] = True
+        candidates.append((turn_id, -priority, source, normalized))
+
+    for priority, key in enumerate((
+        "current_visual_scene",
+        "active_visual_scene",
+        "active_visual_scene_turn",
+        "last_successful_visual_scene",
+        "active_scene_contract",
+    )):
+        add_candidate(key, state.get(key), priority)
+
+    history = state.get("visual_scene_history")
+    if isinstance(history, list):
+        for idx, candidate in enumerate(history):
+            add_candidate(
+                f"visual_scene_history[{idx}]",
+                candidate,
+                20,
+            )
+
+    timeline = state.get("memory_timeline")
+    if isinstance(timeline, dict):
+        for day_key, day in timeline.items():
+            if not isinstance(day, dict):
+                continue
+            scenes = day.get("visual_scenes")
+            if not isinstance(scenes, list):
+                continue
+            for idx, candidate in enumerate(scenes):
+                add_candidate(
+                    f"memory_timeline:{day_key}[{idx}]",
+                    candidate,
+                    30,
+                )
+
+    if not candidates:
+        return {}
+
+    # Turn/timestamp wins first; priority is only a deterministic tie-breaker.
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][3]
 
 
 def _quantum_context_diagnostic(
@@ -5030,6 +5061,18 @@ def _persist_structured_scene_payload(
         if isinstance(scene, dict):
             scene.update(deepcopy(scene_payload))
 
+    # A successful structured turn becomes the durable artifact anchor.
+    # Subsequent empty/clarification dialogue scenes must not erase it.
+    successful_scene = _as_dict(
+        state.get("current_visual_scene")
+        or state.get("active_visual_scene")
+        or state.get("active_visual_scene_turn")
+    )
+    if successful_scene:
+        durable_scene = deepcopy(successful_scene)
+        durable_scene.update(deepcopy(scene_payload))
+        state["last_successful_visual_scene"] = durable_scene
+
     # State-manager's compact contract is also upgraded with the same canonical
     # structured payload so later context builders can consume it directly.
     active_contract = state.get("active_scene_contract")
@@ -5341,6 +5384,7 @@ def _validate_quantum_release(request: MachineRequest) -> None:
 
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
+    print("🧬 APRIL PROCESSOR MODE: CASCADED_SINGLE_STREAM")
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
