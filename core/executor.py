@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v34_canonical_visible_stream_visual_context_v2"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v36_canonical_visible_stream_visual_context_v4"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -452,7 +452,15 @@ class QuantumMemoryUnderstandingEngine:
             return 0.0
         return len(a & b) / max(1, len(a | b))
 
-    def _semantic_score(self, query: str, candidates: list[str]) -> tuple[dict[str, float], str]:
+    @staticmethod
+    def _semantic_score(query: str, candidates: list[str]) -> tuple[dict[str, float], str]:
+        """Measure semantic similarity through the shared quantum embedding engine.
+
+        This helper has no per-instance state, so it is a static operation. That
+        keeps instance and classmethod call sites on one coherent measurement
+        primitive and prevents an implicit ``self`` from being required when the
+        historical-pair selector executes through ``cls``.
+        """
         if not query or not candidates:
             return {}, "none"
         try:
@@ -462,7 +470,7 @@ class QuantumMemoryUnderstandingEngine:
             values = QUANTUM_EMBEDDING_ENGINE.similarities(query, candidates)
             return values, "shared_quantum_embedding"
         except Exception:
-            return {c: self._lexical_score(query, c) for c in candidates}, "lexical_fallback"
+            return {c: QuantumMemoryUnderstandingEngine._lexical_score(query, c) for c in candidates}, "lexical_fallback"
 
     def _need_memory(
         self,
@@ -691,6 +699,7 @@ class QuantumMemoryUnderstandingEngine:
         previous_assistant: str,
         dialog_history: list[dict[str, Any]] | None,
         memory_timeline: dict[str, Any] | None = None,
+        dialogue_measurement: dict[str, Any] | None = None,
     ) -> tuple[str, str, str, float]:
         """Select the immediate canonical USER↔APRIL pair first.
 
@@ -702,10 +711,30 @@ class QuantumMemoryUnderstandingEngine:
         if previous_user and previous_assistant:
             pairs = cls._historical_pairs(dialog_history, memory_timeline)
 
+            # Historical semantic retrieval is part of the memory branch, not a
+            # universal preprocessing step. If the already-measured dialogue
+            # state says that this turn is independent/new-topic, keep the
+            # immediate pair and do not reopen old context merely because the
+            # previous answer was short.
+            measured = dialogue_measurement if isinstance(dialogue_measurement, dict) else {}
+            measured_relation = _s(
+                measured.get("relation") or measured.get("dialogue_relation")
+            ).upper()
+            measured_continuation = bool(measured.get("continuation"))
+            measured_reference = bool(measured.get("reference_to_previous"))
+            memory_authorized = bool(
+                measured_continuation
+                or measured_reference
+                or measured_relation in {
+                    "CONTINUE_TOPIC", "CONTINUATION",
+                    "ARTIFACT_REFERENCE", "MEMORY_QUERY",
+                }
+            )
+
             # Keep the immediate pair unless it is a weak/clarification-like
             # anchor and another recent pair is semantically more substantive.
             immediate_quality = cls._pair_quality(previous_user, previous_assistant)
-            if pairs and immediate_quality < 0.38:
+            if pairs and immediate_quality < 0.38 and memory_authorized:
                 candidates = pairs[-8:]
                 texts = [
                     f"{pair.get('user', '')} {pair.get('assistant', '')}"
@@ -796,6 +825,7 @@ class QuantumMemoryUnderstandingEngine:
             previous_assistant,
             dialog_history,
             (dynamic_memory or {}).get("memory_timeline") if isinstance(dynamic_memory, dict) else None,
+            dialogue_measurement=dialogue_measurement,
         )
         if selected_user and selected_assistant:
             previous_user, previous_assistant = selected_user, selected_assistant
@@ -5310,6 +5340,7 @@ def _validate_quantum_release(request: MachineRequest) -> None:
         raise RuntimeError("Quantum release blocked: identity scope missing")
 
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
+    print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
