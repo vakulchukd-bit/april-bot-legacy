@@ -4256,7 +4256,10 @@ def _presentation_signal_for_block(block: dict, request: MachineRequest | None =
     elif kind == "graph":
         signal.update({"kind": "graph", "renderer": "graph", "engine": "graph", "layout": "graph_document", "label_text_engine": "mcdowell", "label_math_engine": "katex", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "axis_text_engine": "mcdowell", "axis_math_engine": "katex", "artifact_payload": _presentation_payload_contract(source, "graph")})
     elif kind == "diagram":
-        signal.update({"kind": "diagram", "renderer": "graph", "engine": "diagram", "layout": "diagram_document", "label_text_engine": "mcdowell", "label_math_engine": "katex", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "diagram")})
+        # Diagram is a distinct Web representation. GraphBlock is reserved for
+        # mathematical/data graphs; the diagram payload is consumed by the
+        # diagram-capable Web renderer without emitting a graph signal.
+        signal.update({"kind": "diagram", "renderer": "diagram", "engine": "diagram", "layout": "diagram_document", "label_text_engine": "mcdowell", "label_math_engine": "katex", "caption_text_engine": "mcdowell", "description_text_engine": "mcdowell", "artifact_payload": _presentation_payload_contract(source, "diagram")})
     elif kind == "link":
         signal.update({"kind": "link", "renderer": "link", "engine": "link_card", "layout": "link_card_document", "title_text_engine": "mcdowell", "description_text_engine": "mcdowell", "inline_math_engine": "katex", "href_preserved": True, "artifact_payload": _presentation_payload_contract(source, "link")})
     elif kind == "code":
