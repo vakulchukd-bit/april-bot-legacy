@@ -2540,17 +2540,27 @@ def _archive_current_visual_scene_to_dynamic(state_obj, user_id):
 
 
 def _visual_block_has_payload(block):
-    """Return True when a structured visual block contains usable canonical data."""
+    """Return True when a canonical structured block carries real render data.
+
+    The predicate is deliberately renderer-agnostic. It recognizes the complete
+    payload families used by the canonical SceneContract, including arithmetic
+    diagrams and calculation-result processor blocks. A placeholder
+    ``quantum_processor`` status block still does not become visual memory.
+    """
     if not isinstance(block, dict):
         return False
+
     btype = str(
         block.get("type")
         or block.get("artifact_type")
         or block.get("representation")
         or ""
     ).strip().lower()
+    renderer = str(block.get("renderer") or "").strip().lower()
+
     if btype in {"", "text", "markdown"}:
         return False
+
     payload = block.get("payload")
     if not isinstance(payload, dict):
         artifact = block.get("artifact")
@@ -2562,13 +2572,41 @@ def _visual_block_has_payload(block):
     if status in {"unavailable", "pending_data", "incomplete", "error"}:
         return False
 
-    # Generic structural payload integrity: any of these establishes that the
-    # renderer has actual data rather than only a placeholder card.
+    # Canonical structured payload families currently produced by the
+    # Quantum Processor/Web contract.
     structural_keys = (
+        # Generic data/visual families
         "categories", "labels", "x", "x_values", "points", "data",
         "series", "rows", "items", "nodes", "edges", "url", "src",
+        # Geometry / drawing
+        "vertices", "segments", "shapes", "coordinates",
+        # Arithmetic diagram / number-line families
+        "left_group", "right_group", "operator", "equals", "result",
+        "expression", "groups", "value", "operands", "operation",
+        # Media / artifact identity
+        "image", "images", "svg", "drawing_elements", "artifact",
     )
-    return any(payload.get(key) not in (None, [], {}, "") for key in structural_keys)
+
+    has_structured_data = any(
+        payload.get(key) not in (None, [], {}, "")
+        for key in structural_keys
+    )
+    if has_structured_data:
+        return True
+
+    # ``quantum_processor`` is also used for lightweight status blocks. Only
+    # promote it to visual memory when it contains a concrete calculation
+    # result, not merely ``status=ready/processed`` metadata.
+    if btype == "quantum_processor":
+        return bool(
+            renderer in {"calculation_result", "arithmetic_result", "result"}
+            or any(
+                payload.get(key) not in (None, [], {}, "")
+                for key in ("operation", "operands", "result", "expression", "value")
+            )
+        )
+
+    return False
 
 
 def _scene_has_successful_visual(scene):
