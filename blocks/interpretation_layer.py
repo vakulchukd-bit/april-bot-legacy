@@ -1009,8 +1009,8 @@ class QuantumInterpretationEngine:
             "diagram":{"build","modify","present","explain"},
             "table":{"build","modify","present","compare","list","explain"},
             "formula":{"build","modify","present","calculate","explain","answer"},
-            "link":{"retrieve","present","answer"},
-            "code":{"build","modify","present","explain"},
+            "link":{"retrieve","present","answer","explain","list"},
+            "code":{"build","modify","present","explain","list"},
             "image":{"build","modify","present"},
             "gallery":{"build","present"},
             "file":{"retrieve","present"},
@@ -1441,13 +1441,26 @@ class QuantumInterpretationEngine:
             "ascii_schema_score": float(p.get("request_features", {}).get("ascii_schema_score", 0.0) or 0.0),
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
+        presentation_recommendations = self._presentation_recommendations(
+            text, p, production, locked=locked, continuation=continuation,
+            previous_scene=previous_scene, explicit=explicit,
+        )
         presentation={
-            "version":"quantum_interpretation_transport_v3","decision_owner":DECISION_OWNER,
-            "single_route":True,"production_representation":production,
-            "signals":[{
-                "type":production,"renderer":"semantic_signal","engine":"semantic_interpretation",
-                "source":"QUANTUM_INTERPRETATION_ENGINE","evidence_only":True
-            }]
+            "version":"quantum_interpretation_transport_v4","decision_owner":DECISION_OWNER,
+            "single_route":True, "production_representation":production,
+            "recommendation_policy": {
+                "generated_after_interpretation": True,
+                "current_request_authoritative": True,
+                "multiple_representations_allowed": True,
+                "multiple_renderer_recommendations_allowed": True,
+                "scene_recommendation_per_representation": True,
+                "text_intro_renderer": "MessageTextBlock",
+                "text_explanation_renderer": "MessageTextBlock",
+                "stale_context_cannot_upgrade_current_representation": True,
+            },
+            "signals":[x["renderer_signal"] for x in presentation_recommendations],
+            "recommendations": presentation_recommendations,
+            "scene_plan": [x["scene_recommendation"] for x in presentation_recommendations],
         }
         if ascii_schema_advisory:
             presentation["format_advisory"] = {
@@ -1479,7 +1492,10 @@ class QuantumInterpretationEngine:
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
             "presentation_transport":presentation,"presentation_signal":presentation,
+            "presentation_recommendations":presentation_recommendations,
             "presentation_signals":presentation["signals"],
+            "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
+            "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
             "dialogue_vector": {
                 **dict(dialogue_vector or {}),
                 "reference_resolution": reference_resolution,
@@ -1600,8 +1616,169 @@ class QuantumInterpretationEngine:
         result["response_complexity"]=None
         result["factory_targets"]=[]
         result["factory_order"]={"owner":DECISION_OWNER,"status":"evidence_only"}
-        result["scene_strategy"]={"scene_strategy":"evidence_only","preferred_blocks":[production],"decision_owner":DECISION_OWNER}
+        result["scene_strategy"]={
+            "scene_strategy":"evidence_only",
+            "preferred_blocks":[x["representation"] for x in presentation_recommendations if x["representation"] != "text"] or [production],
+            "presentation_recommendations":presentation_recommendations,
+            "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
+            "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
+            "decision_owner":DECISION_OWNER,
+            "recommendations_only":True,
+        }
         return result
+
+    # ------------------------------------------------------------------
+    # Presentation recommendations
+    # ------------------------------------------------------------------
+    # Produced only AFTER the current request has been semantically
+    # interpreted. These are advisory downstream signals, never renderer
+    # commands. Multiple distinct representations are allowed.
+    PRESENTATION_RENDERERS = {
+        "text": "MessageTextBlock", "code": "CodeBlock", "graph": "GraphBlock",
+        "diagram": "GalleryBlock", "image": "GalleryBlock", "gallery": "GalleryBlock",
+        "link": "LinkCard", "table": "TableBlock", "formula": "MessageTextBlock",
+        "file": "LinkCard", "audio": "MessageTextBlock", "video": "MessageTextBlock",
+        "action": "MessageTextBlock", "scene": "GalleryBlock", "memory": "MessageTextBlock",
+        "visual_context": "GalleryBlock",
+    }
+    PRESENTATION_LABELS = {
+        "text": "textual answer", "code": "executable code", "graph": "graph/chart",
+        "diagram": "diagram or geometric construction", "image": "image",
+        "gallery": "image gallery", "link": "link cards", "table": "table",
+        "formula": "mathematical notation", "file": "file/resource", "audio": "audio",
+        "video": "video", "action": "interactive action", "scene": "visual scene",
+        "memory": "memory explanation", "visual_context": "visual context",
+    }
+    PRESENTATION_SCENE_PROFILES = {
+        "text": ("explanation", "message", "human-readable answer"),
+        "code": ("code_example", "message_intro -> code -> message_explanation", "source code plus implementation context"),
+        "graph": ("data_visualization", "message_intro -> graph -> message_explanation", "series, axes, labels, units and requested ranges"),
+        "diagram": ("diagram_or_construction", "message_intro -> gallery_diagram -> message_explanation", "nodes/shapes/relations/dimensions and construction facts"),
+        "image": ("image", "message_intro -> gallery_image -> message_explanation", "generated or selected image with visual context"),
+        "gallery": ("image_collection", "message_intro -> gallery -> message_explanation", "ordered image collection with per-image meaning"),
+        "link": ("resource_links", "message_intro -> link_cards -> message_explanation", "URL, title and short purpose for each resource"),
+        "table": ("structured_data", "message_intro -> table -> message_explanation", "rows, columns, headers, units and values"),
+        "formula": ("mathematical_explanation", "message_intro -> message_formula -> message_explanation", "formula plus variable definitions and interpretation"),
+        "file": ("resource_file", "message_intro -> link_or_file -> message_explanation", "resource identity and purpose"),
+        "audio": ("audio", "message_intro -> audio_resource -> message_explanation", "audio resource metadata and purpose"),
+        "video": ("video", "message_intro -> video_resource -> message_explanation", "video resource metadata and purpose"),
+        "action": ("interactive_action", "message_intro -> action -> message_explanation", "action target, parameters and expected result"),
+        "scene": ("composite_visual_scene", "message_intro -> visual_scene -> message_explanation", "scene objects, spatial relations and visual semantics"),
+        "memory": ("memory_explanation", "message_intro -> message_explanation", "resolved prior context"),
+        "visual_context": ("visual_analysis", "message_intro -> gallery_context -> message_explanation", "visual evidence and interpretation"),
+    }
+
+    @classmethod
+    def _presentation_recommendations(cls, text, profile, production, *, locked=False,
+                                      continuation=False, previous_scene=None,
+                                      explicit=None):
+        """Return post-interpretation presentation/scene recommendations.
+
+        The current semantic task is authoritative. Evidence may justify zero,
+        one, or many additional representations; no renderer-count cap exists.
+        """
+        profile = profile if isinstance(profile, dict) else {}
+        rep_scores = dict(profile.get("representation_scores") or {})
+        obj_scores = dict(profile.get("object_scores") or {})
+        op_scores = dict(profile.get("operation_scores") or {})
+        explicit_values = list(dict.fromkeys(
+            _clean_representation(x) for x in (explicit or []) if _clean_representation(x)
+        ))
+        compatible_ops = {
+            "graph": {"build","modify","present","calculate","analyze","list","explain"},
+            "diagram": {"build","modify","present","explain"},
+            "table": {"build","modify","present","compare","list","explain"},
+            "formula": {"build","modify","present","calculate","explain","answer"},
+            "link": {"retrieve","present","answer"}, "code": {"build","modify","present","explain"},
+            "image": {"build","modify","present"}, "gallery": {"build","present"},
+            "file": {"retrieve","present"}, "audio": {"build","present"},
+            "video": {"build","present"}, "action": {"build","modify","present"},
+            "scene": {"build","modify","present"}, "memory": {"retrieve","answer","present"},
+            "visual_context": {"answer","analyze","explain"},
+        }
+        op = str(profile.get("best_operation") or "answer").lower()
+        candidates = set(explicit_values)
+        if production:
+            candidates.add(production)
+        for label, value in rep_scores.items():
+            score = float(value or 0.0)
+            obj_score = float(obj_scores.get(label, 0.0) or 0.0)
+            if label == "text":
+                if score >= 0.14: candidates.add(label)
+                continue
+            if label in explicit_values or label == production or (
+                op in compatible_ops.get(label, set()) and score >= 0.16 and obj_score >= 0.07
+            ):
+                candidates.add(label)
+        if any(x != "text" for x in candidates):
+            candidates.add("text")
+
+        ordered = ([production] if production else [])
+        ordered += [x for x, _ in sorted(
+            ((x, float(rep_scores.get(x, 0.0) or 0.0)) for x in candidates if x != production),
+            key=lambda item: item[1], reverse=True
+        )]
+        if "text" in candidates and "text" not in ordered:
+            ordered.insert(0, "text")
+        ordered = list(dict.fromkeys(ordered))
+        scene_id = str(previous_scene.get("scene_id") or "") if isinstance(previous_scene, dict) else ""
+
+        out = []
+        for idx, label in enumerate(ordered):
+            if label not in REPRESENTATION_UNIVERSE:
+                continue
+            renderer = cls.PRESENTATION_RENDERERS.get(label, "MessageTextBlock")
+            role, composition, payload = cls.PRESENTATION_SCENE_PROFILES.get(
+                label, cls.PRESENTATION_SCENE_PROFILES["text"]
+            )
+            continuing_scene = bool(continuation and scene_id and label != "text")
+            out.append({
+                "recommendation_id": f"semantic-presentation-{idx + 1}",
+                "representation": label,
+                "representation_label": cls.PRESENTATION_LABELS.get(label, label),
+                "renderer": renderer,
+                "renderer_signal": {
+                    "type": label, "renderer": renderer, "owner": DECISION_OWNER,
+                    "source": "QUANTUM_INTERPRETATION_ENGINE", "evidence_only": True,
+                },
+                "semantic_basis": {
+                    "representation_score": round(float(rep_scores.get(label, 0.0) or 0.0), 6),
+                    "object_score": round(float(obj_scores.get(label, 0.0) or 0.0), 6),
+                    "operation": op,
+                    "goal": str(profile.get("best_goal") or "understand"),
+                    "is_production_representation": label == production,
+                    "production_locked": bool(locked and label == production),
+                    "explicit_current_request": label in explicit_values,
+                },
+                "response_role": "supporting_explanation" if label == "text" else "primary_representation",
+                "scene_recommendation": {
+                    "role": role,
+                    "order_hint": "representation" if label != "text" else "narrative",
+                    "composition": composition,
+                    "sequence": ([
+                        {"role": "introduction", "renderer": "MessageTextBlock", "content_role": "request_essence"},
+                        {"role": "representation", "renderer": renderer, "type": label, "content_role": "specialized_result"},
+                        {"role": "explanation", "renderer": "MessageTextBlock", "content_role": "result_explanation"},
+                    ] if label != "text" else [
+                        {"role": "answer", "renderer": "MessageTextBlock", "content_role": "human_answer"},
+                    ]),
+                    "intro_via": "MessageTextBlock",
+                    "renderer": renderer,
+                    "explanation_via": "MessageTextBlock",
+                    "payload_expectation": payload,
+                    "scene_relation": "continue_existing_scene" if continuing_scene else "new_scene",
+                    "reuse_scene_id": scene_id if continuing_scene else "",
+                    "avoid_repeat": continuing_scene,
+                    "build_scene_after_semantic_understanding": True,
+                    "independent_scene_recommendation": True,
+                },
+                "text_guidance": {
+                    "introduction": "Briefly state the essence of the current user request and what this representation will show.",
+                    "explanation": "Explain the produced result, its main meaning and purpose after the specialized block.",
+                },
+                "advisory_only": True,
+            })
+        return out
 
     def fast_semantic_profile(self,text,previous_assistant="",previous_user="",active_topic="",active_goal=""):
         return self.measure(text,previous_assistant=previous_assistant,previous_user=previous_user,active_topic=active_topic,active_goal=active_goal)
