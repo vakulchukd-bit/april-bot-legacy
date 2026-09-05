@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v35_canonical_visible_stream_visual_context_v3"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v36_canonical_visible_stream_visual_context_v4"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -5340,6 +5340,7 @@ def _validate_quantum_release(request: MachineRequest) -> None:
         raise RuntimeError("Quantum release blocked: identity scope missing")
 
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
+    print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
