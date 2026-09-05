@@ -375,43 +375,52 @@ def _semantic_request_shape(interpreted):
 
 def _resolve_production_representation(interpreted, constraints):
     """
-    Resolve exactly one production representation.
+    Transport the canonical production representation chosen by Interpretation.
 
-    Priority:
-      1) explicit production/resolved/requested signal;
-      2) semantic scene/operation fields;
-      3) a single high-confidence evidence candidate with a clear margin;
-      4) text.
-
-    Multiple unconfirmed candidates are never forwarded as production
-    representations.
+    Semantic Core is not allowed to invent, promote, downgrade, or inherit a
+    renderer/representation from evidence, scores, arithmetic, memory, or the
+    previous scene. If Interpretation did not resolve one, production remains
+    unresolved and the Quantum Processor retains authority.
     """
     interpreted = interpreted if isinstance(interpreted, dict) else {}
-    production, source = _locked_production_representation(interpreted)
-    if production:
-        return production, source, True
 
-    semantic_rep, semantic_source = _semantic_request_shape(interpreted)
-    if semantic_rep:
-        return semantic_rep, semantic_source, True
+    # Only explicit production-level Interpretation fields may cross this
+    # boundary as the semantic production signal.
+    for container_key in (
+        "presentation_signals",
+        "quantum_representation_measurement",
+        "quantum_interpretation_evidence",
+    ):
+        container = interpreted.get(container_key)
+        if isinstance(container, dict):
+            for key in (
+                "resolved",
+                "production_representation",
+                "resolved_representation",
+            ):
+                value = _clean_representation(container.get(key))
+                if value:
+                    return value, f"{container_key}.{key}", True
 
-    scores = dict(constraints.get("scores") or {})
-    text_score = float(scores.get("text", 0.0) or 0.0)
-    candidates = [
-        (name, float(score or 0.0))
-        for name, score in scores.items()
-        if name in STRUCTURED_REPRESENTATIONS
-        and name not in set(constraints.get("negative") or [])
-    ]
-    candidates.sort(key=lambda item: item[1], reverse=True)
+    for key in (
+        "production_representation",
+        "resolved_representation",
+    ):
+        value = _clean_representation(interpreted.get(key))
+        if value:
+            return value, key, True
 
-    if candidates:
-        best, best_score = candidates[0]
-        second = candidates[1][1] if len(candidates) > 1 else 0.0
-        if best_score >= 0.80 and best_score - max(second, text_score) >= 0.16:
-            return best, "single_strong_evidence", True
+    # requested/preferred are transported only when Interpretation explicitly
+    # marked the production signal as authoritative/locked.
+    if interpreted.get("production_representation_locked") or interpreted.get(
+        "resolved_representation_locked"
+    ):
+        for key in ("requested_representation", "preferred_representation"):
+            value = _clean_representation(interpreted.get(key))
+            if value:
+                return value, key, True
 
-    return "text", "unresolved_default", False
+    return "", "unresolved", False
 
 def build_artifact_bundle():
     return {"domain":"general","primary":[],"secondary":[]}
@@ -572,10 +581,12 @@ def _representation_posteriors(
 
 def _signal_fusion(text, signals, interpreted):
     """
-    Unified Semantic Core engine.
+    Evidence-only semantic fusion.
 
-    Evidence is fused here, but production representation is resolved exactly
-    once. The Quantum Processor remains the final execution authority.
+    Interpretation owns semantic interpretation and production
+    representation. Semantic Core measures/forwards evidence but does not
+    choose renderers, infer representation from arithmetic/math, inherit a
+    prior renderer, or construct execution targets.
     """
     constraints = detect_representation_constraints(text, interpreted)
     production, production_source, production_confident = (
@@ -584,10 +595,6 @@ def _signal_fusion(text, signals, interpreted):
     posterior, evidence_selected, blocked = _representation_posteriors(
         text, signals, interpreted, constraints
     )
-
-    # Evidence candidates remain visible for diagnostics, but only one
-    # production representation crosses the semantic->processor boundary.
-    selected = [production]
 
     renderer_measurement = detect_renderer_probability(text, interpreted)
     image = detect_image_generation_probability(text, interpreted)
@@ -605,19 +612,15 @@ def _signal_fusion(text, signals, interpreted):
     goal = bool(signals["goal"])
     memory = bool(signals["memory_signals"])
 
+    # Renderer pressure remains a diagnostic measurement only. It is never
+    # converted into production representation or routing authority here.
     structured_mass = (
-        posterior.get(production, 0.0) if production != "text" else 0.0
+        posterior.get(production, 0.0) if production and production != "text" else 0.0
+    )
+    evidence_render_score = clamp(
+        structured_mass * 0.85 + renderer_measurement * 0.15
     )
 
-    if production != "text" and production_confident:
-        # A canonical production signal is already resolved upstream. Its
-        # confidence must not be re-downgraded by the evidence posterior.
-        render_score = 1.0
-    else:
-        render_score = clamp(
-            structured_mass * 0.85 + renderer_measurement * 0.15
-            if production != "text" else 0.0
-        )
     continuity_score = clamp(
         (0.30 if continuity else 0.0)
         + (0.20 if history else 0.0)
@@ -625,25 +628,25 @@ def _signal_fusion(text, signals, interpreted):
         + (0.15 if memory else 0.0)
         + (0.15 if interpreted.get("dialogue_contract", {}).get("continuation") else 0.0)
     )
-    execution_score = clamp(
+    execution_evidence = clamp(
         execution * 0.45
-        + render_score * 0.20
+        + evidence_render_score * 0.20
         + structured_mass * 0.20
         + (0.10 if interpreted.get("dialogue_act") == "request" else 0.0)
         + (0.05 if goal else 0.0)
     )
 
     return {
-        "renderer": render_score,
+        "renderer": evidence_render_score,
         "image": image,
         "visual": visual,
-        "execution": execution_score,
+        "execution": execution_evidence,
         "discussion": discussion,
         "reflection": reflection,
         "continuity": continuity_score,
         "requested_representation": production,
-        "requested_representations": list(selected),
-        "required_representations": list(selected),
+        "requested_representations": [production] if production else [],
+        "required_representations": [production] if production else [],
         "production_representation": production,
         "production_representation_source": production_source,
         "production_representation_confident": production_confident,
@@ -654,10 +657,10 @@ def _signal_fusion(text, signals, interpreted):
         },
         "representation_posteriors": posterior,
         "representation_consensus": {
-            "selected": list(selected),
+            "selected": [production] if production else [],
             "evidence_candidates": list(dict.fromkeys(evidence_selected)),
             "production_representation": production,
-            "production_confidence": posterior.get(production, 0.0),
+            "production_confidence": posterior.get(production, 0.0) if production else 0.0,
             "production_source": production_source,
             "production_locked": production_confident,
             "entropy": -sum(
@@ -670,7 +673,6 @@ def _signal_fusion(text, signals, interpreted):
             evidence_selected, continuity, goal, memory, discussion, reflection
         )),
     }
-
 
 def _base_result(text, signals):
     return {
@@ -1168,46 +1170,9 @@ def analyze(text: str, state: dict=None, history: list=None,
         text, signals, interpreted
     )
 
-    # Canonical continuity may preserve the previous structured representation
-    # when the current Interpretation contract says this turn is a
-    # continuation/reference. This only preserves the representation type;
-    # executor creates a fresh artifact.
-    continuity_rep, continuity_source = _continuity_preservation_candidate(
-        signals, interpreted
-    )
-    canonical_locked = bool(
-        interpreted.get("production_representation_locked")
-    )
-    canonical_production = _clean_representation(
-        interpreted.get("production_representation")
-        or interpreted.get("requested_representation")
-        or interpreted.get("resolved_representation")
-    )
-
-    if (
-        continuity_rep
-        and not canonical_locked
-        and canonical_production in {"", "text"}
-        and continuity_rep != "text"
-    ):
-        fusion = dict(fusion)
-        fusion["requested_representation"] = continuity_rep
-        fusion["requested_representations"] = [continuity_rep]
-        fusion["required_representations"] = [continuity_rep]
-        fusion["production_representation"] = continuity_rep
-        fusion["production_representation_source"] = continuity_source
-        fusion["production_representation_confident"] = True
-        fusion["evidence_representations"] = list(
-            dict.fromkeys(
-                [continuity_rep]
-                + list(fusion.get("evidence_representations", []))
-            )
-        )
-        fusion["renderer"] = 1.0
-
-    current_representation = detect_representation_constraints(
-        text, interpreted
-    )
+    # Continuity is dialogue evidence only. Representation remains owned by
+    # Interpretation; Semantic Core never restores a previous renderer.
+    continuity_rep, continuity_source = "", "semantic_core_no_representation_inference"
 
     current_representation = detect_representation_constraints(text, interpreted)
     result=_base_result(text, signals)
@@ -1304,6 +1269,14 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["production_representation_confident"] = fusion["production_representation_confident"]
     result["representation_posteriors"] = fusion["representation_posteriors"]
     result["representation_consensus"] = fusion["representation_consensus"]
+    result["semantic_representation_signal"] = (
+        fusion["production_representation"]
+        if fusion["production_representation_confident"]
+        else ""
+    )
+    result["semantic_representation_unresolved"] = not bool(
+        fusion["production_representation_confident"]
+    )
 
     result["candidate_domains"] = list(dict.fromkeys(
         result.get("candidate_domains", []) + fusion["candidate_domains"]
@@ -1314,44 +1287,33 @@ def analyze(text: str, state: dict=None, history: list=None,
 
     blocked = set(fusion["representation_constraints"].get("negative", []))
     production = fusion["production_representation"]
-    if production in blocked:
-        production = "text"
 
-    # Preserve evidence for diagnostics without promoting it.
+    # Semantic Core transports only an already-resolved Interpretation signal.
+    # It never repairs that signal from evidence, previous scene, arithmetic,
+    # or renderer measurements.
+    if production in blocked:
+        production = ""
+
     evidence_candidates = [
         x for x in fusion.get("evidence_representations", [])
         if x not in blocked
     ]
 
-    result["required_representations"] = [production]
-    result["candidate_representations"] = evidence_candidates or [production]
-    result["requested_representations"] = [production]
+    result["required_representations"] = [production] if production else []
+    result["candidate_representations"] = evidence_candidates
+    result["requested_representations"] = [production] if production else []
 
-    # Do NOT demote a structured continuation because the utterance is short
-    # or because production_representation_locked is false. The latest
-    # Interpretation Engine owns semantic representation; continuity
-    # preservation above is the only sanctioned scene-derived recovery path.
     result["production_representation"] = production
-    result["production_representation_preserved"] = bool(
-        continuity_rep
-        and production == continuity_rep
-        and continuity_source != "not_authorized"
-    )
-    result["production_representation_preservation_source"] = (
-        continuity_source
-        if result["production_representation_preserved"]
-        else ""
-    )
+    result["production_representation_preserved"] = False
+    result["production_representation_preservation_source"] = ""
 
-    result["requested_outputs"] = [production]
-    result["required_outputs"] = [production]
-    result["requested_representation"] = production
+    result["requested_outputs"] = [production] if production else []
+    result["required_outputs"] = [production] if production else []
+    result["requested_representation"] = production or None
 
-    # ASCII is advisory-only and scoped to the TEXT block. It never becomes
-    # a representation and is never emitted for structured rooms.
     ascii_schema_advisory = bool(
         interpreted.get("ascii_schema_advisory")
-        and production == "text"
+        and not production
     )
     result["ascii_schema_advisory"] = ascii_schema_advisory
     if ascii_schema_advisory:
@@ -1361,17 +1323,13 @@ def analyze(text: str, state: dict=None, history: list=None,
             "mode": "optional",
             "reason": "semantic_text_schema_request",
         }
+
+    # These fields are explicitly inert. Semantic Core is evidence transport,
+    # not a routing/rendering/execution layer.
     result["representation_authority"] = (
-        "interpretation_canonical"
-        if production != "text"
-        and (
-            fusion["production_representation_confident"]
-            or bool(interpreted.get("production_representation"))
-            or bool(result.get("production_representation_preserved"))
-        )
-        else "quantum_processor"
+        "interpretation_canonical" if production else "quantum_processor"
     )
-    result["current_request_authoritative"] = True
+    result["current_request_authoritative"] = bool(production)
     result["memory_role"] = "evidence_only"
     result["semantic_conflict"] = {
         "representation_conflict": False,
@@ -1397,34 +1355,34 @@ def analyze(text: str, state: dict=None, history: list=None,
         ),
     })
 
-    requested = result.get("requested_representation") or fusion["requested_representation"]
-    # Evidence is diagnostic. Only the single production representation
-    # controls the downstream capability signal.
-    result["render_intent"] = requested != "text"
-    result["prefer_renderer"] = result["render_intent"]
-    result["renderer_scene_object"] = requested != "text"
-    result["visual_routing"] = requested in {"graph", "diagram", "gallery", "image"}
-    result["possible_capability"]="renderer" if requested else None
-    result["possible_output"]=requested
-    result["possible_scene_type"]=requested
-    result["current_representation"]=requested or "text"
-    result["unresolved_intent"]=not bool(requested or interpreted.get("dialog_act"))
+    requested = result.get("requested_representation") or ""
+    # Never turn a semantic measurement into a renderer/executor command.
+    result["render_intent"] = False
+    result["prefer_renderer"] = False
+    result["renderer_scene_object"] = False
+    result["visual_routing"] = False
+    result["possible_capability"] = None
+    result["possible_output"] = requested or None
+    result["possible_scene_type"] = None
+    result["current_representation"] = requested or "unresolved"
+    result["unresolved_intent"] = not bool(
+        interpreted.get("dialog_act") or requested
+    )
 
-    if requested == "image" and fusion["image"] > 0.0:
-        result["visual_generation_needed"] = True
-        result["explicit_image_generation_only"] = True
-        result["possible_output"] = "image"
-        result["possible_capability"] = "image_generation"
+    # Image/visual measurements remain evidence. Image generation authority is
+    # outside Semantic Core.
+    result["visual_generation_needed"] = False
+    result["explicit_image_generation_only"] = False
 
     result["should_execute"]=False  # execution authority remains downstream
-    result["response_mode"] = "structured" if requested != "text" else "talk"
-    result["renderer_first"] = requested != "text"
+    result["response_mode"] = "evidence"
+    result["renderer_first"] = False
     result["semantic_evidence"]={
         "fusion":fusion,
         "source_signals":signals,
         "interpretation":interpreted,
         "representation_constraints":current_representation,
-        "current_request_authoritative":True,
+        "current_request_authoritative":bool(production),
         "memory_role":"evidence_only",
         "representation_authority":result["representation_authority"],
         "production_representation_preserved":result.get(
@@ -1441,12 +1399,9 @@ def analyze(text: str, state: dict=None, history: list=None,
         "decision_owner":"QUANTUM_PROCESSOR",
     }
 
-    # No semantic-core room order: only capabilities/evidence leave this layer.
-    result["factory_targets"] = [requested]
-    if result["required_domains"]:
-        result["factory_targets"].extend(
-            d for d in result["required_domains"] if d not in result["factory_targets"]
-        )
+    # No semantic-core room order or renderer target. Capability/domain
+    # measurements leave as evidence; execution owns target selection.
+    result["factory_targets"] = []
 
     artifact=build_artifact_bundle()
     artifact=enrich_artifact_bundle(artifact,result)
@@ -1473,7 +1428,7 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["machine_packet"]={
         "transport":"transport_state",
         "evidence":result["semantic_evidence"],
-        "capabilities":result["required_representations"],
+        "capabilities":list(result["required_representations"]),
         "domains":result["required_domains"],
         "decision_owner":"QUANTUM_PROCESSOR",
         "single_route":True,
