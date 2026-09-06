@@ -2707,12 +2707,16 @@ def _make_request(
         or _as_dict(semantic.get("semantic_profile")).get("history_task_context")
     )
     if _s(canonical_dialogue.get("relation")).upper() in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
-        _dbg("🧠 APRIL HISTORY DEPENDENCY SNAPSHOT:", {
+        history_snapshot = {
             "required": bool(history_task_context.get("required")),
             "operation": _s(history_task_context.get("arithmetic_operation") or history_task_context.get("operation")),
             "resolved_operands": _as_list(history_task_context.get("resolved_operands")),
             "available_numeric_results": history_task_context.get("available_numeric_results", 0),
-        })
+        }
+        # Optional diagnostic logging must never be able to abort execution.
+        # Keep the snapshot in request metadata instead of depending on an
+        # undefined module-level debug helper.
+        semantic.setdefault("quantum_history_dependency_snapshot", history_snapshot)
 
     dialogue_contract = {
         "dialog_act": _s(
