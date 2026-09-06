@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v39_canonical_dialogue_memory_visible_text_v7"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v41_history_dependency_passthrough_visible_context_v9"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1385,7 +1385,7 @@ def _scene_continuity_engine(
 
 
 
-def _recent_canonical_dialogue_pairs(state: dict, limit: int = 6) -> list[dict[str, str]]:
+def _recent_canonical_dialogue_pairs(state: dict, limit: int = 10) -> list[dict[str, str]]:
     """Return recent authentic USER→APRIL pairs as dialogue evidence.
 
     The current turn remains authoritative. This window exists so a request
@@ -1727,7 +1727,7 @@ def _dialogue_evidence(
 
     # Persist the selected immediate anchor for diagnostics; historical memory
     # remains evidence only.
-    recent_pairs = _recent_canonical_dialogue_pairs(state, limit=6)
+    recent_pairs = _recent_canonical_dialogue_pairs(state, limit=10)
 
     state["_quantum_context_anchor"] = {
         "previous_user": previous_user,
@@ -2507,6 +2507,13 @@ def _build_processor_control_plane(
         )
     )
 
+    interpretation_evidence = _as_dict(semantic.get("quantum_interpretation_evidence"))
+    history_task_context = _as_dict(
+        interpretation_evidence.get("history_task_context")
+        or canonical_dialogue.get("history_task_context")
+        or semantic.get("history_task_context")
+    )
+
     # Interpretation is the sole authority for dialogue mode. Memory may provide
     # target/context evidence, but it cannot promote/demote or rewrite the mode.
     mode = _s(canonical_dialogue.get("relation")).upper() or "INDEPENDENT"
@@ -2814,8 +2821,16 @@ def _make_request(
         if flow_id:
             request_metadata["flow_id"] = flow_id
 
+    request_goal = _s(control.get("active_goal")) or text
+    if history_task_context.get("required"):
+        request_goal = _s(
+            dialogue_contract.get("resolved_request")
+            or interpretation_evidence.get("resolved_request")
+            or request_goal
+        )
+
     request = MachineRequest(
-        goal=_s(control.get("active_goal")) or text,
+        goal=request_goal,
         intent={
             "type": _s(semantic.get("intent")) or (
                 "self_identification" if semantic.get("identity_request") else "dialogue"
@@ -2824,6 +2839,8 @@ def _make_request(
             "dialogue_state": mode,
             "coherence": round(coherence, 4),
             "dialog_act": dialogue_contract["dialog_act"],
+            "history_dependent_task": bool(history_task_context.get("required")),
+            "resolved_operands": list(history_task_context.get("resolved_operands") or []),
         },
         conversation={
             "current_request": _s(text),
@@ -2858,6 +2875,19 @@ def _make_request(
                 or dialogue_contract.get("resolved_scene")
             ),
             "recent_dialogue_pairs": deepcopy(_as_dict(semantic.get("quantum_interpretation_evidence")).get("recent_dialogue_pairs") or evidence.get("recent_dialogue_pairs") or []),
+            "history_dependent_task": bool(history_task_context.get("required")),
+            "history_task_context": _quantum_snapshot(history_task_context),
+            "resolved_operands": list(history_task_context.get("resolved_operands") or []),
+            "provider_history_context": _quantum_snapshot({
+                "required": bool(history_task_context.get("required")),
+                "operation": history_task_context.get("operation", ""),
+                "resolved_operands": list(history_task_context.get("resolved_operands") or []),
+                "selected_results": list(history_task_context.get("selected_results") or []),
+                "instruction": (
+                    "Use the resolved historical results as the operands for the current task. "
+                    "Do not ask the user to repeat values that are already present."
+                ) if history_task_context.get("required") else "",
+            }),
             **(
                 {
                     "active_topic": _clip(_s(control.get("active_topic")), 300),
@@ -2873,7 +2903,7 @@ def _make_request(
                     "SAME_TOPIC",
                     "ARTIFACT_REFERENCE",
                     "MEMORY_QUERY",
-                } or bool(control.get("context_dependency"))
+                } or bool(control.get("context_dependency")) or bool(history_task_context.get("required"))
                 else {}
             ),
         },
@@ -2976,6 +3006,9 @@ def _make_request(
             else {}
         ),
         "context_dependency": bool(control.get("context_dependency")),
+        "history_dependent_task": bool(history_task_context.get("required")),
+        "history_task_context": _quantum_snapshot(history_task_context),
+        "resolved_operands": list(history_task_context.get("resolved_operands") or []),
         "reference_to_previous": bool(control.get("reference_to_previous")),
         "continuation": bool(control.get("continuation")),
         "scene_continuity": _quantum_snapshot(
@@ -3016,6 +3049,8 @@ def _make_request(
         "quantum_signal_count": QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT,
         "quantum_budget_field": quantum_budget_field,
         "requested_outputs": requested_outputs,
+        "history_dependent_task": bool(history_task_context.get("required")),
+        "history_task_context": _quantum_snapshot(history_task_context),
         "identity_scope": deepcopy(scope),
         "control_plane": _quantum_snapshot(control),
         "presentation_plan": _quantum_snapshot(request.constraints.get("presentation_plan", {})),
@@ -5543,6 +5578,18 @@ def _validate_quantum_release(request: MachineRequest) -> None:
     if getattr(request, "provider_calls_allowed", 1) != 1:
         raise RuntimeError("Quantum release blocked: provider call count invariant failed")
 
+    conversation = getattr(request, "conversation", {})
+    if not isinstance(conversation, dict):
+        conversation = {}
+    history_task_context = conversation.get("history_task_context")
+    if isinstance(history_task_context, dict) and history_task_context.get("required"):
+        operands = list(history_task_context.get("resolved_operands") or [])
+        if len(operands) < 2:
+            raise RuntimeError("Quantum release blocked: history-dependent task has unresolved operands")
+        dependency = str((getattr(request, "dialogue_contract", {}) or {}).get("context_dependency") or "").lower()
+        if dependency == "independent":
+            raise RuntimeError("Quantum release blocked: history-dependent interpretation collapsed to independent")
+
     if getattr(request, "single_route", True) is not True:
         raise RuntimeError("Quantum release blocked: single_route invariant failed")
 
@@ -5556,7 +5603,9 @@ def _validate_quantum_release(request: MachineRequest) -> None:
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
     print("🧬 APRIL PROCESSOR MODE: CASCADED_SINGLE_STREAM")
-    print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled")
+    print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled (10 pairs)")
+    print("🧠 APRIL HISTORY TASK BRIDGE: interpretation-owned")
+    print("🧠 APRIL EXPECTED INTERPRETATION: quantum_interpretation_engine_v11_probabilistic_context_reconstruction_10turn_task_dependency_v3")
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
