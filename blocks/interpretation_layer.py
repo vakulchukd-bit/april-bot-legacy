@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v17_vectorized_cached_semantic_measurement_v10"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_vectorized_context_guard_graph_followup_v11"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 print("⚡ APRIL INTERPRETATION MODE: VECTORIZED_CACHED_FAMILY_SCORING")
 
@@ -750,18 +750,50 @@ class QuantumInterpretationEngine:
         recent_dialogue_pairs: list[dict[str, str]] | None,
         features: dict[str, Any],
     ) -> dict[str, Any]:
-        """Resolve history-dependent arithmetic without asking the user to repeat values.
+        """Resolve a history-dependent arithmetic task only when arithmetic intent is real.
 
-        Rules are structural:
+        The earlier implementation treated the highest arithmetic label as meaningful
+        even when *all* arithmetic scores were low. That caused ordinary greetings and
+        unrelated visual requests to inherit stale numeric results. We now require
+        positive semantic arithmetic evidence (or an explicit calculate operation) before
+        history can participate.
+
+        Rules:
         - 2+ explicit operands in the current request => self-contained.
-        - 1 explicit number + arithmetic follow-up + a prior numeric result =>
+        - 1 explicit number + confirmed arithmetic intent + prior numeric result =>
           use the most recent prior result and the current number.
-        - no explicit numbers + arithmetic follow-up + >=2 prior results =>
+        - no explicit numbers + confirmed arithmetic intent + >=2 prior results =>
           use the two most recent prior results.
+        - weak arithmetic similarity alone can never activate history.
         """
         current_text = cls.normalize(current)
+        operation_scores = features.get("operation_scores") or features.get("operation") or {}
+        arithmetic_scores = features.get("arithmetic_operation_scores") or features.get("arithmetic_operation") or {}
+
         operation = cls.normalize(features.get("semantic_best_operation")).lower()
         arithmetic = cls.normalize(features.get("semantic_best_arithmetic_operation")).lower()
+
+        def score(mapping: Any, label: str) -> float:
+            try:
+                return float(mapping.get(label, 0.0) or 0.0) if isinstance(mapping, dict) else 0.0
+            except Exception:
+                return 0.0
+
+        best_arithmetic_score = score(arithmetic_scores, arithmetic)
+        calculate_score = score(operation_scores, "calculate")
+
+        # Arithmetic evidence must be materially above background similarity.
+        # This is deliberately conservative so "Привет", "Ненадо" and graph requests
+        # cannot inherit an old arithmetic task merely because one arithmetic prototype
+        # happened to be the top-ranked label.
+        arithmetic_confirmed = bool(
+            arithmetic in {"addition", "subtraction", "multiplication", "division"}
+            and (
+                best_arithmetic_score >= 0.52
+                or (operation == "calculate" and calculate_score >= 0.45)
+            )
+        )
+
         numeric_results = cls._extract_numeric_results(recent_dialogue_pairs)
         current_number_matches = re.findall(
             r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
@@ -779,14 +811,8 @@ class QuantumInterpretationEngine:
         history_required = False
         relation = "none"
 
-        is_arithmetic = operation == "calculate" or arithmetic in {
-            "addition", "subtraction", "multiplication", "division"
-        }
-
-        if is_arithmetic and not self_contained_numeric and numeric_results:
+        if arithmetic_confirmed and not self_contained_numeric and numeric_results:
             if explicit_count == 1:
-                # Single-number arithmetic follow-up: previous result is the left
-                # operand, current number is the right operand.
                 selected = [numeric_results[-1]]
                 operands = [str(selected[0]["result"]), str(current_number_matches[0])]
                 history_required = True
@@ -797,13 +823,15 @@ class QuantumInterpretationEngine:
                 history_required = True
                 relation = "latest_two_results"
 
-        # The task must be genuinely incomplete without history.
         required = bool(history_required and operands)
         confidence = 0.99 if required else 0.0
         return {
             "required": required,
             "operation": operation,
-            "arithmetic_operation": arithmetic,
+            "arithmetic_operation": arithmetic if arithmetic_confirmed else "",
+            "arithmetic_score": best_arithmetic_score,
+            "calculate_score": calculate_score,
+            "arithmetic_confirmed": arithmetic_confirmed,
             "self_contained_numeric": self_contained_numeric,
             "explicit_numeric_count": explicit_count,
             "available_numeric_results": len(numeric_results),
@@ -811,8 +839,9 @@ class QuantumInterpretationEngine:
             "resolved_operands": operands,
             "relation": relation,
             "confidence": confidence,
-            "source": "semantic_arithmetic_plus_structural_history",
+            "source": "semantic_arithmetic_plus_structural_history_v2",
         }
+
 
     def _dialogue_relation_engine(
         self,
