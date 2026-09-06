@@ -14,6 +14,7 @@ import hashlib
 import threading
 from copy import deepcopy
 from typing import Any
+from contextvars import ContextVar
 
 from blocks.context_system import build_deephub_context, build_executor_context_packet
 from blocks.interpretation_layer import (
@@ -41,7 +42,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v43_history_dependency_passthrough_visible_context_v11"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v44_turn_cache_fast_snapshot_preserve_openai_contract_v12"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -54,39 +55,117 @@ QUANTUM_LANE_COUNT = 8
 QUANTUM_CORES = tuple(f"core_{i+1}" for i in range(QUANTUM_CORE_COUNT))
 QUANTUM_LANES = tuple(f"lane_{i+1}" for i in range(QUANTUM_LANE_COUNT))
 
+# ---------------------------------------------------------------------------
+# TURN-LOCAL EXECUTION CACHE
+# ---------------------------------------------------------------------------
+# The processor deliberately keeps one route and one Provider call. These
+# caches only eliminate repeated deterministic work inside the SAME turn.
+# ContextVar is required because FastAPI/async requests may interleave on the
+# same event-loop thread. Nothing here is persisted to user state.
+_EXECUTOR_TURN_CACHE: ContextVar[dict | None] = ContextVar(
+    "APRIL_EXECUTOR_TURN_CACHE",
+    default=None,
+)
+
+def _turn_cache() -> dict:
+    cache = _EXECUTOR_TURN_CACHE.get()
+    if cache is None:
+        cache = {}
+        _EXECUTOR_TURN_CACHE.set(cache)
+    return cache
+
+def _reset_turn_cache() -> object:
+    """Reset the turn-local cache after execute() completes."""
+    return _EXECUTOR_TURN_CACHE.set({})
+
+def _visual_state_signature(state: dict) -> tuple:
+    """Cheap identity signature for visual-state memoization.
+
+    Only state containers that can affect _best_visual_context selection are
+    included. This avoids hashing/copying large scene payloads.
+    """
+    if not isinstance(state, dict):
+        return ()
+    keys = (
+        "current_visual_scene",
+        "active_visual_scene",
+        "active_visual_scene_turn",
+        "last_successful_visual_scene",
+        "active_scene_contract",
+        "visual_scene_history",
+        "memory_timeline",
+    )
+    sig = []
+    for key in keys:
+        value = state.get(key)
+        if isinstance(value, (dict, list)):
+            sig.append((key, id(value), len(value)))
+        else:
+            sig.append((key, value))
+    return tuple(sig)
+
+def _dialogue_state_signature(state: dict) -> tuple:
+    if not isinstance(state, dict):
+        return ()
+    dialog = state.get("dialog")
+    if not isinstance(dialog, list):
+        return ("dialog", 0)
+    tail_ids = []
+    for item in dialog[-3:]:
+        if isinstance(item, dict):
+            tail_ids.append((
+                id(item),
+                _s(item.get("turn_id")),
+                _s(item.get("role")),
+            ))
+    return ("dialog", len(dialog), tuple(tail_ids))
+
 def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
     """
     Convert runtime evidence into a detached, JSON-safe snapshot.
 
-    Quantum evidence may contain shared references because multiple engines
-    contribute the same dicts. Shared references are fine; live back-references
-    are not. This helper detaches every branch so the persisted user state
-    cannot become a self-referential object graph.
+    Fast-path immutable/scalar containers before recursive traversal. This keeps
+    the exact snapshot semantics while avoiding per-element recursion for the
+    many small metadata packets created by the executor.
     """
     active = _active if _active is not None else set()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+
+    if isinstance(value, dict):
+        if not value:
+            return {}
+        # Detached shallow copies are safe when every value is scalar.
+        if all(
+            isinstance(k, (str, int, float, bool))
+            and (v is None or isinstance(v, (str, int, float, bool)))
+            for k, v in value.items()
+        ):
+            return dict(value)
+    elif isinstance(value, (list, tuple, set)):
+        if not value:
+            return []
+        if all(v is None or isinstance(v, (str, int, float, bool)) for v in value):
+            return [_quantum_snapshot(v, active) for v in value]
+
     oid = id(value)
     if oid in active:
         return {"__cycle__": True}
     if isinstance(value, dict):
         active.add(oid)
         try:
-            result = {
+            return {
                 str(k): _quantum_snapshot(v, active)
                 for k, v in value.items()
             }
         finally:
             active.remove(oid)
-        return result
     if isinstance(value, (list, tuple, set)):
         active.add(oid)
         try:
-            result = [_quantum_snapshot(v, active) for v in value]
+            return [_quantum_snapshot(v, active) for v in value]
         finally:
             active.remove(oid)
-        return result
-    # Runtime objects are not allowed into canonical state/evidence.
     return _s(value)
 
 def _s(v: Any) -> str:
@@ -1386,6 +1465,16 @@ def _scene_continuity_engine(
 
 
 def _recent_canonical_dialogue_pairs(state: dict, limit: int = 10) -> list[dict[str, str]]:
+    cache = _turn_cache()
+    key = ("recent_pairs", id(state), int(limit), _dialogue_state_signature(state))
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    value = _recent_canonical_dialogue_pairs_uncached(state, limit=limit)
+    cache[key] = value
+    return value
+
+def _recent_canonical_dialogue_pairs_uncached(state: dict, limit: int = 10) -> list[dict[str, str]]:
     """Return recent authentic USER→APRIL pairs as dialogue evidence.
 
     The current turn remains authoritative. This window exists so a request
@@ -1427,6 +1516,16 @@ def _recent_canonical_dialogue_pairs(state: dict, limit: int = 10) -> list[dict[
 
 
 def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
+    cache = _turn_cache()
+    key = ("latest_pair", id(state), _dialogue_state_signature(state))
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    value = _latest_canonical_dialogue_pair_uncached(state)
+    cache[key] = value
+    return value
+
+def _latest_canonical_dialogue_pair_uncached(state: dict) -> tuple[str, str, Any, str]:
     """Return the newest adjacent USER→APRIL pair in the current conversation.
 
     The pair is resolved structurally from the hot dialog. Historical memory can
@@ -1469,6 +1568,17 @@ def _usable_visual_scene(state: dict) -> dict:
 
 
 def _best_visual_context(state: dict) -> dict:
+    """Return the same canonical visual context while memoizing selection per turn."""
+    cache = _turn_cache()
+    key = ("best_visual_context", id(state), _visual_state_signature(state))
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    value = _best_visual_context_uncached(state)
+    cache[key] = value
+    return value
+
+def _best_visual_context_uncached(state: dict) -> dict:
     """Return the newest valid structured visual artifact without scene-slot masking.
 
     Search order is deterministic but evidence-driven:
@@ -1669,6 +1779,29 @@ def _quantum_context_diagnostic(
 
 
 def _dialogue_evidence(
+    text: str,
+    semantic: dict,
+    cognition: dict,
+    decision: dict,
+    state: dict,
+) -> dict:
+    cache = _turn_cache()
+    key = (
+        "dialogue_evidence",
+        id(state),
+        id(semantic),
+        id(decision),
+        _dialogue_state_signature(state),
+        _s(text),
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    value = _dialogue_evidence_uncached(text, semantic, cognition, decision, state)
+    cache[key] = value
+    return value
+
+def _dialogue_evidence_uncached(
     text: str,
     semantic: dict,
     cognition: dict,
@@ -5633,6 +5766,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     combined field, creates one MachineRequest, then uses the existing Provider
     path once and the existing C-Artifact/SceneContract path once.
     """
+    _turn_cache()  # initialize request-isolated cache
     state = get_state(user_id)
     state = state if isinstance(state, dict) else {}
     state["user_id"] = _s(user_id)
@@ -6258,6 +6392,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             "preserved": True,
         })
 
+    _reset_turn_cache()
     return _canonicalize(
         user_id, response, state, semantic, cognition, decision, request,
         internal_context=internal_context,
