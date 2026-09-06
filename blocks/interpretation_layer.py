@@ -68,7 +68,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v6_probabilistic_task_field"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v7_probabilistic_context_reconstruction_10turn"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -118,7 +118,7 @@ SEMANTIC_TURN_PROTOTYPES = {
     "correction": "пользователь исправляет предыдущий результат, добавляет условие, меняет параметр или уточняет деталь уже обсуждаемой задачи; the user corrects, extends, or changes a detail of the preceding task",
     "reference": "пользователь явно ссылается на уже показанное, созданное или сказанное, использует местоимение или указание на объект, этот, эту, это, него, неё, нему, просит изменить добавить отметить в нём или в ней; the user explicitly refers to a previously shown or discussed object",
     "artifact_reference": "пользователь спрашивает о содержимом, свойствах или результате уже созданного или показанного артефакта, что было нарисовано, какие элементы получились, что находится в предыдущем результате, просит перечислить или объяснить уже созданный объект; the user asks about the contents, properties, or result of an artifact that was already created or shown",
-    "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
+    "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема, последние ответы, предыдущие результаты, два последних результата, что было выше; the user asks to recall previous questions, recent answers, prior results, or earlier discussion",
     "affirmation": "пользователь подтверждает согласие принимает предыдущий результат; the user confirms the preceding result",
     "rejection": "пользователь отклоняет предыдущий результат или предлагает другой вариант; the user rejects the preceding result",
     "new_topic": "пользователь начинает новую тему не связанную с предыдущим обсуждением; the user starts a new topic",
@@ -227,7 +227,7 @@ OPERATION_HYPOTHESES = {
     "compare": "сравнить сопоставить различия сходства",
     "modify": "изменить исправить обновить переделать дополнить",
     "retrieve": "найти получить ресурс источник ссылку документ",
-    "calculate": "посчитать вычислить рассчитать решить",
+    "calculate": "посчитать вычислить рассчитать решить сложить сложи сумма суммировать арифметика; calculate compute add sum arithmetic",
     "analyze": "проанализировать разобрать исследовать проверить",
     "explain": "объяснить разъяснить пояснить растолковать как работает почему смысл принцип",
     "summarize": "суммировать сократить основные пункты",
@@ -825,7 +825,7 @@ class QuantumInterpretationEngine:
             "previous_block_ids": previous_block_ids,
             "explicit_reference": semantic_reference,
             "anaphoric": semantic_reference,
-            "source": "quantum_dialogue_vector_v6_semantic",
+            "source": "quantum_dialogue_vector_v7_semantic",
             "decision_owner": DECISION_OWNER,
             "trigger_independent": False,
             "semantic_dialogue_label": dialogue_best,
@@ -850,7 +850,7 @@ class QuantumInterpretationEngine:
         return {
             "language":None,"tokens":tokens,"lemmas":tokens,"pos":[],
             "dependencies":[],"entities":[],"sentences":[text] if text else [],
-            "source":"quantum_matrix","engine":"quantum_interpretation_engine_v6"
+            "source":"quantum_matrix","engine":"quantum_interpretation_engine_v7"
         }
 
     def similarity(self,text_a,text_b):
@@ -878,6 +878,369 @@ class QuantumInterpretationEngine:
 
     def prewarm_static(self,candidates):
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
+
+
+    @classmethod
+    def _is_authentic_user_turn(cls, item: Any) -> bool:
+        """Return True only for human-authored turns, excluding internal/tool records."""
+        if not isinstance(item, dict):
+            return False
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if (
+            metadata.get("internal_context")
+            or metadata.get("internal_turn")
+            or metadata.get("system")
+            or metadata.get("tool")
+            or metadata.get("source") in {
+                "internal_visual",
+                "internal_visual_analysis",
+                "passive_visual_helper",
+                "system",
+                "tool",
+            }
+            or item.get("internal_context")
+            or item.get("internal_turn")
+        ):
+            return False
+        role = str(item.get("role") or "").strip().lower()
+        if role in {"user", "human"}:
+            return True
+        return isinstance(item.get("user"), dict)
+
+    @classmethod
+    def _extract_human_turn(cls, item: Any) -> str:
+        if not cls._is_authentic_user_turn(item):
+            return ""
+        obj = item.get("user") if isinstance(item.get("user"), dict) else item
+        return cls.normalize(
+            obj.get("text")
+            or obj.get("content")
+            or obj.get("answer")
+            or obj.get("message")
+        )
+
+    @classmethod
+    def _extract_assistant_turn(cls, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if (
+            metadata.get("internal_context")
+            or metadata.get("internal_turn")
+            or metadata.get("source") in {
+                "internal_visual",
+                "internal_visual_analysis",
+                "passive_visual_helper",
+                "system",
+                "tool",
+            }
+            or item.get("internal_context")
+            or item.get("internal_turn")
+        ):
+            return ""
+        role = str(item.get("role") or "").strip().lower()
+        obj = item.get("april") if isinstance(item.get("april"), dict) else item
+        if role not in {"assistant", "april", "bot"} and not isinstance(item.get("april"), dict):
+            return ""
+        return cls.normalize(
+            obj.get("answer")
+            or obj.get("content")
+            or obj.get("text")
+            or obj.get("summary")
+        )
+
+    @classmethod
+    def _extract_render_blocks(cls, item: Any) -> list[dict[str, Any]]:
+        if not isinstance(item, dict):
+            return []
+        candidates = [
+            item.get("render_blocks"),
+            item.get("blocks"),
+            (item.get("april") or {}).get("render_blocks") if isinstance(item.get("april"), dict) else None,
+            item.get("rendered_blocks"),
+        ]
+        blocks: list[dict[str, Any]] = []
+        for value in candidates:
+            if not isinstance(value, list):
+                continue
+            for block in value:
+                if isinstance(block, dict):
+                    blocks.append(dict(block))
+            if blocks:
+                break
+        return blocks[:8]
+
+    @classmethod
+    def _visual_block_kind(cls, block: dict[str, Any]) -> str:
+        kind = cls.normalize(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
+        if kind in {"text", "markdown"}:
+            return ""
+        return _clean_representation(kind)
+
+    @classmethod
+    def _visual_payload_present(cls, block: dict[str, Any]) -> bool:
+        kind = cls._visual_block_kind(block)
+        if not kind:
+            return False
+        payload = block.get("payload")
+        if isinstance(payload, dict) and payload:
+            return True
+        if isinstance(payload, str) and payload.strip():
+            return True
+        for key in (
+            "content", "value", "data", "formula", "svg", "url", "src",
+            "points", "series", "rows", "columns", "cells", "vertices",
+            "operands", "result", "expression", "groups",
+        ):
+            value = block.get(key)
+            if value not in (None, "", [], {}):
+                return True
+        return False
+
+    @classmethod
+    def _history_context_window(cls, history: Any, limit: int = 10) -> list[dict[str, Any]]:
+        """Build a human-authored USER↔ASSISTANT window, preserving structured outputs."""
+        if not isinstance(history, list):
+            return []
+        # Work chronologically so an assistant result can be paired with the
+        # immediately preceding authentic user request.
+        records: list[dict[str, Any]] = []
+        pending_user = ""
+        pending_user_turn_id = None
+        sequence = 0
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            user_text = cls._extract_human_turn(item)
+            if user_text:
+                pending_user = user_text
+                pending_user_turn_id = item.get("turn_id")
+                continue
+            assistant_text = cls._extract_assistant_turn(item)
+            if not assistant_text:
+                continue
+            blocks = cls._extract_render_blocks(item)
+            structured = [
+                block for block in blocks
+                if cls._visual_block_kind(block) and cls._visual_payload_present(block)
+            ]
+            sequence += 1
+            records.append({
+                "sequence": sequence,
+                "user_request": pending_user,
+                "assistant_answer": assistant_text,
+                "turn_id": item.get("turn_id"),
+                "user_turn_id": pending_user_turn_id,
+                "render_blocks": blocks,
+                "structured_blocks": structured,
+                "render_block_types": [
+                    cls._visual_block_kind(block) for block in structured
+                    if cls._visual_block_kind(block)
+                ],
+                "has_visual": bool(structured),
+                "has_numeric": bool(re.search(r"[-+]?\d+(?:[.,]\d+)?", assistant_text)),
+            })
+            pending_user = ""
+            pending_user_turn_id = None
+        return records[-max(1, int(limit)):]
+
+    @classmethod
+    def _scene_history_window(
+        cls,
+        history: Any,
+        state: Any,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Collect up to 10 recent rendered scenes from state/history.
+
+        Current/active scenes are included only as evidence; authentic dialogue
+        turns are preferred over internal visual/tool records.
+        """
+        candidates: list[dict[str, Any]] = []
+        if isinstance(state, dict):
+            for key in ("current_visual_scene", "active_visual_scene"):
+                scene = state.get(key)
+                if isinstance(scene, dict):
+                    metadata = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+                    if not (
+                        scene.get("internal_context")
+                        or scene.get("internal_turn")
+                        or metadata.get("internal_context")
+                        or str(scene.get("topic") or "").startswith("VISUAL_ANALYSIS:")
+                    ):
+                        candidates.append(dict(scene))
+            for key in ("last_successful_visual_scene", "active_scene"):
+                scene = state.get(key)
+                if isinstance(scene, dict):
+                    candidates.append(dict(scene))
+            for key in ("visual_scene_history", "scene_history"):
+                items = state.get(key)
+                if isinstance(items, list):
+                    candidates.extend(x for x in items[-limit:] if isinstance(x, dict))
+        for record in cls._history_context_window(history, limit=limit):
+            if record.get("has_visual"):
+                candidates.append({
+                    "scene_id": record.get("turn_id"),
+                    "turn_id": record.get("turn_id"),
+                    "topic": record.get("user_request"),
+                    "user_request": record.get("user_request"),
+                    "april_answer": record.get("assistant_answer"),
+                    "render_blocks": record.get("structured_blocks"),
+                    "render_block_types": record.get("render_block_types"),
+                    "source": "dialogue_history",
+                })
+        result, seen = [], set()
+        for scene in candidates:
+            sid = cls.normalize(scene.get("scene_id") or scene.get("id"))
+            fingerprint = sid or cls.normalize(
+                scene.get("user_request")
+                or scene.get("topic")
+                or scene.get("april_answer")
+            )
+            if not fingerprint or fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            result.append(scene)
+        return result[-max(1, int(limit)):]
+
+    def _reconstruct_recent_context(
+        cls,
+        current_request: str,
+        history: Any,
+        state: Any,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Rank recent authentic turns and visual scenes for the current request.
+
+        The result is evidence for downstream reasoning. It does not route, call
+        a provider, or invent missing content.
+        """
+        current = cls.normalize(current_request)
+        records = cls._history_context_window(history, limit=limit)
+        ranked: list[dict[str, Any]] = []
+        for idx, record in enumerate(records):
+            source_text = " ".join(
+                str(x) for x in (
+                    record.get("user_request"),
+                    record.get("assistant_answer"),
+                    " ".join(record.get("render_block_types") or []),
+                ) if x
+            )
+            similarity = QUANTUM_INTERPRETATION_ENGINE.similarity(current, source_text)
+            semantic_score = float(similarity.get("score", 0.0) or 0.0)
+            recency = (idx + 1) / max(1, len(records))
+            visual_bonus = 0.16 if record.get("has_visual") else 0.0
+            numeric_bonus = 0.08 if record.get("has_numeric") else 0.0
+            user_authenticity = 1.0 if record.get("user_request") else 0.35
+            score = (
+                0.54 * semantic_score
+                + 0.22 * recency
+                + 0.12 * user_authenticity
+                + visual_bonus
+                + numeric_bonus
+            )
+            ranked.append({**record, "semantic_relevance": round(semantic_score, 6),
+                           "context_score": round(score, 6)})
+        ranked.sort(key=lambda x: (float(x.get("context_score", 0.0)), int(x.get("sequence", 0))), reverse=True)
+
+        scenes = cls._scene_history_window(history, state, limit=limit)
+        scene_ranked = []
+        for idx, scene in enumerate(scenes):
+            scene_text = cls._scene_semantic_text(scene)
+            sim = cls.similarity(current, scene_text)["score"] if scene_text else 0.0
+            has_visual = bool(
+                scene.get("render_blocks")
+                or scene.get("render_block_types")
+            )
+            recency = (idx + 1) / max(1, len(scenes))
+            score = 0.60 * float(sim) + 0.24 * recency + (0.16 if has_visual else 0.0)
+            scene_ranked.append({
+                "scene": scene,
+                "semantic_relevance": round(float(sim), 6),
+                "context_score": round(float(score), 6),
+            })
+        scene_ranked.sort(
+            key=lambda x: float(x.get("context_score", 0.0)),
+            reverse=True,
+        )
+
+        recent_answers = [
+            {
+                "sequence": r.get("sequence"),
+                "turn_id": r.get("turn_id"),
+                "user_request": r.get("user_request"),
+                "answer": r.get("assistant_answer"),
+                "render_block_types": list(r.get("render_block_types") or []),
+            }
+            for r in records
+        ]
+        selected_answers = ranked[:5]
+        selected_visuals = scene_ranked[:5]
+        normalized_selected_answers = [
+            {
+                "sequence": r.get("sequence"),
+                "turn_id": r.get("turn_id"),
+                "user_request": r.get("user_request"),
+                "answer": r.get("assistant_answer"),
+                "render_block_types": list(r.get("render_block_types") or []),
+                "semantic_relevance": r.get("semantic_relevance"),
+                "context_score": r.get("context_score"),
+            }
+            for r in selected_answers
+            if isinstance(r, dict)
+        ]
+        numeric_facts: list[dict[str, Any]] = []
+        for r in records:
+            answer = cls.normalize(r.get("assistant_answer"))
+            if not answer:
+                continue
+            nums = re.findall(r"[-+]?\d+(?:[.,]\d+)?", answer)
+            if nums:
+                numeric_facts.append({
+                    "turn_id": r.get("turn_id"),
+                    "user_request": r.get("user_request"),
+                    "answer": answer,
+                    "numbers": nums[:12],
+                })
+
+        return {
+            "version": "quantum_context_reconstruction_v2",
+            "window_size": int(limit),
+            "authentic_user_turns_only": True,
+            "recent_dialogue": recent_answers,
+            "ranked_relevant_turns": [
+                {
+                    "sequence": r.get("sequence"),
+                    "turn_id": r.get("turn_id"),
+                    "user_request": r.get("user_request"),
+                    "answer": r.get("assistant_answer"),
+                    "render_block_types": list(r.get("render_block_types") or []),
+                    "semantic_relevance": r.get("semantic_relevance"),
+                    "context_score": r.get("context_score"),
+                }
+                for r in ranked[:10]
+            ],
+            "selected_answer_context": normalized_selected_answers,
+            "ranked_visual_scenes": selected_visuals,
+            "selected_visual_scenes": selected_visuals[:5],
+            "numeric_facts": numeric_facts[-10:],
+            "latest_visual_scene": (selected_visuals[0].get("scene") if selected_visuals else {}),
+            "reconstructed": bool(selected_answers or selected_visuals or numeric_facts),
+            "selection_policy": {
+                "max_history_turns": 10,
+                "max_selected_answers": 5,
+                "max_selected_visual_scenes": 5,
+                "prefer_authentic_user_questions": True,
+                "prefer_semantically_relevant": True,
+                "prefer_structured_visual_payload": True,
+                "prefer_recent": True,
+                "internal_turns_excluded": True,
+            },
+        }
 
     def _history(self,history):
         last_a=last_u=""; reply_to=None
@@ -1566,11 +1929,49 @@ class QuantumInterpretationEngine:
         semantic=semantic if isinstance(semantic,dict) else {}
         state=state if isinstance(state,dict) else {}
         history=history if isinstance(history,list) else []
+        context_window = self._reconstruct_recent_context(text, history, state, limit=10)
         last_a,last_u,reply_to=self._history(history)
+        # For semantic continuity, prefer the latest authentic human↔assistant pair
+        # from the reconstructed window rather than a stale/internal record.
+        ranked_turns = context_window.get("ranked_relevant_turns") or []
+        if ranked_turns:
+            latest_authentic = max(
+                (r for r in ranked_turns if r.get("user_request") or r.get("answer")),
+                key=lambda r: int(r.get("sequence") or 0),
+                default=None,
+            )
+            if isinstance(latest_authentic, dict):
+                last_u = self.normalize(latest_authentic.get("user_request")) or last_u
+                last_a = self.normalize(latest_authentic.get("answer")) or last_a
         active_topic=self.normalize(state.get("active_topic") or state.get("current_topic") or semantic.get("active_topic") or cognition.get("active_topic"))
         active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
-        previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+        historical_answer_context = list(context_window.get("selected_answer_context") or [])
+        historical_numeric_facts = list(context_window.get("numeric_facts") or [])
+        historical_visual_scenes = list(context_window.get("selected_visual_scenes") or [])
+        context_request_score = QUANTUM_INTERPRETATION_ENGINE.similarity(
+            text,
+            "используй последние ответы предыдущие результаты два последних результата вспомни что было выше; use the recent previous answers and results"
+        ).get("score", 0.0)
+        visual_context_request_score = QUANTUM_INTERPRETATION_ENGINE.similarity(
+            text,
+            "покажи или объясни что было нарисовано в последних результатах предыдущих визуальных ответах; describe the previous visual results"
+        ).get("score", 0.0)
+        previous_scene = {}
+        reconstructed_visual = context_window.get("latest_visual_scene")
+        if isinstance(reconstructed_visual, dict) and (
+            reconstructed_visual.get("render_blocks")
+            or reconstructed_visual.get("render_block_types")
+        ):
+            previous_scene = reconstructed_visual
+        elif historical_visual_candidate and historical_visual_scenes:
+            candidate_scene = historical_visual_scenes[0].get("scene") if isinstance(historical_visual_scenes[0], dict) else None
+            if isinstance(candidate_scene, dict):
+                previous_scene = candidate_scene
+        else:
+            state_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+            if isinstance(state_scene, dict):
+                previous_scene = state_scene
         if not isinstance(previous_scene, dict):
             previous_scene = {}
         # Internal visual/tool scenes are not dialog anchors.
@@ -1598,11 +1999,69 @@ class QuantumInterpretationEngine:
         d=dialogue_packet["dialogue"]
         dialogue_vector=dialogue_packet.get("dialogue_relation", {})
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
-        production,source,locked=self._resolve_production(text,p,explicit)
-        continuation=bool(
+
+        # Reconstructed history can authorize a continuation even when the
+        # dialogue classifier under-ranks the discourse relation. This is a
+        # semantic state-space decision: current task operation + multiple recent
+        # authentic answers + coherent historical evidence.
+        numeric_context = list(context_window.get("numeric_facts") or [])
+        historical_answers = [
+            item for item in (context_window.get("recent_dialogue") or [])
+            if isinstance(item, dict) and item.get("answer")
+        ]
+        historical_operand_candidate = bool(
+            len(numeric_context) >= 2
+            and (
+                str(p.get("best_operation") or "").lower() in {"calculate", "compare", "analyze", "answer"}
+                or float(context_request_score or 0.0) >= 0.08
+            )
+        )
+        historical_visual_candidate = bool(
+            historical_visual_scenes
+            and (
+                float(visual_context_request_score or 0.0) >= 0.08
+                or str(p.get("best_operation") or "").lower() in {"answer", "analyze", "explain", "list"}
+            )
+        )
+        if historical_operand_candidate:
+            dialogue_vector["historical_context_available"] = True
+            dialogue_vector["historical_context_score"] = round(float(context_request_score or 0.0), 6)
+            if historical_numeric_facts:
+                # Arithmetic over historical answers is a current operation whose
+                # operands are reconstructed from authenticated prior assistant results.
+                if str(p.get("best_operation") or "").lower() in {"answer", "summarize", "compare", "analyze"} and (
+                    "слож" in text.lower() or "sum" in text.lower() or "+" in text
+                ):
+                    p["best_operation"] = "calculate"
+                    p["semantic_historical_operation"] = "calculate_from_recent_answers"
+            dialogue_vector["historical_answer_count"] = len(historical_answers)
+            dialogue_vector["historical_numeric_fact_count"] = len(numeric_context)
+            if dialogue_vector.get("relation") in {"NEW_TOPIC", "INDEPENDENT", ""}:
+                dialogue_vector["relation"] = "CONTINUE_TOPIC"
+                dialogue_vector["topic_relation"] = "SAME_TOPIC"
+                dialogue_vector["request_relation"] = "CONTINUE_TOPIC"
+                dialogue_vector["request_dependency"] = "continuation"
+                dialogue_vector["continuation_score"] = max(
+                    float(dialogue_vector.get("continuation_score", 0.0) or 0.0), 0.82
+                )
+                dialogue_vector["request_dependency_score"] = max(
+                    float(dialogue_vector.get("request_dependency_score", 0.0) or 0.0), 0.82
+                )
+                dialogue_vector["independent_score"] = min(
+                    float(dialogue_vector.get("independent_score", 1.0) or 1.0), 0.18
+                )
+                dialogue_vector["subtype"] = "HISTORICAL_TASK_RECONSTRUCTION"
+                dialogue_vector["delta_mode"] = "extend"
+                dialogue_vector["source"] = "quantum_context_reconstruction_v2"
+
+        # For a historical task, the current user request remains the anchor,
+        # while the reconstructed answers become explicit evidence for execution.
+        continuation = bool(
             dialogue_packet.get("continuation")
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
+            or historical_operand_candidate
         )
+        production,source,locked=self._resolve_production(text,p,explicit)
         # A short continuation question does not acquire a structured renderer
         # merely because the representation matrix found a weak candidate.
         # Structured output must be supported by the current turn's operation,
@@ -1737,6 +2196,33 @@ class QuantumInterpretationEngine:
         )
         resolved_reference = reference_resolution.get("target") or ""
         resolved_request = text
+        selected_context = list(context_window.get("selected_answer_context") or [])
+        numeric_context = list(context_window.get("numeric_facts") or [])
+        # For explicit continuation/reference tasks, make the best reconstructed
+        # context visible to the provider-facing semantic packet without replacing
+        # the authentic current request.
+        if (continuation or reference) and (selected_context or numeric_context):
+            context_lines = []
+            for item in selected_context[:5]:
+                if not isinstance(item, dict):
+                    continue
+                u = self.normalize(item.get("user_request"))
+                a = self.normalize(item.get("answer"))
+                if u or a:
+                    context_lines.append(f"USER: {u}\nAPRIL: {a}".strip())
+            for item in numeric_context[-5:]:
+                if not isinstance(item, dict):
+                    continue
+                answer = self.normalize(item.get("answer"))
+                nums = ", ".join(str(x) for x in (item.get("numbers") or []))
+                if answer and nums and all(answer != self.normalize(x.get("answer")) for x in selected_context if isinstance(x, dict)):
+                    context_lines.append(f"RECENT NUMERIC FACT: {nums} | {answer}")
+            if context_lines:
+                resolved_request = (
+                    f"{text}\n\nReconstructed recent authentic dialogue context (evidence only):\n"
+                    + "\n".join(context_lines[:8])
+                    + "\nUse the current request as authoritative; use these prior turns only when the current request refers to them."
+                )
         if resolved_reference and (continuation or reference):
             # Structural discourse resolution: make the provider-facing request
             # explicit without hard-coded topic/entity rules.
@@ -1783,6 +2269,12 @@ class QuantumInterpretationEngine:
         presentation_recommendations = self._presentation_recommendations(
             text, p, production, locked=locked, continuation=continuation,
             previous_scene=previous_scene, explicit=explicit,
+            context_reconstruction={
+                **context_window,
+                "historical_visual_candidate": historical_visual_candidate,
+                "historical_context_score": float(context_request_score or 0.0),
+                "visual_context_request_score": float(visual_context_request_score or 0.0),
+            },
         )
         presentation={
             "version":"quantum_interpretation_transport_v4","decision_owner":DECISION_OWNER,
@@ -1808,6 +2300,22 @@ class QuantumInterpretationEngine:
                 "mode": "optional",
                 "reason": "semantic_text_schema_request",
             }
+        # Context is reconstructed before presentation recommendations and is
+        # carried forward as evidence. The current authentic user request remains
+        # authoritative; prior turns can explain references or supply values/facts.
+        presentation["context_reconstruction"] = {
+            "window_size": context_window.get("window_size", 10),
+            "historical_visual_candidate": historical_visual_candidate,
+            "historical_context_score": round(float(context_request_score or 0.0), 6),
+            "visual_context_request_score": round(float(visual_context_request_score or 0.0), 6),
+            "selected_visual_scenes": [
+                item.get("scene") if isinstance(item, dict) else {}
+                for item in (context_window.get("selected_visual_scenes") or [])
+            ],
+            "selected_answer_context": list(context_window.get("selected_answer_context") or []),
+            "numeric_facts": list(context_window.get("numeric_facts") or []),
+            "policy": context_window.get("selection_policy") or {},
+        }
         result=build_result(text)
         result.update({
             "type":p["dialogue_best"],"subtype":production,"scene_type":production,
@@ -1827,6 +2335,7 @@ class QuantumInterpretationEngine:
                 "production_representation_locked":locked,"scene_matrix":matrix
             },
             "semantic_task":semantic_task,
+            "context_reconstruction": {**context_window, "historical_visual_candidate": historical_visual_candidate, "historical_context_score": round(float(context_request_score or 0.0), 6), "visual_context_request_score": round(float(visual_context_request_score or 0.0), 6)},
             "ascii_schema_advisory": ascii_schema_advisory,
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
@@ -1840,6 +2349,16 @@ class QuantumInterpretationEngine:
                 "reference_resolution": reference_resolution,
                 "resolved_reference": resolved_reference,
                 "resolved_request": resolved_request,
+                "context_window_size": context_window.get("window_size", 10),
+                "selected_visual_scene_ids": [
+                    str((item.get("scene") or {}).get("scene_id") or "")
+                    for item in (context_window.get("selected_visual_scenes") or [])
+                    if isinstance(item, dict) and isinstance(item.get("scene"), dict)
+                ][:5],
+                "authentic_user_turns_only": True,
+                "historical_visual_candidate": historical_visual_candidate,
+                "historical_context_score": round(float(context_request_score or 0.0), 6),
+                "visual_context_request_score": round(float(visual_context_request_score or 0.0), 6),
             },
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
@@ -1888,14 +2407,14 @@ class QuantumInterpretationEngine:
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
                 "goal_scores":p["goal_scores"],"context_scores":p["context_scores"],
-                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v6"
+                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v7"
             },
             "quantum_interpretation_field":{
                 "linguistic":self._linguistic(text),"dialogue":d,"representation":evidence,
                 "domain":[{"domain":k,"score":float(v)} for k,v in p["domain_scores"].items()],
                 "context_vectors":p["context_scores"],"semantic_task":semantic_task,
                 "production":presentation,"profile":p,"scene_matrix":matrix,
-                "decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"quantum_interpretation_engine_v6"
+                "decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"quantum_interpretation_engine_v7"
             },
             "quantum_matrix":matrix,"matrix_scene":matrix["best_scene"],
             "matrix_confidence":matrix["best_score"],"decision_owner":DECISION_OWNER,
@@ -2023,7 +2542,7 @@ class QuantumInterpretationEngine:
     @classmethod
     def _presentation_recommendations(cls, text, profile, production, *, locked=False,
                                       continuation=False, previous_scene=None,
-                                      explicit=None):
+                                      explicit=None, context_reconstruction=None):
         """Return post-interpretation presentation/scene recommendations.
 
         The current semantic task is authoritative. Evidence may justify zero,
@@ -2072,6 +2591,26 @@ class QuantumInterpretationEngine:
                 op in compatible_ops.get(label, set()) and score >= 0.16 and obj_score >= 0.07
             ):
                 candidates.add(label)
+        context_reconstruction = context_reconstruction if isinstance(context_reconstruction, dict) else {}
+        historical_visual_candidate = bool(context_reconstruction.get("historical_visual_candidate"))
+        if historical_visual_candidate:
+            # The answer remains the current semantic production, while a selected
+            # prior visual context may be presented as a supporting scene.
+            visual_types = []
+            for item in context_reconstruction.get("selected_visual_scenes") or []:
+                scene = item.get("scene") if isinstance(item, dict) else None
+                for block in (scene or {}).get("render_blocks") or []:
+                    kind = _clean_representation(
+                        block.get("type") or block.get("artifact_type") or block.get("representation")
+                    ) if isinstance(block, dict) else ""
+                    if kind in {"diagram", "graph", "image", "gallery", "table", "formula"} and kind not in visual_types:
+                        visual_types.append(kind)
+            if "visual_context" not in candidates:
+                candidates.add("visual_context")
+            for kind in visual_types[:5]:
+                # Preserve only semantically relevant concrete prior render types.
+                if kind == production or kind in explicit_values:
+                    candidates.add(kind)
         if any(x != "text" for x in candidates):
             candidates.add("text")
 
@@ -2476,9 +3015,9 @@ class QuantumMemoryUnderstandingEngine:
     """
 
     VERSION = "QUANTUM-MEMORY-UNDERSTANDING-V1"
-    MAX_DIALOG_TURNS = 6
-    MAX_VISUAL_BLOCKS = 4
-    MAX_VISUAL_HISTORY = 4
+    MAX_DIALOG_TURNS = 10
+    MAX_VISUAL_BLOCKS = 8
+    MAX_VISUAL_HISTORY = 10
 
     @staticmethod
     def _text(value):
@@ -2528,9 +3067,19 @@ class QuantumMemoryUnderstandingEngine:
         active = visual_context.get("active_visual_scene")
         if isinstance(active, dict):
             candidates.append(active)
+        for key in ("last_successful_visual_scene", "active_scene"):
+            scene = visual_context.get(key)
+            if isinstance(scene, dict):
+                candidates.append(scene)
         history = visual_context.get("visual_scene_history") or []
         if isinstance(history, list):
             candidates.extend(x for x in history[-cls.MAX_VISUAL_HISTORY:] if isinstance(x, dict))
+        reconstructed = visual_context.get("selected_visual_scenes") or []
+        if isinstance(reconstructed, list):
+            for item in reconstructed[:cls.MAX_VISUAL_HISTORY]:
+                scene = item.get("scene") if isinstance(item, dict) else None
+                if isinstance(scene, dict):
+                    candidates.append(scene)
         result, seen = [], set()
         for scene in candidates:
             sid = cls._text(scene.get("scene_id") or scene.get("id"))
@@ -2539,7 +3088,7 @@ class QuantumMemoryUnderstandingEngine:
                 continue
             seen.add(key)
             result.append(scene)
-        return result
+        return result[:cls.MAX_VISUAL_HISTORY]
 
     @classmethod
     def _extract_visual_schema(cls, scene):
@@ -2592,7 +3141,11 @@ class QuantumMemoryUnderstandingEngine:
         continuation = bool(dialogue_vector.get("continuation") or dialogue_contract.get("continuation") or relation in {"CONTINUE_TOPIC", "CONTINUATION"})
         reference = bool(dialogue_vector.get("reference_to_previous") or dialogue_contract.get("reference_to_previous") or relation == "ARTIFACT_REFERENCE")
 
-        candidates = self._visual_candidates(visual_memory)
+        reconstructed = visual_memory.get("context_reconstruction") if isinstance(visual_memory.get("context_reconstruction"), dict) else {}
+        candidates = self._visual_candidates({
+            **visual_memory,
+            "selected_visual_scenes": reconstructed.get("selected_visual_scenes") or [],
+        })
         schemas = [self._extract_visual_schema(scene) for scene in candidates]
         active_schema = schemas[0] if schemas else {}
         current_rep = self._text(interpretation.get("production_representation") or interpretation.get("requested_representation") or interpretation.get("scene_type")).lower()
@@ -2652,6 +3205,16 @@ class QuantumMemoryUnderstandingEngine:
                 "requested_representation": current_rep or None,
                 "create_new_visual_artifact": bool(related_visual and current_rep in STRUCTURED_REPRESENTATIONS),
                 "preserve_meaning_from_previous_visual": bool(related_visual),
+            },
+            "reconstructed_context": {
+                "window_size": int(reconstructed.get("window_size", 10) or 10),
+                "selected_visual_scene_ids": [
+                    str((item.get("scene") or {}).get("scene_id") or "")
+                    for item in (reconstructed.get("selected_visual_scenes") or [])
+                    if isinstance(item, dict)
+                ][:5],
+                "numeric_facts": list(reconstructed.get("numeric_facts") or [])[-10:],
+                "authentic_user_turns_only": True,
             },
         }
 
