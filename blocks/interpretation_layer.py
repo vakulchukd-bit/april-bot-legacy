@@ -66,9 +66,8 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_vectorized_context_guard_graph_followup_v11"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_probabilistic_context_reconstruction_10turn_arithmetic_followup_v9"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
-print("⚡ APRIL INTERPRETATION MODE: VECTORIZED_CACHED_FAMILY_SCORING")
 
 SEMANTIC_MODEL_NAME = os.getenv(
     "APRIL_SENTENCE_MODEL",
@@ -301,12 +300,7 @@ class QuantumInterpretationEngine:
         self._vectorizer = None
         self._prototype_matrix = None
         self._prototype_index = {}
-        self._family_indices = {}
-        self._prototype_token_sets = {}
         self._semantic_encoder = None
-        self._prototype_embeddings = None
-        self._similarity_cache = {}
-        self._similarity_cache_limit = 512
         self._compile_matrix()
 
     @staticmethod
@@ -344,30 +338,11 @@ class QuantumInterpretationEngine:
             )
             self._prototype_matrix = self._vectorizer.fit_transform(docs)
 
-        # Precompute static family indices and lexical token sets once.
-        # The semantic contract is unchanged; only repeated CPU work moves out of
-        # the request hot path.
-        offset = 0
-        for family, vocab in families:
-            indices = []
-            for label, description in vocab.items():
-                indices.append(offset)
-                self._prototype_token_sets[f"{family}:{label}"] = frozenset(
-                    token for token in self._tokens(description) if len(token) >= 3
-                )
-                offset += 1
-            self._family_indices[family] = tuple(indices)
-
         if APRIL_ENABLE_HEAVY_HOTPATH and SentenceTransformer is not None:
             try:
                 self._semantic_encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
-                self._prototype_embeddings = self._semantic_encoder.encode(
-                    docs,
-                    normalize_embeddings=True,
-                )
             except Exception:
                 self._semantic_encoder = None
-                self._prototype_embeddings = None
 
     @staticmethod
     def _semantic_focus_text(text: str) -> str:
@@ -405,47 +380,50 @@ class QuantumInterpretationEngine:
         return negated
 
     def _family_scores(self, text, family, vocab):
-        """Vectorized family scoring with startup-cached prototypes."""
         text = self.normalize(text)
         if not text:
-            return {k: 0.0 for k in vocab}
+            return {k:0.0 for k in vocab}
 
-        if self._semantic_encoder is not None and self._prototype_embeddings is not None:
+        if self._semantic_encoder is not None:
             try:
                 q = self._semantic_encoder.encode([text], normalize_embeddings=True)[0]
-                indices = self._family_indices.get(family, ())
-                vals = self._prototype_embeddings[list(indices)] @ q if indices else []
-                return {
-                    label: max(0.0, min(1.0, float(value)))
-                    for label, value in zip(vocab.keys(), vals)
-                }
+                d = self._semantic_encoder.encode(
+                    list(vocab.values()), normalize_embeddings=True
+                )
+                vals = ((d @ q) + 1.0) / 2.0
+                return {k:max(0.0,min(1.0,float(v))) for k,v in zip(vocab,vals)}
             except Exception:
                 pass
 
         if self._vectorizer is not None and self._prototype_matrix is not None and cosine_similarity is not None:
-            try:
-                q = self._vectorizer.transform([text])
-                indices = self._family_indices.get(family, ())
-                if indices:
-                    values = cosine_similarity(q, self._prototype_matrix[list(indices)]).ravel()
-                    return {
-                        label: max(0.0, min(1.0, float(value)))
-                        for label, value in zip(vocab.keys(), values)
-                    }
-            except Exception:
-                pass
+            q = self._vectorizer.transform([text])
+            result = {}
+            for label in vocab:
+                idx = self._prototype_index.get(f"{family}:{label}")
+                if idx is None:
+                    # Never allow a missing prototype namespace to crash the
+                    # interpretation engine.  Measure this hypothesis through
+                    # the same degraded lexical evidence used when no matrix is
+                    # available, then continue the joint inference.
+                    words = set(self._tokens(vocab[label]))
+                    tokens = set(self._tokens(text))
+                    result[label] = min(1.0, len(tokens & words) / max(2.0, len(words) * 0.2))
+                    continue
+                similarity_value = cosine_similarity(q, self._prototype_matrix[idx])
+                # cosine_similarity returns a 2-D array for sparse row/row input.
+                # Extract the single scalar explicitly instead of coercing the
+                # whole ndarray to float.
+                score = float(similarity_value[0, 0])
+                result[label] = max(0.0, min(1.0, score))
+            return result
 
+        # Evidence-only degraded measurement. It can rank hypotheses but it
+        # cannot create or suppress production representation.
         tokens = set(self._tokens(text))
         result = {}
-        for label in vocab:
-            words = self._prototype_token_sets.get(
-                f"{family}:{label}",
-                frozenset(self._tokens(vocab[label])),
-            )
-            result[label] = min(
-                1.0,
-                len(tokens & words) / max(2.0, len(words) * 0.2),
-            )
+        for label, description in vocab.items():
+            words = set(self._tokens(description))
+            result[label] = min(1.0, len(tokens & words)/max(2.0,len(words)*0.2))
         return result
 
     def _operation_family_scores(self, text: str) -> dict[str, float]:
@@ -666,10 +644,8 @@ class QuantumInterpretationEngine:
             "active_topic":active_topic,
             "active_goal":active_goal,
         }
-        normalized=[self.normalize(v) for v in vals.values() if self.normalize(v)]
-        scores=self.similarities(text, normalized)
         return {
-            k: float(scores.get(self.normalize(v),0.0)) if self.normalize(v) else 0.0
+            k:self.similarity(text,v)["score"] if self.normalize(v) else 0.0
             for k,v in vals.items()
         }
 
@@ -750,50 +726,18 @@ class QuantumInterpretationEngine:
         recent_dialogue_pairs: list[dict[str, str]] | None,
         features: dict[str, Any],
     ) -> dict[str, Any]:
-        """Resolve a history-dependent arithmetic task only when arithmetic intent is real.
+        """Resolve history-dependent arithmetic without asking the user to repeat values.
 
-        The earlier implementation treated the highest arithmetic label as meaningful
-        even when *all* arithmetic scores were low. That caused ordinary greetings and
-        unrelated visual requests to inherit stale numeric results. We now require
-        positive semantic arithmetic evidence (or an explicit calculate operation) before
-        history can participate.
-
-        Rules:
+        Rules are structural:
         - 2+ explicit operands in the current request => self-contained.
-        - 1 explicit number + confirmed arithmetic intent + prior numeric result =>
+        - 1 explicit number + arithmetic follow-up + a prior numeric result =>
           use the most recent prior result and the current number.
-        - no explicit numbers + confirmed arithmetic intent + >=2 prior results =>
+        - no explicit numbers + arithmetic follow-up + >=2 prior results =>
           use the two most recent prior results.
-        - weak arithmetic similarity alone can never activate history.
         """
         current_text = cls.normalize(current)
-        operation_scores = features.get("operation_scores") or features.get("operation") or {}
-        arithmetic_scores = features.get("arithmetic_operation_scores") or features.get("arithmetic_operation") or {}
-
         operation = cls.normalize(features.get("semantic_best_operation")).lower()
         arithmetic = cls.normalize(features.get("semantic_best_arithmetic_operation")).lower()
-
-        def score(mapping: Any, label: str) -> float:
-            try:
-                return float(mapping.get(label, 0.0) or 0.0) if isinstance(mapping, dict) else 0.0
-            except Exception:
-                return 0.0
-
-        best_arithmetic_score = score(arithmetic_scores, arithmetic)
-        calculate_score = score(operation_scores, "calculate")
-
-        # Arithmetic evidence must be materially above background similarity.
-        # This is deliberately conservative so "Привет", "Ненадо" and graph requests
-        # cannot inherit an old arithmetic task merely because one arithmetic prototype
-        # happened to be the top-ranked label.
-        arithmetic_confirmed = bool(
-            arithmetic in {"addition", "subtraction", "multiplication", "division"}
-            and (
-                best_arithmetic_score >= 0.52
-                or (operation == "calculate" and calculate_score >= 0.45)
-            )
-        )
-
         numeric_results = cls._extract_numeric_results(recent_dialogue_pairs)
         current_number_matches = re.findall(
             r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
@@ -811,8 +755,14 @@ class QuantumInterpretationEngine:
         history_required = False
         relation = "none"
 
-        if arithmetic_confirmed and not self_contained_numeric and numeric_results:
+        is_arithmetic = operation == "calculate" or arithmetic in {
+            "addition", "subtraction", "multiplication", "division"
+        }
+
+        if is_arithmetic and not self_contained_numeric and numeric_results:
             if explicit_count == 1:
+                # Single-number arithmetic follow-up: previous result is the left
+                # operand, current number is the right operand.
                 selected = [numeric_results[-1]]
                 operands = [str(selected[0]["result"]), str(current_number_matches[0])]
                 history_required = True
@@ -823,15 +773,13 @@ class QuantumInterpretationEngine:
                 history_required = True
                 relation = "latest_two_results"
 
+        # The task must be genuinely incomplete without history.
         required = bool(history_required and operands)
         confidence = 0.99 if required else 0.0
         return {
             "required": required,
             "operation": operation,
-            "arithmetic_operation": arithmetic if arithmetic_confirmed else "",
-            "arithmetic_score": best_arithmetic_score,
-            "calculate_score": calculate_score,
-            "arithmetic_confirmed": arithmetic_confirmed,
+            "arithmetic_operation": arithmetic,
             "self_contained_numeric": self_contained_numeric,
             "explicit_numeric_count": explicit_count,
             "available_numeric_results": len(numeric_results),
@@ -839,15 +787,13 @@ class QuantumInterpretationEngine:
             "resolved_operands": operands,
             "relation": relation,
             "confidence": confidence,
-            "source": "semantic_arithmetic_plus_structural_history_v2",
+            "source": "semantic_arithmetic_plus_structural_history",
         }
-
 
     def _dialogue_relation_engine(
         self,
         text: str,
         *,
-        measured_profile: dict[str, Any] | None = None,
         previous_assistant: str = "",
         previous_user: str = "",
         active_topic: str = "",
@@ -877,12 +823,7 @@ class QuantumInterpretationEngine:
             "active_goal": self.similarity(current, goal)["score"] if goal else 0.0,
             "previous_scene_topic": self.similarity(current, scene_topic)["score"] if scene_topic else 0.0,
         }
-        measured_profile = measured_profile if isinstance(measured_profile, dict) else {}
-        dialogue_scores = (
-            measured_profile.get("dialogue_scores")
-            if isinstance(measured_profile.get("dialogue_scores"), dict)
-            else self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
-        )
+        dialogue_scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
         dialogue_rank = sorted(
             dialogue_scores.items(),
             key=lambda item: float(item[1] or 0.0),
@@ -894,21 +835,15 @@ class QuantumInterpretationEngine:
         features = self._semantic_request_features(
             current,
             {
-                "representation": measured_profile.get("representation_scores")
-                    if measured_profile.get("representation_scores") is not None
-                    else self._family_scores(current, "representation", REPRESENTATION_HYPOTHESES),
-                "operation": measured_profile.get("operation_scores")
-                    if measured_profile.get("operation_scores") is not None
-                    else self._family_scores(current, "operation", OPERATION_HYPOTHESES),
-                "arithmetic_operation": measured_profile.get("arithmetic_operation_scores")
-                    if measured_profile.get("arithmetic_operation_scores") is not None
-                    else self._arithmetic_operation_scores(current),
-                "object": measured_profile.get("object_scores")
-                    if measured_profile.get("object_scores") is not None
-                    else self._family_scores(current, "object", OBJECT_HYPOTHESES),
-                "goal": measured_profile.get("goal_scores")
-                    if measured_profile.get("goal_scores") is not None
-                    else self._family_scores(current, "goal", GOAL_HYPOTHESES),
+                "representation": self._family_scores(current, "representation", REPRESENTATION_HYPOTHESES),
+                "operation": self._family_scores(current, "operation", OPERATION_HYPOTHESES),
+                # Arithmetic subtype is part of the same joint task measurement.
+                # Without carrying this family into the dialogue relation engine,
+                # history-dependent requests such as "отгними 2" lose the arithmetic
+                # signal before history reconstruction runs.
+                "arithmetic_operation": self._arithmetic_operation_scores(current),
+                "object": self._family_scores(current, "object", OBJECT_HYPOTHESES),
+                "goal": self._family_scores(current, "goal", GOAL_HYPOTHESES),
                 "dialogue": dialogue_scores,
             },
         )
@@ -1182,57 +1117,24 @@ class QuantumInterpretationEngine:
         left,right=self.normalize(text_a),self.normalize(text_b)
         if not left or not right:
             return {"score":0.0,"source":"unresolved_semantic_similarity","measured":False,"cached":False}
-        key=(left,right)
-        with self._lock:
-            cached=self._similarity_cache.get(key)
-        if cached is not None:
-            return {**cached, "cached": True}
-
-        result=None
         if self._semantic_encoder is not None:
             try:
                 v=self._semantic_encoder.encode([left,right],normalize_embeddings=True)
-                result={"score":max(0.0,min(1.0,float(v[0]@v[1]))),
+                return {"score":max(0.0,min(1.0,float(v[0]@v[1]))),
                         "source":"sentence_transformer","measured":True,"cached":False}
-            except Exception:
-                result=None
-        if result is None and self._vectorizer is not None and cosine_similarity is not None:
-            try:
-                v=self._vectorizer.transform([left,right])
-                result={"score":max(0.0,min(1.0,float(cosine_similarity(v[0],v[1])[0][0]))),
-                        "source":"quantum_matrix_tfidf","measured":True,"cached":False}
-            except Exception:
-                result=None
-        if result is None:
-            result={"score":0.0,"source":"unresolved_semantic_similarity","measured":False,"cached":False}
-
-        with self._lock:
-            self._similarity_cache[key]=result
-            if len(self._similarity_cache)>self._similarity_cache_limit:
-                self._similarity_cache.pop(next(iter(self._similarity_cache)))
-        return result
-
-    def similarities(self,text,candidates):
-        left=self.normalize(text)
-        normalized=[self.normalize(c) for c in candidates if self.normalize(c)]
-        if not left or not normalized:
-            return {}
-        unique=list(dict.fromkeys(normalized))
-        if self._semantic_encoder is not None:
-            try:
-                vectors=self._semantic_encoder.encode([left,*unique],normalize_embeddings=True)
-                scores=(vectors[1:] @ vectors[0]).tolist()
-                return {c:max(0.0,min(1.0,float(s))) for c,s in zip(unique,scores)}
             except Exception:
                 pass
         if self._vectorizer is not None and cosine_similarity is not None:
             try:
-                vectors=self._vectorizer.transform([left,*unique])
-                scores=cosine_similarity(vectors[0:1],vectors[1:]).ravel().tolist()
-                return {c:max(0.0,min(1.0,float(s))) for c,s in zip(unique,scores)}
+                v=self._vectorizer.transform([left,right])
+                return {"score":max(0.0,min(1.0,float(cosine_similarity(v[0],v[1])[0][0]))),
+                        "source":"quantum_matrix_tfidf","measured":True,"cached":False}
             except Exception:
                 pass
-        return {c:self._lexical_score(left,c) for c in unique}
+        return {"score":0.0,"source":"unresolved_semantic_similarity","measured":False,"cached":False}
+
+    def similarities(self,text,candidates):
+        return {self.normalize(c):self.similarity(text,c)["score"] for c in candidates if self.normalize(c)}
 
     def prewarm_static(self,candidates):
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
@@ -1446,7 +1348,6 @@ class QuantumInterpretationEngine:
                        active_goal=active_goal,active_topic=active_topic)
         vector=self._dialogue_relation_engine(
             text,
-            measured_profile=p,
             previous_assistant=previous_assistant,
             previous_user=previous_user,
             active_goal=active_goal,
