@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v41_history_dependency_passthrough_visible_context_v9"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v42_history_dependency_passthrough_visible_context_v10"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -2696,6 +2696,17 @@ def _make_request(
             _as_dict(semantic.get("quantum_interpretation_evidence"))
         )
     )
+    # History-task context belongs to the Interpretation packet.  _make_request
+    # must materialize it locally before any downstream field reads it; otherwise
+    # an otherwise valid request crashes with NameError before Provider release.
+    history_task_context = _as_dict(
+        _as_dict(semantic.get("quantum_interpretation_evidence")).get("history_task_context")
+        or canonical_dialogue.get("history_task_context")
+        or _as_dict(semantic.get("dialogue_vector")).get("history_task_context")
+        or _as_dict(semantic.get("context_resolution")).get("history_task_context")
+        or _as_dict(semantic.get("semantic_profile")).get("history_task_context")
+    )
+
     dialogue_contract = {
         "dialog_act": _s(
             canonical_dialogue.get("dialog_act")
@@ -5603,6 +5614,7 @@ def _validate_quantum_release(request: MachineRequest) -> None:
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
     print("🧬 APRIL PROCESSOR MODE: CASCADED_SINGLE_STREAM")
+    print("🧠 APRIL HISTORY TASK CONTEXT: MATERIALIZED_BEFORE_REQUEST")
     print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled (10 pairs)")
     print("🧠 APRIL HISTORY TASK BRIDGE: interpretation-owned")
     print("🧠 APRIL EXPECTED INTERPRETATION: quantum_interpretation_engine_v11_probabilistic_context_reconstruction_10turn_task_dependency_v3")
