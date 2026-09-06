@@ -171,6 +171,12 @@ def _quantum_snapshot(value: Any, _active: set[int] | None = None) -> Any:
 def _s(v: Any) -> str:
     return str(v or "").strip()
 
+def _dbg(*args: Any) -> None:
+    """Emit lightweight processor diagnostics without changing execution semantics."""
+    print(*args, flush=True)
+
+
+
 
 def _as_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
