@@ -806,6 +806,128 @@ def _extract_resolved_artifact_context(resolved_scene: dict[str, Any]) -> list[d
     return artifacts[:4]
 
 
+
+def _canonical_dialogue_pairs(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Read the processor-owned USER↔APRIL history without opening a second route."""
+    conversation = payload.get("conversation")
+    if not isinstance(conversation, dict):
+        return []
+
+    candidates = conversation.get("recent_dialogue_pairs")
+    if not isinstance(candidates, list):
+        candidates = conversation.get("recent_dialogue")
+    if not isinstance(candidates, list):
+        return []
+
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        user = _safe_text(
+            item.get("user")
+            or item.get("USER")
+            or item.get("content")
+            or item.get("question")
+        ).strip()
+        april = _safe_text(
+            item.get("april")
+            or item.get("APRIL")
+            or item.get("assistant")
+            or item.get("answer")
+        ).strip()
+        if not user and not april:
+            continue
+        key = (user, april)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"user": user, "april": april})
+    return result[-10:]
+
+
+def _pack_cascade_dialogue(
+    pairs: list[dict[str, str]],
+    *,
+    max_estimated_tokens: int = 120,
+) -> dict[str, Any]:
+    """
+    Build a deterministic compact dialogue ledger.
+
+    The ledger keeps the semantic order of the conversation while clipping each
+    turn enough to remain inside the fixed Provider input envelope. Newer pairs
+    retain more detail; older pairs remain as short anchors instead of vanishing.
+    No model call or semantic reclassification is performed here.
+    """
+    if not pairs:
+        return {}
+
+    compact: list[dict[str, str]] = []
+    # Allocate more detail to recent turns while retaining the complete pair
+    # sequence as a compact cascade.
+    newest_first = list(reversed(pairs))
+    for age, pair in enumerate(newest_first):
+        user_limit = 150 if age < 2 else 72
+        april_limit = 190 if age < 2 else 92
+
+        user = _safe_text(pair.get("user")).strip()
+        april = _safe_text(pair.get("april")).strip()
+        if len(user) > user_limit:
+            user = user[: max(1, user_limit - 1)].rstrip() + "…"
+        if len(april) > april_limit:
+            april = april[: max(1, april_limit - 1)].rstrip() + "…"
+
+        compact.append({
+            "turn": str(len(pairs) - age),
+            "user": user,
+            "april": april,
+        })
+
+        candidate = {
+            "cascade": "USER→APRIL",
+            "pairs": list(reversed(compact)),
+        }
+        rendered = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+        if _estimate_input_tokens(rendered) > max_estimated_tokens:
+            compact.pop()
+            break
+
+    if not compact:
+        latest = pairs[-1]
+        candidate = {
+            "cascade": "USER→APRIL",
+            "pairs": [{
+                "turn": str(len(pairs)),
+                "user": _safe_text(latest.get("user"))[:80],
+                "april": _safe_text(latest.get("april"))[:100],
+            }],
+        }
+    else:
+        candidate = {
+            "cascade": "USER→APRIL",
+            "pairs": list(reversed(compact)),
+        }
+
+    return candidate
+
+
+def _dialogue_memory_priority(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return immediate + rolling dialogue context in compact canonical form."""
+    pairs = _canonical_dialogue_pairs(payload)
+    if not pairs:
+        return {}, {}
+
+    latest = pairs[-1]
+    immediate = {
+        "user": _safe_text(latest.get("user"))[:120],
+        "april": _safe_text(latest.get("april"))[:150],
+    }
+    rolling = _pack_cascade_dialogue(pairs, max_estimated_tokens=120)
+    return immediate, rolling
+
+
 def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     """
     Semantic context selection. It does not key off magic words.
@@ -819,6 +941,14 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     fields: list[tuple[str, Any]] = []
     fields.append(("CURRENT_REQUEST", current))
 
+    # A compact immediate pair is always available as semantic evidence. This
+    # keeps short follow-ups such as "Ты уверен?" connected even if another
+    # layer conservatively labels the turn INDEPENDENT. The provider is instructed
+    # to use it only when the current request semantically depends on it.
+    immediate_dialogue, rolling_dialogue = _dialogue_memory_priority(payload)
+    if immediate_dialogue:
+        fields.append(("IMMEDIATE_DIALOGUE", immediate_dialogue))
+
     dialog_act = _safe_text(dialogue.get("dialog_act")).lower()
     continuation = bool(dialogue.get("continuation"))
     reference = dialog_act == "reference" or bool(dialogue.get("reply_to"))
@@ -826,6 +956,18 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     topic_relation = bool(dialogue.get("active_topic")) and (
         continuation or reference or same_goal
     )
+
+    # The full rolling cascade is admitted only when the processor has declared
+    # that prior dialogue is relevant. It is compacted before budget selection,
+    # so adding this field never expands the configured input-token ceiling.
+    if rolling_dialogue and (
+        continuation
+        or reference
+        or topic_relation
+        or bool(dialogue.get("context_dependency"))
+        or bool(payload.get("history_dependent_task"))
+    ):
+        fields.append(("DIALOGUE_MEMORY", rolling_dialogue))
 
     # The compact dialogue vector is a first-class semantic context field.
     # It explains what has already been established and what is being developed,
@@ -939,8 +1081,14 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
     memory_mode = _safe_text(memory.get("retrieval_mode") or "").lower()
     dynamic_memory = memory.get("dynamic_memory")
-    if memory_mode == "memory_query" and dynamic_memory:
-        fields.append(("MEMORY_RECALL", dynamic_memory))
+    if memory_mode == "memory_query":
+        # MEMORY_QUERY is itself an explicit authorization to carry the rolling
+        # dialogue cascade. The compact ledger remains bounded by the same input
+        # token envelope, so this does not raise the configured limit.
+        if rolling_dialogue and not any(label == "DIALOGUE_MEMORY" for label, _ in fields):
+            fields.append(("DIALOGUE_MEMORY", rolling_dialogue))
+        if dynamic_memory:
+            fields.append(("MEMORY_RECALL", dynamic_memory))
 
     # Visual context is sent only for an actual visual/artifact relation.
     visual = payload.get("visual_context")
@@ -976,10 +1124,34 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
     ]
 
     pieces = list(mandatory)
-    used = _estimate_input_tokens("\n".join(pieces))
     soft_limit = max(1, budget_tokens - 10)
 
-    for label, value in fields[1:]:
+    # Priority is semantic, not textual:
+    # current request > immediate dialogue > rolling cascade > resolved scene /
+    # artifact > dialogue vector > plan/competencies > optional diagnostics.
+    priority = {
+        "IMMEDIATE_DIALOGUE": 0,
+        "DIALOGUE_MEMORY": 1,
+        "RESOLVED_ARTIFACT_CONTEXT": 2,
+        "RESOLVED_SCENE_CONTEXT": 3,
+        "DIALOGUE_VECTOR": 4,
+        "PREVIOUS_APRIL_TURN": 5,
+        "RESOLVED_GOAL": 6,
+        "REQUESTED_OUTPUTS": 7,
+        "REQUIRED_ARTIFACTS": 8,
+        "COMPETENCIES": 9,
+        "VISUAL_SCHEMA": 10,
+        "MEMORY_RECALL": 11,
+        "VISUAL_CONTEXT": 12,
+        "RESPONSE_DECISION": 13,
+        "SEMANTIC_STATE": 14,
+    }
+
+    ordered_fields = sorted(
+        enumerate(fields[1:]),
+        key=lambda item: (priority.get(item[1][0], 50), item[0]),
+    )
+    for _, (label, value) in ordered_fields:
         candidate = render(label, value)
         candidate_total = _estimate_input_tokens("\n".join(pieces + [candidate]))
         if candidate_total <= soft_limit:
@@ -1007,46 +1179,76 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     user_message = build_openai_request(machine_request)
     user_text = user_message["content"][0]["text"]
 
-    # If the conservative estimator still exceeds the boundary, rebuild from
-    # the already-computed semantic fields. This is logical machine-packet
-    # compression, not character truncation: intent, goal, representation plan
-    # and output constraints survive while verbose transport context is removed.
+    # The hard 900-token input envelope applies to the final Provider packet.
+    # If the first semantic packing pass reaches the boundary, rebuild from the
+    # smallest canonical cascade ledger rather than dropping conversation history.
     if _estimate_input_tokens(user_text) > remaining:
         payload = machine_request_to_dict(machine_request)
         intent = payload.get("intent") or {}
-        constraints = payload.get("constraints") or {}
-        representation_plan = constraints.get("representation_plan") or {}
         current = _extract_request_text(payload)
         complexity = _derive_complexity(payload)
         output_tokens = _derive_output_tokens(payload)
+        immediate, rolling = _dialogue_memory_priority(payload)
 
-        compact_fields = [
+        pieces = [
             "APRIL CANONICAL REQUEST",
-            f"GOAL: {_safe_text(payload.get('goal')).strip()}",
-            f"INTENT_TYPE: {_safe_text(intent.get('type')).strip()}",
             f"REQUEST: {current}",
-            f"ASSISTANT_IDENTITY: {json.dumps({"name": APRIL_IDENTITY.get("name", "April"), "mode": APRIL_IDENTITY.get("identity_mode", "integrated")}, ensure_ascii=False, separators=(",", ":"))}",
-            f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
-            f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
-            f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
-            f"COMPLEXITY: {complexity}",
-            f"OUTPUT_CAP: {output_tokens}",
-            "Preserve the logical request; omit verbose transport context.",
-            "Return one complete logical answer as JSON.",
         ]
-        # Drop the least critical verbose fields until the whole machine packet
-        # fits the 900-token envelope. The current request itself is retained.
-        removable = {"REPRESENTATION_PLAN:", "REQUIRED_ARTIFACTS:", "INTENT_TYPE:"}
-        pieces = []
-        for piece in compact_fields:
-            trial = "\n".join(pieces + [piece])
-            if _estimate_input_tokens(trial) <= remaining:
-                pieces.append(piece)
-            elif piece.split(":", 1)[0] + ":" not in removable:
-                # Preserve the authoritative current request even when other
-                # machine metadata has to yield to the 900-token envelope.
-                if piece.startswith("REQUEST:"):
-                    pieces.append(piece)
+
+        # Keep the immediate pair first because it is the cheapest way to
+        # preserve short-turn conversational continuity.
+        if immediate:
+            candidate = "IMMEDIATE_DIALOGUE: " + json.dumps(
+                immediate, ensure_ascii=False, separators=(",", ":")
+            )
+            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
+                pieces.append(candidate)
+
+        # Then keep the compact rolling USER→APRIL cascade when there is room.
+        if rolling:
+            candidate = "DIALOGUE_MEMORY: " + json.dumps(
+                rolling, ensure_ascii=False, separators=(",", ":")
+            )
+            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
+                pieces.append(candidate)
+
+        # History-dependent arithmetic/semantic evidence is tiny and outranks
+        # optional presentation metadata.
+        history_task_context = {}
+        conversation = payload.get("conversation")
+        if isinstance(conversation, dict):
+            history_task_context = conversation.get("history_task_context")
+        if isinstance(history_task_context, dict) and history_task_context.get("required"):
+            compact_history = {
+                "required": True,
+                "operation": history_task_context.get("operation")
+                    or history_task_context.get("arithmetic_operation"),
+                "resolved_operands": list(history_task_context.get("resolved_operands") or [])[:8],
+                "available_numeric_results": history_task_context.get("available_numeric_results", 0),
+            }
+            candidate = "HISTORY_TASK: " + json.dumps(
+                compact_history, ensure_ascii=False, separators=(",", ":")
+            )
+            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
+                pieces.append(candidate)
+
+        for label, value in (
+            ("INTENT_TYPE", intent.get("type")),
+            ("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
+            ("COMPLEXITY", complexity),
+            ("OUTPUT_CAP", output_tokens),
+        ):
+            if value in (None, "", [], {}):
+                continue
+            candidate = f"{label}: " + (
+                json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+                if isinstance(value, (dict, list, tuple))
+                else _safe_text(value)
+            )
+            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
+                pieces.append(candidate)
+
+        pieces.append("Return one complete logical answer as JSON.")
         user_text = "\n".join(pieces)
         user_message = {
             "role": "user",
@@ -1058,7 +1260,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         "input_token_budget": INPUT_TOKEN_BUDGET,
         "estimated_input_tokens": estimated,
         "input_budget_enforced": estimated <= INPUT_TOKEN_BUDGET,
-        "context_strategy": "semantic_field_selection",
+        "context_strategy": "semantic_field_selection_with_cascade_memory",
         "current_request_truncation": False,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
