@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v12_probabilistic_context_reconstruction_10turn_arithmetic_followup_v5"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_probabilistic_context_reconstruction_10turn_arithmetic_followup_v9"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -318,6 +318,10 @@ class QuantumInterpretationEngine:
             ("domain", DOMAIN_HYPOTHESES),
             ("capability", CAPABILITY_HYPOTHESES),
             ("operation", OPERATION_HYPOTHESES),
+            # Arithmetic is a distinct semantic family.  Its hypotheses must
+            # have their own prototype namespace; reusing the generic operation
+            # namespace causes KeyError for labels such as ``addition``.
+            ("arithmetic_operation", ARITHMETIC_OPERATION_HYPOTHESES),
             ("object", OBJECT_HYPOTHESES),
             ("goal", GOAL_HYPOTHESES),
             ("visual_schema", VISUAL_SCHEMA_HYPOTHESES),
@@ -395,7 +399,16 @@ class QuantumInterpretationEngine:
             q = self._vectorizer.transform([text])
             result = {}
             for label in vocab:
-                idx = self._prototype_index[f"{family}:{label}"]
+                idx = self._prototype_index.get(f"{family}:{label}")
+                if idx is None:
+                    # Never allow a missing prototype namespace to crash the
+                    # interpretation engine.  Measure this hypothesis through
+                    # the same degraded lexical evidence used when no matrix is
+                    # available, then continue the joint inference.
+                    words = set(self._tokens(vocab[label]))
+                    tokens = set(self._tokens(text))
+                    result[label] = min(1.0, len(tokens & words) / max(2.0, len(words) * 0.2))
+                    continue
                 similarity_value = cosine_similarity(q, self._prototype_matrix[idx])
                 # cosine_similarity returns a 2-D array for sparse row/row input.
                 # Extract the single scalar explicitly instead of coercing the
@@ -437,11 +450,40 @@ class QuantumInterpretationEngine:
         return scores
 
     def _arithmetic_operation_scores(self, text: str) -> dict[str, float]:
-        """Measure arithmetic subtype with semantic + typo-tolerant token evidence."""
-        base = self._family_scores(text, "operation", ARITHMETIC_OPERATION_HYPOTHESES)
+        """Measure arithmetic subtype from semantic, structural, and typo-tolerant evidence.
+
+        Explicit mathematical operators are unambiguous structural evidence and
+        therefore outrank lexical similarity.  Natural-language variants and
+        small typing errors are additional evidence, not routing triggers.
+        """
+        base = self._family_scores(text, "arithmetic_operation", ARITHMETIC_OPERATION_HYPOTHESES)
         tokens = self._tokens(text)
+
+        # Structural operator measurement: +, -, *, /, ×, ÷ inside a numeric
+        # expression directly identifies the arithmetic family.
+        match = re.search(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?\s*([+*/×÷-])\s*[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+            text,
+        )
+        if match:
+            operator = match.group(1)
+            structural_label = {
+                "+": "addition",
+                "-": "subtraction",
+                "*": "multiplication",
+                "×": "multiplication",
+                "/": "division",
+                "÷": "division",
+            }.get(operator)
+            if structural_label:
+                base[structural_label] = max(
+                    float(base.get(structural_label, 0.0) or 0.0),
+                    0.995,
+                )
+
         if not tokens:
             return base
+
         from difflib import SequenceMatcher
         for label, description in ARITHMETIC_OPERATION_HYPOTHESES.items():
             desc_tokens = [t for t in self._tokens(description) if len(t) >= 3]
@@ -449,7 +491,6 @@ class QuantumInterpretationEngine:
             for token in tokens:
                 for candidate in desc_tokens:
                     ratio = SequenceMatcher(None, token, candidate).ratio()
-                    # Accept natural inflection/typo similarity as measured evidence.
                     if ratio > best_fuzzy:
                         best_fuzzy = ratio
             base[label] = max(float(base.get(label, 0.0) or 0.0), 0.78 * best_fuzzy)
@@ -796,6 +837,11 @@ class QuantumInterpretationEngine:
             {
                 "representation": self._family_scores(current, "representation", REPRESENTATION_HYPOTHESES),
                 "operation": self._family_scores(current, "operation", OPERATION_HYPOTHESES),
+                # Arithmetic subtype is part of the same joint task measurement.
+                # Without carrying this family into the dialogue relation engine,
+                # history-dependent requests such as "отгними 2" lose the arithmetic
+                # signal before history reconstruction runs.
+                "arithmetic_operation": self._arithmetic_operation_scores(current),
                 "object": self._family_scores(current, "object", OBJECT_HYPOTHESES),
                 "goal": self._family_scores(current, "goal", GOAL_HYPOTHESES),
                 "dialogue": dialogue_scores,
@@ -1525,6 +1571,27 @@ class QuantumInterpretationEngine:
             dialogue_packet.get("continuation")
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
         )
+        # Canonical mathematical presentation: a concrete arithmetic expression
+        # is itself a formula task even when the user asked in plain language.
+        # This keeps "Реши пример 4+4" from collapsing to a generic text block.
+        arithmetic_scores = p.get("arithmetic_operation_scores") or {}
+        best_arithmetic, best_arithmetic_score = (
+            max(arithmetic_scores.items(), key=lambda item: float(item[1] or 0.0))
+            if arithmetic_scores else ("none", 0.0)
+        )
+        explicit_numeric_expression = bool(re.search(
+            r"[-+]?\d+(?:[.,]\d+)?\s*[+*/-]\s*[-+]?\d+(?:[.,]\d+)?",
+            text,
+        ))
+        if (
+            best_arithmetic in {"addition", "subtraction", "multiplication", "division"}
+            and best_arithmetic_score >= 0.60
+            and explicit_numeric_expression
+            and production in {"text", "formula"}
+        ):
+            production = "formula"
+            source = "semantic_arithmetic_formula_resolution"
+            locked = True
         # A short continuation question does not acquire a structured renderer
         # merely because the representation matrix found a weak candidate.
         # Structured output must be supported by the current turn's operation,
