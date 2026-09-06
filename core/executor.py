@@ -2896,7 +2896,12 @@ def _make_request(
                 control.get("resolved_scene")
                 or dialogue_contract.get("resolved_scene")
             ),
-            "recent_dialogue_pairs": deepcopy(_as_dict(semantic.get("quantum_interpretation_evidence")).get("recent_dialogue_pairs") or evidence.get("recent_dialogue_pairs") or []),
+            "recent_dialogue_pairs": deepcopy(
+                _recent_canonical_dialogue_pairs(state, limit=10)
+                or _as_dict(semantic.get("quantum_interpretation_evidence")).get("recent_dialogue_pairs")
+                or evidence.get("recent_dialogue_pairs")
+                or []
+            ),
             "history_dependent_task": bool(history_task_context.get("required")),
             "history_task_context": _quantum_snapshot(history_task_context),
             "resolved_operands": list(history_task_context.get("resolved_operands") or []),
