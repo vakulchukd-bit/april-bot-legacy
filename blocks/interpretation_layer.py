@@ -66,6 +66,8 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v11_probabilistic_context_reconstruction_10turn_task_dependency_v3"
+print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
     "APRIL_SENTENCE_MODEL",
@@ -223,7 +225,7 @@ OPERATION_HYPOTHESES = {
     "compare": "сравнить сопоставить различия сходства",
     "modify": "изменить исправить обновить переделать дополнить",
     "retrieve": "найти получить ресурс источник ссылку документ",
-    "calculate": "посчитать вычислить рассчитать решить",
+    "calculate": "посчитать посчитай вычислить вычисли рассчитать рассчитай решить реши сложить сложи складывать складывай сумма суммировать арифметика добавить прибавить получить сумму; calculate compute add sum arithmetic",
     "analyze": "проанализировать разобрать исследовать проверить",
     "explain": "объяснить разъяснить пояснить растолковать как работает почему смысл принцип",
     "summarize": "суммировать сократить основные пункты",
@@ -404,6 +406,29 @@ class QuantumInterpretationEngine:
             result[label] = min(1.0, len(tokens & words)/max(2.0,len(words)*0.2))
         return result
 
+    def _operation_family_scores(self, text: str) -> dict[str, float]:
+        """Measure operation hypotheses using matrix similarity plus token evidence.
+
+        The token component is a measurement signal, not a hard-coded command trigger.
+        It prevents long prototype descriptions from suppressing a semantically obvious
+        operation such as arithmetic addition merely because unrelated words dominate
+        the character n-gram similarity.
+        """
+        scores = self._family_scores(text, "operation", OPERATION_HYPOTHESES)
+        query_tokens = set(self._tokens(text))
+        if not query_tokens:
+            return scores
+        for label, description in OPERATION_HYPOTHESES.items():
+            desc_tokens = set(self._tokens(description))
+            shared = len(query_tokens & desc_tokens)
+            overlap = shared / max(1, len(query_tokens))
+            # Blend a structural lexical measurement with the semantic matrix score.
+            scores[label] = max(
+                float(scores.get(label, 0.0) or 0.0),
+                min(1.0, 0.80 * overlap),
+            )
+        return scores
+
     @staticmethod
     def _semantic_request_features(
         text: str,
@@ -554,7 +579,7 @@ class QuantumInterpretationEngine:
         }
 
     @classmethod
-    def _recent_dialogue_pairs(cls, history: list, limit: int = 6) -> list[dict[str, str]]:
+    def _recent_dialogue_pairs(cls, history: list, limit: int = 10) -> list[dict[str, str]]:
         """Build a compact authentic USER→APRIL memory window for follow-ups."""
         pairs: list[dict[str, str]] = []
         pending_user = ""
@@ -582,6 +607,92 @@ class QuantumInterpretationEngine:
                 if user and answer:
                     pairs.append({"user": user[:700], "april": answer[:900]})
         return pairs[-max(1, int(limit)):]
+
+    @classmethod
+    def _extract_numeric_results(cls, recent_dialogue_pairs: list[dict[str, str]] | None) -> list[dict[str, Any]]:
+        """Extract concrete numeric results from recent authentic assistant answers.
+
+        This is structural evidence, not a topic/phrase trigger. Equality RHS values
+        are preferred; when an answer contains exactly one numeric value, that value
+        is accepted as the result. The original user/assistant pair is preserved so
+        downstream reasoning can cite the source without guessing.
+        """
+        results: list[dict[str, Any]] = []
+        for idx, pair in enumerate(recent_dialogue_pairs or [], start=1):
+            if not isinstance(pair, dict):
+                continue
+            answer = cls.normalize(pair.get("april") or pair.get("assistant"))
+            user = cls.normalize(pair.get("user"))
+            if not answer:
+                continue
+            values: list[str] = []
+            for match in re.finditer(
+                r"(?:=|равно|equals)\s*([-+]?\d+(?:[.,]\d+)?)\b",
+                answer,
+                flags=re.I,
+            ):
+                values.append(match.group(1))
+            if not values:
+                numbers = re.findall(r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])", answer)
+                if len(numbers) == 1:
+                    values.append(numbers[0])
+            if not values:
+                continue
+            results.append({
+                "history_index": idx,
+                "user": user,
+                "assistant": answer,
+                "result": values[-1],
+                "source": "authentic_dialogue_result",
+            })
+        # Keep chronological order and only concrete result-bearing pairs.
+        return results[-10:]
+
+    @classmethod
+    def _history_task_resolution(
+        cls,
+        current: str,
+        recent_dialogue_pairs: list[dict[str, str]] | None,
+        features: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Determine whether the current task is incomplete without recent results.
+
+        The decision is based on the semantic operation plus structural operand
+        availability. It is intentionally independent from any exact wording such
+        as "два последних" so paraphrases behave consistently.
+        """
+        operation = cls.normalize(features.get("semantic_best_operation")).lower()
+        numeric_results = cls._extract_numeric_results(recent_dialogue_pairs)
+        current_numbers = re.findall(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+            cls.normalize(current),
+        )
+        explicit_expression = bool(re.search(
+            r"[-+]?\d+(?:[.,]\d+)?\s*[+*/-]\s*[-+]?\d+(?:[.,]\d+)?",
+            cls.normalize(current),
+        ))
+        # A self-contained arithmetic task has its operands in the current request.
+        self_contained_numeric = bool(explicit_expression or len(current_numbers) >= 2)
+
+        requires_history = bool(
+            operation == "calculate"
+            and not self_contained_numeric
+            and len(numeric_results) >= 2
+        )
+        selected = numeric_results[-2:] if requires_history else []
+        operands = [x["result"] for x in selected]
+        confidence = 0.99 if requires_history else 0.0
+        return {
+            "required": requires_history,
+            "operation": operation,
+            "self_contained_numeric": self_contained_numeric,
+            "explicit_numeric_count": len(current_numbers),
+            "available_numeric_results": len(numeric_results),
+            "selected_results": selected,
+            "resolved_operands": operands,
+            "source": "semantic_operation_plus_structural_history",
+            "confidence": confidence,
+        }
 
     def _dialogue_relation_engine(
         self,
@@ -636,6 +747,9 @@ class QuantumInterpretationEngine:
             },
         )
 
+        recent_pairs = recent_dialogue_pairs if isinstance(recent_dialogue_pairs, list) else []
+        history_task = self._history_task_resolution(current, recent_pairs, features)
+
         followup_labels = {"continuation", "reformulation", "correction", "reference", "artifact_reference", "affirmation", "rejection"}
         dialogue_followup = max(
             (float(dialogue_scores.get(label, 0.0) or 0.0) for label in followup_labels),
@@ -655,7 +769,6 @@ class QuantumInterpretationEngine:
             float(dialogue_scores.get("correction", 0.0) or 0.0),
         )
 
-        recent_pairs = recent_dialogue_pairs if isinstance(recent_dialogue_pairs, list) else []
         history_available = bool(recent_pairs or prev_a or prev_u)
         topic_affinity = max(
             sims["active_topic"],
@@ -673,10 +786,13 @@ class QuantumInterpretationEngine:
         contextual_operation = str(features.get("semantic_best_operation") or "").lower() in {"calculate", "analyze", "explain", "list", "compare", "modify", "present"}
         semantic_followup_evidence = max(dialogue_followup, reference_evidence, memory_evidence, continuation_evidence)
         history_dependent_task = bool(
-            history_available
-            and not current_self_contained
-            and semantic_followup_evidence >= 0.08
-            and not explicit_numeric_expression
+            history_task.get("required")
+            or (
+                history_available
+                and not current_self_contained
+                and semantic_followup_evidence >= 0.08
+                and not explicit_numeric_expression
+            )
         )
         semantic_reference = bool(
             dialogue_best == "reference"
@@ -697,6 +813,13 @@ class QuantumInterpretationEngine:
             relation = "CONTINUE_TOPIC"
             topic_relation = "SAME_TOPIC"
         elif dialogue_best in {"continuation", "reformulation", "correction"} and not current_self_contained:
+            relation = "CONTINUE_TOPIC"
+            topic_relation = "SAME_TOPIC"
+        elif history_task.get("required"):
+            # The current operation is structurally incomplete without concrete
+            # results from recent authenticated dialogue. Preserve the task as a
+            # continuation even when the dialogue classifier ranked it as a generic
+            # question/new task.
             relation = "CONTINUE_TOPIC"
             topic_relation = "SAME_TOPIC"
         elif history_dependent_task and semantic_followup_evidence >= 0.08:
@@ -803,6 +926,7 @@ class QuantumInterpretationEngine:
         ]
 
         dependency_score = max(
+            0.98 if history_task.get("required") else 0.0,
             0.92 if semantic_reference else 0.0,
             0.88 if semantic_memory_query and not current_self_contained else 0.0,
             continuation_evidence if not current_self_contained else 0.0,
@@ -835,6 +959,7 @@ class QuantumInterpretationEngine:
             "current_request_complete": current_self_contained,
             "history_dependent_task": history_dependent_task,
             "history_window_size": len(recent_pairs),
+            "history_task_context": history_task,
             "continuation_score": float(max(0.0, min(1.0, continuation_score))),
             "independent_score": float(max(0.0, min(1.0, independent_score))),
             "relation_strength": float(max(0.0, min(1.0, relation_strength))),
@@ -941,7 +1066,7 @@ class QuantumInterpretationEngine:
             "representation":self._family_scores(focus_text or text,"representation",REPRESENTATION_HYPOTHESES),
             "domain":self._family_scores(text,"domain",DOMAIN_HYPOTHESES),
             "capability":self._family_scores(text,"capability",CAPABILITY_HYPOTHESES),
-            "operation":self._family_scores(text,"operation",OPERATION_HYPOTHESES),
+            "operation":self._operation_family_scores(text),
             "object":self._family_scores(focus_text or text,"object",OBJECT_HYPOTHESES),
             "goal":self._family_scores(text,"goal",GOAL_HYPOTHESES),
             "visual_schema":self._family_scores(text,"visual_schema",VISUAL_SCHEMA_HYPOTHESES),
@@ -1325,7 +1450,7 @@ class QuantumInterpretationEngine:
             active_goal=active_goal,
             active_topic=active_topic,
             previous_scene=previous_scene,
-            recent_dialogue_pairs=self._recent_dialogue_pairs(history, limit=6),
+            recent_dialogue_pairs=self._recent_dialogue_pairs(history, limit=10),
         )
         d=dialogue_packet["dialogue"]
         dialogue_vector=dialogue_packet.get("dialogue_relation", {})
@@ -1456,6 +1581,21 @@ class QuantumInterpretationEngine:
         )
         resolved_reference = reference_resolution.get("target") or ""
         resolved_request = text
+        history_task_context = dict(dialogue_vector.get("history_task_context") or {})
+        if history_task_context.get("required"):
+            selected_results = history_task_context.get("selected_results") or []
+            lines = []
+            for idx, item in enumerate(selected_results, start=1):
+                lines.append(
+                    f"Historical result {idx}: {item.get('result')} (from USER: {item.get('user')}; APRIL: {item.get('assistant')})"
+                )
+            resolved_request = (
+                f"{text}\n\n"
+                "The current calculation is history-dependent. The interpretation engine resolved the "
+                "required operands from the two most recent concrete numeric results in the authenticated "
+                "USER↔APRIL dialogue history. Use these values directly; do not ask the user to repeat them.\n"
+                + "\n".join(lines)
+            )
         if resolved_reference and (continuation or reference):
             # Structural discourse resolution: make the provider-facing request
             # explicit without hard-coded topic/entity rules.
@@ -1547,12 +1687,15 @@ class QuantumInterpretationEngine:
             "presentation_signals":presentation["signals"],
             "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
             "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
-            "dialogue_memory_window": self._recent_dialogue_pairs(history, limit=6),
+            "dialogue_memory_window": self._recent_dialogue_pairs(history, limit=10),
             "dialogue_vector": {
                 **dict(dialogue_vector or {}),
                 "reference_resolution": reference_resolution,
                 "resolved_reference": resolved_reference,
                 "resolved_request": resolved_request,
+                "history_dependent_task": bool(history_task_context.get("required")),
+                "history_window_size": len(self._recent_dialogue_pairs(history, limit=10)),
+                "history_task_context": history_task_context,
             },
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
@@ -1585,6 +1728,8 @@ class QuantumInterpretationEngine:
                     dialogue_vector.get("visual_scene_similarity", 0.0) or 0.0
                 ),
                 "resolved_request":resolved_request,
+                "history_dependent_task": bool(history_task_context.get("required")),
+                "history_task_context": history_task_context,
                 "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
                 "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
                 "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
@@ -1592,7 +1737,9 @@ class QuantumInterpretationEngine:
                 "canonical":True,"version":"quantum_dialogue_field_v4"
             },
             "context_resolution":{
-                "depends_on_previous_dialogue":bool(continuation or reference or memory),
+                "depends_on_previous_dialogue":bool(continuation or reference or memory or history_task_context.get("required")),
+                "history_dependent_task": bool(history_task_context.get("required")),
+                "history_task_context": history_task_context,
                 "resolved_scene":resolved_scene,"active_topic":active_topic,"active_goal":active_goal
             },
             "semantic_profile":{
@@ -1601,7 +1748,10 @@ class QuantumInterpretationEngine:
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
                 "goal_scores":p["goal_scores"],"context_scores":p["context_scores"],
-                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v3"
+                "semantic_task":semantic_task,
+                "history_dependent_task": bool(history_task_context.get("required")),
+                "history_task_context": history_task_context,
+                "engine":"quantum_interpretation_engine_v9"
             },
             "quantum_interpretation_field":{
                 "linguistic":self._linguistic(text),"dialogue":d,"representation":evidence,
