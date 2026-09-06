@@ -1,5 +1,6 @@
 """
 APRIL INTERPRETATION LAYER — QUANTUM MATRIX ENGINE
+Interpretation confidence model: v6
 
 Single semantic engine for:
 input -> matrix interpretation -> evidence packet -> QUANTUM_PROCESSOR
@@ -13,6 +14,7 @@ downstream imports can continue using the same single route.
 from __future__ import annotations
 
 import os
+import math
 import re
 import threading
 import time
@@ -66,6 +68,8 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v6_probabilistic_task_field"
+print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
     "APRIL_SENTENCE_MODEL",
@@ -593,6 +597,16 @@ class QuantumInterpretationEngine:
         )
         dialogue_best = dialogue_rank[0][0] if dialogue_rank else "statement"
         dialogue_best_score = float(dialogue_rank[0][1]) if dialogue_rank else 0.0
+        dialogue_distribution = self._softmax_distribution(dialogue_scores, temperature=0.10)
+        dialogue_entropy = self._normalized_entropy(dialogue_distribution)
+        dialogue_second = dialogue_rank[1][1] if len(dialogue_rank) > 1 else 0.0
+        dialogue_margin = max(0.0, dialogue_best_score - float(dialogue_second))
+        dialogue_confidence_estimate = max(
+            0.0,
+            min(1.0, 0.55 * dialogue_distribution.get(dialogue_best, 0.0)
+                + 0.25 * min(1.0, dialogue_margin * 3.0)
+                + 0.20 * (1.0 - dialogue_entropy))
+        )
 
         features = self._semantic_request_features(
             current,
@@ -816,6 +830,15 @@ class QuantumInterpretationEngine:
             "trigger_independent": False,
             "semantic_dialogue_label": dialogue_best,
             "semantic_dialogue_confidence": dialogue_best_score,
+            "dialogue_probability_proxy": round(float(dialogue_distribution.get(dialogue_best, 0.0)), 8),
+            "dialogue_margin": round(dialogue_margin, 8),
+            "dialogue_entropy": round(dialogue_entropy, 8),
+            "dialogue_confidence_estimate": round(dialogue_confidence_estimate, 8),
+            "dialogue_high_confidence_gate_99": bool(
+                dialogue_distribution.get(dialogue_best, 0.0) >= 0.99
+                and dialogue_margin >= 0.12
+                and dialogue_entropy <= 0.08
+            ),
             "visual_reference_candidate": bool(visual_reference_candidate),
             "visual_scene_similarity": float(max(0.0, min(1.0, scene_reference_similarity))),
             "artifact_reference_evidence": bool(visual_reference_candidate),
@@ -827,7 +850,7 @@ class QuantumInterpretationEngine:
         return {
             "language":None,"tokens":tokens,"lemmas":tokens,"pos":[],
             "dependencies":[],"entities":[],"sentences":[text] if text else [],
-            "source":"quantum_matrix","engine":"quantum_interpretation_engine_v3"
+            "source":"quantum_matrix","engine":"quantum_interpretation_engine_v6"
         }
 
     def similarity(self,text_a,text_b):
@@ -953,110 +976,406 @@ class QuantumInterpretationEngine:
             "identity_request":bool(dial and dial[0][0]=="identity" and dial[0][1]>=0.12),
             "fast_social":bool(dial and dial[0][0] in {"identity","greeting"} and dial[0][1]>=0.18),
         }
+        profile["task_inference"] = self._joint_task_inference(text, profile)
         with self._lock:
             self._cache[key]=profile
             if len(self._cache)>self._cache_limit: self._cache.pop(next(iter(self._cache)))
         return profile
 
-    def _resolve_production(self,text,profile,explicit):
-        # Canonical upstream interpretation may lock one representation.
-        explicit_values=[_clean_representation(x) for x in (explicit or [])]
-        explicit_values=[x for x in explicit_values if x]
-        if len(explicit_values)==1:
-            return explicit_values[0],"explicit_current_request",True
 
-        rep=dict(profile.get("representation_scores") or {})
-        obj=dict(profile.get("object_scores") or {})
-        op=dict(profile.get("operation_scores") or {})
-        goal=dict(profile.get("goal_scores") or {})
-        features=dict(profile.get("request_features") or {})
-
-        def rank(items):
-            return sorted(items.items(), key=lambda x: float(x[1]), reverse=True)
-
-        rep_rank=rank(rep); obj_rank=rank(obj); op_rank=rank(op); goal_rank=rank(goal)
-        best_rep=rep_rank[0][0] if rep_rank else "text"
-        best_rep_score=float(rep.get(best_rep,0.0))
-        second_rep_score=float(rep_rank[1][1]) if len(rep_rank)>1 else 0.0
-        best_obj=obj_rank[0][0] if obj_rank else "text"
-        best_obj_score=float(obj.get(best_obj,0.0))
-        best_op=op_rank[0][0] if op_rank else "answer"
-        best_op_score=float(op.get(best_op,0.0))
-        best_goal=goal_rank[0][0] if goal_rank else "understand"
-        best_goal_score=float(goal.get(best_goal,0.0))
-
-        # A textual/ASCII schema is an optional format advisory for the TEXT
-        # block. It must win only when the semantic matrix itself identifies a
-        # textual-schema intent and the request has not already been resolved
-        # to a different structured representation.
-        visual_schema_scores = dict(profile.get("visual_schema_scores") or {})
-        text_schema_score = float(visual_schema_scores.get("text_schema", 0.0) or 0.0)
-        diagram_score = float(visual_schema_scores.get("diagram", 0.0) or 0.0)
-        text_schema_format_intent = bool(
-            text_schema_score >= 0.15
-            and text_schema_score >= diagram_score + 0.04
-            and best_op in {"build", "present", "answer", "explain", "list", "modify"}
-        )
-        if (
-            text_schema_format_intent
-            and best_rep in {"text", "diagram"}
-            and best_obj in {"text", "diagram"}
-        ):
-            return "text", "semantic_text_schema_format_advisory", True
-
-        compatible_ops={
-            "graph":{"build","modify","present","calculate","analyze","list","explain"},
-            "diagram":{"build","modify","present","explain"},
-            "table":{"build","modify","present","compare","list","explain"},
-            "formula":{"build","modify","present","calculate","explain","answer"},
-            "link":{"retrieve","present","answer","explain","list"},
-            "code":{"build","modify","present","explain","list"},
-            "image":{"build","modify","present"},
-            "gallery":{"build","present"},
-            "file":{"retrieve","present"},
-            "audio":{"build","present"},
-            "video":{"build","present"},
-            "action":{"build","modify","present"},
-            "scene":{"build","modify","present"},
-            "memory":{"retrieve","answer","present"},
-            "visual_context":{"answer","analyze","explain"},
+    @staticmethod
+    def _structural_evidence(text: str) -> dict[str, bool]:
+        """Extract deterministic structural signals, not semantic keywords."""
+        source = str(text or "")
+        urls = re.findall(r"https?://[^\s)\]}>,]+", source, flags=re.I)
+        markdown_links = re.findall(r"\[[^\]]+\]\(https?://[^)]+\)", source, flags=re.I)
+        code_fences = bool(re.search(r"```[\s\S]*?```", source))
+        table_rows = len(re.findall(r"(?m)^\s*\|.+\|\s*$", source))
+        numeric_rows = sum(1 for _ in re.finditer(
+            r"(?m)^\s*(?:[-*•]\s*)?[A-Za-zА-Яа-яЁё0-9 _.-]{1,40}\s*(?:[—–:-])\s*-?\d+(?:[.,]\d+)?(?:\s*[%°A-Za-zА-Яа-яЁё$€£]{0,8})?\s*$",
+            source,
+        ))
+        return {
+            "link": bool(urls or markdown_links),
+            "code": code_fences,
+            "table": table_rows >= 2,
+            "numeric_rows": numeric_rows >= 2,
+            "formula": bool(re.search(
+                r"(?:\d+\s*[+\-*/×÷=]\s*\d+|[A-Za-z]\w*\s*[+\-*/=]\s*\d+|√|∛|∜|\\frac|\\sqrt)",
+                source,
+            )),
         }
-        aligned = best_op in compatible_ops.get(best_rep,set())
 
-        # Strong structural interpretation for a self-contained visual construction.
-        # This is intentionally a task-vector rule: operation + object/constraint
-        # evidence must agree before a structured representation is locked.
-        if features.get("visual_construction") and not self._negated_representation_labels(text):
-            return "diagram", "semantic_visual_construction", True
+    @staticmethod
+    def _softmax_distribution(values: dict[str, float], temperature: float = 0.12) -> dict[str, float]:
+        """Convert heterogeneous evidence into a stable probability-like distribution.
 
-        if best_rep != "text" and aligned:
-            rep_margin = best_rep_score - second_rep_score
-            object_agreement = best_obj == best_rep and best_obj_score >= 0.05
-            representation_clear = (
-                best_rep_score >= 0.10 and
-                (rep_margin >= 0.015 or best_rep_score >= 0.22)
+        This is a posterior *proxy*, not a statistically calibrated probability.
+        Temperature controls separation between competing hypotheses.
+        """
+        items = {str(k): float(v or 0.0) for k, v in (values or {}).items()}
+        if not items:
+            return {}
+        temperature = max(0.04, float(temperature))
+        max_value = max(items.values())
+        exps = {}
+        total = 0.0
+        for key, value in items.items():
+            z = max(-60.0, min(60.0, (value - max_value) / temperature))
+            weight = math.exp(z)
+            exps[key] = weight
+            total += weight
+        if total <= 0.0:
+            uniform = 1.0 / max(1, len(items))
+            return {key: uniform for key in items}
+        return {key: exps[key] / total for key in items}
+
+    @staticmethod
+    def _normalized_entropy(distribution: dict[str, float]) -> float:
+        """Return entropy in [0,1]; 0 means a single dominant hypothesis."""
+        if not distribution:
+            return 1.0
+        probs = [max(1e-12, float(v)) for v in distribution.values()]
+        total = sum(probs)
+        probs = [v / total for v in probs]
+        if len(probs) <= 1:
+            return 0.0
+        entropy = -sum(p * math.log(p) for p in probs)
+        return max(0.0, min(1.0, entropy / math.log(len(probs))))
+
+    @staticmethod
+    def _compatibility_score(operation: str, representation: str) -> float:
+        compatibility = {
+            "answer": {"text", "formula", "memory", "visual_context", "link"},
+            "build": {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "audio", "video", "action", "scene"},
+            "present": {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link", "file", "audio", "video", "action", "scene", "memory", "visual_context"},
+            "compare": {"text", "table", "graph", "diagram", "formula"},
+            "modify": {"text", "table", "graph", "diagram", "formula", "image", "code", "action", "scene"},
+            "retrieve": {"link", "file", "memory", "text"},
+            "calculate": {"formula", "graph", "table", "text"},
+            "analyze": {"text", "table", "graph", "diagram", "formula", "code", "memory", "visual_context"},
+            "explain": {"text", "formula", "table", "graph", "diagram", "code", "memory", "visual_context"},
+            "summarize": {"text", "table"},
+            "list": {"text", "table", "link", "gallery", "memory"},
+        }
+        allowed = compatibility.get(str(operation or "").strip().lower(), {"text"})
+        return 1.0 if str(representation or "").strip().lower() in allowed else 0.0
+
+    def _joint_task_inference(self, text: str, profile: dict[str, Any]) -> dict[str, Any]:
+        """Fuse representation, operation, object, goal and structure into one task field.
+
+        The engine follows four principles:
+          1) independent evidence families are measured separately;
+          2) compatible evidence is fused into a joint hypothesis;
+          3) entropy/margin expose ambiguity instead of hiding it;
+          4) a strict high-confidence gate is available for executable locking.
+
+        The names are inspired by probabilistic inference and state-space geometry.
+        They are engineering metaphors, not claims of physical relativity or a
+        formally calibrated Bayesian posterior.
+        """
+        profile = profile if isinstance(profile, dict) else {}
+        reps = {k: float(v or 0.0) for k, v in (profile.get("representation_scores") or {}).items()}
+        ops = {k: float(v or 0.0) for k, v in (profile.get("operation_scores") or {}).items()}
+        objs = {k: float(v or 0.0) for k, v in (profile.get("object_scores") or {}).items()}
+        goals = {k: float(v or 0.0) for k, v in (profile.get("goal_scores") or {}).items()}
+        domains = {k: float(v or 0.0) for k, v in (profile.get("domain_scores") or {}).items()}
+
+        op_dist = self._softmax_distribution(ops)
+        goal_dist = self._softmax_distribution(goals)
+        domain_dist = self._softmax_distribution(domains)
+
+        structural = self._structural_evidence(text)
+        syntax_evidence = {
+            "link": 1.0 if structural.get("link") else 0.0,
+            "code": 1.0 if structural.get("code") else 0.0,
+            "table": 1.0 if structural.get("table") else 0.0,
+            "formula": 1.0 if structural.get("formula") else 0.0,
+            "numeric_rows": 1.0 if structural.get("numeric_rows") else 0.0,
+            "text": 0.25,
+        }
+
+        joint_scores: dict[str, float] = {}
+        per_rep: dict[str, dict[str, Any]] = {}
+
+        top_operation = max(op_dist.items(), key=lambda item: item[1])[0] if op_dist else "answer"
+        top_goal = max(goal_dist.items(), key=lambda item: item[1])[0] if goal_dist else "understand"
+        top_domain = max(domain_dist.items(), key=lambda item: item[1])[0] if domain_dist else ""
+
+        for rep in REPRESENTATION_UNIVERSE:
+            rep_score = float(reps.get(rep, 0.0))
+            obj_score = float(objs.get(rep, 0.0))
+            operation_fit = sum(
+                float(weight) * self._compatibility_score(op, rep)
+                for op, weight in op_dist.items()
             )
-            if representation_clear and (object_agreement or best_rep_score >= 0.16):
-                return best_rep,"task_object_goal_resolution",True
+            focused_operation_fit = self._compatibility_score(top_operation, rep)
+            goal_signal = float(goal_dist.get(
+                "visualize" if rep in {"graph", "diagram", "image", "gallery"} else
+                "organize" if rep == "table" else
+                "obtain" if rep in {"link", "file"} else
+                "transform" if rep in {"code", "formula", "action"} else
+                "understand",
+                0.0,
+            ))
 
-            production_ops = {"build", "modify", "present"}
-            production_signal = max(float(op.get(name,0.0) or 0.0) for name in production_ops)
-            production_goal = max(float(goal.get(name,0.0) or 0.0) for name in {"visualize","transform","present","organize"})
-            object_alignment = best_obj == best_rep and best_obj_score >= 0.10
-            representation_dominance = best_rep_score >= max(0.09, float(rep.get("text",0.0) or 0.0) + 0.025)
-            structured_task = (
-                best_rep != "text"
-                and object_alignment
-                and representation_dominance
-                and (production_signal >= 0.055 or (aligned and best_op_score >= 0.08))
-                and (production_goal >= 0.035 or best_rep_score >= 0.14)
+            # Structural evidence is a hard factual constraint only where the
+            # input itself contains a matching structure. It does not invent
+            # a representation; it strengthens a compatible hypothesis.
+            syntax = float(syntax_evidence.get(rep, 0.0))
+            if rep == "formula" and syntax_evidence.get("formula"):
+                syntax += 0.75
+            if rep in {"graph", "table"} and syntax_evidence.get("numeric_rows"):
+                syntax += 0.35
+            if rep == "table" and syntax_evidence.get("table"):
+                syntax += 0.75
+            if rep == "code" and syntax_evidence.get("code"):
+                syntax += 0.85
+            if rep == "link" and syntax_evidence.get("link"):
+                syntax += 0.85
+            syntax = min(1.0, syntax)
+
+            goal_rep_alignment = 1.0 if (
+                (rep in {"graph", "diagram", "image", "gallery"} and top_goal in {"visualize", "present", "transform"})
+                or (rep == "table" and top_goal in {"organize", "compare", "present"})
+                or (rep in {"link", "file"} and top_goal == "obtain")
+                or (rep in {"code", "formula", "action"} and top_goal == "transform")
+                or (rep == "text" and top_goal == "understand")
+            ) else 0.0
+
+            # The task-space distance is represented by disagreement between
+            # independent dimensions. High agreement increases the joint score.
+            agreement = (
+                0.40 * rep_score
+                + 0.25 * obj_score
+                + 0.20 * focused_operation_fit
+                + 0.10 * goal_rep_alignment
+                + 0.05 * syntax
             )
-            if structured_task:
-                return best_rep,"semantic_task_vector_resolution",True
-            if aligned and best_rep_score >= 0.10 and best_op_score >= 0.08:
-                return best_rep,"operation_representation_resolution",True
 
-        return "text","unresolved",False
+            raw = (
+                0.34 * rep_score
+                + 0.22 * obj_score
+                + 0.18 * operation_fit
+                + 0.08 * focused_operation_fit
+                + 0.08 * goal_signal
+                + 0.04 * goal_rep_alignment
+                + 0.03 * syntax
+                + 0.03 * max(domain_dist.values(), default=0.0)
+            )
+
+            # Numeric structure has special evidentiary value: calculations and
+            # formulas are distinguished from plain numeric prose by operators
+            # or multi-row value structure, not by topic words.
+            if syntax_evidence.get("formula") and rep == "formula":
+                raw += 0.12
+            if syntax_evidence.get("numeric_rows") and rep in {"graph", "table"}:
+                raw += 0.07
+
+            joint_scores[rep] = max(0.0, min(1.0, raw))
+            per_rep[rep] = {
+                "representation": rep,
+                "representation_evidence": round(rep_score, 6),
+                "object_evidence": round(obj_score, 6),
+                "operation_compatibility": round(operation_fit, 6),
+                "focused_operation_compatibility": round(focused_operation_fit, 6),
+                "goal_alignment": round(goal_signal, 6),
+                "goal_rep_alignment": round(goal_rep_alignment, 6),
+                "structural_evidence": round(syntax, 6),
+                "cross_family_agreement": round(agreement, 6),
+                "joint_score": round(joint_scores[rep], 6),
+            }
+            per_rep[rep] = {
+                "representation": rep,
+                "representation_evidence": round(rep_score, 6),
+                "object_evidence": round(obj_score, 6),
+                "operation_compatibility": round(operation_fit, 6),
+                "goal_alignment": round(goal_signal, 6),
+                "structural_evidence": round(syntax, 6),
+                "joint_score": round(joint_scores[rep], 6),
+            }
+
+        rep_posterior = self._softmax_distribution(joint_scores, temperature=0.10)
+        rep_rank = sorted(rep_posterior.items(), key=lambda item: item[1], reverse=True)
+        best_rep, best_prob = rep_rank[0] if rep_rank else ("text", 1.0)
+        second_prob = rep_rank[1][1] if len(rep_rank) > 1 else 0.0
+        rep_margin = max(0.0, float(best_prob - second_prob))
+        rep_entropy = self._normalized_entropy(rep_posterior)
+
+        op_joint: dict[str, float] = {}
+        for op, op_score in ops.items():
+            rep_support = sum(
+                float(prob) * self._compatibility_score(op, rep)
+                for rep, prob in rep_posterior.items()
+            )
+            object_support = float(objs.get(best_rep, 0.0))
+            goal_support = float(goal_dist.get(op, 0.0))
+            op_joint[op] = max(
+                0.0,
+                min(1.0, 0.50 * float(op_score) + 0.30 * rep_support + 0.20 * max(object_support, goal_support))
+            )
+        op_posterior = self._softmax_distribution(op_joint, temperature=0.10)
+        op_rank = sorted(op_posterior.items(), key=lambda item: item[1], reverse=True)
+        best_op, best_op_prob = op_rank[0] if op_rank else ("answer", 1.0)
+        second_op_prob = op_rank[1][1] if len(op_rank) > 1 else 0.0
+        op_margin = max(0.0, float(best_op_prob - second_op_prob))
+        op_entropy = self._normalized_entropy(op_posterior)
+
+        coherence = (
+            0.46 * float(best_prob)
+            + 0.24 * max(0.0, 1.0 - rep_entropy)
+            + 0.20 * float(op_rank[0][1] if op_rank else 1.0)
+            + 0.10 * max(0.0, 1.0 - op_entropy)
+        )
+        coherence = max(0.0, min(1.0, coherence))
+
+        # Confidence is deliberately stricter than the raw posterior proxy.
+        # A 0.99 gate requires dominance, low entropy and cross-family agreement.
+        best_detail = per_rep.get(best_rep, {})
+        evidence_agreement = float(best_detail.get("cross_family_agreement", 0.0) or 0.0)
+        confidence_estimate = max(
+            0.0,
+            min(
+                1.0,
+                0.35 * float(best_prob)
+                + 0.20 * min(1.0, rep_margin * 5.0)
+                + 0.20 * coherence
+                + 0.10 * float(best_op_prob)
+                + 0.15 * evidence_agreement,
+            ),
+        )
+        high_confidence = bool(
+            best_prob >= 0.99
+            and best_op_prob >= 0.97
+            and rep_margin >= 0.20
+            and coherence >= 0.985
+            and rep_entropy <= 0.08
+            and op_entropy <= 0.12
+        )
+
+        return {
+            "engine": "quantum_joint_task_inference_v2",
+            "decision_owner": DECISION_OWNER,
+            "method": "multi_evidence_posterior_proxy",
+            "principles": {
+                "probabilistic_fusion": True,
+                "contextual_state_space": True,
+                "number_structure": True,
+                "entropy_measurement": True,
+                "cross_family_coherence": True,
+                "hardcoded_keyword_routing": False,
+                "physical_theory_claim": False,
+            },
+            "representation_posterior": {
+                key: round(float(value), 8) for key, value in rep_posterior.items()
+            },
+            "operation_posterior": {
+                key: round(float(value), 8) for key, value in op_posterior.items()
+            },
+            "representation_details": per_rep,
+            "best_representation": best_rep,
+            "best_representation_probability_proxy": round(float(best_prob), 8),
+            "second_representation_probability_proxy": round(float(second_prob), 8),
+            "representation_margin": round(rep_margin, 8),
+            "representation_entropy": round(rep_entropy, 8),
+            "best_operation": best_op,
+            "best_operation_probability_proxy": round(float(best_op_prob), 8),
+            "second_operation_probability_proxy": round(float(second_op_prob), 8),
+            "operation_margin": round(op_margin, 8),
+            "operation_entropy": round(op_entropy, 8),
+            "coherence": round(coherence, 8),
+            "confidence_estimate": round(confidence_estimate, 8),
+            "high_confidence_gate_99": high_confidence,
+            "confidence_semantics": (
+                "strict_release_gate_requires_cross_family_convergence"
+                if high_confidence else
+                "best_hypothesis_only_until_statistically_calibrated"
+            ),
+            "ambiguity": bool(rep_entropy > 0.30 or rep_margin < 0.10 or coherence < 0.75),
+            "requires_clarification": bool(
+                not high_confidence
+                and confidence_estimate < 0.78
+                and rep_entropy > 0.45
+            ),
+            "structural_evidence": structural,
+            "temperature": {
+                "representation": 0.10,
+                "operation": 0.10,
+            },
+            "selected_task": {
+                "representation": best_rep,
+                "operation": best_op,
+                "goal": max(goal_dist.items(), key=lambda item: item[1])[0] if goal_dist else "understand",
+                "confidence_estimate": round(confidence_estimate, 8),
+                "high_confidence_gate_99": high_confidence,
+            },
+        }
+
+
+    def _resolve_production(self, text, profile, explicit):
+        """Resolve the best production representation from fused evidence.
+
+        The 99% gate is reserved for a truly convergent lock. Clear but not
+        fully calibrated cases still propagate their best semantic hypothesis
+        as evidence so downstream dialogue/processor logic can preserve it.
+        """
+        explicit_values = [_clean_representation(x) for x in (explicit or []) if _clean_representation(x)]
+        explicit_values = list(dict.fromkeys(explicit_values))
+        if len(explicit_values) == 1:
+            return explicit_values[0], "explicit_current_request", True
+
+        task = profile.get("task_inference")
+        if not isinstance(task, dict):
+            task = self._joint_task_inference(text, profile)
+
+        best_rep = str(task.get("best_representation") or "text").strip().lower()
+        if best_rep not in REPRESENTATION_UNIVERSE:
+            best_rep = "text"
+
+        rep_scores = {
+            k: float(v or 0.0) for k, v in (profile.get("representation_scores") or {}).items()
+        }
+        obj_scores = {
+            k: float(v or 0.0) for k, v in (profile.get("object_scores") or {}).items()
+        }
+        op_scores = {
+            k: float(v or 0.0) for k, v in (profile.get("operation_scores") or {}).items()
+        }
+        op = max(op_scores.items(), key=lambda item: item[1])[0] if op_scores else "answer"
+        rep_proxy = float((task.get("representation_posterior") or {}).get(best_rep, 0.0) or 0.0)
+        raw_rep = float(rep_scores.get(best_rep, 0.0) or 0.0)
+        raw_obj = float(obj_scores.get(best_rep, 0.0) or 0.0)
+        structural = task.get("structural_evidence") if isinstance(task.get("structural_evidence"), dict) else {}
+        structural_match = bool(
+            (best_rep == "formula" and structural.get("formula"))
+            or (best_rep in {"graph", "table"} and (structural.get("numeric_rows") or structural.get("table")))
+            or (best_rep == "code" and structural.get("code"))
+            or (best_rep == "link" and structural.get("link"))
+        )
+        confidence = float(task.get("confidence_estimate", 0.0) or 0.0)
+        high_gate = bool(task.get("high_confidence_gate_99"))
+
+        structured_supported = bool(
+            best_rep != "text"
+            and (
+                raw_obj >= 0.08
+                or raw_rep >= 0.10
+                or structural_match
+                or rep_proxy >= 0.20
+            )
+        )
+        if high_gate:
+            return best_rep, "quantum_joint_task_inference_high_confidence", True
+        if structured_supported:
+            return best_rep, "quantum_joint_task_inference", False
+
+        # A strong operation against a weak representation still needs a human
+        # readable response; do not manufacture a specialized renderer from
+        # insufficient evidence.
+        if best_rep == "text" and confidence >= 0.55 and op in {"answer", "explain", "summarize"}:
+            return "text", "quantum_joint_task_inference_text", False
+
+        return "text", "quantum_joint_task_inference_uncertain", False
 
     def dialogue(self,text,previous_assistant="",previous_user="",active_goal="",active_topic="",previous_scene=None):
         p=self.measure(text,previous_assistant=previous_assistant,previous_user=previous_user,
@@ -1293,13 +1612,26 @@ class QuantumInterpretationEngine:
             obj = str(p.get("best_object") or "").lower()
             goal = str(p.get("best_goal") or "").lower()
             obj_score = float(p.get("object_scores", {}).get(production, 0.0) or 0.0)
+            task_inference = p.get("task_inference") if isinstance(p.get("task_inference"), dict) else {}
+            task_structural = task_inference.get("structural_evidence") if isinstance(task_inference.get("structural_evidence"), dict) else {}
+            structural_support = bool(
+                (production == "formula" and task_structural.get("formula"))
+                or (production in {"graph", "table"} and (task_structural.get("numeric_rows") or task_structural.get("table")))
+                or (production == "code" and task_structural.get("code"))
+                or (production == "link" and task_structural.get("link"))
+            )
             current_visual_intent = (
                 locked
                 or (
-                    op in {"build", "modify", "present", "explain"}
-                    and obj == production
-                    and obj_score >= 0.10
-                    and goal in {"visualize", "transform", "present", "organize"}
+                    op in {"build", "modify", "present", "explain", "calculate", "compare", "retrieve", "list"}
+                    and (
+                        (obj == production and obj_score >= 0.08)
+                        or structural_support
+                    )
+                    and (
+                        goal in {"visualize", "transform", "present", "organize", "understand", "obtain", "decide"}
+                        or float(task_inference.get("confidence_estimate", 0.0) or 0.0) >= 0.25
+                    )
                 )
             )
             # `locked` means the representation was already resolved from the
@@ -1435,6 +1767,13 @@ class QuantumInterpretationEngine:
         semantic_task={
             "operation":p["best_operation"],"object":p["best_object"],"goal":p["best_goal"],
             "representation":production,
+            "task_inference": p.get("task_inference", {}),
+            "interpretation_confidence_estimate": float(
+                p.get("task_inference", {}).get("confidence_estimate", 0.0) or 0.0
+            ),
+            "high_confidence_gate_99": bool(
+                p.get("task_inference", {}).get("high_confidence_gate_99")
+            ),
             "visual_schema":visual_schema,
             "visual_schema_confidence":visual_schema_confidence,
             "ascii_schema_advisory": ascii_schema_advisory,
@@ -1549,14 +1888,14 @@ class QuantumInterpretationEngine:
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
                 "goal_scores":p["goal_scores"],"context_scores":p["context_scores"],
-                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v3"
+                "semantic_task":semantic_task,"engine":"quantum_interpretation_engine_v6"
             },
             "quantum_interpretation_field":{
                 "linguistic":self._linguistic(text),"dialogue":d,"representation":evidence,
                 "domain":[{"domain":k,"score":float(v)} for k,v in p["domain_scores"].items()],
                 "context_vectors":p["context_scores"],"semantic_task":semantic_task,
                 "production":presentation,"profile":p,"scene_matrix":matrix,
-                "decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"quantum_interpretation_engine_v3"
+                "decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"quantum_interpretation_engine_v6"
             },
             "quantum_matrix":matrix,"matrix_scene":matrix["best_scene"],
             "matrix_confidence":matrix["best_score"],"decision_owner":DECISION_OWNER,
@@ -1591,8 +1930,21 @@ class QuantumInterpretationEngine:
                            else "analysis" if p["capability_scores"].get("exploration",0.0)>=0.60 else None,
             "artifact_contract":{"contract":"scene_artifact","transport":TRANSPORT_NAME,
                                 "scene_type":production,"representation":[production],"decision_owner":DECISION_OWNER},
+            "task_inference": p.get("task_inference", {}),
+            "intent_action": {
+                "operation": p.get("task_inference", {}).get("best_operation", p.get("best_operation")),
+                "representation": p.get("task_inference", {}).get("best_representation", production),
+                "confidence_estimate": float(p.get("task_inference", {}).get("confidence_estimate", 0.0) or 0.0),
+                "high_confidence_gate_99": bool(p.get("task_inference", {}).get("high_confidence_gate_99")),
+                "requires_clarification": bool(p.get("task_inference", {}).get("requires_clarification")),
+                "decision_owner": DECISION_OWNER,
+            },
             "semantic_engine_diagnostics":{
-                "engine":"quantum_interpretation_engine_v4","domain_representation_gates":False,
+                "engine":"quantum_interpretation_engine_v5_probability_fusion",
+                "joint_task_inference": True,
+                "confidence_gate_99": True,
+                "entropy_based_ambiguity": True,
+                "domain_representation_gates":False,
                 "capability_representation_gates":False,"lexical_routing":False,
                 "token_overlap_context":False,"production_resolution":"task_object_goal",
                 "single_route":True,"decision_owner":DECISION_OWNER
@@ -1681,6 +2033,16 @@ class QuantumInterpretationEngine:
         rep_scores = dict(profile.get("representation_scores") or {})
         obj_scores = dict(profile.get("object_scores") or {})
         op_scores = dict(profile.get("operation_scores") or {})
+        task_inference = profile.get("task_inference") if isinstance(profile.get("task_inference"), dict) else {}
+        posterior_scores = dict(task_inference.get("representation_posterior") or {})
+        if posterior_scores:
+            # Presentation is downstream of interpretation: use the fused task
+            # posterior as the primary ordering signal while retaining raw evidence
+            # for diagnostics.
+            rep_scores = {
+                label: max(float(rep_scores.get(label, 0.0) or 0.0), float(posterior_scores.get(label, 0.0) or 0.0))
+                for label in set(rep_scores) | set(posterior_scores)
+            }
         explicit_values = list(dict.fromkeys(
             _clean_representation(x) for x in (explicit or []) if _clean_representation(x)
         ))
