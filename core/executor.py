@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v38_frozen_interpretation_dialogue_stream_visual_context_v6"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v39_canonical_dialogue_memory_visible_text_v7"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1385,6 +1385,47 @@ def _scene_continuity_engine(
 
 
 
+def _recent_canonical_dialogue_pairs(state: dict, limit: int = 6) -> list[dict[str, str]]:
+    """Return recent authentic USER→APRIL pairs as dialogue evidence.
+
+    The current turn remains authoritative. This window exists so a request
+    referring to multiple previous answers can reach the Provider with the
+    actual preceding values instead of only the immediately previous pair.
+    """
+    if not isinstance(state, dict):
+        return []
+    dialog = state.get("dialog", [])
+    if not isinstance(dialog, list):
+        return []
+    pairs: list[dict[str, str]] = []
+    pending_user = ""
+    for item in dialog:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if metadata.get("internal_context") or metadata.get("internal_turn"):
+            continue
+        role = _s(item.get("role")).lower()
+        if role in {"user", "human"}:
+            pending_user = _s(item.get("content") or item.get("text") or item.get("answer"))
+            continue
+        if role in {"assistant", "april", "bot"}:
+            answer = _s(item.get("content") or item.get("answer") or item.get("text") or item.get("summary"))
+            if pending_user and answer:
+                pairs.append({"user": pending_user[:700], "april": answer[:900]})
+            pending_user = ""
+            continue
+        # Some persisted turns use {user:{...}, april:{...}}.
+        user_obj = item.get("user") if isinstance(item.get("user"), dict) else None
+        april_obj = item.get("april") if isinstance(item.get("april"), dict) else None
+        if user_obj and april_obj:
+            user = _s(user_obj.get("text") or user_obj.get("content") or user_obj.get("answer"))
+            answer = _s(april_obj.get("answer") or april_obj.get("content") or april_obj.get("text"))
+            if user and answer:
+                pairs.append({"user": user[:700], "april": answer[:900]})
+    return pairs[-max(1, int(limit)):]
+
+
 def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
     """Return the newest adjacent USER→APRIL pair in the current conversation.
 
@@ -1686,6 +1727,8 @@ def _dialogue_evidence(
 
     # Persist the selected immediate anchor for diagnostics; historical memory
     # remains evidence only.
+    recent_pairs = _recent_canonical_dialogue_pairs(state, limit=6)
+
     state["_quantum_context_anchor"] = {
         "previous_user": previous_user,
         "previous_april": previous_april,
@@ -1762,6 +1805,7 @@ def _dialogue_evidence(
         "previous_user": previous_user,
         "previous_april": previous_april,
         "last_turn_id": last_turn_id,
+        "recent_dialogue_pairs": recent_pairs,
         "active_topic": active_topic,
         "active_goal": active_goal,
         "context_dependency": context_dependency,
@@ -2813,6 +2857,7 @@ def _make_request(
                 control.get("resolved_scene")
                 or dialogue_contract.get("resolved_scene")
             ),
+            "recent_dialogue_pairs": deepcopy(_as_dict(semantic.get("quantum_interpretation_evidence")).get("recent_dialogue_pairs") or evidence.get("recent_dialogue_pairs") or []),
             **(
                 {
                     "active_topic": _clip(_s(control.get("active_topic")), 300),
@@ -3067,6 +3112,41 @@ def _decode_json_envelope(value: Any, *, max_depth: int = 5) -> Any:
     return current
 
 
+def _sanitize_visible_text(value: Any) -> str:
+    """Normalize Provider text for Web without changing its meaning.
+
+    Transport escapes such as literal ``\\n``/``\\r``/``\\t`` are decoded
+    before the human text reaches SceneContract. Duplicate adjacent lines are
+    collapsed, while ordinary multiline prose is preserved.
+    """
+    text = _s(value)
+    if not text:
+        return ""
+    # Provider JSON sometimes survives one extra serialization layer. At this
+    # boundary these are transport escapes, not visible characters.
+    text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n").replace("\\t", "\t")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    lines = text.splitlines()
+    compact: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if compact and compact[-1] != "":
+                compact.append("")
+            continue
+        # Do not duplicate an identical visible line produced twice by nested
+        # Provider formatting. This is transport cleanup, not content rewriting.
+        if compact and compact[-1].strip() == stripped:
+            continue
+        compact.append(stripped)
+    while compact and compact[-1] == "":
+        compact.pop()
+    while compact and compact[0] == "":
+        compact.pop(0)
+    return "\n".join(compact).strip()
+
+
 def _clean_text_value(value: Any) -> str:
     """Return only the final human-readable text from a Provider field."""
     current = _decode_json_envelope(value)
@@ -3076,14 +3156,59 @@ def _clean_text_value(value: Any) -> str:
             if current.get(key) not in (None, "", [], {}):
                 nested = _decode_json_envelope(current.get(key))
                 if isinstance(nested, str):
-                    return nested.strip()
+                    return _sanitize_visible_text(nested)
                 if isinstance(nested, dict):
                     resolved = _clean_text_value(nested)
                     if resolved:
                         return resolved
         return ""
 
-    return _s(current)
+    return _sanitize_visible_text(current)
+
+
+def _dedupe_visible_answer_against_blocks(answer: str, blocks: list[dict]) -> str:
+    """Remove only duplicate standalone structured lines from a multiline answer.
+
+    A specialized Formula/Graph/etc. block already renders its payload. If the
+    Provider also repeats that exact payload as a second line in the human text,
+    keep the explanatory text but remove the redundant standalone copy. A sole
+    formula answer is preserved.
+    """
+    text = _sanitize_visible_text(answer)
+    if not text or not isinstance(blocks, list):
+        return text
+    if "\n" not in text:
+        return text
+    structured_values: set[str] = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+        if kind not in {"formula", "graph", "table", "diagram", "code", "link"}:
+            continue
+        payload = block.get("payload")
+        if isinstance(payload, dict):
+            for key in ("expression", "formula", "value", "content", "text", "title"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    structured_values.add(_s(value))
+        elif isinstance(payload, str) and payload.strip():
+            structured_values.add(_s(payload))
+    if not structured_values:
+        return text
+    normalized_values = {re.sub(r"\s+", " ", value).strip(" .") for value in structured_values}
+    lines = text.splitlines()
+    if len([line for line in lines if line.strip()]) <= 1:
+        return text
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        normalized = re.sub(r"\s+", " ", stripped).strip(" .")
+        if normalized in normalized_values and len(stripped) <= 240:
+            continue
+        kept.append(line)
+    result = "\n".join(kept).strip()
+    return result or text
 
 
 def _clean_render_blocks(blocks: Any) -> list[dict]:
@@ -4998,8 +5123,10 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     fields = MachineResponse.__dataclass_fields__
     allowed = {k: v for k, v in payload.items() if k in fields}
     answer = _clean_text_value(payload.get("answer") or payload.get("content") or payload.get("response"))
+    answer = _sanitize_visible_text(answer)
     blocks = _materialize_provider_blocks(payload)
     blocks = _promote_embedded_structured_blocks(blocks)
+    answer = _dedupe_visible_answer_against_blocks(answer, blocks)
     if answer and not any(isinstance(b, dict) and _s(b.get("type") or b.get("artifact_type")).lower() in {"text", "markdown"} for b in blocks):
         blocks.insert(0, {"type": "text", "content": answer, "text": answer, "renderer": "TextBlock", "viewer": "TextBlock", "scene_contract": True})
     blocks = _finalize_quantum_visible_stream(
@@ -5192,7 +5319,7 @@ def _canonicalize(
     decoded_answer = _decode_json_envelope(answer)
     if isinstance(decoded_answer, dict):
         answer = _clean_text_value(decoded_answer)
-    answer = _s(answer)
+    answer = _sanitize_visible_text(answer)
     if not answer:
         raise RuntimeError("Quantum canonicalization blocked: decoded answer is empty")
 
@@ -5429,6 +5556,7 @@ def _validate_quantum_release(request: MachineRequest) -> None:
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
     print("🧬 APRIL PROCESSOR MODE: CASCADED_SINGLE_STREAM")
+    print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled")
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
@@ -5480,6 +5608,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     interpretation["quantum_structured_payload_boundary"] = _quantum_snapshot(structured_boundary)
     canonical_dialogue = _freeze_interpretation_dialogue(interpretation)
     interpretation["canonical_dialogue_frozen"] = _quantum_snapshot(canonical_dialogue)
+    # Detach the Interpretation packet before any downstream engine sees it.
+    # Semantic/Cognition/Memory receive evidence, never the live authoritative
+    # object, so no downstream room can mutate the dialogue decision in-place.
+    interpretation_authority = _quantum_snapshot(interpretation)
     state["_canonical_interpretation_dialogue"] = _quantum_snapshot(canonical_dialogue)
     print("🧠 APRIL CANONICAL DIALOGUE:", {
         "relation": canonical_dialogue["relation"],
@@ -5537,7 +5669,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         active_flow=active_flow,
         dialog_state=dialog_state,
-        interpreted=interpretation,
+        interpreted=interpretation_authority,
     ) or {}
 
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
@@ -5548,7 +5680,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     interpretation["cognition"] = _quantum_snapshot(cognition)
 
     _merge_evidence_fields(semantic, (interpretation,))
-    semantic["quantum_interpretation_evidence"] = interpretation
+    semantic["quantum_interpretation_evidence"] = _quantum_snapshot(interpretation_authority)
     if isinstance(interpretation.get("quantum_representation_measurement"), dict):
         semantic["quantum_representation_measurement"] = _quantum_snapshot(
             interpretation["quantum_representation_measurement"]
