@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v42_history_dependency_passthrough_visible_context_v10"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v43_history_dependency_passthrough_visible_context_v11"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -2706,6 +2706,13 @@ def _make_request(
         or _as_dict(semantic.get("context_resolution")).get("history_task_context")
         or _as_dict(semantic.get("semantic_profile")).get("history_task_context")
     )
+    if _s(canonical_dialogue.get("relation")).upper() in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+        _dbg("🧠 APRIL HISTORY DEPENDENCY SNAPSHOT:", {
+            "required": bool(history_task_context.get("required")),
+            "operation": _s(history_task_context.get("arithmetic_operation") or history_task_context.get("operation")),
+            "resolved_operands": _as_list(history_task_context.get("resolved_operands")),
+            "available_numeric_results": history_task_context.get("available_numeric_results", 0),
+        })
 
     dialogue_contract = {
         "dialog_act": _s(
@@ -5617,7 +5624,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     print("🧠 APRIL HISTORY TASK CONTEXT: MATERIALIZED_BEFORE_REQUEST")
     print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled (10 pairs)")
     print("🧠 APRIL HISTORY TASK BRIDGE: interpretation-owned")
-    print("🧠 APRIL EXPECTED INTERPRETATION: quantum_interpretation_engine_v11_probabilistic_context_reconstruction_10turn_task_dependency_v3")
+    print("🧠 APRIL EXPECTED INTERPRETATION: quantum_interpretation_engine_v12_probabilistic_context_reconstruction_10turn_arithmetic_followup_v5")
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
