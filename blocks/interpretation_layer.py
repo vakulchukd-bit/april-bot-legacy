@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v11_probabilistic_context_reconstruction_10turn_task_dependency_v3"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v12_probabilistic_context_reconstruction_10turn_arithmetic_followup_v5"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -230,6 +230,13 @@ OPERATION_HYPOTHESES = {
     "explain": "объяснить разъяснить пояснить растолковать как работает почему смысл принцип",
     "summarize": "суммировать сократить основные пункты",
     "list": "перечислить список варианты",
+}
+
+ARITHMETIC_OPERATION_HYPOTHESES = {
+    "addition": "прибавить добавить сложить сложи сумма суммировать плюс плюсовать увеличение увеличить; add addition plus sum",
+    "subtraction": "вычесть вычти отнять отними отгними убавить уменьшить минус разность разница; subtract subtraction minus decrease difference",
+    "multiplication": "умножить умножь перемножить произведение на; multiply multiplication product",
+    "division": "разделить раздели делить поделить частное на; divide division quotient",
 }
 OBJECT_HYPOTHESES = {
     "graph": "график plot chart curve series числовая визуализация",
@@ -429,6 +436,25 @@ class QuantumInterpretationEngine:
             )
         return scores
 
+    def _arithmetic_operation_scores(self, text: str) -> dict[str, float]:
+        """Measure arithmetic subtype with semantic + typo-tolerant token evidence."""
+        base = self._family_scores(text, "operation", ARITHMETIC_OPERATION_HYPOTHESES)
+        tokens = self._tokens(text)
+        if not tokens:
+            return base
+        from difflib import SequenceMatcher
+        for label, description in ARITHMETIC_OPERATION_HYPOTHESES.items():
+            desc_tokens = [t for t in self._tokens(description) if len(t) >= 3]
+            best_fuzzy = 0.0
+            for token in tokens:
+                for candidate in desc_tokens:
+                    ratio = SequenceMatcher(None, token, candidate).ratio()
+                    # Accept natural inflection/typo similarity as measured evidence.
+                    if ratio > best_fuzzy:
+                        best_fuzzy = ratio
+            base[label] = max(float(base.get(label, 0.0) or 0.0), 0.78 * best_fuzzy)
+        return base
+
     @staticmethod
     def _semantic_request_features(
         text: str,
@@ -455,6 +481,8 @@ class QuantumInterpretationEngine:
 
         best_rep, best_rep_score = best(rep_scores, "text")
         best_op, best_op_score = best(op_scores, "answer")
+        arithmetic_scores = measured.get("arithmetic_operation", {}) if isinstance(measured.get("arithmetic_operation"), dict) else {}
+        best_arithmetic, best_arithmetic_score = best(arithmetic_scores, "none")
         best_obj, best_obj_score = best(obj_scores, "text")
         best_goal, best_goal_score = best(goal_scores, "understand")
         best_dialogue, best_dialogue_score = best(dial_scores, "statement")
@@ -517,6 +545,8 @@ class QuantumInterpretationEngine:
             "memory_query": memory_query,
             "semantic_best_representation": best_rep,
             "semantic_best_operation": best_op,
+            "semantic_best_arithmetic_operation": best_arithmetic,
+            "semantic_best_arithmetic_operation_score": best_arithmetic_score,
             "semantic_best_object": best_obj,
             "semantic_best_goal": best_goal,
             "semantic_best_dialogue": best_dialogue,
@@ -655,43 +685,68 @@ class QuantumInterpretationEngine:
         recent_dialogue_pairs: list[dict[str, str]] | None,
         features: dict[str, Any],
     ) -> dict[str, Any]:
-        """Determine whether the current task is incomplete without recent results.
+        """Resolve history-dependent arithmetic without asking the user to repeat values.
 
-        The decision is based on the semantic operation plus structural operand
-        availability. It is intentionally independent from any exact wording such
-        as "два последних" so paraphrases behave consistently.
+        Rules are structural:
+        - 2+ explicit operands in the current request => self-contained.
+        - 1 explicit number + arithmetic follow-up + a prior numeric result =>
+          use the most recent prior result and the current number.
+        - no explicit numbers + arithmetic follow-up + >=2 prior results =>
+          use the two most recent prior results.
         """
+        current_text = cls.normalize(current)
         operation = cls.normalize(features.get("semantic_best_operation")).lower()
+        arithmetic = cls.normalize(features.get("semantic_best_arithmetic_operation")).lower()
         numeric_results = cls._extract_numeric_results(recent_dialogue_pairs)
-        current_numbers = re.findall(
+        current_number_matches = re.findall(
             r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
-            cls.normalize(current),
+            current_text,
         )
         explicit_expression = bool(re.search(
             r"[-+]?\d+(?:[.,]\d+)?\s*[+*/-]\s*[-+]?\d+(?:[.,]\d+)?",
-            cls.normalize(current),
+            current_text,
         ))
-        # A self-contained arithmetic task has its operands in the current request.
-        self_contained_numeric = bool(explicit_expression or len(current_numbers) >= 2)
+        explicit_count = len(current_number_matches)
+        self_contained_numeric = bool(explicit_expression or explicit_count >= 2)
 
-        requires_history = bool(
-            operation == "calculate"
-            and not self_contained_numeric
-            and len(numeric_results) >= 2
-        )
-        selected = numeric_results[-2:] if requires_history else []
-        operands = [x["result"] for x in selected]
-        confidence = 0.99 if requires_history else 0.0
+        selected: list[dict[str, Any]] = []
+        operands: list[str] = []
+        history_required = False
+        relation = "none"
+
+        is_arithmetic = operation == "calculate" or arithmetic in {
+            "addition", "subtraction", "multiplication", "division"
+        }
+
+        if is_arithmetic and not self_contained_numeric and numeric_results:
+            if explicit_count == 1:
+                # Single-number arithmetic follow-up: previous result is the left
+                # operand, current number is the right operand.
+                selected = [numeric_results[-1]]
+                operands = [str(selected[0]["result"]), str(current_number_matches[0])]
+                history_required = True
+                relation = "latest_result_plus_current_operand"
+            elif explicit_count == 0 and len(numeric_results) >= 2:
+                selected = numeric_results[-2:]
+                operands = [str(x["result"]) for x in selected]
+                history_required = True
+                relation = "latest_two_results"
+
+        # The task must be genuinely incomplete without history.
+        required = bool(history_required and operands)
+        confidence = 0.99 if required else 0.0
         return {
-            "required": requires_history,
+            "required": required,
             "operation": operation,
+            "arithmetic_operation": arithmetic,
             "self_contained_numeric": self_contained_numeric,
-            "explicit_numeric_count": len(current_numbers),
+            "explicit_numeric_count": explicit_count,
             "available_numeric_results": len(numeric_results),
             "selected_results": selected,
             "resolved_operands": operands,
-            "source": "semantic_operation_plus_structural_history",
+            "relation": relation,
             "confidence": confidence,
+            "source": "semantic_arithmetic_plus_structural_history",
         }
 
     def _dialogue_relation_engine(
@@ -784,9 +839,17 @@ class QuantumInterpretationEngine:
         current_self_contained = bool(features.get("self_contained"))
         explicit_numeric_expression = bool(re.search(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?\s*[+*\-/]\s*[+-]?\d+(?:[.,]\d+)?(?!\w)", current))
         contextual_operation = str(features.get("semantic_best_operation") or "").lower() in {"calculate", "analyze", "explain", "list", "compare", "modify", "present"}
+        arithmetic_operation = str(features.get("semantic_best_arithmetic_operation") or "").lower()
         semantic_followup_evidence = max(dialogue_followup, reference_evidence, memory_evidence, continuation_evidence)
+        single_operand_arithmetic_followup = bool(
+            arithmetic_operation in {"addition", "subtraction", "multiplication", "division"}
+            and not current_self_contained
+            and len(re.findall(r"(?<![\\w.])[-+]?\\d+(?:[.,]\\d+)?(?![\\w.])", current)) == 1
+            and history_available
+        )
         history_dependent_task = bool(
             history_task.get("required")
+            or single_operand_arithmetic_followup
             or (
                 history_available
                 and not current_self_contained
@@ -1067,6 +1130,7 @@ class QuantumInterpretationEngine:
             "domain":self._family_scores(text,"domain",DOMAIN_HYPOTHESES),
             "capability":self._family_scores(text,"capability",CAPABILITY_HYPOTHESES),
             "operation":self._operation_family_scores(text),
+            "arithmetic_operation":self._arithmetic_operation_scores(text),
             "object":self._family_scores(focus_text or text,"object",OBJECT_HYPOTHESES),
             "goal":self._family_scores(text,"goal",GOAL_HYPOTHESES),
             "visual_schema":self._family_scores(text,"visual_schema",VISUAL_SCHEMA_HYPOTHESES),
@@ -1113,7 +1177,8 @@ class QuantumInterpretationEngine:
             "dialogue_margin":float(dial[0][1]-dial[1][1]) if len(dial)>1 else 0.0,
             "representation_scores":scores["representation"],
             "domain_scores":scores["domain"],"capability_scores":scores["capability"],
-            "operation_scores":scores["operation"],"object_scores":scores["object"],"goal_scores":scores["goal"],
+            "operation_scores":scores["operation"],"arithmetic_operation_scores":scores["arithmetic_operation"],
+            "object_scores":scores["object"],"goal_scores":scores["goal"],
             "visual_schema_scores":scores["visual_schema"],
             "request_features":request_features,
             "context_scores":ctx,
@@ -1583,19 +1648,55 @@ class QuantumInterpretationEngine:
         resolved_request = text
         history_task_context = dict(dialogue_vector.get("history_task_context") or {})
         if history_task_context.get("required"):
-            selected_results = history_task_context.get("selected_results") or []
-            lines = []
-            for idx, item in enumerate(selected_results, start=1):
-                lines.append(
-                    f"Historical result {idx}: {item.get('result')} (from USER: {item.get('user')}; APRIL: {item.get('assistant')})"
+            # History-dependent arithmetic is a concrete formula task, not a plain
+            # conversational text task. Keep the canonical representation aligned
+            # with the resolved operation and operands before the Processor sees it.
+            arithmetic_operation = str(history_task_context.get("arithmetic_operation") or "").lower()
+            if arithmetic_operation in {"addition", "subtraction", "multiplication", "division"}:
+                production = "formula"
+                source = "semantic_history_arithmetic_resolution"
+                locked = True
+                # Rebuild the recommendation set from the final production decision.
+                presentation_recommendations = self._presentation_recommendations(
+                    text, p, production, locked=locked, continuation=True,
+                    previous_scene=previous_scene, explicit=explicit,
                 )
-            resolved_request = (
-                f"{text}\n\n"
-                "The current calculation is history-dependent. The interpretation engine resolved the "
-                "required operands from the two most recent concrete numeric results in the authenticated "
-                "USER↔APRIL dialogue history. Use these values directly; do not ask the user to repeat them.\n"
-                + "\n".join(lines)
-            )
+                resolved_operands = list(history_task_context.get("resolved_operands") or [])
+                operator = {
+                    "addition": "+",
+                    "subtraction": "-",
+                    "multiplication": "×",
+                    "division": "÷",
+                }.get(arithmetic_operation, "→")
+                lines = []
+                for idx, item in enumerate(history_task_context.get("selected_results") or [], start=1):
+                    lines.append(
+                        f"Historical result {idx}: {item.get('result')} "
+                        f"(USER: {item.get('user')}; APRIL: {item.get('assistant')})"
+                    )
+                resolved_request = (
+                    f"{text}\n\n"
+                    "Interpretation resolved this as a history-dependent arithmetic follow-up. "
+                    "Use the already resolved operands directly and do not ask the user to repeat them.\n"
+                    f"Arithmetic operation: {arithmetic_operation}\n"
+                    f"Resolved operands: {operator.join(resolved_operands)}\n"
+                    + "\n".join(lines)
+                )
+            else:
+                selected_results = history_task_context.get("selected_results") or []
+                lines = []
+                for idx, item in enumerate(selected_results, start=1):
+                    lines.append(
+                        f"Historical result {idx}: {item.get('result')} (from USER: {item.get('user')}; APRIL: {item.get('assistant')})"
+                    )
+                resolved_request = (
+                    f"{text}\n\n"
+                    "The current calculation is history-dependent. The interpretation engine resolved the "
+                    "required operands from recent concrete numeric results in the authenticated "
+                    "USER↔APRIL dialogue history. Use these values directly; do not ask the user to repeat them.\n"
+                    + "\n".join(lines)
+                )
+
         if resolved_reference and (continuation or reference):
             # Structural discourse resolution: make the provider-facing request
             # explicit without hard-coded topic/entity rules.
