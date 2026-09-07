@@ -11,7 +11,6 @@ import ast
 import json
 import re
 import hashlib
-import difflib
 import threading
 from copy import deepcopy
 from typing import Any
@@ -3802,117 +3801,6 @@ def _decode_json_envelope(value: Any, *, max_depth: int = 5) -> Any:
     return current
 
 
-
-KATEX_MATH_COLOR = "#34d399"
-
-
-def _strip_provider_math_style_wrappers(value: Any) -> str:
-    """Remove provider-only color wrappers while keeping their math payload."""
-    text = _s(value)
-    if not text:
-        return ""
-    # Providers sometimes emit display intent as raw LaTeX without Markdown
-    # math delimiters. Strip only the presentation wrapper here; the canonical
-    # formatter below will re-wrap recognized math for KaTeX.
-    prev = None
-    for _ in range(4):
-        if text == prev:
-            break
-        prev = text
-        text = re.sub(
-            r"\\color\s*\{\s*#[0-9A-Fa-f]{6}\s*\}\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}",
-            r"\1",
-            text,
-        )
-    return text
-
-
-def _canonicalize_visible_math_markdown(value: Any) -> str:
-    """Make recognized provider math explicitly consumable by KaTeX.
-
-    The human answer stays semantically the same, but raw LaTeX fragments are
-    converted into standard ``\\(...\\)`` spans. This prevents Web from showing
-    TeX commands literally when a Provider omitted delimiters.
-    """
-    text = _strip_provider_math_style_wrappers(value)
-    if not text:
-        return ""
-    # Normalize transport escapes before structural analysis.
-    text = (
-        text.replace("\\r\\n", "\n")
-        .replace("\\n", "\n")
-        .replace("\\r", "\n")
-        .replace("\\t", "\t")
-    )
-
-    # Reuse the processor's structural math detector; never route by words.
-    try:
-        profile = _math_structure_profile_v2(text, policy={"mode": "structural"})
-        ranges = list(profile.get("ranges", []) if isinstance(profile, dict) else [])
-    except Exception:
-        ranges = []
-
-    if not ranges:
-        return text
-
-    result: list[str] = []
-    cursor = 0
-    for item in sorted(ranges, key=lambda x: (int(x.get("start", 0)), int(x.get("end", 0)))):
-        start = max(0, int(item.get("start", 0)))
-        end = min(len(text), int(item.get("end", 0)))
-        if end <= start or start < cursor:
-            continue
-        result.append(text[cursor:start])
-        raw = text[start:end].strip()
-        latex = _math_normalize_provider_fragment(raw)
-        if latex:
-            result.append(r"\(\color{" + KATEX_MATH_COLOR + "}{" + latex + r"}\)")
-        else:
-            result.append(raw)
-        cursor = end
-    result.append(text[cursor:])
-    return "".join(result)
-
-
-def _drop_redundant_answer_lines(value: Any) -> str:
-    """Remove mechanically repeated/mangled answer lines without semantic rewriting."""
-    text = _s(value)
-    if not text or "\n" not in text:
-        return text
-
-    lines = text.splitlines()
-    seen_tokens: set[str] = set()
-    kept: list[str] = []
-
-    def norm_tokens(line: str) -> set[str]:
-        normalized = re.sub(r"\\\([^)]*?\\\)", " ", line)
-        normalized = re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", " ", normalized).lower()
-        return {tok for tok in normalized.split() if len(tok) >= 2}
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if kept and kept[-1] != "":
-                kept.append("")
-            continue
-
-        tokens = norm_tokens(stripped)
-        # Drop a later line when almost all of its substantive tokens have
-        # already appeared earlier and the line is long enough to be a likely
-        # duplicated/mangled tail. This does not alter normal one-off prose.
-        if len(tokens) >= 4:
-            overlap = len(tokens & seen_tokens) / max(len(tokens), 1)
-            if overlap >= 0.90:
-                continue
-
-        kept.append(stripped)
-        seen_tokens.update(tokens)
-
-    while kept and kept[-1] == "":
-        kept.pop()
-    return "\n".join(kept)
-
-
 def _sanitize_visible_text(value: Any) -> str:
     """Normalize Provider text for Web without changing its meaning.
 
@@ -3920,7 +3808,7 @@ def _sanitize_visible_text(value: Any) -> str:
     before the human text reaches SceneContract. Duplicate adjacent lines are
     collapsed, while ordinary multiline prose is preserved.
     """
-    text = _strip_provider_math_style_wrappers(value)
+    text = _s(value)
     if not text:
         return ""
     # Provider JSON sometimes survives one extra serialization layer. At this
@@ -3945,9 +3833,7 @@ def _sanitize_visible_text(value: Any) -> str:
         compact.pop()
     while compact and compact[0] == "":
         compact.pop(0)
-    cleaned = "\n".join(compact).strip()
-    cleaned = _drop_redundant_answer_lines(cleaned)
-    return _canonicalize_visible_math_markdown(cleaned)
+    return "\n".join(compact).strip()
 
 
 def _clean_text_value(value: Any) -> str:
@@ -4748,10 +4634,9 @@ def _ensure_visible_text_block(
     if text_indexes:
         # Keep the first human text block and align it with the canonical answer.
         first_idx, first_content, first_block = text_indexes[0]
-        render_text = _canonicalize_visible_math_markdown(answer_text)
-        if render_text and first_content != render_text:
-            first_block["content"] = render_text
-            first_block["text"] = render_text
+        if answer_text and first_content != answer_text:
+            first_block["content"] = answer_text
+            first_block["text"] = answer_text
         first_block["type"] = "text"
         first_block["artifact_type"] = "text"
         first_block.setdefault("renderer", "TextBlock")
@@ -4776,12 +4661,11 @@ def _ensure_visible_text_block(
     if not answer_text:
         return canonical
 
-    render_text = _canonicalize_visible_math_markdown(answer_text)
     text_block = {
         "type": "text",
         "artifact_type": "text",
-        "content": render_text or answer_text,
-        "text": render_text or answer_text,
+        "content": answer_text,
+        "text": answer_text,
         "renderer": "TextBlock",
         "viewer": "TextBlock",
         "scene_contract": True,
@@ -5945,20 +5829,6 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     blocks = _materialize_provider_blocks(payload)
     blocks = _promote_embedded_structured_blocks(blocks)
     answer = _dedupe_visible_answer_against_blocks(answer, blocks)
-
-    # Formula artifacts are not a second visible response. Their mathematical
-    # content is delegated to the canonical McDowell text stream -> KaTeX path.
-    # Keep non-formula structured artifacts; fold formula renderers into text.
-    if blocks:
-        folded: list[dict] = []
-        for block in blocks:
-            kind = _s(
-                block.get("type") or block.get("artifact_type") or block.get("representation")
-            ).lower() if isinstance(block, dict) else ""
-            if kind == "formula":
-                continue
-            folded.append(block)
-        blocks = folded
     if answer and not any(isinstance(b, dict) and _s(b.get("type") or b.get("artifact_type")).lower() in {"text", "markdown"} for b in blocks):
         blocks.insert(0, {"type": "text", "content": answer, "text": answer, "renderer": "TextBlock", "viewer": "TextBlock", "scene_contract": True})
     blocks = _finalize_quantum_visible_stream(
