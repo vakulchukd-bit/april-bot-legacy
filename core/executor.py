@@ -6055,8 +6055,39 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_processor_version"] = PROCESSOR_VERSION
     semantic["semantic_decision_owner"] = "QUANTUM_PROCESSOR"
 
+    # Canonical processor cascade: freeze the ordered hand-off between existing
+    # engines before the Provider request is released. This is a control contract,
+    # not a second execution route.
+    quantum_cascade = QUANTUM_CASCADE_ENGINE.build(
+        text=text,
+        interpretation=interpretation,
+        semantic=semantic,
+        reasoning=reasoning,
+        cognition=cognition,
+        intent=intent,
+        intent_ai=intent_ai,
+        resolver=resolver,
+        router=router_evidence,
+        visual=visual,
+        goal=goal_evidence,
+        decision=decision,
+        memory_understanding=memory_understanding,
+        state=state,
+    )
+    cascade_check = QUANTUM_CASCADE_ENGINE.validate(quantum_cascade)
+    if not cascade_check.get("ok"):
+        raise RuntimeError(
+            "Quantum release blocked: canonical cascade invariant failed: "
+            + ", ".join(cascade_check.get("errors") or [])
+        )
+    semantic["quantum_cascade"] = _quantum_snapshot(quantum_cascade)
+    control_plane["quantum_cascade"] = _quantum_snapshot(quantum_cascade)
+
     request = _make_request(text, semantic, cognition, decision, state, visual, control=control_plane)
     request.quantum_state["evidence_channels"] = 15
+    request.quantum_state["cascade_order"] = list(QUANTUM_CASCADE_ORDER)
+    request.quantum_state["cascade_version"] = QUANTUM_CASCADE_VERSION
+    request.quantum_state["cascade_plan"] = _quantum_snapshot(quantum_cascade)
     request.quantum_state["evidence_field"] = quantum_field
     request_meta = _request_metadata(request)
     request_meta.update({
@@ -6162,6 +6193,12 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "visual_reference_system": True,
         "control_plane_version": control_plane.get("version"),
         "control_plane_single_route": bool(control_plane.get("single_route")),
+        "cascade_version": QUANTUM_CASCADE_VERSION,
+        "cascade_order": list(QUANTUM_CASCADE_ORDER),
+        "cascade_specialized_engines": _quantum_snapshot(
+            quantum_cascade.get("specialized_engine_plan", [])
+        ),
+        "cascade_validated": True,
     }
 
     provider_result = await generate_text(
