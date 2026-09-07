@@ -40,6 +40,22 @@ networkx
 graphviz
 pydot
 
+# =========================================================
+# APRIL LOCAL NANO VISUAL SCANNER + NANO PRINTER
+# Runtime libraries used by blocks/image_system.py
+# =========================================================
+opencv-python-headless
+pytesseract
+scikit-image
+shapely
+imageio
+pandas
+
+# Pillow / NumPy / SciPy / Matplotlib / SymPy / NetworkX
+# are already listed below and are also used by the Nano engines.
+# Tesseract executable is a SYSTEM package, not a Python package:
+# Debian/Ubuntu: tesseract-ocr tesseract-ocr-rus tesseract-ocr-ukr tesseract-ocr-eng
+
 # === Semantic Interpretation Stack ===
 sentence-transformers
 transformers
