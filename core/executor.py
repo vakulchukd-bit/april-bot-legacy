@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v43_history_dependency_passthrough_visible_context_v11"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v44_context_binding_cascade_history_visible_v12"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -327,7 +327,8 @@ class QuantumCascadeEngine:
         interpretation = _as_dict(interpretation)
         semantic = _as_dict(semantic)
         dialogue = _as_dict(
-            semantic.get("canonical_dialogue_frozen")
+            state.get("_canonical_processor_dialogue")
+            or semantic.get("canonical_dialogue_frozen")
             or interpretation.get("dialogue_contract")
             or interpretation.get("dialogue_vector")
         )
@@ -1515,7 +1516,7 @@ def _build_quantum_field(
             "context": _as_dict(context.get("quantum_evidence")),
         }),
         "arbitration": {
-            "dialogue": "processor",
+            "dialogue": "processor_context_binding",
             "representation": "processor",
             "room": "delegated",
             "renderer": "delegated",
@@ -2099,6 +2100,180 @@ def _dialogue_evidence(
         "source": "QUANTUM_DIALOGUE_ENGINE",
     }
 
+
+
+def _quantum_context_binding(
+    *,
+    text: str,
+    interpretation: dict,
+    semantic: dict,
+    scene_continuity: dict,
+    memory_understanding: dict,
+    dialogue_evidence: dict,
+    visual: dict,
+    state: dict,
+) -> dict:
+    """Collapse all pre-provider context evidence into one processor-owned state.
+
+    Interpretation starts the measurement; it is not the final owner. This stage
+    runs only after dialogue, semantic, memory and visual evidence are available.
+    No word triggers, topic dictionaries or second Provider call are used.
+    """
+    interp = _as_dict(interpretation)
+    vector = _as_dict(interp.get("dialogue_vector"))
+    frozen = _freeze_interpretation_dialogue(interp)
+
+    scene = _as_dict(scene_continuity)
+    memory = _as_dict(memory_understanding)
+    mem_ref = _as_dict(memory.get("reference"))
+    mem_visual = _as_dict(memory.get("visual_context"))
+    evidence = _as_dict(dialogue_evidence)
+    semantic_dialogue = _as_dict(semantic.get("quantum_dialogue_measurement"))
+
+    relation = _s(
+        frozen.get("relation")
+        or vector.get("relation")
+        or scene.get("mode")
+        or "INDEPENDENT"
+    ).upper()
+    continuation = bool(
+        frozen.get("continuation")
+        or scene.get("continuation")
+        or vector.get("continuation")
+    )
+    reference = bool(
+        frozen.get("reference_to_previous")
+        or scene.get("reference_to_previous")
+        or vector.get("reference_to_previous")
+    )
+
+    # Existing semantic dialogue engine is the primary relational evidence.
+    scene_mode = _s(scene.get("mode")).upper()
+    if scene_mode in {
+        "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC", "NEW_TOPIC"
+    }:
+        if scene_mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+            relation = scene_mode
+            continuation = continuation or scene_mode == "CONTINUATION"
+            reference = reference or scene_mode == "ARTIFACT_REFERENCE"
+
+    # A resolved memory target is stronger than an unresolved top-level label.
+    if bool(mem_ref.get("resolved")):
+        relation = "ARTIFACT_REFERENCE"
+        continuation = True
+        reference = True
+
+    # A memory query is explicitly a history-dependent request even when the
+    # original Interpretation pass was conservative.
+    if relation == "MEMORY_QUERY":
+        continuation = bool(continuation)
+        reference = bool(reference)
+
+    current_complete = semantic_dialogue.get("current_request_complete")
+    incomplete = current_complete is False
+    history_available = bool(
+        evidence.get("previous_user")
+        or evidence.get("previous_april")
+        or evidence.get("recent_dialogue_pairs")
+        or state.get("dialog")
+    )
+
+    # If the semantic measurement says the current request is incomplete and a
+    # canonical prior exchange exists, history is mandatory processor context.
+    # This is structural evidence, not a lexical trigger.
+    if incomplete and history_available and relation in {"INDEPENDENT", "NEW_TOPIC", "SAME_TOPIC"}:
+        relation = "CONTINUATION"
+        continuation = True
+
+    context_dependency = relation in {
+        "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC"
+    }
+
+    # When history is needed, attach the authentic recent pairs. Provider_router
+    # remains responsible for compacting them under the existing 900-token cap.
+    recent_pairs = evidence.get("recent_dialogue_pairs")
+    if not isinstance(recent_pairs, list):
+        recent_pairs = _recent_canonical_dialogue_pairs(state, limit=10)
+
+    resolved_request = _s(
+        memory.get("resolved_request")
+        if relation in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+        else ""
+    ) or _s(frozen.get("resolved_request")) or _s(text)
+
+    resolved_scene = deepcopy(
+        mem_visual if mem_visual.get("scene_id") else frozen.get("resolved_scene") or {}
+    )
+    if bool(mem_ref.get("resolved")) and not resolved_scene:
+        resolved_scene = {
+            "scene_id": _s(mem_visual.get("scene_id")),
+            "relation": "current_scene",
+            "source": "quantum_memory_understanding",
+        }
+
+    active_topic = _s(
+        frozen.get("active_topic")
+        or evidence.get("active_topic")
+        or scene.get("active_topic")
+        or state.get("active_topic")
+        or state.get("current_topic")
+    )
+    active_goal = _s(
+        frozen.get("active_goal")
+        or evidence.get("active_goal")
+        or scene.get("active_goal")
+        or state.get("active_goal")
+    )
+
+    provider_history_required = bool(
+        history_available and (
+            context_dependency
+            or incomplete
+            or relation == "MEMORY_QUERY"
+        )
+    )
+
+    return {
+        "version": "QUANTUM_CONTEXT_BINDING_V1",
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "relation": relation,
+        "dialogue_state": relation,
+        "continuation": bool(continuation),
+        "reference_to_previous": bool(reference),
+        "context_dependency": (
+            "reference" if reference
+            else "continuation" if continuation
+            else "memory_query" if relation == "MEMORY_QUERY"
+            else "topic" if relation == "SAME_TOPIC"
+            else "independent"
+        ),
+        "resolved_request": resolved_request,
+        "resolved_scene": resolved_scene,
+        "active_topic": active_topic,
+        "active_goal": active_goal,
+        "previous_user_turn": _s(evidence.get("previous_user")),
+        "previous_april_turn": _s(evidence.get("previous_april")),
+        "recent_dialogue_pairs": _quantum_snapshot(recent_pairs[-10:]),
+        "history_available": history_available,
+        "history_required": provider_history_required,
+        "incomplete_request_evidence": incomplete,
+        "semantic_measurement": _quantum_snapshot(semantic_dialogue),
+        "interpretation_evidence": _quantum_snapshot(frozen),
+        "memory_evidence": _quantum_snapshot(memory),
+        "visual_evidence": _quantum_snapshot(visual),
+        "source_order": [
+            "interpretation",
+            "semantic",
+            "dialogue",
+            "memory",
+            "visual",
+            "processor_collapse",
+        ],
+        "word_trigger_routing": False,
+        "score_routing": False,
+        "single_route": True,
+        "provider_calls": 1,
+    }
 
 def _collapse_dialogue(e: dict[str, Any]) -> tuple[str, dict[str, float], float]:
     """Compatibility bridge: no local score collapse; semantic engines own the state."""
@@ -2779,7 +2954,8 @@ def _build_processor_control_plane(
     memory_continuation = bool(memory_packet.get("continuation"))
     memory_resolved = bool(memory_reference.get("resolved"))
     canonical_dialogue = _as_dict(
-        semantic.get("canonical_dialogue_frozen")
+        state.get("_canonical_processor_dialogue")
+        or semantic.get("canonical_dialogue_frozen")
         or state.get("_canonical_interpretation_dialogue")
         or _freeze_interpretation_dialogue(
             _as_dict(semantic.get("quantum_interpretation_evidence"))
@@ -2793,7 +2969,7 @@ def _build_processor_control_plane(
         or semantic.get("history_task_context")
     )
 
-    # Interpretation is the sole authority for dialogue mode. Memory may provide
+    # Context Binding is the final pre-provider authority for dialogue mode. Memory may provide
     # target/context evidence, but it cannot promote/demote or rewrite the mode.
     mode = _s(canonical_dialogue.get("relation")).upper() or "INDEPENDENT"
     continuation = bool(canonical_dialogue.get("continuation"))
@@ -2881,7 +3057,7 @@ def _build_processor_control_plane(
     control = {
         "version": "QUANTUM_CONTROL_PLANE_V1",
         "authority": {
-            "dialogue": "interpretation",
+            "dialogue": "processor_context_binding",
             "representation": "semantic_decision",
             "capabilities": "semantic_cognition",
             "memory": "state_manager",
@@ -2916,6 +3092,13 @@ def _build_processor_control_plane(
             canonical_dialogue.get("resolved_request") or text
         ),
         "resolved_context_evidence": _quantum_snapshot(memory_context_evidence),
+        "context_binding": _quantum_snapshot(state.get("_canonical_processor_dialogue", {})),
+        "history_required": bool(
+            _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
+        ),
+        "incomplete_request_evidence": bool(
+            _as_dict(state.get("_canonical_processor_dialogue", {})).get("incomplete_request_evidence")
+        ),
         "resolved_reference": _quantum_snapshot(
             memory_reference if reference_to_previous else {}
         ),
@@ -2969,7 +3152,8 @@ def _make_request(
         _as_dict(semantic.get("quantum_interpretation_evidence")).get("dialogue_contract")
     )
     canonical_dialogue = _as_dict(
-        semantic.get("canonical_dialogue_frozen")
+        state.get("_canonical_processor_dialogue")
+        or semantic.get("canonical_dialogue_frozen")
         or state.get("_canonical_interpretation_dialogue")
         or _freeze_interpretation_dialogue(
             _as_dict(semantic.get("quantum_interpretation_evidence"))
@@ -3114,6 +3298,10 @@ def _make_request(
         "dialogue_coherence": round(coherence, 4),
         "identity_scope": deepcopy(scope),
         "control_plane_version": control.get("version"),
+        "context_binding_version": _as_dict(state.get("_canonical_processor_dialogue", {})).get("version"),
+        "context_binding_history_required": bool(
+            _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
+        ),
     }
 
     if isinstance(state, dict):
@@ -3203,13 +3391,23 @@ def _make_request(
                 else {}
             ),
             **(
-                {"recent_dialogue": context.get("recent_dialogue", [])}
-                if mode in {
-                    "CONTINUATION",
-                    "SAME_TOPIC",
-                    "ARTIFACT_REFERENCE",
-                    "MEMORY_QUERY",
-                } or bool(control.get("context_dependency")) or bool(history_task_context.get("required"))
+                {
+                    "recent_dialogue": (
+                        context.get("recent_dialogue", [])
+                        or list(
+                            _as_dict(control.get("dialogue_evidence")).get("recent_dialogue_pairs")
+                            or []
+                        )
+                    )
+                }
+                if bool(
+                    control.get("context_dependency")
+                    or _as_dict(control).get("history_required")
+                    or _as_dict(control).get("mode") in {
+                        "CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"
+                    }
+                    or _as_dict(control).get("incomplete_request_evidence")
+                )
                 else {}
             ),
         },
@@ -5911,7 +6109,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     print("🧬 APRIL PROCESSOR MODE: CASCADED_SINGLE_STREAM")
     print("🧠 APRIL HISTORY TASK CONTEXT: MATERIALIZED_BEFORE_REQUEST")
     print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled (10 pairs)")
-    print("🧠 APRIL HISTORY TASK BRIDGE: interpretation-owned")
+    print("🧠 APRIL HISTORY TASK BRIDGE: processor-context-binding-owned")
     print("🧠 APRIL EXPECTED INTERPRETATION: quantum_interpretation_engine_v12_probabilistic_context_reconstruction_10turn_arithmetic_followup_v5")
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
@@ -6219,6 +6417,53 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_context_diagnostic"] = memory_diag
     print("🧭 QUANTUM CONTEXT DIAGNOSTIC:", memory_diag)
 
+    # FINAL pre-provider context binding.
+    # All local evidence is now available. This is the first point at which the
+    # Quantum Processor is allowed to collapse dialogue/context dependency.
+    context_binding = _quantum_context_binding(
+        text=text,
+        interpretation=interpretation,
+        semantic=semantic,
+        scene_continuity=scene_continuity,
+        memory_understanding=memory_understanding,
+        dialogue_evidence=previous_pair_evidence,
+        visual=visual,
+        state=state,
+    )
+    semantic["quantum_context_binding"] = _quantum_snapshot(context_binding)
+    state["_quantum_context_binding"] = _quantum_snapshot(context_binding)
+    state["_canonical_processor_dialogue"] = _quantum_snapshot(context_binding)
+
+    # Downstream engines consume the processor-owned canonical state instead of
+    # the earlier frozen Interpretation decision.
+    processor_dialogue = _as_dict(context_binding)
+    semantic["canonical_dialogue_frozen"] = _quantum_snapshot({
+        **_freeze_interpretation_dialogue(interpretation),
+        "relation": processor_dialogue.get("relation"),
+        "dialogue_state": processor_dialogue.get("relation"),
+        "continuation": bool(processor_dialogue.get("continuation")),
+        "reference_to_previous": bool(processor_dialogue.get("reference_to_previous")),
+        "context_dependency": processor_dialogue.get("context_dependency"),
+        "resolved_request": processor_dialogue.get("resolved_request"),
+        "resolved_scene": processor_dialogue.get("resolved_scene") or {},
+        "active_topic": processor_dialogue.get("active_topic"),
+        "active_goal": processor_dialogue.get("active_goal"),
+        "previous_user_turn": processor_dialogue.get("previous_user_turn"),
+        "previous_april_turn": processor_dialogue.get("previous_april_turn"),
+        "reply_to": _freeze_interpretation_dialogue(interpretation).get("reply_to"),
+        "source": "QUANTUM_PROCESSOR_CONTEXT_BINDING",
+    })
+    print("🧠 QUANTUM CONTEXT BINDING:", {
+        "relation": context_binding.get("relation"),
+        "continuation": bool(context_binding.get("continuation")),
+        "reference": bool(context_binding.get("reference_to_previous")),
+        "dependency": context_binding.get("context_dependency"),
+        "history_available": bool(context_binding.get("history_available")),
+        "history_required": bool(context_binding.get("history_required")),
+        "incomplete_request": bool(context_binding.get("incomplete_request_evidence")),
+        "provider_calls": 1,
+    })
+
     # One authoritative control plane for dialogue, representation, memory relation,
     # capability delegation, and single-route ownership. Individual engines remain
     # evidence sources; downstream code consumes this collapsed state.
@@ -6232,7 +6477,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         memory_understanding=memory_understanding,
     )
     canonical_after_control = _as_dict(
-        semantic.get("canonical_dialogue_frozen")
+        state.get("_canonical_processor_dialogue")
+        or semantic.get("canonical_dialogue_frozen")
         or state.get("_canonical_interpretation_dialogue")
     )
     if canonical_after_control:
@@ -6352,6 +6598,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         decision=decision,
         memory_understanding=memory_understanding,
         state=state,
+    )
+    quantum_cascade["context_binding"] = _quantum_snapshot(
+        state.get("_canonical_processor_dialogue", {})
+    )
+    quantum_cascade["stages"]["3_CONTEXT_BINDING"]["status"] = "complete"
+    quantum_cascade["stages"]["3_CONTEXT_BINDING"]["signal"] = _quantum_snapshot(
+        state.get("_canonical_processor_dialogue", {})
+    )
+    quantum_cascade["stages"]["7_PROVIDER_CONTEXT"]["history_required"] = bool(
+        _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
     )
     cascade_check = QUANTUM_CASCADE_ENGINE.validate(quantum_cascade)
     if not cascade_check.get("ok"):
@@ -6563,7 +6819,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     }
 
     final_canonical = _as_dict(
-        semantic.get("canonical_dialogue_frozen")
+        state.get("_canonical_processor_dialogue")
+        or semantic.get("canonical_dialogue_frozen")
         or state.get("_canonical_interpretation_dialogue")
     )
     if final_canonical:
