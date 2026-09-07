@@ -41,7 +41,7 @@ from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v44_context_binding_cascade_history_visible_v12"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v45_sequential_engine_fusion_context_render_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -110,6 +110,77 @@ def _unique_strings(values: Any) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+# ---------------------------------------------------------------------------
+# SEQUENTIAL ENGINE HANDOFF
+# ---------------------------------------------------------------------------
+# Internal processor trace only. It makes the dependency order explicit for
+# diagnosis and future engine upgrades without adding a route, provider call,
+# or provider payload fields.
+QUANTUM_ENGINE_HANDOFF_VERSION = "quantum_engine_handoff_v1"
+QUANTUM_ENGINE_HANDOFF_ORDER = (
+    "INPUT", "INTERPRETATION", "SEMANTIC", "REASONING", "COGNITION",
+    "INTENT", "RESOLUTION", "ROUTING", "VISUAL_REFERENCE", "GOAL",
+    "RESPONSE_DECISION", "DYNAMIC_MEMORY", "MEMORY_UNDERSTANDING",
+    "CONTEXT_BINDING", "CONTROL_PLANE", "PROVIDER", "OUTPUT_UNDERSTANDING",
+    "PRESENTATION", "SCENE_CONTRACT", "WEB",
+)
+
+def _compact_engine_signal(value: Any, *, max_chars: int = 6000) -> dict:
+    """Detach one engine result for the internal cascade ledger."""
+    snap = _quantum_snapshot(value)
+    if isinstance(snap, dict):
+        return snap
+    return {"value": _s(snap)[:max_chars]}
+
+def _record_engine_handoff(
+    state: dict,
+    stage: str,
+    output: Any,
+    *,
+    consumes: tuple[str, ...] = (),
+) -> dict:
+    """Record one sequential engine handoff without affecting Provider cost."""
+    ledger = state.get("_quantum_engine_handoffs")
+    if not isinstance(ledger, list):
+        ledger = []
+    entry = {
+        "version": QUANTUM_ENGINE_HANDOFF_VERSION,
+        "stage": stage,
+        "sequence_index": (
+            QUANTUM_ENGINE_HANDOFF_ORDER.index(stage)
+            if stage in QUANTUM_ENGINE_HANDOFF_ORDER else len(ledger)
+        ),
+        "consumes": list(consumes),
+        "output": _compact_engine_signal(output),
+        "decision_owner": "QUANTUM_PROCESSOR",
+    }
+    ledger.append(entry)
+    state["_quantum_engine_handoffs"] = sorted(
+        ledger,
+        key=lambda item: int(item.get("sequence_index", 0)),
+    )[-len(QUANTUM_ENGINE_HANDOFF_ORDER):]
+    state["_quantum_engine_active_stage"] = stage
+    return entry
+
+def _engine_handoff_context(state: dict) -> dict:
+    ledger = state.get("_quantum_engine_handoffs")
+    if not isinstance(ledger, list):
+        return {}
+    return {
+        "version": QUANTUM_ENGINE_HANDOFF_VERSION,
+        "active_stage": _s(state.get("_quantum_engine_active_stage")),
+        "stages": [
+            {
+                "stage": item.get("stage"),
+                "sequence_index": item.get("sequence_index"),
+                "consumes": item.get("consumes", []),
+            }
+            for item in ledger[-12:]
+            if isinstance(item, dict)
+        ],
+    }
 
 
 def _user_scope(state: dict, user_id: Any) -> dict:
@@ -2102,6 +2173,81 @@ def _dialogue_evidence(
 
 
 
+def _dialogue_context_consensus(
+    *,
+    interpretation: dict,
+    scene_continuity: dict,
+    semantic: dict,
+    memory_understanding: dict,
+) -> dict:
+    """Fuse explicit dialogue-state outputs from existing engines.
+
+    The processor uses structural state consensus. It does not inspect words,
+    invoke another provider, or calculate a local routing score.
+    """
+    sources = {
+        "interpretation": _freeze_interpretation_dialogue(_as_dict(interpretation)),
+        "scene_continuity": _as_dict(scene_continuity),
+        "semantic": _as_dict(semantic.get("quantum_dialogue_measurement")),
+        "memory": _as_dict(memory_understanding),
+    }
+    buckets = {
+        "reference": [],
+        "memory_query": [],
+        "continuation": [],
+        "same_topic": [],
+        "independent": [],
+        "new_topic": [],
+    }
+    for name, packet in sources.items():
+        relation = _s(
+            packet.get("relation")
+            or packet.get("dialogue_relation")
+            or packet.get("mode")
+            or packet.get("state")
+        ).upper()
+        if bool(packet.get("reference_to_previous")) or relation == "ARTIFACT_REFERENCE":
+            buckets["reference"].append(name)
+        elif relation == "MEMORY_QUERY":
+            buckets["memory_query"].append(name)
+        elif bool(packet.get("continuation")) or relation in {"CONTINUATION", "CONTINUE_TOPIC"}:
+            buckets["continuation"].append(name)
+        elif relation == "SAME_TOPIC":
+            buckets["same_topic"].append(name)
+        elif relation == "NEW_TOPIC":
+            buckets["new_topic"].append(name)
+        elif relation == "INDEPENDENT":
+            buckets["independent"].append(name)
+
+    if buckets["reference"]:
+        relation = "ARTIFACT_REFERENCE"
+    elif buckets["memory_query"]:
+        relation = "MEMORY_QUERY"
+    elif len(buckets["continuation"]) >= 2 or buckets["continuation"]:
+        relation = "CONTINUATION"
+    elif buckets["same_topic"] and not buckets["independent"]:
+        relation = "SAME_TOPIC"
+    elif buckets["new_topic"] and not buckets["same_topic"] and not buckets["independent"]:
+        relation = "NEW_TOPIC"
+    elif buckets["independent"]:
+        relation = "INDEPENDENT"
+    else:
+        relation = "INDEPENDENT"
+
+    return {
+        "version": "QUANTUM_DIALOGUE_CONSENSUS_V1",
+        "relation": relation,
+        "continuation": relation == "CONTINUATION",
+        "reference_to_previous": relation == "ARTIFACT_REFERENCE",
+        "memory_query": relation == "MEMORY_QUERY",
+        "evidence_sources": buckets,
+        "consensus_method": "explicit_engine_state_consensus",
+        "lexical_triggers": False,
+        "score_routing": False,
+        "decision_owner": "QUANTUM_PROCESSOR",
+    }
+
+
 def _quantum_context_binding(
     *,
     text: str,
@@ -2130,32 +2276,30 @@ def _quantum_context_binding(
     evidence = _as_dict(dialogue_evidence)
     semantic_dialogue = _as_dict(semantic.get("quantum_dialogue_measurement"))
 
-    relation = _s(
+    consensus = _dialogue_context_consensus(
+        interpretation=interpretation,
+        scene_continuity=scene_continuity,
+        semantic=semantic,
+        memory_understanding=memory_understanding,
+    )
+    relation = _s(consensus.get("relation")).upper() or _s(
         frozen.get("relation")
         or vector.get("relation")
         or scene.get("mode")
         or "INDEPENDENT"
     ).upper()
     continuation = bool(
-        frozen.get("continuation")
+        consensus.get("continuation")
+        or frozen.get("continuation")
         or scene.get("continuation")
         or vector.get("continuation")
     )
     reference = bool(
-        frozen.get("reference_to_previous")
+        consensus.get("reference_to_previous")
+        or frozen.get("reference_to_previous")
         or scene.get("reference_to_previous")
         or vector.get("reference_to_previous")
     )
-
-    # Existing semantic dialogue engine is the primary relational evidence.
-    scene_mode = _s(scene.get("mode")).upper()
-    if scene_mode in {
-        "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC", "NEW_TOPIC"
-    }:
-        if scene_mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
-            relation = scene_mode
-            continuation = continuation or scene_mode == "CONTINUATION"
-            reference = reference or scene_mode == "ARTIFACT_REFERENCE"
 
     # A resolved memory target is stronger than an unresolved top-level label.
     if bool(mem_ref.get("resolved")):
@@ -2258,6 +2402,7 @@ def _quantum_context_binding(
         "history_required": provider_history_required,
         "incomplete_request_evidence": incomplete,
         "semantic_measurement": _quantum_snapshot(semantic_dialogue),
+        "dialogue_consensus": _quantum_snapshot(consensus),
         "interpretation_evidence": _quantum_snapshot(frozen),
         "memory_evidence": _quantum_snapshot(memory),
         "visual_evidence": _quantum_snapshot(visual),
@@ -2505,14 +2650,18 @@ def _preserve_semantic_visual_representation(
         semantic.get("artifact_reference_answer")
         or dialogue_contract.get("artifact_reference_answer")
     )
-    should_preserve = (
-        (
-            relation in {"ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-            and not artifact_reference_answer
-        )
-        or (
-            operation in allowed_operations
-            and not artifact_reference_answer
+    # The previous renderer is inherited only for an explicit artifact reference
+    # or when the current semantic plan already requests the same structured type.
+    explicit_current_structured = bool(current_structured)
+    same_representation_requested = bool(
+        explicit_current_structured
+        and any(item in structured for item in current_structured)
+    )
+    should_preserve = bool(
+        not artifact_reference_answer
+        and (
+            relation == "ARTIFACT_REFERENCE"
+            or same_representation_requested
         )
     )
     if not should_preserve:
@@ -3538,6 +3687,7 @@ def _make_request(
     request.provider_calls_allowed = 1
 
     request.constraints["metadata"].update({
+        "engine_handoff_trace": _engine_handoff_context(state),
         "processor_version": PROCESSOR_VERSION,
         "visual_context_evidence": bool(visual),
         "single_route": True,
@@ -4632,11 +4782,24 @@ def _quantum_visible_render_policy(
         }
     }
 
-    # Explicit structured outputs are authoritative. Without an explicit list,
-    # preserve the Provider's first concrete structured representation.
-    authorized = requested_structured or (
-        {kind_of(structured[0])} if structured else set()
-    )
+    # Only the current-turn processor representation contract authorizes a
+    # structured renderer. Provider output can never create a new visible
+    # renderer when the current turn was classified as plain text.
+    preferred = ""
+    if request is not None:
+        qstate = getattr(request, "quantum_state", {}) or {}
+        preferred = _s(qstate.get("measured_output")).lower()
+        if not preferred:
+            preferred = _s(
+                _as_dict(
+                    _as_dict(getattr(request, "constraints", {}) or {}).get(
+                        "representation_plan"
+                    )
+                ).get("preferred_representation")
+            ).lower()
+    authorized = set(requested_structured)
+    if not authorized and preferred not in {"", "text", "markdown"}:
+        authorized = {preferred}
 
     chosen: list[dict] = []
     seen_kinds: set[str] = set()
@@ -5956,6 +6119,22 @@ def _canonicalize(
         pass
 
     contract = build_scene_contract(scene)
+    _record_engine_handoff(
+        state, "SCENE_CONTRACT",
+        {
+            "scene_id": _s(getattr(contract, "scene_id", "")),
+            "block_types": [
+                _s(
+                    b.get("type")
+                    or b.get("artifact_type")
+                    or b.get("representation")
+                ).lower()
+                for b in list(getattr(contract, "render_blocks", []) or [])
+                if isinstance(b, dict)
+            ],
+        },
+        consumes=("PRESENTATION", "OUTPUT_UNDERSTANDING"),
+    )
 
     # SceneContract is the release boundary. Its render stream is canonical:
     # one MessageTextBlock plus any authorized specialized renderer blocks.
@@ -6042,6 +6221,17 @@ def _canonicalize(
         }
     except Exception:
         pass
+
+    _record_engine_handoff(
+        state, "WEB",
+        {
+            "target": "AprilWeb",
+            "scene_contract": True,
+            "visible_block_count": len(render_blocks),
+            "single_visible_stream": True,
+        },
+        consumes=("SCENE_CONTRACT",),
+    )
 
     return {
         "transport_contract": "scene_first",
@@ -6155,6 +6345,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         state=state,
     ) or {}
+    _record_engine_handoff(state, "INTERPRETATION", interpretation, consumes=("INPUT",))
 
     # Structured payload analysis is diagnostic only. It must never rewrite or
     # reset the already-collapsed Interpretation dialogue state.
@@ -6225,11 +6416,17 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dialog_state=dialog_state,
         interpreted=interpretation_authority,
     ) or {}
+    _record_engine_handoff(state, "SEMANTIC", semantic, consumes=("INTERPRETATION",))
 
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
+    _record_engine_handoff(state, "REASONING", reasoning, consumes=("SEMANTIC",))
     cognition = analyze_cognition(
         text=text, semantic=semantic, reasoning=reasoning, state=state
     ) or {}
+    _record_engine_handoff(
+        state, "COGNITION", cognition,
+        consumes=("SEMANTIC", "REASONING"),
+    )
 
     interpretation["cognition"] = _quantum_snapshot(cognition)
 
@@ -6245,9 +6442,17 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         )
 
     intent = detect_intent(text, state) or {}
+    _record_engine_handoff(
+        state, "INTENT", intent,
+        consumes=("INTERPRETATION", "SEMANTIC", "COGNITION"),
+    )
     intent_ai = await detect_intent_ai(text, state)
     intent_ai = intent_ai if isinstance(intent_ai, dict) else {}
     resolver = resolve_input(history, state) or {}
+    _record_engine_handoff(
+        state, "RESOLUTION", resolver,
+        consumes=("INTENT", "SEMANTIC"),
+    )
     focus_intent = build_focus_intent_state(text, state) or {}
 
     intent_ai["provider_calls"] = 0
@@ -6282,6 +6487,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         router_evidence = {}
 
     router_system = decide_action(text, history) or {}
+    _record_engine_handoff(
+        state, "ROUTING",
+        {"router": router_evidence, "router_system": router_system},
+        consumes=("SEMANTIC", "COGNITION", "INTENT", "RESOLUTION"),
+    )
 
     _merge_evidence_fields(semantic, (router_evidence, router_system))
     semantic["quantum_router_evidence"] = {
@@ -6293,6 +6503,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     visual = build_visual_reference(
         semantic=semantic, cognition=cognition, text=text, state=state
     ) or {}
+    _record_engine_handoff(
+        state, "VISUAL_REFERENCE", visual,
+        consumes=("SEMANTIC", "COGNITION", "ROUTING"),
+    )
 
     # -------------------------------------------------------------
     # FOUR NEW QUANTUM EVIDENCE LENSES
@@ -6327,6 +6541,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         state=state,
         semantic=semantic,
     ) or {}
+    _record_engine_handoff(
+        state, "GOAL", goal_evidence,
+        consumes=("SEMANTIC", "CONTEXT_BINDING"),
+    )
 
     decision = build_response_decision(
         semantic=semantic,
@@ -6334,6 +6552,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         state=state,
         visual_reference=visual,
     ) or {}
+    _record_engine_handoff(
+        state, "RESPONSE_DECISION", decision,
+        consumes=("SEMANTIC", "COGNITION", "VISUAL_REFERENCE", "GOAL"),
+    )
 
     # Canonical dynamic-memory evidence is resolved exactly once for this turn,
     # after interpretation/semantic measurement and before the Quantum Control
@@ -6352,6 +6574,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     )
     if not isinstance(dynamic_memory, dict):
         dynamic_memory = {}
+    _record_engine_handoff(
+        state, "DYNAMIC_MEMORY", dynamic_memory,
+        consumes=("INTERPRETATION", "SEMANTIC", "RESPONSE_DECISION"),
+    )
 
     semantic["quantum_dynamic_memory_evidence"] = _quantum_snapshot(dynamic_memory)
     semantic["dynamic_memory_available"] = bool(dynamic_memory.get("matches"))
@@ -6379,6 +6605,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         semantic_profile=_as_dict(semantic.get("semantic_profile") or {}),
         visual_reference=_as_dict(visual),
     ) or {}
+    _record_engine_handoff(
+        state, "MEMORY_UNDERSTANDING", memory_understanding,
+        consumes=("DYNAMIC_MEMORY", "VISUAL_REFERENCE", "ROUTING"),
+    )
     semantic["memory_understanding"] = _quantum_snapshot(memory_understanding)
     semantic["quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
     state["_quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
@@ -6433,6 +6663,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_context_binding"] = _quantum_snapshot(context_binding)
     state["_quantum_context_binding"] = _quantum_snapshot(context_binding)
     state["_canonical_processor_dialogue"] = _quantum_snapshot(context_binding)
+    _record_engine_handoff(
+        state, "CONTEXT_BINDING", context_binding,
+        consumes=("INTERPRETATION", "SEMANTIC", "MEMORY_UNDERSTANDING", "VISUAL_REFERENCE"),
+    )
 
     # Downstream engines consume the processor-owned canonical state instead of
     # the earlier frozen Interpretation decision.
@@ -6526,6 +6760,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         ),
         "context_dependency": bool(control_plane.get("context_dependency")),
     }
+
+    _record_engine_handoff(
+        state, "CONTROL_PLANE", control_plane,
+        consumes=("CONTEXT_BINDING", "SEMANTIC", "RESPONSE_DECISION"),
+    )
 
     processor_context = build_processor_execution_context({
         "state": state,
@@ -6736,11 +6975,37 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "cascade_validated": True,
     }
 
+    request.constraints.setdefault("metadata", {})["engine_handoff_trace"] = _engine_handoff_context(state)
+    _record_engine_handoff(
+        state, "PROVIDER",
+        {
+            "input_budget": 900,
+            "one_call": True,
+            "requested_outputs": list(request.requested_outputs or []),
+            "context_mode": _s(
+                (request.dialogue_contract or {}).get("context_dependency")
+                if isinstance(getattr(request, "dialogue_contract", {}), dict)
+                else ""
+            ),
+        },
+        consumes=("CONTROL_PLANE", "CONTEXT_BINDING"),
+    )
+
     provider_result = await generate_text(
         request,
         max_output_tokens=request.response_output_tokens,
     )
     response = _response(provider_result, request)
+    _record_engine_handoff(
+        state, "OUTPUT_UNDERSTANDING",
+        {
+            "answer_present": bool(
+                _s(getattr(response, "answer", "") or getattr(response, "content", ""))
+            ),
+            "render_blocks": len(getattr(response, "render_blocks", []) or []),
+        },
+        consumes=("PROVIDER",),
+    )
 
     requested_structured = [
         _s(x).lower()
@@ -6799,6 +7064,22 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     response.render_blocks = _ensure_visible_text_block(
         list(getattr(response, "render_blocks", []) or []),
         _s(response.answer or response.content or response.response),
+    )
+    _record_engine_handoff(
+        state, "PRESENTATION",
+        {
+            "types": [
+                _s(
+                    b.get("type")
+                    or b.get("artifact_type")
+                    or b.get("representation")
+                ).lower()
+                for b in list(getattr(response, "render_blocks", []) or [])
+                if isinstance(b, dict)
+            ],
+            "count": len(getattr(response, "render_blocks", []) or []),
+        },
+        consumes=("OUTPUT_UNDERSTANDING", "CONTROL_PLANE"),
     )
     if _s(response.answer or response.content or response.response) and not any(
         isinstance(block, dict)
