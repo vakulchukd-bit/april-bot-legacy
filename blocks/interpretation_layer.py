@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v14_universal_context_topic_entity_multimodal_v1"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v15_fast_context_no_cold_model_v1"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -300,7 +300,7 @@ class QuantumContextUnderstandingEngine:
     by the canonical interpretation engine.
     """
 
-    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V3"
+    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V4_FAST_HOTPATH"
     TOPIC_WINDOW = 12
     ENTITY_WINDOW = 8
     NLI_ENABLED = (
@@ -308,7 +308,7 @@ class QuantumContextUnderstandingEngine:
         in {"1", "true", "yes", "on"}
     )
     EMBEDDING_ENABLED = (
-        os.getenv("APRIL_ENABLE_CONTEXT_EMBEDDINGS", "1").strip().lower()
+        os.getenv("APRIL_ENABLE_CONTEXT_EMBEDDINGS", "0").strip().lower()
         in {"1", "true", "yes", "on"}
     )
 
@@ -771,10 +771,10 @@ class QuantumContextUnderstandingEngine:
     def _embedding_similarity(self, left: str, right: str) -> tuple[float, str]:
         if not left or not right:
             return 0.0, "none"
-        if self.EMBEDDING_ENABLED:
+        if self.EMBEDDING_ENABLED and os.getenv("APRIL_ALLOW_CONTEXT_MODEL_DOWNLOAD", "0").strip().lower() in {"1", "true", "yes", "on"}:
             try:
-                # The shared engine lazily loads the multilingual encoder only when
-                # explicitly available; failures fall back to the existing matrix.
+                # Context embeddings are an explicit opt-in cold path. They never
+                # download/load a Hugging Face model during normal production turns.
                 if self.semantic_engine._semantic_encoder is None:
                     try:
                         if SentenceTransformer is not None:
@@ -1298,7 +1298,7 @@ class QuantumInterpretationEngine:
             )
             self._prototype_matrix = self._vectorizer.fit_transform(docs)
 
-        if APRIL_ENABLE_HEAVY_HOTPATH and SentenceTransformer is not None:
+        if APRIL_ENABLE_HEAVY_HOTPATH and os.getenv("APRIL_ALLOW_CONTEXT_MODEL_DOWNLOAD", "0").strip().lower() in {"1", "true", "yes", "on"} and SentenceTransformer is not None:
             try:
                 self._semantic_encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
             except Exception:
