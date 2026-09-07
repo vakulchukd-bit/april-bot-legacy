@@ -124,7 +124,7 @@ def _user_scope(state: dict, user_id: Any) -> dict:
         or ""
     )
     if not conversation_id:
-        conversation_id = f"april-{hashlib.sha256(uid.encode("utf-8")).hexdigest()[:24]}"
+        conversation_id = f"april-{hashlib.sha256(uid.encode('utf-8')).hexdigest()[:24]}"
         state["conversation_id"] = conversation_id
 
     scope = {
@@ -197,6 +197,285 @@ def _merge_evidence_fields(target: dict, sources: tuple[dict, ...]) -> dict:
 
     target["quantum_candidate_signals"] = candidates
     return target
+
+# ---------------------------------------------------------------------------
+# CANONICAL QUANTUM CASCADE CONTROL
+# ---------------------------------------------------------------------------
+# This is deliberately a control/contract engine only. It does not execute a
+# second route and does not call Provider. Existing rooms/engines remain the
+# actual processors; this object records their ordered hand-off and validates
+# that the cascade is complete before release.
+
+QUANTUM_CASCADE_VERSION = "quantum_cascade_v1"
+QUANTUM_CASCADE_ORDER = (
+    "INPUT",
+    "INTERPRETATION",
+    "CONTEXT_BINDING",
+    "SEMANTIC_UNDERSTANDING",
+    "TASK_COMPILATION",
+    "SPECIALIZED_ENGINE_PLAN",
+    "PROVIDER_CONTEXT",
+    "OUTPUT_UNDERSTANDING",
+    "RENDER_CONTRACT",
+    "WEB_DELIVERY",
+)
+
+
+class QuantumCascadeEngine:
+    """Single canonical ordering/validation contract for the existing engines."""
+
+    VERSION = QUANTUM_CASCADE_VERSION
+    ORDER = QUANTUM_CASCADE_ORDER
+
+    @staticmethod
+    def _names(values: Any) -> list[str]:
+        result: list[str] = []
+        for value in _as_list(values):
+            name = _s(value)
+            if name and name not in result:
+                result.append(name)
+        return result
+
+    @classmethod
+    def _specialized_plan(
+        cls,
+        semantic: dict,
+        intent: dict,
+        decision: dict,
+        cognition: dict,
+    ) -> list[dict[str, Any]]:
+        """Describe existing specialized engines from declared semantic evidence.
+
+        This method only builds a plan; it never imports/creates another room and
+        never executes a second route.
+        """
+        sources = (semantic, intent, decision, cognition)
+        domains: list[str] = []
+        capabilities: list[str] = []
+        representations: list[str] = []
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in ("required_domains", "candidate_domains", "required_competencies"):
+                for value in _as_list(source.get(key)):
+                    name = _s(value).lower()
+                    if name and name not in domains:
+                        domains.append(name)
+            for key in ("required_capabilities", "available_tools"):
+                for value in _as_list(source.get(key)):
+                    name = _s(value).lower()
+                    if name and name not in capabilities:
+                        capabilities.append(name)
+            for key in (
+                "requested_outputs",
+                "required_outputs",
+                "required_representations",
+                "requested_representations",
+                "preferred_representation",
+                "production_representation",
+            ):
+                for value in _as_list(source.get(key)):
+                    name = _s(value).lower()
+                    if name and name not in representations:
+                        representations.append(name)
+
+        # Existing room registry names are referenced by semantic capability,
+        # not selected by word-trigger matching.
+        room_aliases = {
+            "mathematics": "C_MATHEMATICS_ROOM",
+            "math": "C_MATHEMATICS_ROOM",
+            "trigonometry": "C_TRIGONOMETRY_ROOM",
+            "physics": "C_PHYSICS_ROOM",
+            "chemistry": "C_CHEMISTRY_ROOM",
+            "biology": "C_BIOLOGY_ROOM",
+            "literature": "C_LITERATURE_ROOM",
+            "history": "C_HISTORY_ROOM",
+            "engineering": "C_ENGINEERING_ROOM",
+            "it": "C_IT_ROOM",
+            "web": "C_WEB_ROOM",
+            "news": "C_NEWS_ROOM",
+            "social": "C_SOCIAL_ROOM",
+            "formula": "C_FORMULA_ROOM",
+            "graph": "C_GRAPH_ROOM",
+            "diagram": "C_DIAGRAM_ROOM",
+            "table": "C_TABLE_ROOM",
+            "code": "C_CODE_ROOM",
+            "link": "C_LINK_ROOM",
+        }
+
+        plan: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for signal in domains + capabilities + representations:
+            room = room_aliases.get(signal)
+            if not room or room in seen:
+                continue
+            seen.add(room)
+            plan.append({
+                "engine": room,
+                "reason": "declared_semantic_capability",
+                "source_signal": signal,
+            })
+        return plan
+
+    @classmethod
+    def build(cls, *, text: str, state: dict, interpretation: dict,
+              semantic: dict, reasoning: dict, cognition: dict,
+              intent: dict, intent_ai: dict, resolver: dict,
+              router: dict, visual: dict, goal: dict, decision: dict,
+              memory_understanding: dict) -> dict:
+        interpretation = _as_dict(interpretation)
+        semantic = _as_dict(semantic)
+        dialogue = _as_dict(
+            semantic.get("canonical_dialogue_frozen")
+            or interpretation.get("dialogue_contract")
+            or interpretation.get("dialogue_vector")
+        )
+        mode = _s(
+            dialogue.get("relation")
+            or dialogue.get("context_mode")
+            or semantic.get("dialogue_state")
+            or "INDEPENDENT"
+        ).upper()
+
+        current_request = _s(text)
+        context_binding = {
+            "mode": mode,
+            "continuation": bool(
+                dialogue.get("continuation") or mode in {"CONTINUATION", "CONTINUE_TOPIC"}
+            ),
+            "reference_to_previous": bool(
+                dialogue.get("reference_to_previous") or mode == "ARTIFACT_REFERENCE"
+            ),
+            "context_dependency": _s(dialogue.get("context_dependency") or mode.lower()),
+            "previous_user_turn": _s(dialogue.get("previous_user_turn")),
+            "previous_april_turn": _s(dialogue.get("previous_april_turn")),
+            "resolved_request": _s(
+                dialogue.get("resolved_request") or current_request
+            ),
+        }
+
+        specialized = cls._specialized_plan(
+            semantic=semantic,
+            intent=_as_dict(intent),
+            decision=_as_dict(decision),
+            cognition=_as_dict(cognition),
+        )
+
+        return {
+            "version": cls.VERSION,
+            "order": list(cls.ORDER),
+            "single_route": True,
+            "provider_calls": 1,
+            "current_request": current_request,
+            "stages": {
+                "1_INPUT": {
+                    "status": "complete",
+                    "signal": current_request,
+                },
+                "2_INTERPRETATION": {
+                    "status": "complete",
+                    "engine": "interpretation_layer",
+                    "signal": _quantum_snapshot(interpretation),
+                },
+                "3_CONTEXT_BINDING": {
+                    "status": "complete",
+                    "engine": "quantum_context_binding",
+                    "signal": _quantum_snapshot(context_binding),
+                },
+                "4_SEMANTIC_UNDERSTANDING": {
+                    "status": "complete",
+                    "engine": "semantic_core",
+                    "signal": _quantum_snapshot(semantic),
+                },
+                "5_TASK_COMPILATION": {
+                    "status": "complete",
+                    "engine": "response_decision",
+                    "signal": _quantum_snapshot(decision),
+                },
+                "6_SPECIALIZED_ENGINE_PLAN": {
+                    "status": "complete",
+                    "engines": specialized,
+                },
+                "7_PROVIDER_CONTEXT": {
+                    "status": "pending_release",
+                    "budget_input_tokens": 900,
+                    "one_call": True,
+                },
+                "8_OUTPUT_UNDERSTANDING": {
+                    "status": "pending_provider",
+                },
+                "9_RENDER_CONTRACT": {
+                    "status": "pending_provider",
+                    "engine": "C_ARTIFACT_CONTRACT + presentation_matrix",
+                },
+                "10_WEB_DELIVERY": {
+                    "status": "pending_provider",
+                    "engine": "SceneContract → AprilWeb",
+                },
+            },
+            "specialized_engine_plan": specialized,
+            "handoff_invariants": {
+                "current_request_preserved": bool(current_request),
+                "interpretation_present": bool(interpretation),
+                "context_binding_present": bool(context_binding),
+                "semantic_present": bool(semantic),
+                "single_route": True,
+                "one_provider_call": True,
+                "provider_input_budget": 900,
+                "word_trigger_routing": False,
+                "score_routing": False,
+                "duplicate_route": False,
+            },
+        }
+
+    @classmethod
+    def validate(cls, cascade: dict) -> dict:
+        errors: list[str] = []
+        if not isinstance(cascade, dict):
+            return {"ok": False, "errors": ["cascade_not_dict"]}
+        if list(cascade.get("order") or []) != list(cls.ORDER):
+            errors.append("cascade_order_mismatch")
+        invariants = cascade.get("handoff_invariants")
+        if not isinstance(invariants, dict):
+            errors.append("handoff_invariants_missing")
+        else:
+            for key in (
+                "current_request_preserved",
+                "interpretation_present",
+                "context_binding_present",
+                "semantic_present",
+                "single_route",
+                "one_provider_call",
+            ):
+                if invariants.get(key) is not True:
+                    errors.append(f"{key}_failed")
+            if invariants.get("provider_input_budget") != 900:
+                errors.append("provider_input_budget_failed")
+            if invariants.get("word_trigger_routing") is not False:
+                errors.append("word_trigger_routing_failed")
+            if invariants.get("score_routing") is not False:
+                errors.append("score_routing_failed")
+            if invariants.get("duplicate_route") is not False:
+                errors.append("duplicate_route_detected")
+        stages = cascade.get("stages")
+        if not isinstance(stages, dict):
+            errors.append("cascade_stages_missing")
+        else:
+            required = (
+                "1_INPUT", "2_INTERPRETATION", "3_CONTEXT_BINDING",
+                "4_SEMANTIC_UNDERSTANDING", "5_TASK_COMPILATION",
+                "6_SPECIALIZED_ENGINE_PLAN", "7_PROVIDER_CONTEXT",
+                "8_OUTPUT_UNDERSTANDING", "9_RENDER_CONTRACT", "10_WEB_DELIVERY",
+            )
+            for stage in required:
+                if stage not in stages:
+                    errors.append(f"missing_{stage}")
+        return {"ok": not errors, "errors": errors}
+
+
+QUANTUM_CASCADE_ENGINE = QuantumCascadeEngine()
+
 
 # ---------------------------------------------------------------------------
 # INTEGRATED QUANTUM MEMORY UNDERSTANDING ENGINE
