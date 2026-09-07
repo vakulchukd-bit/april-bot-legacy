@@ -47,6 +47,21 @@ PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
 OUTPUT_MAX_TOKENS = 8000
 
+# Canonical math presentation: mathematical spans are rendered by KaTeX in Web.
+# The color is encoded in the LaTeX span itself so the semantic text route stays
+# single-stream and ordinary prose is never recolored.
+KATEX_MATH_COLOR = "#34d399"
+
+
+def _katex_green_latex(value: Any) -> str:
+    """Wrap one already-normalized KaTeX expression in April's canonical green."""
+    latex = _s(value)
+    if not latex:
+        return ""
+    if latex.startswith(r"\color{"):
+        return latex
+    return rf"\color{{{KATEX_MATH_COLOR}}}{{{latex}}}"
+
 # Canonical structural dimensions of the single processor matrix.
 # These are fixed engine dimensions, not routing triggers or score thresholds.
 QUANTUM_CORE_COUNT = 8
@@ -4250,6 +4265,19 @@ def _math_presentation_policy(request: MachineRequest | None = None) -> dict:
         or "formula" in outputs
         or "math" in outputs
     )
+    request_intent = getattr(request, "intent", {}) or {}
+    request_text = _s(
+        request_intent.get("normalized_text")
+        or getattr(request, "goal", "")
+    )
+    structural_math_request = bool(
+        re.search(
+            r"(?:\d\s*(?:[+\-−*/=×÷]|\\(?:times|cdot|div))\s*\d|"
+            r"\b(?:E|mc|x|y|z)\s*\^?\s*\d|\\(?:frac|sqrt)\b)",
+            request_text,
+            flags=re.I,
+        )
+    )
     plan = getattr(request, "constraints", {}) or {}
     presentation_plan = plan.get("presentation_plan", {}) if isinstance(plan, dict) else {}
     explicit_numbers = bool(
@@ -4257,13 +4285,19 @@ def _math_presentation_policy(request: MachineRequest | None = None) -> dict:
         or presentation_plan.get("all_math_numbers")
     )
 
-    mode = "explicit_math" if explicit_formula or explicit_numbers else "structural"
+    mode = "explicit_math" if (
+        explicit_formula or explicit_numbers or structural_math_request
+    ) else "structural"
 
     return {
         "version": "math_presentation_policy_v2",
         "mode": mode,
-        "promote_math_numbers": bool(explicit_numbers or explicit_formula),
-        "promote_variable_labels": bool(explicit_numbers or explicit_formula),
+        "promote_math_numbers": bool(
+            explicit_numbers or explicit_formula or structural_math_request
+        ),
+        "promote_variable_labels": bool(
+            explicit_numbers or explicit_formula or structural_math_request
+        ),
         "source": "QUANTUM_PROCESSOR",
     }
 
@@ -4369,6 +4403,21 @@ def _math_structure_profile_v2(value: Any, *, policy: dict | None = None) -> dic
     for match in relation_re.finditer(source):
         add_range(*match.span("expr"), "relation_structure", display=False)
 
+    # 3b. Parenthesized equations/operations are common Provider output.
+    # Only classify a parenthesized fragment as math when its interior contains
+    # actual mathematical notation; ordinary parenthetical prose stays text.
+    parenthesized_math_re = re.compile(r"\(([^()\n]{1,240})\)")
+    for match in parenthesized_math_re.finditer(source):
+        inner = match.group(1)
+        has_operator = bool(re.search(
+            r"(?:=|≈|≃|≅|≤|≥|≠|×|÷|\*|/|\^|²|³|√|∛|∜|"
+            r"\\(?:frac|dfrac|tfrac|sqrt|cdot|times|div|pm|leq|geq|neq))",
+            inner,
+        ))
+        has_operand = bool(re.search(r"[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9]", inner))
+        if has_operator and has_operand:
+            add_range(*match.span(), "parenthesized_math_structure", display=False)
+
     # 4. Standalone radical/fraction structures.
     standalone_re = re.compile(
         rf"(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|"
@@ -4397,6 +4446,16 @@ def _math_structure_profile_v2(value: Any, *, policy: dict | None = None) -> dic
                 re.search(r"(?:=|≈|≃|≅|≤|≥|≠|×|÷|\*|/|\^|²|³|√|∛|∜|\\(?:frac|sqrt|cdot|times|div))", line)
                 or re.match(r"^\s*(?:[A-Za-zΑ-Ωα-ω]\w*|[A-Za-zА-Яа-яЁё]\w*)\s*=", line)
             )
+            if not line_math:
+                # A pure numeric answer on its own line is a mathematical result
+                # when the current turn explicitly entered math presentation mode.
+                line_math = bool(
+                    promote_numbers
+                    and re.fullmatch(
+                        r"\s*[-+]?\d+(?:[.,]\d+)?(?:\s*(?:[A-Za-zА-Яа-яЁё]{1,8}|%|°))?\s*[.!]?\s*",
+                        line,
+                    )
+                )
             if not line_math:
                 # Still support explanatory list labels like "- **E** — энергия".
                 line_math = bool(
@@ -4484,14 +4543,28 @@ def _math_structure_profile_v2(value: Any, *, policy: dict | None = None) -> dic
 
 
 def _math_normalize_provider_fragment(fragment: str) -> str:
-    """Normalize common Provider TeX fragments into stable KaTeX source."""
+    """Normalize common Provider math notation into one stable KaTeX source."""
     value = _presentation_latex(fragment)
+    if not value:
+        return ""
+
+    stripped = value.strip()
+    if stripped.startswith("(") and stripped.endswith(")"):
+        inner = stripped[1:-1].strip()
+        if re.search(
+            r"(?:=|≈|≃|≅|≤|≥|≠|×|÷|\*|/|\^|\\(?:times|cdot|div|frac|sqrt))",
+            inner,
+        ):
+            value = inner
+
     value = value.replace(r"\text{кг}", r"\mathrm{кг}")
     value = value.replace(r"\text{г}", r"\mathrm{г}")
     value = value.replace(r"\text{м}", r"\mathrm{м}")
     value = value.replace(r"\text{с}", r"\mathrm{с}")
     value = re.sub(r"\\text\{([^{}]{1,40})\}", r"\\mathrm{\1}", value)
     value = value.replace(r"\cdot", r"\times")
+    value = value.replace("×", r"\times")
+    value = value.replace("÷", r"\div")
     return value
 
 
@@ -4754,6 +4827,46 @@ def _quantum_visible_render_policy(
         kind = kind_of(block)
         if kind in internal_kinds:
             continue
+
+        # Legacy Formula blocks are deliberately collapsed into the single text
+        # stream. KaTeX is the only math presentation engine for human-visible
+        # mathematical content; Web therefore never receives a formula renderer
+        # block from the canonical processor.
+        if kind in {"formula", "math"}:
+            formulas = _formula_values_from_payload(_canonical_block_payload(block))
+            if not formulas:
+                raw_value = _s(
+                    block.get("content")
+                    or block.get("text")
+                    or block.get("value")
+                    or ""
+                )
+                if raw_value:
+                    formulas = [{
+                        "label": "",
+                        "value": raw_value,
+                        "latex": _math_normalize_provider_fragment(raw_value),
+                        "display": True,
+                    }]
+            for formula in formulas:
+                latex = formula.get("latex") or _math_normalize_provider_fragment(formula.get("value", ""))
+                green = latex if latex.startswith(r"\\color{") else _katex_green_latex(latex)
+                display = bool(formula.get("display", True))
+                wrapped = ("$$\n" + green + "\n$$") if display else (r"\(" + green + r"\)")
+                visible.append({
+                    "type": "text",
+                    "artifact_type": "text",
+                    "content": wrapped,
+                    "text": wrapped,
+                    "renderer": "TextBlock",
+                    "viewer": "TextBlock",
+                    "scene_contract": True,
+                    "human_visible": True,
+                    "presentation_role": "math_answer",
+                    "source": "quantum_processor_katex_math",
+                })
+            continue
+
         block["type"] = kind or "text"
         if kind in {"markdown", "text"}:
             content = _clean_text_value(
@@ -4797,6 +4910,10 @@ def _quantum_visible_render_policy(
                     )
                 ).get("preferred_representation")
             ).lower()
+    # Formula/math are semantic descriptions, not Web renderer kinds. They are
+    # folded into text and delegated to KaTeX below.
+    if preferred in {"formula", "math"}:
+        preferred = "text"
     authorized = set(requested_structured)
     if not authorized and preferred not in {"", "text", "markdown"}:
         authorized = {preferred}
@@ -5031,7 +5148,7 @@ def _presentation_segments(content: Any, *, math_policy: dict | None = None) -> 
                 )
 
             original = source[item_start:item_end]
-            latex = _math_normalize_provider_fragment(original)
+            latex = _katex_green_latex(_math_normalize_provider_fragment(original))
             display = bool(item.get("display"))
             # A formula occupying the meaningful body of a line is visually
             # stronger as display math; inline formulas remain inline.
@@ -5246,11 +5363,11 @@ def _formula_values_from_payload(payload: dict) -> list[dict]:
                 continue
             expression = _s(step.get("expression") or step.get("latex") or step.get("formula") or step.get("value"))
             if expression:
-                values.append({"label": _s(step.get("label") or step.get("title")), "value": expression, "latex": _math_normalize_provider_fragment(expression), "display": True})
+                values.append({"label": _s(step.get("label") or step.get("title")), "value": expression, "latex": _katex_green_latex(_math_normalize_provider_fragment(expression)), "display": True})
     else:
         expression = _s(payload.get("formula") or payload.get("equation") or payload.get("expression") or payload.get("math") or payload.get("content")) if isinstance(payload, dict) else ""
         if expression:
-            values.append({"label": "", "value": expression, "latex": _math_normalize_provider_fragment(expression), "display": True})
+            values.append({"label": "", "value": expression, "latex": _katex_green_latex(_math_normalize_provider_fragment(expression)), "display": True})
     return values
 
 
