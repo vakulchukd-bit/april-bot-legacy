@@ -521,27 +521,47 @@ try:
 except Exception:  # pragma: no cover
     _imageio = None
 
-try:
-    import matplotlib
-    matplotlib.use("Agg", force=True)
-    import matplotlib.pyplot as _plt
-    from mpl_toolkits.mplot3d import Axes3D as _Axes3D  # noqa: F401
-except Exception:  # pragma: no cover
-    _plt = None
+_plt = None
+_Axes3D = None
+
+def _get_matplotlib():
+    """Lazy-load matplotlib only for actual printer requests that need it."""
+    global _plt, _Axes3D
+    if _plt is not None:
+        return _plt
+    if not NANO_USE_OPTIONAL_HEAVY_IMAGE_LIBS:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+        _plt = plt
+        _Axes3D = Axes3D
+        return _plt
+    except Exception:
+        return None
 
 
-VERSION = "LOCAL_NANO_VISUAL_SCANNER_NANO_PRINTER_V4"
+VERSION = "LOCAL_NANO_VISUAL_SCANNER_NANO_PRINTER_V5_FAST_ADAPTIVE"
 PROVIDER = "local"
-MAX_OCR_ITEMS = 700
+MAX_OCR_ITEMS = 500
 MAX_TEXT_CHARS = 16000
-MAX_REGIONS = 120
-MAX_LINES = 320
-MAX_CONTOURS = 220
+MAX_REGIONS = 100
+MAX_LINES = 240
+MAX_CONTOURS = 160
 MAX_COLORS = 24
 MAX_VECTOR_PRIMITIVES = 260
 MAX_DIFF_REGIONS = 80
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+# Fast adaptive hot-path controls. Expensive secondary passes are disabled by
+# default and run only when the first measurement is weak.
+NANO_FAST_MODE = os.getenv("APRIL_NANO_FAST_MODE", "1").strip().lower() in {"1", "true", "yes", "on"}
+NANO_OCR_MAX_PASSES = max(1, int(os.getenv("APRIL_NANO_OCR_MAX_PASSES", "2")))
+NANO_OCR_UPSCALE = os.getenv("APRIL_NANO_OCR_UPSCALE", "1").strip().lower() in {"1", "true", "yes", "on"}
+NANO_USE_OPTIONAL_HEAVY_IMAGE_LIBS = os.getenv("APRIL_NANO_USE_OPTIONAL_HEAVY_IMAGE_LIBS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>\]\[()\"']+")
 FORMULA_RE = re.compile(
@@ -775,22 +795,27 @@ def _ocr_scan(img: Image.Image) -> Dict[str, Any]:
         }
 
     w, h = img.size
-    variants: List[Tuple[str, Image.Image, float]] = [("rgb", img, 1.0)]
     gray = ImageOps.grayscale(img)
-    variants.append(("gray", gray, 1.0))
-    scale = 1.8 if max(w, h) < 2600 else 1.0
-    if scale > 1.0:
+    variants: List[Tuple[str, Image.Image, float]] = [("base", gray, 1.0)]
+
+    # One fast base pass. A second pass is only created for low-confidence OCR.
+    if NANO_OCR_UPSCALE and max(w, h) < 2600:
+        scale = 1.6
         up = gray.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
         variants.append(("upscaled", up, scale))
-        variants.append(("upscaled_contrast", ImageEnhance.Contrast(up).enhance(1.4), scale))
-        variants.append(("upscaled_sharp", up.filter(ImageFilter.SHARPEN), scale))
+
+    if NANO_FAST_MODE:
+        variants = variants[:NANO_OCR_MAX_PASSES]
+    else:
+        variants.append(("contrast", ImageEnhance.Contrast(gray).enhance(1.35), 1.0))
+        variants = variants[:max(2, NANO_OCR_MAX_PASSES)]
 
     lang_arg = "+".join(langs)
     best_items: List[Dict[str, Any]] = []
     best_text = ""
-    best_score = -1.0
+    best_conf = 0.0
 
-    for name, variant, factor in variants:
+    for pass_index, (name, variant, factor) in enumerate(variants):
         try:
             data = _pytesseract.image_to_data(
                 variant,
@@ -825,24 +850,28 @@ def _ocr_scan(img: Image.Image) -> Dict[str, Any]:
             })
             confs.append(c)
         text = _normalize_text(" ".join(x["text"] for x in items))
-        score = _confidence(confs) + min(1.0, len(text) / 500.0) + min(0.6, len(items) / 100.0)
-        if score > best_score:
-            best_score = score
-            best_items = items
-            best_text = text
+        confidence = _confidence(confs)
+        # Favor useful text and confidence, not simply the number of OCR boxes.
+        score = confidence * 1.7 + min(1.0, len(text) / 800.0)
+        if score > (best_conf * 1.7 + min(1.0, len(best_text) / 800.0)):
+            best_items, best_text, best_conf = items, text, confidence
+
+        # Once OCR is already good enough, do not spend time on secondary passes.
+        if pass_index == 0 and best_conf >= 0.72 and len(best_text) >= 12:
+            break
 
     best_items.sort(key=lambda x: (x["bbox"][1], x["bbox"][0]))
     best_items = best_items[:MAX_OCR_ITEMS]
     return {
         "text": _clip_text(best_text),
         "items": best_items,
-        "confidence": _confidence([x["confidence"] for x in best_items]),
-        "engine": "tesseract_local",
+        "confidence": round(best_conf, 4),
+        "engine": "tesseract_local_adaptive",
         "languages": langs,
         "available": True,
+        "passes_used": min(len(variants), NANO_OCR_MAX_PASSES),
         "reason": None,
     }
-
 
 def _layout_scan(img: Image.Image) -> Dict[str, Any]:
     arr = _cv_array(img)
@@ -1351,7 +1380,7 @@ def _capabilities() -> Dict[str, Any]:
         "networkx": _nx is not None,
         "pandas": _pd is not None,
         "imageio": _imageio is not None,
-        "matplotlib": _plt is not None,
+        "matplotlib": _plt is not None or NANO_USE_OPTIONAL_HEAVY_IMAGE_LIBS,
         "nano_printer": True,
     }
 
@@ -1404,6 +1433,12 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
     return {
         "version": VERSION,
         "source": PROVIDER,
+        "performance": {
+            "fast_mode": NANO_FAST_MODE,
+            "ocr_max_passes": NANO_OCR_MAX_PASSES,
+            "lazy_matplotlib": True,
+            "heavy_optional_image_libs_enabled": NANO_USE_OPTIONAL_HEAVY_IMAGE_LIBS,
+        },
         "provider_calls": 0,
         "single_call": False,
         "paid_provider_used": False,
@@ -1479,7 +1514,7 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
 # NANO PRINTER V4
 # ============================================================
 
-NANO_PRINTER_VERSION = "NANO_PRINTER_V4"
+NANO_PRINTER_VERSION = "NANO_PRINTER_V5_FAST_ADAPTIVE"
 DEFAULT_CANVAS = (1280, 800)
 SUPPORTED_PRINT_KINDS = {
     "image", "screenshot", "annotated_image", "drawing", "diagram",
@@ -1668,13 +1703,13 @@ def _render_formula(spec,size):
     img=_new_canvas(size,spec.get("background",(18,20,24)))
     if _plt is not None:
         try:
-            fig=_plt.figure(figsize=(size[0]/120,size[1]/120),dpi=120); ax=fig.add_axes([0,0,1,1]); ax.axis("off")
+            fig=plt.figure(figsize=(size[0]/120,size[1]/120),dpi=120); ax=fig.add_axes([0,0,1,1]); ax.axis("off")
             ax.text(.5,.55,str(spec.get("formula") or spec.get("text") or ""),ha="center",va="center",fontsize=34)
             fig.canvas.draw(); w,h=fig.canvas.get_width_height()
             rgba=fig.canvas.buffer_rgba(); overlay=Image.frombuffer("RGBA",(w,h),rgba,"raw","RGBA",0,1).copy()
-            img.paste(overlay,(0,0),overlay); _plt.close(fig); return img
+            img.paste(overlay,(0,0),overlay); plt.close(fig); return img
         except Exception:
-            try:_plt.close("all")
+            try:plt.close("all")
             except Exception:pass
     d=ImageDraw.Draw(img); d.text((40,28),str(spec.get("title","Formula")),font=_printer_font(30,True),fill=(245,245,245))
     d.text((70,340),str(spec.get("formula") or spec.get("text") or ""),font=_printer_font(32,True),fill=(235,235,235))
@@ -1683,7 +1718,7 @@ def _render_formula(spec,size):
 def _render_3d(spec,size):
     if _plt is None:return None
     try:
-        fig=_plt.figure(figsize=(size[0]/120,size[1]/120),dpi=120); ax=fig.add_subplot(111,projection="3d"); ax.set_title(str(spec.get("title","3D Scene")))
+        fig=plt.figure(figsize=(size[0]/120,size[1]/120),dpi=120); ax=fig.add_subplot(111,projection="3d"); ax.set_title(str(spec.get("title","3D Scene")))
         pts=spec.get("points") or []
         if pts: ax.scatter([p[0] for p in pts],[p[1] for p in pts],[p[2] for p in pts],s=36)
         for seg in spec.get("lines",[]):
@@ -1691,9 +1726,9 @@ def _render_3d(spec,size):
                 ax.plot([seg[0][0],seg[1][0]],[seg[0][1],seg[1][1]],[seg[0][2],seg[1][2]],linewidth=2)
         fig.tight_layout(); fig.canvas.draw(); w,h=fig.canvas.get_width_height()
         rgba=fig.canvas.buffer_rgba(); img=Image.frombuffer("RGBA",(w,h),rgba,"raw","RGBA",0,1).convert("RGB").resize(size,Image.Resampling.LANCZOS)
-        _plt.close(fig); return img
+        plt.close(fig); return img
     except Exception:
-        try:_plt.close("all")
+        try:plt.close("all")
         except Exception:pass
         return None
 
