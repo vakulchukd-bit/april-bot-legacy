@@ -42,9 +42,9 @@ Web gateway должен:
 import os
 import json
 import asyncio
+import hashlib
 import time
 import tempfile
-import hashlib
 from pathlib import Path
 
 from flask import (
@@ -193,6 +193,131 @@ def _json_safe_snapshot(value, _active=None):
 
 def safe_json(value):
     return _json_safe_snapshot(value)
+
+def _compact_visual_context(analysis: Any) -> dict:
+    """Build a bounded visual packet for the CPU hot path.
+
+    The full Nano Scanner result remains available in the HTTP response, but the
+    CPU receives only semantic evidence that can materially affect interpretation.
+    Pixel sample grids, full palettes and large geometry arrays are intentionally
+    excluded from the hot prompt.
+    """
+    if not isinstance(analysis, dict):
+        return {"available": False, "reason": "invalid_visual_analysis"}
+
+    text_data = analysis.get("text") if isinstance(analysis.get("text"), dict) else {}
+    ocr_data = analysis.get("ocr") if isinstance(analysis.get("ocr"), dict) else {}
+    objects = analysis.get("visual_objects") if isinstance(analysis.get("visual_objects"), list) else []
+    issues = analysis.get("issues") if isinstance(analysis.get("issues"), list) else []
+    request_evidence = analysis.get("request_evidence") if isinstance(analysis.get("request_evidence"), dict) else {}
+    screenshot_detection = analysis.get("screenshot_detection") if isinstance(analysis.get("screenshot_detection"), dict) else {}
+    visual = analysis.get("visual") if isinstance(analysis.get("visual"), dict) else {}
+    graphs = analysis.get("graphs") if isinstance(analysis.get("graphs"), dict) else {}
+    diagrams = analysis.get("diagrams") if isinstance(analysis.get("diagrams"), dict) else {}
+    tables = analysis.get("tables") if isinstance(analysis.get("tables"), dict) else {}
+    change_detection = analysis.get("change_detection") if isinstance(analysis.get("change_detection"), dict) else {}
+    local_interpretation = analysis.get("local_interpretation") if isinstance(analysis.get("local_interpretation"), dict) else {}
+    semantic_scope = analysis.get("semantic_scope") if isinstance(analysis.get("semantic_scope"), dict) else {}
+
+    ocr_text = str(
+        text_data.get("content")
+        or ocr_data.get("text")
+        or ""
+    ).strip()
+    if len(ocr_text) > 5000:
+        ocr_text = ocr_text[:5000] + "…"
+
+    object_types = []
+    for item in objects[:24]:
+        if isinstance(item, dict):
+            kind = str(item.get("type") or "").strip().lower()
+            if kind and kind not in object_types:
+                object_types.append(kind)
+
+    compact_issues = []
+    for item in issues[:16]:
+        if not isinstance(item, dict):
+            continue
+        compact_issues.append({
+            "type": item.get("type"),
+            "action": item.get("action"),
+            "target": str(item.get("target") or item.get("target_text") or "")[:260],
+            "confidence": item.get("confidence"),
+        })
+
+    return {
+        "version": analysis.get("version"),
+        "input_type": analysis.get("input_type"),
+        "local_only": bool(analysis.get("local_only")),
+        "provider_calls": int(analysis.get("provider_calls", 0) or 0),
+        "visual": {
+            "width": visual.get("width"),
+            "height": visual.get("height"),
+            "orientation": visual.get("orientation"),
+            "aspect_ratio": visual.get("aspect_ratio"),
+            "mean_luma": visual.get("mean_luma"),
+            "contrast": visual.get("contrast"),
+        },
+        "screenshot_detection": {
+            "is_screenshot": bool(screenshot_detection.get("is_screenshot")),
+            "confidence": screenshot_detection.get("confidence", 0.0),
+            "reasons": list(screenshot_detection.get("reasons") or [])[:8],
+        },
+        "text": {
+            "content": ocr_text,
+            "confidence": text_data.get("confidence", ocr_data.get("confidence", 0.0)),
+        },
+        "links": list(analysis.get("links") or [])[:32],
+        "formulas": list(analysis.get("formulas") or [])[:32],
+        "code_blocks": list(analysis.get("code_blocks") or [])[:16],
+        "objects": object_types,
+        "graphs": {
+            "confidence": graphs.get("confidence", 0.0),
+            "line_count": graphs.get("line_count", 0),
+            "horizontal_axis_candidates": graphs.get("horizontal_axis_candidates", 0),
+            "vertical_axis_candidates": graphs.get("vertical_axis_candidates", 0),
+        },
+        "diagrams": {
+            "confidence": diagrams.get("confidence", 0.0),
+            "line_count": diagrams.get("line_count", 0),
+            "circle_count": diagrams.get("circle_count", 0),
+        },
+        "tables": {
+            "detected": bool(tables.get("detected")),
+            "confidence": tables.get("confidence", 0.0),
+            "candidate_count": len(tables.get("candidates") or []) if isinstance(tables.get("candidates"), list) else 0,
+        },
+        "change_detection": {
+            "available": bool(change_detection.get("available")),
+            "changed": bool(change_detection.get("changed")),
+            "similarity": change_detection.get("similarity"),
+            "difference_ratio": change_detection.get("difference_ratio"),
+            "changed_region_count": change_detection.get("changed_region_count", 0),
+        },
+        "request_evidence": {
+            "asks_explanation": bool(request_evidence.get("asks_explanation")),
+            "asks_edit_or_fix": bool(request_evidence.get("asks_edit_or_fix")),
+            "asks_change_comparison": bool(request_evidence.get("asks_change_comparison")),
+            "asks_color_change": bool(request_evidence.get("asks_color_change")),
+            "asks_drawing": bool(request_evidence.get("asks_drawing")),
+            "requested_color": request_evidence.get("requested_color"),
+            "requested_changes": list(request_evidence.get("requested_changes") or [])[:12],
+        },
+        "local_interpretation": {
+            "description": str(local_interpretation.get("description") or "")[:1200],
+            "help_mode": local_interpretation.get("help_mode"),
+        },
+        "semantic_scope": {
+            "can_extract_text": bool(semantic_scope.get("can_extract_text")),
+            "can_detect_tables": bool(semantic_scope.get("can_detect_tables")),
+            "can_detect_graph_geometry": bool(semantic_scope.get("can_detect_graph_geometry")),
+            "can_detect_diagram_geometry": bool(semantic_scope.get("can_detect_diagram_geometry")),
+            "can_compare_previous_image": bool(semantic_scope.get("can_compare_previous_image")),
+            "can_propose_change_evidence": bool(semantic_scope.get("can_propose_change_evidence")),
+            "can_build_2d_editable_evidence": bool(semantic_scope.get("can_build_2d_editable_evidence")),
+        },
+        "confidence": analysis.get("confidence", 0.0),
+    }
 
 
 def _checkout_best_text(*values):
@@ -841,6 +966,7 @@ def build_space_continuity(normalized):
 # =========================================================
 
 GATEWAY_ROLE = "TRANSPORT_ONLY"
+VISUAL_CONTEXT_TRANSPORT_VERSION = "VISUAL_CONTEXT_PACKET_V2_BOUNDED"
 GATEWAY_CANONICAL_ONLY = True
 GATEWAY_PARALLEL_ROUTE = False
 GATEWAY_PROVIDER_CALLS = 0
@@ -1228,29 +1354,54 @@ def image_chat():
         )
 
         analysis_payload = safe_json(result)
+        compact_visual = _compact_visual_context(result)
+
+        # Keep the full scanner result available to diagnostics, while only the
+        # bounded semantic packet enters the CPU hot path.
+        try:
+            user_state["_incoming_visual_evidence"] = compact_visual
+            user_state["_incoming_visual_analysis_meta"] = {
+                "version": result.get("version"),
+                "timestamp": time.time(),
+                "provider_calls": int(result.get("provider_calls", 0) or 0),
+                "local_only": bool(result.get("local_only")),
+            }
+            persist_state(user_id)
+        except Exception as state_error:
+            print("🧠 VISUAL EVIDENCE STATE STORE SKIPPED:", state_error)
 
         visual_summary = {
             "image_analysis": True,
             "user_id": user_id,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "local_only": bool(result.get("local_only")),
+            "scanner_confidence": result.get("confidence", 0.0),
+            "objects": compact_visual.get("objects", []),
         }
+
+        print("🧠 NANO VISUAL PACKET:", {
+            "input_type": compact_visual.get("input_type"),
+            "ocr_chars": len(compact_visual.get("text", {}).get("content", "")),
+            "objects": compact_visual.get("objects", []),
+            "graph_confidence": compact_visual.get("graphs", {}).get("confidence", 0.0),
+            "diagram_confidence": compact_visual.get("diagrams", {}).get("confidence", 0.0),
+            "local_only": compact_visual.get("local_only"),
+            "provider_calls": compact_visual.get("provider_calls"),
+        })
 
         # =====================================================
         # 🧠 APRIL THINKING ROUTE
         # =====================================================
-
-        visual_context = f"""
-VISUAL_ANALYSIS:
-{analysis_payload}
-
-Проанализируй активную визуальную сцену пользователя.
-Если изображение прислано впервые — дай краткое понятное описание.
-Если изображение относится к текущему диалогу — ответь по контексту диалога и содержимому изображения.
-Используй VISUAL_ANALYSIS как источник визуального контекста.
-"""
+        visual_context = (
+            "VISUAL_CONTEXT_PACKET:\n"
+            + json.dumps(compact_visual, ensure_ascii=False, separators=(",", ":"))
+            + "\n\n"
+            + "Проанализируй текущее изображение и ответь пользователю по его "
+              "содержимому. Используй только переданный VISUAL_CONTEXT_PACKET "
+              "как визуальное evidence; не выдумывай отсутствующие детали."
+        )
 
         april_result = asyncio.run(
-
             process_web_message(
                 user_id=user_id,
                 text=visual_context,
