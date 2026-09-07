@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v11_probabilistic_context_reconstruction_10turn_task_dependency_v3"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v14_universal_context_topic_entity_multimodal_v1"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -278,6 +278,977 @@ def _clean_representation(value: Any) -> str:
     value = str(value or "").strip().lower()
     value = REPRESENTATION_ALIASES.get(value, value)
     return value if value in REPRESENTATION_UNIVERSE else ""
+
+
+class QuantumContextUnderstandingEngine:
+    """
+    Context-first semantic fusion layer.
+
+    Purpose:
+      1) reconstruct the active topic/thread from authentic USER↔APRIL history;
+      2) resolve entities/coreference before downstream engines see the turn;
+      3) distinguish current-turn structure ("first/second/third") from historical
+         references ("the previous formula", "that image");
+      4) describe the COMPLETE task as a multi-dimensional intent packet:
+         operation + object + representation + input modality + output modality;
+      5) use multilingual sentence embeddings as the primary semantic comparison
+         when available, with the existing matrix engine as a deterministic fallback;
+      6) optionally use local NLI only for genuinely ambiguous relations.
+
+    This class never routes, calls a provider, executes tools, selects renderers,
+    or mutates an answer. It produces an evidence/understanding packet consumed
+    by the canonical interpretation engine.
+    """
+
+    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V3"
+    TOPIC_WINDOW = 12
+    ENTITY_WINDOW = 8
+    NLI_ENABLED = (
+        os.getenv("APRIL_ENABLE_CONTEXT_NLI", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    EMBEDDING_ENABLED = (
+        os.getenv("APRIL_ENABLE_CONTEXT_EMBEDDINGS", "1").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+    ACTION_UNIVERSE = (
+        "answer", "ask", "explain", "calculate", "analyze", "compare",
+        "summarize", "list", "retrieve", "create", "build", "present",
+        "modify", "correct", "continue", "recall", "inspect", "read",
+        "extract", "classify", "translate",
+    )
+
+    OUTPUT_UNIVERSE = (
+        "text", "number", "formula", "code", "link", "table", "graph",
+        "diagram", "image", "gallery", "file", "audio", "video",
+        "memory", "visual_context", "action",
+    )
+
+    INPUT_UNIVERSE = (
+        "text", "number", "formula", "code", "link", "image", "screenshot",
+        "gallery", "file", "audio", "video", "visual_context",
+    )
+
+    _PRONOUNS = {
+        "он", "она", "они", "его", "её", "ее", "их", "ему", "ей", "им",
+        "ним", "него", "нём", "нем", "неё", "нее", "ней", "этом", "этот", "эта", "это",
+        "эти", "тот", "та", "то", "те", "тем", "того", "ту", "выше",
+        "ниже", "там", "здесь", "такой", "такая", "такое", "такие",
+    }
+
+    _ORDINAL_MAP = {
+        "первый": 1, "первая": 1, "первое": 1,
+        "второй": 2, "вторая": 2, "второе": 2,
+        "третий": 3, "третья": 3, "третье": 3,
+        "четвертый": 4, "четвёртый": 4, "четвертая": 4, "четвёртая": 4,
+        "пятый": 5, "пятая": 5, "пятое": 5,
+        "шестой": 6, "шестая": 6, "шестое": 6,
+        "седьмой": 7, "седьмая": 7, "седьмое": 7,
+        "восьмой": 8, "восьмая": 8, "восьмое": 8,
+        "девятый": 9, "девятая": 9, "девятое": 9,
+        "десятый": 10, "десятая": 10, "десятое": 10,
+        "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+        "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+    }
+
+    _STOP = {
+        "что", "это", "такое", "как", "кто", "когда", "где", "куда",
+        "почему", "зачем", "мне", "тебе", "тебя", "ты", "вы", "он", "она",
+        "они", "его", "ее", "её", "их", "ему", "ей", "им", "можно",
+        "нужно", "хочу", "покажи", "показать", "расскажи", "рассказать",
+        "объясни", "объяснить", "скажи", "сделай", "сделать", "дай",
+        "добавь", "добавить", "первое", "второе", "третье", "первый",
+        "второй", "третий", "и", "а", "но", "ещё", "еще", "then", "the",
+        "what", "who", "how", "why", "this", "that", "they", "he", "she",
+        "it", "and", "or", "to", "of", "for",
+    }
+
+    def __init__(self, semantic_engine: "QuantumInterpretationEngine") -> None:
+        self.semantic_engine = semantic_engine
+        self._nli = None
+        self._nli_lock = threading.RLock()
+
+    @staticmethod
+    def _compact(value: Any, limit: int = 800) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())[:limit]
+
+    @staticmethod
+    def _tokens(text: Any) -> list[str]:
+        return re.findall(
+            r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+",
+            str(text or "").lower(),
+        )
+
+    @classmethod
+    def _content_tokens(cls, text: Any) -> list[str]:
+        return [
+            token for token in cls._tokens(text)
+            if len(token) >= 3 and token not in cls._STOP
+        ]
+
+    @classmethod
+    def _entities(cls, text: Any) -> list[dict[str, Any]]:
+        source = str(text or "")
+        found: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        patterns = (
+            ("url", r"https?://[^\s)\]}>,]+"),
+            ("email", r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
+            (
+                "proper_name",
+                r"\b[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4}\b",
+            ),
+            (
+                "proper_name",
+                r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
+            ),
+            (
+                "formula_symbol",
+                r"\b(?:[A-Za-z](?:\^[A-Za-z0-9+\-]+)?|[A-Za-z]\s*=\s*[A-Za-z0-9^_()+*/.\-]+)\b",
+            ),
+            (
+                "number_expression",
+                r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?:\s*[+\-*/×÷]\s*[-+]?\d+(?:[.,]\d+)?)+",
+            ),
+            (
+                "code_identifier",
+                r"\b[A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]{1,})+\b",
+            ),
+        )
+        for kind, pattern in patterns:
+            for match in re.finditer(pattern, source):
+                value = match.group(0).strip(".,:;()[]{}<>\"'")
+                if not value:
+                    continue
+                # Single-token proper names are valid even in mid-sentence.
+                # Exclude only generic discourse/function words.
+                if kind == "proper_name" and len(value.split()) == 1:
+                    if value.casefold() in {
+                        "кто", "что", "когда", "где", "куда", "почему", "зачем",
+                        "сколько", "какая", "какой", "какое", "какие", "расскажи",
+                        "покажи", "объясни", "сделай", "скажи", "а", "и", "но",
+                        "the", "what", "who", "when", "where", "why", "how",
+                    }:
+                        continue
+                key = (kind, value.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({
+                    "type": kind,
+                    "value": value,
+                    "start": match.start(),
+                    "end": match.end(),
+                })
+        return found[:48]
+
+    @classmethod
+    def _ordinals(cls, text: Any) -> list[int]:
+        source = str(text or "").lower()
+        hits = []
+        for word, number in cls._ORDINAL_MAP.items():
+            pos = source.find(word)
+            if pos >= 0:
+                hits.append((pos, number))
+        hits.sort(key=lambda item: item[0])
+        result = []
+        for _, value in hits:
+            if value not in result:
+                result.append(value)
+        return result
+
+    @classmethod
+    def _request_segments(cls, text: Any) -> list[dict[str, Any]]:
+        source = str(text or "").strip()
+        if not source:
+            return []
+
+        numbered = list(re.finditer(
+            r"(?:^|\n|\s)(\d{1,3})[.)]\s+(.+?)(?=(?:\s+\d{1,3}[.)]\s+)|\n+\s*(?:\d{1,3})[.)]\s+|$)",
+            source,
+            flags=re.S,
+        ))
+        if len(numbered) >= 2:
+            return [
+                {
+                    "segment_index": int(match.group(1)),
+                    "text": re.sub(r"\s+", " ", match.group(2)).strip(),
+                    "source": "numbered_current_turn",
+                }
+                for match in numbered[:32]
+            ]
+
+        pieces = [
+            piece.strip(" \t")
+            for piece in re.split(r"(?:\n{2,}|;(?=\s+)|\s+\band\b\s+|\s+\bи\b\s+)", source, flags=re.I)
+            if piece.strip()
+        ]
+        if len(pieces) >= 2:
+            return [
+                {
+                    "segment_index": idx,
+                    "text": re.sub(r"\s+", " ", piece),
+                    "source": "semantic_clause_segmentation",
+                }
+                for idx, piece in enumerate(pieces[:16], start=1)
+            ]
+        return [{
+            "segment_index": 1,
+            "text": re.sub(r"\s+", " ", source),
+            "source": "single_current_turn",
+        }]
+
+    @classmethod
+    def _modality_evidence(
+        cls,
+        text: str,
+        *,
+        semantic: dict[str, Any] | None = None,
+        cognition: dict[str, Any] | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        sources = [
+            semantic if isinstance(semantic, dict) else {},
+            cognition if isinstance(cognition, dict) else {},
+            state if isinstance(state, dict) else {},
+        ]
+        combined = " ".join(cls._compact(s) for s in sources if s)
+        source_text = f"{text} {combined}"
+
+        code = bool(re.search(r"```[\s\S]*?```|(?:\bdef\b|\bclass\b|\bimport\b|\bfunction\b)\s+\w+", text, re.I))
+        link = bool(re.search(r"https?://|www\.[\w.-]+\.", text, re.I))
+        screenshot = bool(re.search(
+            r"\b(?:скриншот|скрин|screenshot|screen shot|снимок экрана|изображен(?:ие|ия) на экране)\b",
+            source_text, re.I,
+        ))
+        formula = bool(re.search(
+            r"(?:[A-Za-z]\s*=\s*[A-Za-z0-9^_()+*/.\-]+|\b(?:mc\^2|E\s*=\s*mc2)\b|\\frac|\\sqrt)",
+            text,
+            re.I,
+        ))
+        numeric = bool(re.search(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?:\s*[+\-*/×÷]\s*[-+]?\d+(?:[.,]\d+)?)+",
+            text,
+        ))
+        image_signal = screenshot or bool(re.search(
+            r"\b(?:изображение|картинка|фото|фотография|image|picture|photo)\b",
+            source_text, re.I,
+        ))
+        table_signal = bool(re.search(
+            r"\b(?:таблица|таблич(?:а|ный)|table|rows?|columns?)\b",
+            source_text, re.I,
+        ))
+        graph_signal = bool(re.search(
+            r"\b(?:график|графика|chart|plot|curve|диаграмма данных)\b",
+            source_text, re.I,
+        ))
+        diagram_signal = bool(re.search(
+            r"\b(?:схема|чертёж|чертеж|diagram|schematic|flowchart|блок-схема)\b",
+            source_text, re.I,
+        ))
+        audio_signal = bool(re.search(r"\b(?:аудио|голос|audio|voice|sound)\b", source_text, re.I))
+        video_signal = bool(re.search(r"\b(?:видео|ролик|video)\b", source_text, re.I))
+        file_signal = bool(re.search(r"\b(?:файл|документ|attachment|file|pdf|docx?)\b", source_text, re.I))
+
+        for src in sources:
+            keys = {str(k).lower(): v for k, v in src.items()}
+            if any(k in keys and keys[k] for k in ("images", "image", "vision_context", "vision")):
+                image_signal = True
+            if any(k in keys and keys[k] for k in ("files", "file_context", "attachment", "attachments")):
+                file_signal = True
+            if any(k in keys and keys[k] for k in ("audio", "voice_context", "voice")):
+                audio_signal = True
+            if any(k in keys and keys[k] for k in ("video", "video_context")):
+                video_signal = True
+            if any(k in keys and keys[k] for k in ("screenshot", "screenshots")):
+                screenshot = True
+                image_signal = True
+
+        inputs = []
+        if text.strip():
+            inputs.append("text")
+        if numeric:
+            inputs.append("number")
+        if formula:
+            inputs.append("formula")
+        if code:
+            inputs.append("code")
+        if link:
+            inputs.append("link")
+        if image_signal:
+            inputs.append("screenshot" if screenshot else "image")
+        if table_signal:
+            inputs.append("table")
+        if graph_signal:
+            inputs.append("graph")
+        if diagram_signal:
+            inputs.append("diagram")
+        if file_signal:
+            inputs.append("file")
+        if audio_signal:
+            inputs.append("audio")
+        if video_signal:
+            inputs.append("video")
+
+        return {
+            "inputs": list(dict.fromkeys(inputs)),
+            "flags": {
+                "text": bool(text.strip()),
+                "number": numeric,
+                "formula": formula,
+                "code": code,
+                "link": link,
+                "image": image_signal,
+                "screenshot": screenshot,
+                "table": table_signal,
+                "graph": graph_signal,
+                "diagram": diagram_signal,
+                "file": file_signal,
+                "audio": audio_signal,
+                "video": video_signal,
+            },
+            "source": "multimodal_structural_evidence",
+            "lexical_routing": False,
+        }
+
+    @classmethod
+    def _task_actions(
+        cls,
+        text: str,
+        profile: dict[str, Any],
+        modality: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compile an action/output vector from semantic evidence.
+
+        Operation is measured by the existing matrix. Structured outputs are
+        admitted when operation + object semantics agree; raw words are never
+        used as renderer commands.
+        """
+        scores = {
+            key: float(value or 0.0)
+            for key, value in (profile.get("operation_scores") or {}).items()
+        }
+        objects = {
+            key: float(value or 0.0)
+            for key, value in (profile.get("object_scores") or {}).items()
+        }
+        reps = {
+            key: float(value or 0.0)
+            for key, value in (profile.get("representation_scores") or {}).items()
+        }
+
+        op_rank = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        best = op_rank[0][0] if op_rank else "answer"
+        flags = modality.get("flags", {})
+
+        # Explicit arithmetic structure is strong CALCULATE evidence even when
+        # natural-language wording pulls another operation prototype upward.
+        if flags.get("number") and re.search(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?\s*[+\-*/×÷]\s*[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+            text,
+        ):
+            best = "calculate"
+
+        compatible = {
+            "formula": {"calculate", "answer", "explain", "present", "build", "modify"},
+            "code": {"build", "modify", "present", "explain", "analyze"},
+            "link": {"retrieve", "present", "answer", "list", "explain"},
+            "table": {"build", "present", "compare", "list", "explain", "analyze"},
+            "graph": {"build", "present", "calculate", "analyze", "compare", "list", "explain"},
+            "diagram": {"build", "present", "modify", "explain", "analyze"},
+            "image": {"build", "present", "modify", "create"},
+            "gallery": {"build", "present", "compare", "list"},
+            "file": {"retrieve", "present", "analyze", "read"},
+            "audio": {"retrieve", "present", "analyze", "read"},
+            "video": {"retrieve", "present", "analyze", "read"},
+        }
+
+        candidates = []
+        for action in cls.ACTION_UNIVERSE:
+            score = float(scores.get(action, 0.0) or 0.0)
+            if score >= 0.05:
+                candidates.append({"action": action, "score": round(score, 6)})
+
+        outputs: list[str] = []
+
+        # Structural numeric expression: the answer itself is a numerical result,
+        # usually accompanied by text explanation.
+        if flags.get("number") and best in {"calculate", "answer"}:
+            outputs.append("number")
+
+        # The request's semantic object can authorize a structured output even when
+        # the character-level representation rank is polluted by decorative words.
+        compatible_object_candidates = []
+        for label, obj_score in objects.items():
+            if label not in cls.OUTPUT_UNIVERSE or label == "text":
+                continue
+            if best in compatible.get(label, set()) and obj_score >= 0.08:
+                compatible_object_candidates.append((label, obj_score))
+        compatible_object_candidates.sort(key=lambda item: item[1], reverse=True)
+        for label, _ in compatible_object_candidates[:4]:
+            outputs.append(label)
+
+        # Representation measurements remain evidence, not a hard trigger. When
+        # they agree with the current operation, they contribute to the output plan.
+        for label, rep_score in sorted(reps.items(), key=lambda item: item[1], reverse=True):
+            if label == "text" or label not in cls.OUTPUT_UNIVERSE:
+                continue
+            if rep_score < 0.10:
+                continue
+            if best in compatible.get(label, set()) or label in {
+                "formula" if flags.get("formula") else "",
+                "code" if flags.get("code") else "",
+                "link" if flags.get("link") else "",
+            }:
+                outputs.append(label)
+
+        # Explicit input/output modality mapping.
+        if flags.get("formula"):
+            outputs.append("formula")
+        if flags.get("code"):
+            outputs.append("code")
+        if flags.get("link"):
+            outputs.append("link")
+        if flags.get("table"):
+            outputs.append("table")
+        if flags.get("graph"):
+            outputs.append("graph")
+        if flags.get("diagram"):
+            outputs.append("diagram")
+        if flags.get("screenshot"):
+            # Reading/analysing a screenshot produces an understanding, not another
+            # screenshot. A later renderer may display an annotated result, but the
+            # semantic output is visual_context unless the current request explicitly
+            # asks to create a new image.
+            outputs.append("visual_context")
+        elif flags.get("image"):
+            outputs.append("image")
+        if flags.get("file"):
+            outputs.append("file")
+        if flags.get("audio"):
+            outputs.append("audio")
+        if flags.get("video"):
+            outputs.append("video")
+
+        return {
+            "primary": best,
+            "primary_score": float(scores.get(best, 0.0) or 0.0),
+            "candidates": candidates[:16],
+            "requested_outputs": list(dict.fromkeys(outputs)),
+            "output_evidence": {
+                "object_scores": {k: round(float(v), 6) for k, v in sorted(objects.items(), key=lambda item: item[1], reverse=True)[:12]},
+                "representation_scores": {k: round(float(v), 6) for k, v in sorted(reps.items(), key=lambda item: item[1], reverse=True)[:12]},
+            },
+            "source": "task_action_matrix",
+        }
+
+    @classmethod
+    def _topic_label(cls, pair: dict[str, str], scene: dict[str, Any] | None = None) -> str:
+        texts = [
+            str(pair.get("user") or ""),
+            str(pair.get("assistant") or ""),
+        ]
+        if isinstance(scene, dict):
+            texts.extend([
+                str(scene.get("topic") or ""),
+                str(scene.get("summary") or ""),
+            ])
+        entities = cls._entities(" ".join(texts))
+        names = [x["value"] for x in entities if x["type"] == "proper_name"]
+        if names:
+            return max(names, key=lambda x: (len(x.split()), len(x)))
+        content = [
+            token for token in cls._content_tokens(" ".join(texts))
+            if not token.isdigit()
+        ]
+        if content:
+            ranked = sorted(set(content), key=lambda x: (-len(x), x))
+            return " ".join(ranked[:4])
+        return ""
+
+    def _embedding_similarity(self, left: str, right: str) -> tuple[float, str]:
+        if not left or not right:
+            return 0.0, "none"
+        if self.EMBEDDING_ENABLED:
+            try:
+                # The shared engine lazily loads the multilingual encoder only when
+                # explicitly available; failures fall back to the existing matrix.
+                if self.semantic_engine._semantic_encoder is None:
+                    try:
+                        if SentenceTransformer is not None:
+                            self.semantic_engine._semantic_encoder = SentenceTransformer(SEMANTIC_MODEL_NAME)
+                    except Exception:
+                        self.semantic_engine._semantic_encoder = None
+                result = self.semantic_engine.similarity(left, right)
+                if result.get("measured"):
+                    return float(result.get("score", 0.0)), str(result.get("source", "embedding"))
+            except Exception:
+                pass
+        try:
+            result = self.semantic_engine.similarity(left, right)
+            return float(result.get("score", 0.0)), str(result.get("source", "matrix"))
+        except Exception:
+            return 0.0, "none"
+
+    @staticmethod
+    def _shared_entities(current_entities: list[dict[str, Any]], prior_entities: list[dict[str, Any]]) -> list[str]:
+        current = {str(x.get("value")).casefold() for x in current_entities}
+        return [
+            str(x.get("value"))
+            for x in prior_entities
+            if str(x.get("value")).casefold() in current
+        ][:16]
+
+    def _topic_profiles(
+        self,
+        current: str,
+        recent_pairs: list[dict[str, str]],
+        active_topic: str,
+        previous_scene: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        profiles = []
+        current_entities = self._entities(current)
+        candidates = list(reversed(recent_pairs[-self.TOPIC_WINDOW:]))
+        if active_topic:
+            candidates.insert(0, {"user": active_topic, "assistant": active_topic, "source": "active_topic"})
+        for idx, pair in enumerate(candidates, start=1):
+            user = self._compact(pair.get("user"))
+            assistant = self._compact(pair.get("assistant"), 1200)
+            pair_text = f"{user} {assistant}".strip()
+            if not pair_text:
+                continue
+            sim, source = self._embedding_similarity(current, pair_text)
+            prior_entities = self._entities(pair_text)
+            shared = self._shared_entities(current_entities, prior_entities)
+            current_terms = set(self._content_tokens(current))
+            prior_terms = set(self._content_tokens(pair_text))
+            lexical_overlap = (
+                len(current_terms & prior_terms) / max(1, len(current_terms | prior_terms))
+            )
+            recency = 1.0 / (1.0 + 0.12 * (idx - 1))
+            topic_label = self._topic_label(pair, previous_scene)
+            topic_score = (
+                0.58 * sim
+                + 0.22 * (len(shared) / max(1, min(4, len(current_entities) or 1)))
+                + 0.12 * lexical_overlap
+                + 0.08 * recency
+            )
+            profiles.append({
+                "pair_index": idx,
+                "topic": topic_label,
+                "user": user,
+                "assistant": assistant,
+                "semantic_similarity": round(float(sim), 6),
+                "shared_entities": shared,
+                "lexical_overlap": round(float(lexical_overlap), 6),
+                "recency": round(float(recency), 6),
+                "score": round(float(min(1.0, topic_score)), 6),
+                "source": source,
+            })
+        return sorted(profiles, key=lambda item: item["score"], reverse=True)
+
+    @classmethod
+    def _is_current_turn_reference(cls, text: str) -> bool:
+        source = str(text or "").lower()
+        ordinals = cls._ordinals(source)
+        numbered_items = len(cls._request_segments(source)) >= 2
+        # An ordinal within a multi-part current request is local structure, not
+        # a historical pointer.
+        return bool(ordinals) and numbered_items
+
+    @classmethod
+    def _coreference_candidates(
+        cls,
+        current: str,
+        prior_text: str,
+        topic_profiles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        current_tokens = set(cls._tokens(current))
+        has_pronoun = bool(current_tokens & cls._PRONOUNS)
+        ordinals = cls._ordinals(current)
+        local_reference = cls._is_current_turn_reference(current)
+
+        if not has_pronoun and not ordinals:
+            return []
+
+        entities = cls._entities(prior_text)
+        scored = []
+        for entity in entities:
+            kind = entity["type"]
+            value = entity["value"]
+            score = 0.0
+            if kind == "proper_name":
+                score += 0.34
+            elif kind in {"formula_symbol", "number_expression", "code_identifier"}:
+                score += 0.22
+            if topic_profiles:
+                shared = any(
+                    value.casefold() in {str(x).casefold() for x in profile.get("shared_entities", [])}
+                    for profile in topic_profiles[:4]
+                )
+                topic_labels = {
+                    str(profile.get("topic") or "").casefold()
+                    for profile in topic_profiles[:4]
+                    if profile.get("topic")
+                }
+                if shared:
+                    score += 0.34
+                if value.casefold() in topic_labels:
+                    score += 0.46
+            scored.append({
+                "entity": value,
+                "type": kind,
+                "score": round(min(1.0, score), 6),
+            })
+
+        scored.sort(key=lambda item: item["score"], reverse=True)
+
+        if local_reference:
+            return [{
+                "type": "current_turn_ordinal",
+                "ordinal_targets": ordinals,
+                "historical_reference_blocked": True,
+                "candidates": [],
+                "confidence": 0.98,
+            }]
+
+        # A standalone ordinal after a previous numbered answer refers to that
+        # previous answer only when the antecedent exists structurally.
+        if ordinals:
+            numbered = []
+            for match in re.finditer(
+                r"(?:^|\s)(\d{1,3})[.)]\s+(.+?)(?=(?:\s+\d{1,3}[.)]\s+)|$)",
+                prior_text,
+                flags=re.S,
+            ):
+                numbered.append({
+                    "index": int(match.group(1)),
+                    "content": re.sub(r"\s+", " ", match.group(2)).strip()[:1000],
+                })
+            ordinal_target = ordinals[0]
+            selected = [
+                item for item in numbered if item["index"] == ordinal_target
+            ]
+            if selected:
+                return [{
+                    "type": "historical_ordinal",
+                    "ordinal_targets": ordinals,
+                    "historical_reference_blocked": False,
+                    "candidates": [{
+                        "entity": f"item_{ordinal_target}",
+                        "type": "historical_list_item",
+                        "content": selected[0]["content"],
+                        "score": 0.94,
+                    }],
+                    "confidence": 0.94,
+                }]
+
+        return [{
+            "type": "historical_entity",
+            "ordinal_targets": ordinals,
+            "historical_reference_blocked": False,
+            "candidates": scored[:8],
+            "confidence": round(float(scored[0]["score"]) if scored else 0.0, 6),
+        }]
+
+    def _nli_verify(
+        self,
+        current: str,
+        hypothesis_pairs: list[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Use local NLI as an ambiguity verifier, never as the primary router."""
+        if not self.NLI_ENABLED or hf_pipeline is None or not hypothesis_pairs:
+            return []
+        labels = [str(label) for label, _ in hypothesis_pairs[:4]]
+        with self._nli_lock:
+            try:
+                if self._nli is None:
+                    self._nli = hf_pipeline(
+                        "zero-shot-classification",
+                        model=NLI_MODEL_NAME,
+                        tokenizer=NLI_MODEL_NAME,
+                    )
+            except Exception:
+                return []
+        try:
+            result = self._nli(
+                current,
+                candidate_labels=labels,
+                hypothesis_template="This user request is {} relative to the previous conversation.",
+                multi_label=False,
+            )
+            out = []
+            for label, score in zip(
+                result.get("labels", []) if isinstance(result, dict) else [],
+                result.get("scores", []) if isinstance(result, dict) else [],
+            ):
+                out.append({
+                    "hypothesis": str(label),
+                    "score": round(float(score), 6),
+                })
+            return out
+        except Exception:
+            return []
+
+    def analyze(
+        self,
+        current: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        state: dict[str, Any] | None = None,
+        semantic: dict[str, Any] | None = None,
+        cognition: dict[str, Any] | None = None,
+        active_topic: str = "",
+        active_goal: str = "",
+        previous_scene: dict[str, Any] | None = None,
+        semantic_profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self._compact(current, 2200)
+        history = history if isinstance(history, list) else []
+        state = state if isinstance(state, dict) else {}
+        semantic = semantic if isinstance(semantic, dict) else {}
+        cognition = cognition if isinstance(cognition, dict) else {}
+        semantic_profile = semantic_profile if isinstance(semantic_profile, dict) else {}
+
+        recent_pairs = []
+        pending_user = ""
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if metadata.get("internal_context") or metadata.get("internal_turn"):
+                continue
+            role = str(item.get("role") or "").lower()
+            content = self._compact(item.get("content") or item.get("text") or item.get("answer"), 1200)
+            if role in {"user", "human"}:
+                pending_user = content
+            elif role in {"assistant", "april", "bot"} and pending_user:
+                recent_pairs.append({
+                    "user": pending_user,
+                    "assistant": content,
+                    "source": "authentic_dialogue",
+                })
+                pending_user = ""
+        recent_pairs = recent_pairs[-self.TOPIC_WINDOW:]
+
+        topic_profiles = self._topic_profiles(
+            current,
+            recent_pairs,
+            self._compact(active_topic, 500),
+            previous_scene,
+        )
+        top_topic = topic_profiles[0] if topic_profiles else {}
+        current_topic_label = self._topic_label({"user": current, "assistant": ""}, previous_scene)
+        reconstructed_topic = (
+            current_topic_label
+            if top_topic and float(top_topic.get("semantic_similarity", 0.0) or 0.0) < 0.24
+            else self._compact(top_topic.get("topic"), 500)
+            or self._compact(active_topic, 500)
+            or current_topic_label
+            or self._compact(current, 500)
+        )
+
+        modality = self._modality_evidence(
+            current,
+            semantic=semantic,
+            cognition=cognition,
+            state=state,
+        )
+        request_segments = self._request_segments(current)
+        ordinals = self._ordinals(current)
+
+        prior_text = " ".join(
+            [self._compact(pair.get("user"), 700) + " " + self._compact(pair.get("assistant"), 1000)
+             for pair in recent_pairs[-self.ENTITY_WINDOW:]]
+        )
+        coreference = self._coreference_candidates(
+            current,
+            prior_text,
+            topic_profiles,
+        )
+
+        semantic_operation_scores = semantic_profile.get("operation_scores")
+        if not isinstance(semantic_operation_scores, dict):
+            semantic_operation_scores = {}
+        action_matrix = self._task_actions(
+            current,
+            {
+                "operation_scores": semantic_operation_scores,
+                "object_scores": semantic_profile.get("object_scores", {}) if isinstance(semantic_profile.get("object_scores"), dict) else {},
+                "representation_scores": semantic_profile.get("representation_scores", {}) if isinstance(semantic_profile.get("representation_scores"), dict) else {},
+            },
+            modality,
+        )
+
+        topic_similarity = float(top_topic.get("semantic_similarity", 0.0) or 0.0)
+        shared_entities = list(top_topic.get("shared_entities") or [])
+        current_entities = self._entities(current)
+
+        topic_shift = bool(
+            top_topic
+            and topic_similarity < 0.24
+            and not shared_entities
+            and len(current_entities) > 0
+        )
+        if topic_shift and current_topic_label:
+            reconstructed_topic = current_topic_label
+        local_compound = len(request_segments) > 1
+
+        # A current turn that contains its own complete task should not be forced
+        # into a historical reference just because it shares vocabulary with the
+        # previous answer. The topic may remain the same while task dependency is
+        # independent.
+        self_contained = bool(
+            not coreference
+            or all(item.get("historical_reference_blocked") for item in coreference)
+        )
+        pronoun_present = bool(set(self._tokens(current)) & self._PRONOUNS)
+        historical_reference = bool(
+            coreference
+            and any(not item.get("historical_reference_blocked") for item in coreference)
+            and not local_compound
+            and pronoun_present
+        )
+
+        if topic_shift:
+            relation = "NEW_TOPIC"
+        elif historical_reference:
+            relation = "CONTINUE_TOPIC"
+        elif local_compound:
+            relation = "SAME_TOPIC" if top_topic and not topic_shift else "NEW_TOPIC"
+        elif topic_similarity >= 0.30 or shared_entities:
+            relation = "SAME_TOPIC"
+        else:
+            relation = "INDEPENDENT"
+
+        # Pronoun references strengthen continuation, but must have an actual
+        # antecedent candidate. An unresolved pronoun never invents a topic.
+        if historical_reference and coreference[0].get("confidence", 0.0) < 0.34:
+            historical_reference = False
+            relation = "SAME_TOPIC" if topic_similarity >= 0.22 else "INDEPENDENT"
+
+        discourse_confidence = max(
+            0.0,
+            min(
+                1.0,
+                0.62 * topic_similarity
+                + 0.18 * min(1.0, len(shared_entities) / 2.0)
+                + 0.12 * (1.0 if relation in {"CONTINUE_TOPIC", "SAME_TOPIC"} else 0.0)
+                + 0.08 * (1.0 if self_contained else 0.0),
+            ),
+        )
+        if relation == "NEW_TOPIC" and not top_topic:
+            discourse_confidence = max(discourse_confidence, 0.82)
+        if historical_reference:
+            discourse_confidence = max(discourse_confidence, 0.72)
+        if local_compound:
+            discourse_confidence = max(discourse_confidence, 0.80)
+
+        # Topic selection follows the discourse result. A resolved historical
+        # coreference keeps the previous topic even when the new sentence shares
+        # few literal tokens; a detected topic shift adopts the current anchor.
+        if historical_reference and top_topic and top_topic.get("topic"):
+            reconstructed_topic = self._compact(top_topic.get("topic"), 500)
+        elif topic_shift and current_topic_label:
+            reconstructed_topic = current_topic_label
+        elif relation == "SAME_TOPIC" and top_topic and top_topic.get("topic"):
+            reconstructed_topic = self._compact(top_topic.get("topic"), 500)
+        elif relation == "CONTINUE_TOPIC" and top_topic and top_topic.get("topic"):
+            reconstructed_topic = self._compact(top_topic.get("topic"), 500)
+
+        hypothesis_pairs = []
+        if relation in {"SAME_TOPIC", "CONTINUE_TOPIC"} and top_topic:
+            hypothesis_pairs.append((
+                "continuation",
+                f"The current user request continues the same subject as: {top_topic.get('user', '')}",
+            ))
+        if relation == "NEW_TOPIC":
+            hypothesis_pairs.append((
+                "new_topic",
+                f"The current user request starts a different subject from: {top_topic.get('user', '')}",
+            ))
+        if historical_reference and coreference[0].get("candidates"):
+            hypothesis_pairs.append((
+                "reference",
+                f"The current request refers to: {coreference[0]['candidates'][0]['entity']}",
+            ))
+        nli = self._nli_verify(current, hypothesis_pairs)
+
+        return {
+            "version": self.VERSION,
+            "topic": {
+                "active": reconstructed_topic,
+                "relation": relation,
+                "confidence": round(float(discourse_confidence), 6),
+                "similarity_to_best_pair": round(topic_similarity, 6),
+                "topic_shift": topic_shift,
+                "best_pair": top_topic,
+                "candidates": topic_profiles[:8],
+                "source": "multilingual_embedding_topic_tracking",
+            },
+            "entities": {
+                "current": current_entities[:24],
+                "shared_with_active_topic": shared_entities[:16],
+                "coreference": coreference,
+                "source": "semantic_entity_graph",
+            },
+            "turn_structure": {
+                "segments": request_segments,
+                "segment_count": len(request_segments),
+                "ordinals": ordinals,
+                "local_ordinal_reference": bool(local_compound and ordinals),
+                "historical_ordinal_reference_blocked": bool(local_compound and ordinals),
+                "source": "current_turn_structure",
+            },
+            "discourse": {
+                "relation": relation,
+                "continuation": relation == "CONTINUE_TOPIC",
+                "same_topic": relation == "SAME_TOPIC",
+                "new_topic": relation == "NEW_TOPIC",
+                "independent": relation == "INDEPENDENT",
+                "historical_reference": historical_reference,
+                "self_contained": self_contained,
+                "confidence": round(float(discourse_confidence), 6),
+                "source": "topic_entity_discourse_fusion",
+            },
+            "task": {
+                "actions": action_matrix,
+                "input_modalities": modality.get("inputs", []),
+                "input_evidence": modality,
+                "requested_outputs": action_matrix.get("requested_outputs", []),
+                "active_goal": self._compact(active_goal, 700),
+                "source": "unified_multimodal_task_matrix",
+            },
+            "verification": {
+                "nli": nli,
+                "performed": bool(nli),
+                "source": "local_nli_verifier" if nli else "not_run",
+            },
+            "context_contract": {
+                "topic": reconstructed_topic,
+                "relation": relation,
+                "reference_entities": [
+                    item.get("entity")
+                    for item in (coreference[0].get("candidates", []) if coreference else [])
+                    if item.get("entity")
+                ][:8],
+                "local_current_turn_structure": bool(local_compound),
+                "historical_memory_allowed": bool(
+                    relation in {"CONTINUE_TOPIC", "SAME_TOPIC"} or historical_reference
+                ),
+                "historical_reference_blocked_for_local_ordinals": bool(
+                    local_compound and ordinals
+                ),
+                "multimodal_inputs": modality.get("inputs", []),
+                "requested_outputs": action_matrix.get("requested_outputs", []),
+                "decision_owner": DECISION_OWNER,
+            },
+            "decision_owner": DECISION_OWNER,
+            "evidence_only": True,
+        }
+
 
 class QuantumInterpretationEngine:
     """
@@ -804,8 +1775,10 @@ class QuantumInterpretationEngine:
         # A dialogue classifier is authoritative for discourse act.  Similarity
         # only supplies topical context and never upgrades an independent task.
         if not has_context:
-            relation = "MEMORY_QUERY" if dialogue_best == "memory_query" else "NEW_TOPIC"
-            topic_relation = relation
+            # A memory-query state requires an existing dialogue anchor. A generic
+            # question such as "Who is Pushkin?" is a new topic, not a recall request.
+            relation = "NEW_TOPIC"
+            topic_relation = "NEW_TOPIC"
         elif semantic_memory_query:
             relation = "MEMORY_QUERY"
             topic_relation = "SAME_TOPIC"
@@ -1443,6 +2416,7 @@ class QuantumInterpretationEngine:
                 previous_scene = {}
         except Exception:
             pass
+        recent_dialogue_pairs = self._recent_dialogue_pairs(history, limit=10)
         dialogue_packet = self.dialogue(
             text,
             previous_assistant=last_a,
@@ -1450,12 +2424,152 @@ class QuantumInterpretationEngine:
             active_goal=active_goal,
             active_topic=active_topic,
             previous_scene=previous_scene,
-            recent_dialogue_pairs=self._recent_dialogue_pairs(history, limit=10),
+            recent_dialogue_pairs=recent_dialogue_pairs,
         )
         d=dialogue_packet["dialogue"]
         dialogue_vector=dialogue_packet.get("dialogue_relation", {})
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
+
+        # Context-first fusion.  This is the interpretation authority for topic,
+        # entity/reference and current-turn structure.  It augments the existing
+        # matrix instead of creating a second route.
+        context_understanding = QUANTUM_CONTEXT_ENGINE.analyze(
+            text,
+            history=history,
+            state=state,
+            semantic=semantic,
+            cognition=cognition,
+            active_topic=active_topic,
+            active_goal=active_goal,
+            previous_scene=previous_scene,
+            semantic_profile=p,
+        )
+        topic_understanding = context_understanding.get("topic") if isinstance(context_understanding.get("topic"), dict) else {}
+        discourse_understanding = context_understanding.get("discourse") if isinstance(context_understanding.get("discourse"), dict) else {}
+        entities_understanding = context_understanding.get("entities") if isinstance(context_understanding.get("entities"), dict) else {}
+        turn_structure_understanding = context_understanding.get("turn_structure") if isinstance(context_understanding.get("turn_structure"), dict) else {}
+        task_understanding = context_understanding.get("task") if isinstance(context_understanding.get("task"), dict) else {}
+
+        # A locally numbered/compound request ("second", "the third item", etc.)
+        # refers to the structure of the CURRENT turn unless the user explicitly
+        # establishes a historical reference. This blocks the previous scene from
+        # hijacking a new multi-part request.
+        local_turn_reference = bool(
+            turn_structure_understanding.get("local_ordinal_reference")
+            and turn_structure_understanding.get("historical_ordinal_reference_blocked")
+        )
+        if local_turn_reference:
+            dialogue_vector = {
+                **dict(dialogue_vector or {}),
+                "relation": "SAME_TOPIC" if topic_understanding.get("active") else "INDEPENDENT",
+                "topic_relation": "SAME_TOPIC" if topic_understanding.get("active") else "INDEPENDENT",
+                "request_relation": "SAME_TOPIC" if topic_understanding.get("active") else "INDEPENDENT",
+                "request_dependency": "same_topic" if topic_understanding.get("active") else "independent",
+                "reference_to_previous": False,
+                "explicit_reference": False,
+                "anaphoric": False,
+                "artifact_reference_evidence": False,
+                "previous_scene_id": "",
+                "reuse_existing_scene": False,
+                "local_current_turn_structure": True,
+                "historical_ordinal_reference_blocked": True,
+            }
+            d = {
+                **dict(d or {}),
+                "label": "question" if d.get("label") in {"reference", "artifact_reference"} else d.get("label"),
+                "continuation_score": 0.0,
+                "reference_score": 0.0,
+                "topic_score": float(topic_understanding.get("similarity_to_best_pair", 0.0) or 0.0),
+            }
+
+        # The context tracker owns the repaired topic label.  Do not let a stale
+        # state slot remain authoritative when the current canonical history gives
+        # a stronger reconstructed topic.
+        reconstructed_topic = normalize_text(topic_understanding.get("active"))
+        if reconstructed_topic and topic_understanding.get("relation") in {
+            "SAME_TOPIC", "CONTINUE_TOPIC"
+        }:
+            active_topic = reconstructed_topic
+
+        # Semantic coreference may establish a historical continuation even when
+        # the prototype classifier ranks the surface turn as a generic question.
+        if (
+            not local_turn_reference
+            and discourse_understanding.get("historical_reference")
+            and entities_understanding.get("coreference")
+        ):
+            coref_packets = entities_understanding.get("coreference") or []
+            best_coref = coref_packets[0] if isinstance(coref_packets[0], dict) else {}
+            coref_candidates = best_coref.get("candidates") or []
+            if coref_candidates and float(best_coref.get("confidence", 0.0) or 0.0) >= 0.34:
+                dialogue_vector = {
+                    **dict(dialogue_vector or {}),
+                    "relation": "CONTINUE_TOPIC",
+                    "topic_relation": "SAME_TOPIC",
+                    "request_relation": "CONTINUE_TOPIC",
+                    "request_dependency": "continuation",
+                    "reference_to_previous": True,
+                    "explicit_reference": True,
+                    "anaphoric": True,
+                    "semantic_reference": coref_candidates[0].get("entity"),
+                    "semantic_reference_confidence": float(best_coref.get("confidence", 0.0) or 0.0),
+                }
+                d = {
+                    **dict(d or {}),
+                    "label": "reference",
+                    "continuation_score": max(
+                        float(d.get("continuation_score", 0.0) or 0.0),
+                        float(best_coref.get("confidence", 0.0) or 0.0),
+                    ),
+                    "reference_score": max(
+                        float(d.get("reference_score", 0.0) or 0.0),
+                        float(best_coref.get("confidence", 0.0) or 0.0),
+                    ),
+                    "topic_score": max(
+                        float(d.get("topic_score", 0.0) or 0.0),
+                        float(topic_understanding.get("similarity_to_best_pair", 0.0) or 0.0),
+                    ),
+                }
+
+        explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
+
+        # Context Task Matrix can repair a polluted raw representation ranking.
+        # Prefer the semantically supported current-turn object (formula/code/link/
+        # table/graph/diagram/image/etc.) when operation and object evidence agree.
+        context_outputs = [
+            str(x).lower() for x in (task_understanding.get("requested_outputs") or [])
+        ]
+        object_scores = p.get("object_scores") if isinstance(p.get("object_scores"), dict) else {}
+        op_name = str(p.get("best_operation") or "").lower()
+        compatible_context = {
+            "formula": {"calculate", "answer", "explain", "present", "build", "modify"},
+            "code": {"build", "modify", "present", "explain", "analyze"},
+            "link": {"retrieve", "present", "answer", "list", "explain"},
+            "table": {"build", "present", "compare", "list", "explain", "analyze"},
+            "graph": {"build", "present", "calculate", "analyze", "compare", "list", "explain"},
+            "diagram": {"build", "present", "modify", "explain", "analyze"},
+            "image": {"build", "present", "modify"},
+            "gallery": {"build", "present", "compare", "list"},
+        }
+        context_structured = [
+            item for item in context_outputs
+            if item in compatible_context and op_name in compatible_context[item]
+        ]
+        context_structured.sort(
+            key=lambda item: float(object_scores.get(item, 0.0) or 0.0),
+            reverse=True,
+        )
+        if context_structured and not explicit:
+            best_context_rep = context_structured[0]
+            best_context_score = float(object_scores.get(best_context_rep, 0.0) or 0.0)
+            if best_context_score >= 0.08 and (
+                production == "text"
+                or best_context_rep != production
+            ):
+                production = best_context_rep
+                source = "context_task_matrix_resolution"
+                locked = True
         continuation=bool(
             dialogue_packet.get("continuation")
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
@@ -1679,6 +2793,11 @@ class QuantumInterpretationEngine:
                 "production_representation_locked":locked,"scene_matrix":matrix
             },
             "semantic_task":semantic_task,
+            "context_understanding": context_understanding,
+            "topic_understanding": topic_understanding,
+            "entity_understanding": entities_understanding,
+            "turn_structure_understanding": turn_structure_understanding,
+            "task_understanding": task_understanding,
             "ascii_schema_advisory": ascii_schema_advisory,
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
@@ -1728,6 +2847,13 @@ class QuantumInterpretationEngine:
                     dialogue_vector.get("visual_scene_similarity", 0.0) or 0.0
                 ),
                 "resolved_request":resolved_request,
+                "context_topic": active_topic,
+                "context_relation": topic_understanding.get("relation"),
+                "context_reference_entities": [
+                    item.get("entity") for item in (entities_understanding.get("coreference") or [{}])
+                    if isinstance(item, dict) for item in (item.get("candidates") or []) if item.get("entity")
+                ][:8],
+                "local_current_turn_structure": local_turn_reference,
                 "history_dependent_task": bool(history_task_context.get("required")),
                 "history_task_context": history_task_context,
                 "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
@@ -1744,6 +2870,9 @@ class QuantumInterpretationEngine:
             },
             "semantic_profile":{
                 "active_topic":active_topic,"active_goal":active_goal,
+                "context_topic_state": topic_understanding,
+                "context_entity_state": entities_understanding,
+                "context_task_state": task_understanding,
                 "previous_april_turn":last_a,"representation_scores":p["representation_scores"],
                 "domain_scores":p["domain_scores"],"capability_scores":p["capability_scores"],
                 "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],
@@ -2286,6 +3415,7 @@ def build_interpretation_route(state: dict[str, Any], result: dict[str, Any]):
 QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
 
 # Compatibility singleton names intentionally reference the same engine object.
+QUANTUM_CONTEXT_ENGINE = QuantumContextUnderstandingEngine(QUANTUM_INTERPRETATION_ENGINE)
 QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_LINGUISTIC_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
