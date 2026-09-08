@@ -43,7 +43,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v48_visual_scan_printer_cascade_user_scoped_stage_fix"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_visual_scan_printer_cascade_user_scoped_validator_fix"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -554,10 +554,11 @@ class QuantumCascadeEngine:
             errors.append("cascade_stages_missing")
         else:
             required = (
-                "1_INPUT", "2_INTERPRETATION", "3_CONTEXT_BINDING",
-                "5_SEMANTIC_UNDERSTANDING", "6_TASK_COMPILATION",
-                "7_SPECIALIZED_ENGINE_PLAN", "8_PROVIDER_CONTEXT",
-                "9_OUTPUT_UNDERSTANDING", "10_RENDER_CONTRACT", "12_WEB_DELIVERY",
+                "1_INPUT", "2_VISUAL_SCAN", "3_INTERPRETATION",
+                "4_CONTEXT_BINDING", "5_SEMANTIC_UNDERSTANDING",
+                "6_TASK_COMPILATION", "7_SPECIALIZED_ENGINE_PLAN",
+                "8_PROVIDER_CONTEXT", "9_OUTPUT_UNDERSTANDING",
+                "10_RENDER_CONTRACT", "11_NANO_PRINTER", "12_WEB_DELIVERY",
             )
             for stage in required:
                 if stage not in stages:
