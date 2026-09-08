@@ -87,10 +87,6 @@ from blocks.provider_router import (
     transcribe_voice
 )
 
-from blocks.image_system import (
-    analyze_image
-)
-
 
 # =========================================================
 # 🔥 CONFIG
@@ -988,7 +984,17 @@ CPU_OWNS_SCENE_CONTRACT = True
 # Future CPU diagnostics can be attached here without
 # changing Flask routes.
 
-async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_context=False, request_source="april_web"):
+async def gateway_forward_to_cpu(
+    user_id,
+    text,
+    run_with_activity,
+    *,
+    internal_context=False,
+    request_source="april_web",
+    visual_input_path=None,
+    visual_user_request="",
+    visual_output_dir=None,
+):
     return await execute(
         user_id=user_id,
         text=text,
@@ -996,6 +1002,9 @@ async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_c
         run_with_activity=run_with_activity,
         internal_context=internal_context,
         request_source=request_source,
+        visual_input_path=visual_input_path,
+        visual_user_request=visual_user_request,
+        visual_output_dir=visual_output_dir,
     )
 
 
@@ -1004,13 +1013,26 @@ async def gateway_forward_to_cpu(user_id, text, run_with_activity, *, internal_c
 # =========================================================
 # Single CPU bridge used by all web entrypoints.
 
-async def gateway_cpu_execute(user_id, text, run_with_activity, *, internal_context=False, request_source="april_web"):
+async def gateway_cpu_execute(
+    user_id,
+    text,
+    run_with_activity,
+    *,
+    internal_context=False,
+    request_source="april_web",
+    visual_input_path=None,
+    visual_user_request="",
+    visual_output_dir=None,
+):
     result = await gateway_forward_to_cpu(
         user_id=user_id,
         text=text,
         run_with_activity=run_with_activity,
         internal_context=internal_context,
         request_source=request_source,
+        visual_input_path=visual_input_path,
+        visual_user_request=visual_user_request,
+        visual_output_dir=visual_output_dir,
     )
     return gateway_return_cpu_result(result)
 
@@ -1019,7 +1041,10 @@ async def process_web_message(
     text,
     *,
     internal_context=False,
-    request_source="april_web"
+    request_source="april_web",
+    visual_input_path=None,
+    visual_user_request="",
+    visual_output_dir=None,
 ):
 
     async def run_with_activity(chat_id, coro):
@@ -1042,6 +1067,9 @@ async def process_web_message(
             run_with_activity=run_with_activity,
             internal_context=internal_context,
             request_source=request_source,
+            visual_input_path=visual_input_path,
+            visual_user_request=visual_user_request,
+            visual_output_dir=visual_output_dir,
         )
 
         result = executor_contract_passthrough(result)
@@ -1273,166 +1301,190 @@ PURPOSE:
     methods=["POST"]
 )
 def image_chat():
+    """
+    IMAGE TRANSPORT ONLY.
+
+    The gateway receives and persists the upload for the duration of the CPU
+    turn, then passes the path into the existing Quantum Processor route.
+    Nano Scanner ownership stays inside INPUT -> VISUAL_SCAN in the Processor.
+    Checkout performs no visual analysis, no routing, and no provider call.
+    """
+    temp_path = None
 
     try:
+        print("🖼️ IMAGE REQUEST RECEIVED")
 
-        print(
-            "🖼️ IMAGE REQUEST RECEIVED"
-        )
-
-        image_file = request.files.get(
-            "image"
-        )
-
-        user_id = (request.form.get("user_id") or "").strip()
+        image_file = request.files.get("image")
+        user_id = str(
+            request.form.get("user_id")
+            or request.form.get("aprilId")
+            or ""
+        ).strip()
 
         if not image_file:
-
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "image file missing"
-
+                "error": "image file missing",
             }), 400
 
         if not user_id:
             return jsonify({
                 "success": False,
-                "error": "user_id required"
+                "error": "user_id required",
             }), 400
 
-        print(
-            "🖼️ IMAGE FILE:",
-            image_file.filename
-        )
+        print("🖼️ IMAGE FILE:", image_file.filename)
 
-        temp_path = (
-            f"image_{hashlib.sha256(user_id.encode('utf-8')).hexdigest()[:16]}_{int(time.time()*1000)}.jpg"
-        )
+        suffix = Path(image_file.filename or ".jpg").suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+            suffix = ".jpg"
 
-        image_file.save(
-            temp_path
-        )
+        with tempfile.NamedTemporaryFile(
+            prefix=f"april_image_{hashlib.sha256(user_id.encode('utf-8')).hexdigest()[:16]}_",
+            suffix=suffix,
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            image_file.save(temp_path)
 
-        print(
-            "🖼️ IMAGE SAVED:",
-            temp_path
-        )
+        print("🖼️ IMAGE SAVED:", temp_path)
+        print("🧠 IMAGE ROUTE: TRANSPORT -> QUANTUM PROCESSOR")
 
-        print(
-            "🧠 IMAGE ANALYSIS START"
-        )
+        # The text field is optional for image-only turns. The actual image is
+        # passed as INPUT to the Processor, which invokes Nano Scanner inside
+        # its own cascade and binds the evidence to user/conversation scope.
+        user_text = str(request.form.get("text") or "").strip()
+        visual_user_request = user_text
 
-        # =====================================================
-        # 🧠 REAL USER STATE
-        # =====================================================
+        # Optional persistent output location for the Processor-owned Nano
+        # Printer. No printer call is made by the gateway.
+        visual_output_dir = str(
+            request.form.get("visual_output_dir")
+            or os.getenv("APRIL_VISUAL_OUTPUT_DIR")
+            or ""
+        ).strip() or None
 
-        user_state = get_state(
-            user_id
-        )
-
-        try:
-            result = asyncio.run(
-                analyze_image(
-                    temp_path,
-                    state=user_state
-                )
+        if not user_text:
+            user_text = (
+                "Проанализируй текущее изображение и ответь пользователю "
+                "по его содержимому. Используй визуальное evidence, которое "
+                "получит Nano Scanner внутри Quantum Processor."
             )
-        finally:
+
+        # Use the same CPU route as text turns. Do not pre-scan the image and
+        # do not create a separate visual reasoning route.
+        april_result = asyncio.run(
+            process_web_message(
+                user_id=user_id,
+                text=user_text,
+                internal_context=False,
+                request_source="april_web_image",
+                visual_input_path=temp_path,
+                visual_user_request=visual_user_request or user_text,
+                visual_output_dir=visual_output_dir,
+            )
+        )
+
+        canonical_scene = scene_contract_view(
+            april_result.get("scene_contract")
+        ) if isinstance(april_result, dict) else {}
+
+        if not canonical_scene and isinstance(april_result, dict):
+            gateway_scene = april_result.get("gateway_transport", {})
+            if isinstance(gateway_scene, dict):
+                canonical_scene = scene_contract_view(
+                    gateway_scene.get("scene_contract")
+                )
+
+        canonical_scene = (
+            canonical_scene
+            if isinstance(canonical_scene, dict)
+            else {}
+        )
+
+        canonical_blocks = canonical_scene.get("render_blocks") or (
+            april_result.get("render_blocks", [])
+            if isinstance(april_result, dict)
+            else []
+        )
+
+        return jsonify({
+            "success": True,
+            "space_response": safe_json(april_result),
+
+            # The gateway does not own scanner results. These fields are only
+            # compatibility projections of the canonical CPU SceneContract.
+            "renderer_mode": WEB_RENDERER_MODE,
+            "scene_mode": WEB_SCENE_MODE,
+
+            "scene_contract": safe_json(canonical_scene),
+            "render_blocks": safe_json(canonical_blocks),
+
+            "answer": safe_json(
+                canonical_scene.get("answer")
+                or canonical_scene.get("content")
+                or (
+                    april_result.get("answer")
+                    if isinstance(april_result, dict)
+                    else ""
+                )
+            ),
+            "content": safe_json(
+                canonical_scene.get("content")
+                or canonical_scene.get("answer")
+                or (
+                    april_result.get("content")
+                    if isinstance(april_result, dict)
+                    else ""
+                )
+            ),
+            "summary": safe_json(
+                canonical_scene.get("summary")
+                or (
+                    april_result.get("summary")
+                    if isinstance(april_result, dict)
+                    else ""
+                )
+            ),
+            "renderer_state": safe_json(
+                canonical_scene.get("renderer_state")
+                or (
+                    april_result.get("renderer_state", {})
+                    if isinstance(april_result, dict)
+                    else {}
+                )
+            ),
+            "gateway_transport": safe_json(
+                april_result.get("gateway_transport", {})
+                if isinstance(april_result, dict)
+                else {}
+            ),
+            "preferred_transport": "scene_contract",
+            "canonical_route": "/image",
+            "single_route": True,
+            "gateway_transport_only": True,
+            "user_id": user_id,
+        })
+
+    except Exception as e:
+        import traceback as _traceback
+        print("IMAGE ERROR:", e)
+        _traceback.print_exc()
+
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "canonical_route": "/image",
+            "single_route": True,
+            "gateway_transport_only": True,
+        }), 500
+
+    finally:
+        if temp_path:
             try:
                 Path(temp_path).unlink(missing_ok=True)
             except Exception:
                 pass
-
-        print(
-            "🧠 IMAGE ANALYSIS COMPLETE"
-        )
-
-        print(
-            "🧠 VISUAL STATE READY"
-        )
-
-        analysis_payload = safe_json(result)
-        compact_visual = _compact_visual_context(result)
-
-        visual_summary = {
-            "image_analysis": True,
-            "user_id": user_id,
-            "timestamp": time.time(),
-            "local_only": bool(result.get("local_only")),
-            "scanner_confidence": result.get("confidence", 0.0),
-            "objects": compact_visual.get("objects", []),
-        }
-
-        print("🧠 NANO VISUAL PACKET:", {
-            "input_type": compact_visual.get("input_type"),
-            "ocr_chars": len(compact_visual.get("text", {}).get("content", "")),
-            "objects": compact_visual.get("objects", []),
-            "graph_confidence": compact_visual.get("graphs", {}).get("confidence", 0.0),
-            "diagram_confidence": compact_visual.get("diagrams", {}).get("confidence", 0.0),
-            "local_only": compact_visual.get("local_only"),
-            "provider_calls": compact_visual.get("provider_calls"),
-        })
-
-        # =====================================================
-        # 🧠 APRIL THINKING ROUTE
-        # =====================================================
-        visual_context = (
-            "VISUAL_CONTEXT_PACKET:\n"
-            + json.dumps(compact_visual, ensure_ascii=False, separators=(",", ":"))
-            + "\n\n"
-            + "Проанализируй текущее изображение и ответь пользователю по его "
-              "содержимому. Используй только переданный VISUAL_CONTEXT_PACKET "
-              "как визуальное evidence; не выдумывай отсутствующие детали."
-        )
-
-        april_result = asyncio.run(
-            process_web_message(
-                user_id=user_id,
-                text=visual_context,
-                internal_context=True,
-            )
-        )
-
-        return jsonify({
-
-            "success": True,
-
-            "space_response":
-                safe_json(april_result),
-
-            "analysis":
-                analysis_payload,
-
-            "renderer_mode":
-                WEB_RENDERER_MODE,
-
-            "scene_mode":
-                WEB_SCENE_MODE,
-
-            "visual_summary":
-                safe_json(
-                    visual_summary
-                )
-        })
-
-    except Exception as e:
-
-        print(
-            "IMAGE ERROR:",
-            e
-        )
-
-        return jsonify({
-
-            "success": False,
-
-            "error":
-                str(e)
-
-        }), 500
 
 
 # =========================================================
