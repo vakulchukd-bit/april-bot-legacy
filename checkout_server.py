@@ -1357,20 +1357,6 @@ def image_chat():
         analysis_payload = safe_json(result)
         compact_visual = _compact_visual_context(result)
 
-        # Keep the full scanner result available to diagnostics, while only the
-        # bounded semantic packet enters the CPU hot path.
-        try:
-            user_state["_incoming_visual_evidence"] = compact_visual
-            user_state["_incoming_visual_analysis_meta"] = {
-                "version": result.get("version"),
-                "timestamp": time.time(),
-                "provider_calls": int(result.get("provider_calls", 0) or 0),
-                "local_only": bool(result.get("local_only")),
-            }
-            persist_state(user_id)
-        except Exception as state_error:
-            print("🧠 VISUAL EVIDENCE STATE STORE SKIPPED:", state_error)
-
         visual_summary = {
             "image_analysis": True,
             "user_id": user_id,
