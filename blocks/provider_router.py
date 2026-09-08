@@ -61,9 +61,13 @@ def _get_gemini_client():
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
 You are the internal text-generation engine used by April.
 The user-facing assistant is ALWAYS April. The provider/model name is an internal implementation detail.
-When the current request asks who you are, answer as April and describe April's own capabilities.
+When the current request asks who you are, answer as April in natural language. Do not emit a fixed capability checklist or canned product description unless the user explicitly asks. Use the identity/context signals supplied by the Quantum Processor.
 Never identify yourself to the user as GPT-5.6 Luna, ChatGPT, a model, the provider, or an internal module.
 Never expose internal provider/model names unless the user explicitly asks for technical implementation details.
+Prefer natural, context-aware conversation over support-style boilerplate.
+Do not repeat generic "what April can do" lists, feature menus, or stock introductions unless directly requested.
+The Quantum Processor owns dialogue relation, memory, visual evidence, intent, representation and response guidance.
+Treat those signals as authoritative; do not create a competing routing or interpretation path.
 
 You receive one canonical MachineRequest already interpreted by April's processor.
 Return exactly one MachineResponse JSON object. Do not wrap it in markdown fences.
@@ -238,6 +242,14 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "dialog_act": intent.get("dialog_act") or dialogue.get("dialog_act"),
         },
         "dialogue_contract": dialogue,
+        "response_guidance": (
+            raw.get("conversation", {}).get("response_guidance", {})
+            if isinstance(raw.get("conversation"), dict) else {}
+        ),
+        "current_visual_evidence": (
+            raw.get("conversation", {}).get("current_visual_evidence", {})
+            if isinstance(raw.get("conversation"), dict) else {}
+        ),
         "dialogue_vector": (
             raw.get("conversation", {}).get("dialogue_vector", {})
             if isinstance(raw.get("conversation"), dict) else {}
@@ -941,6 +953,16 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     fields: list[tuple[str, Any]] = []
     fields.append(("CURRENT_REQUEST", current))
 
+    # These signals are produced by the Quantum Processor. Provider only realizes
+    # them as language/output and never creates a competing decision path.
+    response_guidance = payload.get("response_guidance")
+    if isinstance(response_guidance, dict) and response_guidance:
+        fields.append(("PROCESSOR_RESPONSE_GUIDANCE", response_guidance))
+
+    current_visual_evidence = payload.get("current_visual_evidence")
+    if isinstance(current_visual_evidence, dict) and current_visual_evidence:
+        fields.append(("CURRENT_VISUAL_EVIDENCE", current_visual_evidence))
+
     # A compact immediate pair is always available as semantic evidence. This
     # keeps short follow-ups such as "Ты уверен?" connected even if another
     # layer conservatively labels the turn INDEPENDENT. The provider is instructed
@@ -1118,6 +1140,7 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
     mandatory = [
         "APRIL CANONICAL REQUEST",
         render("REQUEST", fields[0][1]),
+        render("PROCESSOR_BEHAVIOR", "answer naturally as April; focus on the user's actual purpose; avoid canned capability lists"),
         render("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
         render("COMPLEXITY", complexity),
         render("OUTPUT_CAP", output_tokens),
@@ -1130,21 +1153,23 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
     # current request > immediate dialogue > rolling cascade > resolved scene /
     # artifact > dialogue vector > plan/competencies > optional diagnostics.
     priority = {
-        "IMMEDIATE_DIALOGUE": 0,
-        "DIALOGUE_MEMORY": 1,
-        "RESOLVED_ARTIFACT_CONTEXT": 2,
-        "RESOLVED_SCENE_CONTEXT": 3,
-        "DIALOGUE_VECTOR": 4,
-        "PREVIOUS_APRIL_TURN": 5,
-        "RESOLVED_GOAL": 6,
-        "REQUESTED_OUTPUTS": 7,
-        "REQUIRED_ARTIFACTS": 8,
-        "COMPETENCIES": 9,
-        "VISUAL_SCHEMA": 10,
-        "MEMORY_RECALL": 11,
-        "VISUAL_CONTEXT": 12,
-        "RESPONSE_DECISION": 13,
-        "SEMANTIC_STATE": 14,
+        "PROCESSOR_RESPONSE_GUIDANCE": 0,
+        "IMMEDIATE_DIALOGUE": 1,
+        "DIALOGUE_MEMORY": 2,
+        "CURRENT_VISUAL_EVIDENCE": 3,
+        "RESOLVED_ARTIFACT_CONTEXT": 4,
+        "RESOLVED_SCENE_CONTEXT": 5,
+        "DIALOGUE_VECTOR": 6,
+        "PREVIOUS_APRIL_TURN": 7,
+        "RESOLVED_GOAL": 8,
+        "REQUESTED_OUTPUTS": 9,
+        "REQUIRED_ARTIFACTS": 10,
+        "COMPETENCIES": 11,
+        "VISUAL_SCHEMA": 12,
+        "MEMORY_RECALL": 13,
+        "VISUAL_CONTEXT": 14,
+        "RESPONSE_DECISION": 15,
+        "SEMANTIC_STATE": 16,
     }
 
     ordered_fields = sorted(
@@ -1193,7 +1218,24 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         pieces = [
             "APRIL CANONICAL REQUEST",
             f"REQUEST: {current}",
+            "PROCESSOR_BEHAVIOR: answer naturally as April; focus on the user's actual purpose; avoid canned capability lists",
         ]
+
+        response_guidance = payload.get("response_guidance")
+        if isinstance(response_guidance, dict) and response_guidance:
+            candidate = "PROCESSOR_RESPONSE_GUIDANCE: " + json.dumps(
+                response_guidance, ensure_ascii=False, separators=(",", ":"), default=str
+            )
+            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
+                pieces.append(candidate)
+
+        current_visual_evidence = payload.get("current_visual_evidence")
+        if isinstance(current_visual_evidence, dict) and current_visual_evidence:
+            candidate = "CURRENT_VISUAL_EVIDENCE: " + json.dumps(
+                current_visual_evidence, ensure_ascii=False, separators=(",", ":"), default=str
+            )
+            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
+                pieces.append(candidate)
 
         # Keep the immediate pair first because it is the cheapest way to
         # preserve short-turn conversational continuity.
@@ -1493,7 +1535,14 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         artifacts = []
         scene_plan = ["text"]
         render_priority = []
+    processor_guidance = source_payload.get("response_guidance")
+    processor_visual = source_payload.get("current_visual_evidence")
     metadata.update({
+        "processor_response_guidance": (
+            _compact_value(processor_guidance, max_items=8, max_keys=12)
+            if isinstance(processor_guidance, dict) else {}
+        ),
+        "processor_visual_evidence_received": bool(processor_visual),
         "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
         "provider_calls": 1,
@@ -1613,21 +1662,12 @@ def provider_finalize_for_executor(contract: dict) -> dict:
         or (constraints.get("dialogue_act") == "self_identification")
     )
 
-    # Identity is a processor-owned semantic decision. Provider never infers it
-    # from phrases and never exposes its internal model identity to the user.
+    # Identity is decided by the Processor. Keep the Provider's natural answer;
+    # do not overwrite it with a fixed capabilities paragraph.
     if identity_request:
-        identity = APRIL_IDENTITY if isinstance(APRIL_IDENTITY, dict) else {}
-        identity_name = _safe_text(identity.get("name") or "April")
-        capabilities = identity.get("capabilities") if isinstance(identity.get("capabilities"), list) else []
-        capability_text = ", ".join(str(x) for x in capabilities[:6] if x)
-        answer = (
-            f"Я — {identity_name}. Я веду с тобой единый диалог, понимаю смысл запроса, "
-            f"учитываю релевантный контекст и могу работать с текстом, голосом, изображениями "
-            f"и структурированными представлениями ответа"
-            + (f", включая {capability_text}." if capability_text else ".")
-            + " Внутри April использует модельные и вычислительные инструменты, "
-              "но пользователь общается именно с April."
-        )
+        parsed_metadata = parsed.get("metadata")
+        if isinstance(parsed_metadata, dict):
+            parsed_metadata["identity_request_processor_owned"] = True
 
     mr["answer"] = answer
     mr["content"] = answer
