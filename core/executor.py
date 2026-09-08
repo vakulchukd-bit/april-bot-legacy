@@ -7,6 +7,7 @@ There is exactly one Provider call per user turn.
 """
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 import re
@@ -42,7 +43,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v46_visual_scan_printer_cascade_user_scoped"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v47_visual_scan_printer_cascade_user_scoped_asyncio_fix"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
