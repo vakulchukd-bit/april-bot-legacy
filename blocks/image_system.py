@@ -543,7 +543,7 @@ def _get_matplotlib():
         return None
 
 
-VERSION = "LOCAL_NANO_VISUAL_SCANNER_NANO_PRINTER_V5_FAST_ADAPTIVE"
+VERSION = "LOCAL_NANO_VISUAL_SCANNER_NANO_PRINTER_V6_NUMPY_SAFE"
 PROVIDER = "local"
 MAX_OCR_ITEMS = 500
 MAX_TEXT_CHARS = 16000
@@ -970,7 +970,19 @@ def _geometry_scan(img: Image.Image) -> Dict[str, Any]:
     line_items: List[Dict[str, Any]] = []
     if lines is not None:
         for line in lines[:MAX_LINES]:
-            x1, y1, x2, y2 = [int(v) for v in line[0]]
+            # OpenCV may return HoughLinesP rows as (1, 4) or (4,).
+            # In the latter case line[0] is a numpy.int32 scalar and is
+            # not iterable. Flatten the row before unpacking.
+            try:
+                if _np is not None:
+                    coords = _np.asarray(line).reshape(-1).tolist()
+                else:
+                    coords = list(line)
+            except Exception:
+                continue
+            if len(coords) < 4:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in coords[:4]]
             dx, dy = x2 - x1, y2 - y1
             length = math.hypot(dx, dy)
             angle = math.degrees(math.atan2(dy, dx))
@@ -992,7 +1004,14 @@ def _geometry_scan(img: Image.Image) -> Dict[str, Any]:
             minDist=max(18, min(h, w) // 30), param1=100, param2=35,
             minRadius=6, maxRadius=max(8, min(h, w) // 6),
         )
-        circle_count = 0 if circles is None else min(len(circles[0]), 120)
+        if circles is None:
+            circle_count = 0
+        else:
+            try:
+                circle_rows = _np.asarray(circles).reshape(-1, 3) if _np is not None else circles[0]
+                circle_count = min(len(circle_rows), 120)
+            except Exception:
+                circle_count = 0
     except Exception:
         circle_count = 0
 
@@ -1514,7 +1533,7 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
 # NANO PRINTER V4
 # ============================================================
 
-NANO_PRINTER_VERSION = "NANO_PRINTER_V5_FAST_ADAPTIVE"
+NANO_PRINTER_VERSION = "NANO_PRINTER_V6_NUMPY_SAFE"
 DEFAULT_CANVAS = (1280, 800)
 SUPPORTED_PRINT_KINDS = {
     "image", "screenshot", "annotated_image", "drawing", "diagram",
