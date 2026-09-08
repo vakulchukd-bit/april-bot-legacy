@@ -43,7 +43,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_visual_scan_printer_cascade_user_scoped_validator_fix"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_provider_signal_visual_dialogue_fix_r1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -1983,8 +1983,13 @@ def _quantum_context_diagnostic(
         if _s(x)
     ]
 
+    current_visual_input = bool(_as_dict(state.get("_incoming_visual_evidence")))
     contradictions = []
-    if memory_relation in {"CONTINUE_TOPIC", "ARTIFACT_REFERENCE"} and mode in {"INDEPENDENT", "NEW_TOPIC"}:
+    if (
+        memory_relation in {"CONTINUE_TOPIC", "ARTIFACT_REFERENCE"}
+        and mode in {"INDEPENDENT", "NEW_TOPIC"}
+        and not current_visual_input
+    ):
         contradictions.append("memory_vs_dialogue_mode")
     if "graph" in requested and decision_action in {"talk", "clarify"}:
         contradictions.append("graph_request_vs_action")
@@ -2024,7 +2029,9 @@ def _quantum_context_diagnostic(
         "memory_reference_resolved": bool(qref.get("resolved")),
         "memory_target": _s(qref.get("target")),
         "visual_scene_id": _s(qvisual.get("scene_id")),
-        "visual_block_types": render_types,
+        "current_visual_input": current_visual_input,
+        "current_visual_input_type": _s(_as_dict(state.get("_incoming_visual_evidence")).get("input_type")),
+        "visual_block_types": (["image"] if current_visual_input else render_types),
         "semantic_representation": semantic_rep,
         "decision_action": decision_action,
         "requested_outputs": requested,
@@ -2951,6 +2958,117 @@ def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -
 
 
 
+def _compact_current_visual_evidence(state: dict, *, user_id: str, conversation_id: str) -> dict:
+    """Build the small, provider-safe signal for the current uploaded image.
+
+    The raw image is already owned by the transport layer and scanned locally by
+    Nano Scanner. The Provider receives only compact semantic evidence, never a
+    filesystem path or a second visual route. This keeps the one-call/900-token
+    contract intact while preventing a fresh image from being mistaken for a
+    missing attachment.
+    """
+    raw = _as_dict(state.get("_incoming_visual_evidence"))
+    if not raw:
+        return {}
+
+    visual = _as_dict(raw.get("visual"))
+    text = _as_dict(raw.get("text"))
+    local = _as_dict(raw.get("local_interpretation"))
+    request_evidence = _as_dict(raw.get("request_evidence"))
+
+    objects = []
+    for item in _as_list(raw.get("visual_objects"))[:12]:
+        obj = _as_dict(item)
+        if not obj:
+            continue
+        compact_obj = {
+            "type": _s(obj.get("type")),
+            "confidence": round(float(obj.get("confidence") or 0.0), 4),
+            "evidence": _s(obj.get("evidence")),
+        }
+        if compact_obj["type"]:
+            objects.append(compact_obj)
+
+    formulas = []
+    for item in _as_list(raw.get("formulas"))[:8]:
+        if isinstance(item, dict):
+            formulas.append(_quantum_snapshot(item))
+        elif item not in (None, ""):
+            formulas.append(_s(item)[:160])
+
+    packet = {
+        "present": True,
+        "current_turn": True,
+        "source": "NANO_SCANNER",
+        "input_type": _s(raw.get("input_type")) or "image",
+        "confidence": round(float(raw.get("confidence") or 0.0), 4),
+        "user_id": _s(user_id),
+        "conversation_id": _s(conversation_id),
+        "local_only": bool(raw.get("local_only", True)),
+        "provider_calls": int(raw.get("provider_calls") or 0),
+        "visible_text": _s(text.get("content"))[:1200],
+        "visual_description": _s(local.get("description") or local.get("summary"))[:700],
+        "visual_objects": objects,
+        "formulas": formulas,
+        "tables": {
+            "detected": bool(_as_dict(raw.get("tables")).get("detected")),
+            "confidence": round(float(_as_dict(raw.get("tables")).get("confidence") or 0.0), 4),
+        },
+        "graphs": {
+            "confidence": round(float(_as_dict(raw.get("graphs")).get("confidence") or 0.0), 4),
+            "line_count": int(_as_dict(raw.get("graphs")).get("line_count") or 0),
+            "horizontal_axis_candidates": int(_as_dict(raw.get("graphs")).get("horizontal_axis_candidates") or 0),
+            "vertical_axis_candidates": int(_as_dict(raw.get("graphs")).get("vertical_axis_candidates") or 0),
+        },
+        "diagrams": {
+            "confidence": round(float(_as_dict(raw.get("diagrams")).get("confidence") or 0.0), 4),
+            "line_count": int(_as_dict(raw.get("diagrams")).get("line_count") or 0),
+            "circle_count": int(_as_dict(raw.get("diagrams")).get("circle_count") or 0),
+        },
+        "request_evidence": {
+            "request_present": bool(request_evidence.get("request_present")),
+            "asks_explanation": bool(request_evidence.get("asks_explanation")),
+            "asks_edit_or_fix": bool(request_evidence.get("asks_edit_or_fix")),
+            "asks_drawing": bool(request_evidence.get("asks_drawing")),
+            "asks_color_change": bool(request_evidence.get("asks_color_change")),
+        },
+        "image_metadata": {
+            "width": visual.get("width"),
+            "height": visual.get("height"),
+            "mode": visual.get("mode"),
+        },
+    }
+    packet = _quantum_snapshot(packet)
+    packet["attachment_status"] = "attached_and_scanned"
+    packet["instruction"] = (
+        "Treat this as current-turn visual evidence. Do not claim that the image is missing. "
+        "Use only the supplied scan evidence; when evidence is insufficient, say so plainly."
+    )
+    return packet
+
+
+def _human_response_guidance() -> dict:
+    """Compact processor signal that makes Provider output conversational, not canned."""
+    return {
+        "mode": "natural_human_dialogue",
+        "priority": "meaning_first",
+        "tone": "warm_clear_attentive",
+        "behavior": [
+            "understand the user's actual purpose before answering",
+            "explain naturally and help the user move forward",
+            "show genuine conversational engagement without theatrical emotion",
+            "offer one useful next step or question when it genuinely helps",
+        ],
+        "avoid": [
+            "robotic_support_templates",
+            "repetitive_disclaimers",
+            "restating_the_user_without_progress",
+            "claiming_missing_input_when_current_evidence_is_present",
+        ],
+        "answer_contract": "one complete answer, natural prose, no internal implementation narration",
+    }
+
+
 
 def _canonical_geometry_contract(semantic: dict, text: str) -> dict:
     """Canonical geometry transport contract for all diagram-capable turns.
@@ -3351,6 +3469,15 @@ def _make_request(
         # undefined module-level debug helper.
         semantic.setdefault("quantum_history_dependency_snapshot", history_snapshot)
 
+    scope_user_id = _s(scope.get("user_id") or state.get("user_id"))
+    scope_conversation_id = _s(scope.get("conversation_id"))
+    current_visual_evidence = _compact_current_visual_evidence(
+        state,
+        user_id=scope_user_id,
+        conversation_id=scope_conversation_id,
+    )
+    response_guidance = _human_response_guidance()
+
     dialogue_contract = {
         "dialog_act": _s(
             canonical_dialogue.get("dialog_act")
@@ -3386,6 +3513,13 @@ def _make_request(
         "resolved_reference": _s(canonical_dialogue.get("resolved_reference")),
         "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
         "current_request": _s(text),
+        "response_guidance": response_guidance,
+        "visual_input_present": bool(current_visual_evidence),
+        "visual_input_status": (
+            current_visual_evidence.get("attachment_status")
+            if current_visual_evidence else "not_present"
+        ),
+        "visual_input_evidence": current_visual_evidence,
         "source": "INTERPRETATION_FROZEN_CANONICAL",
     }
 
@@ -3504,6 +3638,8 @@ def _make_request(
         conversation={
             "current_request": _s(text),
             "dialogue_contract": dialogue_contract,
+            "response_guidance": response_guidance,
+            "current_visual_evidence": current_visual_evidence,
             "dialogue_vector": deepcopy(
                 semantic.get("canonical_dialogue_frozen")
                 or state.get("_canonical_interpretation_dialogue")
@@ -3609,13 +3745,19 @@ def _make_request(
             }
         ),
         visual_context=(
-            visual
-            if isinstance(visual, dict)
-            and (
-                mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-                or bool(_best_visual_context(state))
+            {
+                "current_input": current_visual_evidence,
+                "historical_reference": visual if isinstance(visual, dict) else {},
+                "source": "QUANTUM_PROCESSOR",
+                "decision_owner": "QUANTUM_PROCESSOR",
+            }
+            if current_visual_evidence
+            else (
+                visual
+                if isinstance(visual, dict)
+                and mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+                else {}
             )
-            else {}
         ),
         available_tools=list(control.get("capabilities") or []),
         requested_outputs=requested_outputs,
@@ -3636,6 +3778,8 @@ def _make_request(
                 "dialogue": dialogue_state,
                 "representation": control.get("representation_state", {}),
                 "measured_output": measured_output,
+                "response_guidance": response_guidance,
+                "current_visual_input": bool(current_visual_evidence),
             },
             "provider_input_token_budget": 900,
             "provider_context_strategy": "provider_router_semantic_field_selection",
@@ -3666,6 +3810,17 @@ def _make_request(
         },
     )
 
+    print("🧠 PROVIDER SIGNAL BRIDGE:", {
+        "current_visual_input": bool(current_visual_evidence),
+        "visual_status": current_visual_evidence.get("attachment_status") if current_visual_evidence else "not_present",
+        "visual_confidence": current_visual_evidence.get("confidence", 0.0) if current_visual_evidence else 0.0,
+        "dialogue_mode": mode,
+        "continuation": bool(dialogue_contract.get("continuation")),
+        "reference": bool(dialogue_contract.get("reference_to_previous")),
+        "requested_outputs": requested_outputs,
+        "response_guidance": response_guidance.get("mode"),
+        "provider_calls": 1,
+    })
     request.response_complexity = complexity
     request.response_output_tokens = response_budget
     request.max_output_tokens = response_budget
@@ -3688,6 +3843,8 @@ def _make_request(
         "scene_continuity": _quantum_snapshot(
             control.get("dialogue_evidence", {}).get("scene_continuity", {})
         ),
+        "response_guidance": _quantum_snapshot(response_guidance),
+        "current_visual_evidence": _quantum_snapshot(current_visual_evidence),
         "evidence_channels": len(evidence),
         "coherence": round(coherence, 4),
         "response_budget": response_budget,
@@ -3710,7 +3867,13 @@ def _make_request(
     request.constraints["metadata"].update({
         "engine_handoff_trace": _engine_handoff_context(state),
         "processor_version": PROCESSOR_VERSION,
-        "visual_context_evidence": bool(visual),
+        "visual_context_evidence": bool(visual or current_visual_evidence),
+        "current_visual_input": bool(current_visual_evidence),
+        "current_visual_input_status": (
+            current_visual_evidence.get("attachment_status")
+            if current_visual_evidence else "not_present"
+        ),
+        "response_guidance_mode": response_guidance.get("mode"),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -6927,6 +7090,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     quantum_cascade["stages"]["8_PROVIDER_CONTEXT"]["history_required"] = bool(
         _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
     )
+    quantum_cascade["stages"]["8_PROVIDER_CONTEXT"]["current_visual_input"] = bool(
+        _as_dict(state.get("_incoming_visual_evidence"))
+    )
+    quantum_cascade["stages"]["8_PROVIDER_CONTEXT"]["response_guidance"] = "natural_human_dialogue"
     cascade_check = QUANTUM_CASCADE_ENGINE.validate(quantum_cascade)
     if not cascade_check.get("ok"):
         raise RuntimeError(
@@ -7081,6 +7248,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         consumes=("CONTROL_PLANE", "CONTEXT_BINDING"),
     )
 
+    print("🧠 PROVIDER RELEASE SIGNALS:", {
+        "current_visual_input": bool(_as_dict(state.get("_incoming_visual_evidence"))),
+        "dialogue_contract_present": bool(getattr(request, "dialogue_contract", {})),
+        "response_guidance_present": bool(_as_dict(getattr(request, "dialogue_contract", {})).get("response_guidance")),
+        "one_provider_call": True,
+        "input_token_budget": 900,
+        "single_route": True,
+    })
     provider_result = await generate_text(
         request,
         max_output_tokens=request.response_output_tokens,
