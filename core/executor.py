@@ -40,8 +40,9 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_ma
 from blocks.provider_router import generate_text
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
+from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v45_sequential_engine_fusion_context_render_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v46_visual_scan_printer_cascade_user_scoped"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -120,7 +121,7 @@ def _unique_strings(values: Any) -> list[str]:
 # or provider payload fields.
 QUANTUM_ENGINE_HANDOFF_VERSION = "quantum_engine_handoff_v1"
 QUANTUM_ENGINE_HANDOFF_ORDER = (
-    "INPUT", "INTERPRETATION", "SEMANTIC", "REASONING", "COGNITION",
+    "INPUT", "VISUAL_SCAN", "INTERPRETATION", "SEMANTIC", "REASONING", "COGNITION",
     "INTENT", "RESOLUTION", "ROUTING", "VISUAL_REFERENCE", "GOAL",
     "RESPONSE_DECISION", "DYNAMIC_MEMORY", "MEMORY_UNDERSTANDING",
     "CONTEXT_BINDING", "CONTROL_PLANE", "PROVIDER", "OUTPUT_UNDERSTANDING",
@@ -280,6 +281,7 @@ def _merge_evidence_fields(target: dict, sources: tuple[dict, ...]) -> dict:
 QUANTUM_CASCADE_VERSION = "quantum_cascade_v1"
 QUANTUM_CASCADE_ORDER = (
     "INPUT",
+    "VISUAL_SCAN",
     "INTERPRETATION",
     "CONTEXT_BINDING",
     "SEMANTIC_UNDERSTANDING",
@@ -287,7 +289,7 @@ QUANTUM_CASCADE_ORDER = (
     "SPECIALIZED_ENGINE_PLAN",
     "PROVIDER_CONTEXT",
     "OUTPUT_UNDERSTANDING",
-    "RENDER_CONTRACT",
+    "RENDER_CONTRACT", "NANO_PRINTER",
     "WEB_DELIVERY",
 )
 
@@ -445,43 +447,56 @@ class QuantumCascadeEngine:
                     "status": "complete",
                     "signal": current_request,
                 },
-                "2_INTERPRETATION": {
+                "2_VISUAL_SCAN": {
+                    "status": "complete" if bool(state.get("_incoming_visual_evidence")) else "not_requested",
+                    "engine": "NANO_SCANNER",
+                    "user_id": _s((state.get("memory_scope") or {}).get("user_id") or state.get("user_id")),
+                    "signal": _quantum_snapshot(state.get("_incoming_visual_evidence", {})),
+                    "provider_calls": 0,
+                },
+                "3_INTERPRETATION": {
                     "status": "complete",
                     "engine": "interpretation_layer",
                     "signal": _quantum_snapshot(interpretation),
                 },
-                "3_CONTEXT_BINDING": {
+                "4_CONTEXT_BINDING": {
                     "status": "complete",
                     "engine": "quantum_context_binding",
                     "signal": _quantum_snapshot(context_binding),
                 },
-                "4_SEMANTIC_UNDERSTANDING": {
+                "5_SEMANTIC_UNDERSTANDING": {
                     "status": "complete",
                     "engine": "semantic_core",
                     "signal": _quantum_snapshot(semantic),
                 },
-                "5_TASK_COMPILATION": {
+                "6_TASK_COMPILATION": {
                     "status": "complete",
                     "engine": "response_decision",
                     "signal": _quantum_snapshot(decision),
                 },
-                "6_SPECIALIZED_ENGINE_PLAN": {
+                "7_SPECIALIZED_ENGINE_PLAN": {
                     "status": "complete",
                     "engines": specialized,
                 },
-                "7_PROVIDER_CONTEXT": {
+                "8_PROVIDER_CONTEXT": {
                     "status": "pending_release",
                     "budget_input_tokens": 900,
                     "one_call": True,
                 },
-                "8_OUTPUT_UNDERSTANDING": {
+                "9_OUTPUT_UNDERSTANDING": {
                     "status": "pending_provider",
                 },
-                "9_RENDER_CONTRACT": {
+                "10_RENDER_CONTRACT": {
                     "status": "pending_provider",
                     "engine": "C_ARTIFACT_CONTRACT + presentation_matrix",
                 },
-                "10_WEB_DELIVERY": {
+                "11_NANO_PRINTER": {
+                    "status": "pending_provider",
+                    "engine": "NANO_PRINTER",
+                    "provider_calls": 0,
+                    "decision_owner": "QUANTUM_PROCESSOR",
+                },
+                "12_WEB_DELIVERY": {
                     "status": "pending_provider",
                     "engine": "SceneContract → AprilWeb",
                 },
@@ -492,9 +507,12 @@ class QuantumCascadeEngine:
                 "interpretation_present": bool(interpretation),
                 "context_binding_present": bool(context_binding),
                 "semantic_present": bool(semantic),
+                "visual_scan_present": bool(state.get("_incoming_visual_evidence")),
                 "single_route": True,
                 "one_provider_call": True,
                 "provider_input_budget": 900,
+                "visual_scanner_provider_calls": 0,
+                "nano_printer_provider_calls": 0,
                 "word_trigger_routing": False,
                 "score_routing": False,
                 "duplicate_route": False,
@@ -536,9 +554,9 @@ class QuantumCascadeEngine:
         else:
             required = (
                 "1_INPUT", "2_INTERPRETATION", "3_CONTEXT_BINDING",
-                "4_SEMANTIC_UNDERSTANDING", "5_TASK_COMPILATION",
-                "6_SPECIALIZED_ENGINE_PLAN", "7_PROVIDER_CONTEXT",
-                "8_OUTPUT_UNDERSTANDING", "9_RENDER_CONTRACT", "10_WEB_DELIVERY",
+                "5_SEMANTIC_UNDERSTANDING", "6_TASK_COMPILATION",
+                "7_SPECIALIZED_ENGINE_PLAN", "8_PROVIDER_CONTEXT",
+                "9_OUTPUT_UNDERSTANDING", "10_RENDER_CONTRACT", "12_WEB_DELIVERY",
             )
             for stage in required:
                 if stage not in stages:
@@ -1552,9 +1570,10 @@ def _build_quantum_field(
             "experience_manager": _quantum_snapshot(_as_dict(experience_manager)),
             "goal_engine": _quantum_snapshot(_as_dict(goal)),
             "visual_reference_system": _quantum_snapshot(_as_dict(visual_reference)),
+            "nano_scanner": _quantum_snapshot(_as_dict(state.get("_incoming_visual_evidence"))),
             "quantum_memory_understanding": _quantum_snapshot(_as_dict(memory_understanding)),
         },
-        "evidence_channels": 15,
+        "evidence_channels": 16,
         "representations": _unique_strings(
             _as_list(semantic.get("required_representations"))
             + _as_list(interpretation.get("required_representations"))
@@ -6320,6 +6339,57 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     )
     scope = _user_scope(state, user_id)
     state["_request_user_id"] = _s(user_id)
+
+    # Canonical visual entry: the Nano Scanner runs INSIDE the same Processor
+    # route immediately after INPUT. It never owns intent/routing/provider.
+    visual_input_path = _s(
+        kwargs.get("visual_input_path")
+        or kwargs.get("image_path")
+        or kwargs.get("uploaded_image_path")
+    )
+    visual_user_request = _s(
+        kwargs.get("visual_user_request")
+        or kwargs.get("image_request")
+        or ""
+    )
+    if visual_input_path:
+        visual_evidence = await asyncio.to_thread(
+            scan_image,
+            visual_input_path,
+            user_request=visual_user_request or text,
+            previous_path=(
+                state.get("previous_image_path")
+                if isinstance(state.get("previous_image_path"), str)
+                else None
+            ),
+            state=state,
+        )
+        visual_evidence = visual_evidence if isinstance(visual_evidence, dict) else {}
+        visual_evidence["user_id"] = _s(user_id)
+        visual_evidence["conversation_id"] = _s(scope.get("conversation_id"))
+        visual_evidence["decision_owner"] = "QUANTUM_PROCESSOR"
+        visual_evidence["single_route"] = True
+        visual_evidence["provider_calls"] = 0
+        visual_evidence["local_only"] = True
+        state["_incoming_visual_evidence"] = _quantum_snapshot(visual_evidence)
+        state["_incoming_visual_source"] = {
+            "path": visual_input_path,
+            "user_id": _s(user_id),
+            "conversation_id": _s(scope.get("conversation_id")),
+            "local_only": True,
+            "provider_calls": 0,
+        }
+        _record_engine_handoff(
+            state, "VISUAL_SCAN", visual_evidence,
+            consumes=("INPUT",),
+        )
+    else:
+        _record_engine_handoff(
+            state, "VISUAL_SCAN",
+            {"status": "not_requested", "provider_calls": 0, "local_only": True},
+            consumes=("INPUT",),
+        )
+
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
@@ -6345,7 +6415,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         state=state,
     ) or {}
-    _record_engine_handoff(state, "INTERPRETATION", interpretation, consumes=("INPUT",))
+    if state.get("_incoming_visual_evidence"):
+        interpretation["visual_evidence"] = _quantum_snapshot(
+            state.get("_incoming_visual_evidence")
+        )
+        interpretation["visual_input_bound"] = True
+        interpretation["visual_user_id"] = _s(user_id)
+        interpretation["visual_conversation_id"] = _s(scope.get("conversation_id"))
+    _record_engine_handoff(state, "INTERPRETATION", interpretation, consumes=("INPUT", "VISUAL_SCAN"))
 
     # Structured payload analysis is diagnostic only. It must never rewrite or
     # reset the already-collapsed Interpretation dialogue state.
@@ -6845,7 +6922,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     quantum_cascade["stages"]["3_CONTEXT_BINDING"]["signal"] = _quantum_snapshot(
         state.get("_canonical_processor_dialogue", {})
     )
-    quantum_cascade["stages"]["7_PROVIDER_CONTEXT"]["history_required"] = bool(
+    quantum_cascade["stages"]["8_PROVIDER_CONTEXT"]["history_required"] = bool(
         _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
     )
     cascade_check = QUANTUM_CASCADE_ENGINE.validate(quantum_cascade)
@@ -6867,7 +6944,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     request_meta.update({
         "dynamic_memory_available": bool(dynamic_memory.get("matches")),
         "dynamic_memory_match_count": len(dynamic_memory.get("matches") or []),
-        "quantum_evidence_channels": 15,
+        "quantum_evidence_channels": 16,
         "quantum_evidence_field_version": PROCESSOR_VERSION,
         "provider_calls_per_request": 1,
         "single_route": True,
@@ -6939,7 +7016,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
 
     # Final quantum release audit: 15 evidence lenses, one request, one provider.
     request.constraints.setdefault("metadata", {})["quantum_release_audit"] = {
-        "evidence_channels": 15,
+        "evidence_channels": 16,
         "decision_owner": "QUANTUM_PROCESSOR",
         "single_route": True,
         "provider_calls": 1,
@@ -6965,6 +7042,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "experience_manager": True,
         "goal_engine": True,
         "visual_reference_system": True,
+        "nano_scanner": True,
+        "nano_scanner_provider_calls": 0,
+        "nano_printer_provider_calls": 0,
         "control_plane_version": control_plane.get("version"),
         "control_plane_single_route": bool(control_plane.get("single_route")),
         "cascade_version": QUANTUM_CASCADE_VERSION,
@@ -6976,6 +7056,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     }
 
     request.constraints.setdefault("metadata", {})["engine_handoff_trace"] = _engine_handoff_context(state)
+    request.constraints.setdefault("metadata", {})["nano_visual"] = {
+        "scanner_bound": bool(state.get("_incoming_visual_evidence")),
+        "scanner_user_id": _s(user_id),
+        "scanner_conversation_id": _s(scope.get("conversation_id")),
+        "scanner_provider_calls": 0,
+        "printer_provider_calls": 0,
+        "printer_version": NANO_PRINTER_VERSION,
+    }
     _record_engine_handoff(
         state, "PROVIDER",
         {
@@ -7088,6 +7176,78 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     ):
         raise RuntimeError("Quantum release blocked: MessageTextBlock invariant failed")
 
+    # Nano Printer is downstream of Processor decision + Provider output.
+    # It never routes and never calls a provider. Only explicit structured
+    # output selected by the Processor may activate it.
+    nano_printer_artifacts = []
+    structured_kinds = {
+        "graph", "plot", "chart", "table", "diagram", "scene", "drawing",
+        "formula", "3d", "image", "annotated_image"
+    }
+    printer_allowed = any(
+        isinstance(block, dict)
+        and _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower() in structured_kinds
+        for block in response.render_blocks
+    )
+    if printer_allowed:
+        printer_output_dir = _s(kwargs.get("visual_output_dir") or "")
+        if printer_output_dir:
+            from pathlib import Path as _PrinterPath
+            _PrinterPath(printer_output_dir).mkdir(parents=True, exist_ok=True)
+            for idx, block in enumerate(response.render_blocks[:12], start=1):
+                if not isinstance(block, dict):
+                    continue
+                kind = _s(
+                    block.get("type") or block.get("artifact_type") or block.get("representation")
+                ).lower()
+                if kind not in structured_kinds:
+                    continue
+                out_file = _PrinterPath(printer_output_dir) / f"{_s(user_id) or 'user'}_turn_visual_{idx}.png"
+                try:
+                    printer_result = await asyncio.to_thread(
+                        render_visual_answer,
+                        kind,
+                        output_path=str(out_file),
+                        title=_s(block.get("title") or kind.title() or "April Visual"),
+                        graph=block.get("payload") if kind in {"graph", "plot", "chart"} else None,
+                        table=block.get("payload") if kind == "table" else None,
+                        diagram=block.get("payload") if kind == "diagram" else None,
+                        drawing=block.get("payload") if kind in {"drawing", "scene"} else None,
+                        formula=block.get("payload", {}).get("formula") if kind == "formula" and isinstance(block.get("payload"), dict) else (block.get("content") if kind == "formula" else None),
+                        scene_3d=block.get("payload") if kind == "3d" else None,
+                        source_image=block.get("source_path") or state.get("_incoming_visual_source", {}).get("path"),
+                    )
+                    if isinstance(printer_result, dict) and printer_result.get("ok"):
+                        printer_result["user_id"] = _s(user_id)
+                        printer_result["conversation_id"] = _s(scope.get("conversation_id"))
+                        printer_result["decision_owner"] = "QUANTUM_PROCESSOR"
+                        printer_result["provider_calls"] = 0
+                        nano_printer_artifacts.append(printer_result)
+                except Exception as printer_error:
+                    nano_printer_artifacts.append({
+                        "ok": False,
+                        "error": str(printer_error),
+                        "provider_calls": 0,
+                        "local_only": True,
+                    })
+
+    state["_nano_printer_artifacts"] = _quantum_snapshot(nano_printer_artifacts)
+    _record_engine_handoff(
+        state, "NANO_PRINTER",
+        {
+            "activated": bool(nano_printer_artifacts),
+            "requested": printer_allowed,
+            "artifacts": nano_printer_artifacts,
+            "provider_calls": 0,
+            "printer_version": NANO_PRINTER_VERSION,
+            "user_id": _s(user_id),
+        },
+        consumes=("PRESENTATION", "CONTROL_PLANE", "OUTPUT_UNDERSTANDING"),
+    )
+
+    request.constraints.setdefault("metadata", {})["nano_printer_artifacts"] = _quantum_snapshot(
+        state.get("_nano_printer_artifacts", [])
+    )
     request.constraints.setdefault("metadata", {})["visible_answer_audit"] = {
         "answer_present": bool(_s(response.answer) or _s(response.content) or _s(response.response)),
         "render_blocks_before_canonicalize": len(getattr(response, "render_blocks", []) or []),
