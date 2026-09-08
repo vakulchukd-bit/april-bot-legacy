@@ -43,7 +43,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_visual_scan_printer_cascade_user_scoped_validator_fix"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v50_visual_evidence_bridge_user_scoped"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -112,6 +112,98 @@ def _unique_strings(values: Any) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _compact_visual_scan_evidence(evidence: Any, *, max_text: int = 2600) -> dict:
+    """Build a bounded scanner packet for downstream semantic/provider context.
+
+    The Nano Scanner stays local. This bridge carries only the structured visual
+    evidence that can materially affect interpretation; raw pixel grids,
+    contours and other large diagnostic arrays stay out of the Provider hot
+    path. No routing or intent decision is made here.
+    """
+    packet = _as_dict(evidence)
+    if not packet:
+        return {}
+
+    visual = _as_dict(packet.get("visual"))
+    ocr = _as_dict(packet.get("ocr"))
+    text = _as_dict(packet.get("text"))
+    screenshot = _as_dict(packet.get("screenshot_detection"))
+    request = _as_dict(packet.get("request_evidence"))
+    graphs = _as_dict(packet.get("graphs"))
+    diagrams = _as_dict(packet.get("diagrams"))
+    tables = _as_dict(packet.get("tables"))
+    interpretation = _as_dict(packet.get("local_interpretation"))
+    objects = []
+
+    for item in _as_list(packet.get("visual_objects"))[:24]:
+        if isinstance(item, dict):
+            objects.append({
+                "type": _s(item.get("type")),
+                "confidence": item.get("confidence"),
+                "evidence": _s(item.get("evidence")),
+            })
+
+    ocr_text = _s(
+        text.get("content")
+        or ocr.get("text")
+        or ""
+    )
+    if len(ocr_text) > max_text:
+        ocr_text = ocr_text[:max_text] + "…"
+
+    return {
+        "version": _s(packet.get("version")),
+        "input_type": _s(packet.get("input_type")),
+        "local_only": bool(packet.get("local_only", True)),
+        "provider_calls": int(packet.get("provider_calls", 0) or 0),
+        "user_id": _s(packet.get("user_id")),
+        "conversation_id": _s(packet.get("conversation_id")),
+        "visual": {
+            "width": visual.get("width"),
+            "height": visual.get("height"),
+            "orientation": _s(visual.get("orientation")),
+            "aspect_ratio": visual.get("aspect_ratio"),
+            "mean_luma": visual.get("mean_luma"),
+            "contrast": visual.get("contrast"),
+        },
+        "screenshot_detection": {
+            "is_screenshot": bool(screenshot.get("is_screenshot")),
+            "confidence": screenshot.get("confidence", 0.0),
+            "reasons": _as_list(screenshot.get("reasons"))[:8],
+        },
+        "ocr": {
+            "text": ocr_text,
+            "confidence": ocr.get("confidence", text.get("confidence", 0.0)),
+        },
+        "objects": objects,
+        "graphs": {
+            "confidence": graphs.get("confidence", 0.0),
+            "line_count": graphs.get("line_count", 0),
+            "horizontal_axis_candidates": graphs.get("horizontal_axis_candidates", 0),
+            "vertical_axis_candidates": graphs.get("vertical_axis_candidates", 0),
+        },
+        "diagrams": {
+            "confidence": diagrams.get("confidence", 0.0),
+            "line_count": diagrams.get("line_count", 0),
+            "circle_count": diagrams.get("circle_count", 0),
+        },
+        "tables": {
+            "detected": bool(tables.get("detected")),
+            "confidence": tables.get("confidence", 0.0),
+        },
+        "request_evidence": _quantum_snapshot(request),
+        "local_interpretation": {
+            "description": _clip(interpretation.get("description"), 1400),
+            "help_mode": _s(interpretation.get("help_mode")),
+        },
+        "semantic_scope": _quantum_snapshot(
+            _as_dict(packet.get("semantic_scope"))
+        ),
+        "evidence_only": True,
+        "decision_owner": "QUANTUM_PROCESSOR",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3609,11 +3701,38 @@ def _make_request(
             }
         ),
         visual_context=(
-            visual
-            if isinstance(visual, dict)
-            and (
-                mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-                or bool(_best_visual_context(state))
+            {
+                **(
+                    _quantum_snapshot(visual)
+                    if isinstance(visual, dict)
+                    else {}
+                ),
+                **(
+                    {
+                        "input_visual_evidence": _quantum_snapshot(
+                            semantic.get("visual_input_evidence")
+                            or state.get("_visual_scan_semantic_evidence")
+                            or {}
+                        ),
+                        "input_modality": "image",
+                        "input_visual_evidence_present": True,
+                    }
+                    if (
+                        isinstance(semantic.get("visual_input_evidence"), dict)
+                        or isinstance(state.get("_visual_scan_semantic_evidence"), dict)
+                    )
+                    else {}
+                ),
+            }
+            if (
+                isinstance(visual, dict)
+                and (
+                    mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+                    or bool(_best_visual_context(state))
+                )
+            ) or isinstance(
+                semantic.get("visual_input_evidence"),
+                dict,
             )
             else {}
         ),
@@ -3701,6 +3820,12 @@ def _make_request(
         "response_budget_logical": True,
         "response_budget_compression_ceiling": OUTPUT_MAX_TOKENS,
         "control_plane": _quantum_snapshot(control),
+        "visual_input_evidence_present": bool(
+            isinstance(semantic.get("visual_input_evidence"), dict)
+        ),
+        "visual_input_evidence": _quantum_snapshot(
+            semantic.get("visual_input_evidence") or {}
+        ),
     }
     request.dialogue_contract = dialogue_contract
     request.response_decision = decision
@@ -3711,6 +3836,12 @@ def _make_request(
         "engine_handoff_trace": _engine_handoff_context(state),
         "processor_version": PROCESSOR_VERSION,
         "visual_context_evidence": bool(visual),
+        "visual_input_evidence": bool(
+            isinstance(semantic.get("visual_input_evidence"), dict)
+        ),
+        "visual_input_evidence_version": _s(
+            _as_dict(semantic.get("visual_input_evidence")).get("version")
+        ),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -6392,6 +6523,30 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             consumes=("INPUT",),
         )
 
+    # The scanner packet is now a first-class processor evidence channel.
+    # Keep the raw local packet in state for diagnostics, but pass a bounded
+    # semantic projection through every downstream stage.
+    visual_scan_evidence = _compact_visual_scan_evidence(
+        state.get("_incoming_visual_evidence")
+    )
+    if visual_scan_evidence:
+        state["_visual_scan_semantic_evidence"] = _quantum_snapshot(
+            visual_scan_evidence
+        )
+        print("🧠 NANO SCANNER EVIDENCE BOUND:", {
+            "user_id": _s(visual_scan_evidence.get("user_id") or user_id),
+            "conversation_id": _s(visual_scan_evidence.get("conversation_id") or scope.get("conversation_id")),
+            "input_type": _s(visual_scan_evidence.get("input_type")),
+            "ocr_chars": len(_s(_as_dict(visual_scan_evidence.get("ocr")).get("text"))),
+            "objects": [
+                _s(item.get("type"))
+                for item in _as_list(visual_scan_evidence.get("objects"))
+                if isinstance(item, dict) and _s(item.get("type"))
+            ],
+            "provider_calls": int(visual_scan_evidence.get("provider_calls", 0) or 0),
+            "local_only": bool(visual_scan_evidence.get("local_only", True)),
+        })
+
     history = state.get("dialog", []) if isinstance(state.get("dialog"), list) else []
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     dialog_state = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
@@ -6417,14 +6572,21 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         state=state,
     ) or {}
-    if state.get("_incoming_visual_evidence"):
+    if visual_scan_evidence:
         interpretation["visual_evidence"] = _quantum_snapshot(
-            state.get("_incoming_visual_evidence")
+            visual_scan_evidence
         )
         interpretation["visual_input_bound"] = True
+        interpretation["visual_evidence_present"] = True
+        interpretation["visual_input_type"] = _s(
+            visual_scan_evidence.get("input_type")
+        ) or "image"
         interpretation["visual_user_id"] = _s(user_id)
         interpretation["visual_conversation_id"] = _s(scope.get("conversation_id"))
-    _record_engine_handoff(state, "INTERPRETATION", interpretation, consumes=("INPUT", "VISUAL_SCAN"))
+    _record_engine_handoff(
+        state, "INTERPRETATION", interpretation,
+        consumes=("INPUT", "VISUAL_SCAN"),
+    )
 
     # Structured payload analysis is diagnostic only. It must never rewrite or
     # reset the already-collapsed Interpretation dialogue state.
@@ -6495,7 +6657,29 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dialog_state=dialog_state,
         interpreted=interpretation_authority,
     ) or {}
-    _record_engine_handoff(state, "SEMANTIC", semantic, consumes=("INTERPRETATION",))
+
+    # Semantic Core must receive scanner evidence explicitly, not merely rely on
+    # a state side-channel. This preserves the cascade contract:
+    # INPUT -> VISUAL_SCAN -> INTERPRETATION -> SEMANTIC.
+    if visual_scan_evidence:
+        semantic["visual_input_evidence"] = _quantum_snapshot(
+            visual_scan_evidence
+        )
+        semantic["visual_evidence_present"] = True
+        semantic["visual_input_type"] = _s(
+            visual_scan_evidence.get("input_type")
+        ) or "image"
+        semantic["visual_user_id"] = _s(user_id)
+        semantic["visual_conversation_id"] = _s(scope.get("conversation_id"))
+        semantic.setdefault("semantic_evidence_channels", [])
+        if isinstance(semantic["semantic_evidence_channels"], list):
+            if "nano_scanner" not in semantic["semantic_evidence_channels"]:
+                semantic["semantic_evidence_channels"].append("nano_scanner")
+
+    _record_engine_handoff(
+        state, "SEMANTIC", semantic,
+        consumes=("INTERPRETATION", "VISUAL_SCAN"),
+    )
 
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
     _record_engine_handoff(state, "REASONING", reasoning, consumes=("SEMANTIC",))
