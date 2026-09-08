@@ -43,7 +43,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v47_visual_scan_printer_cascade_user_scoped_asyncio_fix"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v48_visual_scan_printer_cascade_user_scoped_stage_fix"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 1
@@ -6919,8 +6919,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     quantum_cascade["context_binding"] = _quantum_snapshot(
         state.get("_canonical_processor_dialogue", {})
     )
-    quantum_cascade["stages"]["3_CONTEXT_BINDING"]["status"] = "complete"
-    quantum_cascade["stages"]["3_CONTEXT_BINDING"]["signal"] = _quantum_snapshot(
+    quantum_cascade["stages"]["4_CONTEXT_BINDING"]["status"] = "complete"
+    quantum_cascade["stages"]["4_CONTEXT_BINDING"]["signal"] = _quantum_snapshot(
         state.get("_canonical_processor_dialogue", {})
     )
     quantum_cascade["stages"]["8_PROVIDER_CONTEXT"]["history_required"] = bool(
