@@ -1642,8 +1642,9 @@ def _scene_continuity_engine(
     """
     current_scene = {}
     if isinstance(state, dict):
-        candidate = _best_visual_context(state)
-        if not candidate:
+        current_visual_input = bool(_as_dict(state.get("_incoming_visual_evidence")))
+        candidate = {} if current_visual_input else _best_visual_context(state)
+        if not candidate and not current_visual_input:
             candidate = (
                 state.get("current_visual_scene")
                 or state.get("active_visual_scene")
@@ -6389,7 +6390,8 @@ def _canonicalize(
             "version": "quantum_presentation_stream_v1",
             "nodes": stream,
             "single_visible_stream": True,
-            "answer_is_fallback": True,
+            "answer_is_fallback": False,
+            "answer_present": bool(answer),
         }
     except Exception:
         pass
@@ -6441,6 +6443,18 @@ def _canonicalize(
         "visible_answer_guaranteed": True,
         "artifact_preservation": True,
         "identity_scope": deepcopy(scope),
+        "web_delivery": {
+            "version": "quantum_web_delivery_v1",
+            "target": "AprilWeb",
+            "transport": "SceneContract",
+            "single_visible_stream": True,
+            "answer_present": bool(answer),
+            "answer": answer,
+            "content": answer,
+            "render_blocks": render_blocks,
+            "scene_contract": contract,
+            "artifacts": list(getattr(response, "artifacts", []) or []),
+        },
     }
 
 def _validate_quantum_release(request: MachineRequest) -> None:
@@ -6522,6 +6536,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         or kwargs.get("image_request")
         or ""
     )
+
+    # ``_incoming_visual_evidence`` is strictly current-turn input. Never let a
+    # previous image leak into a later text turn, otherwise the dialogue gate
+    # sees stale visual input and can bind the new request to an old scene. The
+    # durable visual scene/history remains intact for an explicit later follow-up.
+    if not visual_input_path:
+        state.pop("_incoming_visual_evidence", None)
+        state.pop("_incoming_visual_source", None)
+
     if visual_input_path:
         visual_evidence = await asyncio.to_thread(
             scan_image,
@@ -6585,6 +6608,41 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         history=history,
         state=state,
     ) or {}
+
+    # A fresh uploaded image is a hard dialogue-turn boundary unless the caller
+    # supplied an explicit user caption. The image itself is current-turn input,
+    # not a continuation of the previous visual scene. This keeps stale history
+    # available for later follow-up turns without binding the new image request
+    # to an older scene before the Provider sees it.
+    fresh_visual_turn = bool(visual_input_path and not visual_user_request)
+    if fresh_visual_turn:
+        dv = _as_dict(interpretation.get("dialogue_vector"))
+        dv = {**dv,
+            "relation": "INDEPENDENT",
+            "dialogue_state": "INDEPENDENT",
+            "request_relation": "INDEPENDENT",
+            "continuation": False,
+            "reference_to_previous": False,
+            "context_dependency": "independent",
+            "resolved_request": text,
+            "source": "QUANTUM_VISUAL_TURN_BOUNDARY",
+        }
+        interpretation["dialogue_vector"] = dv
+        interpretation["canonical_visual_turn_boundary"] = {
+            "applied": True,
+            "relation": "INDEPENDENT",
+            "continuation": False,
+            "reference": False,
+            "reason": "fresh_uploaded_image_without_explicit_caption",
+        }
+    elif not visual_input_path:
+        interpretation["canonical_visual_turn_boundary"] = {
+            "applied": False,
+            "relation": "current_dialogue_only",
+            "continuation": False,
+            "reference": False,
+            "reason": "no_current_visual_input",
+        }
     if state.get("_incoming_visual_evidence"):
         interpretation["visual_evidence"] = _quantum_snapshot(
             state.get("_incoming_visual_evidence")
